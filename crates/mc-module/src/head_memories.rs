@@ -162,27 +162,23 @@ impl Row {
 }
 
 /// The rows a head may show: the person's global memories, the project's
-/// own, and those of the workspaces it belongs to. With no project, the
-/// global memories alone.
-pub fn read_rows(conn: &Connection, project: Option<&str>, now: i64) -> rusqlite::Result<Vec<Row>> {
-    let Some(project) = project else {
-        return conn
-            .prepare_cached(&format!(
-                "SELECT {ROW_COLUMNS} FROM memories
-                  WHERE {LIVE} AND level = 'global' AND owner_id = '{SELF_OWNER}' ORDER BY id"
-            ))?
-            .query_map([now], Row::read)?
-            .collect();
-    };
-    let workspaces = serde_json::to_string(&workspace_ids(conn, project)?).expect("ids serialize");
+/// own, and its workspace's. `project` and `workspace` are Entorhinal's ids
+/// for the session (its memory context); a session without one sees none
+/// of that level's rows.
+pub fn read_rows(
+    conn: &Connection,
+    project: Option<&str>,
+    workspace: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<Vec<Row>> {
     conn.prepare_cached(&format!(
         "SELECT {ROW_COLUMNS} FROM memories
-          WHERE {LIVE} AND ((level = 'project' AND owner_id = ?2)
-             OR (level = 'global' AND owner_id = '{SELF_OWNER}')
-             OR (level = 'workspace' AND owner_id IN (SELECT value FROM json_each(?3))))
+          WHERE {LIVE} AND ((level = 'global' AND owner_id = '{SELF_OWNER}')
+             OR (level = 'project' AND owner_id = ?2)
+             OR (level = 'workspace' AND owner_id = ?3))
           ORDER BY id"
     ))?
-    .query_map(rusqlite::params![now, project, workspaces], Row::read)?
+    .query_map(rusqlite::params![now, project, workspace], Row::read)?
     .collect()
 }
 
@@ -197,23 +193,6 @@ pub fn rows_by_ids(conn: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<Row>>
         "SELECT {ROW_COLUMNS} FROM memories WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id"
     ))?
     .query_map([serde_json::to_string(ids).expect("ids serialize")], Row::read)?
-    .collect()
-}
-
-/// The workspaces `project` belongs to, as the owner ids of their memories.
-fn workspace_ids(conn: &Connection, project: &str) -> rusqlite::Result<Vec<String>> {
-    let members: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_members')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !members {
-        return Ok(Vec::new());
-    }
-    conn.prepare_cached(
-        "SELECT CAST(workspace_id AS TEXT) FROM workspace_members WHERE project_path = ?1",
-    )?
-    .query_map([project], |row| row.get(0))?
     .collect()
 }
 

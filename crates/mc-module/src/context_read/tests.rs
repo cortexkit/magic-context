@@ -94,8 +94,19 @@ impl Fixture {
             }
         });
         drop(db);
+        // The session's Setup recorded Entorhinal's workspace "1" for it.
+        let store = dir.path().join("mode3.db");
+        drop(crate::store::Store::open(&store).unwrap());
+        rusqlite::Connection::open(&store)
+            .unwrap()
+            .execute(
+                "INSERT INTO memory_contexts (runner, harness, session, context) VALUES ('test', 'opencode', 'plugin', '{\"workspace_id\":\"1\"}')",
+                [],
+            )
+            .unwrap();
         let reader = Reader {
             context: Some(path),
+            store: Some(store),
             ..reader()
         };
         Self { _dir: dir, reader }

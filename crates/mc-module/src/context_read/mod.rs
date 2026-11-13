@@ -241,6 +241,7 @@ impl Reader {
             })
         });
         let mut held = false;
+        let mut workspace_id: Option<String> = None;
         let (mut model, mut usable): (Option<String>, u64) = tx.query_row(
             "SELECT COALESCE(NULLIF(last_observed_model_key,''),NULLIF(cached_m0_model_key,'')), MAX(0, CASE WHEN detected_context_limit > 0 THEN detected_context_limit ELSE last_usage_context_limit END) FROM session_meta WHERE harness=?1 AND session_id=?2",
             params![harness, session], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -270,6 +271,20 @@ impl Reader {
             }
             held = !rows.is_empty();
             drop(statement);
+            // The session's workspace is Entorhinal's, from the memory
+            // context its Setup recorded; its workspace memories follow it.
+            let workspaces = store_tx
+                .prepare("SELECT json_extract(context,'$.workspace_id') FROM memory_contexts WHERE harness=?1 AND session=?2")
+                .and_then(|mut statement| {
+                    statement
+                        .query_map(params![harness, session], |row| row.get::<_, Option<String>>(0))?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .map_err(|_| unavailable())?;
+            if workspaces.len() > 1 {
+                return Err(unavailable());
+            }
+            workspace_id = workspaces.into_iter().next().flatten();
             store_tx.rollback().map_err(|_| unavailable())?;
         }
         // A session whose state ck-mc keeps in mode3.db learns its project only
@@ -300,12 +315,16 @@ impl Reader {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |time| time.as_millis() as i64);
-                    snapshot.memories =
-                        crate::head_memories::read_rows(&tx, Some(&project.id), now)
-                            .map_err(|_| unavailable())?
-                            .into_iter()
-                            .filter(|row| row.level != "global")
-                            .collect();
+                    snapshot.memories = crate::head_memories::read_rows(
+                        &tx,
+                        Some(&project.id),
+                        workspace_id.as_deref(),
+                        now,
+                    )
+                    .map_err(|_| unavailable())?
+                    .into_iter()
+                    .filter(|row| row.level != "global")
+                    .collect();
                     snapshot.workspace = Some(workspace);
                 }
             }

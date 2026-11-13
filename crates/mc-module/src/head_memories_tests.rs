@@ -127,7 +127,7 @@ fn save(db: &ContextDb, project: &str, tag: &str, content: &str) -> i64 {
 }
 
 #[test]
-fn a_head_reads_its_project_its_workspaces_and_the_person() {
+fn a_head_reads_its_project_its_workspace_and_the_person() {
     let dir = scratch("read");
     let path = dir.join("context.db");
     let conn = Connection::open(&path).expect("create the store");
@@ -146,13 +146,10 @@ fn a_head_reads_its_project_its_workspaces_and_the_person() {
     let archived = save(&db, "pj-a", "NAMING", "kebab case");
     let expired = save(&db, "pj-a", "CONSTRAINTS", "frozen until Friday");
     let shared = save(&db, "pj-b", "CONSTRAINTS", "one store file");
-    let foreign = save(&db, "pj-c", "CONSTRAINTS", "a workspace pj-a is not in");
+    let foreign = save(&db, "pj-c", "CONSTRAINTS", "another workspace's memory");
+    // Workspace memories are owned by Entorhinal's workspace id; the session
+    // below is in workspace "1".
     db.with_connection(|conn| {
-        conn.execute_batch(
-            "INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'team', 0, 0), (2, 'other', 0, 0);
-             INSERT INTO workspace_members VALUES (1, 'pj-a', 'A', '/a', 0), (1, 'pj-b', 'B', '/b', 0),
-                                                  (2, 'pj-c', 'C', '/c', 0);",
-        )?;
         conn.execute(
             "UPDATE memories SET status = 'archived' WHERE id = ?1",
             params![archived],
@@ -172,7 +169,7 @@ fn a_head_reads_its_project_its_workspaces_and_the_person() {
     })
     .expect("shape the store");
     let rows = db
-        .with_connection(|conn| read_rows(conn, Some("pj-a"), 100))
+        .with_connection(|conn| read_rows(conn, Some("pj-a"), Some("1"), 100))
         .expect("read the head's rows");
     let mut by_level: Vec<(String, i64)> =
         rows.iter().map(|row| (row.level.clone(), row.id)).collect();
@@ -193,7 +190,7 @@ fn a_head_reads_its_project_its_workspaces_and_the_person() {
     assert!(!rows.iter().any(|row| row.id == other));
     // Without a project, only the person's memories.
     let alone = db
-        .with_connection(|conn| read_rows(conn, None, 100))
+        .with_connection(|conn| read_rows(conn, None, None, 100))
         .expect("read without a project");
     assert_eq!(
         alone.iter().map(|row| row.id).collect::<Vec<_>>(),

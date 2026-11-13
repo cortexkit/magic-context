@@ -3793,11 +3793,16 @@ impl Session {
         let mut workspace = None;
         if let (Some(db), true) = (&self.db, shape.memory_enabled) {
             let project = self.project.as_ref().map(|project| project.id.as_str());
+            // The session's workspace is Entorhinal's, from its memory context.
+            let workspace_id = self
+                .memory_context
+                .as_ref()
+                .and_then(|context| context.workspace_id.as_deref());
             match db.with_connection(|conn| {
                 let resolved = project
                     .map(|project| crate::workspace::Workspace::resolve(conn, project))
                     .transpose()?;
-                let read = crate::head_memories::read_rows(conn, project, now)?;
+                let read = crate::head_memories::read_rows(conn, project, workspace_id, now)?;
                 Ok::<_, rusqlite::Error>((resolved, read))
             }) {
                 Ok((resolved, read)) => {

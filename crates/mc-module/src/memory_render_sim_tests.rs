@@ -1729,7 +1729,7 @@ fn the_shipped_parameters_are_the_selection_the_heads_fold_shows() {
     let (workspace, rows) = db
         .with_connection(|conn| {
             let workspace = Workspace::resolve(conn, "pj-big")?;
-            let rows = head_memories::read_rows(conn, Some("pj-big"), now)?;
+            let rows = head_memories::read_rows(conn, Some("pj-big"), None, now)?;
             Ok::<_, rusqlite::Error>((workspace, rows))
         })
         .expect("read the head's memories");
