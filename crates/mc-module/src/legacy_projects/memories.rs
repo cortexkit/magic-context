@@ -90,7 +90,8 @@ fn live_duplicate(
 
 /// The memories the 0.49 merge marked for review: no duplicate in the
 /// target, but the target already has memories of that category. Decided
-/// before anything changes, as the 0.49 merge's audit did.
+/// before any row changes, as the 0.49 merge's dry run
+/// (`auditIdentityMerge`) decided it.
 pub(super) fn review(
     conn: &Connection,
     sources: &[Row],
