@@ -1141,12 +1141,13 @@ impl Session {
             .map(|stamp| stamp.to_string())
             .unwrap_or_else(|| "none".into());
         tracing::info!(
-            "ck-mc: session {}: setup ({}, preset {}, model {}/{}, window {}, reserve {}, applied view {:?}, statement epoch {}, stamp {})",
+            "ck-mc: session {}: setup ({}, preset {}, model {}/{}, child harness {}, window {}, reserve {}, applied view {:?}, statement epoch {}, stamp {})",
             self.key.session,
             self.key.harness,
             request.preset,
             request.model.provider,
             request.model.model,
+            request.child_harness.as_deref().unwrap_or("none"),
             request.context_window,
             request.output_reserve,
             request.applied_view.as_ref().map(|view| view.version),

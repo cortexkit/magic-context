@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
 use cortexkit_role_compaction::view::{
@@ -862,6 +862,36 @@ pub struct Handler {
     /// Every bound `agent-data` route, by channel, with the caller the
     /// daemon stamped on it.
     agent_data_bound: Mutex<HashMap<u16, String>>,
+    answer_routes: Mutex<HashMap<u16, AnswerRoute>>,
+}
+
+struct AnswerRoute {
+    session: Option<String>,
+    caller: Option<String>,
+}
+
+fn log_slow_answer(elapsed: Duration, body: &[u8], route: Option<&AnswerRoute>) {
+    let elapsed_ms = elapsed.as_millis();
+    if elapsed_ms < 500 {
+        return;
+    }
+    let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let op = request
+        .get("method")
+        .or_else(|| request.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let session = route
+        .and_then(|route| route.session.as_deref())
+        .unwrap_or("");
+    let caller = route
+        .and_then(|route| route.caller.as_deref())
+        .unwrap_or("");
+    if elapsed_ms >= 1500 {
+        tracing::warn!(op, elapsed_ms, session, caller, "ck-mc slow answer");
+    } else {
+        tracing::info!(op, elapsed_ms, session, caller, "ck-mc slow answer");
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1059,6 +1089,7 @@ impl Handler {
             command_bound: Mutex::default(),
             context_bound: Mutex::default(),
             agent_data_bound: Mutex::default(),
+            answer_routes: Mutex::default(),
         }
     }
 
@@ -1438,6 +1469,17 @@ impl ModuleHandler for Handler {
     /// the scope stamp's, so nothing that decides whose data a call reaches
     /// comes from the caller's own words.
     async fn on_bind(&self, request: &RouteBindRequest) -> BindDecision {
+        let session = (request.identity.harness != MODULE_LEVEL_HARNESS
+            && !request.identity.session.is_empty())
+        .then(|| request.identity.session.clone());
+        let caller = match &request.principal {
+            Some(Principal::Reserved { module_id }) => Some(module_id.clone()),
+            _ => None,
+        };
+        self.answer_routes
+            .lock()
+            .expect("answer routes")
+            .insert(request.handle.channel, AnswerRoute { session, caller });
         self.bound
             .lock()
             .expect("bound routes")
@@ -1639,8 +1681,10 @@ impl ModuleHandler for Handler {
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
-        if let Some(answer) = self.command(ctx.route_handle().channel, &body).await {
-            return match answer {
+        let started = Instant::now();
+        let channel = ctx.route_handle().channel;
+        let outcome = if let Some(answer) = self.command(channel, &body).await {
+            match answer {
                 Ok(value) => {
                     HandlerOutcome::Response(serde_json::to_vec(&value).expect("command reply"))
                 }
@@ -1649,9 +1693,16 @@ impl ModuleHandler for Handler {
                     message: error.message,
                     detail: error.detail.unwrap_or(Value::Null),
                 },
-            };
+            }
+        } else {
+            self.handle_non_command(ctx, &body).await
+        };
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(500) && !matches!(outcome, HandlerOutcome::Streamed) {
+            let routes = self.answer_routes.lock().expect("answer routes");
+            log_slow_answer(elapsed, &body, routes.get(&channel));
         }
-        self.handle_non_command(ctx, body).await
+        outcome
     }
 }
 
@@ -1682,10 +1733,10 @@ impl Handler {
         None
     }
 
-    async fn handle_non_command(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
+    async fn handle_non_command(&self, ctx: RequestCtx, body: &[u8]) -> HandlerOutcome {
         // Before any other route: a move's request never reaches a session,
         // app or context handler.
-        if let Some(answer) = self.agent_data(ctx.route_handle().channel, &body).await {
+        if let Some(answer) = self.agent_data(ctx.route_handle().channel, body).await {
             return match answer {
                 Ok(reply) => HandlerOutcome::Response(reply),
                 Err(refusal) => match refusal.detail {
@@ -1715,13 +1766,13 @@ impl Handler {
         let result = if context {
             self.module
                 .context_read()
-                .read(&body)
+                .read(body)
                 .await
                 .map(|value| HandlerOutcome::Response(crate::app_read::result_bytes(value)))
         } else if let Some(caller) = caller {
-            self.app(&ctx, &body, caller).await
+            self.app(&ctx, body, caller).await
         } else {
-            self.dispatch(ctx.route_handle().channel, &body)
+            self.dispatch(ctx.route_handle().channel, body)
                 .await
                 .map(HandlerOutcome::Response)
         };
@@ -1765,6 +1816,10 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
 #[cfg(test)]
 #[path = "transport_lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "transport_slow_answer_tests.rs"]
+mod slow_answer_tests;
 
 #[cfg(test)]
 #[path = "tool_conformance_tests.rs"]
