@@ -71,7 +71,9 @@ impl RunnerClient for SummaryClient {
         let mut result = RunResult::new("summary-run", "completed");
         result.final_message = Some(cortexkit_role_llm_runner::run::FinalMessage {
             ordinal: 1, mid: "summary-answer".into(),
-            text: format!("<output><compartments><compartment start=\"{from}\" end=\"{through}\" title=\"Earlier work\" episode_type=\"feature\" importance=\"50\"><p1>Completed earlier work.</p1><p2>Earlier work.</p2><p3>Work.</p3><p4 /></compartment></compartments><meta><unprocessed_from>{next}</unprocessed_from></meta></output>"),
+            // The summarizer's first-turn envelope; the session has no
+            // project, so no second turn follows.
+            text: mc_mock_runner::child::turn_one_reply(&format!("<output><compartments><compartment start=\"{from}\" end=\"{through}\" title=\"Earlier work\" episode_type=\"feature\" importance=\"50\"><p1>Completed earlier work.</p1><p2>Earlier work.</p2><p3>Work.</p3><p4 /></compartment></compartments><meta><unprocessed_from>{next}</unprocessed_from></meta></output>")),
         });
         Ok(result)
     }
@@ -165,8 +167,7 @@ async fn wrapup_worker_starts_exactly_one_routed_child_and_status_reports_wait()
 
 #[tokio::test]
 async fn wrapup_worker_drains_successive_runs_until_target_is_covered() {
-    let (session, _, mut settings) = wrapup::ready();
-    settings.turn_two = false;
+    let (session, _, settings) = wrapup::ready();
     let (_, _, route, mut setup, _) = fixture();
     setup.preset = "head".into();
     let trace = Arc::new(Trace {

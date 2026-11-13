@@ -14,6 +14,12 @@ pub struct Target {
 }
 
 impl Session {
+    /// The first message a wrapup leaves raw, keeping the newest `keep` raw
+    /// messages. When the first kept message sits inside a turn, the cut moves
+    /// back to that turn's user prompt so the turn isn't split between summary
+    /// and raw text, unless the turn's earlier part is larger than a summary
+    /// trigger's budget (bounded to 2,000..48,000 tokens); then it cuts at the
+    /// message itself.
     fn wrapup_boundary(&self, settings: &Settings, keep: u64) -> u64 {
         let from = self.summarized_through().map_or(1, |n| n + 1);
         let entries = self.index.entries();
@@ -93,7 +99,7 @@ impl Session {
         let mut preview = Preview::new(version, reason.is_none());
         preview.reason = reason.map(str::to_owned);
         if reason.is_none() {
-            preview.effect = Some("May take several model runs. ctx_expand recovers raw text. Shrinks next rebuild (now at threshold); flush applies now.".into());
+            preview.effect = Some("Older messages become summaries over one or more model runs; they leave the prompt at the next rebuild or with flush.".into());
             let state = if self.summarizing {
                 "building"
             } else if waiting || backoff {

@@ -68,7 +68,6 @@ async fn wrapup_preview_counts_raw_messages_and_tokens_without_mutating() {
     assert!(p.effect.as_ref().unwrap().contains("next rebuild"));
     assert!(p.effect.as_ref().unwrap().contains("flush"));
     assert!(p.effect.as_ref().unwrap().contains("model runs"));
-    assert!(p.effect.as_ref().unwrap().contains("ctx_expand"));
     assert_eq!(before, session.durable());
     assert!(client.reads.lock().unwrap().is_empty());
     assert!(client.offered.lock().unwrap().is_empty());
