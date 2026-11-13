@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 import { expect, it } from "bun:test";
-import { execFileSync, spawn, type SpawnOptions } from "node:child_process";
+import { execFileSync, type SpawnOptions, spawn } from "node:child_process";
 import { once } from "node:events";
 import {
 	existsSync,
@@ -10,13 +10,14 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
 	buildArgs,
 	PiSubagentRunner,
 } from "../../pi-plugin/src/subagent-runner";
 import { OMP_CHILD_TOOL_CONFIG } from "../../pi-plugin/src/subagent-tool-boundary";
 import { MockProvider } from "../src/mock-provider/server";
+import { prepareContextDatabase } from "../src/prepare-context-db";
 import { forEachHost } from "../src/scenario-hosts";
 
 const zeroToolAgents = [
@@ -152,7 +153,7 @@ export default function(pi) {
 				XDG_STATE_HOME: join(root, "state"),
 				XDG_RUNTIME_DIR: join(root, "runtime"),
 				PI_CODING_AGENT_DIR: agentDir,
-				MAGIC_CONTEXT_STORAGE_DIR: join(root, "storage"),
+				MAGIC_CONTEXT_STORAGE_DIR: join(root, "data/cortexkit/magic-context"),
 				MAGIC_CONTEXT_LOG_PATH: logPath,
 				MAGIC_CONTEXT_LOG_SYNC: "1",
 				MAGIC_CONTEXT_PI_SUBAGENT: "1",
@@ -160,8 +161,13 @@ export default function(pi) {
 				PI_SKIP_VERSION_CHECK: "1",
 				ANTHROPIC_API_KEY: "inert-test-key",
 			};
-			if (storageFailure)
+			if (storageFailure) {
+				mkdirSync(dirname(env.MAGIC_CONTEXT_STORAGE_DIR!), { recursive: true });
 				writeFileSync(env.MAGIC_CONTEXT_STORAGE_DIR!, "not a directory");
+			} else {
+				// The startup guard refuses a first migration while another Pi process runs.
+				prepareContextDatabase(env.XDG_DATA_HOME!);
+			}
 			try {
 				const readers =
 					host === "omp"

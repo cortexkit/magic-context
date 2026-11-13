@@ -29,6 +29,7 @@ import {
 } from "../src/scenario-hosts";
 import { openTestDb } from "../src/test-db";
 import { createE2ETempDir } from "../src/temp-dir";
+import { decisionMatchesTurn } from "../src/transform-decision-turn";
 import { PLUGIN_ENTRY } from "../src/opencode-runner/spawn";
 import { TestHarness } from "../src/harness";
 import { PiTestHarness } from "../src/pi-harness";
@@ -60,7 +61,21 @@ type Turn = {
 	end: number;
 	passLog: string[];
 	requests: CapturedRequest[];
+	assistantEntryIds?: string[];
 };
+
+async function piAssistantEntryIds(harness: PiTestHarness): Promise<Set<string>> {
+	const { sessionFile } = await harness.getState();
+	if (!sessionFile) throw new Error("Pi did not report its durable session file");
+	if (!existsSync(sessionFile)) return new Set();
+	const entries = readFileSync(sessionFile, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line));
+	return new Set(entries
+		.filter((entry) => entry.type === "message" && entry.message?.role === "assistant")
+		.map((entry) => String(entry.id)));
+}
 
 /** Hosts move cache breakpoints forward; only that metadata is excluded. */
 function durable(value: unknown): unknown {
@@ -378,6 +393,8 @@ export default async (ctx) => {
 					? readFileSync(logPath, "utf8")
 					: "";
 		const turn = async (label: string, text = label): Promise<Turn> => {
+			const previousAssistantIds = harness instanceof PiTestHarness
+				? await piAssistantEntryIds(harness) : undefined;
 			const start = Date.now();
 			const count = harness.requests().length;
 			await harness.sendPrompt(session, text, { timeoutMs: 90_000 });
@@ -419,7 +436,13 @@ export default async (ctx) => {
 				end: Date.now(),
 				passLog: currentLines(),
 				requests,
+				...(previousAssistantIds && harness instanceof PiTestHarness ? {
+					assistantEntryIds: [...await piAssistantEntryIds(harness)]
+						.filter((id) => !previousAssistantIds.has(id)),
+				} : {}),
 			};
+			if (result.assistantEntryIds !== undefined)
+				expect(result.assistantEntryIds.length).toBeGreaterThan(0);
 			turns.push(result);
 			return result;
 		};
@@ -586,10 +609,9 @@ export default async (ctx) => {
 		const rebuilt = await turn("after the flush");
 		const settled = await turn("warm after the flush");
 		inventories.push(assertContained(h));
-		// Pi binds a pending decision at the NEXT context pass, once the host's
-		// branch includes the assistant. The row can be persisted after the provider
-		// reply and after the context pass is logged, so wait for durable rows, not
-		// network idle.
+		// Pi binds a pending decision at the next context pass, once the host's
+		// branch includes the assistant. Correlate by that durable entry, not the
+		// producing process's diagnostic clock, and still require the row to land.
 		const readDecisions = () =>
 			harness
 				.contextDb()
@@ -597,8 +619,7 @@ export default async (ctx) => {
 					"SELECT * FROM transform_decisions WHERE session_id = ? AND harness = ? ORDER BY ts_ms",
 				)
 				.all(session, host === "omp" ? "pi" : harness.harnessId) as Decision[];
-		const inTurn = (row: Decision, entry: Turn) =>
-			row.ts_ms >= entry.start && row.ts_ms <= entry.end;
+		const inTurn = decisionMatchesTurn;
 		const idleReason = (row: Decision) =>
 			["ttl_idle", "ttl_expiry"].includes(row.materialize_reason ?? "");
 		// OpenCode 1 records the expired pass on its assistant for the cache
@@ -615,15 +636,26 @@ export default async (ctx) => {
 		// The flush pass rebuilds, so every host that binds rows records it. Its
 		// row also shows that rows were being written for the idle turns before it.
 		if (host !== "opencode2") {
-			await h.waitFor(() => readDecisions().some((row) => inTurn(row, rebuilt)), {
-				timeoutMs: 5_000,
-				label: `persisted flush decision for ${session} in ${rebuilt.start}..${rebuilt.end}`,
-			});
+			try {
+				await h.waitFor(() => readDecisions().some((row) => inTurn(row, rebuilt)), {
+					timeoutMs: 5_000,
+					label: `persisted flush decision for ${session} assistants=${rebuilt.assistantEntryIds?.join(",") ?? "n/a"} in ${rebuilt.start}..${rebuilt.end}`,
+				});
+			} catch (error) {
+				console.error("IDLE_TTL_DECISION_FAILURE", JSON.stringify({
+					host, session, decisions: readDecisions(),
+					turns: turns.map(({ label, start, end, assistantEntryIds }) => ({ label, start, end, assistantEntryIds })),
+				}));
+				console.error(logs().split("\n").slice(-80).join("\n"));
+				throw error;
+			}
 		}
 		const decisions = readDecisions();
 		const expiredDecision = decisions.find((row) => inTurn(row, first));
 		const idleDecisions = decisions.filter(
-			(row) => row.ts_ms >= first.start && row.ts_ms <= second.end,
+			(row) => first.assistantEntryIds !== undefined
+				? inTurn(row, first) || inTurn(row, second)
+				: row.ts_ms >= first.start && row.ts_ms <= second.end,
 		);
 		// Logs flush asynchronously, so read each turn's lines again now that
 		// later turns have run: a line logged during a turn carries its timestamp.
