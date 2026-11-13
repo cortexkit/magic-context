@@ -2,9 +2,9 @@
 //! merge. They began as the TypeScript applier's agent path
 //! (`features/magic-context/memory/lifecycle-applier.ts`): each write keeps
 //! the memory's revision, its undo history, the decision receipt and the
-//! journal entry. How a change reaches a prompt is the history head's
-//! business: every session that shows the memory sees the change in its
-//! `m[1]` on its next rebuild. Each runs in one `BEGIN IMMEDIATE`
+//! journal entry. Writes don't touch any session's prompt: every session that
+//! shows the memory sees the change on its next prompt rebuild. Each runs in
+//! one `BEGIN IMMEDIATE`
 //! transaction, so it lands whole or not at all.
 //!
 //! A memory row carries its level and owner, the profile category id it is

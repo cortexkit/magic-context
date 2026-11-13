@@ -167,7 +167,8 @@ fn a_plugin_store_migrates_to_the_leveled_memory_schema() {
     );
     assert_eq!(row(2).2, "swe:project-rules");
     assert_eq!(row(2).3, "USER_DIRECTIVES");
-    // A legacy identity stays the owner; the lift remaps it later.
+    // A legacy identity stays the owner as it is; moving such memories under
+    // a registered project id is a later step, not this migration.
     assert_eq!(row(3).1, "dir:07a38392e402");
     assert_eq!(row(3).2, UNMAPPED_CATEGORY);
     assert_eq!(row(4).2, row(5).2);

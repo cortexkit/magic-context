@@ -243,8 +243,10 @@ fn dangling_memory_references(tx: &Transaction) -> rusqlite::Result<i64> {
 
 fn memory_levels_106(tx: &Transaction) -> rusqlite::Result<()> {
     let dangling_before = dangling_memory_references(tx)?;
-    // The guards belong to the removed Rust transform mode; the triggers and
-    // the search index are rebuilt for the new table below.
+    // The `memories_authority_guard_*` triggers blocked plugin writes to
+    // projects an older ck-mc build had taken over; nothing takes projects
+    // over any more, so they go. The search triggers and index are rebuilt
+    // for the new table below.
     tx.execute_batch(
         "DROP TRIGGER IF EXISTS memories_authority_guard_insert;
          DROP TRIGGER IF EXISTS memories_authority_guard_update;
@@ -356,9 +358,11 @@ fn memory_levels_106(tx: &Transaction) -> rusqlite::Result<()> {
 
     move_observations(tx)?;
 
-    // The level record now lives on the row; the profile version counter has
-    // no reader, since the head compares the rows it shows; and the mutation
-    // log fed only the plugin's history head.
+    // The level record now lives on the row. The profile version counter has
+    // no reader: the module notices a changed user profile by comparing the
+    // profile lines it last put in a session's prompt with the store. The
+    // mutation log only told the standalone plugin which memory changes to
+    // show in its prompt, and the module computes those from the rows too.
     tx.execute_batch(
         "DROP TABLE IF EXISTS memory_placement;
          DROP TABLE IF EXISTS memory_mutation_log;
@@ -378,8 +382,9 @@ fn memory_levels_106(tx: &Transaction) -> rusqlite::Result<()> {
 
 /// Today's user memories become global memories in the reserved unsorted
 /// category. Each keeps its old id and promotion time in `metadata_json`: the
-/// user profile block orders by promotion time, and a history head rendered
-/// before the migration compares the old ids.
+/// `<user-profile>` block in a session's prompt orders by promotion time, and
+/// a prompt built before the migration recorded the old ids, which the next
+/// one compares against to tell whether the profile changed.
 fn move_user_memories(tx: &Transaction) -> rusqlite::Result<()> {
     let exists: bool = tx.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'user_memories'",
