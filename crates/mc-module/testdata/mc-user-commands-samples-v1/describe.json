@@ -21,7 +21,26 @@
       "subject": "session",
       "summary": "Shows context usage, queued drops and summary progress.",
       "title": "Context status"
+    },
+    {
+      "args": [
+        {
+          "default": 20,
+          "key": "messages_to_keep",
+          "kind": "number",
+          "label": "Keep the newest N messages"
+        }
+      ],
+      "effects": [
+        "reversible",
+        "context_change"
+      ],
+      "id": "wrapup",
+      "run": {},
+      "subject": "session",
+      "summary": "Summarizes older history with a model, keeping the newest N raw messages (default 20). ctx_expand recovers raw text; summaries appear on the next rebuild.",
+      "title": "Summarize history"
     }
   ],
-  "digest": "00601bb4922a458a6fa313d9a08ddf03c9f2e9998d507cb0fd68971f53f4b102"
+  "digest": "93fa74e1009f455bef43c1570731d747874436794d0d1b593c14c94d3b95f0d8"
 }

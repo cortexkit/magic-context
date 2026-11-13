@@ -81,6 +81,8 @@ pub struct Request {
     /// the last one included, as the plugin's emergency recovery does: the
     /// session needs the relief now.
     pub emergency: bool,
+    /// Keep the final compartment only when this chunk reaches the manual target.
+    pub force_keep_last_compartment: bool,
 }
 
 /// What a run produced.
@@ -448,6 +450,7 @@ async fn summarize_on<C: RunnerClient>(
         memory_enabled: job.memory_enabled,
         auto_promote: job.auto_promote,
         in_emergency: job.emergency,
+        force_keep_last_compartment: job.force_keep_last_compartment && !chunk.has_more,
         ..ValidateOptions::default()
     };
     if !window.admits(target.output_tokens, system, &prompt) {

@@ -18,6 +18,12 @@ mod audit;
 #[path = "user_commands_version_tests.rs"]
 mod version_tests;
 
+#[path = "user_commands_wrapup_tests.rs"]
+mod wrapup;
+
+#[path = "user_commands_wrapup_runner_tests.rs"]
+mod wrapup_runner;
+
 impl crate::routing::Router for Client {
     async fn select(
         &self,
@@ -422,6 +428,35 @@ async fn user_commands_record_real_handler_samples() {
         "describe.json",
         serde_json::to_value(commands::describe()).unwrap(),
     );
+    {
+        let (mut session, client, settings) = wrapup::ready();
+        let p = wrapup::preview_keep(&mut session, &client, &settings, None).await;
+        samples.insert(
+            "wrapup-preview-available.json",
+            serde_json::to_value(&p).unwrap(),
+        );
+        let request = wire::ModuleRunRequest::new(
+            wrapup::request(&session, None),
+            p.version,
+            "sample-wrapup",
+        );
+        let result = commands::execute(
+            Some(&mut session),
+            &client,
+            &settings,
+            Request::Run(request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["outcome"], "scheduled");
+        samples.insert("wrapup-run.json", result);
+        let p = wrapup::preview_keep(&mut session, &client, &settings, Some(24)).await;
+        assert_eq!(p.reason.as_deref(), Some("within_keep"));
+        samples.insert(
+            "wrapup-preview-unavailable.json",
+            serde_json::to_value(p).unwrap(),
+        );
+    }
     let p = preview(&mut session, &client, &settings, "flush").await;
     samples.insert(
         "flush-preview-available.json",

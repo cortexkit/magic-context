@@ -53,6 +53,7 @@ const IMPLICIT_FORGET_LIMIT: usize = 3;
 #[derive(Clone)]
 pub struct Session {
     command_answers: Arc<Vec<crate::store::CommandAnswer>>,
+    wrapup_target: Option<wrapup::Target>,
     app: crate::app_read::SessionState,
     app_projection: app_projection::Projection,
     app_decisions: Vec<Value>,
@@ -701,6 +702,7 @@ impl Session {
     ) -> Self {
         Self {
             command_answers: Default::default(),
+            wrapup_target: None,
             app: Default::default(),
             app_projection: Default::default(),
             app_decisions: Vec::new(),
@@ -916,6 +918,7 @@ impl Session {
         let _timing = crate::notice_cost_timing::span("session.durable");
         crate::store::Durable {
             command_answers: self.command_answers_for_save(),
+            wrapup_target: self.wrapup_target.clone(),
             app: self.app.clone(),
             compaction: (!self.tools_only).then(|| (self.features, self.conditions.clone())),
             preset: (!self.tools_only).then(|| self.preset.as_str().to_owned()),
@@ -953,6 +956,7 @@ impl Session {
     /// Take back what a previous ck-mc process saved for the session.
     pub fn restore(&mut self, durable: crate::store::Durable) {
         self.command_answers = durable.command_answers;
+        self.wrapup_target = durable.wrapup_target;
         self.app = durable.app.clone();
         self.tools_only = false;
         if let Some(preset) = durable
@@ -1761,6 +1765,9 @@ impl Session {
     /// run at this usage.
     fn summary_due(&mut self, settings: &Settings) -> Option<run::Request> {
         let _timing = crate::notice_cost_timing::span("trigger.summary_due");
+        if self.wrapup_target.is_some() {
+            return self.wrapup_summary_due(settings);
+        }
         let threshold = settings.execute_threshold_percentage;
         let usage = pass::usage(&self.pressure()).unwrap_or(0.0) * 100.0;
         let legacy = self.legacy_summary_scan();
@@ -1805,8 +1812,6 @@ impl Session {
         if !self.features.summarizer || self.summarizing {
             return None;
         }
-        let memory_enabled =
-            self.memory_admissions(settings) && self.writable_memory_level().is_some();
         let window = pass::usable_window(&self.conditions);
         let force = pass::in_force_band(&self.pressure(), settings);
         let tail = trigger::protected_tail_tokens(window, threshold, usage);
@@ -1996,11 +2001,6 @@ impl Session {
             return None;
         };
         self.reservation = Some(reservation);
-        self.summarizing = true;
-        tracing::info!(
-            "ck-mc: session {}: summary started over messages {from}..{until} (~{requested} tokens)",
-            self.key.session
-        );
         self.note_account_run(admitted, usage);
         self.run_start = Some(RunStart {
             lift: lift_floor.then(|| SpentLift {
@@ -2013,7 +2013,33 @@ impl Session {
         if lift_floor {
             self.floor_lifted_for = prompt.map(|(_, mid)| mid);
         }
-        Some(run::Request {
+        Some(self.begin_summary(settings, from, until, force, false))
+    }
+
+    /// Manual and automatic summaries share their request, routing and publication path.
+    fn begin_summary(
+        &mut self,
+        settings: &Settings,
+        from: u64,
+        until: u64,
+        emergency: bool,
+        force_keep_last_compartment: bool,
+    ) -> run::Request {
+        let memory_enabled =
+            self.memory_admissions(settings) && self.writable_memory_level().is_some();
+        let requested: u64 = self
+            .index
+            .entries()
+            .iter()
+            .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
+            .map(entry_removed_tokens)
+            .sum();
+        self.summarizing = true;
+        tracing::info!(
+            "ck-mc: session {}: summary started over messages {from}..{until} (~{requested} tokens)",
+            self.key.session
+        );
+        run::Request {
             limits: self.limits,
             session: self.key.clone(),
             // Retries and turn two belong to one summary attempt; keep them
@@ -2027,8 +2053,9 @@ impl Session {
             language: settings.language.clone(),
             memory_enabled,
             auto_promote: settings.auto_promote,
-            emergency: force,
-        })
+            emergency,
+            force_keep_last_compartment,
+        }
     }
 
     /// The session's clock for the drain quota: when the runner wrote the
@@ -5859,6 +5886,7 @@ mod signed_floor;
 mod statement_order;
 
 mod user_commands;
+pub(crate) mod wrapup;
 pub(crate) use statement_order::epoch_admits;
 use statement_order::{Standing, StatedView};
 

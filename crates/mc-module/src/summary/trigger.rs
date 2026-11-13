@@ -269,9 +269,9 @@ pub fn decide(
         let scan = scan?;
         // Tiny force-band summaries each rewrite the prompt; wait for enough
         // text and tool input to reclaim 2% of the request's usable window.
-        // ck-mc has no manual summary commands (wrapup or compartment rebuild)
-        // or dedicated overflow-recovery summary path. Only notices start runs,
-        // so the 95% exemption keeps recovery moving.
+        // Manual wrapup bypasses this automatic trigger. The 95% exemption
+        // keeps automatic overflow recovery moving even when the scan finds
+        // too little text and tool input to meet that 2% threshold.
         let enough =
             pressure.usage >= 95.0 || scan.removed_tokens >= pressure.usable_window.div_ceil(50);
         return (!drops_suffice && enough).then_some(Reason::Force);

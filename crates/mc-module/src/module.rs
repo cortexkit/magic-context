@@ -993,6 +993,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         }
                         let read_only =
                             matches!(&request, crate::user_commands::Request::Preview(_));
+                        let starts_wrapup = match &request {
+                            crate::user_commands::Request::Run(request)
+                                if request.id == "wrapup" =>
+                            {
+                                session
+                                    .as_ref()
+                                    .is_some_and(|s| !s.command_recorded(&request.request_id))
+                            }
+                            _ => false,
+                        };
                         let result = crate::user_commands::execute(
                             session.as_mut(),
                             inner.client.as_ref(),
@@ -1000,9 +1010,21 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             request,
                         )
                         .await;
+                        let starts_wrapup = starts_wrapup
+                            && result.as_ref().is_ok_and(|r| {
+                                r.get("outcome").and_then(Value::as_str) == Some("scheduled")
+                            });
                         let _ = reply.send(result);
                         if read_only {
                             continue;
+                        }
+                        if starts_wrapup {
+                            if let Some(request) = session
+                                .as_mut()
+                                .and_then(|s| s.pending_wrapup_summary(settings))
+                            {
+                                start_summary(&inner, own.clone(), request, &held_key);
+                            }
                         }
                     }
                     Job::Busy(reply) => {
@@ -1081,6 +1103,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         }
                     }
                     Job::SummaryFinished(result, counted) => {
+                        let progressed = matches!(&*result, Ok(Some(_)));
                         if let Some(session) = &mut session {
                             let continuation = session
                                 .summary_finished(
@@ -1094,6 +1117,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 session.turn_two_job(settings, continuation)
                             }) {
                                 start_turn_two(&inner, own.clone(), job, &held_key);
+                            }
+                            if progressed {
+                                if let Some(request) = session.pending_wrapup_summary(settings) {
+                                    start_summary(&inner, own.clone(), request, &held_key);
+                                }
                             }
                         }
                         // The run stops counting only now that its result is

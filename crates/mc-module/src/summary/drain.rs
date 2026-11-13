@@ -89,7 +89,7 @@ impl Drain {
         }
     }
 
-    fn in_failure_backoff(&self, now: i64) -> bool {
+    pub(crate) fn in_failure_backoff(&self, now: i64) -> bool {
         self.failure_at > 0 && self.failure_at <= now && now - self.failure_at < FAILURE_BACKOFF_MS
     }
 
@@ -129,6 +129,24 @@ impl Drain {
             return None;
         }
         self.spent += tokens;
+        Some(Reservation {
+            tokens,
+            window_started_at: self.window_started_at,
+        })
+    }
+
+    /// A person's anchored wrapup can drain past the automatic window quota,
+    /// but keeps the per-run cap, failure backoff and reservation accounting.
+    pub fn reserve_wrapup(&mut self, usage: &Usage, requested: u64) -> Option<Reservation> {
+        if self.in_failure_backoff(usage.now) {
+            return None;
+        }
+        if !self.window_open(usage.now) {
+            self.window_started_at = usage.now;
+            self.spent = 0;
+        }
+        let tokens = requested.min(usage.per_run_cap);
+        self.spent = self.spent.saturating_add(tokens);
         Some(Reservation {
             tokens,
             window_started_at: self.window_started_at,
