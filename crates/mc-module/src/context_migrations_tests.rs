@@ -373,7 +373,9 @@ fn only_live_memories_are_unique_for_their_owner_and_category() {
 #[test]
 fn a_store_outside_the_migrated_range_is_refused_untouched() {
     let mut connection = plugin_store();
-    let below = i64::from(PLUGIN_SCHEMA_VERSION) - 1;
+    // Stores from 95 up are brought forward (see `catch_up_tests`); only an
+    // older one is refused.
+    let below = crate::context_migrations::RELEASED_PLUGIN_VERSION - 1;
     assert!(upgrade(&mut connection, below).is_err());
     assert!(upgrade(&mut connection, i64::from(SCHEMA_VERSION) + 1).is_err());
     assert_eq!(version(&connection), i64::from(PLUGIN_SCHEMA_VERSION));

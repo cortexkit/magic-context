@@ -1,10 +1,10 @@
 //! The module's own migrations of `context.db`.
 //!
 //! Up to version 105 the standalone plugin owned the schema (its
-//! `migrations.ts`), and ck-mc only checked the version. 0.49 is the last
-//! plugin line, so from 106 on the module migrates the store itself. A store
-//! below the plugin's last version is refused, as before: carrying an older
-//! store forward is separate work.
+//! `migrations.ts`). 0.49 is the last plugin line, so from 106 on the module
+//! migrates the store itself. A store the released 0.49 plugin left at 95 is
+//! first brought to 105 by [`catch_up`]; a store older than 95 is refused,
+//! because only the 0.49 plugin knows how to bring it to 95.
 //!
 //! Each migration runs in its own `BEGIN IMMEDIATE` transaction and records
 //! itself in `schema_migrations`, the table the plugin's migrations use, so
@@ -13,6 +13,14 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::memory_writes::normalized_hash;
+
+#[path = "context_catch_up.rs"]
+mod catch_up;
+pub use catch_up::RELEASED_PLUGIN_VERSION;
+
+#[cfg(test)]
+#[path = "context_catch_up_tests.rs"]
+mod catch_up_tests;
 
 /// The last schema version the plugin's migrations produced.
 pub const PLUGIN_SCHEMA_VERSION: u32 = crate::context_db::PLUGIN_SCHEMA_VERSION;
@@ -47,16 +55,29 @@ const MIGRATIONS: &[Migration] = &[
 ];
 
 /// Apply every pending migration to a store at `found`. Returns the version
-/// the store is at afterwards. A store below [`PLUGIN_SCHEMA_VERSION`] or
+/// the store is at afterwards. A store below [`RELEASED_PLUGIN_VERSION`] or
 /// above [`SCHEMA_VERSION`] is refused untouched.
 pub(crate) fn upgrade(connection: &mut Connection, found: i64) -> Result<i64, String> {
     if found == i64::from(SCHEMA_VERSION) {
         return Ok(found);
     }
-    if found < i64::from(PLUGIN_SCHEMA_VERSION) || found > i64::from(SCHEMA_VERSION) {
+    if found < RELEASED_PLUGIN_VERSION {
         return Err(format!(
-            "schema version {found}; this ck-mc reads version {SCHEMA_VERSION} and migrates from {PLUGIN_SCHEMA_VERSION}"
+            "schema version {found} is older than the last Magic Context plugin's ({RELEASED_PLUGIN_VERSION}); open it once with Magic Context 0.49, then start ck-mc again"
         ));
+    }
+    if found > i64::from(SCHEMA_VERSION) {
+        return Err(format!(
+            "schema version {found}; this ck-mc reads version {SCHEMA_VERSION}"
+        ));
+    }
+    let mut found = found;
+    if found < i64::from(PLUGIN_SCHEMA_VERSION) {
+        catch_up::catch_up(connection, found, now_ms())?;
+        tracing::info!(
+            "ck-mc: context.db brought from the plugin's version {found} to {PLUGIN_SCHEMA_VERSION}"
+        );
+        found = i64::from(PLUGIN_SCHEMA_VERSION);
     }
     let mut at = found;
     for migration in MIGRATIONS

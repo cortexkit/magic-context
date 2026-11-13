@@ -225,8 +225,11 @@ fn tag_floor() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn open_context_db(path: &std::path::Path) -> Result<ContextDb, Box<dyn Error + Send + Sync>> {
+    // From 0.50 the module owns the store: a machine without one gets a new
+    // one, and a store the 0.49 plugin left behind is migrated on open.
     if !path.exists() {
-        return Err("Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc.".into());
+        tracing::info!("ck-mc: creating {}", path.display());
+        return Ok(ContextDb::create(path)?);
     }
     Ok(ContextDb::open(path)?)
 }

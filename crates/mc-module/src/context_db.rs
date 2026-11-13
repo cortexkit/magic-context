@@ -42,9 +42,10 @@ const FORK_VERSION_FLOOR: u32 = declared_number(
 );
 
 /// The fresh schema at [`PLUGIN_SCHEMA_VERSION`], generated from the plugin's
-/// migration chain. Only stores ck-mc creates for tests use it; opening one
-/// applies the module's own migrations on top.
-const FRESH_SCHEMA: &str = include_str!("../testdata/context-schema.sql");
+/// migration chain. A store ck-mc creates starts from it, and a store the
+/// 0.49 plugin left behind is brought to it; opening either applies the
+/// module's own migrations on top.
+pub(crate) const FRESH_SCHEMA: &str = include_str!("../testdata/context-schema.sql");
 
 /// A numeric literal declared in TypeScript source, read at compile time so
 /// an installed binary needs no TypeScript files.
@@ -345,6 +346,40 @@ impl ContextDb {
         crate::context_migrations::upgrade(&mut connection, i64::from(PLUGIN_SCHEMA_VERSION))
             .expect("module migrations");
         connection
+    }
+
+    /// Create the store on a machine that has none, then open it. The schema
+    /// is written to a temporary file next to `path` and linked into place
+    /// only when complete, so a crash never leaves a half-made store, and a
+    /// store another process created meanwhile is never replaced.
+    pub fn create(path: &Path) -> Result<Self, String> {
+        let dir = path
+            .parent()
+            .ok_or_else(|| format!("{} has no folder", path.display()))?;
+        std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        let temp = dir.join(format!("context.db.creating-{}", std::process::id()));
+        let _ = std::fs::remove_file(&temp);
+        let written = (|| {
+            let connection = Connection::open(&temp).map_err(|error| error.to_string())?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as i64)
+                .unwrap_or(0);
+            connection
+                .execute_batch(&FRESH_SCHEMA.replace(":applied_at", &now.to_string()))
+                .map_err(|error| format!("fresh schema: {error}"))
+        })();
+        let linked = written.and_then(|()| {
+            std::fs::hard_link(&temp, path).map_err(|error| format!("{}: {error}", path.display()))
+        });
+        let _ = std::fs::remove_file(&temp);
+        // A store another process created first is opened as found.
+        if let Err(error) = linked {
+            if !path.exists() {
+                return Err(error);
+            }
+        }
+        Self::open(path)
     }
 
     /// Create a store with the fresh schema, for tests and throwaway runs.
