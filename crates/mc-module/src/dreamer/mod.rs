@@ -18,5 +18,8 @@ pub mod tasks;
 /// Every task kind the module runs. A profile's task of any other kind is
 /// not scheduled.
 pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
-    vec![Box::new(tasks::classify::Classify)]
+    vec![
+        Box::new(tasks::classify::Classify),
+        Box::new(tasks::compress_cues::CompressCues),
+    ]
 }

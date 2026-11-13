@@ -3,3 +3,4 @@
 //! accepted reply proposes once the reply passes the kind's own checks.
 
 pub mod classify;
+pub mod compress_cues;

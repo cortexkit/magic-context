@@ -1,0 +1,25 @@
+## Task: Compress Project Memory Cues
+
+**Project:** pj-cues
+
+Compress EVERY memory in the pool below into one mural cue. Emit one <cues> manifest with exactly one <cue> per id.
+
+### Memory pool to compress
+[2] ARCHITECTURE importance=50 (budget 50)
+Use <tags> & Unicode 日本語.
+
+[3] CONSTRAINTS importance=70 (budget 90)
+Line one.
+Line two.
+
+[4] NAMING importance=69 (budget 50)
+Crates are named mc-*.
+
+[6] PROJECT_RULES importance=80 (budget 90)
+Run the gate before pushing.
+
+[1] PROJECT_RULES importance=91 (budget 90)
+Never push without approval.
+
+[10] PROJECT_RULES importance=50 (budget 50)
+Keep #10 out of cues.
