@@ -62,8 +62,13 @@ async fn wrapup_preview_counts_raw_messages_and_tokens_without_mutating() {
     assert_eq!(facts[0].data.value, Some(4.0));
     assert_eq!(facts[1].data.value, Some(400.0));
     assert_eq!(facts[2].data.value, Some(20.0));
+    assert_eq!(facts.len(), 4);
+    assert_eq!(facts[3].label, "Summarizer");
+    assert_eq!(facts[3].data.state.as_deref(), Some("ready"));
     assert!(p.effect.as_ref().unwrap().contains("next rebuild"));
     assert!(p.effect.as_ref().unwrap().contains("flush"));
+    assert!(p.effect.as_ref().unwrap().contains("model runs"));
+    assert!(p.effect.as_ref().unwrap().contains("ctx_expand"));
     assert_eq!(before, session.durable());
     assert!(client.reads.lock().unwrap().is_empty());
     assert!(client.offered.lock().unwrap().is_empty());
@@ -124,17 +129,23 @@ async fn wrapup_run_starts_one_requested_range_and_replays_request() {
 }
 
 #[tokio::test]
-async fn wrapup_preview_stales_on_new_history_summary_or_running_state() {
-    for change in ["history", "summary", "running"] {
+async fn wrapup_preview_stales_on_summary_running_wait_or_pending_target_changes() {
+    for change in ["summary", "running", "wait", "target"] {
         let (mut session, client, settings) = ready();
         let p = preview_keep(&mut session, &client, &settings, Some(0)).await;
         let r = wire::ModuleRunRequest::new(request(&session, Some(0)), p.version, change);
         match change {
-            "history" => {
-                session.index.extend(vec![text(25, "new")]);
-            }
             "summary" => {
                 session.summaries.edit();
+            }
+            "wait" => {
+                session.account_refused(wait_until(crate::summary::account_wait::now_ms() + 60_000))
+            }
+            "target" => {
+                session.wrapup_target = Some(crate::session::wrapup::Target {
+                    until: 23,
+                    last_mid: "m22".into(),
+                })
             }
             _ => session.summarizing = true,
         }
@@ -155,9 +166,11 @@ async fn wrapup_running_summary_waits_and_new_command_replaces_target() {
     session.summarizing = true;
     let p = preview_keep(&mut session, &client, &settings, Some(0)).await;
     assert!(p.available);
-    assert!(serde_json::to_string(&p)
-        .unwrap()
-        .contains("already running"));
+    assert_eq!(p.facts.as_ref().unwrap()[3].label, "Summarizer");
+    assert_eq!(
+        p.facts.as_ref().unwrap()[3].data.state.as_deref(),
+        Some("building")
+    );
     let r = wire::ModuleRunRequest::new(request(&session, Some(0)), p.version, "while-running");
     assert_eq!(
         session
@@ -313,9 +326,10 @@ async fn wrapup_waits_for_account_and_failures_pause_without_losing_target() {
     assert!(session.pending_wrapup_summary(&settings).is_none());
     let p = preview_keep(&mut session, &client, &settings, Some(0)).await;
     assert!(p.available);
-    assert!(serde_json::to_string(&p)
-        .unwrap()
-        .contains("Account wait; target waits too"));
+    assert_eq!(
+        p.facts.as_ref().unwrap()[3].data.state.as_deref(),
+        Some("paused")
+    );
     session.account_wait.as_mut().unwrap().refusal.until_ms = now - 1;
     let resumed = session.pending_wrapup_summary(&settings).unwrap();
     assert_eq!((resumed.from, resumed.until), (run.from, run.until));
@@ -330,9 +344,88 @@ async fn wrapup_waits_for_account_and_failures_pause_without_losing_target() {
     assert!(session.pending_wrapup_summary(&settings).is_none());
     assert!(session.durable().wrapup_target.is_some());
     let p = preview_keep(&mut session, &client, &settings, Some(0)).await;
-    assert!(serde_json::to_string(&p)
-        .unwrap()
-        .contains("failure backoff"));
+    assert_eq!(
+        p.facts.as_ref().unwrap()[3].data.state.as_deref(),
+        Some("paused")
+    );
+}
+
+fn wait_until(until_ms: i64) -> crate::summary::account_wait::AccountWait {
+    crate::summary::account_wait::AccountWait {
+        at_ms: crate::summary::account_wait::now_ms(),
+        until_ms,
+        code: "account_limit_exhausted".into(),
+        send: crate::summary::account_wait::SendKind::TurnOne,
+    }
+}
+
+#[tokio::test]
+async fn wrapup_preview_survives_append_notice_and_uses_current_boundary_and_facts() {
+    let (mut session, client, settings) = ready();
+    session.index_ready = true;
+    session.view_anchor = true;
+    let p = preview_keep(&mut session, &client, &settings, Some(2)).await;
+    assert_eq!(p.facts.as_ref().unwrap()[0].data.value, Some(22.0));
+    let mut appended = vec![text(25, "new user prompt"), text(26, "new assistant reply")];
+    appended[1].role = Role::Assistant;
+    let mut n = notice(&session, 1, appended.last().map(cursor));
+    n.entries = appended;
+    n.conditions.last_prompt_tokens = Some(500);
+    assert!(session.notice(&client, &settings, n).await.is_none());
+    assert_eq!(session.index.cursor().unwrap().ordinal, 26);
+    let current = preview_keep(&mut session, &client, &settings, Some(2)).await;
+    assert_eq!(current.version, p.version);
+    let r = wire::ModuleRunRequest::new(request(&session, Some(2)), p.version, "continued-session");
+    let answer = session.command_run(&client, &settings, &r).await.unwrap();
+    assert_eq!(answer.outcome, "scheduled");
+    let facts = answer.facts.unwrap();
+    assert_eq!(facts[0].data.value, Some(24.0));
+    assert_eq!(facts[1].data.value, Some(2400.0));
+    assert_eq!(facts[2].data.value, Some(2.0));
+    assert_eq!(session.pending_wrapup_summary(&settings).unwrap().until, 25);
+}
+
+#[tokio::test]
+async fn wrapup_preview_wait_duration_is_remaining_time_and_floored_at_zero() {
+    let (mut session, client, settings) = ready();
+    let now = crate::summary::account_wait::now_ms();
+    for until in [now + 60_000, now - 1] {
+        session.account_refused(wait_until(until));
+        let before = crate::summary::account_wait::now_ms();
+        let p = preview_keep(&mut session, &client, &settings, Some(0)).await;
+        let after = crate::summary::account_wait::now_ms();
+        let wait = p
+            .facts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|fact| fact.label == "Waits for")
+            .expect("remaining account wait");
+        assert_eq!(wait.data.unit.as_deref(), Some("duration"));
+        let remaining = wait.data.value.unwrap();
+        assert!(remaining >= (until - after).max(0) as f64);
+        assert!(remaining <= (until - before).max(0) as f64);
+        assert!(!p
+            .facts
+            .unwrap()
+            .iter()
+            .any(|fact| fact.label.contains("epoch")));
+    }
+}
+
+#[tokio::test]
+async fn wrapup_preview_version_ignores_account_wait_metadata_but_tracks_admission() {
+    let (mut session, client, settings) = ready();
+    let now = crate::summary::account_wait::now_ms();
+    session.account_refused(wait_until(now + 60_000));
+    let p = preview_keep(&mut session, &client, &settings, Some(0)).await;
+    session.account_refused(wait_until(now + 120_000));
+    session.account_wait.as_mut().unwrap().refusal.code = "account_selection_final".into();
+    let waiting = preview_keep(&mut session, &client, &settings, Some(0)).await;
+    assert_eq!(p.version, waiting.version);
+    session.account_wait.as_mut().unwrap().refusal.until_ms = now - 1;
+    let resumed = preview_keep(&mut session, &client, &settings, Some(0)).await;
+    assert_ne!(p.version, resumed.version);
 }
 
 #[tokio::test]

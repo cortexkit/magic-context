@@ -1,6 +1,6 @@
 {
   "available": true,
-  "effect": "Shrinks context on the next rebuild, or at once at its rebuild threshold. flush applies published summaries now.",
+  "effect": "May take several model runs. ctx_expand recovers raw text. Shrinks next rebuild (now at threshold); flush applies now.",
   "facts": [
     {
       "label": "To summarize",
@@ -21,17 +21,9 @@
       "value": 20.0
     },
     {
-      "label": "Summary ready; failures pause remaining work",
-      "state": "ready"
-    },
-    {
-      "label": "Uses a model; may take several summary runs",
-      "state": "ready"
-    },
-    {
-      "label": "Raw text recoverable with ctx_expand",
+      "label": "Summarizer",
       "state": "ready"
     }
   ],
-  "version": "e9343548754656ef4b9f1908ae33b9bbf424bf45d1c0f9bb9022a12a153b5cd2"
+  "version": "eb7f6ce1851f59b43b7fb1543d67e2748af00b820db72fdbef62630aa2a62a3a"
 }
