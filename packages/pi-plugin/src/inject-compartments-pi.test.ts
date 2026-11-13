@@ -123,13 +123,15 @@ it("Pi reanchors an invisible cached boundary by active-branch order on repeated
 	}
 });
 
-it("pi applied compaction bounds auto-search blob across 20000 user messages", () => {
+it("pi applied compaction bounds auto-search blob across 200 windows", () => {
 	const db = createTestDb();
 	const sessionId = "pi-auto-search-bounded";
 	const state = { sessionId, injectDocs: false };
-	const window = 100;
-	const total = 20000;
-	const id = (number: number) => `user-${number}`;
+	// Keep 200 windows but use fewer appends: 10 and 100 have the same mod-3
+	// hint cycle. Scaled IDs still cross 100, 1000 and 10000 at the same windows.
+	const window = 10;
+	const total = window * 200;
+	const id = (number: number) => `user-${number * 10}`;
 	let live: Parameters<typeof injectM0M1Pi>[2] = [];
 	let maxEntries = 0;
 	let maxBytes = 0;
