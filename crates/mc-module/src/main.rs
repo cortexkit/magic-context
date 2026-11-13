@@ -130,13 +130,11 @@ fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
     // is refused, so a mistyped flag never turns a copy into a move.
     let mut copy = false;
     for arg in std::env::args().skip(2) {
-        match arg.as_str() {
-            "--copy" => copy = true,
-            other => return Err(format!(
-                "unknown move-in argument `{other}`; usage: ck-mc move-in [--copy] < request.json"
-            )
-            .into()),
+        if arg != "--copy" {
+            let usage = "usage: ck-mc move-in [--copy] < request.json";
+            return Err(format!("unknown move-in argument `{arg}`; {usage}").into());
         }
+        copy = true;
     }
     let context_path = context_db_path();
     let db = open_context_db(&context_path)?;
