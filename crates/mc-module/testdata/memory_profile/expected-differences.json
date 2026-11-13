@@ -581,6 +581,228 @@
       "rendered": [
         "- importance is an integer 1-100."
       ]
+    },
+    {
+      "document": "dreamer/swe:curate/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "You are a memory-pool curator for the magic-context system. You run during a scheduled dream window to keep a project's cross-session memory store lean and well-formed."
+      ],
+      "rendered": [
+        "You curate the memories of one software project. Each memory is a short fact or rule that coding agents read at the start of every session. Only part of them fit in front of the agents, so every memory that adds nothing pushes out one that matters. Your job is to keep one category of memories small and free of repeats."
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "## Memory operations",
+        "- The scoped category snapshot arrives in the first message. Do not list or get it again; track mutation deltas.",
+        "- `action=\"merge\", ids=[N,M,...], content=\"...\", category=\"...\"` — consolidate duplicates into one canonical memory",
+        "- `action=\"update\", ids=[N], content=\"...\", superseded_by=M` — rewrite content; name where removed detail survives when cutting more than half",
+        "- `action=\"write\", category=\"...\", content=\"...\"` — create a memory (SPLITS ONLY — never mint new facts)",
+        "- `action=\"archive\", ids=[N], superseded_by=M, reason=\"...\"` — consolidate a redundant memory into the named active same-category survivor"
+      ],
+      "rendered": [
+        "You read only what this message gives you: the memories, the project documents and the memories every session already sees. You do not read code. You do not decide whether a memory is still true; another task checks memories against the code."
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "## Rules",
+        "1. **Assume the pool is accurate.** A separate verify task checks memories against code. You handle QUALITY only — duplicates, wording, low-value entries — never correctness, and you do NOT read the codebase.",
+        "2. **Work methodically.** Choose your own batch size.",
+        "3. **Be conservative with archives.** Use the task's archive criteria.",
+        "4. **Present-tense operational language.** \"X uses Y\" not \"X was changed to use Y.\"",
+        "5. **One rule/fact per memory.**",
+        "6. **Never mint new facts** — that is the historian's job. `write` is for splitting a compound memory only."
+      ],
+      "rendered": [
+        "## What you may change"
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "## Memory taxonomy (5 categories)"
+      ],
+      "rendered": [
+        "1. **Merge** memories that state the same fact into one memory. The merged text keeps every path, name, number and condition that any of them states.",
+        "2. **Shorten** a long memory to the fact or rule it states. Keep every path, name, number and condition.",
+        "3. **Split** a memory that states several separate facts into one memory per fact.",
+        "4. **Archive** a memory that adds nothing, for one of these reasons:",
+        "   - `duplicate`: another memory already says the same thing. That memory is in your list, or among the memories every session sees, or a line of the project documents says it. Name the memory, or quote the line exactly.",
+        "   - `one-off`: a detail no later session can use, such as a room, session, run, worker or commit id, or a status note about one day.",
+        "   - `lesson`: a story or essay that states no rule a later session could follow. If it contains one rule, shorten it to that rule instead of archiving it."
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "Project memory uses exactly 5 categories. Every memory belongs to one:"
+      ],
+      "rendered": [
+        "## What you must not do",
+        "",
+        "- Do not change what a memory means, and do not add a fact it does not state.",
+        "- Do not make a change that only reformats: backticks, capital letters, word order or punctuation. Leave such a memory as it is.",
+        "- Do not merge memories that state different facts, even when they are about the same subject.",
+        "- Do not change a memory marked `protected`.",
+        "",
+        "Most memories need no change. A good answer often changes only a few of them.",
+        "",
+        "## Categories",
+        "",
+        "The project's memories use 5 categories:"
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/system",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "**Legacy categories during transition:** older memories may still carry pre-v2 category names. When you touch one, map it to its 5-category home with `action=\"update\"` (or `merge`): WORKFLOW_RULES→PROJECT_RULES, ARCHITECTURE_DECISIONS→ARCHITECTURE, CONFIG_DEFAULTS→CONFIG_VALUES, ENVIRONMENT→CONFIG_VALUES (paths) or CONSTRAINTS, KNOWN_ISSUES→CONSTRAINTS only if it's an external-system limit. USER_DIRECTIVES / USER_PREFERENCES are NOT project categories. Do not compare project memories with the global user profile or use it to justify an archive."
+      ],
+      "rendered": [
+        "## Answer",
+        "",
+        "Answer with ONE `<curate>` list and nothing after it. Put only the memories you change in it; a memory you leave out stays as it is. Each memory id appears at most once.",
+        "",
+        "<curate>",
+        "<merge ids=\"12,15\">The merged text</merge>",
+        "<shorten id=\"21\">The shorter text</shorten>",
+        "<split id=\"30\">",
+        "<part>The first fact</part>",
+        "<part>The second fact</part>",
+        "</split>",
+        "<archive id=\"40\" reason=\"duplicate\" of=\"12\"/>",
+        "<archive id=\"41\" reason=\"duplicate\" quote=\"The exact line from the project documents\"/>",
+        "<archive id=\"42\" reason=\"one-off\" why=\"a chat room id\"/>",
+        "<archive id=\"43\" reason=\"lesson\" why=\"a story with no rule\"/>",
+        "</curate>",
+        "",
+        "- `merge` names two or more memories from your list. The merged text replaces all of them.",
+        "- `of` names a memory from your list, from the memories every session sees, or from the similar memories.",
+        "- `quote` copies one line of the project documents exactly.",
+        "- `<curate></curate>` with nothing inside is a valid answer."
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/user",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "## Task: Curate Project Memory Pool (hygiene)"
+      ],
+      "rendered": [
+        "## Curate the `⟦curate.category⟧` memories"
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/user",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "This run covers the whole of the `⟦curate.category⟧` category (the other categories run in later windows).",
+        "",
+        "The memories below are assumed ACCURATE (a separate verify task keeps them true). Your job is pool QUALITY: remove duplicates, tighten wording, and consolidate redundant entries that waste the 4000-token injection budget. Explain each action in one line first. Do NOT mint new facts (that is the historian's job).",
+        "",
+        "Work ALL THREE phases below in order (A → B → C) over this category. Do NOT stop after consolidating — a run that only merges and never improves or archives is incomplete.",
+        "",
+        "### Phase A — Consolidate duplicates",
+        "Group by category, then merge near-identical / superset-subset / same-fact-different-angle clusters into one canonical memory with `ctx_memory(action=\"merge\", ids=[...], content=\"...\", category=\"...\")`. Preserve every unique detail; terse present tense; paths/keys verbatim. Every id in a merge MUST share the same category — the system rejects cross-category merges. If two similar memories sit in different categories they are NOT duplicates; do not archive either as a consolidation. One fact per memory.",
+        "",
+        "### Phase B — Improve wording",
+        "Rewrite narrative/historical → operational present tense (\"X uses Y because Z\", not \"we switched to Y\"); drop session-local context and commit hashes (unless the hash is the point); add specifics where vague. A rewrite that removes more than half the content must name the active same-category memory preserving that detail with `superseded_by`. `write` is for SPLITS ONLY (update the original down to its first fact, write the second) — a healthy run is net-neutral or net-shrinking, never net-adds facts."
+      ],
+      "rendered": [
+        "<project-documents>",
+        "⟦docs⟧",
+        "</project-documents>"
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/user",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "### Phase C — Archive only into a surviving project memory",
+        "Archive a redundant memory only when a better ACTIVE memory in the same project and category preserves its information; name that survivor with `superseded_by`. A bare \"redundant\" verdict is deletion and will be refused. Leave standalone low-value or stale entries unchanged for a human to review. The global user profile describes the operator and is never a substitute for project knowledge, so it cannot justify an archive.",
+        "KEEP (overrides archive): constraint/rule language (must/never/always) · explains WHY (because/so that/to prevent) · EXTERNAL-system limit (CONSTRAINTS: archive only if word-for-word duplicated) · path/config WITH context · retrieval_count>0 · priority/philosophy."
+      ],
+      "rendered": [
+        "<always-shown>",
+        "Every session already sees these memories, from any category. Use them to find duplicates. Do not change them.",
+        "[⟦shown.id⟧] ⟦shown.category⟧: ⟦shown.content⟧",
+        "</always-shown>"
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/user",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "### Cross-chunk duplicate candidates (normalized content matches)",
+        "⟦crossChunkCandidateLine⟧"
+      ],
+      "rendered": [
+        "<similar>",
+        "These memories from other parts of this category have text close to one in your list. Use them to find duplicates. Do not change them.",
+        "[⟦similar.id⟧] ⟦similar.content⟧",
+        "</similar>"
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/user",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "### Category snapshot (do not re-enumerate)",
+        "[⟦memory.id⟧] ⟦memory.category⟧ importance=⟦memory.importance⟧ retrieval_count=⟦memory.retrieval_count⟧ seen_count=⟦memory.seen_count⟧",
+        "Content: ⟦memory.content⟧",
+        "Mapped files: ⟦mappedFile⟧"
+      ],
+      "rendered": [
+        "<memories part=\"⟦part⟧ of ⟦parts⟧\">",
+        "[⟦memory.id⟧]",
+        "⟦memory.content⟧"
+      ]
+    },
+    {
+      "document": "dreamer/swe:curate/user",
+      "class": "ruling",
+      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "today": [
+        "[⟦memory2.id⟧] ⟦memory2.category⟧ importance=⟦memory2.importance⟧ retrieval_count=⟦memory2.retrieval_count⟧ seen_count=⟦memory2.seen_count⟧",
+        "Content: ⟦memory2.content⟧",
+        "Mapped files: (none mapped yet) (file-independent)"
+      ],
+      "rendered": [
+        "[⟦memory2.id⟧] protected",
+        "⟦memory2.content⟧",
+        "</memories>"
+      ]
     }
   ]
 }

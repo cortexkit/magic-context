@@ -120,7 +120,7 @@
   },
   {
     "name": "task prompt without its output contract",
-    "expect": "must contain the MC frame curate.memory-operations",
+    "expect": "must contain the MC frame curate.output-contract",
     "code": "task_interface_mismatch",
     "source": "resolved-swe/resolve.ts:831",
     "rule": "mc-memory-profile-v1.md:\u00a77.2:637"

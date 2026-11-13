@@ -70,13 +70,13 @@
     },
     {
       "path": "prompts/dreamer/curate/system.md",
-      "sha256": "708b417310f557a58f5accff4c6f3261d2b3f42e4bf7aadb2c7dfd6604a80b4c",
-      "bytes": 1581
+      "sha256": "624a25ad7642393d5fe13e401bee4e96e85202fbc489c49b73d363bfb5ef8964",
+      "bytes": 2119
     },
     {
       "path": "prompts/dreamer/curate/user.md",
-      "sha256": "a2b5240f042ea59a900a73516bd7d5a1456dabf4c0a75db715ac9089c17baa05",
-      "bytes": 2564
+      "sha256": "ef09f686b6b021b4e68ace294d2da17c3aa5d0a748360fb31f05057957d247cb",
+      "bytes": 106
     },
     {
       "path": "prompts/dreamer/maintain-docs/system.md",
@@ -701,8 +701,8 @@
         ],
         "actions": [
           "merge",
-          "update",
-          "write-split",
+          "shorten",
+          "split",
           "archive"
         ],
         "categories": [

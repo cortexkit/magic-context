@@ -1,11 +1,21 @@
-### Cross-chunk duplicate candidates (normalized content matches)
-⟦crossChunkCandidateLine⟧
+<project-documents>
+⟦docs⟧
+</project-documents>
 
-### Category snapshot (do not re-enumerate)
-[⟦memory.id⟧] ⟦memory.category⟧ importance=⟦memory.importance⟧ retrieval_count=⟦memory.retrieval_count⟧ seen_count=⟦memory.seen_count⟧
-Content: ⟦memory.content⟧
-Mapped files: ⟦mappedFile⟧
+<always-shown>
+Every session already sees these memories, from any category. Use them to find duplicates. Do not change them.
+[⟦shown.id⟧] ⟦shown.category⟧: ⟦shown.content⟧
+</always-shown>
 
-[⟦memory2.id⟧] ⟦memory2.category⟧ importance=⟦memory2.importance⟧ retrieval_count=⟦memory2.retrieval_count⟧ seen_count=⟦memory2.seen_count⟧
-Content: ⟦memory2.content⟧
-Mapped files: (none mapped yet) (file-independent)
+<similar>
+These memories from other parts of this category have text close to one in your list. Use them to find duplicates. Do not change them.
+[⟦similar.id⟧] ⟦similar.content⟧
+</similar>
+
+<memories part="⟦part⟧ of ⟦parts⟧">
+[⟦memory.id⟧]
+⟦memory.content⟧
+
+[⟦memory2.id⟧] protected
+⟦memory2.content⟧
+</memories>

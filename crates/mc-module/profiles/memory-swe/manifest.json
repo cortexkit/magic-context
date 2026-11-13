@@ -449,8 +449,8 @@
         ],
         "actions": [
           "merge",
-          "update",
-          "write-split",
+          "shorten",
+          "split",
           "archive"
         ],
         "categories": [

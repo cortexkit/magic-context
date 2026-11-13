@@ -652,11 +652,11 @@ fn interface(kind: &str) -> Option<Interface> {
         ),
         "curate" => (
             &["memory-pool"][..],
-            &["merge", "update", "write-split", "archive"][..],
+            &["merge", "shorten", "split", "archive"][..],
             &["system", "user"][..],
             &[][..],
             &[][..],
-            &["curate.input", "curate.memory-operations"],
+            &["curate.input", "curate.output-contract"],
         ),
         "compress-cues" => (
             &["memory-pool"][..],
