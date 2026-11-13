@@ -316,10 +316,47 @@ function renderVariant(
 }
 
 /**
+ * Parameter descriptions the module words on its own. The plugin is frozen at
+ * 0.49, its last line, while these texts belong to the memory levels of 0.50:
+ * ctx_memory's `level` argument, and its `ids`, which may now come from
+ * `<workspace-memory>` too. The plugin's tool has no counterpart for them, so
+ * the parity check leaves them out; every other parameter of the five shared
+ * tools must still equal the plugin's string.
+ */
+const MODULE_ONLY_PARAMETERS: Partial<Record<ToolId, readonly string[]>> = {
+	ctx_memory: ["ids", "level"],
+};
+
+/** Parameter descriptions by surface and tool, without the module-only ones. */
+function withoutModuleOnlyParameters(bySurface: Json): Json {
+	const surfaces = bySurface as Record<
+		string,
+		Record<string, Record<string, Json>>
+	>;
+	return Object.fromEntries(
+		Object.entries(surfaces).map(([surface, tools]) => [
+			surface,
+			Object.fromEntries(
+				Object.entries(tools).map(([tool, params]) => {
+					const own = MODULE_ONLY_PARAMETERS[tool as ToolId] ?? [];
+					return [
+						tool,
+						Object.fromEntries(
+							Object.entries(params).filter(([param]) => !own.includes(param)),
+						),
+					];
+				}),
+			),
+		]),
+	) as Json;
+}
+
+/**
  * Check the definition against the plugin's shipped strings: descriptions and
- * parameter descriptions are equal, and every text the plugin's builder makes
- * is what the definition renders for the same inputs. The tools-only texts
- * have no plugin counterpart.
+ * parameter descriptions are equal, apart from the module-only parameters
+ * above, and every text the plugin's builder makes is what the definition
+ * renders for the same inputs. The tools-only texts have no plugin
+ * counterpart.
  */
 function checkDefinitionMatchesPlugin(): void {
 	const plugin = {
@@ -376,8 +413,13 @@ function checkDefinitionMatchesPlugin(): void {
 				];
 			}),
 		);
+		const compared = (value: Json): Json =>
+			key === "parameter_descriptions"
+				? withoutModuleOnlyParameters(value)
+				: value;
 		if (
-			jcs(shared as unknown as Json) !== jcs(plugin[key] as unknown as Json)
+			jcs(compared(shared as unknown as Json)) !==
+			jcs(compared(plugin[key] as unknown as Json))
 		) {
 			throw new Error(`tool_catalog_v1.json ${key} differ from the plugin's`);
 		}

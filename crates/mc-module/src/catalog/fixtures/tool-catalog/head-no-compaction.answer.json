@@ -1,6 +1,6 @@
 {
-  "generation": "e7c896b9fe24156e640f192184bef000675373f8175a9aa26947f520420cc4dc",
-  "catalog_digest": "e7c896b9fe24156e640f192184bef000675373f8175a9aa26947f520420cc4dc",
+  "generation": "3771ab6587f7c44f8d88ae2acbef5f3b81f5b7c9f70fccfeaade8dc7a8a48abe",
+  "catalog_digest": "3771ab6587f7c44f8d88ae2acbef5f3b81f5b7c9f70fccfeaade8dc7a8a48abe",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -76,7 +76,7 @@
     },
     {
       "name": "ctx_memory",
-      "schema_digest": "de59b47f087c33bb84d20fe9eec0f5cdd5692089aa43e4bf19b72dcb53292cbc",
+      "schema_digest": "b3e2c4e45e8b1a30900ca47d892206945655b2f131c6977cbfe4cedb5b9d1e15",
       "semantics": 1,
       "result_ops": [
         "prepend",
@@ -120,11 +120,20 @@
             "items": {
               "type": "number"
             },
-            "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list."
+            "description": "Memory ids from <project-memory> or <workspace-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list."
           },
           "reason": {
             "type": "string",
             "description": "Why it is being archived (optional)."
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "project",
+              "workspace",
+              "global"
+            ],
+            "description": "Where a write goes: project (default) for this project; workspace for every project in this project's workspace; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly."
           }
         },
         "required": [
@@ -189,7 +198,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive: what earlier sessions said and decided, commits and notes. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.\n\n`ctx_memory` pins facts about this project that stay true for the months this work lasts, for you and for every other agent working on this project. Pin one when you learn something that must not have to be found again, and especially when it cost you several turns to find. Pinned facts are not shown to you automatically: `ctx_search` recalls them.\n\n`ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says \"take a note\", it always goes in the tray.",
     "item_digest": "73c679706bf3e65cc5f7a3de7e7d52600e8e9d071e8b5bdc074ee66cc316bec0",
-    "preflight_digest": "e5758703227ae2c20c4d92cb2d81daf4bf9cb85fde171eaced5c583ee21c3429",
+    "preflight_digest": "7394695b9cb3e21de3df400772511c5e0f570413de4213648f8a5a86c2d19384",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

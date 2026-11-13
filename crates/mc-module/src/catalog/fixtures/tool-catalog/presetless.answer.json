@@ -1,6 +1,6 @@
 {
-  "generation": "43a2850e01f4a301b9325aa6fca32065980da0eb0dd550c9a55d45602f27eac8",
-  "catalog_digest": "43a2850e01f4a301b9325aa6fca32065980da0eb0dd550c9a55d45602f27eac8",
+  "generation": "258d0ed4b061c32c66b5cbc5573508cece8dcf03ec8b72de6b18dccc8d174f6d",
+  "catalog_digest": "258d0ed4b061c32c66b5cbc5573508cece8dcf03ec8b72de6b18dccc8d174f6d",
   "presets": [
     "head",
     "worker",
@@ -81,7 +81,7 @@
     },
     {
       "name": "ctx_memory",
-      "schema_digest": "de59b47f087c33bb84d20fe9eec0f5cdd5692089aa43e4bf19b72dcb53292cbc",
+      "schema_digest": "b3e2c4e45e8b1a30900ca47d892206945655b2f131c6977cbfe4cedb5b9d1e15",
       "semantics": 1,
       "result_ops": [
         "prepend",
@@ -125,11 +125,20 @@
             "items": {
               "type": "number"
             },
-            "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list."
+            "description": "Memory ids from <project-memory> or <workspace-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list."
           },
           "reason": {
             "type": "string",
             "description": "Why it is being archived (optional)."
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "project",
+              "workspace",
+              "global"
+            ],
+            "description": "Where a write goes: project (default) for this project; workspace for every project in this project's workspace; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly."
           }
         },
         "required": [

@@ -1,15 +1,22 @@
-//! `ctx_memory`: the agent saves, changes and reads project memories. The
-//! argument rules and replies are the TypeScript tool's
-//! (`packages/plugin/src/tools/ctx-memory`), so an agent reads the same in
-//! both. The writes go through [`crate::memory_writes`].
+//! `ctx_memory`: the agent saves, changes and reads the memories of its
+//! project and of its project's workspace. The argument rules and replies
+//! began as the TypeScript tool's (`packages/plugin/src/tools/ctx-memory`);
+//! the `level` argument and its replies are the module's own. The writes go
+//! through [`crate::memory_writes`].
 //!
-//! A session sees and changes only its own project's memories; memories a
-//! workspace shares from other projects are not shown here yet.
+//! A write goes to the session's project unless `level` names another
+//! level. `workspace` files it for every project in the session's workspace,
+//! when the session's memory profile allows the category there. `global`
+//! saves no memory: global memories have one writer, the review that keeps
+//! the user profile, so the fact is passed to that review as an observation.
+//! Update, archive, merge and get take ids of the project's memories and of
+//! the workspace's; any other memory is not the session's to read or change.
 
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::memory_writes::{self, MutationError, Operation, Refused, Writer};
+use crate::app_read::Change;
+use crate::memory_writes::{self, MutationError, Operation, Refused, SaveLevel, Writer};
 
 /// Categories a write may name.
 const CATEGORIES: [&str; 12] = [
@@ -27,6 +34,39 @@ const CATEGORIES: [&str; 12] = [
     "KNOWN_ISSUES",
 ];
 const GET_MAX_IDS: usize = 20;
+
+/// Why a global write saves nothing and a global memory can't be changed
+/// here; both replies say it.
+const GLOBAL_NOTE: &str =
+    "global memories are written only by the review that keeps the user profile";
+
+/// Where a write goes, as its `level` argument names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Level {
+    Project,
+    Workspace,
+    Global,
+}
+
+/// A write's level: the project when the argument is absent or empty.
+fn level(input: &Value) -> Result<Level, String> {
+    match text(input, "level") {
+        None | Some("project") => Ok(Level::Project),
+        Some("workspace") => Ok(Level::Workspace),
+        Some("global") => Ok(Level::Global),
+        Some(other) => Err(format!(
+            "Error: Unknown memory level '{other}'. Use project, workspace or global."
+        )),
+    }
+}
+
+/// The apps' reload hint for the memories of `memory`'s owner.
+fn owner_changed(memory: &memory_writes::MemoryRow) -> Change {
+    Change::Memories {
+        level: memory.level.clone(),
+        owner: memory.owner_id.clone(),
+    }
+}
 
 fn text<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
     input
@@ -140,16 +180,36 @@ fn format_list(memories: &[memory_writes::MemoryRow]) -> String {
     lines.join("\n")
 }
 
-/// Whether a `ctx_memory` call asks to change memories, not only read them.
-pub(crate) fn writes(input: &Value) -> bool {
-    matches!(
-        input.get("action").and_then(Value::as_str),
-        Some("write" | "update" | "archive" | "merge")
-    )
+/// One `ctx_memory` call's reply, and the owners whose memories or pending
+/// observations it may have changed, for the apps' reload hints.
+pub(crate) struct Reply {
+    pub text: String,
+    pub changed: Vec<Change>,
+}
+
+impl Reply {
+    fn read(text: String) -> Self {
+        Self {
+            text,
+            changed: Vec::new(),
+        }
+    }
 }
 
 /// Run one `ctx_memory` call.
 pub fn run(conn: &mut Connection, who: &Writer, input: &Value) -> Result<String, String> {
+    call(conn, who, input, None).map(|reply| reply.text)
+}
+
+/// Run one `ctx_memory` call. `ordinal` is the newest message the session
+/// had seen when the agent called the tool: a fact passed to the user-profile
+/// review names it as its source.
+pub(crate) fn call(
+    conn: &mut Connection,
+    who: &Writer,
+    input: &Value,
+    ordinal: Option<u64>,
+) -> Result<Reply, String> {
     let store = |error: rusqlite::Error| error.to_string();
     let action = input.get("action").and_then(Value::as_str).unwrap_or("");
     match action {
@@ -161,19 +221,29 @@ pub fn run(conn: &mut Connection, who: &Writer, input: &Value) -> Result<String,
             if !CATEGORIES.contains(&category) {
                 return Err(format!("Error: Unknown memory category '{category}'."));
             }
-            let receipt = memory_writes::save(conn, who, category, content).map_err(store)?;
-            Ok(
-                match (receipt.applied, receipt.inserted, receipt.memory_id) {
-                    (false, _, _) => format!("{}: memory was not saved.", receipt.reason),
-                    (true, false, Some(id)) => format!(
-                        "Memory already exists [ID: {id}] in {category} (seen count incremented)."
-                    ),
-                    (true, _, id) => format!(
-                        "Saved memory [ID: {}] in {category}.",
-                        id.unwrap_or_default()
-                    ),
-                },
-            )
+            match level(input)? {
+                Level::Project => {
+                    let receipt =
+                        memory_writes::save(conn, who, category, content).map_err(store)?;
+                    Ok(Reply {
+                        text: saved(&receipt, category, Level::Project),
+                        changed: vec![Change::project_memories(who.project)],
+                    })
+                }
+                Level::Workspace => write_workspace(conn, who, category, content),
+                Level::Global => {
+                    memory_writes::observe(conn, who, category, content, ordinal)
+                        .map_err(store)?;
+                    // The apps' global page counts the review's pending
+                    // observations, so its reload hint covers this one.
+                    Ok(Reply {
+                        text: format!(
+                            "Not saved as a memory: {GLOBAL_NOTE}. The fact was passed to that review."
+                        ),
+                        changed: vec![Change::global_memories()],
+                    })
+                }
+            }
         }
         "get" => {
             let requested = ids(input).filter(|ids| !ids.is_empty()).ok_or(
@@ -189,13 +259,11 @@ pub fn run(conn: &mut Connection, who: &Writer, input: &Value) -> Result<String,
             let mut parts = Vec::new();
             for id in requested.into_iter().filter(|id| seen.insert(*id)) {
                 parts.push(match memory_writes::get_memory(conn, id).map_err(store)? {
-                    Some(memory) if memory.is_project_owned_by(who.project) => {
-                        format_list(&[memory])
-                    }
+                    Some(memory) if who.owns(&memory) => format_list(&[memory]),
                     _ => format!("id {id}: not found or not visible from this project"),
                 });
             }
-            Ok(parts.join("\n\n"))
+            Ok(Reply::read(parts.join("\n\n")))
         }
         "update" | "archive" | "merge" => mutate(conn, who, action, input),
         other => Err(format!(
@@ -204,12 +272,81 @@ pub fn run(conn: &mut Connection, who: &Writer, input: &Value) -> Result<String,
     }
 }
 
+/// A save's reply. A workspace memory says so; a project memory's reply is
+/// the one the tool always gave.
+fn saved(receipt: &memory_writes::Receipt, category: &str, level: Level) -> String {
+    let (exists, saved) = match level {
+        Level::Workspace => ("Workspace memory already exists", "Saved workspace memory"),
+        _ => ("Memory already exists", "Saved memory"),
+    };
+    match (receipt.applied, receipt.inserted, receipt.memory_id) {
+        (false, _, _) => format!("{}: memory was not saved.", receipt.reason),
+        (true, false, Some(id)) => {
+            format!("{exists} [ID: {id}] in {category} (seen count incremented).")
+        }
+        (true, _, id) => format!("{saved} [ID: {}] in {category}.", id.unwrap_or_default()),
+    }
+}
+
+/// Whether the session's memory profile lets a memory under `category` (a
+/// tag) be filed at the workspace level.
+fn workspace_allows(who: &Writer, category: &str) -> bool {
+    let category_id = crate::memory_levels::category_id(category, who.authority);
+    who.authority
+        .is_some_and(|authority| authority.allows(&category_id, "workspace"))
+}
+
+fn not_allowed_at_workspace(category: &str) -> String {
+    format!("Error: This session's memory profile does not allow {category} memories at the workspace level.")
+}
+
+/// Save a memory for the session's workspace: owned by the workspace, with
+/// the session's project as its source.
+fn write_workspace(
+    conn: &mut Connection,
+    who: &Writer,
+    category: &str,
+    content: &str,
+) -> Result<Reply, String> {
+    // The memory context's project is the one whose membership makes the
+    // workspace the session's, so a context that names none can't vouch for
+    // the workspace either.
+    let project = !who.project.trim().is_empty()
+        && who
+            .authority
+            .is_some_and(|authority| authority.project_id.is_some());
+    if !project {
+        return Err(
+            "Error: A workspace memory needs the session's project, and this session has none; memory was not saved."
+                .into(),
+        );
+    }
+    let Some(workspace) = who.workspace() else {
+        return Err(
+            "Error: This session's project is in no workspace; memory was not saved.".into(),
+        );
+    };
+    if !workspace_allows(who, category) {
+        return Err(not_allowed_at_workspace(category));
+    }
+    let changed = Change::Memories {
+        level: "workspace".into(),
+        owner: workspace.to_owned(),
+    };
+    let receipt = memory_writes::save_at(conn, who, SaveLevel::Workspace, category, content)
+        .map_err(|error| error.to_string())?;
+    Ok(Reply {
+        text: saved(&receipt, category, Level::Workspace),
+        changed: vec![changed],
+    })
+}
+
 fn mutate(
     conn: &mut Connection,
     who: &Writer,
     action: &str,
     input: &Value,
-) -> Result<String, String> {
+) -> Result<Reply, String> {
     let store = |error: rusqlite::Error| error.to_string();
     let content = text(input, "content");
     let reason = text(input, "reason");
@@ -251,9 +388,15 @@ fn mutate(
     };
     let mut targets = Vec::new();
     let mut categories = std::collections::BTreeSet::new();
+    let mut changed = Vec::new();
     for id in &ids {
         let memory = memory_writes::get_memory(conn, *id).map_err(store)?;
-        let Some(memory) = memory.filter(|memory| memory.is_project_owned_by(who.project)) else {
+        if memory.as_ref().is_some_and(|memory| memory.level == "global") {
+            return Err(format!(
+                "Error: Memory with ID {id} is a global memory, and {GLOBAL_NOTE}."
+            ));
+        }
+        let Some(memory) = memory.filter(|memory| who.owns(memory)) else {
             return Err(if operation == Operation::Merge {
                 "Error: One or more source memories were not found.".into()
             } else {
@@ -263,8 +406,19 @@ fn mutate(
         if !memory.is_mutable() {
             return Err(inactive(*id, verb));
         }
+        // A workspace memory moved to another category must still be
+        // allowed at the workspace level.
+        if let Some(category) = category {
+            if memory.level == "workspace" && !workspace_allows(who, category) {
+                return Err(not_allowed_at_workspace(category));
+            }
+        }
         categories.insert(memory.category.clone());
         targets.push((memory.id, memory.revision));
+        let owner = owner_changed(&memory);
+        if !changed.contains(&owner) {
+            changed.push(owner);
+        }
     }
     if operation == Operation::Merge && categories.len() > 1 {
         return Err(format!(
@@ -288,20 +442,25 @@ fn mutate(
         reason,
     };
     match memory_writes::mutate(conn, who, &change) {
-        Ok(receipt) => Ok(match operation {
-            Operation::Update => format!("Updated memory [ID: {}] in {shown_category}.", ids[0]),
-            Operation::Merge => format!(
-                "Merged memories [{joined}] into canonical memory [ID: {}] in {shown_category}; superseded [{}].",
-                receipt.memory_id.unwrap_or_default(),
-                receipt.superseded_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
-            ),
-            Operation::Archive => {
-                let plural = if ids.len() > 1 { "memories" } else { "memory" };
-                match reason {
-                    Some(reason) => format!("Archived {plural} [ID: {joined}] ({reason})."),
-                    None => format!("Archived {plural} [ID: {joined}]."),
+        Ok(receipt) => Ok(Reply {
+            text: match operation {
+                Operation::Update => {
+                    format!("Updated memory [ID: {}] in {shown_category}.", ids[0])
                 }
-            }
+                Operation::Merge => format!(
+                    "Merged memories [{joined}] into canonical memory [ID: {}] in {shown_category}; superseded [{}].",
+                    receipt.memory_id.unwrap_or_default(),
+                    receipt.superseded_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+                ),
+                Operation::Archive => {
+                    let plural = if ids.len() > 1 { "memories" } else { "memory" };
+                    match reason {
+                        Some(reason) => format!("Archived {plural} [ID: {joined}] ({reason})."),
+                        None => format!("Archived {plural} [ID: {joined}]."),
+                    }
+                }
+            },
+            changed,
         }),
         Err(MutationError::Refused(Refused::Duplicate(id))) => Err(match operation {
             Operation::Merge => format!(

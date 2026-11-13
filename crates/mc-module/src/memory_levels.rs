@@ -30,10 +30,19 @@ pub struct OriginProfile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Authority {
     pub project_id: Option<String>,
+    /// Entorhinal's id for the workspace the session's project belongs to:
+    /// the owner of the session's workspace memories. `None` when the project
+    /// is in no workspace.
+    pub workspace_id: Option<String>,
     pub profile: Option<OriginProfile>,
     pub state: String,
     pub snapshot_digest: Option<String>,
     pub category_ids: BTreeMap<String, String>,
+    /// The levels each category id of the session's profile may be filed at
+    /// (its `allowed_levels`). The profile is the one the session's prompts
+    /// render from: the chosen one, or the bundled coding profile when the
+    /// context chose none.
+    pub category_levels: BTreeMap<String, Vec<String>>,
 }
 
 impl Authority {
@@ -53,12 +62,50 @@ impl Authority {
             .flatten();
         Some(Self {
             project_id: context.project_id.clone(),
+            workspace_id: context.workspace_id.clone(),
             profile,
             state,
             snapshot_digest: context.snapshot_digest.clone(),
             category_ids,
+            category_levels: category_levels(context),
         })
     }
+
+    /// Whether the session's profile lets a memory under `category_id` be
+    /// filed at `level`. A category the profile doesn't declare allows none.
+    pub fn allows(&self, category_id: &str, level: &str) -> bool {
+        self.category_levels
+            .get(category_id)
+            .is_some_and(|levels| levels.iter().any(|allowed| allowed == level))
+    }
+}
+
+/// Each category id's allowed levels in the profile a session with `context`
+/// renders from. A profile that can't be loaded declares none, so no write
+/// beyond the project level is allowed.
+fn category_levels(context: &MemoryContext) -> BTreeMap<String, Vec<String>> {
+    let profile = match crate::memory_profile::prompt_profile(Some(context)) {
+        Ok(profile) => profile,
+        Err(refusal) => {
+            tracing::warn!("ck-mc: memory writes see no allowed levels: {refusal:?}");
+            return BTreeMap::new();
+        }
+    };
+    profile.body["categories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|category| {
+            let levels = category["allowed_levels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            Some((category["id"].as_str()?.to_owned(), levels))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,8 +216,8 @@ pub fn merge_owner(conn: &Connection, ids: &[i64]) -> rusqlite::Result<Option<Ow
 }
 
 /// The level and writer columns of a new memory, decided before the insert.
-/// Only the project level is writable yet: anything else refuses as
-/// `level_unavailable`.
+/// Only the project and workspace levels are writable yet: anything else
+/// refuses as `level_unavailable`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRow {
     pub level: String,
@@ -191,7 +238,7 @@ impl NewRow {
             kind: "project".into(),
             id: project.to_owned(),
         });
-        if owner.kind != "project" {
+        if !matches!(owner.kind.as_str(), "project" | "workspace") {
             return Err(refuse("level_unavailable"));
         }
         let ordinals = (!placer.ordinals.is_empty()).then(|| {

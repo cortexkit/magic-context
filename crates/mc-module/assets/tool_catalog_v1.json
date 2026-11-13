@@ -186,6 +186,14 @@
           },
           "reason": {
             "type": "string"
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "project",
+              "workspace",
+              "global"
+            ]
           }
         },
         "required": [
@@ -312,8 +320,9 @@
         "action": "write | update | archive | merge | get",
         "content": "The memory text — one standalone fact (write, update, merge). Archive and get take an empty string.",
         "category": "Kind of fact: the new fact's kind for write; on update/merge, the memory's current category to keep it. Archive and get ignore it.",
-        "ids": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list.",
-        "reason": "Why it is being archived (optional)."
+        "ids": "Memory ids from <project-memory> or <workspace-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list.",
+        "reason": "Why it is being archived (optional).",
+        "level": "Where a write goes: project (default) for this project; workspace for every project in this project's workspace; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly."
       },
       "ctx_search": {
         "query": "A natural-language question carrying the exact terms you expect in the answer.",
@@ -351,8 +360,9 @@
         "action": "write | update | archive | merge | get",
         "content": "One standalone fact (write, update, merge). Archive and get: empty string.",
         "category": "Kind of fact (write; on update/merge pass the current category to keep it). Archive and get ignore it.",
-        "ids": "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get. Write: empty list.",
-        "reason": "Why it is archived (optional)."
+        "ids": "Ids from <project-memory> or <workspace-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get. Write: empty list.",
+        "reason": "Why it is archived (optional).",
+        "level": "project (default), workspace, or global (passed to the user-profile review, not saved directly)."
       },
       "ctx_search": {
         "query": "A natural-language question carrying the exact terms you expect in the answer.",

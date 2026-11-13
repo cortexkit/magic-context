@@ -3218,12 +3218,21 @@ impl Session {
                     project: &project.id,
                     authority: self.authority.as_ref(),
                 };
-                let answer = db.with_connection(|conn| crate::memory_tool::run(conn, &who, input));
-                // The tool writes only memories of the session's project.
-                if answer.is_ok() && crate::memory_tool::writes(input) {
-                    db.changed(crate::app_read::Change::project_memories(&project.id));
-                }
-                answer
+                // The newest message the session has seen: a fact the agent
+                // passes to the user-profile review names it as its source.
+                let ordinal = self.index.entries().last().map(|entry| entry.ordinal);
+                let answer = db.with_connection(|conn| {
+                    crate::memory_tool::call(conn, &who, input, ordinal)
+                });
+                // A call may change the project's memories, the workspace's,
+                // or the person's pending observations; each owner's app
+                // pages reload.
+                answer.map(|reply| {
+                    for change in reply.changed {
+                        db.changed(change);
+                    }
+                    reply.text
+                })
             }
             "ctx_search" => {
                 let db = self

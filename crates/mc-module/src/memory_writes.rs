@@ -19,6 +19,8 @@
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde_json::{json, Map, Value};
 
+use crate::memory_levels::Owner;
+
 /// The categories a memory row may hold; history refuses a snapshot outside them.
 const KNOWN_CATEGORIES: [&str; 12] = [
     "PROJECT_RULES",
@@ -108,13 +110,12 @@ pub struct MemoryRow {
 }
 
 impl MemoryRow {
-    /// Active or permanent, and not replaced by another memory.
-    /// A project memory of `project`: the only memories a session's tools
-    /// may read by id or change, until other levels are writable.
+    /// A project memory of `project`.
     pub fn is_project_owned_by(&self, project: &str) -> bool {
         self.level == "project" && self.owner_id == project
     }
 
+    /// Active or permanent, and not replaced by another memory.
     pub fn is_mutable(&self) -> bool {
         matches!(self.status.as_str(), "active" | "permanent")
             && self.superseded_by_memory_id.is_none()
@@ -170,34 +171,52 @@ pub(crate) fn memory_by_hash(
     category_id: &str,
     hash: &str,
 ) -> rusqlite::Result<Option<MemoryRow>> {
+    memory_by_hash_at(conn, &project_owner(project), category_id, hash)
+}
+
+/// The memory of `owner` filed under `category_id` with this text, live
+/// rows first, as [`memory_by_hash`] finds a project's.
+fn memory_by_hash_at(
+    conn: &Connection,
+    owner: &Owner,
+    category_id: &str,
+    hash: &str,
+) -> rusqlite::Result<Option<MemoryRow>> {
     conn.query_row(
         &format!(
             "SELECT {ROW_COLUMNS} FROM memories
-              WHERE level = 'project' AND owner_id = ?1 AND category = ?2 AND normalized_hash = ?3
+              WHERE level = ?1 AND owner_id = ?2 AND category = ?3 AND normalized_hash = ?4
               ORDER BY COALESCE(status, 'active') NOT IN ('active', 'permanent'), id LIMIT 1"
         ),
-        params![project, category_id, hash],
+        params![owner.kind, owner.id, category_id, hash],
         row,
     )
     .optional()
 }
 
-/// A live project memory in another category with exactly this text.
+/// A live memory of `owner` in another category with exactly this text.
 fn cross_category_match(
     tx: &Transaction,
-    project: &str,
+    owner: &Owner,
     category_id: &str,
     hash: &str,
     content: &str,
 ) -> rusqlite::Result<Option<i64>> {
     tx.query_row(
         "SELECT id FROM memories
-          WHERE level = 'project' AND owner_id = ?1 AND category != ?2 AND normalized_hash = ?3
-            AND content = ?4 AND status != 'archived' ORDER BY id LIMIT 1",
-        params![project, category_id, hash, content],
+          WHERE level = ?1 AND owner_id = ?2 AND category != ?3 AND normalized_hash = ?4
+            AND content = ?5 AND status != 'archived' ORDER BY id LIMIT 1",
+        params![owner.kind, owner.id, category_id, hash, content],
         |row| row.get(0),
     )
     .optional()
+}
+
+fn project_owner(project: &str) -> Owner {
+    Owner {
+        kind: "project".into(),
+        id: project.to_owned(),
+    }
 }
 
 /// The memory row as undo history stores it: the shared field set, or
@@ -524,8 +543,9 @@ pub struct Writer<'a> {
     pub session: &'a str,
     pub project: &'a str,
     /// What the session's memory context says about the writer, for the
-    /// level record of each new memory. `None` leaves new
-    /// memories unplaced.
+    /// level record of each new memory, and the workspace whose memories the
+    /// session may write. `None` leaves new memories unplaced and the
+    /// session without a workspace.
     pub authority: Option<&'a crate::memory_levels::Authority>,
 }
 
@@ -539,17 +559,53 @@ impl Writer<'_> {
             ordinals: &[],
         }
     }
+
+    /// Entorhinal's id for the session's workspace, when its project is in
+    /// one.
+    pub fn workspace(&self) -> Option<&str> {
+        self.authority?.workspace_id.as_deref()
+    }
+
+    /// Whether the session's tools may read this memory by id or change it:
+    /// a memory of its project, or of its workspace.
+    pub fn owns(&self, memory: &MemoryRow) -> bool {
+        memory.is_project_owned_by(self.project)
+            || (memory.level == "workspace" && self.workspace() == Some(memory.owner_id.as_str()))
+    }
+}
+
+/// Where an agent's save lands: the session's project, or the workspace its
+/// project belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveLevel {
+    Project,
+    Workspace,
 }
 
 fn immediate(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
 }
 
-/// Save a memory the agent asked for. A memory with the same text in the
-/// category bumps that memory's seen count instead.
+/// Save a memory the agent asked for in the session's project. A memory with
+/// the same text in the category bumps that memory's seen count instead.
 pub fn save(
     conn: &mut Connection,
     who: &Writer,
+    category: &str,
+    content: &str,
+) -> rusqlite::Result<Receipt> {
+    save_at(conn, who, SaveLevel::Project, category, content)
+}
+
+/// Save a memory the agent asked for at `level`, as [`save`] does for the
+/// project. A workspace memory belongs to the session's workspace and names
+/// the session's project as its source; a session without a workspace saves
+/// nothing (`no_workspace`). Whether the category may be filed there is the
+/// caller's to check.
+pub fn save_at(
+    conn: &mut Connection,
+    who: &Writer,
+    level: SaveLevel,
     category: &str,
     content: &str,
 ) -> rusqlite::Result<Receipt> {
@@ -577,7 +633,21 @@ pub fn save(
     };
     let hash = normalized_hash(content);
     let category_id = crate::memory_levels::category_id(category, who.authority);
-    let matched = memory_by_hash(&tx, who.project, &category_id, &hash)?;
+    let owner = match level {
+        SaveLevel::Project => project_owner(who.project),
+        SaveLevel::Workspace => match who.workspace() {
+            Some(workspace) => Owner {
+                kind: "workspace".into(),
+                id: workspace.to_owned(),
+            },
+            None => {
+                let receipt = pending(&tx, "no_workspace", None)?;
+                tx.commit()?;
+                return Ok(receipt);
+            }
+        },
+    };
+    let matched = memory_by_hash_at(&tx, &owner, &category_id, &hash)?;
     if matched
         .as_ref()
         .is_some_and(|memory| memory.status == "archived")
@@ -587,7 +657,7 @@ pub fn save(
         return Ok(receipt);
     }
     if matched.is_none() {
-        if let Some(cross) = cross_category_match(&tx, who.project, &category_id, &hash, content)? {
+        if let Some(cross) = cross_category_match(&tx, &owner, &category_id, &hash, content)? {
             let receipt = pending(&tx, "cross_category_match", Some(cross))?;
             tx.commit()?;
             return Ok(receipt);
@@ -604,8 +674,14 @@ pub fn save(
         }
         None => {
             let placer = who.placer();
-            let new_row =
-                crate::memory_levels::NewRow::decide(&placer, who.project, None, category)?;
+            let new_row = crate::memory_levels::NewRow::decide(
+                &placer,
+                who.project,
+                Some(&owner),
+                category,
+            )?;
+            // The row's source project is the session's project, so a
+            // workspace memory shows which member project it came from.
             let memory = insert_memory(
                 &tx,
                 &new_row,
@@ -649,6 +725,45 @@ pub fn save(
     })
 }
 
+/// Leave a fact about the person for the review that keeps the user profile.
+/// The agent asked to save it as a global memory, but global memories have
+/// one writer, that review, so the fact is stored as the summarizer stores
+/// what it notices about the person (`memory_observations`). Its source is
+/// this session at `ordinal`, the newest message the session had seen when
+/// the agent called the tool (none when it had seen none); a summarizer
+/// observation names the messages of a summary instead. Returns the
+/// observation's id.
+pub fn observe(
+    conn: &Connection,
+    who: &Writer,
+    category: &str,
+    content: &str,
+    ordinal: Option<u64>,
+) -> rusqlite::Result<i64> {
+    let profile = who.authority.and_then(|authority| authority.profile.as_ref());
+    let ordinal = ordinal.map(|ordinal| ordinal as i64);
+    conn.execute(
+        "INSERT INTO memory_observations (content, proposed_category, origin_profile,
+             origin_profile_version, origin_profile_digest, session_id, project_id,
+             workspace_id, source_start_ordinal, source_end_ordinal, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
+        params![
+            content,
+            category,
+            profile.map(|profile| &profile.name),
+            profile.map(|profile| &profile.version),
+            profile.map(|profile| &profile.digest),
+            who.session,
+            who.authority
+                .and_then(|authority| authority.project_id.as_deref()),
+            who.workspace(),
+            ordinal,
+            now_ms(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 /// An agent's update, archive or merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
@@ -686,7 +801,7 @@ pub struct Change<'a> {
     pub reason: Option<&'a str>,
 }
 
-/// Apply a change to memories of `who.project`.
+/// Apply a change to memories of `who.project` or of its workspace.
 pub fn mutate(
     conn: &mut Connection,
     who: &Writer,
@@ -727,7 +842,7 @@ pub fn mutate(
         let Some(memory) = get_memory(&tx, *id)? else {
             return refuse(tx, "target_not_owned");
         };
-        if !memory.is_project_owned_by(who.project) {
+        if !who.owns(&memory) {
             return refuse(tx, "target_not_owned");
         }
         if memory.revision != *revision || !memory.is_mutable() {
@@ -755,9 +870,15 @@ pub fn mutate(
         None => first.category_id.clone(),
     };
     let hash = content.map(normalized_hash);
+    // Duplicates are looked for among the memories of the first target's
+    // owner; a merge whose sources have different owners is refused below.
+    let first_owner = Owner {
+        kind: first.level.clone(),
+        id: first.owner_id.clone(),
+    };
     let duplicate = match (&hash, operation) {
         (Some(hash), Operation::Update | Operation::Merge) => {
-            memory_by_hash(&tx, who.project, &category_id, hash)?
+            memory_by_hash_at(&tx, &first_owner, &category_id, hash)?
         }
         _ => None,
     };
