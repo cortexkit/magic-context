@@ -120,6 +120,7 @@ fn memory_hint_scores_use_full_text_but_search_output_keeps_the_preview() {
                 model_id: "test",
                 chunk_model_id: "test",
             }),
+            count_retrievals: true,
         };
         let query = "historian cache wiring";
         let input = serde_json::json!({"query": query, "sources": ["memory"]});

@@ -81,6 +81,7 @@ impl Fixture {
             source_runner_entries: false,
             tag_floor: None,
             before_newest: None,
+            injection_project: None,
         };
         let store = Store::open(&dir.path().join("mode3.db")).unwrap();
         Self {

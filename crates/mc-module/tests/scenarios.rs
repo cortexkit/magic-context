@@ -4186,6 +4186,7 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         source_runner_entries: false,
         tag_floor: None,
         before_newest: Some("msg00005".into()),
+        injection_project: None,
     };
     let config_source = mc_module::config::Config::from(Settings::default());
     let open = || {
@@ -4312,6 +4313,7 @@ fn a_session_that_changes_harness_moves_every_row_to_the_runners_harness() {
         source_runner_entries: false,
         tag_floor: None,
         before_newest: Some("msg00001".into()),
+        injection_project: None,
     };
     let config_source = mc_module::config::Config::from(Settings::default());
     let open = || {

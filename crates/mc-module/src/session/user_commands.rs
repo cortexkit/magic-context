@@ -487,7 +487,7 @@ impl Session {
             Some("views"),
             false,
         ));
-        let memories = self.db.as_ref().zip(self.project.as_ref()).and_then(|(db, project)| {
+        let memories = self.db.as_ref().zip(self.memory_project()).and_then(|(db, project)| {
             db.with_connection(|conn| conn.query_row(
                 "SELECT COUNT(*) FROM memories WHERE project_path = ?1 AND status IN ('active', 'permanent') AND (expires_at IS NULL OR expires_at > ?2)",
                 rusqlite::params![project.id, wall_now], |row| row.get::<_, u64>(0),

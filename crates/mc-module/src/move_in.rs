@@ -34,6 +34,10 @@
 //! The source host and indexers must be stopped, or the target session held:
 //! no writer may change that session until the fence is committed. Other
 //! sessions may keep writing to the shared context.db between move batches.
+//!
+//! [`copy_in`] (`ck-mc move-in --copy`) instead starts a new runner session
+//! from a copy of another session's summaries, writing nothing of the source;
+//! see the `copy` module.
 
 use cortexkit_role_compaction::read::{Cursor, SessionRef};
 use cortexkit_role_compaction::rules::ProviderRules;
@@ -49,8 +53,10 @@ use crate::route::{Project, Route};
 use crate::session::Session;
 use crate::store::Store;
 
+mod copy;
 mod runner;
 
+pub use copy::{copy_in, CopyOrigin};
 /// What the runner's move tool knows about the session. `ck-mc move-in`
 /// reads it as JSON on standard input.
 #[derive(Debug, serde::Deserialize)]
@@ -97,6 +103,18 @@ pub struct MoveRequest {
     /// view's cut goes through. Needed only without `messages`, which name it.
     #[serde(default)]
     pub before_newest: Option<String>,
+    /// Only for a copy (`ck-mc move-in --copy`, see [`copy_in`]): the project
+    /// whose memories and project docs the copied session reads, in place of
+    /// the project its runner stamps. A move refuses it.
+    #[serde(default)]
+    pub injection_project: Option<InjectionProject>,
+}
+
+/// A project named by its memory id and the folder its docs are read from.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct InjectionProject {
+    pub id: String,
+    pub folder: String,
 }
 
 /// What the runner's move tool installs. `ck-mc move-in` prints it as JSON.
@@ -193,6 +211,14 @@ pub fn move_in(
     config: &Config,
     request: &MoveRequest,
 ) -> Result<Moved, String> {
+    // The injection project belongs to a copy's own saved state; a move
+    // carries the session's own project and nothing else may set it.
+    if request.injection_project.is_some() {
+        return Err(
+            "invalid_request: injection_project applies only to a copy (ck-mc move-in --copy)"
+                .into(),
+        );
+    }
     if request.source_runner_entries {
         return runner::move_in(db, store, config, request);
     }

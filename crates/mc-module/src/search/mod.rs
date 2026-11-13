@@ -63,6 +63,10 @@ pub struct Scope<'a> {
     /// The query's embedding, when the session has an embedding provider and
     /// the endpoint answered.
     pub semantic: Option<sources::Semantic<'a>>,
+    /// Whether an explicit search counts the memories it returns as
+    /// retrieved, in their rows. A copy of another session (see
+    /// `crate::move_in::copy_in`) changes no memory row, so it doesn't.
+    pub count_retrievals: bool,
 }
 
 /// One search result, from whichever lane found it.
@@ -912,7 +916,8 @@ pub fn prepare(
     })
 }
 
-/// Count the memories the reply returns as retrieved, and write the reply.
+/// Count the memories the reply returns as retrieved (unless the scope says
+/// not to), and write the reply.
 pub fn finish(conn: &mut Connection, scope: &Scope, prepared: Prepared) -> String {
     let Prepared {
         query,
@@ -920,18 +925,20 @@ pub fn finish(conn: &mut Connection, scope: &Scope, prepared: Prepared) -> Strin
         diagnostics,
         ..
     } = prepared;
-    let returned: Vec<i64> = hits
-        .iter()
-        .filter_map(|hit| match hit {
-            Hit::Memory(memory) => Some(memory.id),
-            _ => None,
-        })
-        .collect();
-    if let Err(error) = sources::count_retrievals(conn, &returned) {
-        tracing::warn!(
-            "ck-mc: session {}: counting memory retrievals failed: {error}",
-            scope.session
-        );
+    if scope.count_retrievals {
+        let returned: Vec<i64> = hits
+            .iter()
+            .filter_map(|hit| match hit {
+                Hit::Memory(memory) => Some(memory.id),
+                _ => None,
+            })
+            .collect();
+        if let Err(error) = sources::count_retrievals(conn, &returned) {
+            tracing::warn!(
+                "ck-mc: session {}: counting memory retrievals failed: {error}",
+                scope.session
+            );
+        }
     }
     format_results(&query, &hits, scope.session, &diagnostics)
 }

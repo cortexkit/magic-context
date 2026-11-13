@@ -267,6 +267,7 @@ fn move_in_checkpoint_matches_tag_floor_without_a_request_floor() {
         source_runner_entries: false,
         tag_floor: None,
         before_newest: Some("m2".into()),
+        injection_project: None,
     };
     let moved = move_in(
         db,

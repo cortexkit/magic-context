@@ -50,6 +50,10 @@ use crate::view_builder;
 /// messages again ([`Session::hold_transcript_behind`]).
 const IMPLICIT_FORGET_LIMIT: usize = 3;
 
+/// What `ctx_memory` answers a copy of another session (see
+/// `crate::move_in::copy_in`) that asks to change a memory.
+const READ_ONLY_COPY: &str = "Error: this session is a read-only copy of another session; it can read and search memories but not change them.";
+
 #[derive(Clone)]
 pub struct Session {
     command_answers: Arc<Vec<crate::store::CommandAnswer>>,
@@ -302,6 +306,11 @@ pub struct Session {
     /// A pass held its view back because the view could not meet the move
     /// floor, and no view has met it since: the hold is logged only once.
     move_floor_held: bool,
+    /// For a session `ck-mc move-in --copy` started from another session's
+    /// history: where it came from and, optionally, the project whose
+    /// memories it reads. Such a session never writes memories. Only that
+    /// command sets it; a restart restores it with the saved state.
+    copy: Option<crate::move_in::CopyOrigin>,
     /// The entry id of the runner's signed floor, as ck-mc last took it
     /// (see the `signed_floor` module). The runner strips signed reasoning at or before it.
     signed_floor: Option<String>,
@@ -796,6 +805,7 @@ impl Session {
             mural_image: None,
             move_floor: None,
             move_floor_held: false,
+            copy: None,
             signed_floor: None,
             disproved_floor: None,
             statement_seq: None,
@@ -844,9 +854,35 @@ impl Session {
     /// The memory level a summary's facts can become memories in: today only
     /// the session's project, by its id. A session without one has no level
     /// it can write to: its summarizer asks for no facts, keeps no records
-    /// for a second turn, and runs no second turn.
+    /// for a second turn, and runs no second turn. Neither has a copy of
+    /// another session: its memories are read-only.
     fn writable_memory_level(&self) -> Option<&str> {
+        if self.copy.is_some() {
+            return None;
+        }
         self.project.as_ref().map(|project| project.id.as_str())
+    }
+
+    /// The project whose memories this session reads: in its history head
+    /// (with that project's docs and mural), in `ctx_memory` get, in the
+    /// project sources of `ctx_search` and in the automatic search hint.
+    /// That is the session's own project, except for a copy started with an
+    /// injection project, which reads the injection project's memories while
+    /// it runs in the project its runner stamps.
+    fn memory_project(&self) -> Option<&Project> {
+        match &self.copy {
+            Some(crate::move_in::CopyOrigin {
+                injection_project: Some(project),
+                ..
+            }) => Some(project),
+            _ => self.project.as_ref(),
+        }
+    }
+
+    /// Mark the session as a copy of another one. Only `ck-mc move-in
+    /// --copy` calls it, before the session's first view.
+    pub(crate) fn copied_from(&mut self, origin: crate::move_in::CopyOrigin) {
+        self.copy = Some(origin);
     }
 
     /// A session that only calls tools: a runner offers it `ctx_search`,
@@ -949,6 +985,7 @@ impl Session {
             unconfirmed: self.unconfirmed.clone(),
             summary_unshown: self.summary_unshown,
             move_floor: self.move_floor.clone(),
+            copy: self.copy.clone(),
             signed_floor: self.signed_floor.clone(),
         }
     }
@@ -1010,6 +1047,7 @@ impl Session {
             .and_then(|pending| pending.before.transcript_retry);
         self.summary_unshown = durable.summary_unshown;
         self.move_floor = durable.move_floor;
+        self.copy = durable.copy;
         self.signed_floor = durable.signed_floor;
         // A view handed over before the restart is the one ck-mc expects
         // the runner to show; Setup settles it.
@@ -2651,8 +2689,10 @@ impl Session {
         // memory level it can write to keeps no publication, and its facts
         // are dropped.
         if let Some(db) = &self.db {
-            // The plugin stores one primer candidate per run, the first.
-            let primer = match (&self.project, validated.primer_candidates.first()) {
+            // The plugin stores one primer candidate per run, the first. A
+            // copy adds no project knowledge, as it adds no memories.
+            let own_project = self.project.as_ref().filter(|_| self.copy.is_none());
+            let primer = match (own_project, validated.primer_candidates.first()) {
                 (Some(project), Some(candidate)) => {
                     let origin = candidate.origin_compartment_index;
                     let source = origin
@@ -2736,7 +2776,14 @@ impl Session {
                 self.publish(client, view).await;
             }
         }
-        if self.writable_memory_level().is_none() {
+        if let Some(copy) = &self.copy {
+            tracing::info!(
+                "ck-mc: session {}: no second summary turn: the session is a read-only copy of {}/{}",
+                self.key.session,
+                copy.harness,
+                copy.session
+            );
+        } else if self.writable_memory_level().is_none() {
             tracing::info!(
                 "ck-mc: session {}: no second summary turn: the session has no memory level it can write to",
                 self.key.session
@@ -3105,9 +3152,11 @@ impl Session {
                     .db
                     .as_ref()
                     .ok_or("ctx_memory needs the context store")?;
+                if self.copy.is_some() && crate::memory_tool::changes_memories(input) {
+                    return Err(READ_ONLY_COPY.into());
+                }
                 let project = self
-                    .project
-                    .as_ref()
+                    .memory_project()
                     .ok_or("Error: Could not resolve project identity for memory action: the session has no project.")?;
                 let who = crate::memory_writes::Writer {
                     harness: &self.key.harness,
@@ -3279,13 +3328,12 @@ impl Session {
         empty: &'a std::collections::BTreeMap<i64, String>,
     ) -> crate::search::Scope<'a> {
         let root = self
-            .project
-            .as_ref()
+            .memory_project()
             .map(|project| std::path::Path::new(&project.root));
         crate::search::Scope {
             harness: &self.key.harness,
             session: &self.key.session,
-            project: self.project.as_ref().map(|project| project.id.as_str()),
+            project: self.memory_project().map(|project| project.id.as_str()),
             cutoff: self
                 .summaries
                 .last()
@@ -3312,6 +3360,8 @@ impl Session {
             git_commits_enabled: settings.git_commits_enabled,
             git_repository: root.map(|root| root.join(".git").exists()),
             semantic: None,
+            // A copy changes no memory row, its retrieval counts included.
+            count_retrievals: self.copy.is_none(),
         }
     }
 
@@ -3369,11 +3419,12 @@ impl Session {
             let visible_messages = scope.visible_messages;
             let seen = scope.seen.clone();
             let key = self.key.clone();
-            let project = self.project.clone();
-            let (memory_enabled, git_commits_enabled, git_repository) = (
+            let project = self.memory_project().cloned();
+            let (memory_enabled, git_commits_enabled, git_repository, count_retrievals) = (
                 scope.memory_enabled,
                 scope.git_commits_enabled,
                 scope.git_repository,
+                scope.count_retrievals,
             );
             let (db, prompt) = (db.clone(), prompt.clone());
             // SQLite and its connection mutex are synchronous. Keep both off
@@ -3396,6 +3447,7 @@ impl Session {
                             chunk_model_id,
                         }
                     }),
+                    count_retrievals,
                 };
                 db.with_connection(|conn| crate::search::auto_hits(conn, &scope, &prompt))
             })
@@ -3690,8 +3742,7 @@ impl Session {
             return self.head_as_shown("a flush cannot create a baseline");
         }
         let docs = self
-            .project
-            .as_ref()
+            .memory_project()
             .map(|project| {
                 crate::project_docs::read_project_docs_canonical(&project.root).rendered_block
             })
@@ -3707,7 +3758,7 @@ impl Session {
         let mut workspace = None;
         let (mut profile, mut profile_max_id) = (Vec::new(), 0);
         if let (Some(db), true) = (&self.db, shape.memory_enabled) {
-            if let Some(project) = &self.project {
+            if let Some(project) = self.memory_project() {
                 match db.with_connection(|conn| {
                     let resolved = crate::workspace::Workspace::resolve(conn, &project.id)?;
                     let read = resolved.memories(conn, now, true)?;
@@ -3874,7 +3925,7 @@ impl Session {
         {
             return None;
         }
-        let (db, project) = (self.db.as_ref()?, self.project.as_ref()?);
+        let (db, project) = (self.db.as_ref()?, self.memory_project()?);
         let drawn = db
             .project_memories(&project.id, now)
             .map_err(|error| error.to_string())

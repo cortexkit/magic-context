@@ -139,6 +139,12 @@ pub struct Durable {
     /// for every other session, so their rows don't change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub move_floor: Option<crate::session::MoveFloor>,
+    /// For a session `ck-mc move-in --copy` started from another session's
+    /// history: where it came from and the project whose memories it reads.
+    /// Left out of the saved text for every other session, so their rows
+    /// don't change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<crate::move_in::CopyOrigin>,
     /// The entry id of the runner's signed floor: after a tool-set change on
     /// a model whose signed reasoning is bound to the request prefix, the
     /// runner strips signed reasoning at or before this entry. It is the

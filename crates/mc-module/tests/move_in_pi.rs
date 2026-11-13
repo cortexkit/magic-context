@@ -117,6 +117,7 @@ impl Fixture {
             source_runner_entries: false,
             tag_floor: None,
             before_newest: None,
+            injection_project: None,
         };
         Self { dir, conn, request }
     }

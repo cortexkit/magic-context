@@ -311,6 +311,7 @@ async fn werni_sized_writes_stay_within_budget() {
             source_runner_entries: false,
             tag_floor: None,
             before_newest: Some(format!("msg{:05}", MESSAGES - 1)),
+            injection_project: None,
         },
     )
     .unwrap();

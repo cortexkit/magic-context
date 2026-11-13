@@ -78,6 +78,9 @@ mod embedding_search_tests;
 #[path = "transcript_behind_tests.rs"]
 mod transcript_behind_tests;
 
+#[path = "copy_session_tests.rs"]
+mod copy_session_tests;
+
 #[path = "session_named_read_tests.rs"]
 mod named_read_tests;
 

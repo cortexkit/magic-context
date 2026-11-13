@@ -140,6 +140,7 @@ pub(super) fn request(n: usize) -> MoveRequest {
         messages: Some(messages(n)),
         source_harness: Some("opencode".into()),
         before_newest: None,
+        injection_project: None,
         source_session: None,
         source_runner_entries: false,
         tag_floor: None,

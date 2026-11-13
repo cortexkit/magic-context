@@ -300,6 +300,7 @@ fn contact(size: usize) -> Value {
         source_runner_entries: false,
         tag_floor: None,
         before_newest: None,
+        injection_project: None,
     };
     // Compare the traced library call with the real offline executable on an
     // identical, checkpointed copy. CLI parsing, printing and process startup

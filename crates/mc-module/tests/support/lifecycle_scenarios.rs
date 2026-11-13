@@ -205,6 +205,7 @@ fn move_request(dir: &std::path::Path) -> mc_module::move_in::MoveRequest {
         source_runner_entries: false,
         tag_floor: None,
         before_newest: Some("m1".into()),
+        injection_project: None,
     }
 }
 

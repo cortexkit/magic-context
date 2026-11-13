@@ -4,7 +4,9 @@
 //! plugin to a runner, where ck-mc manages it (see `mc_module::move_in`): it
 //! reads the request as JSON on standard input and prints the first view and
 //! tag checkpoint for the runner's own move. Run it with ck-mc and the
-//! session's host stopped.
+//! session's host stopped. `ck-mc move-in --copy` instead copies another
+//! session's summaries to a new runner session and leaves that session as it
+//! is (see `mc_module::move_in::copy_in`).
 
 #![forbid(unsafe_code)]
 
@@ -123,6 +125,19 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
+    // `--copy` copies the source's history to a new session and leaves the
+    // source as it is (see `mc_module::move_in::copy_in`). Any other argument
+    // is refused, so a mistyped flag never turns a copy into a move.
+    let mut copy = false;
+    for arg in std::env::args().skip(2) {
+        match arg.as_str() {
+            "--copy" => copy = true,
+            other => return Err(format!(
+                "unknown move-in argument `{other}`; usage: ck-mc move-in [--copy] < request.json"
+            )
+            .into()),
+        }
+    }
     let context_path = context_db_path();
     let db = open_context_db(&context_path)?;
     let store = Store::open(&store_path(&context_path))?;
@@ -147,12 +162,12 @@ fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
             (source_harness, source_session),
         ],
     )?;
-    let moved = mc_module::move_in::move_in(
-        db,
-        &store,
-        &Config::Files(Loader::from_environment()),
-        &request,
-    )?;
+    let config = Config::Files(Loader::from_environment());
+    let moved = if copy {
+        mc_module::move_in::copy_in(db, &store, &config, &request)?
+    } else {
+        mc_module::move_in::move_in(db, &store, &config, &request)?
+    };
     println!("{}", serde_json::to_string(&moved)?);
     Ok(())
 }

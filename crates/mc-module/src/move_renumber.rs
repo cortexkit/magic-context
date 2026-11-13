@@ -724,8 +724,69 @@ impl Numbering {
             .find_map(|(mid, &number)| (number == Some(entry)).then_some((entry, mid.as_str())))
     }
 
+    /// The runner coordinates of one stored summary: the first and last
+    /// entries it covers and the message ids that bound them, after checking
+    /// that its stored ids name the messages the transcript has at its
+    /// numbers. A move writes them over the summary's own row; a copy
+    /// (`move_in::copy`) writes them on the new row it inserts, so both
+    /// renumber a summary the same way.
+    pub(crate) fn summary_coordinates(
+        &self,
+        session: &str,
+        sequence: i64,
+        (start, end): (i64, i64),
+        (start_id, end_id): (&str, &str),
+    ) -> Result<(i64, i64, String, String), String> {
+        if self.source_ordinals.is_some() && (self.at(start).is_none() || self.at(end).is_none()) {
+            return Err(unmapped(
+                session,
+                &format!("summary {sequence}"),
+                start,
+                end,
+            ));
+        }
+        for (ordinal, stored) in [(start, start_id), (end, end_id)] {
+            let actual = self.mid(ordinal);
+            // A number kept for a message the Pi branch no longer reaches
+            // has nothing to compare; its message is gone from the file.
+            if self.unreachable(ordinal) {
+                continue;
+            }
+            if !stored.is_empty() && actual != Some(stored) {
+                return Err(format!(
+                    "ordinal_mismatch: summary {sequence} of {session} stores message {stored} at {ordinal}, but the transcript has {} there",
+                    actual.unwrap_or("no message")
+                ));
+            }
+        }
+        let (first, last) = self.range(start, end).ok_or_else(|| {
+            if start > 0
+                && end >= start
+                && end - start < self.by_plugin.len() as i64
+                && (start..=end).all(|o| self.at(o).is_some())
+            {
+                format!(
+                    "summary_covers_no_runner_entry: summary {sequence} of {session} covers only rows the runner left out ({start}..{end})"
+                )
+            } else {
+                unmapped(session, &format!("summary {sequence}"), start, end)
+            }
+        })?;
+        let first_id = self.endpoint(start, first, start_id);
+        let last_id = self.endpoint(end, last, end_id);
+        let (Some(first_id), Some(last_id)) = (first_id, last_id) else {
+            return Err(unmapped(
+                session,
+                &format!("summary {sequence} endpoints"),
+                start,
+                end,
+            ));
+        };
+        Ok((first, last, first_id.to_owned(), last_id.to_owned()))
+    }
+
     /// Whether every plugin number already is the runner's.
-    fn is_identity(&self) -> bool {
+    pub(crate) fn is_identity(&self) -> bool {
         self.source_ordinals.is_none()
             && !self.has_added
             && self.by_plugin.iter().enumerate().all(|(index, numbered)| {
@@ -851,6 +912,12 @@ fn check_row(
         *last_entry = entry;
     }
     Ok(())
+}
+
+fn unmapped(session: &str, what: &str, start: i64, end: i64) -> String {
+    format!(
+        "ordinal_unmapped: {what} of {session} covers messages {start}..{end}, which have no entry in the runner's numbering"
+    )
 }
 
 fn not_at_newest(newest: &Cursor) -> String {
@@ -1043,10 +1110,7 @@ impl Rewrite<'_> {
     }
 
     fn unmapped(&self, what: &str, start: i64, end: i64) -> Failure {
-        Failure(format!(
-            "ordinal_unmapped: {what} of {} covers messages {start}..{end}, which have no entry in the runner's numbering",
-            self.session
-        ))
+        Failure(unmapped(self.session, what, start, end))
     }
 
     /// Summary ranges, after checking that each summary's stored message ids
@@ -1071,45 +1135,10 @@ impl Rewrite<'_> {
             })?
             .collect::<Result<_, _>>()?;
         for (id, sequence, start, end, start_id, end_id) in rows {
-            if self.numbering.source_ordinals.is_some()
-                && (self.numbering.at(start).is_none() || self.numbering.at(end).is_none())
-            {
-                return Err(self.unmapped(&format!("summary {sequence}"), start, end));
-            }
-            for (ordinal, stored) in [(start, &start_id), (end, &end_id)] {
-                let actual = self.numbering.mid(ordinal);
-                // A number kept for a message the Pi branch no longer reaches
-                // has nothing to compare; its message is gone from the file.
-                if self.numbering.unreachable(ordinal) {
-                    continue;
-                }
-                if !stored.is_empty() && actual != Some(stored.as_str()) {
-                    return Err(Failure(format!(
-                        "ordinal_mismatch: summary {sequence} of {} stores message {stored} at {ordinal}, but the transcript has {} there",
-                        self.session,
-                        actual.unwrap_or("no message")
-                    )));
-                }
-            }
-            let (first, last) = self.numbering.range(start, end).ok_or_else(|| {
-                if start > 0
-                    && end >= start
-                    && end - start < self.numbering.by_plugin.len() as i64
-                    && (start..=end).all(|o| self.numbering.at(o).is_some())
-                {
-                    Failure(format!(
-                        "summary_covers_no_runner_entry: summary {sequence} of {} covers only rows the runner left out ({start}..{end})",
-                        self.session
-                    ))
-                } else {
-                    self.unmapped(&format!("summary {sequence}"), start, end)
-                }
-            })?;
-            let first_id = self.numbering.endpoint(start, first, &start_id);
-            let last_id = self.numbering.endpoint(end, last, &end_id);
-            let (Some(first_id), Some(last_id)) = (first_id, last_id) else {
-                return Err(self.unmapped(&format!("summary {sequence} endpoints"), start, end));
-            };
+            let (first, last, first_id, last_id) = self
+                .numbering
+                .summary_coordinates(self.session, sequence, (start, end), (&start_id, &end_id))
+                .map_err(Failure)?;
             self.stats.borrow_mut()["summary_endpoints"]
                 .as_array_mut()
                 .expect("summary endpoints are an array")
