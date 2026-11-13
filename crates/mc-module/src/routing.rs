@@ -25,9 +25,6 @@ pub const CAPABILITY: &str = "routing/v1";
 /// stopped and no operator configuration is needed.
 pub const SUMMARY_CONSUMER: &str = "magic-context.summary";
 
-/// The largest reply a summary run asks for.
-pub const SUMMARY_OUTPUT_TOKENS: u64 = 32_000;
-
 /// The smallest context window a summary run can use: a chunk, the prompt
 /// around it and the reply.
 pub const SUMMARY_CONTEXT_WINDOW: u64 = 64_000;
@@ -35,6 +32,12 @@ pub const SUMMARY_CONTEXT_WINDOW: u64 = 64_000;
 /// The routing consumers ck-mc owns, for its manifest's
 /// `role_declarations["routing/v1"]` slot: summaries run tool-free on the
 /// session's own runner, at [`SUMMARY_IQ`].
+///
+/// The declaration states no output cap. Routing admits a cap only on a
+/// runner harness that declares it can enforce one, and the ChatGPT routes
+/// summaries run on refuse an output cap, so a declared cap would leave
+/// summaries with no route. The run still asks its runner for at most the
+/// chosen model's own output limit (see `summary::run`).
 pub fn consumer_declarations() -> cortexkit_role_routing::declarations::ConsumerDeclarations {
     use cortexkit_role_routing::declarations::{
         ConsumerDeclaration, ConsumerDeclarations, DemandDefaults,
@@ -43,7 +46,6 @@ pub fn consumer_declarations() -> cortexkit_role_routing::declarations::Consumer
         .with_iq(SUMMARY_IQ)
         .with_placement(cortexkit_role_routing::placement::Placement::caller_runner());
     summary.tools = Some(cortexkit_role_routing::select::ToolsRequirement::None);
-    summary.max_output_tokens = Some(SUMMARY_OUTPUT_TOKENS);
     summary.context_window = Some(SUMMARY_CONTEXT_WINDOW);
     ConsumerDeclarations::new().with_consumers(vec![
         ConsumerDeclaration::new(SUMMARY_CONSUMER).with_defaults(summary)

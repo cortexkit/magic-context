@@ -2245,7 +2245,6 @@ mod manifest_tests {
                 "iq": 40,
                 "placement": "caller_runner",
                 "tools": "none",
-                "max_output_tokens": 32000,
                 "context_window": 64000,
             }]})
         );
