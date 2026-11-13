@@ -341,15 +341,8 @@ async fn werni_sized_writes_stay_within_budget() {
     context["domain"] = Value::Null;
     let client = HostClient::default();
     *client.entorhinal.lock().unwrap() = Some(context);
-    let mut runner = start_with_client(
-        client,
-        config,
-        settings.clone(),
-        Some(dir.clone()),
-        false,
-        |_| {},
-    )
-    .await;
+    let mut runner =
+        start_with_client(client, config, settings, Some(dir.clone()), false, |_| {}).await;
     runner
         .provider()
         .module()
@@ -476,44 +469,6 @@ async fn werni_sized_writes_stay_within_budget() {
     );
     measurements.collect(
         "project-upkeep",
-        runner.provider().module().take_context_lock_samples(),
-    );
-    let client = runner.provider().client.clone();
-    drop(runner);
-    let mut config = super::config("head", Kind::OpenAi, free());
-    config.session.session = "one-pass".into();
-    config.project = Some(mc_mock_runner::runner::Project {
-        id: "pj-test".into(),
-        root: repo.to_string_lossy().into_owned(),
-    });
-    let mut runner = start_with_client(
-        client,
-        config,
-        Settings {
-            turn_two: false,
-            ..settings
-        },
-        Some(dir.clone()),
-        false,
-        |_| {},
-    )
-    .await;
-    let summarizer = mc_mock_runner::child::scripted_summarizer();
-    runner.host().set_responder(Arc::new(move |settings, prompt| {
-        let mut reply = summarizer(settings, prompt);
-        reply.text = reply.text.replace("</output>", "<facts><PROJECT_RULES>\n* Validate release manifests before publishing.\n</PROJECT_RULES></facts>\n</output>");
-        reply
-    }));
-    let mut steps = Vec::new();
-    for prompt in ["Inspect d.rs.", "Inspect e.rs.", "Inspect f.rs."] {
-        steps.extend(turn(prompt));
-    }
-    steps.push(answer());
-    runner.play(&steps).await;
-    assert_clean(&runner);
-    assert_eq!(count("SELECT COUNT(*) FROM memories WHERE content='Validate release manifests before publishing.'"), 1);
-    measurements.collect(
-        "one-pass-summary-promotion",
         runner.provider().module().take_context_lock_samples(),
     );
     measurements.check();

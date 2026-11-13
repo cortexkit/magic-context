@@ -211,11 +211,9 @@ pub(crate) fn job() -> Request {
         project_root: Some("/project".into()),
         project: None,
         language: None,
-        memories: Vec::new(),
         memory_enabled: false,
         auto_promote: false,
         emergency: false,
-        two_pass: false,
     }
 }
 

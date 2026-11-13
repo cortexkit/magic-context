@@ -28,7 +28,6 @@ async fn sequence(randomized: bool) {
             1 => {
                 settings.execute_threshold_percentage = [45.0, 65.0, 90.0][step as usize % 3];
                 settings.commit_clusters = Some(step % 3 + 1);
-                settings.turn_two = step % 2 == 0;
             }
             2 if transcript.len() > 4 => {
                 // Apply the same accepted cut through the normal index-pruning

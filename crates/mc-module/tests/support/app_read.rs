@@ -6,8 +6,10 @@ async fn app_read_summary_reduce_publication_and_all_six_methods() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config("head", Kind::OpenAi, free());
     let key = cfg.session.clone();
-    let mut settings = one_pass();
-    settings.protected_tokens = Some(0);
+    let settings = Settings {
+        protected_tokens: Some(0),
+        ..Settings::default()
+    };
     let mut runner = start_full(cfg, settings, Some(dir.path().to_owned())).await;
     for prompt in ["Look at the appneedle in a.rs.", "Now b.rs.", "And c.rs."] {
         runner.play(&turn(prompt)).await;

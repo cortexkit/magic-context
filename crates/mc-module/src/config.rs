@@ -356,16 +356,6 @@ fn resolve_tiers(
     settings.rerank = crate::search::rerank::Reranker::from_tiers(user, project);
     settings.caveman = caveman(user, project);
     settings.commit_clusters = commit_clusters(user, project);
-    // Only the user turns the two-pass historian off; a value other than
-    // "on" or "off" counts as off, as the plugin's loader recovers it.
-    settings.turn_two = user
-        .pointer("/historian/turn_two")
-        .is_none_or(|value| value.as_str() == Some("on"));
-    for tier in [user, project] {
-        if let Some(editor) = tier.pointer("/historian/two_pass").and_then(Value::as_bool) {
-            settings.editor_pass = editor;
-        }
-    }
     // Only the user sets the language; a project file cannot.
     settings.language = user
         .pointer("/language")

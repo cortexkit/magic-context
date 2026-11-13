@@ -552,10 +552,16 @@ async fn contract_update_setup_child_harness_changes_only_future_children() {
     .unwrap();
     *client.pause_children.lock().unwrap() = None;
     pause.add_permits(1);
-    let runner = tokio::time::timeout(std::time::Duration::from_secs(5), play)
+    let mut runner = tokio::time::timeout(std::time::Duration::from_secs(5), play)
         .await
         .unwrap()
         .unwrap();
+    // More history, so a summary runs after the Setup change.
+    let mut steps = turn("Then d.rs.");
+    steps.extend(turn("Then e.rs."));
+    steps.extend(turn("Then f.rs."));
+    steps.push(answer());
+    runner.play(&steps).await;
     let calls = client.child_harnesses.lock().unwrap().clone();
     assert_eq!(
         calls[..2],

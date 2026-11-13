@@ -404,28 +404,23 @@ impl ContextDb {
             session,
             compartments,
             None,
-            None,
             &Recall::default(),
             now_ms,
         )
         .map(|_| ())
     }
 
-    /// Store a run's summaries and, with `facts` (the project and its
-    /// category and text pairs), promote the facts to project memories in the
-    /// same transaction, so summaries never land without the memories their
-    /// run found, nor the other way round. The run's events and its primer
-    /// candidate land in the same transaction too ([`Recall`]), and so does
-    /// the summarizer's `publication` record: the activity ledger, and on the
-    /// two-pass lane the facts kept as candidates for its second turn
-    /// ([`turn_one::commit`]). Returns how many facts landed.
-    #[allow(clippy::too_many_arguments)]
+    /// Store a run's summaries. The run's events and its primer candidate
+    /// land in the same transaction ([`Recall`]), and so does the
+    /// summarizer's `publication` record: the activity ledger, and the facts
+    /// kept as candidates for its second turn ([`turn_one::commit`]), so
+    /// summaries never land without the candidates their run found, nor the
+    /// other way round. Returns how many candidates landed.
     pub fn publish_summaries(
         &self,
         harness: &str,
         session: &str,
         compartments: &[ValidatedCompartment],
-        facts: Option<Promotion>,
         publication: Option<&turn_one::Publication>,
         recall: &Recall,
         now_ms: i64,
@@ -482,44 +477,20 @@ impl ContextDb {
             now_ms,
         )
         .map_err(|error| error.to_string())?;
-        let promoted = match facts {
-            Some(promotion) => {
-                // A promoted fact came from the messages these summaries cover.
-                let ordinals: Vec<(u64, u64)> = compartments
-                    .iter()
-                    .map(|compartment| (compartment.start_message, compartment.end_message))
-                    .collect();
-                let placer = crate::memory_levels::Placer {
-                    authority: promotion.authority,
-                    actor: crate::memory_levels::Actor::Historian,
-                    session: Some(session),
-                    ordinals: &ordinals,
-                };
-                crate::memory_writes::promote_facts(
-                    &transaction,
-                    promotion.project,
-                    session,
-                    promotion.facts,
-                    &placer,
-                )
-                .map_err(|error| error.to_string())?
-            }
-            None => 0,
-        };
-        let promoted = match publication {
+        let candidates = match publication {
             Some(publication) => {
                 let ranges: Vec<(u64, u64)> = compartments
                     .iter()
                     .map(|compartment| (compartment.start_message, compartment.end_message))
                     .collect();
-                let committed = turn_one::commit(&transaction, publication, &ids, &ranges, now_ms)
-                    .map_err(|error| error.to_string())?;
-                promoted + committed.candidates
+                turn_one::commit(&transaction, publication, &ids, &ranges, now_ms)
+                    .map_err(|error| error.to_string())?
+                    .candidates
             }
-            None => promoted,
+            None => 0,
         };
         transaction.commit().map_err(|error| error.to_string())?;
-        Ok(promoted)
+        Ok(candidates)
     }
 
     /// Run `apply` on the connection, for a caller that manages its own
@@ -871,7 +842,6 @@ mod tests {
             "s1",
             &[summary(0, 1, 4), summary(1, 5, 9)],
             None,
-            None,
             &recall,
             7,
         )
@@ -932,16 +902,6 @@ mod tests {
             .is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Facts a published summary promotes to project memories, in the same
-/// transaction as the summary.
-pub struct Promotion<'a> {
-    pub project: &'a str,
-    pub facts: &'a [(String, String)],
-    /// The session's writer authority, for each new memory's project-level
-    /// placement record, written in the same transaction as the memory.
-    pub authority: Option<&'a crate::memory_levels::Authority>,
 }
 
 /// What a summary run records for recall besides its summaries, as the

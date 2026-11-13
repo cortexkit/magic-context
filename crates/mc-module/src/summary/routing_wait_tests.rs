@@ -55,7 +55,7 @@ async fn routing_account_wait_fallback_refusal_keeps_the_failed_route_outcome() 
     assert_eq!(
         message,
         format!(
-            "the run ended error: {} (child head:mc-summary:1-4:decision-1:first)",
+            "the run ended error: {} (child head:mc-summary:1-4:decision-1:turn-one)",
             Answer::RunEndsFinal.run_end().error.unwrap().message
         )
     );

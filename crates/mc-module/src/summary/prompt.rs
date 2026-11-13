@@ -96,66 +96,6 @@ pub struct ReferenceBlocks {
     pub session_references: String,
 }
 
-/// The plugin's historian prompt source. It holds the output contract of
-/// both historian modes, each between `<!-- historian:<mode>:start -->` and
-/// `<!-- historian:<mode>:end -->` lines; [`render_contract`] keeps one.
-const HISTORIAN_PROMPT_SOURCE: &str =
-    include_str!("../../../../packages/plugin/src/hooks/magic-context/historian-prompt.source.md");
-
-/// The one-pass historian SYSTEM prompt, sent role-scoped via the producer's
-/// `system` field and never concatenated into the user prompt: the plugin's
-/// prompt source with its XML contract kept, rendered as its generator does
-/// (`COMPARTMENT_AGENT_SYSTEM_PROMPT`), so both implementations send the
-/// same bytes.
-pub fn historian_system_prompt() -> &'static str {
-    static RENDERED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    RENDERED.get_or_init(|| render_contract(HISTORIAN_PROMPT_SOURCE, "xml"))
-}
-
-/// Keep the sections of `source` marked for `contract` (`xml` or
-/// `combined`) without their marker lines, drop the other mode's sections,
-/// and trim the end, as the plugin's `renderHistorianSystemPrompt` does.
-pub fn render_contract(source: &str, contract: &str) -> String {
-    const PREFIX: &str = "<!-- historian:";
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    loop {
-        let Some(at) = rest.find(PREFIX) else {
-            out.push_str(rest);
-            break;
-        };
-        let after = &rest[at + PREFIX.len()..];
-        let section = ["xml", "combined"].into_iter().find_map(|kind| {
-            let start = format!("{kind}:start -->\n");
-            let body = after.strip_prefix(start.as_str())?;
-            let end = format!("\n<!-- historian:{kind}:end -->");
-            let close = body.find(end.as_str())?;
-            let mut consumed = close + end.len();
-            if body[consumed..].starts_with('\n') {
-                consumed += 1;
-            }
-            Some((kind, &body[..close], &body[consumed..]))
-        });
-        match section {
-            Some((kind, content, remainder)) => {
-                out.push_str(&rest[..at]);
-                if kind == contract {
-                    out.push_str(content);
-                    out.push('\n');
-                }
-                rest = remainder;
-            }
-            None => {
-                // Not a section marker: keep it and look past it.
-                out.push_str(&rest[..at + PREFIX.len()]);
-                rest = after;
-            }
-        }
-    }
-    out.truncate(out.trim_end().len());
-    out
-}
-
 /// These options mirror TypeScript so both implementations generate the same instructions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContentLanguageDirectiveOptions {
@@ -203,42 +143,6 @@ pub fn with_content_language_directive<'a>(
     } else {
         Cow::Owned(format!("{system_prompt}\n\n{directive}"))
     }
-}
-
-/// Rebuild a rejected historian prompt without placing instructions before untrusted XML.
-///
-/// The language instruction is appended last so it cannot be overridden by the previous
-/// output, which is data rather than an instruction source.
-pub fn build_historian_repair_prompt(
-    original_prompt: &str,
-    previous_output: &str,
-    validation_error: &str,
-    language: Option<&str>,
-) -> String {
-    let validation_line = format!("Validation error: {validation_error}");
-    let prompt = [
-        original_prompt,
-        "",
-        "Your previous XML response was invalid and cannot be persisted.",
-        validation_line.as_str(),
-        "Return a corrected full XML response for the same existing state and new messages.",
-        "Do not skip any displayed raw ordinal or displayed raw range, even if the message looks trivial.",
-        "Every displayed message range must belong to exactly one compartment unless it is intentionally left in one trailing suffix marked by <unprocessed_from>.",
-        "If every message in the chunk is covered by a compartment, nothing is unprocessed: set `<unprocessed_from>` to the chunk's last message index + 1.",
-        "",
-        "Previous invalid XML:",
-        previous_output,
-    ]
-    .join("\n");
-    with_content_language_directive(
-        &prompt,
-        language,
-        ContentLanguageDirectiveOptions {
-            preserve_user_quotes: true,
-            retrospective: false,
-        },
-    )
-    .into_owned()
 }
 
 pub struct CompartmentPromptInputs<'a> {
@@ -674,28 +578,6 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Both contracts render to the bytes the plugin generates
-    /// (`COMPARTMENT_AGENT_SYSTEM_PROMPT` and
-    /// `COMPARTMENT_AGENT_COMBINED_SYSTEM_PROMPT`); the plugin's own contract
-    /// test checks these artifacts against its generated constants.
-    #[test]
-    fn the_system_prompt_is_the_plugins_rendered_xml_contract() {
-        assert_eq!(
-            historian_system_prompt(),
-            include_str!("../../testdata/historian-system-prompt.txt")
-        );
-        assert_eq!(
-            render_contract(HISTORIAN_PROMPT_SOURCE, "combined"),
-            include_str!("../../testdata/historian-system-prompt-combined.txt")
-        );
-        assert!(!historian_system_prompt().contains("<!-- historian:"));
-        // A comment that is not a section marker stays.
-        assert_eq!(
-            render_contract("a <!-- historian:note --> b\n\n", "xml"),
-            "a <!-- historian:note --> b"
-        );
-    }
-
     #[derive(Deserialize)]
     struct SeedCase {
         label: String,
@@ -814,20 +696,13 @@ mod tests {
         directive: String,
     }
 
-    #[derive(Deserialize)]
-    struct RepairPromptCase {
-        language: Option<String>,
-        original_prompt: String,
-        previous_output: String,
-        validation_error: String,
-        prompt: String,
-    }
-
+    /// The content-language golden also holds the plugin's repair prompts
+    /// for its one-turn summarizer, which ck-mc does not have; they are not
+    /// read here.
     #[derive(Deserialize)]
     struct ContentLanguageGoldenFile {
         language_names: Vec<LanguageNameCase>,
         directive_cases: Vec<LanguageDirectiveCase>,
-        repair_cases: Vec<RepairPromptCase>,
     }
 
     fn memory(row: &GoldenMemory) -> StoredMemory {
@@ -997,10 +872,6 @@ mod tests {
             "empty language-name golden"
         );
         assert!(!golden.directive_cases.is_empty(), "empty directive golden");
-        assert!(
-            !golden.repair_cases.is_empty(),
-            "empty repair-prompt golden"
-        );
 
         for case in &golden.language_names {
             assert_eq!(
@@ -1028,20 +899,6 @@ mod tests {
                 actual, case.directive,
                 "directive mismatch in {}",
                 case.label
-            );
-        }
-
-        for case in &golden.repair_cases {
-            let actual = build_historian_repair_prompt(
-                &case.original_prompt,
-                &case.previous_output,
-                &case.validation_error,
-                case.language.as_deref(),
-            );
-            assert_eq!(
-                actual, case.prompt,
-                "repair prompt mismatch for {:?}",
-                case.language
             );
         }
     }

@@ -51,8 +51,8 @@ pub const MIN_WAIT_MS: i64 = 60 * 1000;
 /// Which summarizer send met the refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendKind {
-    /// The send that asks for the summary itself (either historian lane),
-    /// or its repair.
+    /// The send that asks for the summary itself: the two-pass historian's
+    /// first turn.
     TurnOne,
     /// The two-pass historian's second turn, which reconciles candidate
     /// facts with project memory.

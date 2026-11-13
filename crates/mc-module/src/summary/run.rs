@@ -17,21 +17,21 @@ use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::{json, Map, Value};
 
 use super::account_wait::{caller_next_ms, AccountWait, SendKind};
-use super::two_pass::turn_one::{self, Lane};
+use super::two_pass::turn_one;
 use super::{chunk, fit};
 use std::sync::OnceLock;
 
 use regex::Regex;
 
 use super::prompt::{
-    build_compartment_agent_prompt, build_historian_repair_prompt, with_content_language_directive,
-    CompartmentPromptInputs, ContentLanguageDirectiveOptions,
+    build_compartment_agent_prompt, with_content_language_directive, CompartmentPromptInputs,
+    ContentLanguageDirectiveOptions,
 };
 use super::validate::{
     validate_historian_output, StoredCompartmentRange, ValidateOptions, ValidatedChunk,
 };
 use crate::client::{Child, RunnerClient};
-use crate::context_db::{ContextDb, StoredCompartment, StoredMemory};
+use crate::context_db::{ContextDb, StoredCompartment};
 use crate::routing::{self, Router};
 use cortexkit_role_compaction::read::StepUsage;
 use cortexkit_role_routing::report::Outcome;
@@ -45,9 +45,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// What a child session's id adds to its parent's: each summarizer attempt
 /// runs in a child of its own, `<parent session>:mc-summary:<attempt>`, so
 /// the summarizer sees exactly its system prompt and one user message, and a
-/// child never continues another attempt's conversation. The two-pass
-/// historian's second turn is the one exception: it continues the child its
-/// first turn answered in.
+/// child never continues another attempt's conversation. The second turn is
+/// the one exception: it continues the child its first turn answered in.
 pub const CHILD: &str = "mc-summary";
 
 /// What a run reads and writes.
@@ -67,14 +66,13 @@ pub struct Request {
     /// The session's project folder, where the runner creates the
     /// summarizer's child sessions.
     pub project_root: Option<String>,
-    /// The session's project id. With it, the run keeps the plugin's send
-    /// and publication records, and the two-pass historian can run.
+    /// The memory level the session can write to: its project id (see
+    /// `Session::writable_memory_level`). With it and a store, the run keeps
+    /// the plugin's send and publication records, which the second turn
+    /// reads its candidate facts from.
     pub project: Option<String>,
     /// The user's `language`: the summarizer writes its prose in it.
     pub language: Option<String>,
-    /// The project's memories, for the summarizer's `<project-memory>`
-    /// block, so it leaves out facts already known. Empty with memory off.
-    pub memories: Vec<StoredMemory>,
     /// Memory is on: the summarizer may report facts.
     pub memory_enabled: bool,
     /// `memory.auto_promote`: the facts it reports are kept.
@@ -83,9 +81,6 @@ pub struct Request {
     /// the last one included, as the plugin's emergency recovery does: the
     /// session needs the relief now.
     pub emergency: bool,
-    /// `historian.turn_two` is on and the editor pass is off: the two-pass
-    /// historian runs unless its failure budget for this chunk is spent.
-    pub two_pass: bool,
 }
 
 /// What a run produced.
@@ -95,7 +90,8 @@ pub struct Summarized {
     /// The first turn's send and publication record, stored with the
     /// summaries. `None` without a project or store.
     pub publication: Option<turn_one::Publication>,
-    /// On the two-pass lane: the conversation the second turn continues.
+    /// With memory on and a publication: the conversation the second turn
+    /// continues.
     pub continuation: Option<Continuation>,
 }
 
@@ -154,23 +150,20 @@ impl Target {
     }
 }
 
-/// Run the summarizer. `Ok(None)` when there was nothing to summarize.
+/// Run the summarizer: the two-pass historian's first turn ([`turn_one`]).
+/// `Ok(None)` when there was nothing to summarize.
 ///
-/// Routing picks the model, on the session's own runner (compaction contract SR4). As
-/// the plugin's historian (`compartment-runner-historian.ts`): a transient
-/// provider error retries twice on the same model, after 2 to 3 s and then
-/// 6 to 8 s; an invalid reply gets one repair run that sees the validation
-/// error and its own reply; and when a model still fails, the next one
-/// routing picks without it is tried. Every attempt runs in a child of its
-/// own, so the summarizer always sees exactly its system prompt and one user
-/// message. Each decision's outcome is reported back to routing.
+/// Routing picks the model, on the session's own runner (compaction contract
+/// SR4). A transient provider error retries twice on the same model, after
+/// 2 to 3 s and then 6 to 8 s. When a model still fails, or gives no valid
+/// turn-one reply, the next one routing picks without it is tried. Every
+/// attempt runs in a child of its own, so the summarizer always sees exactly
+/// its system prompt and one user message. Each decision's outcome is
+/// reported back to routing.
 ///
-/// With [`Request::two_pass`], a project and a store, each model first runs
-/// the two-pass historian's first turn ([`turn_one`]) unless that chunk's
-/// failure budget for the model is spent: its facts carry source anchors and
-/// become candidates, and its reply is a JSON envelope. An invalid first
-/// turn gets no repair and no fallback: it counts against the budget, and
-/// the run ends.
+/// With memory on, the reply's facts carry source anchors. With a project
+/// and a store, the run records its send before it goes out, and the facts
+/// become candidates for the second turn.
 pub async fn run<C: RunnerClient + Router>(
     client: &C,
     db: Option<&ContextDb>,
@@ -180,26 +173,16 @@ pub async fn run<C: RunnerClient + Router>(
     if entries.is_empty() {
         return Ok(None);
     }
-    let language = |prompt: &str| {
-        with_content_language_directive(
-            prompt,
-            job.language.as_deref(),
-            ContentLanguageDirectiveOptions::default(),
-        )
-        .into_owned()
-    };
-    let one_pass = language(super::prompt::historian_system_prompt());
-    let two_pass = two_pass_system(job.language.as_deref());
+    let system = two_pass_system(job.language.as_deref());
     let carrier = format!("ck-mc:{}", job.session.runner);
     // A runner may host several harnesses with different model support. Route
     // against the same harness that will receive every attempt's child send.
     let child_harness = job.child_harness.as_deref().unwrap_or(&job.session.harness);
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
-    // One deadline for the whole run, retries, repair and fallbacks
-    // included.
+    // One deadline for the whole run, retries and fallbacks included.
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
-    for fallback in 0..=MAX_FALLBACKS {
+    for _ in 0..=MAX_FALLBACKS {
         let answer = match client
             .select(routing::summary_select(
                 &job.session.runner,
@@ -239,35 +222,16 @@ pub async fn run<C: RunnerClient + Router>(
                 db,
                 project,
                 carrier: &carrier,
-                counter: turn_one::CounterKey::new(
-                    &job.session.session,
-                    &entries[0].mid,
-                    &carrier,
-                    &target.model_json(),
-                    &two_pass,
-                ),
             }),
             _ => None,
         };
-        let lane = match &records {
-            Some(records) if job.two_pass && records.budget_left() => Lane::Enabled,
-            _ => Lane::Dormant,
-        };
         let mut usage = None;
-        // Only the first model gets a repair run, as in the plugin; a
-        // fallback's invalid reply moves on to the next model.
         let call = Call {
             target: &target,
             child_harness,
             window,
-            repair: fallback == 0 && lane == Lane::Dormant,
             deadline,
-            lane,
-            system: if lane == Lane::Enabled {
-                &two_pass
-            } else {
-                &one_pass
-            },
+            system: &system,
         };
         let outcome =
             summarize_on(client, job, &entries, &call, records.as_ref(), &mut usage).await;
@@ -278,7 +242,7 @@ pub async fn run<C: RunnerClient + Router>(
             // An unavailable account or a person-owned wait says nothing
             // against the route, even if the run had already started.
             Err(Failure::AccountWait(_)) => Outcome::Cancelled,
-            Err(Failure::Failed(_) | Failure::Final(_)) => Outcome::Failed,
+            Err(Failure::Failed(_)) => Outcome::Failed,
         };
         client
             .report(routing::report(
@@ -289,7 +253,6 @@ pub async fn run<C: RunnerClient + Router>(
             .await;
         match outcome {
             Ok(result) => return Ok(result),
-            Err(Failure::Final(error)) => return Err(error.into()),
             // Another model would draw on the same accounts, and the
             // runner named when to ask again: the run ends waiting.
             Err(Failure::AccountWait(wait)) => return Err(SummaryError::AccountWait(wait)),
@@ -342,9 +305,6 @@ enum Failure {
     NotSent(String),
     /// The model was asked and did not give a valid summary.
     Failed(String),
-    /// The two-pass historian's first turn gave no valid reply: the run ends
-    /// without trying another model.
-    Final(String),
     /// The runner holds summarizer sends back until an account has room.
     AccountWait(AccountWait),
 }
@@ -363,10 +323,7 @@ struct Call<'a> {
     target: &'a Target,
     child_harness: &'a str,
     window: fit::Window,
-    /// An invalid reply gets one repair run.
-    repair: bool,
     deadline: tokio::time::Instant,
-    lane: Lane,
     /// The system prompt, language directive included.
     system: &'a str,
 }
@@ -376,18 +333,6 @@ struct Records<'a> {
     db: &'a ContextDb,
     project: &'a str,
     carrier: &'a str,
-    /// The two-pass lane's failure budget key for this model and chunk.
-    counter: turn_one::CounterKey,
-}
-
-impl Records<'_> {
-    /// The two-pass lane's failure budget for this chunk and model is not
-    /// spent. A store that can't be read leaves the lane off.
-    fn budget_left(&self) -> bool {
-        self.db
-            .with_connection(|conn| turn_one::failure_count(conn, self.project, &self.counter))
-            .is_ok_and(|failures| failures < turn_one::FAILURE_BUDGET)
-    }
 }
 
 /// The marker an oversized chunk ends with, as in the plugin.
@@ -422,11 +367,10 @@ fn truncate_to(text: &str, budget: u64, counter: crate::count::Counter) -> Strin
     format!("{}{TRUNCATION_MARKER}", &text[..boundaries[best]])
 }
 
-/// Summarize on one model: fit the prompt to its window, ask, and repair an
-/// invalid reply once when `call.repair` allows. Every prompt is checked
-/// against the model's window right before it is sent. `usage` adds up what
-/// every call reported. With `records`, the send is recorded before it goes
-/// out and the result carries its publication.
+/// Summarize on one model: fit the prompt to its window and ask. The prompt
+/// is checked against the model's window right before it is sent. `usage`
+/// adds up what every call reported. With `records`, the send is recorded
+/// before it goes out and the result carries its publication.
 async fn summarize_on<C: RunnerClient>(
     client: &C,
     job: &Request,
@@ -436,10 +380,9 @@ async fn summarize_on<C: RunnerClient>(
     usage: &mut Option<StepUsage>,
 ) -> Result<Option<Summarized>, Failure> {
     let (target, window, system) = (call.target, call.window, call.system);
-    let enabled = call.lane == Lane::Enabled;
     // Facts carry anchors only when memory is on: with memory off the
     // prompt asks for none.
-    let anchored = enabled && job.memory_enabled;
+    let anchored = job.memory_enabled;
     // A quarter of the routed model's window. Exact vocabularies use that
     // budget directly; estimates convert it with the prose/tool calibration.
     let requested = ((window.context_window as f64 * CHUNK_SHARE).round() as u64)
@@ -450,7 +393,9 @@ async fn summarize_on<C: RunnerClient>(
         chunk_start: job.from,
         last_ordinal: job.until.saturating_sub(1).max(job.from),
         summaries: &job.summaries,
-        memories: &job.memories,
+        // The first turn shows no memories: the second turn compares the
+        // facts with them.
+        memories: &[],
         memory_enabled: job.memory_enabled,
         anchored_facts: anchored,
         system_prompt: system,
@@ -459,19 +404,19 @@ async fn summarize_on<C: RunnerClient>(
         requested_chunk_tokens: requested,
     })
     .map_err(Failure::NotSent)?;
-    // The two-pass lane prints each message on a line of its own, so a
-    // fact's anchor can cite exactly the lines that state it.
-    let lines = if enabled {
-        chunk::Lines::PerMessage
-    } else {
-        chunk::Lines::Merged
-    };
-    let Some(chunk) = chunk::build_with(entries, fitted.chunk_tokens, lines, window.counter) else {
+    // Each message is printed on a line of its own, so a fact's anchor can
+    // cite exactly the lines that state it.
+    let Some(chunk) = chunk::build_with(
+        entries,
+        fitted.chunk_tokens,
+        chunk::Lines::PerMessage,
+        window.counter,
+    ) else {
         return Ok(None);
     };
     // The first message is always taken, even past the budget.
     let input = truncate_to(&chunk.input, fitted.chunk_tokens, window.counter);
-    let mut prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
+    let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &fitted.seed_examples,
         session_references: &fitted.session_references,
         project_memory: &fitted.project_memory,
@@ -481,9 +426,7 @@ async fn summarize_on<C: RunnerClient>(
         extraction_free: false,
         anchored_facts: anchored,
     });
-    if enabled {
-        prompt = format!("{prompt}\n\n{}", turn_one::FORMAT_INSTRUCTION);
-    }
+    let prompt = format!("{prompt}\n\n{}", turn_one::FORMAT_INSTRUCTION);
     // The model is part of the child's name, so a fallback model never
     // continues another model's conversation.
     let range = format!(
@@ -498,7 +441,7 @@ async fn summarize_on<C: RunnerClient>(
             end_message: summary.end_message as u64,
         })
         .collect();
-    let options = || ValidateOptions {
+    let options = ValidateOptions {
         sequence_offset: job
             .summaries
             .last()
@@ -513,7 +456,7 @@ async fn summarize_on<C: RunnerClient>(
             "prompt_over_window: the summarizer prompt does not fit the model".into(),
         ));
     }
-    let label = format!("{range}:{}", if enabled { "turn-one" } else { "first" });
+    let label = format!("{range}:turn-one");
     let send = match records {
         Some(records) => Some(
             records
@@ -526,7 +469,6 @@ async fn summarize_on<C: RunnerClient>(
                             session: &job.session.session,
                             harness: &job.session.harness,
                             carrier: records.carrier,
-                            lane: call.lane,
                             chunk: (chunk.validation.start_index, chunk.validation.end_index),
                             model: target.model_json(),
                             child: &child_name(job, &label, 0),
@@ -538,114 +480,49 @@ async fn summarize_on<C: RunnerClient>(
         ),
         None => None,
     };
-    let (first, answered_in) = attempt(client, job, &label, &prompt, call, usage)
+    let (reply, answered_in) = attempt(client, job, &label, &prompt, call, usage)
         .await
         .map_err(Failure::from)?;
+    // An invalid reply fails this model; the run moves on to the next one.
     let hashes = super::hashes::by_ordinal(entries);
-    let checked = |reply: &str| {
-        validate_historian_output(reply, &chunk.validation, &prior, options()).map(
-            |mut validated| {
-                super::hashes::sanitize(&mut validated.compartments, &hashes);
-                validated
+    let mut validated = turn_one::parse_reply(&reply)
+        .ok_or_else(|| "the reply is not a turn-one JSON envelope".to_owned())
+        .and_then(|xml| {
+            validate_historian_output(&xml, &chunk.validation, &prior, options)
+                .map_err(|error| error.message)
+        })
+        .map_err(|error| Failure::Failed(format!("invalid turn-one reply: {error}")))?;
+    super::hashes::sanitize(&mut validated.compartments, &hashes);
+    let publication = send
+        .clone()
+        .zip(records)
+        .map(|(send, records)| turn_one::Publication {
+            send,
+            project: records.project.to_owned(),
+            session: job.session.session.clone(),
+            blocks: chunk::blocks_sent(&chunk, &input)
+                .into_iter()
+                .cloned()
+                .collect(),
+            candidates: if anchored {
+                validated.facts.clone()
+            } else {
+                Vec::new()
             },
-        )
-    };
-    let publish = |validated: ValidatedChunk, child: Option<Child>| {
-        let publication = send
-            .clone()
-            .zip(records)
-            .map(|(send, records)| turn_one::Publication {
-                send,
-                project: records.project.to_owned(),
-                session: job.session.session.clone(),
-                harness: job.session.harness.clone(),
-                carrier: records.carrier.to_owned(),
-                counter: enabled.then(|| records.counter.clone()),
-                blocks: chunk::blocks_sent(&chunk, &input)
-                    .into_iter()
-                    .cloned()
-                    .collect(),
-                candidates: if anchored {
-                    validated.facts.clone()
-                } else {
-                    Vec::new()
-                },
-            });
-        let continuation = child
-            .filter(|_| anchored)
-            .zip(send.as_ref())
-            .map(|(child, send)| Continuation {
-                child,
-                model: target.model.clone(),
-                decision_id: target.decision_id.clone(),
-                output_tokens: target.output_tokens,
-                language: job.language.clone(),
-                publication_id: send.publication_id.clone(),
-            });
-        Summarized {
-            validated,
-            publication,
-            continuation,
-        }
-    };
-    if enabled {
-        // No repair and no other model: an invalid first turn counts
-        // against the chunk's failure budget, and the run ends.
-        let reply = turn_one::parse_reply(&first)
-            .ok_or_else(|| "the reply is not a turn-one JSON envelope".to_owned())
-            .and_then(|xml| checked(&xml).map_err(|error| error.message));
-        return match reply {
-            Ok(validated) => Ok(Some(publish(validated, Some(answered_in)))),
-            Err(error) => {
-                if let Some(records) = records {
-                    let counted = records.db.with_connection(|conn| {
-                        turn_one::record_counter(
-                            conn,
-                            records.project,
-                            &records.counter,
-                            &job.session.harness,
-                            records.carrier,
-                            true,
-                            now_ms(),
-                        )
-                    });
-                    if let Err(failure) = counted {
-                        tracing::warn!("ck-mc: recording a turn-one failure failed: {failure}");
-                    }
-                }
-                Err(Failure::Final(format!("invalid turn-one reply: {error}")))
-            }
-        };
-    }
-    let error = match checked(&first) {
-        Ok(validated) => return Ok(Some(publish(validated, None))),
-        Err(error) => error.message,
-    };
-    if !call.repair {
-        return Err(Failure::Failed(format!("invalid reply: {error}")));
-    }
-    let repair_prompt =
-        build_historian_repair_prompt(&prompt, &first, &error, job.language.as_deref());
-    // The repair prompt carries the invalid reply, so it can outgrow the
-    // window the first prompt fit.
-    if !window.admits(target.output_tokens, system, &repair_prompt) {
-        return Err(Failure::Failed(format!(
-            "invalid reply, and its repair prompt does not fit the model: {error}"
-        )));
-    }
-    let (repaired, _) = attempt(
-        client,
-        job,
-        &format!("{range}:repair"),
-        &repair_prompt,
-        call,
-        usage,
-    )
-    .await
-    .map_err(Failure::from)?;
-    checked(&repaired)
-        .map(|validated| Some(publish(validated, None)))
-        .map_err(|error| Failure::Failed(format!("invalid after repair: {}", error.message)))
+        });
+    let continuation = send.as_ref().filter(|_| anchored).map(|send| Continuation {
+        child: answered_in,
+        model: target.model.clone(),
+        decision_id: target.decision_id.clone(),
+        output_tokens: target.output_tokens,
+        language: job.language.clone(),
+        publication_id: send.publication_id.clone(),
+    });
+    Ok(Some(Summarized {
+        validated,
+        publication,
+        continuation,
+    }))
 }
 
 /// The child session of attempt `retry` of the call `label` names.
@@ -751,11 +628,9 @@ async fn call<C: RunnerClient>(
         continuation: false,
         creates_child: true,
         send: SendKind::TurnOne,
-        cache_ttl: if call_on.lane == Lane::Enabled {
-            cortexkit_role_llm_runner::cache::Ttl::Short
-        } else {
-            cortexkit_role_llm_runner::cache::Ttl::None
-        },
+        // The second turn follows within seconds and reuses the cache this
+        // send writes.
+        cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
     };
     let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage).await?;
     if reply.length_capped {

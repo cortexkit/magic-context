@@ -464,9 +464,7 @@ async fn attempt_on(
             counter: crate::count::Counter::for_model(None),
             context_window: 400_000,
         },
-        repair: false,
         deadline,
-        lane: Lane::Dormant,
         system: "system",
     };
     attempt(

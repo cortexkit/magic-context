@@ -36,7 +36,9 @@ struct Client {
 impl Client {
     fn new(valid: bool) -> Self {
         Self {
-            runner: account_wait_send_tests::Client::new(account_wait_send_tests::Answer::RefuseSend),
+            runner: account_wait_send_tests::Client::new(
+                account_wait_send_tests::Answer::RefuseSend,
+            ),
             valid,
             sends: Mutex::new(Vec::new()),
         }
@@ -53,7 +55,11 @@ impl RunnerClient for Client {
     async fn child_temperature(&self, _: &Child) -> bool {
         true
     }
-    async fn read(&self, session: &SessionRef, request: ReadRequest) -> Result<ReadPage, ClientError> {
+    async fn read(
+        &self,
+        session: &SessionRef,
+        request: ReadRequest,
+    ) -> Result<ReadPage, ClientError> {
         self.runner.read(session, request).await
     }
     async fn apply_view(
@@ -69,7 +75,11 @@ impl RunnerClient for Client {
     async fn send(&self, _: &SessionRef, _: SendRequest) -> Result<SendReply, ClientError> {
         unreachable!()
     }
-    async fn send_child(&self, child: &Child, request: SendRequest) -> Result<SendReply, ClientError> {
+    async fn send_child(
+        &self,
+        child: &Child,
+        request: SendRequest,
+    ) -> Result<SendReply, ClientError> {
         self.sends.lock().unwrap().push((child.clone(), request));
         let mut reply = SendReply::new(states::ACTIVE);
         reply.run_id = Some("run".into());
@@ -111,7 +121,10 @@ impl Router for Client {
             });
         }
         let route = RouteRef::new("test", "model");
-        let runner = RunnerRef::new(request.runners.unwrap_or_default()[0].clone(), route.clone());
+        let runner = RunnerRef::new(
+            request.runners.unwrap_or_default()[0].clone(),
+            route.clone(),
+        );
         Ok(SelectAnswer::new(
             "decision",
             route,
@@ -127,11 +140,11 @@ impl Router for Client {
     }
 }
 
-/// A job for project `pj-test`, whose send records `db` keeps.
+/// A job for project `pj-test`. Run with a store, it records each
+/// first-turn send in the store before the send goes out.
 fn project_job() -> Request {
     let mut job = account_wait_send_tests::job();
     job.project = Some("pj-test".into());
-    job.two_pass = true;
     job
 }
 
@@ -169,14 +182,6 @@ async fn a_two_turn_first_turn_sends_the_recorded_bytes() {
     let mut memory_on = project_job();
     memory_on.memory_enabled = true;
     memory_on.auto_promote = true;
-    memory_on.memories = vec![StoredMemory {
-        id: 1,
-        project_path: "pj-test".into(),
-        category: "PROJECT_RULES".into(),
-        content: "Ask before pushing.".into(),
-        status: "active".into(),
-        ..StoredMemory::default()
-    }];
     let mut memory_off = project_job();
     memory_off.language = Some("de".into());
     let actual = serde_json::to_string_pretty(&json!({

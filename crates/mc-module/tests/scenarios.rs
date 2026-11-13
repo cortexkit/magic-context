@@ -2063,46 +2063,6 @@ async fn near_limit_summary_waits_when_only_tiny_tool_inputs_can_leave() {
 }
 
 #[tokio::test]
-async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
-    let mut runner = start(config("head", Kind::OpenAi, free())).await;
-    runner.host().set_responder(summarizer_failing(
-        ":first",
-        mc_mock_runner::child::Reply {
-            text: "<output>not a summary</output>".into(),
-            finish: Some("stop".into()),
-            error: None,
-        },
-    ));
-    let mut steps = Vec::new();
-    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
-        steps.extend(turn(prompt));
-    }
-    // The third turn's summary lands with the view of the pass after it.
-    steps.push(answer());
-    runner.play(&steps).await;
-    assert_clean(&runner);
-    let runs = runner.host().child_runs();
-    let repair = runs
-        .iter()
-        .find(|run| run.child.ends_with(":repair"))
-        .expect("a repair run");
-    assert!(repair
-        .prompt
-        .contains("Your previous XML response was invalid and cannot be persisted."));
-    assert!(repair.prompt.contains("<output>not a summary</output>"));
-    // Each attempt has a child of its own.
-    let children: std::collections::BTreeSet<String> =
-        runs.iter().map(|run| run.child.clone()).collect();
-    assert_eq!(children.len(), runs.len());
-    // The repaired summaries are shown.
-    let (m0, m1) = head_texts(runner.host());
-    assert!(
-        m0.contains("<session-history>\n") || m1.contains("<new-compartments>"),
-        "{m0}\n{m1}"
-    );
-}
-
-#[tokio::test]
 async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
     let client = HostClient::default();
     *client.notice_log.lock().unwrap() = Some(Vec::new());
@@ -2155,15 +2115,6 @@ async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
     assert!(runs[0].prompt.contains("Refactor the whole crate."));
 }
 
-/// The one-pass summarizer: `historian.turn_two` off, so facts become
-/// memories when the summary is stored.
-fn one_pass() -> Settings {
-    Settings {
-        turn_two: false,
-        ..Settings::default()
-    }
-}
-
 async fn cache_summary(
     describe: Option<Result<Value, String>>,
 ) -> Vec<mc_mock_runner::child::ChildRun> {
@@ -2172,7 +2123,7 @@ async fn cache_summary(
     let mut runner = start_with_client(
         client,
         config("head", Kind::OpenAi, free()),
-        one_pass(),
+        Settings::default(),
         None,
         false,
         |_| {},
@@ -2189,24 +2140,6 @@ async fn cache_summary(
     assert!(!runs.is_empty(), "the summary must still run");
     assert!(runs[0].prompt.contains("<new_messages>"));
     runs
-}
-
-#[tokio::test]
-async fn one_pass_children_request_no_explicit_cache() {
-    let runs = cache_summary(None).await;
-    let mut children = std::collections::HashSet::new();
-    for run in runs {
-        let request = serde_json::to_value(&run.request).unwrap();
-        if children.insert(run.child.clone()) {
-            assert_eq!(request["cache"], json!({"ttl": "none", "keep_warm": "off"}));
-            assert_eq!(
-                serde_json::to_value(&run.settings.cache).unwrap(),
-                request["cache"]
-            );
-        } else {
-            assert!(request.get("cache").is_none(), "{request}");
-        }
-    }
 }
 
 #[tokio::test]
@@ -2229,91 +2162,7 @@ async fn a_failed_describe_does_not_stop_the_summary_or_send_cache() {
     }
 }
 
-#[tokio::test]
-async fn facts_a_summary_finds_become_project_memories_with_it() {
-    let dir = scratch("facts");
-    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
-    insert_memory(&dir, 1, "Ask before pushing.");
-    // Give it the hash a fact with the same text has.
-    let seen_before: i64 = {
-        let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
-        conn.execute(
-            "UPDATE memories SET normalized_hash = ?1 WHERE id = 1",
-            [mc_module::memory_writes::normalized_hash(
-                "Ask before pushing.",
-            )],
-        )
-        .unwrap();
-        conn.query_row("SELECT seen_count FROM memories WHERE id = 1", [], |row| {
-            row.get(0)
-        })
-        .unwrap()
-    };
-    let mut config = config("head", Kind::OpenAi, free());
-    config.project = Some(mc_mock_runner::runner::Project {
-        id: "pj-test".into(),
-        root: dir.to_string_lossy().into_owned(),
-    });
-    let mut runner = start_full(config, one_pass(), Some(dir.clone())).await;
-    let summarizer = mc_mock_runner::child::scripted_summarizer();
-    // The facts name the first summary they come from. An unanchored fact is
-    // withheld when the run's last summary is discarded for lack of lookahead,
-    // and the run here reaches the end of what it may read.
-    runner
-        .host()
-        .set_responder(std::sync::Arc::new(move |settings, prompt| {
-            let mut reply = summarizer(settings, prompt);
-            reply.text = reply.text.replace(
-                "</output>",
-                "<facts><PROJECT_RULES>\n* [at_compartment=1] Releases need two reviewers.\n* [at_compartment=1] Ask before pushing.\n</PROJECT_RULES></facts>\n</output>",
-            );
-            reply
-        }));
-    let mut steps = Vec::new();
-    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
-        steps.extend(turn(prompt));
-    }
-    // The third turn's summary lands with the view of the pass after it.
-    steps.push(answer());
-    runner.play(&steps).await;
-    assert_clean(&runner);
-    // Every summarizer child was sent under the project's folder, where a
-    // real runner creates it.
-    let folders = runner
-        .provider()
-        .client
-        .child_scopes
-        .lock()
-        .unwrap()
-        .clone();
-    assert!(!folders.is_empty());
-    let root = dir.to_string_lossy().into_owned();
-    assert!(
-        folders
-            .iter()
-            .all(|folder| folder.as_deref() == Some(root.as_str())),
-        "{folders:?}"
-    );
-    // The summarizer saw the project's memories, to leave known facts out.
-    let runs = runner.host().child_runs();
-    assert!(runs[0].prompt.contains("Ask before pushing."));
-    // The new fact became a memory; the known one only counted as seen again.
-    let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
-    let rows: Vec<(String, String, i64)> = conn
-        .prepare("SELECT content, source_type, seen_count FROM memories WHERE project_path = 'pj-test' ORDER BY id")
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert_eq!(rows.len(), 2, "{rows:?}");
-    assert_eq!(rows[1].0, "Releases need two reviewers.");
-    assert_eq!(rows[1].1, "historian");
-    assert_eq!(rows[0].2, seen_before + 1, "{rows:?}");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The two-pass historian, which runs by default: the first turn sees no
+/// The two-pass historian: the first turn sees no
 /// memory block and anchors its facts to the lines that state them; the
 /// facts become candidates, not memories; a second turn in the same child
 /// conversation then decides each against the project's memories. A `new`
@@ -2662,7 +2511,7 @@ async fn with_no_route_no_summary_runs_and_ck_mc_picks_no_model_itself() {
 async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
     let mut runner = start(config("head", Kind::OpenAi, free())).await;
     runner.host().set_responder(summarizer_failing(
-        ":first",
+        ":turn-one",
         mc_mock_runner::child::Reply {
             error: Some("503 Service Unavailable: overloaded".into()),
             ..Default::default()
@@ -2689,7 +2538,8 @@ async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
     assert_clean(&runner);
     let runs = runner.host().child_runs();
     assert!(
-        runs.iter().any(|run| run.child.ends_with(":first:retry1")),
+        runs.iter()
+            .any(|run| run.child.ends_with(":turn-one:retry1")),
         "{:?}",
         runs.iter().map(|run| run.child.clone()).collect::<Vec<_>>()
     );
@@ -2999,9 +2849,11 @@ async fn a_restarted_ck_mc_keeps_the_history_baseline() {
     // request between views still extends the one before it.
     runner.provider().restart();
     let mut steps = Vec::new();
-    for prompt in ["Then d.rs.", "Last e.rs."] {
+    // Enough new history for a summary to land after the restart.
+    for prompt in ["Then d.rs.", "Next e.rs.", "Last f.rs."] {
         steps.extend(turn(prompt));
     }
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     let (m0_after, _) = head_texts(runner.host());

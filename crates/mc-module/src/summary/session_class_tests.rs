@@ -159,9 +159,7 @@ async fn turn_one_call_sets_creating_send_label() {
         child_harness: "pi",
         window,
         system: "system",
-        repair: false,
         deadline: tokio::time::Instant::now() + Duration::from_secs(1),
-        lane: Lane::Enabled,
     };
     call(&client, &child(), "first", "prompt", &call_on, &mut None)
         .await

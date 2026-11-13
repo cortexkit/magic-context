@@ -33,7 +33,6 @@ use crate::route::{Project, Route};
 use crate::summary::head::{self, Baseline};
 use crate::summary::run;
 use crate::summary::trigger;
-use crate::summary::two_pass::turn_one;
 use crate::tokens;
 use crate::view_builder;
 
@@ -838,6 +837,14 @@ impl Session {
                     "unresolved" | "conflict" | "blocked" | "unavailable"
                 )
             })
+    }
+
+    /// The memory level a summary's facts can become memories in: today only
+    /// the session's project, by its id. A session without one has no level
+    /// it can write to: its summarizer asks for no facts, keeps no records
+    /// for a second turn, and runs no second turn.
+    fn writable_memory_level(&self) -> Option<&str> {
+        self.project.as_ref().map(|project| project.id.as_str())
     }
 
     /// A session that only calls tools: a runner offers it `ctx_search`,
@@ -1798,7 +1805,8 @@ impl Session {
         if !self.features.summarizer || self.summarizing {
             return None;
         }
-        let memory_enabled = self.memory_admissions(settings) && self.project.is_some();
+        let memory_enabled =
+            self.memory_admissions(settings) && self.writable_memory_level().is_some();
         let window = pass::usable_window(&self.conditions);
         let force = pass::in_force_band(&self.pressure(), settings);
         let tail = trigger::protected_tail_tokens(window, threshold, usage);
@@ -2008,17 +2016,15 @@ impl Session {
         Some(run::Request {
             limits: self.limits,
             session: self.key.clone(),
-            // Retries, repairs and turn two belong to one summary attempt;
-            // keep them on one harness even if Setup changes during the run.
+            // Retries and turn two belong to one summary attempt; keep them
+            // on one harness even if Setup changes during the run.
             child_harness: self.child_harness.clone(),
             from,
             until,
             project_root: self.workdir.clone(),
-            project: self.project.as_ref().map(|project| project.id.clone()),
-            two_pass: settings.turn_two && !settings.editor_pass,
+            project: self.writable_memory_level().map(str::to_owned),
             summaries: self.summaries.to_vec(),
             language: settings.language.clone(),
-            memories: self.historian_memories(memory_enabled),
             memory_enabled,
             auto_promote: settings.auto_promote,
             emergency: force,
@@ -2235,18 +2241,6 @@ impl Session {
         self.account_wait
             .as_ref()
             .is_some_and(|waiting| waiting.holds(crate::summary::account_wait::now_ms()))
-    }
-
-    /// The project's memories for the summarizer's `<project-memory>` block;
-    /// none with memory off.
-    fn historian_memories(&self, memory_enabled: bool) -> Vec<StoredMemory> {
-        let (Some(db), Some(project), true) = (&self.db, &self.project, memory_enabled) else {
-            return Vec::new();
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_millis() as i64);
-        db.project_memories(&project.id, now).unwrap_or_default()
     }
 
     /// After a revert removed messages from `ordinal` on, forget the summaries
@@ -2624,33 +2618,11 @@ impl Session {
             self.record_no_progress(settings);
             return None;
         }
-        // On the two-pass lane the facts are candidates for the second
-        // turn, stored with the publication; they never become memories here.
-        let two_pass = publication
-            .as_ref()
-            .is_some_and(|publication| publication.send.lane == turn_one::Lane::Enabled);
+        // The facts are candidates for the second turn, stored with the
+        // publication; they never become memories here. A session with no
+        // memory level it can write to keeps no publication, and its facts
+        // are dropped.
         if let Some(db) = &self.db {
-            // Facts become memories of the session's project, with memory and
-            // auto-promotion on; the validator already left them out otherwise.
-            let facts: Vec<(String, String)> = validated
-                .facts
-                .iter()
-                .map(|fact| (fact.category.clone(), fact.content.clone()))
-                .collect();
-            let promote = self
-                .project
-                .as_ref()
-                .filter(|_| {
-                    !two_pass
-                        && self.memory_admissions(settings)
-                        && settings.auto_promote
-                        && !facts.is_empty()
-                })
-                .map(|project| crate::context_db::Promotion {
-                    project: project.id.as_str(),
-                    facts: facts.as_slice(),
-                    authority: self.authority.as_ref(),
-                });
             // The plugin stores one primer candidate per run, the first.
             let primer = match (&self.project, validated.primer_candidates.first()) {
                 (Some(project), Some(candidate)) => {
@@ -2684,7 +2656,6 @@ impl Session {
                 &self.key.harness,
                 &self.key.session,
                 &validated.compartments,
-                promote,
                 publication.as_ref(),
                 &recall,
                 now_ms,
@@ -2737,7 +2708,13 @@ impl Session {
                 self.publish(client, view).await;
             }
         }
-        continuation.filter(|_| two_pass && self.db.is_some())
+        if self.writable_memory_level().is_none() {
+            tracing::info!(
+                "ck-mc: session {}: no second summary turn: the session has no memory level it can write to",
+                self.key.session
+            );
+        }
+        continuation.filter(|_| self.db.is_some())
     }
 
     /// The second turn a two-pass summary's first turn calls for.
@@ -2748,7 +2725,7 @@ impl Session {
     ) -> Option<crate::summary::two_pass::turn_two::Job> {
         Some(crate::summary::two_pass::turn_two::Job {
             owner: self.key.clone(),
-            project: self.project.as_ref()?.id.clone(),
+            project: self.writable_memory_level()?.to_owned(),
             project_root: self.workdir.clone(),
             continuation,
             memory_enabled: self.memory_admissions(settings),

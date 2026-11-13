@@ -1,8 +1,9 @@
 //! The summarizer has one shape: the two-turn historian. A session without a
-//! project runs its first turn and publishes the summaries, and since no
-//! memory level it could write to exists, sends no second turn. A model whose
-//! first turn gives no valid reply hands the run to the next model routing
-//! picks, which gets the same two-turn first turn.
+//! project runs its first turn and publishes the summaries, but sends no
+//! second turn: its facts have no project to become memories in, which is
+//! what the second turn writes. A model whose first turn gives no valid reply
+//! hands the run to the next model routing picks, which gets the same
+//! two-turn first turn.
 
 use super::*;
 
@@ -24,8 +25,9 @@ fn summarizer_with_a_fact() -> mc_mock_runner::child::Responder {
     })
 }
 
-/// Three short turns and the answer after them, so the third turn's summary
-/// lands with the view of the pass after it.
+/// Three short turns and one more answer. A summary is shown only when ck-mc
+/// publishes a new view, which happens on a later request, so the extra
+/// answer gives the third turn's summary that request.
 fn three_turns() -> Vec<Step> {
     let mut steps = Vec::new();
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {

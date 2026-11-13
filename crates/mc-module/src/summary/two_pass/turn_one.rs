@@ -1,13 +1,12 @@
 //! The two-pass historian's first turn: its envelope, the send record kept
-//! before it goes out, the failure budget that falls back to the one-pass
-//! summarizer, and the publication that stores its facts as candidates for
-//! the second turn. Ported from the plugin's `memory/turn-one-publication.ts`;
-//! every table here is shared with the plugin (`context.db` migration 99).
+//! before it goes out, and the publication that stores its facts as
+//! candidates for the second turn. Ported from the plugin's
+//! `memory/turn-one-publication.ts`; every table here is shared with the
+//! plugin (`context.db` migration 99).
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
-use super::text::lifecycle_text_hash;
 use crate::summary::chunk::PrintedBlock;
 use crate::summary::validate::{resolve_fact_anchor, FactCandidate};
 
@@ -18,10 +17,6 @@ pub const SYSTEM: &str = include_str!("../../../testdata/two-pass/system.md");
 /// Appended to the first turn's prompt; the second turn sees it in the
 /// conversation (`HISTORIAN_FORMAT_INSTRUCTION`).
 pub const FORMAT_INSTRUCTION: &str = r#"Reply with exactly one JSON object with a result object. On turn one use {"result":{"step":"turn_one","xml":"the complete compartment XML"}}. On turn two use {"result":{"step":"turn_two","decisions":[],"scores":[]}} with the decisions and scores described in the system contract. Do not call tools."#;
-
-/// Parse failures for one counter key after which the one-pass summarizer
-/// runs instead.
-pub const FAILURE_BUDGET: usize = 3;
 
 /// The categories a candidate may have: the five current ones and the older
 /// ones still promotable (`PROMOTABLE_CATEGORIES`).
@@ -51,152 +46,11 @@ pub fn parse_reply(text: &str) -> Option<String> {
         .flatten()
 }
 
-/// What identifies a run for the failure budget: the parent session, the
-/// chunk's first message, and the model and prompt bytes it ran with. A
-/// growing chunk keeps its key, so its failures add up across runs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CounterKey {
-    pub parent_session: String,
-    pub first_message: String,
-    pub profile_hash: String,
-    pub rendering_hash: String,
-    pub schema_hash: String,
-    pub tool_hash: String,
-}
-
-impl CounterKey {
-    /// The key for a run of `model` (provider, model, variant) on the
-    /// `carrier`, with `system` as its system prompt.
-    pub fn new(
-        parent_session: &str,
-        first_message: &str,
-        carrier: &str,
-        model: &Value,
-        system: &str,
-    ) -> Self {
-        let profile = json!({"lane": "enabled", "carrier": carrier, "model": model});
-        Self {
-            parent_session: parent_session.to_owned(),
-            first_message: first_message.to_owned(),
-            profile_hash: lifecycle_text_hash(&profile.to_string()),
-            rendering_hash: lifecycle_text_hash(system),
-            schema_hash: lifecycle_text_hash(FORMAT_INSTRUCTION),
-            tool_hash: lifecycle_text_hash("[]"),
-        }
-    }
-
-    fn json(&self) -> Value {
-        json!({
-            "parentSessionId": self.parent_session,
-            "firstMessageId": self.first_message,
-            "profileHash": self.profile_hash,
-            "renderingHash": self.rendering_hash,
-            "schemaHash": self.schema_hash,
-            "toolHash": self.tool_hash,
-        })
-    }
-
-    /// The counter rows' publication id. `serde_json` sorts the keys, as the
-    /// plugin's canonical JSON does.
-    fn publication(&self) -> String {
-        format!("t1fail:{}", lifecycle_text_hash(&self.json().to_string()))
-    }
-}
-
-/// Parse failures counted for `key` since its last reset.
-pub fn failure_count(
-    conn: &Connection,
-    project: &str,
-    key: &CounterKey,
-) -> rusqlite::Result<usize> {
-    let publication = key.publication();
-    let mut statement = conn.prepare_cached(
-        "SELECT run_attempt, state FROM memory_stage_attempts
-         WHERE project_path = ?1 AND publication_id = ?2 AND stage = 'turn_one'",
-    )?;
-    let rows: Vec<(i64, String)> = statement
-        .query_map(params![project, publication], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?
-        .collect::<Result<_, _>>()?;
-    let reset = rows
-        .iter()
-        .filter(|(_, state)| state == "counter_reset")
-        .map(|(attempt, _)| *attempt)
-        .max()
-        .unwrap_or(0);
-    Ok(rows
-        .iter()
-        .filter(|(attempt, state)| state == "parse_failed" && *attempt > reset)
-        .count())
-}
-
-/// Record a parse failure for `key`, or reset its count after a
-/// publication. A reset with nothing counted writes nothing. The rows need
-/// no publication of their own, so restarts and growing chunks keep the
-/// count.
-pub fn record_counter(
-    conn: &Connection,
-    project: &str,
-    key: &CounterKey,
-    harness: &str,
-    carrier: &str,
-    failed: bool,
-    now_ms: i64,
-) -> rusqlite::Result<()> {
-    if !failed && failure_count(conn, project, key)? == 0 {
-        return Ok(());
-    }
-    let publication = key.publication();
-    let attempt: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(run_attempt), 0) + 1 FROM memory_stage_attempts
-         WHERE project_path = ?1 AND publication_id = ?2",
-        params![project, publication],
-        |row| row.get(0),
-    )?;
-    conn.execute(
-        "INSERT INTO memory_stage_attempts
-            (stage_key, project_path, publication_id, run_attempt, stage, session_id, harness,
-             carrier, state, request_json, started_at)
-         VALUES (?1, ?2, ?3, ?4, 'turn_one', ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            format!("{publication}:{attempt}"),
-            project,
-            publication,
-            attempt,
-            key.parent_session,
-            harness,
-            carrier,
-            if failed {
-                "parse_failed"
-            } else {
-                "counter_reset"
-            },
-            key.json().to_string(),
-            now_ms,
-        ],
-    )?;
-    Ok(())
-}
-
-/// Which first turn a run sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Lane {
-    /// Anchored facts become candidates for the second turn.
-    Enabled,
-    /// The one-pass summarizer: memory block in the prompt, facts promoted
-    /// at once.
-    Dormant,
-}
-
-impl Lane {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Enabled => "enabled",
-            Self::Dormant => "dormant",
-        }
-    }
-}
+/// The lane a send record names in its `request_json`. The plugin's
+/// records also name a dormant lane for its one-turn summarizer; ck-mc runs
+/// only the two-turn historian, whose facts become candidates for the second
+/// turn.
+const LANE: &str = "enabled";
 
 /// The send record kept before a first turn goes out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,7 +58,6 @@ pub struct Send {
     pub publication_id: String,
     pub run_attempt: i64,
     pub stage_key: String,
-    pub lane: Lane,
     /// The chunk's first and last ordinal.
     pub chunk: (u64, u64),
 }
@@ -215,7 +68,6 @@ pub struct SendInput<'a> {
     pub session: &'a str,
     pub harness: &'a str,
     pub carrier: &'a str,
-    pub lane: Lane,
     pub chunk: (u64, u64),
     /// The model and routing decision the turn runs on, which the second
     /// turn and its checks reuse.
@@ -275,7 +127,7 @@ pub fn allocate(
     )?;
     let stage_key = json!([input.project, publication_id, run_attempt, "turn_one"]).to_string();
     let request = json!({
-        "lane": input.lane.name(),
+        "lane": LANE,
         "chunkStart": input.chunk.0,
         "chunkEnd": input.chunk.1,
         "model": input.model,
@@ -303,7 +155,6 @@ pub fn allocate(
         publication_id,
         run_attempt,
         stage_key,
-        lane: input.lane,
         chunk: input.chunk,
     })
 }
@@ -345,12 +196,10 @@ pub struct Publication {
     pub send: Send,
     pub project: String,
     pub session: String,
-    pub harness: String,
-    pub carrier: String,
-    pub counter: Option<CounterKey>,
     /// The printed lines the summarizer saw whole.
     pub blocks: Vec<PrintedBlock>,
-    /// On the enabled lane: the facts of the reply, kept as candidates.
+    /// The facts of the reply, kept as candidates. Empty with memory off,
+    /// when the first turn asks for no facts.
     pub candidates: Vec<FactCandidate>,
 }
 
@@ -367,10 +216,9 @@ pub struct Committed {
 /// summaries (`compartment_ids` and `ranges`, in reply order): the
 /// publication commits exactly once with the next commit order, the send
 /// becomes `published`, each new summary is counted once in the activity
-/// ledger, the failure budget resets, and on the enabled lane the facts
-/// become candidates with the lines they cite. Fails when the publication
-/// already committed or its send was released, which rolls the summaries
-/// back too.
+/// ledger, and the facts become candidates with the lines they cite. Fails
+/// when the publication already committed or its send was released, which
+/// rolls the summaries back too.
 pub fn commit(
     tx: &Transaction<'_>,
     publication: &Publication,
@@ -429,22 +277,11 @@ pub fn commit(
             params![publication.project, send.publication_id, id, now_ms],
         )?;
     }
-    if let Some(key) = &publication.counter {
-        record_counter(
-            tx,
-            &publication.project,
-            key,
-            &publication.harness,
-            &publication.carrier,
-            false,
-            now_ms,
-        )?;
-    }
     let mut committed = Committed {
         commit_order,
         ..Committed::default()
     };
-    if send.lane != Lane::Enabled || ranges.is_empty() {
+    if ranges.is_empty() {
         return Ok(committed);
     }
     // Summaries are contiguous: a cited range outside their outer bounds
