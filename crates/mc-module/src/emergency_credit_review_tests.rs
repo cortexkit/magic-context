@@ -119,7 +119,7 @@ fn tools_touched(view: &View) -> BTreeSet<&str> {
 
 #[test]
 fn emergency_credit_review_an_over_limit_request_with_a_new_cut_still_drops_outputs() {
-    // The runner says the next request, 144k, will not fit the 100k window:
+    // The over-limit ride estimates the next request at 144k, which will not fit the 100k window:
     // a 2k task, a 40k tool result in "large", tool outputs of 23k, 23k,
     // 23k, 1k, 1k and 1k, and 30k of fixed overhead.
     let (mut session, settings) = session_sized("tool", 40_000, 23_000);
