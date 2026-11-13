@@ -70,6 +70,9 @@ pub mod memory;
 pub(crate) mod memory_context;
 pub mod memory_levels;
 pub mod memory_profile;
+/// The selection a head's memory blocks show; not yet wired into the head.
+#[expect(dead_code)]
+pub(crate) mod memory_render;
 pub(crate) mod memory_sync;
 pub mod memory_tool;
 pub mod memory_writes;
