@@ -688,6 +688,10 @@
             {
               "label": "Curate",
               "value": "curate"
+            },
+            {
+              "label": "Map memories",
+              "value": "map-memories"
             }
           ]
         }
@@ -775,5 +779,5 @@
       "title": "Delete notes"
     }
   ],
-  "digest": "026b88e04f5cb23ab3246606c174e53ef26a338f52929c3edcc5a818e5b117a8"
+  "digest": "984a7021219593a7ab96394cd7b8deb5ea56f2f0b929d82b468e9ccd789b30b1"
 }
