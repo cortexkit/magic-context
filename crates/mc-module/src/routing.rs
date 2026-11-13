@@ -25,9 +25,6 @@ pub const CAPABILITY: &str = "routing/v1";
 /// stopped and no operator configuration is needed.
 pub const SUMMARY_CONSUMER: &str = "magic-context.summary";
 
-/// The largest reply a summary run asks for.
-pub const SUMMARY_OUTPUT_TOKENS: u64 = 32_000;
-
 /// The smallest context window a summary run can use: a chunk, the prompt
 /// around it and the reply.
 pub const SUMMARY_CONTEXT_WINDOW: u64 = 64_000;
@@ -36,6 +33,12 @@ pub const SUMMARY_CONTEXT_WINDOW: u64 = 64_000;
 /// `role_declarations["routing/v1"]` slot: summaries run tool-free on the
 /// session's own runner, at [`SUMMARY_IQ`]; each dreamer task kind has a
 /// consumer of its own ([`DREAM_DEMANDS`]), on whatever runner routing picks.
+///
+/// No declaration states an output cap. Routing admits a cap only on a
+/// runner harness that declares it can enforce one, and ChatGPT routes refuse
+/// an output cap, so a declared cap would leave these consumers with no
+/// route there. Each run still asks its runner for at most the chosen
+/// model's own output limit (see `summary::run` and `dreamer::run`).
 pub fn consumer_declarations() -> cortexkit_role_routing::declarations::ConsumerDeclarations {
     use cortexkit_role_routing::declarations::{
         ConsumerDeclaration, ConsumerDeclarations, DemandDefaults,
@@ -45,7 +48,6 @@ pub fn consumer_declarations() -> cortexkit_role_routing::declarations::Consumer
         .with_iq(SUMMARY_IQ)
         .with_placement(cortexkit_role_routing::placement::Placement::caller_runner());
     summary.tools = Some(ToolsRequirement::None);
-    summary.max_output_tokens = Some(SUMMARY_OUTPUT_TOKENS);
     summary.context_window = Some(SUMMARY_CONTEXT_WINDOW);
     let mut consumers = vec![ConsumerDeclaration::new(SUMMARY_CONSUMER).with_defaults(summary)];
     for demand in DREAM_DEMANDS {
@@ -55,7 +57,6 @@ pub fn consumer_declarations() -> cortexkit_role_routing::declarations::Consumer
         } else {
             ToolsRequirement::None
         });
-        defaults.max_output_tokens = Some(DREAM_OUTPUT_TOKENS);
         defaults.context_window = Some(demand.context_window);
         consumers
             .push(ConsumerDeclaration::new(dream_consumer(demand.kind)).with_defaults(defaults));
@@ -151,7 +152,8 @@ pub const DREAM_DEMANDS: &[DreamDemand] = &[
     },
 ];
 
-/// The largest reply a dreamer task asks for.
+/// The largest reply a dreamer task asks its runner for, capped further by
+/// the chosen model's own output limit.
 pub const DREAM_OUTPUT_TOKENS: u64 = 32_000;
 
 /// The consumer a dreamer task kind is selected under.

@@ -2254,7 +2254,6 @@ mod manifest_tests {
                 "iq": 40,
                 "placement": "caller_runner",
                 "tools": "none",
-                "max_output_tokens": 32000,
                 "context_window": 64000,
             })
         );
@@ -2271,6 +2270,10 @@ mod manifest_tests {
         assert!(consumers[1..]
             .iter()
             .all(|consumer| consumer.get("placement").is_none()));
+        // No consumer states an output cap (see `routing::consumer_declarations`).
+        assert!(consumers
+            .iter()
+            .all(|consumer| consumer.get("max_output_tokens").is_none()));
         let verify = consumers
             .iter()
             .find(|consumer| consumer["name"] == "magic-context.dream.verify")
@@ -2281,7 +2284,6 @@ mod manifest_tests {
                 "name": "magic-context.dream.verify",
                 "iq": 60,
                 "tools": "required",
-                "max_output_tokens": 32000,
                 "context_window": 200000,
             })
         );
