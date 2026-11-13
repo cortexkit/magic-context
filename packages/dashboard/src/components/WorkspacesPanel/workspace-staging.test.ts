@@ -77,7 +77,7 @@ describe("workspace staged editor helpers", () => {
     expect("shareCategories" in payload).toBe(false);
   });
 
-  it("#given workspace refetched before save #then membership-only save does not resend stale categories", () => {
+  it("#given workspace refetched before save #then a rename-only save does not resend stale categories", () => {
     // Simulate: panel opened with NAMING, another window disables NAMING, panel
     // refetches (live workspace now has []), user saves a rename without touching
     // the checkboxes.  The save must not re-enable NAMING.
@@ -89,6 +89,8 @@ describe("workspace staged editor helpers", () => {
     // The "live" workspace (after refetch) has NAMING removed.
     const wsAfterRefetch = workspace({ share_categories: [] });
     const payload = workspaceStageToPayload(wsAfterRefetch, stage);
+    expect(payload.rename).toBe("team-renamed");
+    expect(workspaceStageDirty(wsAfterRefetch, stage)).toBe(true);
     expect("shareCategories" in payload).toBe(false);
   });
 
