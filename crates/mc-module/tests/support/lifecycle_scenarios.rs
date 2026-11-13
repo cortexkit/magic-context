@@ -243,16 +243,26 @@ fn lifecycle_move_never_fences_a_failed_state_save() {
 
 #[test]
 fn lifecycle_move_refuses_unrenderable_memories_and_profile_without_writes() {
-    // The user profile is the global rows of `memories`, so one table covers
-    // both.
-    for table in ["memories"] {
-        let dir = scratch(&format!("move-head-{table}"));
+    // Project memories become unreadable when their table is gone; the user
+    // profile (the global rows of the same table) when a row's metadata isn't
+    // JSON, which only the profile query reads.
+    for (case, fault) in [
+        ("memories", "ALTER TABLE memories RENAME TO unavailable"),
+        (
+            "profile",
+            "INSERT INTO memories(level, owner_id, category, origin_category, content,
+                 normalized_hash, first_seen_at, created_at, updated_at, last_seen_at, status,
+                 metadata_json)
+             VALUES ('global', 'self', 'mc:user-unsorted', 'USER_MEMORY', 'Unreadable',
+                 'h-unreadable', 1, 1, 1, 1, 'active', 'not json')",
+        ),
+    ] {
+        let table = case;
+        let dir = scratch(&format!("move-head-{case}"));
         let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
         insert_summary(&dir, "s1", 1, (1, "m1"), (2, "m2"), "History");
-        db.with_connection(|conn| {
-            conn.execute_batch(&format!("ALTER TABLE {table} RENAME TO unavailable"))
-        })
-        .unwrap();
+        db.with_connection(|conn| conn.execute_batch(fault))
+            .unwrap();
         let store = Store::open(&dir.join("mode3.db")).unwrap();
         let result = mc_module::move_in::move_in(
             db,
