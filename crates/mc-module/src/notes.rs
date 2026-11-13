@@ -223,8 +223,6 @@ fn text<'a>(args: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
         .filter(|text| !text.is_empty())
 }
 
-/// Run one `ctx_note` call. `anchor` is the number of the newest message, if
-/// any, which a written note records as the conversation tail it came from.
 /// The action a `ctx_note` call asks for.
 fn action(args: &Map<String, Value>) -> String {
     match args.get("action").and_then(Value::as_str) {
@@ -242,6 +240,8 @@ pub(crate) fn writes(input: &Value) -> bool {
     action(input.as_object().unwrap_or(&empty)) != "read"
 }
 
+/// Run one `ctx_note` call. `anchor` is the number of the newest message, if
+/// any, which a written note records as the conversation tail it came from.
 pub fn run(
     db: &ContextDb,
     scope: &NoteScope,
