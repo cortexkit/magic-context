@@ -12,6 +12,11 @@ pub mod pi_sessions;
 pub mod process_ext;
 pub mod project_identity;
 pub mod project_names;
+/// The integration tests' throwaway `context.db` builder, shared with the
+/// library's own tests. Declared once, here, so the file is compiled once.
+#[cfg(test)]
+#[path = "../tests/support/context_db.rs"]
+pub(crate) mod schema_fixture;
 pub mod serve;
 #[cfg(test)]
 pub mod test_bin;

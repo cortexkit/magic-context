@@ -511,8 +511,7 @@ fn collect_opencode_db_projects(
 }
 
 #[cfg(test)]
-#[path = "../tests/support/context_db.rs"]
-mod schema_fixture;
+use crate::schema_fixture;
 
 #[cfg(test)]
 mod tests {

@@ -13,8 +13,7 @@ mod compartment_scores;
 mod historian_telemetry;
 pub use historian_telemetry::{count_historian_runs, get_subagent_invocations, SubagentInvocation};
 #[cfg(test)]
-#[path = "../tests/support/context_db.rs"]
-mod schema_fixture;
+use crate::schema_fixture;
 
 pub fn resolve_db_path() -> Option<PathBuf> {
     // Keep the dashboard on the same harness-side database as the plugin. An

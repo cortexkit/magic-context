@@ -14,8 +14,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
-#[path = "../tests/support/context_db.rs"]
-mod schema_fixture;
+use crate::schema_fixture;
 
 // `projectPath` and `category` keep the names the plugin's history used: the
 // memory's owner and the tag it was written under. `level` and `categoryId`
@@ -703,6 +702,7 @@ fn plan(
         {
             return Ok(Plan::failed("refused", "invalid_request", vec![]));
         }
+        let hash = normalized_hash(content);
         // The profile category follows the tag. A restore puts back the
         // category its history recorded; an edit that keeps the tag keeps the
         // row's category; a new tag maps through the frozen map, as ck-mc
@@ -718,7 +718,7 @@ fn plan(
             target["categoryId"] =
                 json!(frozen_category_id(target["category"].as_str().unwrap_or("")));
         }
-        target["normalizedHash"] = json!(normalized_hash(content));
+        target["normalizedHash"] = json!(hash);
         target["shareable"] = json!(0);
         target["verificationStatus"] = json!("unverified");
         target["verifiedAt"] = Value::Null;
