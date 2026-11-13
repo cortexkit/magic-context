@@ -264,7 +264,10 @@ pub(crate) fn parts(pool: &[Memory], counter: Counter) -> Vec<Vec<Memory>> {
             tokens = 0;
         }
         tokens += cost;
-        parts.last_mut().expect("a part was just made").push(memory.clone());
+        parts
+            .last_mut()
+            .expect("a part was just made")
+            .push(memory.clone());
     }
     parts
 }
@@ -356,9 +359,7 @@ pub(crate) fn input(
 ) -> String {
     let mut blocks = Vec::new();
     if !docs.is_empty() {
-        blocks.push(format!(
-            "<project-documents>\n{docs}\n</project-documents>"
-        ));
+        blocks.push(format!("<project-documents>\n{docs}\n</project-documents>"));
     }
     if !shown.is_empty() {
         let lines: Vec<String> = shown
@@ -470,7 +471,10 @@ fn attributes(text: &str) -> HashMap<String, String> {
     re(r#"([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
         .captures_iter(text)
         .map(|found| {
-            let value = found.get(2).or(found.get(3)).map_or("", |value| value.as_str());
+            let value = found
+                .get(2)
+                .or(found.get(3))
+                .map_or("", |value| value.as_str());
             (found[1].to_ascii_lowercase(), unescape(value))
         })
         .collect()
@@ -497,7 +501,13 @@ fn list_body(text: &str) -> Result<&str, String> {
     let before = &text[..close.start()];
     let Some(start) = open
         .find_iter(before)
-        .filter(|found| !found.as_str().trim_end_matches('>').trim_end().ends_with('/'))
+        .filter(|found| {
+            !found
+                .as_str()
+                .trim_end_matches('>')
+                .trim_end()
+                .ends_with('/')
+        })
         .last()
     else {
         return Err("curate list missing its opening root tag".into());
@@ -548,9 +558,7 @@ fn text_of(inner: &str, element: &str) -> Result<String, String> {
 fn entry(name: &str, attributes: &HashMap<String, String>, inner: &str) -> Result<Change, String> {
     match name {
         "merge" => {
-            let listed = attributes
-                .get("ids")
-                .ok_or("<merge> names no ids")?;
+            let listed = attributes.get("ids").ok_or("<merge> names no ids")?;
             let ids = listed
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|id| !id.is_empty())
@@ -610,7 +618,10 @@ pub(crate) fn parse_list(text: &str) -> Result<Vec<Result<Change, String>>, Stri
     let mut rest = body;
     while let Some(at) = rest.find('<') {
         rest = &rest[at..];
-        if let Some(end) = rest.strip_prefix("<!--").and_then(|after| after.find("-->")) {
+        if let Some(end) = rest
+            .strip_prefix("<!--")
+            .and_then(|after| after.find("-->"))
+        {
             rest = &rest[4 + end + 3..];
             continue;
         }
@@ -1111,9 +1122,7 @@ impl CurateBatch {
                 return Ok(Err(format!("memory {id} is not in this part")));
             }
             if named.get(id).copied().unwrap_or(0) > 1 {
-                return Ok(Err(format!(
-                    "memory {id} is named by more than one change"
-                )));
+                return Ok(Err(format!("memory {id} is named by more than one change")));
             }
             if self.protected.contains(id) {
                 return Ok(Err(format!("memory {id} is protected")));
@@ -1128,9 +1137,7 @@ impl CurateBatch {
         }
         match change {
             Change::Merge { text, .. } => self.check_merge(tx, rows, text),
-            Change::Shorten { text, .. } => {
-                self.check_shorten(tx, rows.remove(0), text)
-            }
+            Change::Shorten { text, .. } => self.check_shorten(tx, rows.remove(0), text),
             Change::Split { parts, .. } => self.check_split(tx, rows.remove(0), parts),
             Change::Archive {
                 reason,
@@ -1151,7 +1158,11 @@ impl CurateBatch {
     /// Memory `id` as it is now, when it is still the live memory of this
     /// part the batch read, at the revision it read, and the undo history
     /// can record it.
-    fn current(&self, tx: &Transaction<'_>, id: i64) -> rusqlite::Result<Result<MemoryRow, String>> {
+    fn current(
+        &self,
+        tx: &Transaction<'_>,
+        id: i64,
+    ) -> rusqlite::Result<Result<MemoryRow, String>> {
         let read = self.read_revision(id).unwrap_or_default();
         let Some(row) = get_memory(tx, id)? else {
             return Ok(Err(format!("memory {id} no longer exists")));
@@ -1194,9 +1205,7 @@ impl CurateBatch {
         let hash = normalized_hash(text);
         let ids: Vec<i64> = sources.iter().map(|row| row.id).collect();
         if let Some(other) = live_with_hash(tx, &self.project, &hash, &ids)? {
-            return Ok(Err(format!(
-                "the merged text repeats live memory {other}"
-            )));
+            return Ok(Err(format!("the merged text repeats live memory {other}")));
         }
         let survivor = sources
             .iter()
@@ -1503,7 +1512,10 @@ impl CurateBatch {
         }
         let survivor = match survivor {
             Some(id) => {
-                if sources.iter().any(|row| row.id == id && row.content != text) {
+                if sources
+                    .iter()
+                    .any(|row| row.id == id && row.content != text)
+                {
                     update_content(tx, id, text, hash)?;
                 }
                 id
@@ -1595,7 +1607,12 @@ impl CurateBatch {
     /// other dreamer tasks record theirs: the history rows, then the
     /// journal's receipt with the whole decision, where the undo view and
     /// a run's undo read it.
-    fn record(&self, tx: &Transaction<'_>, decision: &Decision<'_>, now: i64) -> rusqlite::Result<()> {
+    fn record(
+        &self,
+        tx: &Transaction<'_>,
+        decision: &Decision<'_>,
+        now: i64,
+    ) -> rusqlite::Result<()> {
         let recorded = record_history(
             tx,
             &History {

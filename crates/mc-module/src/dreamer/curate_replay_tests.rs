@@ -140,7 +140,8 @@ fn curate_requests() {
         out.display()
     );
     std::fs::create_dir_all(&out).expect("create the output folder");
-    let bytes = std::fs::read(&store).unwrap_or_else(|error| panic!("{}: {error}", store.display()));
+    let bytes =
+        std::fs::read(&store).unwrap_or_else(|error| panic!("{}: {error}", store.display()));
     let digest: String = Sha256::digest(&bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -177,7 +178,9 @@ fn curate_requests() {
         declaration: &declaration,
     };
     let live = db
-        .with_connection(|conn| live_memories(conn, &project, &chosen.id, crate::summary::run::now_ms()))
+        .with_connection(|conn| {
+            live_memories(conn, &project, &chosen.id, crate::summary::run::now_ms())
+        })
         .expect("reading the category's memories");
     // A run curates the category from its first part.
     let batches = Curate

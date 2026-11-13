@@ -413,10 +413,7 @@ pub fn plan(decision: &Revision, context: &Context<'_>) -> Result<Plan, &'static
 /// rewrite that returns `None` keeps every concrete detail of its sources;
 /// the historian's merges and the dreamer's curate changes both refuse one
 /// that doesn't.
-pub fn dropped_token<'a>(
-    sources: impl IntoIterator<Item = &'a str>,
-    kept: &str,
-) -> Option<String> {
+pub fn dropped_token<'a>(sources: impl IntoIterator<Item = &'a str>, kept: &str) -> Option<String> {
     let kept = scan_concrete_tokens(kept);
     sources
         .into_iter()

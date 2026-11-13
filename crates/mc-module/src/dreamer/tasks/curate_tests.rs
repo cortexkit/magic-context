@@ -454,7 +454,9 @@ fn a_run_covers_every_category_in_the_profiles_order_in_parts_of_sixty() {
         ]
     );
     assert_eq!(ids(&batches[1]), [61]);
-    assert!(batches[1].message.contains("<memories part=\"2 of 2\">\n[61]\nRule 61.\n</memories>"));
+    assert!(batches[1]
+        .message
+        .contains("<memories part=\"2 of 2\">\n[61]\nRule 61.\n</memories>"));
     assert!(batches[1]
         .message
         .starts_with("## Curate the `PROJECT_RULES` memories\n\n**Project:** pj-curate\n\n"));
@@ -518,9 +520,8 @@ fn a_part_holds_about_twelve_thousand_tokens_of_memory_text() {
         revision: 1,
         protected: false,
     };
-    let lens = |pool: &[Memory]| -> Vec<usize> {
-        parts(pool, counter).iter().map(Vec::len).collect()
-    };
+    let lens =
+        |pool: &[Memory]| -> Vec<usize> { parts(pool, counter).iter().map(Vec::len).collect() };
     // Three memories of about 5,000 tokens: two fit a part, the third
     // starts the next.
     let pool: Vec<Memory> = (1..=3)
@@ -534,7 +535,9 @@ fn a_part_holds_about_twelve_thousand_tokens_of_memory_text() {
     ];
     assert_eq!(lens(&pool), [1, 1]);
     // Sixty short memories fill a part.
-    let pool: Vec<Memory> = (1..=121).map(|id| memory(id, format!("Rule {id}."))).collect();
+    let pool: Vec<Memory> = (1..=121)
+        .map(|id| memory(id, format!("Rule {id}.")))
+        .collect();
     assert_eq!(lens(&pool), [60, 60, 1]);
 }
 
@@ -562,13 +565,21 @@ fn similar_memories_are_close_texts_of_the_category_outside_the_part() {
         // The same text as the memory once case and spaces are ignored.
         memory(7, "run cargo fmt  before every COMMIT."),
     ];
-    let found: Vec<i64> = similar(&part, &pool).iter().map(|memory| memory.id).collect();
+    let found: Vec<i64> = similar(&part, &pool)
+        .iter()
+        .map(|memory| memory.id)
+        .collect();
     // The closest three, the same text first.
     assert_eq!(found, [7, 2, 5]);
 
     // At most twenty for a part, each shown once.
     let part: Vec<Memory> = (0..10)
-        .map(|index| memory(index, &format!("Alpha{index} beta{index} gamma{index} delta{index} epsilon.")))
+        .map(|index| {
+            memory(
+                index,
+                &format!("Alpha{index} beta{index} gamma{index} delta{index} epsilon."),
+            )
+        })
         .collect();
     let mut pool = part.clone();
     for index in 0..10 {
@@ -595,7 +606,10 @@ fn the_input_follows_its_frame_line_for_line() {
         .find(|(name, _)| *name == INPUT_FRAME)
         .unwrap();
     let filled = frame
-        .replace("⟦docs⟧", "<file name=\"ARCHITECTURE.md\">\nOne crate.\n</file>")
+        .replace(
+            "⟦docs⟧",
+            "<file name=\"ARCHITECTURE.md\">\nOne crate.\n</file>",
+        )
         .replace("⟦shown.id⟧", "20")
         .replace("⟦shown.category⟧", "ARCHITECTURE")
         .replace("⟦shown.content⟧", "The module owns the store.")
@@ -720,7 +734,9 @@ fn refused(store: &Store, batch: &CurateBatch, changes: &str) -> Vec<String> {
 
 impl Store {
     fn memory_or_none(&self, id: i64) -> Option<Stored> {
-        let exists: bool = self.value(&format!("SELECT EXISTS(SELECT 1 FROM memories WHERE id = {id})"));
+        let exists: bool = self.value(&format!(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE id = {id})"
+        ));
         exists.then(|| self.memory(id))
     }
 }
@@ -746,7 +762,12 @@ fn a_merge_writes_one_survivor_and_supersedes_its_sources() {
     let survivor: i64 = store.value("SELECT MAX(id) FROM memories");
     let written = store.memory(survivor);
     assert_eq!(
-        (written.content.as_str(), written.status.as_str(), written.category.as_str(), written.tag.as_str()),
+        (
+            written.content.as_str(),
+            written.status.as_str(),
+            written.category.as_str(),
+            written.tag.as_str()
+        ),
         (
             "Run `cargo fmt --all` in crates/mc-module before every commit.",
             "active",
@@ -757,18 +778,23 @@ fn a_merge_writes_one_survivor_and_supersedes_its_sources() {
     for id in [1, 2] {
         let source = store.memory(id);
         assert_eq!(
-            (source.status.as_str(), source.superseded_by, source.revision),
+            (
+                source.status.as_str(),
+                source.superseded_by,
+                source.revision
+            ),
             ("archived", Some(survivor), 2)
         );
     }
-    let (merged_from, source, session): (String, String, String) = store.db.with_connection(|conn| {
-        conn.query_row(
-            "SELECT merged_from, source_type, source_session_id FROM memories WHERE id = ?1",
-            [survivor],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap()
-    });
+    let (merged_from, source, session): (String, String, String) =
+        store.db.with_connection(|conn| {
+            conn.query_row(
+                "SELECT merged_from, source_type, source_session_id FROM memories WHERE id = ?1",
+                [survivor],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        });
     assert_eq!(merged_from, "[1,2]");
     assert_eq!(source, "dreamer");
     // The session that proposed it, so its transcript can be found.
@@ -789,7 +815,11 @@ fn a_merge_writes_one_survivor_and_supersedes_its_sources() {
     let store = fixture();
     let batch = store.rules();
     let text = store.memory(1).content;
-    let applied = store.apply(&batch, &list(&format!("<merge ids=\"1,2\">{text}</merge>")), RUN);
+    let applied = store.apply(
+        &batch,
+        &list(&format!("<merge ids=\"1,2\">{text}</merge>")),
+        RUN,
+    );
     assert_eq!(applied.applied, 1, "{applied:?}");
     assert_eq!(store.memory(1).status, "active");
     assert_eq!(store.memory(2).superseded_by, Some(1));
@@ -807,22 +837,38 @@ fn a_merge_is_refused_unless_every_check_passes() {
         "two or more memories",
     );
     says(
-        &refused(&store, &batch, &format!("<merge ids=\"1,1\">{good}</merge>")),
+        &refused(
+            &store,
+            &batch,
+            &format!("<merge ids=\"1,1\">{good}</merge>"),
+        ),
         "merge 1,1",
         "memory 1 is named twice",
     );
     says(
-        &refused(&store, &batch, &format!("<merge ids=\"1,20\">{good}</merge>")),
+        &refused(
+            &store,
+            &batch,
+            &format!("<merge ids=\"1,20\">{good}</merge>"),
+        ),
         "merge 1,20",
         "memory 20 is not in this part",
     );
     says(
-        &refused(&store, &batch, &format!("<merge ids=\"1,6\">{good}</merge>")),
+        &refused(
+            &store,
+            &batch,
+            &format!("<merge ids=\"1,6\">{good}</merge>"),
+        ),
         "merge 1,6",
         "memory 6 is protected",
     );
     says(
-        &refused(&store, &batch, "<merge ids=\"1,2\">Run cargo fmt in crates/mc-module before every commit.</merge>"),
+        &refused(
+            &store,
+            &batch,
+            "<merge ids=\"1,2\">Run cargo fmt in crates/mc-module before every commit.</merge>",
+        ),
         "merge 1,2",
         "the merged text drops `cargo fmt --all`",
     );
@@ -830,14 +876,22 @@ fn a_merge_is_refused_unless_every_check_passes() {
     let dropped = refused(
         &store,
         &batch,
-        &format!("<merge ids=\"1,2\">{good}</merge>\n<archive id=\"2\" reason=\"one-off\" why=\"x\"/>"),
+        &format!(
+            "<merge ids=\"1,2\">{good}</merge>\n<archive id=\"2\" reason=\"one-off\" why=\"x\"/>"
+        ),
     );
     assert_eq!(dropped.len(), 2, "{dropped:?}");
-    assert!(dropped.iter().all(|reason| reason.contains("memory 2 is named by more than one change")));
+    assert!(dropped
+        .iter()
+        .all(|reason| reason.contains("memory 2 is named by more than one change")));
     // The merged text may not repeat another live memory, in any category.
     store.insert(&[row(30, "NAMING", good)]);
     says(
-        &refused(&store, &batch, &format!("<merge ids=\"1,2\">{good}</merge>")),
+        &refused(
+            &store,
+            &batch,
+            &format!("<merge ids=\"1,2\">{good}</merge>"),
+        ),
         "merge 1,2",
         "the merged text repeats live memory 30",
     );
@@ -845,14 +899,22 @@ fn a_merge_is_refused_unless_every_check_passes() {
     // A memory changed after the run read it keeps its change.
     store.execute("UPDATE memories SET revision = revision + 1 WHERE id = 2");
     says(
-        &refused(&store, &batch, &format!("<merge ids=\"1,2\">{good}</merge>")),
+        &refused(
+            &store,
+            &batch,
+            &format!("<merge ids=\"1,2\">{good}</merge>"),
+        ),
         "merge 1,2",
         "memory 2 changed after the run read it (revision 1, now 2)",
     );
     // So does one that left the project's live memories of the category.
     store.execute("UPDATE memories SET revision = 1, status = 'archived' WHERE id = 2");
     says(
-        &refused(&store, &batch, &format!("<merge ids=\"1,2\">{good}</merge>")),
+        &refused(
+            &store,
+            &batch,
+            &format!("<merge ids=\"1,2\">{good}</merge>"),
+        ),
         "merge 1,2",
         "memory 2 is no longer a live PROJECT_RULES memory",
     );
@@ -861,10 +923,17 @@ fn a_merge_is_refused_unless_every_check_passes() {
     declaration["actions"] = json!(["shorten", "split", "archive"]);
     let store = fixture();
     let batch = with_context(&store, Some(declaration), |context| {
-        Curate.plan_batches(context, None, Some("PROJECT_RULES")).unwrap().remove(0)
+        Curate
+            .plan_batches(context, None, Some("PROJECT_RULES"))
+            .unwrap()
+            .remove(0)
     });
     says(
-        &refused(&store, &batch, &format!("<merge ids=\"1,2\">{good}</merge>")),
+        &refused(
+            &store,
+            &batch,
+            &format!("<merge ids=\"1,2\">{good}</merge>"),
+        ),
         "merge 1,2",
         "does not allow merge",
     );
@@ -875,7 +944,11 @@ fn a_shorten_keeps_every_detail_in_fewer_words() {
     let store = fixture();
     let batch = store.rules();
     let shorter = "Releases need two reviewers and a green CI run of 45 minutes.";
-    let applied = store.apply(&batch, &list(&format!("<shorten id=\"3\">{shorter}</shorten>")), RUN);
+    let applied = store.apply(
+        &batch,
+        &list(&format!("<shorten id=\"3\">{shorter}</shorten>")),
+        RUN,
+    );
     assert_eq!(applied.applied, 1, "{applied:?}");
     let written = store.memory(3);
     assert_eq!((written.content.as_str(), written.revision), (shorter, 2));
@@ -896,12 +969,20 @@ fn a_shorten_keeps_every_detail_in_fewer_words() {
         "differs only in formatting",
     );
     says(
-        &refused(&store, &batch, "<shorten id=\"3\">Releases need two reviewers and a green CI run.</shorten>"),
+        &refused(
+            &store,
+            &batch,
+            "<shorten id=\"3\">Releases need two reviewers and a green CI run.</shorten>",
+        ),
         "shorten 3",
         "the new text drops 45",
     );
     says(
-        &refused(&store, &batch, &format!("<shorten id=\"1\">{}</shorten>", store.memory(2).content)),
+        &refused(
+            &store,
+            &batch,
+            &format!("<shorten id=\"1\">{}</shorten>", store.memory(2).content),
+        ),
         "shorten 1",
         "the new text repeats live memory 2",
     );
@@ -924,14 +1005,32 @@ fn a_split_keeps_the_original_as_its_first_part() {
     assert_eq!(applied.applied, 1, "{applied:?}");
     let original = store.memory(4);
     assert_eq!(
-        (original.content.as_str(), original.status.as_str(), original.revision),
-        ("The release checklist lives in docs/release.md and needs 2 sign-offs.", "active", 2)
+        (
+            original.content.as_str(),
+            original.status.as_str(),
+            original.revision
+        ),
+        (
+            "The release checklist lives in docs/release.md and needs 2 sign-offs.",
+            "active",
+            2
+        )
     );
     let added: i64 = store.value("SELECT MAX(id) FROM memories");
     let written = store.memory(added);
     assert_eq!(
-        (written.content.as_str(), written.status.as_str(), written.category.as_str(), written.tag.as_str()),
-        ("Release tags use the vX.Y.Z form.", "active", "swe:project-rules", "PROJECT_RULES")
+        (
+            written.content.as_str(),
+            written.status.as_str(),
+            written.category.as_str(),
+            written.tag.as_str()
+        ),
+        (
+            "Release tags use the vX.Y.Z form.",
+            "active",
+            "swe:project-rules",
+            "PROJECT_RULES"
+        )
     );
     let (level, owner, importance): (String, String, i64) = store.db.with_connection(|conn| {
         conn.query_row(
@@ -941,7 +1040,10 @@ fn a_split_keeps_the_original_as_its_first_part() {
         )
         .unwrap()
     });
-    assert_eq!((level.as_str(), owner.as_str(), importance), ("project", PROJECT, 70));
+    assert_eq!(
+        (level.as_str(), owner.as_str(), importance),
+        ("project", PROJECT, 70)
+    );
 
     let store = fixture();
     let batch = store.rules();
@@ -980,7 +1082,11 @@ fn an_archive_needs_its_reason_and_what_it_repeats() {
         )),
         RUN,
     );
-    assert_eq!((applied.applied, applied.dropped.len()), (5, 0), "{applied:?}");
+    assert_eq!(
+        (applied.applied, applied.dropped.len()),
+        (5, 0),
+        "{applied:?}"
+    );
     let archived = |id: i64| {
         let memory = store.memory(id);
         let reason: String = store.value(&format!(
@@ -988,21 +1094,54 @@ fn an_archive_needs_its_reason_and_what_it_repeats() {
         ));
         (memory.status, memory.superseded_by, reason)
     };
-    assert_eq!(archived(2), ("archived".into(), Some(1), "duplicate of memory 1".into()));
-    assert_eq!(archived(3), ("archived".into(), Some(20), "duplicate of memory 20".into()));
+    assert_eq!(
+        archived(2),
+        ("archived".into(), Some(1), "duplicate of memory 1".into())
+    );
+    assert_eq!(
+        archived(3),
+        ("archived".into(), Some(20), "duplicate of memory 20".into())
+    );
     assert_eq!(
         archived(12),
-        ("archived".into(), None, format!("duplicate of the project documents: \"{quote}\""))
+        (
+            "archived".into(),
+            None,
+            format!("duplicate of the project documents: \"{quote}\"")
+        )
     );
-    assert_eq!(archived(5), ("archived".into(), None, "one-off: a room id and a date".into()));
-    assert_eq!(archived(11), ("archived".into(), None, "lesson: a story with no rule".into()));
+    assert_eq!(
+        archived(5),
+        (
+            "archived".into(),
+            None,
+            "one-off: a room id and a date".into()
+        )
+    );
+    assert_eq!(
+        archived(11),
+        (
+            "archived".into(),
+            None,
+            "lesson: a story with no rule".into()
+        )
+    );
     // The history records the reason, and the survivor or the quote.
     let journal = store.journal();
     assert_eq!(journal.len(), 5);
     assert_eq!(journal[0].2["reason"], "duplicate of memory 1");
-    assert_eq!(journal[0].2["evidence"], json!({"reason": "duplicate", "of": 1}));
-    assert_eq!(journal[2].2["evidence"], json!({"reason": "duplicate", "quote": quote}));
-    assert_eq!(journal[3].2["evidence"], json!({"reason": "one-off", "why": "a room id and a date"}));
+    assert_eq!(
+        journal[0].2["evidence"],
+        json!({"reason": "duplicate", "of": 1})
+    );
+    assert_eq!(
+        journal[2].2["evidence"],
+        json!({"reason": "duplicate", "quote": quote})
+    );
+    assert_eq!(
+        journal[3].2["evidence"],
+        json!({"reason": "one-off", "why": "a room id and a date"})
+    );
 
     // A quote that holds the documents' escapes written out matches too.
     let store = fixture();
@@ -1037,13 +1176,21 @@ fn an_archive_needs_its_reason_and_what_it_repeats() {
         RUN,
     );
     assert_eq!(applied.applied, 1, "{applied:?}");
-    says(&applied.dropped, "archive 2", "memory 1 is changed by this list too");
+    says(
+        &applied.dropped,
+        "archive 2",
+        "memory 1 is changed by this list too",
+    );
     // Nor archived since the run read the part.
     let store = fixture();
     let batch = store.rules();
     store.execute("UPDATE memories SET status = 'archived' WHERE id = 20");
     says(
-        &refused(&store, &batch, "<archive id=\"3\" reason=\"duplicate\" of=\"20\"/>"),
+        &refused(
+            &store,
+            &batch,
+            "<archive id=\"3\" reason=\"duplicate\" of=\"20\"/>",
+        ),
         "archive 3",
         "memory 20 is not a live memory of the project",
     );
@@ -1066,7 +1213,10 @@ fn protected_memories_are_shown_as_protected_and_never_changed() {
         assert!(!batch.protected.contains(&id), "memory {id}");
         assert!(batch.message.contains(&format!("\n[{id}]\n")));
     }
-    let before: Vec<Stored> = [6, 7, 8, 9, 10].iter().map(|id| store.memory(*id)).collect();
+    let before: Vec<Stored> = [6, 7, 8, 9, 10]
+        .iter()
+        .map(|id| store.memory(*id))
+        .collect();
     let applied = store.apply(
         &batch,
         &list(
@@ -1081,8 +1231,14 @@ fn protected_memories_are_shown_as_protected_and_never_changed() {
     // The change to an unprotected memory still applies.
     assert_eq!((applied.proposed, applied.applied), (5, 1), "{applied:?}");
     assert_eq!(applied.dropped.len(), 4);
-    assert!(applied.dropped.iter().all(|reason| reason.contains("is protected")));
-    let after: Vec<Stored> = [6, 7, 8, 9, 10].iter().map(|id| store.memory(*id)).collect();
+    assert!(applied
+        .dropped
+        .iter()
+        .all(|reason| reason.contains("is protected")));
+    let after: Vec<Stored> = [6, 7, 8, 9, 10]
+        .iter()
+        .map(|id| store.memory(*id))
+        .collect();
     assert_eq!(before, after);
 }
 
@@ -1116,7 +1272,9 @@ fn each_change_is_one_decision_named_after_the_run_and_undoes_alone_or_with_the_
             ("dream-run:7:curate:0:3", "curate_archive"),
         ]
     );
-    let rows: i64 = store.value("SELECT COUNT(*) FROM memory_history WHERE decision_key LIKE 'dream-run:7:curate:%'");
+    let rows: i64 = store.value(
+        "SELECT COUNT(*) FROM memory_history WHERE decision_key LIKE 'dream-run:7:curate:%'",
+    );
     // Merge: two sources and the survivor; shorten: one; split: the
     // original and its new part; archive: one.
     assert_eq!(rows, 7);
@@ -1185,14 +1343,15 @@ fn applying_a_part_moves_the_resume_point_past_it() {
         )
         .unwrap();
     });
-    let watermark = || -> Option<String> {
-        store.value("SELECT watermark_json FROM dream_schedules")
-    };
+    let watermark =
+        || -> Option<String> { store.value("SELECT watermark_json FROM dream_schedules") };
     let batches = with_context(&store, None, |context| Curate.batches(context).unwrap());
     assert_eq!(batches.len(), 3);
     store.db.with_connection(|conn| {
         let tx = conn.transaction().unwrap();
-        batches[0].apply(&tx, &reply("<curate></curate>"), RUN).unwrap();
+        batches[0]
+            .apply(&tx, &reply("<curate></curate>"), RUN)
+            .unwrap();
         tx.commit().unwrap();
     });
     assert_eq!(
@@ -1215,7 +1374,9 @@ fn applying_a_part_moves_the_resume_point_past_it() {
     store.db.with_connection(|conn| {
         let tx = conn.transaction().unwrap();
         for batch in &resumed {
-            batch.apply(&tx, &reply("<curate></curate>"), RUN + 1).unwrap();
+            batch
+                .apply(&tx, &reply("<curate></curate>"), RUN + 1)
+                .unwrap();
         }
         tx.commit().unwrap();
     });
@@ -1242,8 +1403,8 @@ fn every_memory_the_head_shows_is_listed_except_the_parts_own() {
     let batch = store.rules();
     assert!(!batch.message.contains("<always-shown>"));
     // The documents are the head's own block, inside the frame's wrapper.
-    assert!(batch.message.contains(
-        "<project-documents>\n<file name=\"ARCHITECTURE.md\">\n# Layout\n"
-    ));
+    assert!(batch
+        .message
+        .contains("<project-documents>\n<file name=\"ARCHITECTURE.md\">\n# Layout\n"));
     assert!(batch.message.contains("A &lt;frame&gt; is filled by the module &amp; never by a profile.\n</file>\n</project-documents>"));
 }
