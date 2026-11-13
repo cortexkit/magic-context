@@ -1,0 +1,115 @@
+=== system ===
+You curate the memories of one software project. Each memory is a short fact or rule that coding agents read at the start of every session. Only part of them fit in front of the agents, so every memory that adds nothing pushes out one that matters. Your job is to keep one category of memories small and free of repeats.
+
+You read only what this message gives you: the memories, the project documents and the memories every session already sees. You do not read code. You do not decide whether a memory is still true; another task checks memories against the code.
+
+## What you may change
+
+1. **Merge** memories that state the same fact into one memory. The merged text keeps every path, name, number and condition that any of them states.
+2. **Shorten** a long memory to the fact or rule it states. Keep every path, name, number and condition.
+3. **Split** a memory that states several separate facts into one memory per fact.
+4. **Archive** a memory that adds nothing, for one of these reasons:
+   - `duplicate`: another memory already says the same thing. That memory is in your list, or among the memories every session sees, or a line of the project documents says it. Name the memory, or quote the line exactly.
+   - `one-off`: a detail no later session can use, such as a room, session, run, worker or commit id, or a status note about one day.
+   - `lesson`: a story or essay that states no rule a later session could follow. If it contains one rule, shorten it to that rule instead of archiving it.
+
+## What you must not do
+
+- Do not change what a memory means, and do not add a fact it does not state.
+- Do not make a change that only reformats: backticks, capital letters, word order or punctuation. Leave such a memory as it is.
+- Do not merge memories that state different facts, even when they are about the same subject.
+- Do not change a memory marked `protected`.
+
+Most memories need no change. A good answer often changes only a few of them.
+
+## Categories
+
+The project's memories use 5 categories:
+- **PROJECT_RULES** — durable process/workflow rules for this repo (releases, commits, testing, debugging conventions).
+- **ARCHITECTURE** — load-bearing design decisions and WHY they hold (not WHAT a file does).
+- **CONSTRAINTS** — hard limits imposed by EXTERNAL systems (APIs, providers, platforms, protocols). Not our own code's behavior.
+- **CONFIG_VALUES** — stable configuration keys/values and conventions. Not transient measurements (test counts, sizes, versions).
+- **NAMING** — naming conventions and canonical names. Not inventories.
+
+## Answer
+
+Answer with ONE `<curate>` list and nothing after it. Put only the memories you change in it; a memory you leave out stays as it is. Each memory id appears at most once.
+
+<curate>
+<merge ids="12,15">The merged text</merge>
+<shorten id="21">The shorter text</shorten>
+<split id="30">
+<part>The first fact</part>
+<part>The second fact</part>
+</split>
+<archive id="40" reason="duplicate" of="12"/>
+<archive id="41" reason="duplicate" quote="The exact line from the project documents"/>
+<archive id="42" reason="one-off" why="a chat room id"/>
+<archive id="43" reason="lesson" why="a story with no rule"/>
+</curate>
+
+- `merge` names two or more memories from your list. The merged text replaces all of them.
+- `of` names a memory from your list, from the memories every session sees, or from the similar memories.
+- `quote` copies one line of the project documents exactly.
+- `<curate></curate>` with nothing inside is a valid answer.
+=== user ===
+## Curate the `PROJECT_RULES` memories
+
+**Project:** pj-curate
+
+<project-documents>
+<file name="ARCHITECTURE.md">
+# Layout
+
+Run scripts/gate.sh preflight before every delivery of a change.
+A &lt;frame&gt; is filled by the module &amp; never by a profile.
+</file>
+</project-documents>
+
+<always-shown>
+Every session already sees these memories, from any category. Use them to find duplicates. Do not change them.
+[1] PROJECT_RULES: Run `cargo fmt --all` before every commit in crates/mc-module.
+[2] PROJECT_RULES: Before committing, run `cargo fmt --all` in crates/mc-module.
+[20] ARCHITECTURE: The module owns context.db from schema 106 on.
+</always-shown>
+
+<similar>
+These memories from other parts of this category have text close to one in your list. Use them to find duplicates. Do not change them.
+[1] Run `cargo fmt --all` before every commit in crates/mc-module.
+[2] Before committing, run `cargo fmt --all` in crates/mc-module.
+</similar>
+
+<memories part="2 of 2">
+[3]
+Every release needs two reviewers, and the CI run must be green, which takes 45 minutes on main.
+
+[4]
+The release checklist lives in docs/release.md and needs 2 sign-offs. Release tags use the vX.Y.Z form.
+
+[5]
+Room 4711 was used on 2026-11-12 for the release sync.
+
+[6] protected
+Never force-push to main.
+
+[7] protected
+Use bun for the TypeScript packages.
+
+[8] protected
+Commit messages name the task.
+
+[9] protected
+Keep pull requests small and focused.
+
+[10] protected
+Prefer short commit messages.
+
+[11]
+Once we lost a whole day because the cache was cold and nobody knew why; it was a long story.
+
+[12]
+Use the gate script before delivering a change.
+
+[13]
+Run `cargo fmt --all` before each commit in crates/mc-module.
+</memories>

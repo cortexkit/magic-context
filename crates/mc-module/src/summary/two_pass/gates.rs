@@ -291,11 +291,11 @@ pub fn plan(decision: &Revision, context: &Context<'_>) -> Result<Plan, &'static
     // A merge must keep each source's concrete facts in the surviving
     // memory; naming one in the evidence doesn't keep it.
     if decision.action == "merge"
-        && context.sources.iter().any(|source| {
-            tokens_of(&source.content)
-                .iter()
-                .any(|token| !final_tokens.contains(token))
-        })
+        && dropped_token(
+            context.sources.iter().map(|source| source.content.as_str()),
+            &decision.final_text,
+        )
+        .is_some()
     {
         return Err("dropped_token");
     }
@@ -406,6 +406,22 @@ pub fn plan(decision: &Revision, context: &Context<'_>) -> Result<Plan, &'static
         kept,
         spans,
     })
+}
+
+/// The first concrete token (a path, a code name, a number with its unit,
+/// a date) that one of `sources` states and `kept` no longer does. A
+/// rewrite that returns `None` keeps every concrete detail of its sources;
+/// the historian's merges and the dreamer's curate changes both refuse one
+/// that doesn't.
+pub fn dropped_token<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+    kept: &str,
+) -> Option<String> {
+    let kept = scan_concrete_tokens(kept);
+    sources
+        .into_iter()
+        .flat_map(scan_concrete_tokens)
+        .find(|token| !kept.contains(token))
 }
 
 /// A check's durable key: the decision, the check's operands and input, and

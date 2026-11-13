@@ -684,6 +684,10 @@
             {
               "label": "Compress cues",
               "value": "compress-cues"
+            },
+            {
+              "label": "Curate",
+              "value": "curate"
             }
           ]
         }
@@ -771,5 +775,5 @@
       "title": "Delete notes"
     }
   ],
-  "digest": "f0c2fcdd814a475151e0af1146b2035a76e35d1386c710b9fe14ed8752929e66"
+  "digest": "026b88e04f5cb23ab3246606c174e53ef26a338f52929c3edcc5a818e5b117a8"
 }

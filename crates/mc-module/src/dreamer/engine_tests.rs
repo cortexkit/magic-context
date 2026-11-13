@@ -267,6 +267,119 @@ async fn a_spent_budget_stops_the_run_before_its_next_batch() {
 }
 
 #[tokio::test]
+async fn a_curate_run_stopped_by_its_budget_resumes_at_its_next_part() {
+    let (_dir, db) = store();
+    // Sixty-one rules make two parts of their category; one name makes a
+    // part of a later category.
+    db.with_connection(|conn| {
+        let tx = conn.transaction().unwrap();
+        for id in 1..=62_i64 {
+            let (category, tag) = if id <= 61 {
+                ("swe:project-rules", "PROJECT_RULES")
+            } else {
+                ("swe:naming", "NAMING")
+            };
+            let content = format!("Rule {id}.");
+            tx.execute(
+                "INSERT INTO memories(id, level, owner_id, category, origin_category, content, normalized_hash,
+                                      first_seen_at, created_at, updated_at, last_seen_at)
+                 VALUES (?1, 'project', ?2, ?3, ?4, ?5, ?6, 0, 0, 0, 0)",
+                params![
+                    id,
+                    PROJECT,
+                    category,
+                    tag,
+                    content,
+                    crate::memory_writes::normalized_hash(&content)
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    });
+    let engine = Arc::new(Engine::new(
+        "this",
+        vec![Box::new(crate::dreamer::tasks::curate::Curate)],
+    ));
+    let spent = Settings {
+        budget_tokens: 100,
+        ..Settings::default()
+    };
+    engine.see_project(&db, PROJECT, "/nowhere", profile(), &spent, 1);
+    make_due(&db);
+    let client = Arc::new(Client::new(
+        &["p/a"],
+        &[Ends::Spent(
+            "<curate><archive id=\"1\" reason=\"one-off\" why=\"a room id\"/></curate>",
+            150,
+        )],
+    ));
+    engine.tick(&db, &client, &spent, now_ms());
+    settled(&engine).await;
+
+    // The first part was sent and applied; the tokens it used stop the run
+    // before the second.
+    assert_eq!(client.children(), ["mc-dream:1.0:0.0"]);
+    let status: String = db
+        .with_connection(|conn| {
+            conn.query_row("SELECT status FROM memories WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(status, "archived");
+    let first = &runs(&db)[0];
+    assert_eq!(
+        (first.0.as_str(), first.1.as_deref(), first.2, first.3),
+        ("swe:curate", Some("budget_stopped"), 1, 1)
+    );
+    assert_eq!(schedule(&db).1.as_deref(), Some("budget_stopped"));
+    let watermark = || -> Option<Value> {
+        db.with_connection(|conn| {
+            conn.query_row("SELECT watermark_json FROM dream_schedules", [], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+        })
+        .unwrap()
+        .map(|text| serde_json::from_str(&text).unwrap())
+    };
+    assert_eq!(
+        watermark(),
+        Some(json!({"category": "swe:project-rules", "part": 2, "after": 60}))
+    );
+
+    // The next run starts at the second part and goes on to the end.
+    make_due(&db);
+    let client = Arc::new(Client::new(
+        &["p/a"],
+        &[
+            Ends::Reply("<curate></curate>"),
+            Ends::Reply("<curate></curate>"),
+        ],
+    ));
+    engine.tick(&db, &client, &Settings::default(), now_ms());
+    settled(&engine).await;
+    let prompts: Vec<String> = client
+        .sends
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, request)| request.prompt.clone().unwrap())
+        .collect();
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts[0].contains("<memories part=\"2 of 2\">\n[61]\nRule 61.\n</memories>"),
+        "{}",
+        prompts[0]
+    );
+    assert!(prompts[1].starts_with("## Curate the `NAMING` memories"));
+    assert!(prompts[1].contains("<memories part=\"1 of 1\">\n[62]\nRule 62.\n</memories>"));
+    assert_eq!(runs(&db)[1].1.as_deref(), Some("nothing_to_do"));
+    // Its last part leaves no resume point: the next run starts over.
+    assert_eq!(watermark(), None);
+}
+
+#[tokio::test]
 async fn an_account_wait_ends_the_run_as_a_wait_due_when_it_ends() {
     let (_dir, db) = store();
     let engine = engine(1);

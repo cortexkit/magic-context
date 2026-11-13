@@ -410,7 +410,7 @@ pub(crate) fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bo
 
 /// What a classification, verification, share decision or embedding said
 /// about the old text no longer holds for the new one.
-fn clear_derived(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
+pub(crate) fn clear_derived(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE memories SET shareable = 0, classified_at = NULL WHERE id = ?1",
         params![id],

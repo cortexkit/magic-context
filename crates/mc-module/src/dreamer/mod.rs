@@ -16,6 +16,8 @@ pub mod task;
 pub mod tasks;
 
 #[cfg(test)]
+mod curate_replay_tests;
+#[cfg(test)]
 mod replay_tests;
 
 /// Every task kind the module runs. A profile's task of any other kind is
@@ -24,5 +26,6 @@ pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
     vec![
         Box::new(tasks::classify::Classify),
         Box::new(tasks::compress_cues::CompressCues),
+        Box::new(tasks::curate::Curate),
     ]
 }

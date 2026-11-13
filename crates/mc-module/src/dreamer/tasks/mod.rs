@@ -4,3 +4,4 @@
 
 pub mod classify;
 pub mod compress_cues;
+pub mod curate;

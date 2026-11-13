@@ -20,6 +20,8 @@ use crate::runner_capabilities::SessionRetention;
 #[derive(Clone)]
 pub(crate) enum Ends {
     Reply(&'static str),
+    /// A reply whose run reports this many input tokens used.
+    Spent(&'static str, u64),
     Capped,
     Error(&'static str),
     /// Ends with routing's full capacity (`concurrency_full`) until this
@@ -131,6 +133,14 @@ impl RunnerClient for Client {
             .expect("a scripted run end");
         Ok(match ends {
             Ends::Reply(text) => completed(text, None),
+            Ends::Spent(text, tokens) => {
+                let mut result = completed(text, None);
+                let mut usage = cortexkit_role_llm_runner::usage::RunUsage::default();
+                usage.steps = 1;
+                usage.input_tokens = Some(tokens);
+                result.usage = Some(usage);
+                result
+            }
             Ends::Capped => completed("{\"partial\":", Some(Finish::Length)),
             Ends::Error(message) => {
                 let mut result = RunResult::new("run", states::ERROR);
