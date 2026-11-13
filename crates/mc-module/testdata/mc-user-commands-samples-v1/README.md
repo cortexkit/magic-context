@@ -27,6 +27,14 @@ field: wrapup tells the agent nothing and sends no session reminder. Large targe
 can take several model runs. Status shows their target and summarized ordinal.
 Summaries land on the next rebuild, or at once at the rebuild threshold;
 `flush` applies published summaries now. `ctx_expand` recovers the raw text.
+The numeric facts are `To summarize`, `Raw history` and `Stay raw`, with a
+`Summarizer` state (`ready`, `building` or `paused`). An account wait adds
+`Waits for`, a remaining duration in milliseconds, never an epoch timestamp.
+Model use and raw-text recovery are prose in `effect`, not additional facts.
+Preview versions confirm the keep policy, summary revision, and whether
+summarization is running or blocked by a wait or failure backoff. Ordinary
+new messages do not invalidate a preview. The accepted run reports the
+counts for the boundary resolved at run time.
 
 `queued_in_recent_tail` means every queued part is still in the protected recent
 tail and the rebuild has no other work to land. An explicit flush keeps that

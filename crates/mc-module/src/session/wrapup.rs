@@ -72,15 +72,19 @@ impl Session {
         } else {
             None
         };
+        let now = wall_now();
+        let waiting = self
+            .account_wait
+            .as_ref()
+            .is_some_and(|wait| wait.holds(now));
+        let backoff = self.drain.in_failure_backoff(self.clock());
+        // Confirm the person's keep policy, not a moving transcript snapshot.
+        // The run resolves its boundary and reports current counts when accepted.
         let stamp = serde_json::json!({
-            "keep": keep, "from": from, "until": until,
-            "entries": entries.iter().filter(|e| e.ordinal >= from).map(|e| (&e.mid, e.ordinal, &e.digest)).collect::<Vec<_>>(),
+            "keep": keep, "from": from,
             "summaries": self.summaries.revision(), "reason": reason,
             "running": self.summarizing, "target": self.wrapup_target,
-            "wait": self.account_wait.as_ref().map(|w| (&w.refusal.code, w.refusal.until_ms)),
-            "usable": pass::usable_window(&self.conditions),
-            "threshold": settings.execute_threshold_percentage,
-            "no_progress": self.no_progress, "failure_at": self.drain.failure_at,
+            "wait": waiting, "backoff": backoff,
         });
         let version = format!(
             "{:x}",
@@ -89,15 +93,13 @@ impl Session {
         let mut preview = Preview::new(version, reason.is_none());
         preview.reason = reason.map(str::to_owned);
         if reason.is_none() {
-            preview.effect = Some("Shrinks context on the next rebuild, or at once at its rebuild threshold. flush applies published summaries now.".into());
-            let (label, state) = if self.summarizing {
-                ("Summary already running; target waits", "building")
-            } else if self.summaries_wait_for_account() {
-                ("Account wait; target waits too", "paused")
-            } else if self.drain.in_failure_backoff(self.clock()) {
-                ("Summary failure backoff; target waits", "paused")
+            preview.effect = Some("May take several model runs. ctx_expand recovers raw text. Shrinks next rebuild (now at threshold); flush applies now.".into());
+            let state = if self.summarizing {
+                "building"
+            } else if waiting || backoff {
+                "paused"
             } else {
-                ("Summary ready; failures pause remaining work", "ready")
+                "ready"
             };
             preview.facts = Some(vec![
                 number(
@@ -121,15 +123,7 @@ impl Session {
                     Some("messages"),
                     false,
                 ),
-                Fact::new(label, FactValue::state(state)),
-                Fact::new(
-                    "Uses a model; may take several summary runs",
-                    FactValue::state("ready"),
-                ),
-                Fact::new(
-                    "Raw text recoverable with ctx_expand",
-                    FactValue::state("ready"),
-                ),
+                Fact::new("Summarizer", FactValue::state(state)),
             ]);
             if let Some(wait) = &self.account_wait {
                 preview
@@ -137,8 +131,8 @@ impl Session {
                     .as_mut()
                     .expect("available facts")
                     .push(number(
-                        "Account wait until (epoch ms)",
-                        wait.refusal.until_ms.max(0) as u64,
+                        "Waits for",
+                        wait.refusal.until_ms.saturating_sub(now).max(0) as u64,
                         "duration",
                         None,
                         false,
