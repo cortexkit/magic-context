@@ -549,7 +549,7 @@ pub fn normalize_tool_name(name: &str) -> String {
 pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
-        && entry.parts.iter().any(|part| match &part.body {
+        && crate::neutral::authored_parts(entry).any(|part| match &part.body {
             PartBody::Text { text } => !text.trim().is_empty(),
             PartBody::File(_) => true,
             _ => false,
@@ -586,10 +586,14 @@ pub fn notice_far_behind_bookmark(context: &Context, usable_window: u64) -> u64 
         context,
         usable_window,
         |entry, part| is_sweepable_notice(entry) && matches!(part.body, PartBody::Text { .. }),
-        // A notice usually starts a run that can act on it. Count every newer
-        // user-role entry for notice age rather than waiting for the person
-        // to speak; tools still count person turns.
-        |entry| entry.role == Role::User,
+        // A notice usually starts a run that can act on it. Count newer user-role
+        // entries other than host-only bookkeeping for notice age rather than
+        // waiting for the person to speak; tools still count actionable turns.
+        |entry| {
+            entry.role == Role::User
+                && (entry.host_parts.is_empty()
+                    || crate::neutral::authored_parts(entry).next().is_some())
+        },
     )
 }
 

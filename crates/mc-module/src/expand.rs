@@ -114,6 +114,9 @@ pub fn mode(input: &Value) -> Result<Mode, String> {
 }
 
 fn role_label(entry: &Entry) -> String {
+    if !entry.host_parts.is_empty() && crate::neutral::authored_parts(entry).next().is_none() {
+        return "H (host)".to_owned();
+    }
     if let Some(agent) = &entry.speaks_for {
         return format!(
             "R (agent: {})",
@@ -127,6 +130,21 @@ fn role_label(entry: &Entry) -> String {
         _ => "? (other)",
     }
     .to_owned()
+}
+
+fn recovered_part(
+    entry: &Entry,
+    part: &cortexkit_role_compaction::part::Part,
+    preview: Option<crate::count::Counter>,
+) -> Option<String> {
+    let rendered = match preview {
+        Some(counter) => render_part_preview(&part.body, counter),
+        None => render_part_full(&part.body),
+    }?;
+    Some(match crate::neutral::host_part(entry, part) {
+        Some(fact) => format!("{}\n{rendered}", crate::neutral::host_label(fact)),
+        None => rendered,
+    })
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -300,13 +318,13 @@ async fn by_tag<C: RunnerClient>(
     let entries = reads::by_tags(client, session, vec![tag], limits).await?;
     let part = entries
         .iter()
-        .flat_map(|entry| &entry.parts)
-        .find(|part| part.tag == Some(tag));
+        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .find(|(_, part)| part.tag == Some(tag));
     Ok(match part {
         None => format!(
             "no tag {tag} in this session; if {tag} came from a <session-history> heading or a ctx_search hit, it is an ordinal: use message={tag}"
         ),
-        Some(part) => render_part_full(&part.body).unwrap_or_default(),
+        Some((entry, part)) => recovered_part(entry, part, None).unwrap_or_default(),
     })
 }
 
@@ -326,7 +344,7 @@ async fn by_message<C: RunnerClient>(
     let rendered: Vec<String> = entry
         .parts
         .iter()
-        .filter_map(|part| render_part_full(&part.body))
+        .filter_map(|part| recovered_part(&entry, part, None))
         .collect();
     let mut lines = vec![
         format!("[{number}] {} — full recovery:", role_label(&entry)),
@@ -358,6 +376,11 @@ async fn range<C: RunnerClient>(
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;
+    // Historian lines intentionally omit host text. Raw recovery must keep it,
+    // so a marked range uses per-part labels instead of the historian renderer.
+    if entries.iter().any(|entry| !entry.host_parts.is_empty()) {
+        return Ok(recovery_blocks(&entries, start, end, counter, false));
+    }
     let Some(mut chunk) = chunk::build(&entries, TOKEN_BUDGET, counter) else {
         return Ok(format!(
             "No messages found in range {start}-{asked_end}. The range may be outside this session's history."
@@ -422,19 +445,29 @@ async fn verbose_range<C: RunnerClient>(
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;
+    Ok(recovery_blocks(&entries, start, end, counter, true))
+}
+
+fn recovery_blocks(
+    entries: &[Entry],
+    start: u64,
+    end: u64,
+    counter: crate::count::Counter,
+    preview: bool,
+) -> String {
     let mut blocks = Vec::new();
     let mut used = 0;
     let mut last = start - 1;
     let mut truncated = false;
     let body_budget = cortexkit_role_tool_provider::result::MAX_MODEL_VISIBLE_BYTES - 512;
     let mut bytes = 0;
-    for entry in &entries {
+    for entry in entries {
         let number = entry.ordinal;
         let header = format!("[{number}] {}", verbose_label(entry));
         let parts: Vec<String> = entry
             .parts
             .iter()
-            .filter_map(|part| render_part_preview(&part.body, counter))
+            .filter_map(|part| recovered_part(entry, part, preview.then_some(counter)))
             .collect();
         let block = if parts.is_empty() {
             header
@@ -456,12 +489,12 @@ async fn verbose_range<C: RunnerClient>(
         blocks.push(block);
     }
     if blocks.is_empty() {
-        return Ok(format!(
+        return format!(
             "No messages found in range {start}-{end}. The range may be outside this session's history."
-        ));
+        );
     }
     let mut out = vec![
-        format!("Messages {start}-{last} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):"),
+        format!("Messages {start}-{last} ({}). Recover any one in full with ctx_expand(message=<ordinal>):", if preview { "verbose" } else { "full recovery" }),
         String::new(),
         blocks.join("\n\n"),
     ];
@@ -472,7 +505,7 @@ async fn verbose_range<C: RunnerClient>(
             last + 1
         ));
     }
-    Ok(out.join("\n"))
+    out.join("\n")
 }
 
 fn entry_bytes(entry: &Entry) -> u64 {

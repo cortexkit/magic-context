@@ -280,12 +280,15 @@ pub(super) fn count_header(
     count
 }
 
-/// Attribution changes summary labels but is deliberately outside the wire
-/// digest. Include it only in the local token-count cache's identity.
+/// Speaker and host facts change summary text but are outside the wire digest.
+/// Include them in the local token-count cache's identity to avoid stale counts.
 fn count_identity(entry: &Entry) -> String {
     let mut identity = entry.digest.to_string();
     if let Some(agent) = &entry.speaks_for {
         identity.push_str(&serde_json::to_string(agent).expect("agent attribution serializes"));
+    }
+    if !entry.host_parts.is_empty() {
+        identity.push_str(&serde_json::to_string(&entry.host_parts).expect("host facts serialize"));
     }
     identity
 }
@@ -459,10 +462,20 @@ fn build_counted(
     if !stopped && !covered.is_empty() {
         covered.append(&mut pending_noise);
     }
-    let messages = covered.len();
     let first = covered.first()?;
     let last = covered.last()?;
     let (start, end) = (first.ordinal, last.ordinal);
+    // Coverage keeps every ordinal, but host bookkeeping is not a conversation
+    // message for the proactive summary threshold.
+    let messages = covered.len()
+        - entries
+            .iter()
+            .filter(|entry| {
+                entry.ordinal >= start
+                    && entry.ordinal <= end
+                    && crate::neutral::is_host_only(entry)
+            })
+            .count();
     present.retain(|number| *number <= end);
     let text = lines.join("\n");
     let header = format!("Messages {start}-{end}:\n\n");
@@ -535,9 +548,7 @@ pub(super) fn render_entry(
     verbatim: bool,
 ) -> Option<(char, Vec<String>, Vec<String>, bool)> {
     let _timing = crate::notice_cost_timing::span("trigger.render_entry");
-    let raw_texts: Vec<&str> = entry
-        .parts
-        .iter()
+    let raw_texts: Vec<&str> = crate::neutral::authored_parts(entry)
         .filter_map(|part| match &part.body {
             PartBody::Text { text } => Some(text.as_str()),
             _ => None,
@@ -589,9 +600,7 @@ pub(super) fn render_entry(
                 .filter(|text| !text.is_empty())
                 .collect();
             if texts.is_empty() {
-                let calls: Vec<String> = entry
-                    .parts
-                    .iter()
+                let calls: Vec<String> = crate::neutral::authored_parts(entry)
                     .filter_map(|part| match &part.body {
                         PartBody::Tool(tool) => Some(tool_summary(&tool.name, &tool.input.parse())),
                         _ => None,

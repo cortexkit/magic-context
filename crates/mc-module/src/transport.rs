@@ -153,6 +153,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     let mut claims = vec![
         COMPACTION_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.to_owned(),
+        cortexkit_role_compaction::COMPACTION_HOST_PARTS_PROVIDES.to_owned(),
         // The runner sends its signed floor (reasoning it strips after
         // a tool-set change) only to providers declaring this.
         cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
@@ -2171,6 +2172,7 @@ mod manifest_tests {
         for claim in [
             "compaction-provider/v2",
             "compaction-entry-speaks-for/v1",
+            "compaction-host-parts/v1",
             "compaction-signed-floor/v1",
             "compaction-notes-tokens/v1",
             "compaction-statement-seq/v1",

@@ -7,7 +7,31 @@
 //! an unknown tool status counts as running.
 
 use cortexkit_role_compaction::part::{Part, PartBody, Seal, ToolStatus};
-use cortexkit_role_compaction::read::{Entry, Role};
+use cortexkit_role_compaction::read::{Entry, HostPart, Role};
+
+/// Runner-authored content is still on the wire, but is not a speaker's words.
+pub(crate) fn host_part<'a>(entry: &'a Entry, part: &Part) -> Option<&'a HostPart> {
+    entry.host_parts.iter().find(|fact| fact.part == part.id)
+}
+
+/// Parts eligible for attribution to the entry's user or assistant speaker.
+pub(crate) fn authored_parts(entry: &Entry) -> impl Iterator<Item = &Part> {
+    entry
+        .parts
+        .iter()
+        .filter(|part| host_part(entry, part).is_none())
+}
+
+pub(crate) fn is_host_only(entry: &Entry) -> bool {
+    !entry.parts.is_empty() && authored_parts(entry).next().is_none()
+}
+
+pub(crate) fn host_label(fact: &HostPart) -> String {
+    fact.host_code.as_ref().map_or_else(
+        || "[host text]".to_owned(),
+        |code| format!("[host text: {code}]"),
+    )
+}
 
 /// A part with its number and seal, its checksum computed over both.
 pub fn part(id: impl Into<String>, tag: Option<u64>, seal: Seal, body: PartBody) -> Part {

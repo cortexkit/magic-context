@@ -12,6 +12,7 @@ struct Fact {
     removed: u64,
     body: u64,
     members: u64,
+    host_only: u64,
     prompt: Option<usize>,
     opens: Option<usize>,
     visible: Option<usize>,
@@ -326,9 +327,7 @@ impl Window {
             let before = self.facts.last();
             let meaningful = trigger::is_meaningful_user(entry);
             let opens = meaningful
-                || entry
-                    .parts
-                    .iter()
+                || crate::neutral::authored_parts(entry)
                     .any(|part| matches!(part.body, PartBody::Tool(_)));
             let rendered = chunk::render_entry(entry, false);
             let body = rendered
@@ -352,6 +351,8 @@ impl Window {
                         .sum::<u64>(),
                 body: before.map_or(0, |fact| fact.body) + body,
                 members: before.map_or(0, |fact| fact.members) + u64::from(rendered.is_some()),
+                host_only: before.map_or(0, |fact| fact.host_only)
+                    + u64::from(crate::neutral::is_host_only(entry)),
                 prompt: if meaningful {
                     Some(i)
                 } else {
@@ -610,6 +611,8 @@ impl Window {
                 messages = high - low;
             }
         }
+        messages -= (self.prefix(low + messages, |fact| fact.host_only)
+            - self.prefix(low, |fact| fact.host_only)) as usize;
         (messages > 0).then(|| trigger::Scan {
             tokens,
             commit_clusters: clusters,

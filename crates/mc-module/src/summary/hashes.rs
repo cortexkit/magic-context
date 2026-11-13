@@ -48,7 +48,7 @@ pub fn by_ordinal(entries: &[Entry]) -> BTreeMap<u64, BTreeSet<String>> {
         .iter()
         .map(|entry| {
             let mut hashes = BTreeSet::new();
-            for part in &entry.parts {
+            for part in crate::neutral::authored_parts(entry) {
                 match &part.body {
                     PartBody::Text { text } => hashes_in(text, &mut hashes),
                     PartBody::Tool(tool) => {

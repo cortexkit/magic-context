@@ -72,9 +72,7 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
         && entry.notice.is_none()
         && entry.speaks_for.is_none()
         && !super::chunk::is_relayed_wake(
-            &entry
-                .parts
-                .iter()
+            &crate::neutral::authored_parts(entry)
                 .filter_map(|part| match &part.body {
                     PartBody::Text { text } => Some(text.as_str()),
                     _ => None,
@@ -82,7 +80,7 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
                 .collect::<Vec<_>>()
                 .join("\n"),
         )
-        && entry.parts.iter().any(|part| match &part.body {
+        && crate::neutral::authored_parts(entry).any(|part| match &part.body {
             PartBody::Text { text } => !crate::injection::strip(text)
                 .as_deref()
                 .unwrap_or(text)
@@ -164,9 +162,7 @@ fn semantic_snap(
 ) -> u64 {
     let opens_work = |entry: &Entry| {
         is_meaningful_user(entry)
-            || entry
-                .parts
-                .iter()
+            || crate::neutral::authored_parts(entry)
                 .any(|part| matches!(part.body, PartBody::Tool(_)))
     };
     let Some(snapped) = entries

@@ -248,6 +248,16 @@ impl Index {
                     held.speaks_for = entry.speaks_for.clone();
                     self.app_changed.insert(entry.ordinal);
                 }
+                // Host facts can first arrive on an unchanged stored entry.
+                // Both summary semantics and app attribution must be refreshed.
+                if !entry.host_parts.is_empty() && held.host_parts != entry.host_parts {
+                    self.summary_changed = Some(
+                        self.summary_changed
+                            .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
+                    );
+                    held.host_parts = entry.host_parts.clone();
+                    self.app_changed.insert(entry.ordinal);
+                }
                 if refresh_counts(held, &entry) {
                     self.summary_changed = Some(
                         self.summary_changed

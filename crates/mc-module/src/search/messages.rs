@@ -44,9 +44,7 @@ fn content_of(entry: &Entry) -> String {
     if entry.notice.is_some() || entry.speaks_for.is_some() {
         return String::new();
     }
-    let texts: Vec<&str> = entry
-        .parts
-        .iter()
+    let texts: Vec<&str> = crate::neutral::authored_parts(entry)
         .filter_map(|part| match &part.body {
             PartBody::Text { text } => Some(text.as_str()),
             _ => None,
@@ -57,6 +55,46 @@ fn content_of(entry: &Entry) -> String {
 
 #[cfg(test)]
 mod attribution_tests {
+    #[test]
+    fn host_parts_search_reconcile_refreshes_unchanged_digest() {
+        use cortexkit_role_compaction::{
+            part::{Part, PartBody},
+            read::{Entry, HostPart, Role},
+        };
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            &include_str!("../../testdata/context-schema.sql").replace(":applied_at", "0"),
+        )
+        .unwrap();
+        let mut entry = Entry::new(
+            1,
+            "mixed",
+            Role::User,
+            0,
+            vec![
+                Part::new(
+                    "p",
+                    PartBody::Text {
+                        text: "actual instruction".into(),
+                    },
+                ),
+                Part::new(
+                    "host",
+                    PartBody::Text {
+                        text: "hostmarker".into(),
+                    },
+                ),
+            ],
+        );
+        // The index has already seen the bytes before the runner serves host facts.
+        super::index(&mut conn, "mock", "s", std::slice::from_ref(&entry)).unwrap();
+        entry.host_parts = vec![HostPart::new("host")];
+        super::reconcile(&mut conn, "mock", "s", std::slice::from_ref(&entry)).unwrap();
+        assert_eq!(super::content_of(&entry), "actual instruction");
+        assert!(super::app_page(&conn, "s", "hostmarker", 0, 10).is_empty());
+        assert_eq!(super::app_page(&conn, "s", "instruction", 0, 10).len(), 1);
+    }
+
     #[test]
     fn speaks_for_words_are_not_indexed_as_a_persons_message() {
         use cortexkit_role_compaction::part::{Part, PartBody};
@@ -166,11 +204,12 @@ pub(super) fn reconcile(
     let mark = watermark(conn, session)?.max(0) as u64;
     let mut changed = Vec::new();
     for entry in entries.iter().filter(|entry| entry.ordinal <= mark) {
-        let stored:Option<(String,String)>=conn.query_row("SELECT message_id,source_version FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",params![session,entry.ordinal as i64],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if stored
-            .as_ref()
-            .is_none_or(|(mid, digest)| mid != &entry.mid || digest != &entry.digest)
-        {
+        let stored:Option<(String,String,String)>=conn.query_row("SELECT message_id,source_version,normalized_content_hash FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",params![session,entry.ordinal as i64],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if stored.as_ref().is_none_or(|(mid, digest, hash)| {
+            mid != &entry.mid
+                || digest != &entry.digest
+                || hash != &content_hash(&content_of(entry))
+        }) {
             changed.push(entry);
         }
     }

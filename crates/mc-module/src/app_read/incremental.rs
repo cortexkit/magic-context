@@ -58,6 +58,7 @@ struct Cached {
     parts: Vec<PartInfo>,
     reasoning_measure: (u64, &'static str),
     user_origin: Option<Value>,
+    host_parts: Vec<cortexkit_role_compaction::read::HostPart>,
     row: Option<Arc<Message>>,
     raw: u64,
     user_text: [u64; 2],
@@ -374,6 +375,7 @@ impl Session {
                 parts: Vec::new(),
                 reasoning_measure: (0, "estimate"),
                 user_origin: None,
+                host_parts: Vec::new(),
                 row: None,
                 raw: 0,
                 user_text: [0; 2],
@@ -387,6 +389,7 @@ impl Session {
                 || row.digest != entry.digest
                 || row.reasoning_measure != measure
                 || row.user_origin != user_origin
+                || row.host_parts != entry.host_parts
                 || row
                     .parts
                     .iter()
@@ -417,7 +420,13 @@ impl Session {
                             source,
                             runner_tokens: part.tokens,
                             signed: part.seal == cortexkit_role_compaction::part::Seal::Signed,
-                            origin: if matches!(part.body, PartBody::Text { .. }) {
+                            origin: if let Some(fact) = crate::neutral::host_part(entry, part) {
+                                let mut origin = json!({"kind":"host", "label":crate::neutral::host_label(fact)});
+                                if let Some(code) = &fact.host_code {
+                                    origin["host_code"] = json!(code);
+                                }
+                                Some(origin)
+                            } else if matches!(part.body, PartBody::Text { .. }) {
                                 user_origin.clone()
                             } else {
                                 None
@@ -438,6 +447,7 @@ impl Session {
                 row.digest = entry.digest.to_string();
                 row.reasoning_measure = measure;
                 row.user_origin = user_origin;
+                row.host_parts = entry.host_parts.clone();
                 p.dirty.insert(entry.mid.clone());
             }
             row.at_ms = entry.written_at;
@@ -1104,7 +1114,11 @@ fn message(
             } else if part.kind == "reasoning" {
                 reasoning += tokens;
                 sources[2].add(tokens, source);
-            } else if let Some(origin) = &part.origin {
+            } else if let Some(origin) = part
+                .origin
+                .as_ref()
+                .filter(|origin| origin["kind"] != "host")
+            {
                 let category = usize::from(origin["kind"] != "person");
                 user_text[category] += part.tokens;
                 sources[3 + category].add(part.tokens, source);
@@ -1120,11 +1134,15 @@ fn message(
     } else {
         "raw"
     };
+    let mut row = json!({"message_id":cached.mid,"state":state,"compartment_id":null,"outside_reason":null,"split":null,"parts":{"tagged":tagged,"stamped":stamps,"dropped":gone.len()},"stamped_parts":stamped,"dropped_parts":gone,"items":items});
+    if !cached.host_parts.is_empty() {
+        row["host_parts"] = json!(cached.host_parts);
+    }
     (
         Message {
             ordinal,
             at_ms: cached.at_ms,
-            row: json!({"message_id":cached.mid,"state":state,"compartment_id":null,"outside_reason":null,"split":null,"parts":{"tagged":tagged,"stamped":stamps,"dropped":gone.len()},"stamped_parts":stamped,"dropped_parts":gone,"items":items}),
+            row,
         },
         raw,
         tool,

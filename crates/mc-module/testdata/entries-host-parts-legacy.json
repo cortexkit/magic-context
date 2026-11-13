@@ -1,0 +1,41 @@
+{
+  "entries": [
+    {
+      "digest": "9ad442e04c40fbe7afd6a26d708dce8bed21b21c4c21c1b870f558413670a3bf",
+      "mid": "mixed-message",
+      "ordinal": 1,
+      "parts": [
+        {
+          "digest": "ce85d63628aa7f8a77e2d3768ea3f9ac6675cbac61a51f5816c55722cd37377c",
+          "id": "prompt",
+          "kind": "text",
+          "text": "An invented prompt."
+        },
+        {
+          "digest": "14dfd913950fb2263fb3d91573cacd0c6efd018502de1e474a545c17337133d9",
+          "id": "interrupt",
+          "kind": "text",
+          "text": "[Request interrupted by user]\n"
+        }
+      ],
+      "role": "user",
+      "written_at": 1700000000000
+    },
+    {
+      "digest": "2839f4d133bc655e15827eaa4c22d539f2f6e6b6f5e85445fcf8e123b53b4d3e",
+      "mid": "host-only-message",
+      "ordinal": 2,
+      "parts": [
+        {
+          "digest": "beb2e1da215d94c18c4257884eda81c9c55ec0f558418b3ade4b10d17196128c",
+          "id": "retry",
+          "kind": "text",
+          "text": "The previous response was interrupted. Continue from where you left off."
+        }
+      ],
+      "role": "user",
+      "written_at": 1700000000100
+    }
+  ],
+  "head": {}
+}

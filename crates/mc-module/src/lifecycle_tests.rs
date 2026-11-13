@@ -39,6 +39,9 @@ mod summary_due_differential_tests;
 #[path = "summary_due_review_tests.rs"]
 mod summary_due_review_tests;
 
+#[path = "host_parts_tests.rs"]
+mod host_parts_tests;
+
 #[path = "notes_tokens_tests.rs"]
 mod notes_tokens_tests;
 

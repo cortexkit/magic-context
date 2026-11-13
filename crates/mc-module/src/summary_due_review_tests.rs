@@ -3,13 +3,54 @@
 //! the other with the unindexed evaluator. Unlike the plain appends,
 //! truncations and settings changes in `summary_due_differential_tests.rs`,
 //! these notices also carry runner counts under a token family that
-//! switches, tool results that reach older messages, attribution backfilled
-//! on older messages, summaries that move the start of unsummarized history
-//! forward and back, and runs that stay outstanding over several notices.
+//! switches, tool results that reach older messages, attribution and host facts
+//! backfilled on older messages, summaries that move the start of unsummarized
+//! history forward and back, and runs that stay outstanding over several notices.
 
 use super::*;
 use cortexkit_role_compaction::part::{ToolPart, ToolStatus};
+use cortexkit_role_compaction::read::HostPart;
 use cortexkit_role_compaction::tokens::PartTokens;
+
+#[test]
+fn host_parts_backfill_invalidates_the_cached_due_check() {
+    let (_, _, route, mut setup, settings) = fixture();
+    setup.preset = "head".into();
+    let features = crate::preset::features("head").unwrap();
+    for model in [
+        ModelRef::new("test", "unknown"),
+        ModelRef::new("anthropic", "claude-opus-5-5"),
+    ] {
+        setup.model = model;
+        let mut cached = Session::new(&route, &setup, features, None);
+        let mut legacy = cached.clone();
+        legacy.use_legacy_summary_scan(true);
+        let retry = text(2, "Continue…");
+        for session in [&mut cached, &mut legacy] {
+            session.conditions.last_prompt_tokens = Some(65_000);
+            session.reading_stale = true;
+            session
+                .index
+                .extend(vec![text(1, "real prompt"), retry.clone()]);
+            let _ = crate::test_log::logged(|| session.summary_due(&settings));
+        }
+        let mut backfilled = retry;
+        backfilled.host_parts = vec![HostPart::new("p")];
+        for session in [&mut cached, &mut legacy] {
+            session.index.extend(vec![backfilled.clone()]);
+            session.floor_pending_for = Some((2, "Continue…".into()));
+        }
+        let (a, a_log) = crate::test_log::logged(|| cached.summary_due(&settings));
+        let (b, b_log) = crate::test_log::logged(|| legacy.summary_due(&settings));
+        assert!(
+            legacy.floor_pending_for.is_none(),
+            "backfilled host text is not the prompt"
+        );
+        assert_eq!(cached.floor_pending_for, legacy.floor_pending_for);
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        assert_eq!(a_log, b_log);
+    }
+}
 
 struct Rng(u64);
 
@@ -72,6 +113,7 @@ async fn sequence(seed: u64) {
     let mut family = "fam-a";
     let mut hold = 0;
     let (mut due, mut quiet) = (0, 0);
+    let (mut host_new, mut host_backfill) = (0, 0);
     for step in 1..=160u64 {
         let choice = rng.below(16);
         // Changes to messages the sessions already hold ride on the notice
@@ -192,6 +234,23 @@ async fn sequence(seed: u64) {
                 assert_eq!(format!("{a:?}"), format!("{b:?}"), "Setup step {step}");
                 assert_eq!(a_log, b_log, "Setup logs at step {step}");
             }
+            9 => {
+                if let Some(entry) = transcript.iter_mut().find(|entry| {
+                    entry.host_parts.is_empty()
+                        && entry
+                            .parts
+                            .iter()
+                            .all(|part| matches!(part.body, PartBody::Text { .. }))
+                }) {
+                    entry.host_parts = entry
+                        .parts
+                        .iter()
+                        .map(|part| HostPart::new(&part.id))
+                        .collect();
+                    host_backfill += 1;
+                    changed.push(entry.clone());
+                }
+            }
             _ => {}
         }
         let ordinal = transcript.len() as u64 + 1;
@@ -218,6 +277,10 @@ async fn sequence(seed: u64) {
             Role::Assistant
         };
         let mut entry = Entry::new(ordinal, format!("m{step}-{ordinal}"), role, step, parts);
+        if kind >= 3 && rng.below(4) == 0 {
+            entry.host_parts = vec![HostPart::new("p")];
+            host_new += 1;
+        }
         if rng.below(3) == 0 {
             for part in &mut entry.parts {
                 part.tokens = Some(match part.body {
@@ -271,6 +334,10 @@ async fn sequence(seed: u64) {
     assert!(
         due > 0 && quiet > 0,
         "exercise both summary decisions: {due}/{quiet}"
+    );
+    assert!(
+        host_new > 0 && host_backfill > 0,
+        "exercise fresh and backfilled host facts"
     );
 }
 

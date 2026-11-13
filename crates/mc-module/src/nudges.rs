@@ -298,7 +298,7 @@ pub fn measure(
         if entry.notice.is_some() {
             continue;
         }
-        for part in &entry.parts {
+        for part in crate::neutral::authored_parts(entry) {
             if context.edited.covers(&entry.mid, &part.id) {
                 continue;
             }
@@ -483,7 +483,12 @@ impl State {
 pub fn person_turns(entries: &[Entry]) -> u64 {
     entries
         .iter()
-        .filter(|entry| entry.role == Role::User && entry.notice.is_none())
+        .filter(|entry| {
+            entry.role == Role::User
+                && entry.notice.is_none()
+                && (entry.host_parts.is_empty()
+                    || crate::neutral::authored_parts(entry).next().is_some())
+        })
         .count() as u64
 }
 
