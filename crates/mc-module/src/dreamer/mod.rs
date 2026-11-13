@@ -15,6 +15,9 @@ pub mod store;
 pub mod task;
 pub mod tasks;
 
+#[cfg(test)]
+mod replay_tests;
+
 /// Every task kind the module runs. A profile's task of any other kind is
 /// not scheduled.
 pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
