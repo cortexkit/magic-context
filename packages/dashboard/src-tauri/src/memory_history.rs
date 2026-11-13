@@ -948,9 +948,12 @@ fn apply_plan(
         evidence,
     );
     record_decision(conn, &decision)?;
-    // Running sessions pick the changed rows up on their next prompt rebuild;
-    // ck-mc notices them in the store itself. The epoch bump below tells
-    // embedding and search caches that the project's memories changed.
+    // ck-mc renders memories from the store when a session's prompt is
+    // rebuilt, so running sessions need nothing from this write, and nothing
+    // in ck-mc or the dashboard reads `project_memory_epoch`. The bump below
+    // is kept only so this step changes no write the 0.49 plugin's stores
+    // relied on: that plugin read the epoch to refresh its embedding cache
+    // and to rebuild a session's cached prompt.
     let epoch_project = epoch_identity(project);
     let mut identities = BTreeSet::from([epoch_project.clone()]);
     if exists(conn, "workspace_members")? {

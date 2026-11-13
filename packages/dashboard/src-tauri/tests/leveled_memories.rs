@@ -101,11 +101,11 @@ fn owned(status: &str, tag: &str, category: &str) -> (String, String, String) {
     (status.to_owned(), tag.to_owned(), category.to_owned())
 }
 
-/// The profile lines ck-mc puts in a session's prompt, read the way its
-/// `ContextDb::user_profile` reads them.
+/// The profile lines ck-mc puts in a session's prompt, in the order its
+/// `ContextDb::user_profile` reads them, each with its row id.
 fn prompt_profile(conn: &Connection) -> Vec<(i64, String)> {
     conn.prepare(
-        "SELECT COALESCE(json_extract(metadata_json, '$.user_memory_id'), id), content
+        "SELECT id, content
            FROM memories WHERE level = 'global' AND status = 'active'
           ORDER BY COALESCE(json_extract(metadata_json, '$.promoted_at'), created_at) ASC,
                    COALESCE(json_extract(metadata_json, '$.user_memory_id'), id) ASC",
@@ -134,8 +134,8 @@ fn a_global_user_memory_edit_keeps_it_a_global_user_memory() {
     drop(conn);
     let mut conn = db::open_readwrite(&path).unwrap();
 
-    // The screen shows the ids and times the person saw before the move,
-    // newest first and, for a tie, in id order as the old table returned them.
+    // The screen shows each user memory under its row id, with the promotion
+    // time the move kept, newest first.
     let listed = db::get_user_memories(&conn, None).unwrap();
     assert_eq!(
         listed
@@ -143,14 +143,14 @@ fn a_global_user_memory_edit_keeps_it_a_global_user_memory() {
             .map(|memory| (memory.id, memory.content.as_str(), memory.promoted_at))
             .collect::<Vec<_>>(),
         [
-            (11, "Prefers short answers.", Some(50)),
-            (12, "Works in Madrid.", Some(20))
+            (901, "Prefers short answers.", Some(50)),
+            (902, "Works in Madrid.", Some(20))
         ]
     );
     assert_eq!(listed[0].source_candidate_ids, Some(json!([3, 4])));
     assert_eq!(listed[0].created_at, 40);
 
-    db::update_user_memory_content(&mut conn, 11, "Prefers terse answers.").unwrap();
+    db::update_user_memory_content(&mut conn, 901, "Prefers terse answers.").unwrap();
     let row: (String, String, String, String, String, String, i64, String) = conn
         .query_row(
             "SELECT level, owner_id, category, origin_category, content, normalized_hash,
@@ -187,6 +187,8 @@ fn a_global_user_memory_edit_keeps_it_a_global_user_memory() {
         memory_history::normalized_hash("Prefers terse answers.")
     );
     assert_eq!(row.6, 2);
+    // The id from the old user-memory table stays as a record of where the
+    // row came from.
     let metadata: Value = serde_json::from_str(&row.7).unwrap();
     assert_eq!(metadata["user_memory_id"], 11);
     assert_eq!(metadata["promoted_at"], 50);
@@ -194,13 +196,13 @@ fn a_global_user_memory_edit_keeps_it_a_global_user_memory() {
     // The edit shows on the screen under the same id, and in the profile
     // ck-mc puts in a session's prompt.
     let listed = db::get_user_memories(&conn, Some("active")).unwrap();
-    assert_eq!(listed[0].id, 11);
+    assert_eq!(listed[0].id, 901);
     assert_eq!(listed[0].content, "Prefers terse answers.");
     assert_eq!(
         prompt_profile(&conn),
         [
-            (12, "Works in Madrid.".to_owned()),
-            (11, "Prefers terse answers.".to_owned())
+            (902, "Works in Madrid.".to_owned()),
+            (901, "Prefers terse answers.".to_owned())
         ]
     );
     // The project memory with the old text is untouched, and the memory list
@@ -411,10 +413,11 @@ async fn a_second_live_copy_is_refused() {
     .unwrap();
     drop(conn);
     let mut conn = db::open_readwrite(&path).unwrap();
-    let refused = db::restore_user_memory(&mut conn, 12).unwrap_err();
-    assert!(refused.to_string().contains("#11"), "{refused}");
+    // The refusal names the live memory by the id the screen shows.
+    let refused = db::restore_user_memory(&mut conn, 902).unwrap_err();
+    assert!(refused.to_string().contains("#901 "), "{refused}");
     let refused = db::promote_user_memory_candidate(&mut conn, 8).unwrap_err();
-    assert!(refused.to_string().contains("#11"), "{refused}");
+    assert!(refused.to_string().contains("#901 "), "{refused}");
     let statuses: Vec<String> = conn
         .prepare("SELECT status FROM memories WHERE level = 'global' ORDER BY id")
         .unwrap()
@@ -425,9 +428,9 @@ async fn a_second_live_copy_is_refused() {
     assert_eq!(statuses, ["active", "dismissed"]);
     assert_eq!(db::get_user_memory_candidates(&conn).unwrap().len(), 1);
     // Once the live one is dismissed, the other can come back.
-    db::dismiss_user_memory(&mut conn, 11).unwrap();
-    db::restore_user_memory(&mut conn, 12).unwrap();
-    assert_eq!(prompt_profile(&conn), [(12, "prefers  TABS.".to_owned())]);
+    db::dismiss_user_memory(&mut conn, 901).unwrap();
+    db::restore_user_memory(&mut conn, 902).unwrap();
+    assert_eq!(prompt_profile(&conn), [(902, "prefers  TABS.".to_owned())]);
 }
 
 #[test]
@@ -564,4 +567,151 @@ fn a_promoted_candidate_is_filed_the_way_ck_mc_moves_user_memories() {
     assert!(db::get_user_memories(&conn, None).unwrap().is_empty());
     db::delete_user_memory_candidate(&conn, 9).unwrap();
     assert!(db::get_user_memory_candidates(&conn).unwrap().is_empty());
+}
+
+/// A moved user memory keeps the id it had in the old user-memory table in
+/// its metadata. Old ids and row ids overlap, so a user memory written after
+/// the move can have a moved one's old id as its row id. The screens show
+/// and change each by its row id, so both stay editable.
+#[test]
+fn a_new_user_memory_whose_id_is_a_moved_ones_old_id_leaves_both_editable() {
+    isolated_home();
+    let (_directory, path) = store();
+    let conn = Connection::open(&path).unwrap();
+    // Row 901 had id 902 in the old user-memory table.
+    insert_moved_user_memory(&conn, 901, 902, "Prefers tabs.", "active", 50, 40);
+    conn.execute(
+        "INSERT INTO memory_observations (id, content, session_id, created_at) VALUES (8, 'Likes tables.', 'ses_a', 70)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let mut conn = db::open_readwrite(&path).unwrap();
+    db::promote_user_memory_candidate(&mut conn, 8).unwrap();
+    let new_row: i64 = conn
+        .query_row(
+            "SELECT id FROM memories WHERE level = 'global' AND content = 'Likes tables.'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        new_row, 902,
+        "the promoted row takes the moved row's old id"
+    );
+
+    let shown = |conn: &Connection| {
+        db::get_user_memories(conn, None)
+            .unwrap()
+            .into_iter()
+            .map(|memory| (memory.id, memory.content, memory.status))
+            .collect::<Vec<_>>()
+    };
+    let row = |id: i64, content: &str, status: &str| (id, content.to_owned(), status.to_owned());
+    assert_eq!(
+        shown(&conn),
+        [
+            row(902, "Likes tables.", "active"),
+            row(901, "Prefers tabs.", "active")
+        ]
+    );
+
+    db::update_user_memory_content(&mut conn, 901, "Prefers spaces.").unwrap();
+    db::update_user_memory_content(&mut conn, 902, "Likes charts.").unwrap();
+    assert_eq!(
+        shown(&conn),
+        [
+            row(902, "Likes charts.", "active"),
+            row(901, "Prefers spaces.", "active")
+        ]
+    );
+    let revisions: Vec<(i64, i64)> = conn
+        .prepare("SELECT id, revision FROM memories WHERE level = 'global' ORDER BY id")
+        .unwrap()
+        .query_map([], |found| Ok((found.get(0)?, found.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(revisions, [(901, 2), (902, 2)]);
+    // The old id stays in the moved row's metadata.
+    let metadata: String = conn
+        .query_row(
+            "SELECT metadata_json FROM memories WHERE id = 901",
+            [],
+            |found| found.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&metadata).unwrap()["user_memory_id"],
+        902
+    );
+
+    // Dismiss, restore and delete change only the row they name.
+    db::dismiss_user_memory(&mut conn, 902).unwrap();
+    assert_eq!(
+        shown(&conn),
+        [
+            row(902, "Likes charts.", "dismissed"),
+            row(901, "Prefers spaces.", "active")
+        ]
+    );
+    db::restore_user_memory(&mut conn, 902).unwrap();
+    db::delete_user_memory(&mut conn, 901).unwrap();
+    assert_eq!(shown(&conn), [row(902, "Likes charts.", "active")]);
+}
+
+/// Each live user memory is unique for its owner, category and text, so a
+/// change is checked against the category its own row is in, not only the
+/// category the move files user memories under.
+#[test]
+fn a_user_memory_change_is_checked_against_its_own_category() {
+    isolated_home();
+    let (_directory, path) = store();
+    let conn = Connection::open(&path).unwrap();
+    insert_moved_user_memory(&conn, 901, 11, "Prefers tabs.", "active", 50, 40);
+    // Two user memories a profile has filed under one of its own categories.
+    for (row, content, status) in [
+        (902, "Prefers tabs.", "dismissed"),
+        (903, "Uses vim.", "active"),
+    ] {
+        conn.execute(
+            "INSERT INTO memories (id, level, owner_id, category, origin_category, content,
+                 normalized_hash, source_type, first_seen_at, created_at, updated_at,
+                 last_seen_at, status)
+             VALUES (?1, 'global', 'self', 'profile:preferences', 'USER_MEMORY', ?2, ?3,
+                 'user-review', 60, 60, 60, 60, ?4)",
+            params![
+                row,
+                content,
+                memory_history::normalized_hash(content),
+                status
+            ],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let mut conn = db::open_readwrite(&path).unwrap();
+
+    // The same text as a live memory in another category may come back.
+    db::restore_user_memory(&mut conn, 902).unwrap();
+    // The same text as a live memory in its own category is refused.
+    let refused = db::update_user_memory_content(&mut conn, 903, "prefers  TABS.").unwrap_err();
+    assert!(refused.to_string().contains("#902 "), "{refused}");
+    let rows: Vec<(i64, String, String)> = conn
+        .prepare("SELECT id, content, status FROM memories WHERE level = 'global' ORDER BY id")
+        .unwrap()
+        .query_map([], |found| {
+            Ok((found.get(0)?, found.get(1)?, found.get(2)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (901, "Prefers tabs.".to_owned(), "active".to_owned()),
+            (902, "Prefers tabs.".to_owned(), "active".to_owned()),
+            (903, "Uses vim.".to_owned(), "active".to_owned())
+        ]
+    );
 }

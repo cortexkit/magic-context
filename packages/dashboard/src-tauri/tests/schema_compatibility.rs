@@ -442,8 +442,9 @@ async fn schema106_edits_reject_stale_revisions_and_keep_history_undo_and_safety
         .unwrap(),
         3
     );
-    // Running sessions see the edits on their own: the dashboard keeps no
-    // mutation log, and the project's memory epoch moves once per decision.
+    // ck-mc reads the edited rows when it next rebuilds a session's prompt,
+    // so the dashboard keeps no mutation log; the project's memory epoch still
+    // moves once per decision.
     assert_eq!(
         conn.query_row(
             "SELECT project_memory_epoch FROM project_state WHERE project_path='git:compat'",

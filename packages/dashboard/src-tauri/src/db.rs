@@ -8494,6 +8494,12 @@ pub struct UserMemoryCandidate {
 // The screens write these rows the way that migration shapes them. Sessions
 // pick up a changed profile on their own: ck-mc compares the profile lines it
 // last put in a prompt with the store.
+//
+// The screens show and address every user memory by its `memories` row id.
+// A memory the migration moved also keeps its id from the old user-memory
+// table in `metadata_json` (`user_memory_id`), but only as a record of where
+// it came from: the old ids and the row ids overlap, so an old id can't name
+// a row.
 
 /// The owner of every user memory: the person.
 const USER_MEMORY_OWNER: &str = "self";
@@ -8501,10 +8507,6 @@ const USER_MEMORY_OWNER: &str = "self";
 const USER_MEMORY_CATEGORY: &str = "mc:user-unsorted";
 /// The tag a user memory keeps as the category it was written under.
 const USER_MEMORY_TAG: &str = "USER_MEMORY";
-/// The id the user-memory screens show and act on. A user memory the
-/// migration moved keeps its old id in `metadata_json`, and so does the
-/// profile ck-mc puts in a session's prompt; a newer one has only its row id.
-const USER_MEMORY_ID: &str = "COALESCE(json_extract(metadata_json, '$.user_memory_id'), id)";
 /// When a user memory joined the profile: the time the migration kept for a
 /// moved one, otherwise when the row was written, as ck-mc orders the profile.
 const USER_MEMORY_PROMOTED_AT: &str =
@@ -8517,41 +8519,24 @@ fn user_memory_refusal(message: String) -> rusqlite::Error {
     )
 }
 
-/// The row behind the user-memory id the screens show, or `None` when no user
-/// memory has it.
-fn user_memory_row(conn: &Connection, shown_id: i64) -> Result<Option<i64>, rusqlite::Error> {
-    let rows: Vec<i64> = conn
-        .prepare(&format!(
-            "SELECT id FROM memories WHERE level = 'global' AND {USER_MEMORY_ID} = ?1"
-        ))?
-        .query_map([shown_id], |row| row.get(0))?
-        .collect::<Result<_, _>>()?;
-    match rows.as_slice() {
-        [] => Ok(None),
-        [row] => Ok(Some(*row)),
-        _ => Err(user_memory_refusal(format!(
-            "More than one user memory has id #{shown_id}, so the dashboard can't tell which one to change."
-        ))),
-    }
-}
-
-/// Refuse a change that would make `content` a second live user memory: the
-/// store keeps one live memory per owner, category and text.
+/// Refuse a change that would give the owner and category a second live
+/// memory with this text: the store keeps one live memory per owner,
+/// category and text. `except_row` is the row being changed, if it exists.
 fn refuse_second_live_user_memory(
     conn: &Connection,
+    owner: &str,
+    category: &str,
     hash: &str,
     except_row: Option<i64>,
 ) -> Result<(), rusqlite::Error> {
     let existing: Option<i64> = conn
         .query_row(
-            &format!(
-                "SELECT {USER_MEMORY_ID} FROM memories
-                  WHERE level = 'global' AND owner_id = ?1 AND category = ?2
-                    AND normalized_hash = ?3 AND id IS NOT ?4
-                    AND (status IS NULL OR status IN ('active', 'permanent'))
-                  LIMIT 1"
-            ),
-            params![USER_MEMORY_OWNER, USER_MEMORY_CATEGORY, hash, except_row],
+            "SELECT id FROM memories
+              WHERE level = 'global' AND owner_id = ?1 AND category = ?2
+                AND normalized_hash = ?3 AND id IS NOT ?4
+                AND (status IS NULL OR status IN ('active', 'permanent'))
+              LIMIT 1",
+            params![owner, category, hash, except_row],
             |row| row.get(0),
         )
         .optional()?;
@@ -8577,13 +8562,13 @@ pub fn get_user_memories(
     }
 
     // Newest first; user memories written in the same millisecond keep the
-    // order of their ids, as the old table's scan returned them.
+    // order they were written in.
     let sql = format!(
-        "SELECT {USER_MEMORY_ID}, content, status, {USER_MEMORY_PROMOTED_AT},
+        "SELECT id, content, status, {USER_MEMORY_PROMOTED_AT},
                 json_extract(metadata_json, '$.source_candidate_ids'), created_at, updated_at
          FROM memories
          WHERE {}
-         ORDER BY created_at DESC, {USER_MEMORY_ID} ASC",
+         ORDER BY created_at DESC, id ASC",
         conditions.join(" AND ")
     );
 
@@ -8637,13 +8622,11 @@ pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlit
     crate::db_capabilities::require_memory_store_sql(conn)?;
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     // A repeat dismiss must not rewrite the timestamp or the revision.
-    if let Some(row) = user_memory_row(&tx, id)? {
-        tx.execute(
-            "UPDATE memories SET status = 'dismissed', updated_at = ?1, revision = revision + 1
-              WHERE id = ?2 AND status = 'active'",
-            params![now_millis(), row],
-        )?;
-    }
+    tx.execute(
+        "UPDATE memories SET status = 'dismissed', updated_at = ?1, revision = revision + 1
+          WHERE id = ?2 AND level = 'global' AND status = 'active'",
+        params![now_millis(), id],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -8652,22 +8635,20 @@ pub fn restore_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlit
     crate::db_capabilities::require_memory_store_sql(conn)?;
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     // The status predicate makes restoring an active memory a no-op.
-    let dismissed: Option<(i64, String)> = match user_memory_row(&tx, id)? {
-        Some(row) => tx
-            .query_row(
-                "SELECT id, normalized_hash FROM memories WHERE id = ?1 AND status = 'dismissed'",
-                params![row],
-                |found| Ok((found.get(0)?, found.get(1)?)),
-            )
-            .optional()?,
-        None => None,
-    };
-    if let Some((row, hash)) = dismissed {
-        refuse_second_live_user_memory(&tx, &hash, Some(row))?;
+    let dismissed: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT owner_id, category, normalized_hash FROM memories
+              WHERE id = ?1 AND level = 'global' AND status = 'dismissed'",
+            params![id],
+            |found| Ok((found.get(0)?, found.get(1)?, found.get(2)?)),
+        )
+        .optional()?;
+    if let Some((owner, category, hash)) = dismissed {
+        refuse_second_live_user_memory(&tx, &owner, &category, &hash, Some(id))?;
         tx.execute(
             "UPDATE memories SET status = 'active', updated_at = ?1, revision = revision + 1
               WHERE id = ?2",
-            params![now_millis(), row],
+            params![now_millis(), id],
         )?;
     }
     tx.commit()?;
@@ -8677,9 +8658,10 @@ pub fn restore_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlit
 pub fn delete_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
     crate::db_capabilities::require_memory_store_sql(conn)?;
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
-    if let Some(row) = user_memory_row(&tx, id)? {
-        tx.execute("DELETE FROM memories WHERE id = ?1", params![row])?;
-    }
+    tx.execute(
+        "DELETE FROM memories WHERE id = ?1 AND level = 'global'",
+        params![id],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -8691,27 +8673,30 @@ pub fn update_user_memory_content(
 ) -> Result<(), rusqlite::Error> {
     crate::db_capabilities::require_memory_store_sql(conn)?;
     let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
-    if let Some(row) = user_memory_row(&tx, id)? {
-        let live: bool = tx.query_row(
-            "SELECT status IS NULL OR status IN ('active', 'permanent') FROM memories WHERE id = ?1",
-            params![row],
-            |found| found.get(0),
-        )?;
+    let found: Option<(String, String, bool)> = tx
+        .query_row(
+            "SELECT owner_id, category, status IS NULL OR status IN ('active', 'permanent')
+               FROM memories WHERE id = ?1 AND level = 'global'",
+            params![id],
+            |found| Ok((found.get(0)?, found.get(1)?, found.get(2)?)),
+        )
+        .optional()?;
+    if let Some((owner, category, live)) = found {
         // The text is the row's unique key, so its hash changes with it.
         let hash = crate::memory_history::normalized_hash(content);
         if live {
-            refuse_second_live_user_memory(&tx, &hash, Some(row))?;
+            refuse_second_live_user_memory(&tx, &owner, &category, &hash, Some(id))?;
         }
         tx.execute(
             "UPDATE memories SET content = ?1, normalized_hash = ?2, updated_at = ?3,
                     revision = revision + 1
               WHERE id = ?4",
-            params![content, hash, now_millis(), row],
+            params![content, hash, now_millis(), id],
         )?;
         // A vector computed for the old text no longer describes the row.
         tx.execute(
             "DELETE FROM memory_embeddings WHERE memory_id = ?1",
-            params![row],
+            params![id],
         )?;
     }
     tx.commit()?;
@@ -8742,7 +8727,7 @@ pub fn promote_user_memory_candidate(
         |row| row.get(0),
     )?;
     let hash = crate::memory_history::normalized_hash(&content);
-    refuse_second_live_user_memory(&tx, &hash, None)?;
+    refuse_second_live_user_memory(&tx, USER_MEMORY_OWNER, USER_MEMORY_CATEGORY, &hash, None)?;
 
     let metadata = serde_json::json!({ "promoted_at": now, "source_candidate_ids": [id] });
     tx.execute(

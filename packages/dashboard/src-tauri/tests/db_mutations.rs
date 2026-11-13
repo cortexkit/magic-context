@@ -209,8 +209,8 @@ fn restore_memory_status_keeps_epoch_bump() {
 #[test]
 fn pin_active_to_permanent_bumps_epoch() {
     isolated_home();
-    // Pinning updates search-cache state; running sessions pick the change up
-    // at their next natural rebuild.
+    // Pinning changes what a session's prompt shows the next time ck-mc
+    // rebuilds it from the store; the project's memory epoch moves once.
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "active");
     seed_project_state(&conn, "git:project-a", 9);
@@ -716,8 +716,8 @@ fn test_update_memory_category_success() {
         ("NAMING".to_owned(), "swe:naming".to_owned())
     );
 
-    // Changing a category affects the heading and workspace visibility, so the
-    // project change counter tells the project's caches the memories changed.
+    // The project's memory epoch moves once for the edit, as it did for the
+    // 0.49 plugin's stores; ck-mc itself reads the changed row.
     assert_eq!(memory_epoch(&conn, "git:project-a"), 12);
     assert_eq!(history_decisions(&conn), 1);
 }
