@@ -1,8 +1,4 @@
-import {
-    HiddenCompletionRefusal,
-    type HiddenRunIdentity,
-} from "../hooks/magic-context/compartment-runner-types";
-import { sameProjectDirectory } from "../shared/project-directory-key";
+import type { HiddenRunIdentity } from "../hooks/magic-context/compartment-runner-types";
 import {
     childCreateInput,
     errorText,
@@ -18,10 +14,12 @@ import type { HiddenChildHook } from "./hooks/hidden-child";
 
 /**
  * The hidden-child lifecycle for OpenCode 2 hosts whose plugin session API has `session.remove`.
- * Every run gets a fresh child created under the user's session, and the child is removed when
- * the run ends, whether it succeeded or failed. Nothing is recorded in context.db: a child whose
- * removal fails still goes when its parent session is deleted, because the host deletes a
- * session's children with it.
+ * Every run gets a fresh root child in the run's directory, and the child is removed when the run
+ * ends, whether it succeeded or failed. Nothing is recorded in context.db.
+ *
+ * The child is never given the user's session as its parent: OpenCode 2.3 reports every idle of a
+ * parented session to its parent and wakes the parent, so each historian or dreamer run would
+ * start a turn in the user's session.
  */
 
 type RemoveSession = NonNullable<HiddenChildHost["removeSession"]>;
@@ -48,15 +46,6 @@ export function isSessionNotFound(error: unknown): boolean {
     return /not\s*found/i.test(label);
 }
 
-// A host that drops the parent of a created session does it for every session, so saying so once
-// per process is enough.
-let parentDroppedNoted = false;
-
-/** Clears the once-per-process notice, for tests. */
-export function __resetParentDroppedNotice(): void {
-    parentDroppedNoted = false;
-}
-
 export function createNativeHiddenChildren(
     host: HiddenChildHost,
     removeSession: RemoveSession,
@@ -66,13 +55,6 @@ export function createNativeHiddenChildren(
         keepSubagents: boolean;
         log: (message: string) => void;
         removalTimeoutMs?: number;
-        /**
-         * The directory of the plugin instance that owns this lifecycle. OpenCode 2
-         * runs a session's hooks in the instance of the session's own location,
-         * and a child takes its parent's location, so a child bound to any other
-         * directory would be shaped (and guarded) by a different instance.
-         */
-        directory?: string;
     },
 ): HiddenChildLifecycle {
     // Removals in flight, so a finished run can wait for the removal its own failure started.
@@ -102,7 +84,7 @@ export function createNativeHiddenChildren(
             } catch (error) {
                 if (isSessionNotFound(error)) return;
                 options.log(
-                    `[magic-context] hidden child ${child.id} could not be removed; it goes when its parent session is deleted: ${errorText(error)}`,
+                    `[magic-context] hidden child ${child.id} could not be removed: ${errorText(error)}`,
                 );
             }
         })().finally(() => {
@@ -112,69 +94,19 @@ export function createNativeHiddenChildren(
         return done;
     };
 
-    const noteCreated = (sessionID: string, role: HiddenChildRole, parentID: string) => {
-        options.log(
-            `[magic-context] hidden child ${sessionID} created role=${role} parent=${parentID} keep_subagents=${options.keepSubagents}`,
-        );
-    };
-
-    /**
-     * Reads the new session back, because a host can accept `parentID` and silently drop it,
-     * and refuses a child the host bound to another plugin instance's location.
-     */
-    const confirmPlacement = async (sessionID: string, parentID: string, role: HiddenChildRole) => {
-        let stored: Awaited<ReturnType<HiddenChildHost["get"]>>;
-        try {
-            stored = await host.get({ sessionID });
-        } catch (error) {
-            noteCreated(sessionID, role, "unknown");
-            options.log(
-                `[magic-context] could not read back hidden child ${sessionID} to confirm its parent: ${errorText(error)}`,
-            );
-            return;
-        }
-        noteCreated(sessionID, role, stored.parentID ?? "none");
-        const directory = stored.location?.directory;
-        // Compared by spelling-normalized equality: the host can write this
-        // instance's own directory as `D:/work/app` while the instance knows it
-        // as `D:\work\app`. Any genuinely different directory is still refused.
-        if (
-            options.directory !== undefined &&
-            directory !== undefined &&
-            !sameProjectDirectory(directory, options.directory)
-        ) {
-            // Nothing has been prompted yet. Every turn of this child would reach the
-            // plugin instance of `directory`, which has no record of this run: it
-            // would run unshaped, with that directory as its working tree.
-            throw new HiddenCompletionRefusal(
-                "hidden_prompt_unrecognized",
-                `hidden child ${sessionID} is bound to ${directory}, not to this instance's ${options.directory}. Reopen the parent session in ${directory}, then run /ctx-recomp so its owning instance can rebuild history.`,
-                true,
-            );
-        }
-        if (stored.parentID === parentID || parentDroppedNoted) return;
-        parentDroppedNoted = true;
-        options.log(
-            `[magic-context] this OpenCode 2 host does not keep the parent of hidden-run sessions (asked for ${parentID}, read back ${stored.parentID ?? "none"}); they are created as separate sessions and still removed when each run ends`,
-        );
-    };
-
     const create = async (
         identity: HiddenRunIdentity,
         role: HiddenChildRole,
         model: HiddenChildModel,
     ): Promise<PersistedHiddenChild> => {
-        const parentID = identity.parentSessionId;
         const input = childCreateInput(identity, role, model);
-        const { location, ...parented } = input;
-        const created = await host.create(
-            parentID ? { ...parented, parentID } : { ...parented, location },
-        );
+        const created = await host.create(input);
         if (!created.id) throw new Error("OpenCode 2 did not return a child session id");
-        // Registered before anything else can fail, so a child removed after a failed read-back is
-        // still recognised by the hidden-child hook while it lives.
         options.hook.registerChild(created.id, input.agent);
-        const child: PersistedHiddenChild = {
+        options.log(
+            `[magic-context] hidden child ${created.id} created role=${role} keep_subagents=${options.keepSubagents}`,
+        );
+        return {
             id: created.id,
             role,
             generation: options.generation,
@@ -183,23 +115,9 @@ export function createNativeHiddenChildren(
             created_at: Date.now(),
             directory: identity.directory,
         };
-        // Only a parented child is read back: it takes its parent's location, which
-        // may not be this instance's. An unparented child is created in the location
-        // passed to the host above.
-        if (parentID) {
-            try {
-                await confirmPlacement(created.id, parentID, role);
-            } catch (error) {
-                await remove(child);
-                throw error;
-            }
-        } else {
-            noteCreated(created.id, role, "none");
-        }
-        return child;
     };
 
-    // keep_subagents retains inspectable runs under the user's session.
+    // keep_subagents retains inspectable runs as root sessions of the run's directory.
     const kept = (child: PersistedHiddenChild) => keptUnderRetention(options.keepSubagents, child);
 
     return {

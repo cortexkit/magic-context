@@ -24,9 +24,10 @@ import {
 /**
  * Hidden runs (historian, dreamer) on a real OpenCode 2 host, through the shipped plugin.
  *
- * OpenCode 2.0.22 creates each hidden child under the user's session and removes it when the
- * run ends, leaving no root session behind. The probe reports the native capability and the
- * parent and metadata observed while each child is running.
+ * Each hidden child is a root session of the run's directory, never a child of the user's session:
+ * OpenCode 2.3 reports every idle of a parented session to its parent and wakes it (issue 913).
+ * The child is removed when the run ends, leaving no root session behind. The probe reports the
+ * native capability and the parent and metadata observed while each child is running.
  */
 
 const REVIEW_PROMPT_MARKER = "Review User Memory Candidates";
@@ -64,7 +65,7 @@ function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T, writ
     }
 }
 
-test("hidden runs on OpenCode 2.0.22 are parented and removed with no root children", async () => {
+test("hidden runs on OpenCode 2 are unparented and removed with no leftover root sessions", async () => {
     const bundleDir = mkdtempSync(join(tmpdir(), "mc-hidden-child-native-probe-"));
     const build = await Bun.build({
         entrypoints: [join(import.meta.dir, "hidden-child-native-probe.ts")],
@@ -174,7 +175,8 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
                 );
         };
 
-        // Give the historian something to compress.
+        // Give the historian something to compress, then record the user session's messages so
+        // hidden historian/dreamer completions can be proven not to inject `<subagent>` turns.
         host.mock.setDefault({ text: "ordinary turn", usage: { input_tokens: 100, output_tokens: 10 } });
         for (let index = 0; index < 6; index++) {
             await client.session.prompt({
@@ -183,6 +185,7 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
             });
             await client.session.wait({ sessionID: user.id }, { signal: AbortSignal.timeout(30_000) });
         }
+        const userMessagesBefore = (await client.message.list({ sessionID: user.id })).data;
         const rootsBefore = await roots();
         console.log(JSON.stringify({ rootsBefore }));
         expect(rootsBefore.filter((session) => session.hidden)).toEqual([]);
@@ -269,9 +272,7 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
 
         expect(native).toBe(true);
         {
-            // Each hidden child was created under the user's session...
-            for (const child of hiddenChildren) expect(child.parentID).toBe(user.id);
-            // ...and is gone once its run has ended.
+            // Each hidden child is gone once its run has ended...
             for (const child of hiddenChildren) {
                 await eventually(
                     async () => ((await exists(child.sessionID)) ? undefined : true),
@@ -282,6 +283,13 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
             console.log(JSON.stringify({ rootsAfter, childrenOfUser: await childrenOfUser() }));
             expect(rootsAfter).toEqual(rootsBefore);
             expect(await childrenOfUser()).toEqual([]);
+            const userMessagesAfter = (await client.message.list({ sessionID: user.id })).data;
+            // ...its completion did not reach the user's session...
+            expect(userMessagesAfter.map((row) => row.id)).toEqual(
+                userMessagesBefore.map((row) => row.id),
+            );
+            // ...because it was never created under that session.
+            for (const child of hiddenChildren) expect(child.parentID ?? null).toBeNull();
             // Nothing about these children is recorded for later cleanup.
             expect(
                 withContextDb(host.env, (db) =>

@@ -862,7 +862,7 @@ describe("OpenCode 2 hidden child completion", () => {
                     title: "Magic Context historian",
                     agent: "historian",
                     model: { providerID: "mock", id: "cheap" },
-                    parentID: "user-session",
+                    location: { directory: "/project" },
                     metadata: { magic_context: "hidden-run", role: "historian" },
                     // The historian has no tools: the session rules deny everything,
                     // and the host evaluates them after the user's own rules.
@@ -1002,7 +1002,7 @@ describe("OpenCode 2 hidden child completion", () => {
                     await close(state.executor, handle, false);
                     const role = identity.kind === "dreamer-task" ? "dreamer" : "historian";
                     expect(logs.filter((line) => line.includes("hidden child child-1 "))).toEqual([
-                        `[magic-context] hidden child child-1 created role=${role} parent=none keep_subagents=${keepSubagents}`,
+                        `[magic-context] hidden child child-1 created role=${role} keep_subagents=${keepSubagents}`,
                         ...(keepSubagents && role === "historian"
                             ? ["[magic-context] hidden child child-1 kept (keep_subagents)"]
                             : [

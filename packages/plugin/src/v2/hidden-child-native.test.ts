@@ -1,12 +1,8 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { HiddenRunIdentity } from "../hooks/magic-context/compartment-runner-types";
 import { Database } from "../shared/sqlite";
 import { cleanupLegacyHiddenChildren } from "./hidden-child-cleanup";
-import {
-    __resetParentDroppedNotice,
-    isSessionNotFound,
-    nativeSessionRemove,
-} from "./hidden-child-native";
+import { isSessionNotFound, nativeSessionRemove } from "./hidden-child-native";
 import { createV2HiddenCompletionExecutor, type HiddenChildHost } from "./hidden-completion";
 import { HIDDEN_DREAMER_AGENT, HiddenChildHook } from "./hooks/hidden-child";
 import type { SessionContext } from "./hooks/types";
@@ -40,17 +36,7 @@ const request = () => ({
 });
 
 async function setup(
-    options: {
-        keepsParent?: boolean;
-        readError?: Error;
-        removeError?: unknown;
-        keepSubagents?: boolean;
-        stuck?: boolean;
-        /** The directory the host reports for a parented child; it inherits its parent's. */
-        parentLocation?: string;
-        /** This plugin instance's own directory; defaults to `/project`. */
-        directory?: string;
-    } = {},
+    options: { removeError?: unknown; keepSubagents?: boolean; stuck?: boolean } = {},
 ) {
     const db = new Database(":memory:");
     db.exec("CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
@@ -61,7 +47,6 @@ async function setup(
     const legacyRemovals: string[] = [];
     const logs: string[] = [];
     const lifecycleLogs: string[] = [];
-    const parents = new Map<string, string | undefined>();
     const rows = new Map<string, StoreRow<"assistant">[]>();
     let seq = 0;
     let nextID = 0;
@@ -69,21 +54,11 @@ async function setup(
     const host: HiddenChildHost = {
         async create(input) {
             creates.push(structuredClone(input));
-            const id = `child-${++nextID}`;
-            parents.set(id, options.keepsParent === false ? undefined : input.parentID);
-            return { id };
+            return { id: `child-${++nextID}` };
         },
         async get(input) {
             reads.push(input.sessionID);
-            if (options.readError) throw options.readError;
-            const parentID = parents.get(input.sessionID);
-            return {
-                model: { providerID: "mock", id: "user" },
-                ...(parentID === undefined ? {} : { parentID }),
-                ...(options.parentLocation === undefined
-                    ? {}
-                    : { location: { directory: options.parentLocation } }),
-            };
+            return { model: { providerID: "mock", id: "user" } };
         },
         async switchModel() {},
         async prompt(input) {
@@ -139,7 +114,7 @@ async function setup(
     const executor = await createV2HiddenCompletionExecutor(host, {
         db,
         projectIdentity: "/project",
-        directory: options.directory ?? "/project",
+        directory: "/project",
         hook,
         openReader: () => ({
             latestSequence: (id) => rows.get(id)?.at(-1)?.seq ?? -1,
@@ -210,8 +185,6 @@ async function setup(
 }
 
 describe("OpenCode 2 hidden children on a host with session.remove", () => {
-    beforeEach(() => __resetParentDroppedNotice());
-
     for (const keepSubagents of [false, true]) {
         test(`logs creation and finish decisions once per child with keep_subagents=${keepSubagents}`, async () => {
             const state = await setup({ keepSubagents });
@@ -219,14 +192,14 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
                 await state.runOnce(historian);
                 await state.runOnce(dreamer);
                 expect(state.lifecycleLogs).toEqual([
-                    `[magic-context] hidden child child-1 created role=historian parent=user-session keep_subagents=${keepSubagents}`,
+                    `[magic-context] hidden child child-1 created role=historian keep_subagents=${keepSubagents}`,
                     ...(keepSubagents
                         ? ["[magic-context] hidden child child-1 kept (keep_subagents)"]
                         : [
                               "[magic-context] hidden child child-1 removing",
                               "[magic-context] hidden child child-1 removed",
                           ]),
-                    `[magic-context] hidden child child-2 created role=dreamer parent=user-session keep_subagents=${keepSubagents}`,
+                    `[magic-context] hidden child child-2 created role=dreamer keep_subagents=${keepSubagents}`,
                     ...(keepSubagents
                         ? ["[magic-context] hidden child child-2 kept (keep_subagents)"]
                         : [
@@ -240,56 +213,12 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
         });
     }
 
-    test("creation logs the parent read back from the host, not the requested parent", async () => {
-        const state = await setup({ keepsParent: false });
-        try {
-            await state.runOnce(historian);
-            expect(state.lifecycleLogs).toEqual([
-                "[magic-context] hidden child child-1 created role=historian parent=none keep_subagents=false",
-                "[magic-context] hidden child child-1 removing",
-                "[magic-context] hidden child child-1 removed",
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("creation logs an unknown parent when the host read-back fails", async () => {
-        const state = await setup({ readError: new Error("host unavailable") });
-        try {
-            await state.runOnce(historian);
-            expect(state.lifecycleLogs).toEqual([
-                "[magic-context] hidden child child-1 created role=historian parent=unknown keep_subagents=false",
-                "[magic-context] hidden child child-1 removing",
-                "[magic-context] hidden child child-1 removed",
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("an unparented creation logs once without adding a host read", async () => {
-        const state = await setup();
-        try {
-            const { parentSessionId: _unused, ...withoutParent } = dreamer;
-            await state.runOnce(withoutParent);
-            expect(state.reads).toEqual([]);
-            expect(state.lifecycleLogs).toEqual([
-                "[magic-context] hidden child child-1 created role=dreamer parent=none keep_subagents=false",
-                "[magic-context] hidden child child-1 removing",
-                "[magic-context] hidden child child-1 removed",
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
     test("a failed removal logs its decision but not a successful removal", async () => {
         const state = await setup({ removeError: new Error("host unavailable") });
         try {
             await state.runOnce(historian);
             expect(state.lifecycleLogs).toEqual([
-                "[magic-context] hidden child child-1 created role=historian parent=user-session keep_subagents=false",
+                "[magic-context] hidden child child-1 created role=historian keep_subagents=false",
                 "[magic-context] hidden child child-1 removing",
             ]);
         } finally {
@@ -324,7 +253,9 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
         }
     });
 
-    test("each historian and dreamer run gets a child under the user's session, removed when it ends", async () => {
+    // OpenCode 2.3 reports every idle of a parented session to its parent and wakes it, so a
+    // child under the user's session would start a turn there after each run (issue 913).
+    test("each historian and dreamer run gets a root child in the run's directory, removed when it ends", async () => {
         const state = await setup();
         try {
             const first = await state.runOnce(historian);
@@ -337,14 +268,17 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
                 "child-2",
                 "child-3",
             ]);
-            expect(state.creates.every((input) => !("location" in input))).toBe(true);
-            expect(state.creates.map((input) => [input.parentID, input.metadata.role])).toEqual([
-                ["user-session", "historian"],
-                ["user-session", "historian"],
-                ["user-session", "dreamer"],
+            expect(
+                state.creates.map((input) => [
+                    "parentID" in input,
+                    input.location?.directory,
+                    input.metadata.role,
+                ]),
+            ).toEqual([
+                [false, "/project", "historian"],
+                [false, "/project", "historian"],
+                [false, "/project", "dreamer"],
             ]);
-            // Every child is read back once to confirm the host kept its parent.
-            expect(state.reads).toEqual(["child-1", "child-2", "child-3"]);
             // Removal has finished by the time close() returns.
             expect(state.removed).toEqual(["child-1", "child-2", "child-3"]);
             expect(state.legacyRemovals).toEqual([]);
@@ -373,107 +307,6 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
         }
     });
 
-    test("a host that drops the parent is reported once per process and its children are still removed", async () => {
-        const state = await setup({ keepsParent: false });
-        try {
-            await state.runOnce(historian);
-            await state.runOnce(dreamer);
-            expect(state.removed).toEqual(["child-1", "child-2"]);
-            expect(state.logs).toHaveLength(1);
-            expect(state.logs[0]).toContain("does not keep the parent of hidden-run sessions");
-            expect(state.logs[0]).toContain("asked for user-session, read back none");
-        } finally {
-            state.db.close();
-        }
-    });
-
-    // OpenCode 2 runs a session's hooks in the plugin instance of the session's
-    // location, and a child takes its parent's location. A child placed under a
-    // session of another directory would be shaped by an instance with no record
-    // of the run, so it is refused and removed before anything is prompted.
-    test("a child the host bound to another directory is removed before any prompt", async () => {
-        const state = await setup({ parentLocation: "/somewhere-else" });
-        try {
-            let caught: unknown;
-            try {
-                await state.executor.open(historian);
-            } catch (error) {
-                caught = error;
-            }
-            expect(String(caught)).toContain("hidden_prompt_unrecognized");
-            expect(String(caught)).toContain("bound to /somewhere-else");
-            expect(state.prompts()).toBe(0);
-            expect(state.removed).toEqual(["child-1"]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("a child bound to this instance's own directory runs normally", async () => {
-        const state = await setup({ parentLocation: "/project" });
-        try {
-            const run = await state.runOnce(historian);
-            expect(run.settled).toBe(true);
-            expect(state.prompts()).toBe(1);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    // OpenCode 2 on Windows reports a session's directory with forward slashes
-    // (`D:/coding/app`) while the plugin instance knows its location with
-    // backslashes. Those are the same directory, so the child must run; a
-    // genuinely different directory is still refused before any prompt.
-    for (const [label, parentLocation] of [
-        ["forward slashes against backslashes", "D:/coding/siac/wt/app"],
-        ["drive-letter case", "d:\\coding\\siac\\wt\\app"],
-        ["a trailing separator", "D:/coding/siac/wt/app/"],
-    ] as const) {
-        test(`a child bound to this instance's Windows directory spelled with ${label} runs normally`, async () => {
-            const state = await setup({ parentLocation, directory: "D:\\coding\\siac\\wt\\app" });
-            try {
-                const run = await state.runOnce(historian);
-                expect(run.settled).toBe(true);
-                expect(state.prompts()).toBe(1);
-            } finally {
-                state.db.close();
-            }
-        });
-    }
-
-    test("a child bound to a different Windows directory is still removed before any prompt", async () => {
-        const state = await setup({
-            parentLocation: "D:/coding/siac/wt/other",
-            directory: "D:\\coding\\siac\\wt\\app",
-        });
-        try {
-            let caught: unknown;
-            try {
-                await state.executor.open(historian);
-            } catch (error) {
-                caught = error;
-            }
-            expect(String(caught)).toContain("hidden_prompt_unrecognized");
-            expect(state.prompts()).toBe(0);
-            expect(state.removed).toEqual(["child-1"]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("a run with no user session creates a root child without a parent and removes it", async () => {
-        const state = await setup();
-        try {
-            const { parentSessionId: _unused, ...withoutParent } = dreamer;
-            await state.runOnce(withoutParent);
-            expect("parentID" in (state.creates[0] ?? {})).toBe(false);
-            expect(state.reads).toEqual([]);
-            expect(state.removed).toEqual(["child-1"]);
-        } finally {
-            state.db.close();
-        }
-    });
-
     test("a child the host no longer has counts as removed", async () => {
         const notFound = Object.assign(new Error("Session not found: child-1"), { status: 404 });
         const state = await setup({ removeError: notFound });
@@ -492,7 +325,7 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
             const run = await state.runOnce(historian);
             expect(run.settled).toBe(true);
             expect(state.logs).toEqual([
-                "[magic-context] hidden child child-1 could not be removed; it goes when its parent session is deleted: host is shutting down",
+                "[magic-context] hidden child child-1 could not be removed: host is shutting down",
             ]);
         } finally {
             state.db.close();
@@ -516,7 +349,7 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
         }
     });
 
-    test("keep_subagents keeps a settled child under the user's session", async () => {
+    test("keep_subagents keeps a settled child", async () => {
         const state = await setup({ keepSubagents: true });
         try {
             await state.runOnce(historian);
