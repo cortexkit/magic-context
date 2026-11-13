@@ -342,6 +342,7 @@ const TEMPLATE_DATA = [
 "compartment trigger: not firing at \x01% — below meaningfulness; offset=\x01 protectedStart=\x01 eligibleEnd=\x01 rawTokens=\x01 chunkTokens=\x01",
 "[magic-context] registered tools: ctx_search, ctx_memory, ctx_note, ctx_expand, todowrite, ctx_reduce; registered /todos",
 "signed thinking fit: the held request is over the window and no copy of the pass input exists to retry from; refusing it",
+"ck-mc: session \x01: queued drop mid=\x01 part=\x01 cannot render while its message is excluded; marking the part failed, not landed",
 "v2 payload: left out \x01 emptied messages and \x01 empty text parts, to replay frozen image omissions (logged once per session)",
 "m[0] materialization contention exhausted after \x01 retries with no cached fallback; rendered fresh non-persisted m[0]/m[1]",
 "[magic-context] schema fence on a cached handle: database v\x01 is newer than this build supports (v\x01); refusing to transform",

@@ -11,6 +11,7 @@ pub struct State {
     messages: BTreeSet<String>,
     reasoning_drops: BTreeSet<lanes::PartKey>,
     pub(super) no_view: Option<u64>,
+    failed_edits: Option<String>,
     retry_version: Option<u64>,
     pub(super) repair_pending: bool,
 }
@@ -32,23 +33,53 @@ impl State {
         }
     }
 
-    pub(super) fn accepted(&mut self, version: u64) {
+    pub(super) fn recovery(&self) -> (bool, Option<u64>) {
+        (self.repair_pending, self.retry_version)
+    }
+
+    pub(super) fn restore_recovery(&mut self, recovery: (bool, Option<u64>)) {
+        (self.repair_pending, self.retry_version) = recovery;
+    }
+
+    pub(super) fn recorded(&mut self, view: &View) {
         if self.repair_pending {
-            self.retry_version = Some(version);
-            self.repair_pending = false;
-        } else if self.retry_version != Some(version) {
-            // An independently permitted rebuild ends the immediate retry
-            // chain; a later host failure may then get one recovery of its own.
+            self.retry_version = Some(view.version);
+        } else if !self.same_failed_edits(view) {
+            // Only changed edits end the retry chain. A new version alone
+            // cannot make a host render the same failed operations.
             self.retry_version = None;
         }
     }
+
+    pub(super) fn held(&mut self, version: u64) {
+        if self.retry_version == Some(version) {
+            self.repair_pending = false;
+        }
+    }
+
+    fn same_failed_edits(&self, view: &View) -> bool {
+        self.failed_edits.as_ref() == Some(&edit_fingerprint(view))
+    }
+}
+
+/// Compare rendered operations, not view versions or edit provenance. The
+/// digest keeps the durable retry guard small even for a large accepted view.
+fn edit_fingerprint(view: &View) -> String {
+    use sha2::{Digest, Sha256};
+    let ops: Vec<_> = view.edits.iter().map(|edit| &edit.op).collect();
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&ops).expect("view edits serialize"))
+    )
 }
 
 impl Session {
     /// Record rendering failures without treating an accepted view as refused.
-    /// Returns true when this notice reports the failed immediate recovery.
-    pub(super) fn take_render_failures(&mut self, events: &[Event]) -> bool {
-        let mut repeat = false;
+    pub(super) fn take_render_failures(&mut self, events: &[Event]) {
+        // Every report must inspect the same transcript. Resetting the index
+        // for an older report must not hide a later report's reasoning part.
+        self.record_failed_reasoning(events);
+        let mut reread = false;
         for event in events {
             let Event::ViewRefused {
                 version,
@@ -66,45 +97,119 @@ impl Session {
             } else {
                 if let Some(mid) = mid {
                     self.render_failed.messages.insert(mid.clone());
-                    // The report names only the message, not the failing
-                    // edit. Conservatively treat any signed-reasoning drop
-                    // already in that view on this message as the failed edit.
-                    if let Some(view) = self.latest.as_ref().filter(|v| v.version == *version) {
-                        for edit in &view.edits {
-                            if let EditOp::Drop {
-                                mid: m,
-                                part: Some(part),
-                            } = &edit.op
-                            {
-                                if m == mid
-                                    && self.index.find(m, part).is_some_and(|(_, p)| {
-                                        p.seal == cortexkit_role_compaction::part::Seal::Signed
-                                            && matches!(p.body, PartBody::Reasoning { .. })
-                                    })
-                                {
-                                    self.render_failed
-                                        .reasoning_drops
-                                        .insert((m.clone(), part.clone()));
-                                }
-                            }
-                        }
-                    }
                 }
-                self.index = Index::starting_at(self.cut.unwrap_or(1));
-                self.index_ready = false;
-                // A delayed report about an older view cannot prove that the
-                // runner's current prefix is gone too.
-                if self.latest.as_ref().is_some_and(|v| v.version == *version) {
-                    self.render_failed.no_view = Some(*version);
-                    repeat |= self.render_failed.retry_version == Some(*version);
-                    self.render_failed.repair_pending = !repeat;
-                }
+                reread = true;
             }
             // Recompute served-part accounting even though the accepted view
             // and its checksum have not changed.
             self.app_projection.render_changed();
         }
+        if reread {
+            self.index = Index::starting_at(self.cut.unwrap_or(1));
+            self.index_ready = false;
+        }
+    }
+
+    fn record_failed_reasoning(&mut self, events: &[Event]) {
+        // The report names only the message, not the failing edit.
+        // Conservatively treat any signed-reasoning drop already in that
+        // view on this message as the failed edit.
+        let mut holds = Vec::new();
+        for event in events {
+            let Event::ViewRefused {
+                version,
+                refusal:
+                    ViewRefusal::RenderFailed {
+                        mid: Some(mid),
+                        part: None,
+                        ..
+                    },
+            } = event
+            else {
+                continue;
+            };
+            let view = self
+                .latest
+                .iter()
+                .chain(self.unconfirmed.iter().map(|pending| &pending.view))
+                .chain(
+                    self.unconfirmed
+                        .iter()
+                        .filter_map(|pending| pending.before.latest.as_ref()),
+                )
+                .find(|view| view.version == *version);
+            if let Some(view) = view {
+                for edit in &view.edits {
+                    if let EditOp::Drop {
+                        mid: m,
+                        part: Some(part),
+                    } = &edit.op
+                    {
+                        if m == mid
+                            && self.index.find(m, part).is_some_and(|(_, p)| {
+                                p.seal == cortexkit_role_compaction::part::Seal::Signed
+                                    && matches!(p.body, PartBody::Reasoning { .. })
+                            })
+                        {
+                            holds.push((m.clone(), part.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        self.render_failed.reasoning_drops.extend(holds);
+    }
+
+    /// Adoption may replace an older local view in this very notice. Only
+    /// after it finishes can the report describe the view the runner serves.
+    pub(super) fn settle_render_failures(
+        &mut self,
+        events: &[Event],
+        applied: Option<&AppliedView>,
+    ) -> bool {
+        self.record_failed_reasoning(events);
+        let mut repeat = false;
+        for event in events {
+            let Event::ViewRefused {
+                version,
+                refusal: ViewRefusal::RenderFailed { part: None, .. },
+            } = event
+            else {
+                continue;
+            };
+            if applied.is_some_and(|view| view.version == *version) {
+                self.render_failed.no_view = Some(*version);
+                self.render_failed.failed_edits = self
+                    .latest
+                    .as_ref()
+                    .filter(|view| view.version == *version)
+                    .map(edit_fingerprint);
+                repeat |= self.render_failed.retry_version == Some(*version);
+                self.render_failed.repair_pending = !repeat;
+                self.app_projection.render_changed();
+            }
+        }
         repeat
+    }
+
+    pub(super) fn repeats_failed_edits(&self, view: &View) -> bool {
+        !self.render_failed.repair_pending && self.render_failed.same_failed_edits(view)
+    }
+
+    pub(super) fn retire_banned_queued(&mut self) {
+        let banned: Vec<_> = self
+            .queued
+            .iter()
+            .filter(|(mid, _)| self.render_failed.messages.contains(mid))
+            .cloned()
+            .collect();
+        for key in banned {
+            self.queued.remove(&key);
+            self.app_projection.dirty.insert(key.0.clone());
+            if self.failed_parts.insert(key.clone()) {
+                tracing::warn!("ck-mc: session {}: queued drop mid={:?} part={:?} cannot render while its message is excluded; marking the part failed, not landed", self.key.session, key.0, key.1);
+            }
+        }
     }
 
     pub(super) fn log_render_location(&self, events: &[Event]) {

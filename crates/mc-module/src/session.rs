@@ -402,6 +402,8 @@ struct Before {
     /// it existed and rows of runners that send no reading don't change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spent_reading: Option<SpentReading>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    render_recovery: Option<(bool, Option<u64>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1345,7 +1347,7 @@ impl Session {
             })
             .collect();
         self.settle_stated(stated, &refused);
-        let render_repeat = self.take_render_failures(&notice.events);
+        self.take_render_failures(&notice.events);
         let judged = self.judged_view(stated);
         match standing {
             Standing::Current => self.judge_reading(previous, judged.as_ref()),
@@ -1465,8 +1467,8 @@ impl Session {
         } else if let Some(newest) = notice.newest.as_ref().filter(|_| omitted) {
             self.index_ready = self.sync_from_changeable(client, newest).await;
         }
-        self.log_render_location(&notice.events);
         if !self.index_ready {
+            self.log_render_location(&notice.events);
             return None;
         }
         self.log_window_budget();
@@ -1487,6 +1489,9 @@ impl Session {
                 Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
             }
         }
+        let render_repeat =
+            self.settle_render_failures(&notice.events, self.judged_view(stated).as_ref());
+        self.log_render_location(&notice.events);
         self.forget_missing();
         if render_repeat {
             return None;
@@ -4241,6 +4246,7 @@ impl Session {
             return (None, 0);
         }
         self.next_keep = keep.cloned();
+        self.retire_banned_queued();
         self.app_cause = if over_limit.is_some() {
             "over_limit"
         } else if prefix_changes {
@@ -4447,22 +4453,6 @@ impl Session {
         } else {
             0
         };
-        // The age sweep only drops on the pass after the one that sees an
-        // output far behind, so the first pass over the threshold frees
-        // little by design. What it has lined up for the next pass counts as
-        // relief too, or every session would be asked for ctx_keep on its
-        // first crossing.
-        let lined_up: Vec<lanes::PartKey> = lanes::age_sweep(
-            &context,
-            bookmark.max(self.reclaim_bookmark),
-            notice_bookmark.max(notice_reclaim_bookmark),
-            cutoff,
-        )
-        .into_iter()
-        .map(|(key, _)| key)
-        .filter(|key| !covered.contains(key))
-        .collect();
-        let freed = freed_tokens(&context, &covered) + freed_tokens(&context, &lined_up);
         self.next_reclaim_bookmark = Some(self.reclaim_bookmark.max(bookmark));
         self.next_notice_reclaim_bookmark = self
             .notice_keep
@@ -4488,7 +4478,24 @@ impl Session {
         };
         ops.extend(history);
         drop(lanes_timing);
-        (self.seal(ops, &covered), freed)
+        // Credit only reductions the sealed candidate actually carries, not
+        // excluded operations or work merely lined up for a later pass.
+        let rendered = self.rendered_view(self.latest.as_ref());
+        let (before, _) = self.served_costs(
+            rendered
+                .iter()
+                .flat_map(|view| &view.edits)
+                .map(|edit| &edit.op),
+        );
+        let view = self.seal(ops, &covered);
+        let freed = view.as_ref().map_or(0, |view| {
+            let (after, _) = self.served_costs(view.edits.iter().map(|edit| &edit.op));
+            before
+                .iter()
+                .map(|(key, tokens)| tokens.saturating_sub(after.get(key).copied().unwrap_or(0)))
+                .sum()
+        });
+        (view, freed)
     }
 
     /// Commands and rebuilds use the same tail boundary, so queued work is
@@ -4522,6 +4529,21 @@ impl Session {
         let _timing = crate::notice_cost_timing::span("build.seal");
         let version = self.version + 1;
         ops.retain(|op| !self.render_failed.excludes(op));
+        let covered: Vec<_> = covered
+            .iter()
+            .filter(|(mid, part)| {
+                ops.iter().any(|op| match op {
+                    EditOp::Drop { mid: m, part: p } => {
+                        m == mid && p.as_ref().is_none_or(|p| p == part)
+                    }
+                    EditOp::Replace {
+                        mid: m, part: p, ..
+                    } => m == mid && p == part,
+                    _ => false,
+                })
+            })
+            .cloned()
+            .collect();
         let retire = retired_history(self.summaries.is_empty(), &ops);
         let full = self.with_replaced_outputs(&ops);
         let built = view_builder::next_view_cached(
@@ -4542,13 +4564,17 @@ impl Session {
                     ))
                 .then(|| "strip".into()),
                 signed_floor: self.signed_floor.clone(),
-                force: self.serves_no_view(self.latest.as_ref()),
+                force: self.render_failed.repair_pending,
             },
             |op| retire(op) || self.render_failed.excludes(op),
             &mut self.view_validation,
         );
         match built {
             Ok(Some(view)) => {
+                if self.repeats_failed_edits(&view) {
+                    self.discard_held_view();
+                    return None;
+                }
                 // Provider-rule companion drops of signed reasoning remain
                 // allowed on an excluded message: without them, edits before
                 // that reasoning would produce a request the provider refuses.
@@ -4566,7 +4592,7 @@ impl Session {
                 }
                 self.release_move_floor_hold();
                 self.version = version;
-                self.next_covered = covered.to_vec();
+                self.next_covered = covered;
                 Some(view)
             }
             // Nothing new to land: what the pass covered was covered already.
@@ -4576,7 +4602,7 @@ impl Session {
             Ok(None) => {
                 self.commit_bookmark();
                 let flush = std::mem::take(&mut self.next_flush);
-                self.forget_queued(covered);
+                self.forget_queued(&covered);
                 if let Some(next) = self.next_baseline.take() {
                     self.baseline = Some(next);
                     if !flush {
@@ -4593,7 +4619,7 @@ impl Session {
             // on every pass.
             Err(refusal) => {
                 self.commit_bookmark();
-                self.forget_queued(covered);
+                self.forget_queued(&covered);
                 self.failed_parts.extend(covered.iter().cloned());
                 self.next_latch = false;
                 self.next_rearm = false;
@@ -4945,6 +4971,7 @@ impl Session {
             summary_unshown: self.summary_unshown,
             pending_keep: self.next_keep.take(),
             spent_reading: self.spent_reading,
+            render_recovery: Some(self.render_failed.recovery()),
         };
         self.commit_bookmark();
         self.unconfirmed.push(Unconfirmed {
@@ -4975,13 +5002,14 @@ impl Session {
         self.version = self.version.max(view.version);
         self.spend_reading(view.version);
         self.apply_cut(&view);
+        self.render_failed.recorded(&view);
         self.latest = Some(view);
-        self.render_failed.accepted(self.version);
     }
 
     /// The runner said it holds the unconfirmed view `version` (see
     /// [`Unconfirmed::accepted`]).
     fn runner_holds(&mut self, version: u64) {
+        self.render_failed.held(version);
         if let Some(pending) = self
             .unconfirmed
             .iter_mut()
@@ -5006,6 +5034,7 @@ impl Session {
         self.newest_applied = applied.map_or(0, |applied| applied.version);
         self.app_confirm_head(self.newest_applied);
         if let Some(applied) = applied {
+            self.render_failed.held(applied.version);
             // Views are cumulative: applying a view applies every edit of the
             // unconfirmed ones before it.
             if let Some(at) = self
@@ -5151,6 +5180,9 @@ impl Session {
         let undone = self.unconfirmed.split_off(at);
         let first = &undone[0];
         let before = first.before.clone();
+        if let Some(recovery) = before.render_recovery {
+            self.render_failed.restore_recovery(recovery);
+        }
         self.app_projection.dirty.extend(
             self.queued
                 .iter()

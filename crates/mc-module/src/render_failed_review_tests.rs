@@ -7,6 +7,7 @@
 //! behaviour they describe is fixed.
 
 use super::*;
+use crate::test_log::capture;
 use serde_json::json;
 
 /// A session holding view 1: one output replace of `old`/`p`, under a low
@@ -131,6 +132,17 @@ async fn render_failed_review_unlocated_repeat_does_not_republish_identical_edit
         republished.is_empty(),
         "published views {republished:?} with the edits the runner already failed to render twice"
     );
+    let mut ride = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    );
+    ride.applied_view = session.latest.as_ref().map(View::applied);
+    ride.request_tokens = Some(100_000);
+    assert!(
+        session.ride(&settings, &ride).is_none(),
+        "an over-limit ride republished the same failed edits"
+    );
 }
 
 /// The immediate recovery is cleared in `State::accepted`, which runs when
@@ -168,6 +180,73 @@ async fn render_failed_review_recovery_lost_in_handover_is_tried_again() {
         "the recovery that never reached the runner was not offered again; \
          the runner keeps serving raw history"
     );
+}
+
+#[tokio::test]
+async fn render_failed_review_recovery_refused_at_handover_is_tried_again() {
+    let (mut session, client, settings, view) = fixture_with_view();
+    *client.refuse.lock().unwrap() = true;
+    let request = failure(
+        &session,
+        &client,
+        1,
+        &view,
+        json!({"code":"render_failed", "mid":"old"}),
+    );
+    session.notice(&client, &settings, request).await;
+    assert_eq!(offered(&client).len(), 1);
+    assert_eq!(session.latest.as_ref(), Some(&view));
+    *client.refuse.lock().unwrap() = false;
+    let request = applying(&session, &client, 2, &view);
+    session.notice(&client, &settings, request).await;
+    assert_eq!(
+        offered(&client).len(),
+        2,
+        "a handover refusal consumed the recovery"
+    );
+}
+
+#[tokio::test]
+async fn render_failed_review_excluded_part_frees_no_tokens_and_logs_once() {
+    let logs = capture();
+    let (mut session, client, _, _, settings) = fixture();
+    let entries = vec![text(1, "old"), text(2, "tail")];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries;
+    let view = session.seal_unchecked(vec![EditOp::Replace {
+        mid: "old".into(),
+        part: "p".into(),
+        field: "text".into(),
+        value: json!("trimmed"),
+        expect: session.index.entries()[0].parts[0].digest.clone(),
+    }]);
+    session.accept(view.clone());
+    let request = failure(
+        &session,
+        &client,
+        1,
+        &view,
+        json!({"code":"render_failed", "mid":"old"}),
+    );
+    session.notice(&client, &settings, request).await;
+    let key = ("old".into(), "p".into());
+    session.queued.insert(key.clone());
+    let (candidate, freed) = session.build(&settings, None, false, None);
+    assert!(candidate.is_none());
+    assert_eq!(freed, 0, "an excluded operation was counted as relief");
+    assert!(session.failed_parts.contains(&key));
+    assert!(!session.queued.contains(&key));
+    // A repeated request remains failed without repeating the diagnostic.
+    session.queued.insert(key.clone());
+    session.build(&settings, None, false, None);
+    assert_eq!(
+        logs.text()
+            .lines()
+            .filter(|line| line.contains("queued drop mid=\"old\" part=\"p\" cannot render"))
+            .count(),
+        1
+    );
+    assert!(!session.queued.contains(&key));
 }
 
 /// A runner whose state went back applies an older view than ck-mc's latest
@@ -219,6 +298,7 @@ async fn render_failed_review_report_about_the_view_adopted_in_the_same_notice()
 /// is still served in full, and the build's `freed` estimate counted it.
 #[tokio::test]
 async fn render_failed_review_queued_drop_in_excluded_message_is_not_forgotten_as_landed() {
+    let logs = capture();
     let (mut session, client, settings, view) = fixture_with_view();
     let request = failure(
         &session,
@@ -241,11 +321,20 @@ async fn render_failed_review_queued_drop_in_excluded_message_is_not_forgotten_a
         matches!(&edit.op, EditOp::Drop { mid, part } if mid == "old"
             && part.as_deref().is_none_or(|part| part == "p"))
     });
+    assert!(!dropped, "a banned message was edited");
     assert!(
-        dropped || session.queued.contains(&key),
-        "the queued drop of old/p was forgotten as landed, but view {} still serves it",
-        latest.version
+        !session.queued.contains(&key),
+        "an impossible drop stayed queued"
     );
+    assert!(
+        session.failed_parts.contains(&key),
+        "the excluded drop was not recorded as failed"
+    );
+    assert!(
+        !session.next_covered.contains(&key),
+        "the excluded drop was counted as landed"
+    );
+    assert!(logs.text().contains("queued drop mid=\"old\" part=\"p\" cannot render while its message is excluded; marking the part failed, not landed"));
 }
 
 fn signed_message_fixture() -> (Session, Client, Settings, View, View) {
