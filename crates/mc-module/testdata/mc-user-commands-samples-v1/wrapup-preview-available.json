@@ -1,6 +1,6 @@
 {
   "available": true,
-  "effect": "May take several model runs. ctx_expand recovers raw text. Shrinks next rebuild (now at threshold); flush applies now.",
+  "effect": "Older messages become summaries over one or more model runs; they leave the prompt at the next rebuild or with flush.",
   "facts": [
     {
       "label": "To summarize",
