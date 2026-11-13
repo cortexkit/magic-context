@@ -165,10 +165,11 @@ mod entorhinal_sample_tests {
     use super::{decode_reply, ContextAnswer, SessionContext};
 
     /// Entorhinal's own `context.session` replies for an agent pinned to an
-    /// automation flow, copied from its `test-vectors/catalog-packs-v1/`
-    /// (commit `a3238dd`). Entorhinal releases a reply shape only after
-    /// every reader decodes it, so ck-mc's strict reader must take both
-    /// replies whole; the stale one carries `stale_since_ms` on its pin.
+    /// automation flow, copied from the entorhinal repository's
+    /// `test-vectors/catalog-packs-v1/context.json` (commit `a3238dd`).
+    /// Entorhinal releases a reply shape only after every reader decodes
+    /// it, so this module's strict reader must take both replies whole; the
+    /// stale one carries `stale_since_ms` on its pin.
     #[test]
     fn entorhinal_flow_pin_context_replies_are_answers() {
         let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
