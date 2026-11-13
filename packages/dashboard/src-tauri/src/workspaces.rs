@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::db::{self, ProjectRow};
@@ -838,25 +838,40 @@ pub fn apply_workspace_changes(
     Ok(())
 }
 
-fn is_user_home_workspace_member(identity: &str, display_path: &str) -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
-    let Ok(canonical_home) = fs::canonicalize(home) else {
-        return false;
-    };
-    let home_digest = format!(
-        "{:x}",
-        md5::compute(canonical_home.to_string_lossy().as_bytes())
-    );
-    let home_identity = format!("dir:{}", &home_digest[..12]);
-    if identity == home_identity {
-        return true;
+/// The home directory as the membership check sees it: its canonical path and
+/// the `dir:<hash>` project identity it carries. Computed once per caller that
+/// tests many projects (the Projects grid does), since resolving it costs two
+/// filesystem calls.
+pub(crate) struct HomeProject {
+    canonical: PathBuf,
+    identity: String,
+}
+
+impl HomeProject {
+    pub(crate) fn resolve() -> Option<Self> {
+        let canonical = fs::canonicalize(dirs::home_dir()?).ok()?;
+        let digest = format!("{:x}", md5::compute(canonical.to_string_lossy().as_bytes()));
+        Some(Self {
+            identity: format!("dir:{}", &digest[..12]),
+            canonical,
+        })
     }
 
-    fs::canonicalize(Path::new(display_path))
-        .map(|canonical_display| canonical_display == canonical_home)
-        .unwrap_or(false)
+    /// A project is the home directory when either its identity is home's or its
+    /// directory canonicalizes to home (the two can disagree: an identity alone
+    /// cannot tell a symlinked home apart, and a card may carry no path at all).
+    pub(crate) fn matches(&self, identity: &str, display_path: &str) -> bool {
+        if identity == self.identity {
+            return true;
+        }
+        fs::canonicalize(Path::new(display_path))
+            .map(|canonical_display| canonical_display == self.canonical)
+            .unwrap_or(false)
+    }
+}
+
+fn is_user_home_workspace_member(identity: &str, display_path: &str) -> bool {
+    HomeProject::resolve().is_some_and(|home| home.matches(identity, display_path))
 }
 
 fn temporary_display_name(

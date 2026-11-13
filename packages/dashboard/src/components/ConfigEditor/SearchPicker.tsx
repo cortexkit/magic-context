@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
+import FloatingLayer from "../shared/FloatingLayer";
 import { pickerAccessibleName, pickerSelectedText } from "./a11y-state";
-import FloatingLayer from "./FloatingLayer";
 
 export interface PickerOption {
   value: string;

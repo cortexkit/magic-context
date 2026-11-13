@@ -20,6 +20,12 @@
   --bg-base: #0a0a0f;
   --bg-panel: #13131a;
   --bg-card: #1c1c27;
+  /* Floating surfaces (context menus, popovers) that must read as sitting
+     above the card they were opened from. */
+  --bg-elevated: #262636;
+  /* Hover wash for controls sitting on --bg-elevated: --bg-hover is tuned for
+     the page, and against a raised surface it all but disappears. */
+  --bg-elevated-hover: #34344a;
   --bg-hover: #252535;
   --bg-active: #1e1e30;
   /* Fill for editable fields (text inputs, model pickers). */
@@ -107,6 +113,8 @@
   --bg-base: #f4f1ec;
   --bg-panel: #f9f7f3;
   --bg-card: #fdfcfa;
+  --bg-elevated: #fffefc;
+  --bg-elevated-hover: #eeeae3;
   --bg-hover: #eeeae3;
   --bg-active: #e9ecf5;
   --bg-input: #fffefc;
@@ -3727,6 +3735,142 @@ select.config-input {
 .project-card-active {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.project-grid-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--error-text);
+}
+
+/* ── Context menu (project card right-click) ─────────── */
+/* FloatingLayer measures a point-placed layer before positioning it, so the
+   class itself must be fixed and sized by its content. */
+.context-menu {
+  position: fixed;
+  min-width: 200px;
+  max-width: 320px;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+  font-size: 12px;
+}
+
+.context-menu-entry {
+  position: relative;
+}
+
+.context-menu-submenu {
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  margin: 0 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-menu-item:hover,
+.context-menu-item:focus-visible,
+.context-menu-item[aria-expanded="true"] {
+  background: var(--bg-elevated-hover);
+  outline: none;
+}
+
+.context-menu-item[aria-disabled="true"] {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.context-menu-item[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+.context-menu-item[aria-disabled="true"]:focus-visible {
+  background: var(--bg-elevated-hover);
+}
+
+.context-menu-item.current {
+  color: var(--accent);
+}
+
+.context-menu-check {
+  width: 12px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.context-menu-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.context-menu-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-menu-chevron {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+
+/* The reason is the only explanation for a disabled target, so it wraps under
+   the name instead of being ellipsized, and uses the readable secondary tone. */
+.context-menu-hint {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.context-menu-note {
+  padding: 4px 10px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  /* Not --text-muted: this line is the only explanation of why the item
+     above is disabled, so it has to stay readable on --bg-elevated. */
+  color: var(--text-secondary);
+}
+
+/* A status line in the flyout takes focus so it is read out; show where focus is. */
+.context-menu-note[role="menuitem"] {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+}
+
+.context-menu-note[role="menuitem"]:focus-visible {
+  background: var(--bg-elevated-hover);
+  outline: none;
 }
 
 /* ── Project detail (breadcrumb + tabs) ──────────────── */
