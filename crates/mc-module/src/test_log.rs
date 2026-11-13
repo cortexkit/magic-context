@@ -180,6 +180,16 @@ pub(crate) async fn logged_async<F: Future>(body: F) -> (F::Output, String) {
     (result, text)
 }
 
+/// `log` with the elapsed milliseconds in Setup's completion line blanked:
+/// two runs of the same work log the same lines but not the same time.
+pub(crate) fn without_timings(log: &str) -> String {
+    static TIMING: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    TIMING
+        .get_or_init(|| regex::Regex::new(r"setup done in \d+ ms").unwrap())
+        .replace_all(log, "setup done in _ ms")
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,14 +302,4 @@ mod tests {
             "capture logs with crate::test_log, never with a subscriber of the test's own: {found:?}"
         );
     }
-}
-
-/// `log` with the elapsed milliseconds in Setup's completion line blanked:
-/// two runs of the same work log the same lines but not the same time.
-pub(crate) fn without_timings(log: &str) -> String {
-    static TIMING: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    TIMING
-        .get_or_init(|| regex::Regex::new(r"setup done in \d+ ms").unwrap())
-        .replace_all(log, "setup done in _ ms")
-        .into_owned()
 }
