@@ -1,5 +1,10 @@
-### Friction window
-⟦frictionWindow⟧
+<existing-memories>
+Memories that already exist on these subjects. Do not write them again.
+[⟦memory.id⟧] ⟦memory.category⟧: ⟦memory.content⟧
+</existing-memories>
 
-### Corroborating historian events
-- 1970-01-01T00:00:00.000Z session=⟦event.sessionId⟧ kind=⟦event.kind⟧ — ⟦event.fieldKey⟧: ⟦event.fieldValue⟧
+<group kind="⟦group.kind⟧" ⟦group.key⟧="⟦group.value⟧" sessions="⟦group.sessions⟧">
+<event id="⟦event.id⟧" session="⟦event.session⟧" new="⟦event.new⟧">
+⟦event.field⟧: ⟦event.value⟧
+</event>
+</group>
