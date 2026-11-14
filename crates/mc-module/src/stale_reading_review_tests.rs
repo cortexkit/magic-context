@@ -192,12 +192,18 @@ async fn review_stale_no_view_after_a_foreign_one_is_not_stale_for_good() {
     // The first of those readings built view 4, which this runner accepted
     // and never applies. The two after it repeat the reading that built it,
     // the measurement of the request already in flight when the runner
-    // accepted, so they stay ignored. A different reading under no view was
-    // rendered after acceptance without view 4: view 4 stops counting, and
-    // that reading is judged by the view the runner applies, none.
+    // accepted, so they stay ignored. So does one different reading under
+    // no view: a runner may render one request after accepting before it
+    // takes the view. A third different reading under no view was rendered
+    // after acceptance without view 4: view 4 stops counting, and that
+    // reading is judged by the view the runner applies, none.
     assert!(session.reading_stale);
     grow(&client, 9);
     let request = reading(&session, &client, 5, EXECUTE + 1_000, Some(0), None);
+    session.notice(&client, &settings, request).await;
+    assert!(session.reading_stale);
+    grow(&client, 10);
+    let request = reading(&session, &client, 6, EXECUTE + 2_000, Some(0), None);
     session.notice(&client, &settings, request).await;
     assert!(
         !session.reading_stale,

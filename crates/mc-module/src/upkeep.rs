@@ -52,6 +52,11 @@ const MEMORY_BATCH: usize = 10;
 /// Commits embedded per request, and the most one sweep embeds
 /// (`COMMIT_DRAIN_BATCH_SIZE`, `COMMIT_DRAIN_MAX_PER_SWEEP`).
 const COMMIT_BATCH: usize = 16;
+/// Commits stored per transaction. Each costs about a millisecond with the
+/// commit search index's triggers, and a project's first sweep stores up to
+/// its cap (2,000 by default), so one transaction for all of them would
+/// hold the shared connection for seconds.
+const STORE_BATCH: usize = 200;
 const COMMIT_DRAIN_MAX: usize = 500;
 /// The longest one sweep spends embedding commits
 /// (`GIT_COMMIT_BACKLOG_DRAIN_MAX_MS`).
@@ -307,9 +312,17 @@ async fn sweep_commits(
         Err(GitFailure::Transient(message)) => return fail(db, project, &holder, message),
     };
     let scanned = commits.len();
-    let stored = db.with_connection(|conn| store_commits(conn, project, &commits, max, clock()));
+    let stored = store_in_batches(db, project, &holder, &commits, max, clock);
     let (inserted, updated, evicted) = match stored {
-        Ok(counts) => counts,
+        Ok(Some(counts)) => counts,
+        Ok(None) => {
+            return fail(
+                db,
+                project,
+                &holder,
+                "the sweep's lease lapsed while its commits were stored".into(),
+            )
+        }
         Err(error) => return fail(db, project, &holder, error.to_string()),
     };
     let embedded = match embedding {
@@ -416,6 +429,41 @@ async fn embed_commits(
         }
     }
     total
+}
+
+/// Store `commits` (newest first, as `git log` lists them) a batch per
+/// transaction, oldest batch first, renewing the lease before each batch
+/// after the first. Between batches the shared connection is free for other
+/// calls. The order matters for a sweep that stops part way: the next sweep
+/// reads only the history after the newest commit stored, and with the
+/// oldest batches stored first that history holds every commit not yet
+/// stored. Returns the summed counts, or `None` when the lease lapsed.
+fn store_in_batches(
+    db: &ContextDb,
+    project: &str,
+    holder: &str,
+    commits: &[Commit],
+    max: u64,
+    clock: &(impl Fn() -> i64 + Sync),
+) -> rusqlite::Result<Option<(usize, usize, usize)>> {
+    let (mut inserted, mut updated, mut evicted) = (0, 0, 0);
+    // A sweep with nothing new still stores once, so a lowered cap evicts.
+    let batches: Vec<&[Commit]> = if commits.is_empty() {
+        vec![&[]]
+    } else {
+        commits.rchunks(STORE_BATCH).collect()
+    };
+    for (index, batch) in batches.into_iter().enumerate() {
+        if index > 0 && !db.with_connection(|conn| renew_lease(conn, project, holder, clock()))? {
+            return Ok(None);
+        }
+        let counts =
+            db.with_connection(|conn| store_commits(conn, project, batch, max, clock()))?;
+        inserted += counts.0;
+        updated += counts.1;
+        evicted += counts.2;
+    }
+    Ok(Some((inserted, updated, evicted)))
 }
 
 /// Upsert `commits` and evict the oldest past `max`, in one transaction.
@@ -1416,5 +1464,181 @@ mod tests {
         assert_eq!(iso_8601(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso_8601(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
         assert_eq!(iso_8601(951_782_400_000), "2000-02-29T00:00:00.000Z");
+    }
+
+    /// A repository of `count` commits named `commit 0000` (the oldest)
+    /// onward, a minute apart, the newest at `newest_at_s`, written by
+    /// `git fast-import` in well under a second.
+    fn imported_repository(dir: &Path, count: usize, newest_at_s: i64) -> std::path::PathBuf {
+        use std::io::Write;
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        let mut stream = String::new();
+        for index in 0..count {
+            let message = format!("commit {index:04}\n");
+            let at = newest_at_s - (count - 1 - index) as i64 * 60;
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{}\ncommitter Test <test@example.com> {at} +0000\ndata {}\n{message}",
+                index + 1,
+                message.len()
+            ));
+            if index > 0 {
+                stream.push_str(&format!("from :{index}\n"));
+            }
+            stream.push('\n');
+        }
+        let mut child = Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(&repo)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        git(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        repo
+    }
+
+    #[tokio::test]
+    async fn a_sweep_stopped_between_batches_stores_the_rest_on_the_next_round() {
+        let dir = scratch("batched");
+        let db = database(&dir);
+        let now = 1_800_000_000_000;
+        let repo = imported_repository(&dir, 450, now / 1000 - 3600);
+        let plan = Plan {
+            memory: false,
+            embedding: None,
+            git: Some(GitIndexing {
+                since_days: 3650,
+                max_commits: 2000,
+            }),
+        };
+        // Storing commit 0220 fails, which ends the sweep in its second
+        // batch, however the batches are ordered.
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER interrupt BEFORE INSERT ON git_commits
+                  WHEN NEW.message LIKE 'commit 0220%'
+                 BEGIN SELECT RAISE(ABORT, 'interrupted'); END",
+            )
+            .unwrap()
+        });
+        let report = run_project(&db, PROJECT, &repo, &plan, &|| now).await;
+        assert!(matches!(report.sweep, Some(Sweep::Failed(_))), "{report:?}");
+        // The first batch, the 200 oldest commits, was committed on its own.
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM git_commits WHERE message < 'commit 0200'"
+            ),
+            STORE_BATCH as i64
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM git_commits"),
+            STORE_BATCH as i64
+        );
+        db.with_connection(|conn| conn.execute_batch("DROP TRIGGER interrupt").unwrap());
+        // The next round reads the history after the newest commit stored,
+        // which holds every commit the first round left out.
+        let report = run_project(&db, PROJECT, &repo, &plan, &|| now).await;
+        assert!(
+            matches!(
+                report.sweep,
+                Some(Sweep::Indexed {
+                    inserted: 250,
+                    updated: 0,
+                    evicted: 0,
+                    ..
+                })
+            ),
+            "{report:?}"
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM git_commits"), 450);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_with_nothing_new_still_evicts_past_a_lowered_cap() {
+        let dir = scratch("nothing-new");
+        let db = database(&dir);
+        let now = 1_800_000_000_000;
+        // A minute apart, so the newest commit stored is the branch's tip and
+        // the next sweep reads nothing.
+        let repo = imported_repository(&dir, 3, now / 1000 - 3600);
+        let plan = |max_commits| Plan {
+            memory: false,
+            embedding: None,
+            git: Some(GitIndexing {
+                since_days: 3650,
+                max_commits,
+            }),
+        };
+        let report = run_project(&db, PROJECT, &repo, &plan(3), &|| now).await;
+        assert!(
+            matches!(report.sweep, Some(Sweep::Indexed { inserted: 3, .. })),
+            "{report:?}"
+        );
+        let later = now + SWEEP_COOLDOWN_MS;
+        let report = run_project(&db, PROJECT, &repo, &plan(2), &|| later).await;
+        assert!(
+            matches!(
+                report.sweep,
+                Some(Sweep::Indexed {
+                    scanned: 0,
+                    evicted: 1,
+                    ..
+                })
+            ),
+            "{report:?}"
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM git_commits WHERE message LIKE 'commit 0000%'"
+            ),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lease_lapsed_between_batches_stops_the_store() {
+        let dir = scratch("lapsed");
+        let db = database(&dir);
+        let now = 1_800_000_000_000;
+        let holder = "ck-mc-test-holder";
+        assert!(matches!(
+            db.with_connection(|conn| acquire_lease(conn, PROJECT, holder, now)),
+            Ok(Lease::Acquired)
+        ));
+        let commits: Vec<Commit> = (0..450)
+            .rev()
+            .map(|index| Commit {
+                sha: format!("{index:040x}"),
+                message: format!("commit {index:04}"),
+                author: None,
+                committed_at_ms: now - (450 - index) * 60_000,
+            })
+            .collect();
+        // The first batch is stored at `now`; by the time the next one would
+        // be, the lease has run out.
+        let calls = AtomicUsize::new(0);
+        let clock = || {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                now
+            } else {
+                now + LEASE_TTL_MS
+            }
+        };
+        let stored = store_in_batches(&db, PROJECT, holder, &commits, 2000, &clock).unwrap();
+        assert_eq!(stored, None);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM git_commits"),
+            STORE_BATCH as i64
+        );
     }
 }

@@ -455,7 +455,11 @@ fn run_git_within(root: &Path, args: &[&str], timeout: Duration) -> Result<Strin
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            // An answer seen only after the deadline came too late: a
+            // lookup that ran past its time tells nothing, however fast git
+            // was (a zero timeout always times out).
+            Ok(Some(status)) if Instant::now() <= deadline => break Some(status),
+            Ok(Some(_)) => break None,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
             Ok(None) => {
                 let _ = child.kill();

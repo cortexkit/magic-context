@@ -207,8 +207,49 @@ pub struct ContextDb {
     /// once by the module that serves those reads; a store without one (a
     /// test, a tool) tells no one.
     notifier: std::sync::OnceLock<crate::app_read::Notifier>,
+    /// Read-only connections for searches, opened when first needed.
+    readers: readers::Readers,
     #[cfg(feature = "context-db-timing")]
     timing: timing::Timing,
+    #[cfg(test)]
+    search_pause: Mutex<Option<SearchPausePoint>>,
+}
+
+#[path = "context_db_readers.rs"]
+mod readers;
+
+/// Where a test holds the next search read, inside its read transaction:
+/// the read signals `reached`, then waits for `release`.
+#[cfg(test)]
+type SearchPausePoint = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+/// A test's handle on a held search read: `reached` gets a message when the
+/// read is held, and a message on `release` (or dropping it) lets it go on.
+#[cfg(test)]
+pub(crate) struct SearchPause {
+    pub(crate) reached: std::sync::mpsc::Receiver<()>,
+    pub(crate) release: std::sync::mpsc::Sender<()>,
+}
+
+/// Start a read transaction and take its snapshot with a first read, which
+/// also checks the store is still at the version this build reads.
+fn begin_read(conn: &Connection) -> bool {
+    if conn.execute_batch("BEGIN DEFERRED").is_err() {
+        return false;
+    }
+    let current = live_schema_version(conn).is_ok_and(|found| found == i64::from(SCHEMA_VERSION));
+    if !current {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    current
+}
+
+/// End a read transaction; `false` when one is still open.
+fn end_read(conn: &Connection) -> bool {
+    if conn.execute_batch("COMMIT").is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    conn.is_autocommit()
 }
 
 #[cfg(feature = "context-db-timing")]
@@ -335,8 +376,11 @@ impl ContextDb {
             path: path.to_owned(),
             connection: Mutex::new(connection),
             notifier: std::sync::OnceLock::new(),
+            readers: readers::Readers::default(),
             #[cfg(feature = "context-db-timing")]
             timing,
+            #[cfg(test)]
+            search_pause: Mutex::new(None),
         })
     }
 
@@ -588,6 +632,67 @@ impl ContextDb {
     pub fn with_connection<T>(&self, apply: impl FnOnce(&mut Connection) -> T) -> T {
         let mut connection = self.lock();
         apply(&mut connection)
+    }
+
+    /// Run `read`, a search's reads, on a read-only connection of its own
+    /// (see `context_db_readers.rs`), so a long search never holds the
+    /// connection every other call uses. `read` runs inside one read
+    /// transaction that starts here, and gets the coverage proof that
+    /// belongs to its connection. When no read-only connection can be had,
+    /// `read` runs on the shared connection instead, in a read transaction
+    /// and with a fresh proof.
+    pub fn with_search_reader<T>(
+        &self,
+        read: impl FnOnce(&Connection, &mut crate::search::messages::Coverage) -> T,
+    ) -> T {
+        if let Some(mut lease) = self.readers.lease(&self.path) {
+            let (conn, coverage) = lease.parts();
+            if begin_read(conn) {
+                #[cfg(test)]
+                self.pause_search_read();
+                let value = read(conn, coverage);
+                if !end_read(conn) {
+                    lease.discard();
+                }
+                return value;
+            }
+            lease.discard();
+        }
+        self.with_connection(|conn| {
+            let began = conn.is_autocommit() && conn.execute_batch("BEGIN DEFERRED").is_ok();
+            #[cfg(test)]
+            self.pause_search_read();
+            let value = read(conn, &mut crate::search::messages::Coverage::default());
+            if began {
+                end_read(conn);
+            }
+            value
+        })
+    }
+
+    /// Hold the next search read until the returned handle releases it.
+    #[cfg(test)]
+    pub(crate) fn pause_next_search_read(&self) -> SearchPause {
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *self
+            .search_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((reached_tx, release_rx));
+        SearchPause { reached, release }
+    }
+
+    #[cfg(test)]
+    fn pause_search_read(&self) {
+        let pause = self
+            .search_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((reached, release)) = pause {
+            let _ = reached.send(());
+            let _ = release.recv();
+        }
     }
 
     /// Store a session note and return its id.

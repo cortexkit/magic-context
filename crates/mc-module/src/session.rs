@@ -355,10 +355,12 @@ pub struct Unconfirmed {
     /// with an acceptance, or the view went out as a ride's answer. Until
     /// then ck-mc has only handed it over, and the call may have failed.
     /// The runner keeps an accepted view pending until its next step and
-    /// reports the view before it as applied until then, so every request it
-    /// renders after accepting carries this view; a reading under an older
-    /// view measured a request sent before the runner took it
-    /// ([`Session::judge_reading`]).
+    /// reports the view before it as applied until then. A view it accepts
+    /// between a tool's answer and the request that follows takes force one
+    /// request late, so at most one request it renders after accepting goes
+    /// out without this view, and every later one carries it; a reading
+    /// under an older view measured a request sent before the runner took
+    /// it ([`Session::judge_reading`]).
     ///
     /// Not saved. After ck-mc restarts it can't tell whether the runner
     /// still holds the view (it may never have received a ride's answer
@@ -366,15 +368,18 @@ pub struct Unconfirmed {
     /// Setup offers it again and the runner's answer says it holds it.
     #[serde(skip)]
     accepted: bool,
-    /// The one reading under an older view that this accepted view excused:
-    /// its prompt size and the view it named. A session has one step in
-    /// flight at a time, and an accepted view takes force at the runner's
-    /// next step, so at most one measured request can follow acceptance
-    /// under an older view: the one already in flight. A second, different
-    /// one means the runner rendered a request after accepting the view
+    /// The readings under an older view that this accepted view excused, at
+    /// most two different ones: each one's prompt size and the view it
+    /// named. Two measured requests can follow acceptance
+    /// under an older view: the one already in flight when the runner
+    /// accepted (a session has one step in flight at a time), and the one
+    /// request a runner may render before it takes a view it accepted
+    /// between a tool's answer and that request. A runner takes an accepted
+    /// view one request late at most, never two, so a third, different
+    /// reading means the runner rendered a request after accepting the view
     /// without it ([`Session::judge_reading`]). Not saved, like `accepted`.
     #[serde(skip)]
-    excused: Option<(u64, u64)>,
+    excused: Vec<(u64, u64)>,
 }
 
 /// The state a view's acceptance replaced.
@@ -1043,7 +1048,7 @@ impl Session {
         // `Unconfirmed::accepted`).
         for pending in &mut self.unconfirmed {
             pending.accepted = false;
-            pending.excused = None;
+            pending.excused.clear();
         }
         // Like refused_once, the retry guard survives in an unconfirmed
         // view's rollback snapshot, not in a separate store column.
@@ -1656,11 +1661,15 @@ impl Session {
     /// A reading older than a view the runner accepted from ck-mc but does
     /// not apply yet is stale for the same reason ([`Session::newest_accepted`]):
     /// the runner keeps an accepted view pending until its next step and
-    /// reports the view before it as applied until then, but every request it
-    /// renders from then on carries the accepted view. A session has one step
-    /// in flight at a time, so only the request already in flight when the
-    /// runner accepted can be measured under the older view: the accepted
-    /// views excuse one such measurement, and its repeats. A second,
+    /// reports the view before it as applied until then, and renders every
+    /// request from then on with the accepted view but at most one. Two
+    /// requests can be measured under the older view after acceptance: the
+    /// one already in flight when the runner accepted (a session has one
+    /// step in flight at a time), and, when the runner accepted between a
+    /// tool's answer and the request that follows it, that request, which a
+    /// runner may render before it takes the view. A runner takes an
+    /// accepted view one request late at most, never two, so the accepted
+    /// views excuse two such measurements, and their repeats. A third,
     /// different one shows the runner rendered a later request without the
     /// view it accepted. ck-mc then stops counting the accepted views, warns
     /// once, and judges this reading and later ones by the applied view
@@ -1737,24 +1746,32 @@ impl Session {
     }
 
     /// Excuse a reading under an older view than the newest accepted one
-    /// (`accepted`) as the request in flight when the runner accepted: the
+    /// (`accepted`) as one of the requests the runner can still measure
+    /// under the older view after accepting ([`Unconfirmed::excused`]): the
     /// accepted views record it, and a repeat of it is excused again. A
-    /// different reading after one was excused stops every accepted view
-    /// counting, and returns false.
+    /// different reading once an accepted view has excused two stops every
+    /// accepted view counting, and returns false.
     fn excuse_in_flight(&mut self, tokens: u64, view: u64, accepted: u64) -> bool {
         let reading = (tokens, view);
         let earlier = self
             .unconfirmed
             .iter()
             .filter(|pending| pending.accepted)
-            .find_map(|pending| pending.excused.filter(|excused| *excused != reading));
-        let Some((earlier_tokens, earlier_view)) = earlier else {
+            .find_map(|pending| match pending.excused[..] {
+                [first, second] if !pending.excused.contains(&reading) => Some((first, second)),
+                _ => None,
+            });
+        let Some(((first_tokens, first_view), (second_tokens, second_view))) = earlier else {
+            // No accepted view holds two other readings, so each has room
+            // for this one unless it already holds it.
             for pending in self
                 .unconfirmed
                 .iter_mut()
                 .filter(|pending| pending.accepted)
             {
-                pending.excused = Some(reading);
+                if !pending.excused.contains(&reading) {
+                    pending.excused.push(reading);
+                }
             }
             return true;
         };
@@ -1762,7 +1779,7 @@ impl Session {
             pending.accepted = false;
         }
         tracing::warn!(
-            "ck-mc: session {}: runner accepted view {accepted} but measured a later request without it ({tokens} tokens from view {view}, after {earlier_tokens} tokens from view {earlier_view}); counting readings against the applied view {}",
+            "ck-mc: session {}: runner accepted view {accepted} but measured a later request without it ({tokens} tokens from view {view}, after {first_tokens} tokens from view {first_view} and {second_tokens} tokens from view {second_view}); counting readings against the applied view {}",
             self.key.session,
             self.newest_applied
         );
@@ -3234,15 +3251,25 @@ impl Session {
                 })
             }
             "ctx_search" => {
-                let db = self
-                    .db
-                    .as_ref()
-                    .ok_or("ctx_search needs the context store")?;
+                let db = Arc::clone(
+                    self.db
+                        .as_ref()
+                        .ok_or("ctx_search needs the context store")?,
+                );
                 let empty = std::collections::BTreeMap::new();
-                let mut scope = self.search_scope(settings, &empty);
-                if let Some(answer) =
-                    db.with_connection(|conn| crate::search::by_ids(conn, &scope, input))
-                {
+                let scope = Arc::new(crate::search::OwnedScope::of(
+                    &self.search_scope(settings, &empty),
+                ));
+                let by_ids = {
+                    let (db, scope, input) = (Arc::clone(&db), Arc::clone(&scope), input.clone());
+                    on_blocking_thread(move || {
+                        db.with_search_reader(|conn, _| {
+                            crate::search::by_ids(conn, &scope.scope(None), &input)
+                        })
+                    })
+                    .await
+                };
+                if let Some(answer) = by_ids {
                     return answer;
                 }
                 // Embedded once, before the store is touched, so the request
@@ -3263,14 +3290,7 @@ impl Session {
                     }
                     _ => None,
                 };
-                scope.semantic = embedded.as_ref().map(|(vector, model_id, chunk_model_id)| {
-                    crate::search::sources::Semantic {
-                        vector,
-                        model_id,
-                        chunk_model_id,
-                    }
-                });
-                self.search_reranked(client, settings, db, &scope, input)
+                self.search_reranked(client, settings, db, scope, embedded, input)
                     .await
             }
             "ctx_note" => {
@@ -3322,8 +3342,9 @@ impl Session {
         &self,
         client: &C,
         settings: &Settings,
-        db: &ContextDb,
-        scope: &crate::search::Scope<'_>,
+        db: Arc<ContextDb>,
+        scope: Arc<crate::search::OwnedScope>,
+        embedded: Option<(Vec<f32>, String, String)>,
         input: &Value,
     ) -> Result<String, String> {
         use crate::search::rerank::{self, Reranker, Skipped};
@@ -3353,8 +3374,16 @@ impl Session {
             (Reranker::Remote(remote), _) if prose => Some(remote.top_n),
             _ => None,
         };
-        let mut prepared =
-            db.with_connection(|conn| crate::search::prepare(conn, scope, input, pool))?;
+        let mut prepared = {
+            let (db, scope, input) = (Arc::clone(&db), Arc::clone(&scope), input.clone());
+            on_blocking_thread(move || {
+                db.with_search_reader(|conn, coverage| {
+                    let scope = scope.scope(embedded.as_ref().map(semantic));
+                    crate::search::prepare(conn, coverage, &scope, &input, pool)
+                })
+            })
+            .await?
+        };
         let mut skipped_note = None;
         if !prepared.candidates().is_empty() {
             let texts = prepared.candidates().to_vec();
@@ -3377,6 +3406,12 @@ impl Session {
                 Ok(scores) => prepared.reorder(&scores),
                 Err(Skipped(reason)) => {
                     rerank::log_fallback(&reason);
+                    // A Synapse that refused the scores is asked for its
+                    // model again on the next search, in case the pin is
+                    // what it refused.
+                    if settings.rerank == Reranker::Synapse {
+                        rerank::forget_synapse_pin();
+                    }
                     // Only a hosted reranker's skip is shown to the model, as
                     // the plugin does.
                     if matches!(settings.rerank, Reranker::Remote(_)) {
@@ -3385,7 +3420,10 @@ impl Session {
                 }
             }
         }
-        let mut answer = db.with_connection(|conn| crate::search::finish(conn, scope, prepared));
+        let mut answer = on_blocking_thread(move || {
+            db.with_connection(|conn| crate::search::finish(conn, &scope.scope(None), prepared))
+        })
+        .await;
         if let Some(line) = skipped_note {
             answer.push('\n');
             answer.push_str(&line);
@@ -3489,40 +3527,15 @@ impl Session {
                 None => None,
             };
             let empty = std::collections::BTreeMap::new();
-            let scope = self.search_scope(settings, &empty);
-            let cutoff = scope.cutoff;
-            let visible_messages = scope.visible_messages;
-            let seen = scope.seen.clone();
-            let key = self.key.clone();
-            let project = self.project.clone();
-            let (memory_enabled, git_commits_enabled, git_repository) = (
-                scope.memory_enabled,
-                scope.git_commits_enabled,
-                scope.git_repository,
-            );
+            let scope = crate::search::OwnedScope::of(&self.search_scope(settings, &empty));
             let (db, prompt) = (db.clone(), prompt.clone());
-            // SQLite and its connection mutex are synchronous. Keep both off
+            // SQLite and its connections are synchronous. Keep both off
             // the session worker so the deadline can expire during the read.
             tokio::task::spawn_blocking(move || {
-                let scope = crate::search::Scope {
-                    harness: &key.harness,
-                    session: &key.session,
-                    project: project.as_ref().map(|project| project.id.as_str()),
-                    cutoff,
-                    visible_messages,
-                    seen: &seen,
-                    memory_enabled,
-                    git_commits_enabled,
-                    git_repository,
-                    semantic: embedded.as_ref().map(|(vector, model_id, chunk_model_id)| {
-                        crate::search::sources::Semantic {
-                            vector,
-                            model_id,
-                            chunk_model_id,
-                        }
-                    }),
-                };
-                db.with_connection(|conn| crate::search::auto_hits(conn, &scope, &prompt))
+                db.with_search_reader(|conn, coverage| {
+                    let scope = scope.scope(embedded.as_ref().map(semantic));
+                    crate::search::auto_hits(conn, coverage, &scope, &prompt)
+                })
             })
             .await
             .unwrap_or_default()
@@ -4914,7 +4927,7 @@ impl Session {
         // the view, and its readings are judged afresh from here.
         for pending in &mut self.unconfirmed {
             pending.accepted = false;
-            pending.excused = None;
+            pending.excused.clear();
         }
         let Some(view) = self.unconfirmed.last().map(|pending| pending.view.clone()) else {
             return;
@@ -5096,7 +5109,7 @@ impl Session {
             before,
             built_through: self.index.cursor().map(|cursor| cursor.ordinal),
             accepted: false,
-            excused: None,
+            excused: Vec::new(),
         });
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {
@@ -5720,6 +5733,32 @@ impl Session {
             }
         }
         self.build(settings, None, false, None)
+    }
+}
+
+/// The borrowed form of a query embedding and the model ids it is compared
+/// under.
+fn semantic(
+    (vector, model_id, chunk_model_id): &(Vec<f32>, String, String),
+) -> crate::search::sources::Semantic<'_> {
+    crate::search::sources::Semantic {
+        vector,
+        model_id,
+        chunk_model_id,
+    }
+}
+
+/// Run synchronous store work on Tokio's blocking pool and wait for it.
+/// SQLite and the connection locks block, so a call waiting for a
+/// connection on the session worker would hold one of the runtime's worker
+/// threads, and every task scheduled on it would wait too. The session's
+/// worker still waits for the answer, so its jobs keep their order. A panic
+/// in `work` carries on here, as it would have inline.
+async fn on_blocking_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => panic!("ck-mc: a store read was cancelled: {error}"),
     }
 }
 

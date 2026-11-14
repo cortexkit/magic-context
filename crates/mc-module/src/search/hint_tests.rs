@@ -119,8 +119,9 @@ fn memory_hint_scores_use_full_text_but_search_output_keeps_the_preview() {
         };
         let query = "historian cache wiring";
         let input = serde_json::json!({"query": query, "sources": ["memory"]});
-        let explicit = prepare(&conn, &scope, &input, None).unwrap();
-        let hints = auto_hits(&conn, &scope, query);
+        let mut coverage = messages::Coverage::default();
+        let explicit = prepare(&conn, &mut coverage, &scope, &input, None).unwrap();
+        let hints = auto_hits(&conn, &mut coverage, &scope, query);
         assert_eq!(explicit.hits.len(), 2);
         assert_eq!(hints.len(), 2);
         let mut long_hit = None;

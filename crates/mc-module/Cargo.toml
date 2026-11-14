@@ -57,7 +57,7 @@ cortexkit-role-user-commands = "=0.1.2"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
 # A session's memory context comes from Entorhinal, in these
 # published request and reply types.
-cortexkit-agent-identity = "=0.1.2"
+cortexkit-agent-identity = "=0.1.3"
 cortexkit-project-identity = "=0.1.4"
 # Profile versions compare as semantic versions.
 semver = "1"

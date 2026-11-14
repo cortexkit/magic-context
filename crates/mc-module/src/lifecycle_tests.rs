@@ -99,11 +99,17 @@ mod user_commands_tests;
 #[path = "tool_output_tests.rs"]
 mod tool_output_tests;
 
+#[path = "search_reader_tests.rs"]
+mod search_reader_tests;
+
 #[path = "render_failed_tests.rs"]
 mod render_failed_tests;
 
 #[path = "render_failed_review_tests.rs"]
 mod render_failed_review_tests;
+
+#[path = "render_failed_contract_tests.rs"]
+mod render_failed_contract_tests;
 
 #[derive(Default)]
 struct Client {

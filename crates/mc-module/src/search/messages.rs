@@ -54,6 +54,10 @@ fn content_of(entry: &Entry) -> String {
 }
 
 #[cfg(test)]
+#[path = "messages_tests.rs"]
+mod reach_tests;
+
+#[cfg(test)]
 mod attribution_tests {
     #[test]
     fn host_parts_search_reconcile_refreshes_unchanged_digest() {
@@ -389,36 +393,207 @@ impl DateRange {
     }
 }
 
-/// Run one sanitized FTS query over the session's indexed messages up to
-/// `cutoff`, best first. The cutoff applies before the limit, so newer
-/// matches never crowd out older ones.
-fn query_rows(
-    conn: &Connection,
-    session: &str,
-    fts: &str,
-    limit: usize,
-    cutoff: i64,
-    dates: Option<DateRange>,
-    visible: Option<&BTreeSet<i64>>,
-) -> Vec<Row> {
-    query_rows_page(conn, session, fts, (limit, 0), cutoff, dates, visible)
+/// How the message lane reaches one session's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// The session has nothing indexed: no row in `message_fts_rowid_map`
+    /// and an index watermark of 0. Its reads would find nothing, so no
+    /// full-text read runs.
+    Nothing,
+    /// Every full-text row of the session has its rowid in the rowid map,
+    /// so matches are screened by the session's mapped rowids before any
+    /// row's stored content is read.
+    Mapped,
+    /// Some full-text rows of the session may be missing from the map (rows
+    /// written before the map existed): every match in the store is checked
+    /// by its session id, which is read from the row's stored content.
+    Unmapped,
 }
 
-fn query_rows_page(
+/// Keeps a match only when the session's rowid map holds its rowid, before
+/// the `session_id` column is read: that column is `UNINDEXED`, so reading
+/// it loads the whole stored row, and an ORed query matches about half the
+/// store. The unary `+` keeps SQLite from running the full-text query again
+/// for each mapped rowid. The session-id test after it stays, so a map row
+/// naming the wrong session can never let another session's message
+/// through. `?1` is the session in every statement that uses it.
+const SESSION_SCREEN: &str = "+message_history_fts.rowid IN (
+    SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id = ?1) AND";
+
+/// Above this many unmapped full-text rows the coverage proof gives up and
+/// every session keeps the unscreened query. Finding a row's session reads
+/// its stored content, and a store whose rows the plugin has not yet mapped
+/// can have millions of them.
+const UNMAPPED_LIMIT: usize = 10_000;
+
+/// Which sessions have full-text rows missing from `message_fts_rowid_map`,
+/// as last proven on one connection. This is the TypeScript plugin's
+/// coverage check (`message-fts-session-filter.ts`): a session is screened
+/// by its mapped rowids only when no physical row of the store whose rowid
+/// the map lacks belongs to it. The plugin finds those rows with SQL
+/// `EXCEPT`, which takes about two seconds on a store of two million
+/// messages; here the map's rowids are sorted and merged with the row-size
+/// table's rowids, which are already in order.
+///
+/// A proof is reused until the connection sees another connection's commit
+/// (`PRAGMA data_version`) or makes a change itself (`total_changes()`), and
+/// only on a read-only connection: a connection that writes could hold a
+/// change that a rollback undoes without moving either number. Ask it only
+/// inside a read transaction that has already read the store, so the proof
+/// and the reads it permits see the same snapshot.
+#[derive(Default)]
+pub struct Coverage {
+    proof: Option<Proof>,
+    scans: u64,
+}
+
+struct Proof {
+    /// `total_changes()` and `data_version` when the proof was made.
+    stamp: (i64, i64),
+    incomplete: Incomplete,
+}
+
+enum Incomplete {
+    Sessions(std::collections::HashSet<String>),
+    /// No proof for any session: too many unmapped rows, or the store could
+    /// not be read as expected (for example, without a row-size table).
+    All,
+}
+
+impl Coverage {
+    /// Whether every full-text row of `session` has its rowid in the map.
+    pub fn complete(&mut self, conn: &Connection, session: &str) -> bool {
+        let Ok(stamp) = conn.query_row(
+            "SELECT total_changes(), data_version FROM pragma_data_version",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        ) else {
+            return false;
+        };
+        let reusable = conn
+            .is_readonly(rusqlite::DatabaseName::Main)
+            .unwrap_or(false);
+        if !reusable || self.proof.as_ref().is_none_or(|proof| proof.stamp != stamp) {
+            self.scans += 1;
+            self.proof = Some(Proof {
+                stamp,
+                incomplete: unmapped_sessions(conn),
+            });
+        }
+        match self.proof.as_ref().map(|proof| &proof.incomplete) {
+            Some(Incomplete::Sessions(sessions)) => !sessions.contains(session),
+            _ => false,
+        }
+    }
+
+    /// How many times the store has been scanned for unmapped rows.
+    pub fn scans(&self) -> u64 {
+        self.scans
+    }
+}
+
+/// The sessions owning a full-text row whose rowid the map lacks.
+fn unmapped_sessions(conn: &Connection) -> Incomplete {
+    let scan = || -> rusqlite::Result<Incomplete> {
+        let mut mapped: Vec<i64> = conn
+            .prepare("SELECT fts_rowid FROM message_fts_rowid_map")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        mapped.sort_unstable();
+        let mut mapped = mapped.into_iter().peekable();
+        // FTS5 keeps one row-size entry per physical row, keyed by its rowid.
+        let mut statement =
+            conn.prepare("SELECT id FROM message_history_fts_docsize ORDER BY id")?;
+        let mut rows = statement.query([])?;
+        let mut missing = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            while mapped.next_if(|rowid| *rowid < id).is_some() {}
+            if mapped.peek() != Some(&id) {
+                if missing.len() == UNMAPPED_LIMIT {
+                    return Ok(Incomplete::All);
+                }
+                missing.push(id);
+            }
+        }
+        drop(rows);
+        let mut owner =
+            conn.prepare("SELECT session_id FROM message_history_fts WHERE rowid = ?1")?;
+        let mut sessions = std::collections::HashSet::new();
+        for id in missing {
+            let session: Option<rusqlite::types::Value> =
+                owner.query_row(params![id], |row| row.get(0)).optional()?;
+            // Searches bind the session as text, which never equals a stored
+            // value of another type.
+            if let Some(rusqlite::types::Value::Text(session)) = session {
+                sessions.insert(session);
+            }
+        }
+        Ok(Incomplete::Sessions(sessions))
+    };
+    scan().unwrap_or(Incomplete::All)
+}
+
+/// How the message lane reaches `session`'s rows. A dated read joins the
+/// rowid map anyway, so it only ever finds mapped rows and can always be
+/// screened, as the plugin does.
+pub fn reach(
     conn: &Connection,
+    coverage: &mut Coverage,
     session: &str,
-    fts: &str,
-    page: (usize, usize),
+    dates: Option<DateRange>,
+) -> Reach {
+    let mapped = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM message_fts_rowid_map WHERE session_id = ?1)",
+        params![session],
+        |row| row.get::<_, bool>(0),
+    );
+    match mapped {
+        // Every writer of the index maps each row it adds and raises the
+        // session's watermark in the same transaction.
+        Ok(false) if watermark(conn, session).is_ok_and(|mark| mark <= 0) => return Reach::Nothing,
+        Ok(_) => {}
+        Err(_) => return Reach::Unmapped,
+    }
+    if dates.is_some() || coverage.complete(conn, session) {
+        Reach::Mapped
+    } else {
+        Reach::Unmapped
+    }
+}
+
+/// The session and filters every full-text read of one search shares.
+#[derive(Clone, Copy)]
+struct Within<'a> {
+    session: &'a str,
+    /// The newest message number a read may return.
     cutoff: i64,
     dates: Option<DateRange>,
-    visible: Option<&BTreeSet<i64>>,
-) -> Vec<Row> {
-    if fts.is_empty() {
+    visible: Option<&'a BTreeSet<i64>>,
+    reach: Reach,
+}
+
+impl Within<'_> {
+    /// Whether a row a read returned may be shown: its number parsed and is
+    /// not past the cutoff.
+    fn admits(&self, row: &Row) -> bool {
+        row.number >= 0 && row.number <= self.cutoff
+    }
+}
+
+/// Run one sanitized FTS query over the session's indexed messages up to
+/// the cutoff, best first, and return the rows of `page` (a limit and an
+/// offset) before [`Within::admits`] drops any. The cutoff applies before
+/// the limit, so newer matches never crowd out older ones. Ties in rank
+/// and message number fall to the rowid, so a shorter page is always the
+/// start of a longer one.
+fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize)) -> Vec<Row> {
+    if fts.is_empty() || within.reach == Reach::Nothing {
         return Vec::new();
     }
     // The table also indexes `role`, so restrict matching to the content.
     let matching = format!("content : ({fts})");
-    let (join, date_filter) = match dates {
+    let (join, date_filter) = match within.dates {
         Some(_) => (
             "JOIN message_fts_rowid_map AS map ON map.session_id = message_history_fts.session_id
                 AND map.fts_rowid = message_history_fts.rowid",
@@ -426,14 +601,20 @@ fn query_rows_page(
         ),
         None => ("", ""),
     };
+    let screen = if within.reach == Reach::Mapped {
+        SESSION_SCREEN
+    } else {
+        ""
+    };
     let sql = format!(
         "SELECT message_history_fts.message_ordinal, message_history_fts.message_id,
                 message_history_fts.role, message_history_fts.content
            FROM message_history_fts {join}
-          WHERE message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
+          WHERE {screen} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
             AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?3 {date_filter}
             AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?7))
-          ORDER BY bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER) ASC
+          ORDER BY bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER) ASC,
+                   message_history_fts.rowid ASC
            LIMIT ?4 OFFSET ?8"
     );
     let read = |conn: &Connection| -> rusqlite::Result<Vec<Row>> {
@@ -452,30 +633,44 @@ fn query_rows_page(
                 content: row.get(3)?,
             })
         };
-        let visible = serde_json::to_string(&visible.cloned().unwrap_or_default())
+        let visible = serde_json::to_string(&within.visible.cloned().unwrap_or_default())
             .expect("ordinals serialize");
         let rows = statement
             .query_map(
                 params![
-                    session,
+                    within.session,
                     matching,
-                    cutoff,
+                    within.cutoff,
                     page.0 as i64,
-                    dates.map(|dates| dates.from),
-                    dates.map(|dates| dates.to),
+                    within.dates.map(|dates| dates.from),
+                    within.dates.map(|dates| dates.to),
                     visible,
                     page.1 as i64
                 ],
                 map,
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows
-            .into_iter()
-            .filter(|row| row.number >= 0 && row.number <= cutoff)
-            .collect())
+        Ok(rows)
     };
     // Malformed FTS syntax that survived quoting finds nothing.
     read(conn).unwrap_or_default()
+}
+
+fn query_rows_page(conn: &Connection, within: Within, fts: &str, page: (usize, usize)) -> Vec<Row> {
+    query_raw(conn, within, fts, page)
+        .into_iter()
+        .filter(|row| within.admits(row))
+        .collect()
+}
+
+/// The rows a read of at most `fetch` rows keeps, taken from the start of a
+/// longer read of the same query.
+fn window(raw: &[Row], fetch: usize, within: Within) -> Vec<Row> {
+    raw.iter()
+        .take(fetch)
+        .filter(|row| within.admits(row))
+        .cloned()
+        .collect()
 }
 
 /// App search includes visible messages as well as hidden history. Offset is
@@ -487,23 +682,22 @@ pub fn app_page(
     offset: usize,
     limit: usize,
 ) -> Vec<MessageHit> {
+    let within = Within {
+        session,
+        cutoff: i64::MAX,
+        dates: None,
+        visible: None,
+        reach: Reach::Unmapped,
+    };
     let base = sanitize_fts_query(text.trim());
-    let mut rows = query_rows_page(conn, session, &base, (limit, offset), i64::MAX, None, None);
+    let mut rows = query_rows_page(conn, within, &base, (limit, offset));
     let base_empty = if offset == 0 {
         rows.is_empty()
     } else {
-        query_rows_page(conn, session, &base, (1, 0), i64::MAX, None, None).is_empty()
+        query_rows_page(conn, within, &base, (1, 0)).is_empty()
     };
     if base_empty {
-        rows = query_rows_page(
-            conn,
-            session,
-            &relaxed_fts_query(text),
-            (limit, offset),
-            i64::MAX,
-            None,
-            None,
-        );
+        rows = query_rows_page(conn, within, &relaxed_fts_query(text), (limit, offset));
     }
     rows.iter()
         .enumerate()
@@ -511,39 +705,41 @@ pub fn app_page(
         .collect()
 }
 
-/// How many messages up to `cutoff` match `fts`, for one probe's weight.
-fn count_matches(
-    conn: &Connection,
-    session: &str,
-    fts: &str,
-    cutoff: i64,
-    dates: Option<DateRange>,
-    visible: Option<&BTreeSet<i64>>,
-) -> u64 {
-    if fts.is_empty() {
+/// How many messages up to the cutoff match `fts`, for one probe's weight.
+fn count_matches(conn: &Connection, within: Within, fts: &str) -> u64 {
+    if fts.is_empty() || within.reach == Reach::Nothing {
         return 0;
     }
     let matching = format!("content : ({fts})");
-    let visible =
-        serde_json::to_string(&visible.cloned().unwrap_or_default()).expect("ordinals serialize");
-    let result = match dates {
+    let visible = serde_json::to_string(&within.visible.cloned().unwrap_or_default())
+        .expect("ordinals serialize");
+    let screen = if within.reach == Reach::Mapped {
+        SESSION_SCREEN
+    } else {
+        ""
+    };
+    let result = match within.dates {
         Some(dates) => conn.query_row(
-            "SELECT COUNT(*) FROM message_history_fts
-               JOIN message_fts_rowid_map AS map ON map.session_id = message_history_fts.session_id
-                AND map.fts_rowid = message_history_fts.rowid
-              WHERE message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
-                AND map.message_time_ms BETWEEN ?3 AND ?4
-                AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?5
-                AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?6))",
-            params![session, matching, dates.from, dates.to, cutoff, visible],
+            &format!(
+                "SELECT COUNT(*) FROM message_history_fts
+                   JOIN message_fts_rowid_map AS map ON map.session_id = message_history_fts.session_id
+                    AND map.fts_rowid = message_history_fts.rowid
+                  WHERE {screen} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
+                    AND map.message_time_ms BETWEEN ?3 AND ?4
+                    AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?5
+                    AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?6))"
+            ),
+            params![within.session, matching, dates.from, dates.to, within.cutoff, visible],
             |row| row.get::<_, i64>(0),
         ),
         None => conn.query_row(
-            "SELECT COUNT(*) FROM message_history_fts
-              WHERE session_id = ?1 AND message_history_fts MATCH ?2
-                AND CAST(message_ordinal AS INTEGER) <= ?3
-                AND CAST(message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?4))",
-            params![session, matching, cutoff, visible],
+            &format!(
+                "SELECT COUNT(*) FROM message_history_fts
+                  WHERE {screen} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
+                    AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?3
+                    AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?4))"
+            ),
+            params![within.session, matching, within.cutoff, visible],
             |row| row.get::<_, i64>(0),
         ),
     };
@@ -559,10 +755,23 @@ pub fn count_live_matches(
     cutoff: i64,
     dates: Option<DateRange>,
     visible: Option<&BTreeSet<i64>>,
+    reach: Reach,
 ) -> u64 {
     let fts = sanitize_fts_query(query.trim());
-    let total = count_matches(conn, session, &fts, i64::MAX, dates, None);
-    total.saturating_sub(count_matches(conn, session, &fts, cutoff, dates, visible))
+    let eligible = Within {
+        session,
+        cutoff,
+        dates,
+        visible,
+        reach,
+    };
+    let everything = Within {
+        cutoff: i64::MAX,
+        visible: None,
+        ..eligible
+    };
+    let total = count_matches(conn, everything, &fts);
+    total.saturating_sub(count_matches(conn, eligible, &fts))
 }
 
 fn linear_decay(rank: usize, total: usize) -> f64 {
@@ -597,44 +806,81 @@ pub fn search(
     wanted: &Query,
     cutoff: i64,
     relaxed: bool,
+    reach: Reach,
 ) -> Vec<MessageHit> {
+    search_at(
+        conn,
+        session,
+        wanted,
+        &[wanted.limit],
+        cutoff,
+        relaxed,
+        reach,
+    )
+    .pop()
+    .unwrap_or_default()
+}
+
+/// [`search`] at several depths from one set of reads: for each of
+/// `limits`, in order, the hits [`search`] returns with `wanted.limit` set
+/// to it. Each query is read once, deep enough for the largest limit, and
+/// each depth uses only the rows a read of its own size returns, so every
+/// list equals a separate search at that limit.
+pub fn search_at(
+    conn: &Connection,
+    session: &str,
+    wanted: &Query,
+    limits: &[usize],
+    cutoff: i64,
+    relaxed: bool,
+    reach: Reach,
+) -> Vec<Vec<MessageHit>> {
     let Query {
         text: query,
-        limit,
         probes,
         dates,
         visible,
+        ..
     } = *wanted;
-    let fetch = limit * 3;
+    if reach == Reach::Nothing {
+        return limits.iter().map(|_| Vec::new()).collect();
+    }
+    let within = Within {
+        session,
+        cutoff,
+        dates,
+        visible,
+        reach,
+    };
+    // A search at `limit` reads up to three times that many rows per query.
+    let fetch = |limit: usize| limit * 3;
+    let deepest = limits.iter().copied().map(fetch).max().unwrap_or(0);
+    let read = |fts: &str| query_raw(conn, within, fts, (deepest, 0));
     let base = sanitize_fts_query(query.trim());
     if probes.is_empty() {
-        let mut rows = query_rows(conn, session, &base, fetch, cutoff, dates, visible);
-        if rows.is_empty() && relaxed {
-            rows = query_rows(
-                conn,
-                session,
-                &relaxed_fts_query(query),
-                fetch,
-                cutoff,
-                dates,
-                visible,
-            );
-        }
-        rows.truncate(limit);
-        let total = rows.len();
-        return rows
+        let strict = read(&base);
+        let mut loose: Option<Vec<Row>> = None;
+        return limits
             .iter()
-            .enumerate()
-            .map(|(rank, row)| hit(row, query, linear_decay(rank, total)))
+            .map(|&limit| {
+                let mut rows = window(&strict, fetch(limit), within);
+                if rows.is_empty() && relaxed {
+                    let loose = loose.get_or_insert_with(|| read(&relaxed_fts_query(query)));
+                    rows = window(loose, fetch(limit), within);
+                }
+                rows.truncate(limit);
+                let total = rows.len();
+                rows.iter()
+                    .enumerate()
+                    .map(|(rank, row)| hit(row, query, linear_decay(rank, total)))
+                    .collect()
+            })
             .collect();
     }
     let corpus = watermark(conn, session).unwrap_or(0).min(cutoff.max(0)) as f64;
     let mut lists: Vec<(Vec<Row>, f64)> = Vec::new();
     if !base.is_empty() {
-        lists.push((
-            query_rows(conn, session, &base, fetch, cutoff, dates, visible),
-            1.0,
-        ));
+        lists.push((read(&base), 1.0));
     }
     let mut weights: HashMap<&str, f64> = HashMap::new();
     for probe in probes {
@@ -642,52 +888,56 @@ pub fn search(
         if fts.is_empty() {
             continue;
         }
-        let df = count_matches(conn, session, &fts, cutoff, dates, visible) as f64;
+        let df = count_matches(conn, within, &fts) as f64;
         let weight = if corpus <= 0.0 || df <= 0.0 {
             1.0
         } else {
             1.0 / (1.0 + IDF_FALLOFF * df / corpus)
         };
         weights.insert(probe.as_str(), weight);
-        lists.push((
-            query_rows(conn, session, &fts, fetch, cutoff, dates, visible),
-            weight,
-        ));
+        lists.push((read(&fts), weight));
     }
-    let mut fused: Vec<(Row, f64)> = Vec::new();
-    for (rows, weight) in &lists {
-        for (rank, row) in rows.iter().take(fetch).enumerate() {
-            let contribution = weight / (RRF_K + rank as f64);
-            match fused
-                .iter_mut()
-                .find(|(existing, _)| existing.message_id == row.message_id)
-            {
-                Some((_, score)) => *score += contribution,
-                None => fused.push((row.clone(), contribution)),
-            }
-        }
-    }
-    for (row, score) in &mut fused {
-        let best = probes
-            .iter()
-            .filter(|probe| contains_probe_verbatim(&row.content, std::slice::from_ref(probe)))
-            .map(|probe| weights.get(probe.as_str()).copied().unwrap_or(0.0))
-            .fold(0.0, f64::max);
-        if best > 0.0 {
-            *score += best * VERBATIM_RANK_BONUS;
-        }
-    }
-    fused.sort_by(|(left, left_score), (right, right_score)| {
-        right_score
-            .partial_cmp(left_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(left.number.cmp(&right.number))
-    });
-    fused.truncate(limit);
-    let total = fused.len();
-    fused
+    limits
         .iter()
-        .enumerate()
-        .map(|(rank, (row, _))| hit(row, query, linear_decay(rank, total)))
+        .map(|&limit| {
+            let mut fused: Vec<(Row, f64)> = Vec::new();
+            for (raw, weight) in &lists {
+                for (rank, row) in window(raw, fetch(limit), within).iter().enumerate() {
+                    let contribution = weight / (RRF_K + rank as f64);
+                    match fused
+                        .iter_mut()
+                        .find(|(existing, _)| existing.message_id == row.message_id)
+                    {
+                        Some((_, score)) => *score += contribution,
+                        None => fused.push((row.clone(), contribution)),
+                    }
+                }
+            }
+            for (row, score) in &mut fused {
+                let best = probes
+                    .iter()
+                    .filter(|probe| {
+                        contains_probe_verbatim(&row.content, std::slice::from_ref(probe))
+                    })
+                    .map(|probe| weights.get(probe.as_str()).copied().unwrap_or(0.0))
+                    .fold(0.0, f64::max);
+                if best > 0.0 {
+                    *score += best * VERBATIM_RANK_BONUS;
+                }
+            }
+            fused.sort_by(|(left, left_score), (right, right_score)| {
+                right_score
+                    .partial_cmp(left_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(left.number.cmp(&right.number))
+            });
+            fused.truncate(limit);
+            let total = fused.len();
+            fused
+                .iter()
+                .enumerate()
+                .map(|(rank, (row, _))| hit(row, query, linear_decay(rank, total)))
+                .collect()
+        })
         .collect()
 }
