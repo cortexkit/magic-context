@@ -10,9 +10,13 @@
 //! category order. Each category is split into parts of at most
 //! [`PART_MEMORIES`] memories or about [`PART_TOKENS`] tokens of memory text,
 //! and each part is one message. A part also shows the project documents
-//! every session gets, the project memories the head shows every session,
-//! and the memories of the same category outside the part whose text is
-//! close to one inside it, so the model can find duplicates of all three.
+//! every session gets, the project memories the head shows every session
+//! (with the memories of the project's workspace it shows, when the
+//! workspace holds two or more projects), and the memories of the same
+//! category outside the part whose text is close to one inside it, so the
+//! model can find duplicates of all three. A project memory that repeats a
+//! workspace memory may be archived as its duplicate; the workspace memory
+//! itself is never changed here.
 //!
 //! The model proposes and the batch decides. Each change is checked on its
 //! own and dropped with its reason when a check fails; the others still
@@ -27,6 +31,10 @@
 //! applied: each applied part moves the schedule's `watermark_json` to the
 //! part after it, and the next run resumes there.
 //!
+//! The same checks and writes curate the memories a workspace shares
+//! ([`super::curate_workspace`]): a [`Scope`] names whose memories a batch
+//! reads and changes, and everything else is shared.
+//!
 //! Ported from the 0.49.x Rust module kept for reference in `crates_old/`
 //! (`mc-module/src/dream_tasks/curate.rs` and the merge in
 //! `mc-module/src/memory_actions.rs`), where curate changed memories through
@@ -40,6 +48,7 @@ use serde_json::{json, Value};
 
 use crate::count::Counter;
 use crate::dreamer::run::{TaskInput, TaskReply};
+use crate::dreamer::store::OwnerKey;
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
 use crate::memory_levels::{created, CreateKind, NewRow, Placer};
 use crate::memory_profile::{Profile, FRAMES};
@@ -54,8 +63,6 @@ use crate::summary::two_pass::gates::dropped_token;
 pub(crate) const KIND: &str = "curate";
 /// Magic Context's frame that the task's message fills.
 pub(crate) const INPUT_FRAME: &str = "dreamer/curate.input";
-/// Who the undo history names as the decider.
-const WRITER: &str = "dreamer:curate";
 /// At most this many memories go in one part.
 pub(crate) const PART_MEMORIES: usize = 60;
 /// A part holds about this many tokens of memory text at most. A memory
@@ -72,6 +79,75 @@ const SIMILAR_JACCARD: f64 = 0.6;
 const MIN_QUOTE_CHARS: usize = 20;
 /// The reasons an archive may give.
 const ARCHIVE_REASONS: [&str; 3] = ["duplicate", "one-off", "lesson"];
+
+/// Whose memories one curate run reads and changes: one project's, or the
+/// memories a workspace shares. The two tasks differ only here; every check
+/// and write is the same.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Scope {
+    /// The level the memories are kept at: `project` or `workspace`.
+    pub level: &'static str,
+    /// The project's or the workspace's id, as the memories name their
+    /// owner.
+    pub owner: String,
+    /// The task kind, which names the run's decisions, its journal rows and
+    /// the undo history's decider.
+    pub kind: &'static str,
+    /// Magic Context's frame the task's message fills.
+    pub frame: &'static str,
+}
+
+impl Scope {
+    /// A project's memories.
+    pub(crate) fn project(id: &str) -> Self {
+        Self {
+            level: "project",
+            owner: id.to_owned(),
+            kind: KIND,
+            frame: INPUT_FRAME,
+        }
+    }
+
+    /// The memories a workspace shares.
+    pub(crate) fn workspace(id: &str) -> Self {
+        Self {
+            level: "workspace",
+            owner: id.to_owned(),
+            kind: super::curate_workspace::KIND,
+            frame: super::curate_workspace::INPUT_FRAME,
+        }
+    }
+
+    /// The key of the owner's schedule and lock.
+    pub(crate) fn key(&self) -> OwnerKey {
+        OwnerKey {
+            level: self.level.to_owned(),
+            owner_id: self.owner.clone(),
+        }
+    }
+
+    /// Whether `row` is kept at this level by this owner.
+    fn owns(&self, row: &MemoryRow) -> bool {
+        row.level == self.level && row.owner_id == self.owner
+    }
+
+    /// Who the undo history names as the decider.
+    fn writer(&self) -> String {
+        format!("dreamer:{}", self.kind)
+    }
+
+    /// The journal's name for `operation`: `curate_merge`,
+    /// `curate_workspace_merge`.
+    fn journal_operation(&self, operation: &str) -> String {
+        format!("{}_{operation}", self.kind.replace('-', "_"))
+    }
+
+    /// Only a project's documents are shown to every session, so only a
+    /// project's curate can archive a memory as repeating them.
+    fn has_documents(&self) -> bool {
+        self.level == "project"
+    }
+}
 
 /// One category the task curates: its profile id and the tag its
 /// definition names it by in the prompts.
@@ -129,22 +205,34 @@ pub(crate) struct Memory {
 }
 
 /// The live memories `project` keeps in `category` at `now`, by id.
+#[cfg(test)]
 pub(crate) fn live_memories(
     conn: &Connection,
     project: &str,
     category: &str,
     now: i64,
 ) -> rusqlite::Result<Vec<Memory>> {
+    pool(conn, &Scope::project(project), category, now)
+}
+
+/// The live memories `scope`'s owner keeps in `category` at `now`, by id:
+/// active or permanent, not replaced by another memory, and not expired.
+pub(crate) fn pool(
+    conn: &Connection,
+    scope: &Scope,
+    category: &str,
+    now: i64,
+) -> rusqlite::Result<Vec<Memory>> {
     conn.prepare(&format!(
         "SELECT m.id, m.content, m.revision, {PROTECTED}
            FROM memories m
-          WHERE m.level = 'project' AND m.owner_id = ?1 AND m.category = ?2
+          WHERE m.level = ?1 AND m.owner_id = ?2 AND m.category = ?3
             AND COALESCE(m.status, 'active') IN ('active', 'permanent')
             AND m.superseded_by_memory_id IS NULL
-            AND (m.expires_at IS NULL OR m.expires_at > ?3)
+            AND (m.expires_at IS NULL OR m.expires_at > ?4)
           ORDER BY m.id"
     ))?
-    .query_map(params![project, category, now], |row| {
+    .query_map(params![scope.level, scope.owner, category, now], |row| {
         Ok(Memory {
             id: row.get(0)?,
             content: row.get(1)?,
@@ -155,29 +243,65 @@ pub(crate) fn live_memories(
     .collect()
 }
 
-/// A memory every session of the project already sees.
+/// A memory every session of the owner already sees.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Shown {
     pub id: i64,
     /// The tag of its category, as the prompts name categories.
     pub tag: String,
     pub content: String,
+    /// Its level and owner when the head chose it. A duplicate may name it
+    /// only while it is still a live memory there.
+    pub level: String,
+    pub owner: String,
 }
 
-/// The project memories the history head shows every session of `project`
-/// at `now`: the head's own choice ([`crate::head_memories::choose`]) among
-/// the project's and the person's live memories, at the default memory and
-/// profile budgets (a run has no session whose settings it could read), and
-/// of that choice, the project's rows. Listed in the profile's category
-/// order, then by id.
+/// The memories the history head shows every session of `project` at
+/// `now`, and of those, the project's rows and the rows of its workspace.
+/// `workspace` is the project's workspace when it holds two or more
+/// projects, and `None` otherwise: the head of a project in no such
+/// workspace shows no workspace memories.
 pub(crate) fn shown_memories(
     conn: &Connection,
     project: &str,
+    workspace: Option<&str>,
     profile: &Profile,
     now: i64,
 ) -> rusqlite::Result<Vec<Shown>> {
+    let rows = crate::head_memories::read_rows(conn, Some(project), workspace, now)?;
+    Ok(head_choice(
+        rows,
+        |row| row.level == "project" || row.level == "workspace",
+        profile,
+        now,
+    ))
+}
+
+/// The person's own memories the history head shows every session of
+/// `workspace` at `now`. The head chooses among the person's memories, the
+/// session's project's and its workspace's; a workspace run has no project,
+/// so the choice here is made among the person's and the workspace's.
+pub(crate) fn shown_global(
+    conn: &Connection,
+    workspace: &str,
+    profile: &Profile,
+    now: i64,
+) -> rusqlite::Result<Vec<Shown>> {
+    let rows = crate::head_memories::read_rows(conn, None, Some(workspace), now)?;
+    Ok(head_choice(rows, |row| row.level == "global", profile, now))
+}
+
+/// The head's own choice ([`crate::head_memories::choose`]) among `rows` at
+/// `now`, at the default memory and profile budgets (a run has no session
+/// whose settings it could read), and of that choice, the rows `keep`
+/// accepts. Listed in the profile's category order, then by id.
+fn head_choice(
+    rows: Vec<crate::head_memories::Row>,
+    keep: impl Fn(&crate::head_memories::Row) -> bool,
+    profile: &Profile,
+    now: i64,
+) -> Vec<Shown> {
     let settings = crate::pass::Settings::default();
-    let rows = crate::head_memories::read_rows(conn, Some(project), None, now)?;
     let chosen: HashSet<i64> = crate::head_memories::choose(
         &rows,
         &crate::head_memories::decay_classes(profile),
@@ -207,7 +331,7 @@ pub(crate) fn shown_memories(
         .collect();
     let mut shown: Vec<(i64, Shown)> = rows
         .into_iter()
-        .filter(|row| row.level == "project" && chosen.contains(&row.id))
+        .filter(|row| keep(row) && chosen.contains(&row.id))
         .map(|row| {
             let (rank, tag) = order
                 .get(&row.category)
@@ -219,12 +343,14 @@ pub(crate) fn shown_memories(
                     id: row.id,
                     tag,
                     content: row.content,
+                    level: row.level,
+                    owner: row.owner,
                 },
             )
         })
         .collect();
     shown.sort_by_key(|(rank, memory)| (*rank, memory.id));
-    Ok(shown.into_iter().map(|(_, memory)| memory).collect())
+    shown.into_iter().map(|(_, memory)| memory).collect()
 }
 
 /// The project documents block the head shows every session of the
@@ -323,24 +449,39 @@ pub(crate) fn similar<'a>(part: &[Memory], pool: &'a [Memory]) -> Vec<&'a Memory
     found
 }
 
-/// The line of the input frame right after the line `open`: a block's
+/// The line of input frame `frame` right after the line `open`: a block's
 /// standing instruction.
-fn frame_line_after(open: &str) -> &'static str {
-    let (_, frame) = FRAMES
+fn frame_line_after(frame: &str, open: &str) -> &'static str {
+    let (_, text) = FRAMES
         .iter()
-        .find(|(name, _)| *name == INPUT_FRAME)
-        .expect("the curate input frame is bundled");
-    frame
-        .lines()
+        .find(|(name, _)| *name == frame)
+        .expect("the curate input frames are bundled");
+    text.lines()
         .skip_while(|line| *line != open)
         .nth(1)
         .unwrap_or_default()
 }
 
-/// The text that fills the task's input frame, in the frame's own layout: the
-/// project documents, the memories every session sees, the similar
-/// memories, then the part's memories. A block with no lines is left out.
+/// The text that fills the project task's input frame, in the frame's own
+/// layout: the project documents, the memories every session sees, the
+/// similar memories, then the part's memories. A block with no lines is
+/// left out.
+#[cfg(test)]
 pub(crate) fn input(
+    docs: &str,
+    shown: &[Shown],
+    similar: &[&Memory],
+    part: (usize, usize),
+    memories: &[Memory],
+) -> String {
+    input_in(INPUT_FRAME, docs, shown, similar, part, memories)
+}
+
+/// [`input`] for input frame `frame`, whose blocks' standing instructions
+/// it copies. The workspace's frame has no documents block, and its
+/// `docs` are always empty.
+pub(crate) fn input_in(
+    frame: &str,
     docs: &str,
     shown: &[Shown],
     similar: &[&Memory],
@@ -358,7 +499,7 @@ pub(crate) fn input(
             .collect();
         blocks.push(format!(
             "<always-shown>\n{}\n{}\n</always-shown>",
-            frame_line_after("<always-shown>"),
+            frame_line_after(frame, "<always-shown>"),
             lines.join("\n")
         ));
     }
@@ -369,7 +510,7 @@ pub(crate) fn input(
             .collect();
         blocks.push(format!(
             "<similar>\n{}\n{}\n</similar>",
-            frame_line_after("<similar>"),
+            frame_line_after(frame, "<similar>"),
             lines.join("\n")
         ));
     }
@@ -676,15 +817,15 @@ impl Resume {
     }
 }
 
-/// The resume point the schedule of `task` for `project` keeps.
-fn stored_resume(conn: &Connection, project: &str, task: &str) -> rusqlite::Result<Option<Resume>> {
-    Ok(crate::dreamer::store::schedule_of(
-        conn,
-        &crate::dreamer::store::OwnerKey::project(project),
-        task,
-    )?
-    .and_then(|schedule| schedule.watermark)
-    .and_then(|watermark| Resume::of(&watermark)))
+/// The resume point the schedule of `task` for `owner` keeps.
+pub(crate) fn stored_resume(
+    conn: &Connection,
+    owner: &OwnerKey,
+    task: &str,
+) -> rusqlite::Result<Option<Resume>> {
+    Ok(crate::dreamer::store::schedule_of(conn, owner, task)?
+        .and_then(|schedule| schedule.watermark)
+        .and_then(|watermark| Resume::of(&watermark)))
 }
 
 /// The task kind.
@@ -700,8 +841,163 @@ struct Planned {
     memories: Vec<Memory>,
 }
 
+/// The run's batches for `scope`'s memories, in order: every part of every
+/// category the context's declaration curates, from `resume` on. `only`
+/// keeps one category, by id or tag. Each part's message shows `docs` and
+/// the memories every session sees (`shown`, read at `now`), and fills the
+/// profile's markers with `values`, then the category's tag.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan(
+    context: &TaskContext<'_>,
+    scope: &Scope,
+    docs: &str,
+    shown: &[Shown],
+    values: &[(&str, &str)],
+    now: i64,
+    resume: Option<&Resume>,
+    only: Option<&str>,
+) -> Result<Vec<CurateBatch>, String> {
+    let mut categories = categories(context.profile, context.declaration);
+    if let Some(only) = only {
+        categories.retain(|category| category.id == only || category.tag == only);
+    }
+    // A resume point in a category the task no longer curates starts the
+    // run over.
+    let resume = resume.filter(|resume| {
+        categories
+            .iter()
+            .any(|category| category.id == resume.category)
+    });
+    let start = resume.map_or(0, |resume| {
+        categories
+            .iter()
+            .position(|category| category.id == resume.category)
+            .unwrap_or(0)
+    });
+    let categories = &categories[start..];
+    let pools = context
+        .db
+        .with_connection(|conn| {
+            categories
+                .iter()
+                .map(|category| pool(conn, scope, &category.id, now))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| {
+            format!(
+                "reading the memories of {} {}: {error}",
+                scope.level, scope.owner
+            )
+        })?;
+    let counter = Counter::for_model(None);
+    let mut planned: Vec<Planned> = Vec::new();
+    for (category, pool) in pools.iter().enumerate() {
+        let (first, remaining): (usize, Vec<Memory>) = match resume.filter(|_| category == 0) {
+            Some(resume) => (
+                resume.part.max(1),
+                pool.iter()
+                    .filter(|memory| memory.id > resume.after)
+                    .cloned()
+                    .collect(),
+            ),
+            None => (1, pool.clone()),
+        };
+        let split = parts(&remaining, counter);
+        let count = first - 1 + split.len();
+        planned.extend(
+            split
+                .into_iter()
+                .enumerate()
+                .map(|(index, memories)| Planned {
+                    category,
+                    number: first + index,
+                    count,
+                    memories,
+                }),
+        );
+    }
+    let task = context.declaration["id"].as_str().unwrap_or(scope.kind);
+    let actions = strings(&context.declaration["actions"]);
+    let frame = scope.frame;
+    planned
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let category = &categories[part.category];
+            let inside: HashSet<i64> = part.memories.iter().map(|memory| memory.id).collect();
+            // A memory of the part is shown once, in the part: the block of
+            // memories every session sees tells the model not to change
+            // them.
+            let shown: Vec<Shown> = shown
+                .iter()
+                .filter(|memory| !inside.contains(&memory.id))
+                .cloned()
+                .collect();
+            let close = similar(&part.memories, &pools[part.category]);
+            let text = input_in(
+                frame,
+                docs,
+                &shown,
+                &close,
+                (part.number, part.count),
+                &part.memories,
+            );
+            let mut filled = values.to_vec();
+            filled.push(("curate.category", category.tag.as_str()));
+            let (system, message) = task_prompts(
+                context.profile,
+                context.task_id(),
+                "user",
+                &[(frame, text.as_str())],
+                &filled,
+            )?;
+            let next = planned.get(index + 1).map(|next| Resume {
+                category: categories[next.category].id.clone(),
+                part: next.number,
+                after: if next.category == part.category {
+                    part.memories.last().map_or(0, |memory| memory.id)
+                } else {
+                    0
+                },
+            });
+            let mut seen = inside.clone();
+            seen.extend(shown.iter().map(|memory| memory.id));
+            seen.extend(close.iter().map(|memory| memory.id));
+            Ok(CurateBatch {
+                index,
+                scope: scope.clone(),
+                task: task.to_owned(),
+                category: category.clone(),
+                part: (part.number, part.count),
+                system,
+                message,
+                actions: actions.clone(),
+                read: part
+                    .memories
+                    .iter()
+                    .map(|memory| (memory.id, memory.revision))
+                    .collect(),
+                protected: part
+                    .memories
+                    .iter()
+                    .filter(|memory| memory.protected)
+                    .map(|memory| memory.id)
+                    .collect(),
+                seen,
+                elsewhere: shown
+                    .iter()
+                    .filter(|memory| memory.level != scope.level || memory.owner != scope.owner)
+                    .map(|memory| (memory.id, (memory.level.clone(), memory.owner.clone())))
+                    .collect(),
+                docs: docs.to_owned(),
+                next,
+            })
+        })
+        .collect()
+}
+
 impl Curate {
-    /// The run's batches for the context's owner, in order: every part of
+    /// The run's batches for the context's project, in order: every part of
     /// every category the task curates, from `resume` on. `only` keeps one
     /// category, by id or tag.
     pub(crate) fn plan_batches(
@@ -713,142 +1009,39 @@ impl Curate {
         let Owner::Project { id: project, root } = context.owner else {
             return Err(format!("{KIND} works on a project's memories only"));
         };
-        let mut categories = categories(context.profile, context.declaration);
-        if let Some(only) = only {
-            categories.retain(|category| category.id == only || category.tag == only);
-        }
-        // A resume point in a category the task no longer curates starts the
-        // run over.
-        let resume = resume.filter(|resume| {
-            categories
-                .iter()
-                .any(|category| category.id == resume.category)
-        });
-        let start = resume.map_or(0, |resume| {
-            categories
-                .iter()
-                .position(|category| category.id == resume.category)
-                .unwrap_or(0)
-        });
-        let categories = &categories[start..];
+        // Only a workspace of two or more projects shares memories: the
+        // module writes none for a workspace of one.
+        let workspace = context
+            .workspace
+            .filter(|workspace| workspace.members.len() >= 2)
+            .map(|workspace| workspace.workspace_id.as_str());
         let now = now_ms();
-        let (shown, pools) = context
+        let shown = context
             .db
-            .with_connection(|conn| {
-                let shown = shown_memories(conn, project, context.profile, now)?;
-                let pools = categories
-                    .iter()
-                    .map(|category| live_memories(conn, project, &category.id, now))
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, rusqlite::Error>((shown, pools))
-            })
+            .with_connection(|conn| shown_memories(conn, project, workspace, context.profile, now))
             .map_err(|error| format!("reading the memories of {project}: {error}"))?;
-        let docs = project_documents(root);
-        let counter = Counter::for_model(None);
-        let mut planned: Vec<Planned> = Vec::new();
-        for (category, pool) in pools.iter().enumerate() {
-            let (first, remaining): (usize, Vec<Memory>) = match resume.filter(|_| category == 0) {
-                Some(resume) => (
-                    resume.part.max(1),
-                    pool.iter()
-                        .filter(|memory| memory.id > resume.after)
-                        .cloned()
-                        .collect(),
-                ),
-                None => (1, pool.clone()),
-            };
-            let split = parts(&remaining, counter);
-            let count = first - 1 + split.len();
-            planned.extend(
-                split
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, memories)| Planned {
-                        category,
-                        number: first + index,
-                        count,
-                        memories,
-                    }),
-            );
-        }
-        let task = context.declaration["id"].as_str().unwrap_or(KIND);
-        let actions = strings(&context.declaration["actions"]);
-        planned
-            .iter()
-            .enumerate()
-            .map(|(index, part)| {
-                let category = &categories[part.category];
-                let inside: HashSet<i64> = part.memories.iter().map(|memory| memory.id).collect();
-                // A memory of the part is shown once, in the part: the block
-                // of memories every session sees tells the model not to
-                // change them.
-                let shown: Vec<Shown> = shown
-                    .iter()
-                    .filter(|memory| !inside.contains(&memory.id))
-                    .cloned()
-                    .collect();
-                let close = similar(&part.memories, &pools[part.category]);
-                let text = input(
-                    &docs,
-                    &shown,
-                    &close,
-                    (part.number, part.count),
-                    &part.memories,
-                );
-                let (system, message) = task_prompts(
-                    context.profile,
-                    context.task_id(),
-                    "user",
-                    &[(INPUT_FRAME, text.as_str())],
-                    &[
-                        ("projectIdentity", project.as_str()),
-                        ("curate.category", category.tag.as_str()),
-                    ],
-                )?;
-                let next = planned.get(index + 1).map(|next| Resume {
-                    category: categories[next.category].id.clone(),
-                    part: next.number,
-                    after: if next.category == part.category {
-                        part.memories.last().map_or(0, |memory| memory.id)
-                    } else {
-                        0
-                    },
-                });
-                let mut seen = inside.clone();
-                seen.extend(shown.iter().map(|memory| memory.id));
-                seen.extend(close.iter().map(|memory| memory.id));
-                Ok(CurateBatch {
-                    index,
-                    project: project.clone(),
-                    task: task.to_owned(),
-                    category: category.clone(),
-                    part: (part.number, part.count),
-                    system,
-                    message,
-                    actions: actions.clone(),
-                    read: part
-                        .memories
-                        .iter()
-                        .map(|memory| (memory.id, memory.revision))
-                        .collect(),
-                    protected: part
-                        .memories
-                        .iter()
-                        .filter(|memory| memory.protected)
-                        .map(|memory| memory.id)
-                        .collect(),
-                    seen,
-                    docs: docs.clone(),
-                    next,
-                })
-            })
-            .collect()
+        plan(
+            context,
+            &Scope::project(project),
+            &project_documents(root),
+            &shown,
+            &[("projectIdentity", project.as_str())],
+            now,
+            resume,
+            only,
+        )
     }
 }
 
 impl Task for Curate {
     fn kind(&self) -> &'static str {
         KIND
+    }
+
+    /// A project memory that repeats one of its workspace's can then be
+    /// archived as that one's duplicate.
+    fn sees_workspace(&self) -> bool {
+        true
     }
 
     fn batches(&self, context: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String> {
@@ -858,7 +1051,7 @@ impl Task for Curate {
         let task = context.declaration["id"].as_str().unwrap_or(KIND);
         let resume = context
             .db
-            .with_connection(|conn| stored_resume(conn, project, task))
+            .with_connection(|conn| stored_resume(conn, &OwnerKey::project(project), task))
             .map_err(|error| format!("reading where curate stopped for {project}: {error}"))?;
         Ok(self
             .plan_batches(context, resume.as_ref(), None)?
@@ -872,7 +1065,8 @@ impl Task for Curate {
 pub(crate) struct CurateBatch {
     /// Its place in the run, which names its decisions in the undo history.
     index: usize,
-    project: String,
+    /// Whose memories the part holds and its changes write.
+    pub(crate) scope: Scope,
     /// The profile's id for the task, which keys its schedule.
     task: String,
     pub(crate) category: Category,
@@ -889,11 +1083,34 @@ pub(crate) struct CurateBatch {
     /// Every memory the message shows: the part's, the ones every session
     /// sees and the similar ones. A duplicate may only name one of them.
     seen: HashSet<i64>,
-    /// The project documents the message shows, as it shows them.
+    /// The memories every session sees that another owner keeps (a
+    /// project's workspace, or the person), with the level and owner they
+    /// had when the message was built.
+    elsewhere: HashMap<i64, (String, String)>,
+    /// The project documents the message shows, as it shows them; empty for
+    /// a workspace, which has none.
     docs: String,
     /// Where the next run starts once this part is applied; `None` after
     /// the run's last part.
     pub(crate) next: Option<Resume>,
+}
+
+/// What writing one reply's list did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Written {
+    /// The run's record of it.
+    pub applied: Applied,
+    /// For each entry of the list, in order, why it was dropped; `None` for
+    /// a change that was written.
+    pub refusals: Vec<Option<String>>,
+}
+
+impl CurateBatch {
+    /// The message the batch sends.
+    #[cfg(test)]
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl TaskInput for CurateBatch {
@@ -916,6 +1133,7 @@ impl Batch for CurateBatch {
     fn apply(&self, tx: &Transaction<'_>, reply: &TaskReply, run: i64) -> Result<Applied, String> {
         let entries = parse_list(&reply.text)?;
         self.write(tx, &entries, &reply.child, run)
+            .map(|written| written.applied)
             .map_err(|error| format!("writing curate changes: {error}"))
     }
 }
@@ -957,22 +1175,23 @@ fn formatting_key(text: &str) -> String {
         .collect()
 }
 
-/// A live memory of `project`, in any category, other than `except`, whose
-/// text has `hash`.
+/// A live memory of `scope`'s owner, in any category, other than `except`,
+/// whose text has `hash`.
 fn live_with_hash(
     tx: &Transaction<'_>,
-    project: &str,
+    scope: &Scope,
     hash: &str,
     except: &[i64],
 ) -> rusqlite::Result<Option<i64>> {
     tx.query_row(
         "SELECT id FROM memories
-          WHERE level = 'project' AND owner_id = ?1 AND normalized_hash = ?2
+          WHERE level = ?1 AND owner_id = ?2 AND normalized_hash = ?3
             AND COALESCE(status, 'active') IN ('active', 'permanent')
-            AND id NOT IN (SELECT value FROM json_each(?3))
+            AND id NOT IN (SELECT value FROM json_each(?4))
           ORDER BY id LIMIT 1",
         params![
-            project,
+            scope.level,
+            scope.owner,
             hash,
             serde_json::to_string(except).expect("ids serialize")
         ],
@@ -1035,22 +1254,75 @@ impl CurateBatch {
     /// batch and the change, so each change can be undone alone and the
     /// run as one.
     fn decision_key(&self, run: i64, number: usize) -> String {
-        format!("dream-run:{run}:{KIND}:{}:{number}", self.index)
+        format!(
+            "dream-run:{run}:{}:{}:{number}",
+            self.scope.kind, self.index
+        )
+    }
+
+    /// The project a new memory written in place of memory `id` names as
+    /// its source. A project's new memories name the project; a workspace
+    /// memory names the project it came from, so a merge or split of one
+    /// keeps that, and `None` when the memory names none.
+    fn source_project(&self, tx: &Transaction<'_>, id: i64) -> rusqlite::Result<Option<String>> {
+        if self.scope.level == "project" {
+            return Ok(Some(self.scope.owner.clone()));
+        }
+        tx.query_row(
+            "SELECT source_project_id FROM memories WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+    }
+
+    /// Insert a live memory with `text` in place of `memory`, at its level,
+    /// owner and category, naming `child`, the session that proposed it, and
+    /// `source` as the project it came from.
+    fn insert_beside(
+        &self,
+        tx: &Transaction<'_>,
+        memory: &MemoryRow,
+        source: Option<&str>,
+        text: &str,
+        child: &str,
+        importance: Option<i64>,
+    ) -> rusqlite::Result<MemoryRow> {
+        let written = insert_memory(
+            tx,
+            &beside(memory),
+            source.unwrap_or_default(),
+            &memory.category,
+            text,
+            child,
+            "dreamer",
+            importance,
+        )?;
+        if source.is_none() {
+            tx.execute(
+                "UPDATE memories SET source_project_id = NULL WHERE id = ?1",
+                [written.id],
+            )?;
+        }
+        Ok(written)
     }
 
     /// Check each change of `entries` and write the ones that pass, in
     /// list order, then move the task's resume point past this part.
-    fn write(
+    pub(crate) fn write(
         &self,
         tx: &Transaction<'_>,
         entries: &[Result<Change, String>],
         child: &str,
         run: i64,
-    ) -> rusqlite::Result<Applied> {
-        let mut applied = Applied {
-            proposed: entries.len(),
-            ..Applied::default()
+    ) -> rusqlite::Result<Written> {
+        let mut written = Written {
+            applied: Applied {
+                proposed: entries.len(),
+                ..Applied::default()
+            },
+            refusals: Vec::with_capacity(entries.len()),
         };
+        let applied = &mut written.applied;
         let mut named: HashMap<i64, usize> = HashMap::new();
         for change in entries.iter().flatten() {
             // A change that names a memory twice is refused on its own.
@@ -1068,6 +1340,7 @@ impl CurateBatch {
                     applied
                         .dropped
                         .push(format!("{at}, change {}: {reason}", number + 1));
+                    written.refusals.push(Some(reason.clone()));
                     continue;
                 }
             };
@@ -1075,22 +1348,27 @@ impl CurateBatch {
                 Ok(checked) => {
                     self.commit(tx, checked, child, &self.decision_key(run, number))?;
                     applied.applied += 1;
+                    written.refusals.push(None);
                 }
-                Err(reason) => applied
-                    .dropped
-                    .push(format!("{at}, {}: {reason}", change.label())),
+                Err(reason) => {
+                    applied
+                        .dropped
+                        .push(format!("{at}, {}: {reason}", change.label()));
+                    written.refusals.push(Some(reason));
+                }
             }
         }
         tx.execute(
-            "UPDATE dream_schedules SET watermark_json = ?3
-              WHERE level = 'project' AND owner_id = ?1 AND task = ?2",
+            "UPDATE dream_schedules SET watermark_json = ?4
+              WHERE level = ?1 AND owner_id = ?2 AND task = ?3",
             params![
-                self.project,
+                self.scope.level,
+                self.scope.owner,
                 self.task,
                 self.next.as_ref().map(|next| next.to_json().to_string())
             ],
         )?;
-        Ok(applied)
+        Ok(written)
     }
 
     /// `change` with its rows when every check passes, or why it doesn't.
@@ -1161,13 +1439,10 @@ impl CurateBatch {
         let Some(row) = get_memory(tx, id)? else {
             return Ok(Err(format!("memory {id} no longer exists")));
         };
-        if !row.is_project_owned_by(&self.project)
-            || !row.is_mutable()
-            || row.category_id != self.category.id
-        {
+        if !self.scope.owns(&row) || !row.is_mutable() || row.category_id != self.category.id {
             return Ok(Err(format!(
-                "memory {id} is no longer a live {} memory of the project",
-                self.category.tag
+                "memory {id} is no longer a live {} memory of the {}",
+                self.category.tag, self.scope.level
             )));
         }
         if row.revision != read {
@@ -1198,7 +1473,7 @@ impl CurateBatch {
         }
         let hash = normalized_hash(text);
         let ids: Vec<i64> = sources.iter().map(|row| row.id).collect();
-        if let Some(other) = live_with_hash(tx, &self.project, &hash, &ids)? {
+        if let Some(other) = live_with_hash(tx, &self.scope, &hash, &ids)? {
             return Ok(Err(format!("the merged text repeats live memory {other}")));
         }
         let survivor = sources
@@ -1232,7 +1507,7 @@ impl CurateBatch {
             return Ok(Err(format!("the new text drops {token}")));
         }
         let hash = normalized_hash(text);
-        if let Some(other) = live_with_hash(tx, &self.project, &hash, &[memory.id])? {
+        if let Some(other) = live_with_hash(tx, &self.scope, &hash, &[memory.id])? {
             return Ok(Err(format!("the new text repeats live memory {other}")));
         }
         Ok(Ok(Checked::Shorten { memory, text, hash }))
@@ -1253,7 +1528,7 @@ impl CurateBatch {
         let mut hashes = HashSet::new();
         for part in parts {
             let hash = normalized_hash(part);
-            if let Some(other) = live_with_hash(tx, &self.project, &hash, &[memory.id])? {
+            if let Some(other) = live_with_hash(tx, &self.scope, &hash, &[memory.id])? {
                 return Ok(Err(format!("a part repeats live memory {other}")));
             }
             if !hashes.insert(hash) {
@@ -1288,6 +1563,14 @@ impl CurateBatch {
                 evidence,
             }))
         };
+        // A workspace has no documents every session sees, so nothing a
+        // workspace memory repeats can be quoted.
+        if !self.scope.has_documents() && quote.is_some_and(|quote| !quote.trim().is_empty()) {
+            return Ok(Err(format!(
+                "a {} has no documents to quote",
+                self.scope.level
+            )));
+        }
         match reason {
             "duplicate" => {
                 if let Some(of) = of {
@@ -1300,19 +1583,34 @@ impl CurateBatch {
                     if named.contains_key(&of) {
                         return Ok(Err(format!("memory {of} is changed by this list too")));
                     }
-                    let live = get_memory(tx, of)?.is_some_and(|survivor| {
-                        survivor.is_project_owned_by(&self.project) && survivor.is_mutable()
-                    });
+                    let survivor = get_memory(tx, of)?.filter(MemoryRow::is_mutable);
+                    // A memory every session sees from another owner (the
+                    // project's workspace, or the person's) stays a valid
+                    // original only while it is still that owner's.
+                    let live = match self.elsewhere.get(&of) {
+                        Some((level, owner)) => survivor.is_some_and(|survivor| {
+                            survivor.level == *level && survivor.owner_id == *owner
+                        }),
+                        None => survivor.is_some_and(|survivor| self.scope.owns(&survivor)),
+                    };
                     if !live {
-                        return Ok(Err(format!(
-                            "memory {of} is not a live memory of the project"
-                        )));
+                        return Ok(Err(if self.elsewhere.contains_key(&of) {
+                            format!("memory {of} is no longer a live memory every session sees")
+                        } else {
+                            format!(
+                                "memory {of} is not a live memory of the {}",
+                                self.scope.level
+                            )
+                        }));
                     }
                     return archived(
                         format!("duplicate of memory {of}"),
                         Some(of),
                         json!({"reason": "duplicate", "of": of}),
                     );
+                }
+                if !self.scope.has_documents() {
+                    return Ok(Err("a duplicate names no memory (of)".into()));
                 }
                 let Some(quote) = quote.map(str::trim).filter(|quote| !quote.is_empty()) else {
                     return Ok(Err(
@@ -1391,16 +1689,15 @@ impl CurateBatch {
                 )?;
                 bump(tx, &memory)?;
                 update_content(tx, memory.id, &parts[0], &normalized_hash(&parts[0]))?;
+                let source = self.source_project(tx, memory.id)?;
                 let mut ids = vec![memory.id];
                 for part in &parts[1..] {
-                    let written = insert_memory(
+                    let written = self.insert_beside(
                         tx,
-                        &beside(&memory),
-                        &self.project,
-                        &memory.category,
+                        &memory,
+                        source.as_deref(),
                         part,
                         child,
-                        "dreamer",
                         importance,
                     )?;
                     created(tx, &placer, written.id, CreateKind::Create, now)?;
@@ -1517,16 +1814,9 @@ impl CurateBatch {
             None => {
                 before.push(None);
                 let first = &sources[0];
-                let written = insert_memory(
-                    tx,
-                    &beside(first),
-                    &self.project,
-                    &first.category,
-                    text,
-                    child,
-                    "dreamer",
-                    importance,
-                )?;
+                let source = self.source_project(tx, first.id)?;
+                let written =
+                    self.insert_beside(tx, first, source.as_deref(), text, child, importance)?;
                 created(
                     tx,
                     &Placer::unplaced(),
@@ -1607,12 +1897,13 @@ impl CurateBatch {
         decision: &Decision<'_>,
         now: i64,
     ) -> rusqlite::Result<()> {
+        let writer = self.scope.writer();
         let recorded = record_history(
             tx,
             &History {
                 key: decision.key,
-                project: &self.project,
-                writer: WRITER,
+                project: &self.scope.owner,
+                writer: &writer,
                 operation: decision.operation,
                 reason: decision.reason,
                 now,
@@ -1632,9 +1923,9 @@ impl CurateBatch {
             "INSERT INTO memory_journal(project_path, decision_key, operation, receipt_json, applied_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                self.project,
+                self.scope.owner,
                 decision.key,
-                format!("{KIND}_{}", decision.operation),
+                self.scope.journal_operation(decision.operation),
                 json!({"state": "applied", "reason": decision.operation, "memoryIds": ids})
                     .to_string(),
                 now

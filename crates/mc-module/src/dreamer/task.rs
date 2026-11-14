@@ -28,6 +28,9 @@ pub enum Owner {
     /// The person's own memories, at the global level, and the summarizer's
     /// observations about them. One owner per machine, not per project.
     Global,
+    /// The memories a workspace shares, shown in every session of every
+    /// project in it; `id` is Entorhinal's id for the workspace.
+    Workspace { id: String },
 }
 
 /// What a task kind reads its work from.
@@ -38,9 +41,12 @@ pub(crate) struct TaskContext<'a> {
     /// The profile's declaration of this task: its `id`, `actions`,
     /// `categories` and `settings`.
     pub declaration: &'a Value,
-    /// The workspace of the owner's project and its projects, as Entorhinal
-    /// listed them, for a task that works across a workspace
-    /// ([`Task::once`]). `None` for every other run.
+    /// The workspace and its projects, as Entorhinal listed them, for a run
+    /// that needs them: a task that works across a workspace
+    /// ([`Task::once`]), a task of a workspace's own memories
+    /// ([`Task::workspace`]), and a project's run of a task that also reads
+    /// the project's workspace ([`Task::sees_workspace`]), when that
+    /// workspace holds two or more projects. `None` for every other run.
     pub workspace: Option<&'a WorkspaceMembers>,
 }
 
@@ -68,6 +74,19 @@ pub(crate) trait Task: Send + Sync {
     /// more projects, gives it that workspace, and records the workspace it
     /// ran for.
     fn once(&self) -> bool {
+        false
+    }
+    /// Whether the task works on the memories a workspace shares rather
+    /// than a project's. The engine then schedules it once for each
+    /// workspace of two or more projects, under [`Owner::Workspace`], and
+    /// gives each run the workspace and its projects.
+    fn workspace(&self) -> bool {
+        false
+    }
+    /// Whether a project's run of the task also reads the memories of the
+    /// project's workspace. The engine then gives the run its workspace
+    /// when Entorhinal lists two or more projects in it.
+    fn sees_workspace(&self) -> bool {
         false
     }
     /// The batches one run sends for the context's owner, in order. Empty

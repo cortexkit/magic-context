@@ -485,7 +485,14 @@ fn a_reply_is_not_applied_once_the_lock_passed_to_another_writer() {
         usage: None,
     };
     assert_eq!(
-        apply(&db, &owner, "this", &FakeBatch(0), &reply, 1),
+        apply(
+            &db,
+            std::slice::from_ref(&owner),
+            "this",
+            &FakeBatch(0),
+            &reply,
+            1
+        ),
         Ok(None)
     );
     let written: bool = db

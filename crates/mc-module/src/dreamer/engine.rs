@@ -5,7 +5,10 @@
 //! and that the module implements, gets a schedule for the project; a task
 //! of the person's own memories (the global review) gets one schedule for
 //! the whole machine instead, and runs in the folder and with the profile of
-//! a project that declares it. A task that runs once per workspace (the
+//! a project that declares it. A task of a workspace's shared memories (the
+//! workspace curate) gets one schedule for each workspace of two or more
+//! projects, and runs in the folder and with the profile of one of its
+//! projects seen in this process. A task that runs once per workspace (the
 //! workspace lift) gets no schedule: the engine starts it for a project
 //! whose workspace holds two or more projects, and records the workspace it
 //! completed for. Once a minute the engine starts every due task whose owner
@@ -15,12 +18,14 @@
 //!
 //! One run takes its owner's lock (one writer per owner's memories at a
 //! time), asks the task for its batches, and sends each to a model
-//! ([`super::run`]). Each accepted reply is applied in its own transaction,
-//! with the lock checked in that same transaction, so a run that lost its
-//! lock writes nothing more. A run that used its token budget stops before
-//! its next batch; what it already applied stays.
+//! ([`super::run`]). The lift writes a project's memories and its
+//! workspace's, so it takes both locks, in the one order every run takes
+//! them in ([`store::lock_order`]). Each accepted reply is applied in its
+//! own transaction, with the locks checked in that same transaction, so a
+//! run that lost one writes nothing more. A run that used its token budget
+//! stops before its next batch; what it already applied stays.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -73,7 +78,7 @@ pub fn default_schedule(kind: &str) -> &'static str {
     match kind {
         "map-memories" => "0 2 * * *",
         "verify" => "0 3 * * *",
-        "verify-broad" | "curate" => "0 4 * * 0",
+        "verify-broad" | "curate" | "curate-workspace" => "0 4 * * 0",
         "compress-cues" => "0 4 * * *",
         "classify-memories" => "0 6 * * *",
         "reflect-events" => "0 5 * * *",
@@ -117,10 +122,13 @@ pub struct Engine {
     global: Mutex<Option<(String, Project)>>,
     /// The workspace each project seen in this process is in, by its memory
     /// context: what a task that runs once per workspace ([`Task::once`])
-    /// runs for. A project in no workspace has no entry.
+    /// runs for, and the workspaces whose shared memories get a schedule
+    /// ([`Task::workspace`]). A project in no workspace has no entry.
     workspaces: Mutex<HashMap<String, String>>,
     /// Owners with a run in progress in this process.
     running: Mutex<HashSet<OwnerKey>>,
+    /// Workspaces whose schedules a round is checking with Entorhinal.
+    checking: Mutex<HashSet<String>>,
 }
 
 impl Engine {
@@ -132,6 +140,7 @@ impl Engine {
             global: Mutex::default(),
             workspaces: Mutex::default(),
             running: Mutex::default(),
+            checking: Mutex::default(),
         }
     }
 
@@ -204,6 +213,58 @@ impl Engine {
             .is_some_and(|task| task.once())
     }
 
+    /// Whether `declaration` is a task of a workspace's shared memories.
+    fn is_workspace(&self, declaration: &Value) -> bool {
+        self.task(declaration["kind"].as_str().unwrap_or_default())
+            .is_some_and(|task| task.workspace())
+    }
+
+    /// Mark every owner in `owners` as having a run in progress in this
+    /// process, all or none. `false`, and nothing marked, when one of them
+    /// already has one.
+    fn claim(&self, owners: &[OwnerKey]) -> bool {
+        let mut running = self.running.lock().expect("dreamer runs");
+        if owners.iter().any(|owner| running.contains(owner)) {
+            return false;
+        }
+        running.extend(owners.iter().cloned());
+        true
+    }
+
+    fn release(&self, owners: &[OwnerKey]) {
+        let mut running = self.running.lock().expect("dreamer runs");
+        for owner in owners {
+            running.remove(owner);
+        }
+    }
+
+    /// The project a task of `workspace`'s shared memories runs with: of
+    /// the projects seen in this process in that workspace, the first by id
+    /// whose profile declares such a task (`task`, when one is named), with
+    /// its folder and profile. The task reads no project files, but a
+    /// runner creates a child session only in a folder, and the profile
+    /// supplies the task's prompts and categories.
+    fn workspace_carrier(&self, workspace: &str, task: Option<&str>) -> Option<(String, Project)> {
+        let projects = self.projects.lock().expect("dreamer projects");
+        let workspaces = self.workspaces.lock().expect("dreamer workspaces");
+        let mut members: Vec<(&String, &Project)> = projects
+            .iter()
+            .filter(|(id, _)| workspaces.get(*id).map(String::as_str) == Some(workspace))
+            .collect();
+        members.sort_by(|a, b| a.0.cmp(b.0));
+        members
+            .into_iter()
+            .find(|(_, project)| {
+                self.declarations(&project.profile)
+                    .into_iter()
+                    .any(|declaration| {
+                        self.is_workspace(declaration)
+                            && task.is_none_or(|task| declaration["id"].as_str() == Some(task))
+                    })
+            })
+            .map(|(id, project)| (id.clone(), project.clone()))
+    }
+
     /// Learn which workspace `project` is in, from its memory context: the
     /// workspace a task that runs once per workspace runs for. `None` for a
     /// project in no workspace.
@@ -257,8 +318,10 @@ impl Engine {
         let scheduled = db.with_connection(|conn| {
             for declaration in self.declarations(&seen.profile) {
                 // A task that runs once per workspace never gets a schedule,
-                // whatever the settings say; the rounds start it instead.
-                if self.is_once(declaration) {
+                // whatever the settings say; the rounds start it instead. A
+                // task of a workspace's shared memories is scheduled for the
+                // workspace, not for each of its projects.
+                if self.is_once(declaration) || self.is_workspace(declaration) {
                     continue;
                 }
                 let kind = declaration["kind"].as_str().unwrap_or_default();
@@ -334,6 +397,9 @@ impl Engine {
                     .expect("dreamer global owner")
                     .as_ref()
                     .map(|(_, project)| project.clone()),
+                "workspace" => self
+                    .workspace_carrier(&due.owner.owner_id, Some(&due.task))
+                    .map(|(_, project)| project),
                 _ => None,
             };
             let Some(Project { root, profile, .. }) = carrier else {
@@ -358,6 +424,80 @@ impl Engine {
             });
         }
         self.start_once(db, client, settings, now);
+        self.schedule_workspaces(db, client, settings, now);
+    }
+
+    /// Give each workspace a project seen in this process is in a schedule
+    /// for every task of its shared memories ([`Task::workspace`]) that the
+    /// workspace's carrier project declares ([`Self::workspace_carrier`]),
+    /// once Entorhinal lists two or more projects in it. A workspace of one
+    /// project shares no memories and gets no schedule; nor does one
+    /// Entorhinal doesn't answer for, until a later round asks again. Its
+    /// answer is kept for a while, so most rounds don't wait on it. Seeing a
+    /// schedule again changes it only when the settings changed it.
+    fn schedule_workspaces<C: RunnerClient + Router + Send + Sync + 'static>(
+        self: &Arc<Self>,
+        db: &Arc<ContextDb>,
+        client: &Arc<C>,
+        settings: &Settings,
+        now: i64,
+    ) {
+        let workspaces: BTreeSet<String> = self
+            .workspaces
+            .lock()
+            .expect("dreamer workspaces")
+            .values()
+            .cloned()
+            .collect();
+        for workspace in workspaces {
+            let Some((_, carrier)) = self.workspace_carrier(&workspace, None) else {
+                continue;
+            };
+            let tasks: Vec<(String, String)> = self
+                .declarations(&carrier.profile)
+                .into_iter()
+                .filter(|declaration| self.is_workspace(declaration))
+                .map(|declaration| {
+                    let kind = declaration["kind"].as_str().unwrap_or_default();
+                    let task = declaration["id"].as_str().unwrap_or(kind);
+                    (task.to_owned(), settings.schedule(kind))
+                })
+                .collect();
+            if !self
+                .checking
+                .lock()
+                .expect("dreamer workspace checks")
+                .insert(workspace.clone())
+            {
+                continue;
+            }
+            let engine = Arc::clone(self);
+            let (db, client) = (Arc::clone(db), Arc::clone(client));
+            tokio::spawn(async move {
+                if let Lookup::Members(members) =
+                    crate::workspace_members::workspace_members(&*client, &workspace).await
+                {
+                    if members.members.len() >= 2 {
+                        let owner = OwnerKey::workspace(&workspace);
+                        if let Err(error) = db.with_connection(|conn| {
+                            for (task, schedule) in &tasks {
+                                store::ensure_schedule(conn, &owner, task, schedule, now)?;
+                            }
+                            Ok::<_, rusqlite::Error>(())
+                        }) {
+                            tracing::warn!(
+                                "ck-mc: dreamer: scheduling workspace {workspace} failed: {error}"
+                            );
+                        }
+                    }
+                }
+                engine
+                    .checking
+                    .lock()
+                    .expect("dreamer workspace checks")
+                    .remove(&workspace);
+            });
+        }
     }
 
     /// Start each task that runs once per workspace ([`Task::once`]) for
@@ -407,22 +547,15 @@ impl Engine {
                 if once_retry_at(&record, &workspace).is_none_or(|at| at > now) {
                     continue;
                 }
-                if !self
-                    .running
-                    .lock()
-                    .expect("dreamer runs")
-                    .insert(owner.clone())
-                {
+                // The lift writes the project's memories and the
+                // workspace's, so no other run of either may be in progress.
+                let owners = [OwnerKey::workspace(&workspace), owner.clone()];
+                if !self.claim(&owners) {
                     continue;
                 }
                 let engine = Arc::clone(self);
                 let (db, client, settings) = (Arc::clone(db), Arc::clone(client), settings.clone());
-                let (project, seen, workspace, owner) = (
-                    project.clone(),
-                    seen.clone(),
-                    workspace.clone(),
-                    owner.clone(),
-                );
+                let (project, seen, workspace) = (project.clone(), seen.clone(), workspace.clone());
                 tokio::spawn(async move {
                     engine
                         .run_once(
@@ -435,7 +568,7 @@ impl Engine {
                             &declaration,
                         )
                         .await;
-                    engine.running.lock().expect("dreamer runs").remove(&owner);
+                    engine.release(&owners);
                 });
                 // One run per project at a time: another such task waits for
                 // a later round.
@@ -469,13 +602,24 @@ impl Engine {
         let kind = declaration["kind"].as_str().unwrap_or_default();
         let task = declaration["id"].as_str().unwrap_or(kind);
         let owner = OwnerKey::project(project);
+        // The lift moves rows from the project to the workspace, so it holds
+        // both owners' locks, taken together in the one order every run
+        // takes them in (`store::lock_order`): workspace, then project.
+        let locks = [OwnerKey::workspace(workspace), owner.clone()];
+        let release = |db: &ContextDb| {
+            if let Err(error) =
+                db.with_connection(|conn| store::unlock_all(conn, &locks, &self.holder))
+            {
+                tracing::warn!("ck-mc: dreamer: releasing {project}'s locks failed: {error}");
+            }
+        };
         let now = now_ms();
         match db.with_connection(|conn| {
-            store::lock(conn, &owner, &self.holder, task, now, now + LOCK_MS)
+            store::lock_all(conn, &locks, &self.holder, task, now, now + LOCK_MS)
         }) {
             Ok(true) => {}
-            // Another writer holds the project's memories: a later round
-            // tries again.
+            // Another writer holds the project's or the workspace's
+            // memories: a later round tries again.
             Ok(false) => return,
             Err(error) => {
                 tracing::warn!("ck-mc: dreamer: locking {project} for {task} failed: {error}");
@@ -488,10 +632,7 @@ impl Engine {
             .with_connection(|conn| store::once_record(conn, &owner, task))
             .map(|record| record.done_for.as_deref() == Some(workspace));
         if !matches!(done, Ok(false)) {
-            if let Err(error) = db.with_connection(|conn| store::unlock(conn, &owner, &self.holder))
-            {
-                tracing::warn!("ck-mc: dreamer: releasing {project}'s lock failed: {error}");
-            }
+            release(db);
             return;
         }
         let due = store::Due {
@@ -519,6 +660,7 @@ impl Engine {
                         &seen.profile,
                         run_id,
                         Some(&*members),
+                        &locks,
                     )
                     .await;
                 (Some(run_id), end)
@@ -538,15 +680,58 @@ impl Engine {
                 owner: workspace.to_owned(),
             });
         }
+        let ended = now_ms();
         if let Err(error) = db.with_connection(|conn| {
-            store::settle_once(conn, &owner, task, workspace, run, &end, now_ms())
+            store::settle_once(conn, &owner, task, workspace, run, &end, ended)
         }) {
             tracing::warn!("ck-mc: dreamer: recording {task} for {project} failed: {error}");
         }
-        if let Err(error) = db.with_connection(|conn| store::unlock(conn, &owner, &self.holder)) {
-            tracing::warn!("ck-mc: dreamer: releasing {project}'s lock failed: {error}");
+        if kind == super::tasks::lift_workspace::KIND && end.applied > 0 {
+            self.curate_after_lift(db, settings, seen, workspace, ended);
         }
+        release(db);
         tell(db, &owner);
+    }
+
+    /// Make each task of `workspace`'s shared memories that `seen`'s profile
+    /// declares due [`CURATE_AFTER_LIFT`] after a lift into the workspace
+    /// that moved memories ended at `ended`, and give the workspace the
+    /// task's schedule if it has none yet.
+    ///
+    /// This lives where the lift's run is settled because only the lift's
+    /// end knows that it moved memories and when it ended; the curate's own
+    /// schedule knows neither. A lift is what fills a workspace with copies
+    /// of one rule written separately in many projects, so the curate
+    /// follows it instead of waiting for its weekly slot. Every project of
+    /// the workspace runs its own lift, usually a few rounds apart, and each
+    /// that moves memories pushes the curate to half an hour after itself:
+    /// one curate run then follows the last of them, rather than one per
+    /// lift, and none races a lift for the workspace's lock. A lift that
+    /// moves nothing leaves the curate on its schedule.
+    fn curate_after_lift(
+        &self,
+        db: &ContextDb,
+        settings: &Settings,
+        seen: &Project,
+        workspace: &str,
+        ended: i64,
+    ) {
+        let owner = OwnerKey::workspace(workspace);
+        for declaration in self.declarations(&seen.profile) {
+            if !self.is_workspace(declaration) {
+                continue;
+            }
+            let kind = declaration["kind"].as_str().unwrap_or_default();
+            let task = declaration["id"].as_str().unwrap_or(kind);
+            if let Err(error) = db.with_connection(|conn| {
+                store::ensure_schedule(conn, &owner, task, &settings.schedule(kind), ended)?;
+                store::due_at(conn, &owner, task, ended + CURATE_AFTER_LIFT)
+            }) {
+                tracing::warn!(
+                    "ck-mc: dreamer: bringing {task} for workspace {workspace} forward failed: {error}"
+                );
+            }
+        }
     }
 
     /// Run one due task to its end and settle its schedule.
@@ -587,6 +772,13 @@ impl Engine {
             settle(Settled::Skipped { reason: missing });
             return;
         }
+        let members = match self.members_for(client, &due.owner, &kind).await {
+            Ok(members) => members,
+            Err(settled) => {
+                settle(settled);
+                return;
+            }
+        };
         let locked = db.with_connection(|conn| {
             store::lock(
                 conn,
@@ -624,7 +816,8 @@ impl Engine {
                     root,
                     profile,
                     run_id,
-                    None,
+                    members.as_deref(),
+                    std::slice::from_ref(&due.owner),
                 )
                 .await
             }
@@ -635,6 +828,59 @@ impl Engine {
             },
         };
         self.finish_due(db, &due, &end);
+    }
+
+    /// The workspace and its projects a run of `kind` for `owner` is given
+    /// ([`TaskContext::workspace`]). A run of a workspace's shared memories
+    /// is given its workspace, and starts only when Entorhinal lists two or
+    /// more projects in it; otherwise `Err` says how its schedule is left. A
+    /// project's run of a task that also reads the project's workspace is
+    /// given that workspace when it holds two or more projects, and runs
+    /// without it otherwise. Every other run is given none.
+    async fn members_for<C: RunnerClient>(
+        &self,
+        client: &C,
+        owner: &OwnerKey,
+        kind: &str,
+    ) -> Result<Option<Arc<WorkspaceMembers>>, Settled> {
+        match owner.level.as_str() {
+            "workspace" => {
+                match crate::workspace_members::workspace_members(client, &owner.owner_id).await {
+                    Lookup::Members(members) if members.members.len() >= 2 => Ok(Some(members)),
+                    Lookup::Members(_) | Lookup::Unknown => Err(Settled::Skipped {
+                        reason: format!(
+                            "Entorhinal lists fewer than two projects in workspace {}",
+                            owner.owner_id
+                        ),
+                    }),
+                    Lookup::NotAnswering => Err(Settled::Waiting {
+                        until: now_ms() + ENTORHINAL_RETRY,
+                        reason: format!(
+                            "Entorhinal did not answer for the projects of workspace {}",
+                            owner.owner_id
+                        ),
+                    }),
+                }
+            }
+            "project" if self.task(kind).is_some_and(|task| task.sees_workspace()) => {
+                let workspace = self
+                    .workspaces
+                    .lock()
+                    .expect("dreamer workspaces")
+                    .get(&owner.owner_id)
+                    .cloned();
+                let Some(workspace) = workspace else {
+                    return Ok(None);
+                };
+                Ok(
+                    match crate::workspace_members::workspace_members(client, &workspace).await {
+                        Lookup::Members(members) if members.members.len() >= 2 => Some(members),
+                        Lookup::Members(_) | Lookup::Unknown | Lookup::NotAnswering => None,
+                    },
+                )
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Settle a finished run's schedule as its outcome says, then release
@@ -811,6 +1057,14 @@ impl Engine {
             kind.to_owned(),
         );
         tokio::spawn(async move {
+            // A project run of a task that also reads its workspace is given
+            // the workspace as a scheduled run is; a project run never
+            // refuses for want of one.
+            let members = engine
+                .members_for(&*client, &due.owner, &kind)
+                .await
+                .ok()
+                .flatten();
             let end = engine
                 .run_task(
                     &db,
@@ -822,7 +1076,8 @@ impl Engine {
                     &root,
                     &profile,
                     run_id,
-                    None,
+                    members.as_deref(),
+                    std::slice::from_ref(&due.owner),
                 )
                 .await;
             engine.finish_due(&db, &due, &end);
@@ -836,8 +1091,10 @@ impl Engine {
     }
 
     /// Run one task to its end and record the end in its run's row.
-    /// `workspace` is the owner's workspace for a task that runs once per
-    /// workspace, and `None` for every other.
+    /// `workspace` is what the run is given of its workspace
+    /// ([`TaskContext::workspace`]), and `locks` the owners whose locks the
+    /// run holds, all of which it renews before each batch and checks before
+    /// each write.
     #[allow(clippy::too_many_arguments)]
     async fn run_task<C: RunnerClient + Router>(
         &self,
@@ -851,6 +1108,7 @@ impl Engine {
         profile: &Profile,
         run_id: i64,
         workspace: Option<&WorkspaceMembers>,
+        locks: &[OwnerKey],
     ) -> RunEnd {
         let mut end = RunEnd::default();
         let (task, demand) = match (self.task(kind), demand(kind)) {
@@ -866,13 +1124,15 @@ impl Engine {
                 return end;
             }
         };
-        let owner = if due.owner == OwnerKey::global() {
-            Owner::Global
-        } else {
-            Owner::Project {
+        let owner = match due.owner.level.as_str() {
+            "global" => Owner::Global,
+            "workspace" => Owner::Workspace {
+                id: due.owner.owner_id.clone(),
+            },
+            _ => Owner::Project {
                 id: due.owner.owner_id.clone(),
                 root: root.to_owned(),
-            }
+            },
         };
         let batches = {
             let context = TaskContext {
@@ -888,7 +1148,7 @@ impl Engine {
             Ok(batches) if batches.is_empty() => end.outcome = "nothing_to_do".into(),
             Ok(batches) => {
                 self.send_batches(
-                    db, client, settings, due, demand, run_id, root, batches, &mut end,
+                    db, client, settings, due, locks, demand, run_id, root, batches, &mut end,
                 )
                 .await
             }
@@ -923,6 +1183,7 @@ impl Engine {
         client: &C,
         settings: &Settings,
         due: &store::Due,
+        locks: &[OwnerKey],
         demand: &'static crate::routing::DreamDemand,
         run_id: i64,
         root: &str,
@@ -943,9 +1204,9 @@ impl Engine {
                 ));
                 return;
             }
-            // The lock must still be ours before a model is paid for.
+            // The locks must still be ours before a model is paid for.
             let renewed = db.with_connection(|conn| {
-                store::renew(conn, &due.owner, &self.holder, now_ms() + LOCK_MS)
+                store::renew_all(conn, locks, &self.holder, now_ms() + LOCK_MS)
             });
             if !matches!(renewed, Ok(true)) {
                 end.outcome = "lock_lost".into();
@@ -977,13 +1238,17 @@ impl Engine {
                 }
             };
             record_batch(end, &reply);
-            match apply(db, &due.owner, &self.holder, batch.as_ref(), &reply, run_id) {
+            match apply(db, locks, &self.holder, batch.as_ref(), &reply, run_id) {
                 Ok(Some(applied)) => {
                     if applied.applied > 0 {
                         use crate::app_read::Change;
                         let change = match due.owner.level.as_str() {
                             "project" => Some(Change::project_memories(&due.owner.owner_id)),
                             "global" => Some(Change::global_memories()),
+                            "workspace" => Some(Change::Memories {
+                                level: "workspace".into(),
+                                owner: due.owner.owner_id.clone(),
+                            }),
                             _ => None,
                         };
                         if let Some(change) = change {
@@ -1017,11 +1282,11 @@ impl Engine {
 }
 
 /// Apply one accepted reply in its own transaction, after checking in that
-/// transaction that this process still holds the owner's lock. `None` when
-/// it doesn't: nothing is written.
+/// transaction that this process still holds every lock of `locks`. `None`
+/// when it doesn't: nothing is written.
 fn apply(
     db: &ContextDb,
-    owner: &OwnerKey,
+    locks: &[OwnerKey],
     holder: &str,
     batch: &dyn Batch,
     reply: &TaskReply,
@@ -1031,7 +1296,7 @@ fn apply(
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
-        if !store::renew(&tx, owner, holder, now_ms() + LOCK_MS)
+        if !store::renew_all(&tx, locks, holder, now_ms() + LOCK_MS)
             .map_err(|error| error.to_string())?
         {
             return Ok(None);
@@ -1113,10 +1378,10 @@ fn tell(db: &ContextDb, owner: &OwnerKey) {
 
 /// Whose memories `owner` names, in the messages a run records.
 fn whose(owner: &OwnerKey) -> &'static str {
-    if owner.level == "global" {
-        "the person's"
-    } else {
-        "the project's"
+    match owner.level.as_str() {
+        "global" => "the person's",
+        "workspace" => "the workspace's",
+        _ => "the project's",
     }
 }
 
@@ -1155,6 +1420,14 @@ fn missing_evidence(declaration: &Value, root: &str) -> Option<String> {
 const ONCE_RETRY: i64 = 60 * 60_000;
 const ONCE_RETRY_MAX: i64 = 24 * 60 * 60_000;
 
+/// How long after a lift that moved memories into a workspace the curate
+/// of the workspace's memories becomes due ([`Engine::curate_after_lift`]).
+pub(crate) const CURATE_AFTER_LIFT: i64 = 30 * 60_000;
+
+/// How long a run of a workspace's memories waits for Entorhinal to list
+/// the workspace's projects after it didn't answer.
+const ENTORHINAL_RETRY: i64 = 5 * 60_000;
+
 /// When a once-per-workspace task with `record` may next run for
 /// `workspace`; `None` once a run completed for that workspace.
 fn once_retry_at(record: &store::OnceRecord, workspace: &str) -> Option<i64> {
@@ -1180,3 +1453,7 @@ mod tests;
 #[cfg(test)]
 #[path = "engine_lift_tests.rs"]
 mod lift_tests;
+
+#[cfg(test)]
+#[path = "engine_workspace_tests.rs"]
+mod workspace_tests;

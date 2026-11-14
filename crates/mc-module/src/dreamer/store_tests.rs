@@ -292,3 +292,151 @@ fn a_run_record_holds_its_end_and_a_stopped_process_leaves_none_open() {
         ]
     );
 }
+
+/// Each lock row, in the order the rows were written: level, owner and
+/// holder.
+fn locks(conn: &Connection) -> Vec<(String, String, String)> {
+    conn.prepare("SELECT level, owner_id, holder FROM dream_locks ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn several_locks_are_taken_workspace_before_project_all_or_none() {
+    let (workspace, project) = (OwnerKey::workspace("ws-a"), OwnerKey::project("pj-a"));
+    // Asked for in either order, the workspace's lock comes first.
+    assert_eq!(
+        lock_order(&[project.clone(), workspace.clone()]),
+        [workspace.clone(), project.clone()]
+    );
+    assert_eq!(
+        lock_order(&[
+            OwnerKey::project("pj-b"),
+            project.clone(),
+            OwnerKey::global()
+        ]),
+        [
+            OwnerKey::global(),
+            project.clone(),
+            OwnerKey::project("pj-b")
+        ]
+    );
+
+    let mut conn = ContextDb::fresh_in_memory();
+    assert!(lock_all(
+        &mut conn,
+        &[project.clone(), workspace.clone()],
+        "this",
+        "swe:lift-workspace",
+        0,
+        100
+    )
+    .unwrap());
+    assert_eq!(
+        locks(&conn),
+        [
+            ("workspace".into(), "ws-a".into(), "this".into()),
+            ("project".into(), "pj-a".into(), "this".into()),
+        ]
+    );
+    // Both renew; once another writer takes one after it lapsed, renewing
+    // both fails.
+    assert!(renew_all(&conn, &[workspace.clone(), project.clone()], "this", 200).unwrap());
+    unlock_all(&conn, &[project.clone(), workspace.clone()], "this").unwrap();
+    assert!(locks(&conn).is_empty());
+
+    // Another writer holds the project's memories: nothing is taken, not
+    // even the workspace's free lock.
+    assert!(lock(&mut conn, &project, "other", "swe:curate", 0, 100).unwrap());
+    assert!(!lock_all(
+        &mut conn,
+        &[workspace.clone(), project.clone()],
+        "this",
+        "swe:lift-workspace",
+        0,
+        100
+    )
+    .unwrap());
+    assert_eq!(
+        locks(&conn),
+        [("project".into(), "pj-a".into(), "other".into())]
+    );
+    assert!(!renew_all(&conn, &[workspace.clone(), project.clone()], "this", 200).unwrap());
+    unlock(&conn, &project, "other").unwrap();
+
+    // Another writer holds the workspace's: the same.
+    assert!(lock(
+        &mut conn,
+        &workspace,
+        "other",
+        "swe:curate-workspace",
+        0,
+        100
+    )
+    .unwrap());
+    assert!(!lock_all(
+        &mut conn,
+        &[project.clone(), workspace.clone()],
+        "this",
+        "swe:lift-workspace",
+        0,
+        100
+    )
+    .unwrap());
+    assert_eq!(
+        locks(&conn),
+        [("workspace".into(), "ws-a".into(), "other".into())]
+    );
+    // A lapsed lock is free to take.
+    assert!(lock_all(
+        &mut conn,
+        &[project.clone(), workspace.clone()],
+        "this",
+        "swe:lift-workspace",
+        100,
+        300
+    )
+    .unwrap());
+}
+
+#[test]
+fn a_task_made_due_at_a_time_is_due_then_until_it_settles() {
+    let conn = ContextDb::fresh_in_memory();
+    let owner = OwnerKey::workspace("ws-a");
+    let now = local(1, 12);
+    ensure_schedule(&conn, &owner, "swe:curate-workspace", "0 4 * * 0", now).unwrap();
+    let at = now + HOUR / 2;
+    assert!(due_at(&conn, &owner, "swe:curate-workspace", at).unwrap());
+    assert_eq!(
+        schedule_of(&conn, &owner, "swe:curate-workspace")
+            .unwrap()
+            .unwrap()
+            .next_due_at,
+        at
+    );
+    // Its run settles it back onto the schedule's own slots.
+    settle(
+        &conn,
+        &owner,
+        "swe:curate-workspace",
+        &Settled::Ran { status: "applied" },
+        None,
+        at,
+    )
+    .unwrap();
+    assert_eq!(
+        schedule_of(&conn, &owner, "swe:curate-workspace")
+            .unwrap()
+            .unwrap()
+            .next_due_at,
+        cron::next_due("0 4 * * 0", at).unwrap()
+    );
+    // A task the settings switch off, or one with no schedule, is not made
+    // due.
+    ensure_schedule(&conn, &owner, "swe:curate-workspace", "", now).unwrap();
+    assert!(!due_at(&conn, &owner, "swe:curate-workspace", at).unwrap());
+    assert!(!due_at(&conn, &owner, "swe:other", at).unwrap());
+}

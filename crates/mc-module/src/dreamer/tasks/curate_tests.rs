@@ -626,6 +626,8 @@ fn the_input_follows_its_frame_line_for_line() {
         id: 20,
         tag: "ARCHITECTURE".into(),
         content: "The module owns the store.".into(),
+        level: "project".into(),
+        owner: PROJECT.into(),
     }];
     let close = Memory {
         id: 30,
@@ -1408,4 +1410,196 @@ fn every_memory_the_head_shows_is_listed_except_the_parts_own() {
         .message
         .contains("<project-documents>\n<file name=\"ARCHITECTURE.md\">\n# Layout\n"));
     assert!(batch.message.contains("A &lt;frame&gt; is filled by the module &amp; never by a profile.\n</file>\n</project-documents>"));
+}
+
+// --- A project in a workspace ---
+
+/// The workspace of the tests that put the project in one.
+const WORKSPACE: &str = "ws-curate-project";
+
+/// `WORKSPACE` with the test project and, when `shared`, a second one.
+fn workspace(shared: bool) -> crate::workspace_members::WorkspaceMembers {
+    let mut members = vec![crate::workspace_members::Member {
+        project_id: PROJECT.into(),
+        name: "magic-context".into(),
+    }];
+    if shared {
+        members.push(crate::workspace_members::Member {
+            project_id: "pj-subc".into(),
+            name: "subc".into(),
+        });
+    }
+    crate::workspace_members::WorkspaceMembers {
+        workspace_id: WORKSPACE.into(),
+        name: "CortexKit".into(),
+        members,
+    }
+}
+
+impl Store {
+    /// A live rule `workspace` shares, lifted from the test project.
+    fn workspace_rule(&self, id: i64, workspace: &str, content: &str) {
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO memories(id, level, owner_id, category, origin_category, content, normalized_hash,
+                                      importance, status, source_type, source_project_id,
+                                      first_seen_at, created_at, updated_at, last_seen_at)
+                 VALUES (?1, 'workspace', ?2, 'swe:project-rules', 'PROJECT_RULES', ?3, ?4, 50, 'active',
+                         'historian', ?5, 0, 0, 0, 0)",
+                params![id, workspace, content, normalized_hash(content), PROJECT],
+            )
+            .unwrap();
+        });
+    }
+
+    /// The run's batches with the context's workspace `workspace`.
+    fn plan_in(
+        &self,
+        workspace: Option<&crate::workspace_members::WorkspaceMembers>,
+        resume: Option<&Resume>,
+        only: Option<&str>,
+    ) -> Vec<CurateBatch> {
+        let profile = prompt_profile(None).unwrap();
+        let declaration = declaration();
+        let owner = Owner::Project {
+            id: PROJECT.into(),
+            root: self.root(),
+        };
+        Curate
+            .plan_batches(
+                &TaskContext {
+                    db: &self.db,
+                    owner: &owner,
+                    profile: &profile,
+                    declaration: &declaration,
+                    workspace,
+                },
+                resume,
+                only,
+            )
+            .unwrap()
+    }
+}
+
+#[test]
+fn a_project_in_a_shared_workspace_sees_its_memories_and_may_archive_a_repeat_of_one() {
+    let store = fixture();
+    store.workspace_rule(
+        40,
+        WORKSPACE,
+        "Use the gate script before delivering a change.",
+    );
+    store.workspace_rule(41, "ws-elsewhere", "A rule another workspace shares.");
+    let workspace = workspace(true);
+    let mut batches = store.plan_in(Some(&workspace), None, Some("PROJECT_RULES"));
+    assert_eq!(batches.len(), 1);
+    let batch = batches.remove(0);
+    let shown = &batch.message[batch.message.find("<always-shown>").unwrap()
+        ..batch.message.find("</always-shown>").unwrap()];
+    // The workspace's memory the head shows the project's sessions, beside
+    // the project's own; not another workspace's.
+    assert!(
+        shown.contains("\n[40] PROJECT_RULES: Use the gate script before delivering a change.\n")
+    );
+    assert!(shown.contains("\n[20] ARCHITECTURE: "));
+    assert!(!shown.contains("[41]"), "{shown}");
+    // The workspace's memory is never in the part: only the project's are.
+    assert!(!ids(&batch).contains(&40));
+
+    // A project memory that repeats it is archived as its duplicate; the
+    // workspace's memory stays as it is.
+    assert_eq!(
+        refused(
+            &store,
+            &batch,
+            "<archive id=\"12\" reason=\"duplicate\" of=\"41\"/>"
+        ),
+        ["PROJECT_RULES part 1, archive 12: memory 41 was not shown with this part"]
+    );
+    let applied = store.apply(
+        &batch,
+        &list("<archive id=\"12\" reason=\"duplicate\" of=\"40\"/>"),
+        RUN,
+    );
+    assert_eq!(applied.applied, 1, "{applied:?}");
+    let archived = store.memory(12);
+    assert_eq!(
+        (archived.status.as_str(), archived.superseded_by),
+        ("archived", Some(40))
+    );
+    assert_eq!(
+        store.value::<String>("SELECT status FROM memories WHERE id = 40"),
+        "active"
+    );
+}
+
+#[test]
+fn a_workspace_memory_that_stops_being_shared_is_no_longer_a_valid_original() {
+    let store = fixture();
+    store.workspace_rule(
+        40,
+        WORKSPACE,
+        "Use the gate script before delivering a change.",
+    );
+    let batch = store
+        .plan_in(Some(&workspace(true)), None, Some("PROJECT_RULES"))
+        .remove(0);
+    // Moved to another workspace after the run read it.
+    store.execute("UPDATE memories SET owner_id = 'ws-elsewhere' WHERE id = 40");
+    assert_eq!(
+        refused(&store, &batch, "<archive id=\"12\" reason=\"duplicate\" of=\"40\"/>"),
+        ["PROJECT_RULES part 1, archive 12: memory 40 is no longer a live memory every session sees"]
+    );
+}
+
+#[test]
+fn without_a_workspace_of_two_projects_the_request_is_the_same_as_before() {
+    // The pinned request's store and resume point, with a rule the
+    // workspace shares that would be shown if the workspace were shared.
+    let store = fixture();
+    store.insert(&[row(
+        13,
+        "PROJECT_RULES",
+        "Run `cargo fmt --all` before each commit in crates/mc-module.",
+    )]);
+    store.workspace_rule(
+        40,
+        WORKSPACE,
+        "Use the gate script before delivering a change.",
+    );
+    let resume = Resume {
+        category: "swe:project-rules".into(),
+        part: 2,
+        after: 2,
+    };
+    let window = Window {
+        counter: Counter::for_model(None),
+        context_window: 1_000_000,
+    };
+    let request = |workspace: Option<&crate::workspace_members::WorkspaceMembers>| {
+        let mut batches = store.plan_in(workspace, Some(&resume), Some("PROJECT_RULES"));
+        assert_eq!(batches.len(), 1);
+        let batch = batches.remove(0);
+        let message = batch
+            .prompt(window, crate::routing::DREAM_OUTPUT_TOKENS)
+            .unwrap();
+        format!(
+            "=== system ===\n{}\n=== user ===\n{message}\n",
+            batch.system()
+        )
+    };
+    let pinned = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/dreamer/curate-request.txt"),
+    )
+    .unwrap();
+    // No workspace, and a workspace of this project alone: byte for byte
+    // the request the project's curate sent before it read workspaces.
+    assert_eq!(request(None), pinned);
+    assert_eq!(request(Some(&workspace(false))), pinned);
+    // A workspace of two projects shows its memory.
+    let shared = request(Some(&workspace(true)));
+    assert_ne!(shared, pinned);
+    assert!(
+        shared.contains("\n[40] PROJECT_RULES: Use the gate script before delivering a change.\n")
+    );
 }

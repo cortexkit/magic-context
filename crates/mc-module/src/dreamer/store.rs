@@ -34,6 +34,14 @@ impl OwnerKey {
             owner_id: "self".into(),
         }
     }
+
+    /// The memories a workspace shares, owned by the workspace's id.
+    pub fn workspace(id: &str) -> Self {
+        Self {
+            level: "workspace".into(),
+            owner_id: id.into(),
+        }
+    }
 }
 
 /// A schedule that is due.
@@ -204,27 +212,78 @@ pub fn lock(
     now: i64,
     expires_at: i64,
 ) -> rusqlite::Result<bool> {
+    lock_all(
+        conn,
+        std::slice::from_ref(owner),
+        holder,
+        task,
+        now,
+        expires_at,
+    )
+}
+
+/// `owners` in the one order every run that takes several locks takes them
+/// in: the person's, then workspaces', then projects', each by id. A run
+/// that writes a project's memories and its workspace's (the workspace
+/// lift) thus always takes the workspace's lock before the project's, as a
+/// run of the workspace's own memories does.
+pub fn lock_order(owners: &[OwnerKey]) -> Vec<OwnerKey> {
+    let rank = |owner: &OwnerKey| match owner.level.as_str() {
+        "global" => 0,
+        "workspace" => 1,
+        "project" => 2,
+        _ => 3,
+    };
+    let mut ordered = owners.to_vec();
+    ordered.sort_by(|a, b| {
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.owner_id.cmp(&b.owner_id))
+    });
+    ordered.dedup();
+    ordered
+}
+
+/// Take the lock of every owner in `owners` for `holder` until `expires_at`,
+/// all or none, in [`lock_order`], in one transaction. When another writer
+/// holds any of them, nothing is taken and the answer is `false`. Because
+/// no run ever holds one of several locks while waiting for another, and
+/// every run takes them in the same order, two runs that each want the same
+/// two owners can't each end up holding one.
+pub fn lock_all(
+    conn: &mut Connection,
+    owners: &[OwnerKey],
+    holder: &str,
+    task: &str,
+    now: i64,
+    expires_at: i64,
+) -> rusqlite::Result<bool> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let held: Option<(String, i64)> = tx
-        .query_row(
-            "SELECT holder, expires_at FROM dream_locks WHERE level = ?1 AND owner_id = ?2",
-            params![owner.level, owner.owner_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    if let Some((other, until)) = held {
-        if other != holder && until > now {
-            return Ok(false);
+    let ordered = lock_order(owners);
+    for owner in &ordered {
+        let held: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT holder, expires_at FROM dream_locks WHERE level = ?1 AND owner_id = ?2",
+                params![owner.level, owner.owner_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((other, until)) = held {
+            if other != holder && until > now {
+                return Ok(false);
+            }
         }
     }
-    tx.execute(
-        "INSERT INTO dream_locks(level, owner_id, holder, task, acquired_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(level, owner_id) DO UPDATE
-            SET holder = excluded.holder, task = excluded.task,
-                acquired_at = excluded.acquired_at, expires_at = excluded.expires_at",
-        params![owner.level, owner.owner_id, holder, task, now, expires_at],
-    )?;
+    for owner in &ordered {
+        tx.execute(
+            "INSERT INTO dream_locks(level, owner_id, holder, task, acquired_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(level, owner_id) DO UPDATE
+                SET holder = excluded.holder, task = excluded.task,
+                    acquired_at = excluded.acquired_at, expires_at = excluded.expires_at",
+            params![owner.level, owner.owner_id, holder, task, now, expires_at],
+        )?;
+    }
     tx.commit()?;
     Ok(true)
 }
@@ -244,6 +303,22 @@ pub fn renew(
     .map(|changed| changed == 1)
 }
 
+/// Extend `holder`'s lock on every owner of `owners`. `false` when it no
+/// longer holds one of them: the run must stop writing.
+pub fn renew_all(
+    conn: &Connection,
+    owners: &[OwnerKey],
+    holder: &str,
+    expires_at: i64,
+) -> rusqlite::Result<bool> {
+    for owner in owners {
+        if !renew(conn, owner, holder, expires_at)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Release `holder`'s lock on `owner`, if it still holds it.
 pub fn unlock(conn: &Connection, owner: &OwnerKey, holder: &str) -> rusqlite::Result<()> {
     conn.execute(
@@ -251,6 +326,28 @@ pub fn unlock(conn: &Connection, owner: &OwnerKey, holder: &str) -> rusqlite::Re
         params![owner.level, owner.owner_id, holder],
     )
     .map(drop)
+}
+
+/// Release `holder`'s locks on `owners` that it still holds, in the reverse
+/// of [`lock_order`].
+pub fn unlock_all(conn: &Connection, owners: &[OwnerKey], holder: &str) -> rusqlite::Result<()> {
+    for owner in lock_order(owners).iter().rev() {
+        unlock(conn, owner, holder)?;
+    }
+    Ok(())
+}
+
+/// Make `task` of `owner` due at `at`, whatever slot it was due at, when its
+/// schedule is on. `false` when it has no schedule row or the settings
+/// switch it off. Once that run settles, the schedule's own slots apply
+/// again ([`settle`]).
+pub fn due_at(conn: &Connection, owner: &OwnerKey, task: &str, at: i64) -> rusqlite::Result<bool> {
+    conn.execute(
+        "UPDATE dream_schedules SET next_due_at = ?4
+          WHERE level = ?1 AND owner_id = ?2 AND task = ?3 AND schedule != ''",
+        params![owner.level, owner.owner_id, task, at],
+    )
+    .map(|changed| changed == 1)
 }
 
 /// A started run's record. Returns its id, which names its child sessions

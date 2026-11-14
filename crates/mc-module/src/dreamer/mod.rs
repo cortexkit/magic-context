@@ -19,6 +19,8 @@ pub mod tasks;
 #[cfg(test)]
 pub(crate) mod curate_replay_tests;
 #[cfg(test)]
+mod curate_workspace_replay_tests;
+#[cfg(test)]
 mod lift_replay_tests;
 #[cfg(test)]
 mod map_replay_tests;
@@ -36,6 +38,7 @@ pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
         Box::new(tasks::classify::Classify),
         Box::new(tasks::compress_cues::CompressCues),
         Box::new(tasks::curate::Curate),
+        Box::new(tasks::curate_workspace::CurateWorkspace),
         Box::new(tasks::lift_workspace::LiftWorkspace),
         Box::new(tasks::map_memories::MapMemories),
         Box::new(tasks::verify::Verify { broad: false }),
