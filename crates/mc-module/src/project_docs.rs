@@ -25,6 +25,13 @@ const PROJECT_DOCS_DELIMITER: &str = "\n\n---\n\n";
 /// whole. The curate tasks hold the workspace guidance to the same limit.
 pub(crate) const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
 
+/// The size the docs-upkeep task (`maintain-docs`) keeps the two documents
+/// within together, in the module's own tokens: every head carries both, so
+/// each sentence they gain costs every session. The head itself renders the
+/// documents whole, whatever their size up to [`MAX_PROJECT_DOC_BYTES`]
+/// each; this is the task's bound, the 0.49 plugin's default.
+pub const DOCS_BUDGET_TOKENS: u64 = 12_000;
+
 /// The rendered `<project-docs>` block (empty when no readable doc) + the canonical
 /// content hash (empty hash string when no readable doc).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

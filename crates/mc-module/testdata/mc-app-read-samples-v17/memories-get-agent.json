@@ -1,0 +1,51 @@
+{
+  "name": "memories-get-agent",
+  "request": {
+    "method": "memories.get",
+    "params": {
+      "id": 1
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "memory": {
+        "category": "swe:project-rules",
+        "content": "Run the release script from the repository root, never from a package.",
+        "created_at": 1700000001000,
+        "cue": "release from root",
+        "embedded": true,
+        "first_seen_at": 1700000001000,
+        "history": [
+          {
+            "after": "Run the release script from the repository root, never from a package.",
+            "at": 1700000100000,
+            "before": "Run the release script from the repository root.",
+            "reason": "ctx_memory_update",
+            "revision": 2,
+            "writer": "agent"
+          }
+        ],
+        "id": 1,
+        "importance": 90,
+        "last_seen_at": 1700000001000,
+        "level": "project",
+        "merged_from": [],
+        "owner": "pj-sample",
+        "retrieval_count": 7,
+        "revision": 2,
+        "seen_count": 3,
+        "sensitive": false,
+        "shareable": false,
+        "source": {
+          "session": "s",
+          "type": "agent"
+        },
+        "status": "active",
+        "updated_at": 1700000100000
+      },
+      "op": "memories.get",
+      "schema": 1
+    }
+  }
+}

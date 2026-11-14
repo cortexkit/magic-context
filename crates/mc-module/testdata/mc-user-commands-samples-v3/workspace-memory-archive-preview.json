@@ -1,0 +1,19 @@
+{
+  "available": true,
+  "effect": "Archives 1 workspace memory; agents stop seeing them. Restore brings them back.",
+  "facts": [
+    {
+      "label": "Memories",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Already archived",
+      "noun": "memories",
+      "unit": "count",
+      "value": 0.0
+    }
+  ],
+  "version": "65d617cb88686a37e4128129351c34923c8d085527d274489f0d0772d6f42057"
+}

@@ -1,0 +1,16 @@
+{
+  "facts": [
+    {
+      "label": "Memories changed",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Revision",
+      "unit": "count",
+      "value": 3.0
+    }
+  ],
+  "outcome": "applied"
+}

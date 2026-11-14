@@ -131,10 +131,13 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     // The phone reaches ck-mc through Callosum, which relays only
     // management-surface operations, so the reads it uses are also
     // declared there, as queries.
+    // Basal's flows read docs proposals over the management surface, so the
+    // flow operations are declared there too, as queries.
     provides.push(ProviderRole::ManagementSurface {
         operations: MANAGEMENT_APP_METHODS
             .iter()
             .chain(cortexkit_role_user_commands::MODULE_OPS.iter())
+            .chain(crate::docs_proposals::flow::FLOW_ROUTE_METHODS.iter())
             .map(|method| subc_protocol::manifest::ManagementOperation {
                 name: (*method).into(),
                 kind: if *method == "commands.run" {
@@ -176,6 +179,10 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         step::PROVIDES.to_owned(),
         subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
         subc_protocol::scope::SCOPE_WORKDIR_CAPABILITY.to_owned(),
+        // A flow's route is stamped with its flow, and admitted only to the
+        // flow operations (`crate::docs_proposals::flow`): ck-mc never
+        // treats a call from a flow as a call from the agent that owns it.
+        subc_protocol::scope::FLOW_SCOPES_CAPABILITY.to_owned(),
     ];
     if agent_data {
         claims.push(cortexkit_role_agent_data::PROVIDES.to_owned());
@@ -204,6 +211,9 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
             requires: Vec::new(),
             must_never_reach: Vec::new(),
         }))
+        // The events ck-mc publishes on the bus, with the headers a notice
+        // carries ([`crate::bus`]).
+        .events(Some(vec![crate::docs_proposals::event_declaration()]))
         // The build's commit, from MC_BUILD_SHA at compile time. The daemon
         // shows it in module status, and placement checks it to prove the
         // running module is the placed build. A missing or malformed stamp
@@ -992,7 +1002,18 @@ pub struct Handler {
     /// Every bound `agent-data` route, by channel, with the caller the
     /// daemon stamped on it.
     agent_data_bound: Mutex<HashMap<u16, String>>,
+    /// Every route the daemon bound under a flow's scope, by channel, with
+    /// its stamp. Such a route reaches only the flow operations
+    /// ([`crate::docs_proposals::flow`]), whatever surface it targets.
+    flow_bound: Mutex<HashMap<u16, FlowRoute>>,
     answer_routes: Mutex<HashMap<u16, AnswerRoute>>,
+}
+
+/// What the daemon stamped on a flow-scoped route at bind.
+#[derive(Clone, Debug)]
+struct FlowRoute {
+    principal: Option<Principal>,
+    scope: Option<subc_protocol::scope::ScopeStamp>,
 }
 
 /// Who a route's answers go to, recorded at bind so a slow answer can be
@@ -1226,8 +1247,53 @@ impl Handler {
             command_bound: Mutex::default(),
             context_bound: Mutex::default(),
             agent_data_bound: Mutex::default(),
+            flow_bound: Mutex::default(),
             answer_routes: Mutex::default(),
         }
+    }
+
+    /// A request on a flow-scoped route: the flow operation's answer, or the
+    /// refusal of anything else. `None` for a route bound under no flow.
+    async fn flow_request(&self, channel: u16, body: &[u8]) -> Option<HandlerOutcome> {
+        use crate::docs_proposals::flow;
+        let route = self
+            .flow_bound
+            .lock()
+            .expect("flow routes")
+            .get(&channel)
+            .cloned()?;
+        let error = |error: subc_protocol::ErrorBody| match error.detail {
+            Some(detail) => HandlerOutcome::ErrorWithDetail {
+                code: error.code,
+                message: error.message,
+                detail,
+            },
+            None => HandlerOutcome::Error {
+                code: error.code,
+                message: error.message,
+            },
+        };
+        if let Some(refusal) = flow::flow_route_refusal(body) {
+            return Some(error(refusal));
+        }
+        let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        let method = request["method"].as_str().unwrap_or_default();
+        // The caller is judged from the daemon's bind stamp, before any
+        // argument is read.
+        if let Err(message) =
+            flow::authorize_caller(method, route.principal.as_ref(), route.scope.as_ref())
+        {
+            return Some(HandlerOutcome::Error {
+                code: "caller_forbidden".into(),
+                message,
+            });
+        }
+        Some(match flow::handle(self.module.store_db(), &request) {
+            Ok(reply) => HandlerOutcome::Response(
+                serde_json::to_vec(&reply).expect("flow replies serialize"),
+            ),
+            Err(refusal) => error(refusal),
+        })
     }
 
     /// An `agent-data` request on `channel`, when that channel is a bound
@@ -1637,6 +1703,23 @@ impl ModuleHandler for Handler {
             .lock()
             .expect("command routes")
             .remove(&request.handle.channel);
+        self.flow_bound
+            .lock()
+            .expect("flow routes")
+            .remove(&request.handle.channel);
+        // First: a route bound under a flow's scope reaches the flow
+        // operations and nothing else, on any surface, so it is never judged
+        // as a runner's, an app's or a command caller's route.
+        if crate::docs_proposals::flow::flow_scoped(request.scope.as_ref()) {
+            self.flow_bound.lock().expect("flow routes").insert(
+                request.handle.channel,
+                FlowRoute {
+                    principal: request.principal.clone(),
+                    scope: request.scope.clone(),
+                },
+            );
+            return BindDecision::accept();
+        }
         if matches!(&request.target, RouteTarget::ManagementSurface { module_id } if module_id == crate::MODULE_ID)
         {
             let principal = request.principal.clone().unwrap_or(Principal::Unverified);
@@ -1820,7 +1903,9 @@ impl ModuleHandler for Handler {
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
         let started = Instant::now();
         let channel = ctx.route_handle().channel;
-        let outcome = if let Some(answer) = self.command(channel, &body).await {
+        let outcome = if let Some(answer) = self.flow_request(channel, &body).await {
+            answer
+        } else if let Some(answer) = self.command(channel, &body).await {
             match answer {
                 Ok(value) => {
                     HandlerOutcome::Response(serde_json::to_vec(&value).expect("command reply"))
@@ -2213,6 +2298,9 @@ mod app_read_tests {
                 ("context.cache_why".into(), "query".into()),
                 ("context.search".into(), "query".into()),
                 ("context.watch".into(), "query".into()),
+                // The two reads a Basal flow may call (docs proposals).
+                ("docs_proposals.state".into(), "query".into()),
+                ("events_get".into(), "query".into()),
                 ("session_data.read".into(), "query".into()),
             ]
         );
@@ -2465,5 +2553,281 @@ mod manifest_tests {
                 .any(|claim| claim.ends_with("-provider/v1") && *claim != "tool-provider/v1"),
             "an old contract version is still claimed: {provides:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod flow_tests {
+    //! A route bound under a flow's scope reaches the two flow operations
+    //! and nothing else, on every surface ck-mc serves, and only when the
+    //! module that carries flow calls (Basal, `basal()` here) makes the call
+    //! under a flow scope its owner authorized.
+
+    use super::*;
+    use subc_protocol::scope::{ScopeKind, ScopeStamp};
+
+    const PROJECT: &str = "pj-flow";
+
+    fn handler(dir: &std::path::Path) -> Handler {
+        let db = crate::context_db::ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+        db.with_connection(|conn| {
+            let tx = conn.transaction().unwrap();
+            crate::docs_proposals::insert(
+                &tx,
+                &crate::docs_proposals::NewProposal {
+                    project: PROJECT.into(),
+                    run_id: None,
+                    checkout: "/nonexistent/pj-flow".into(),
+                    base_commit: "0".repeat(40),
+                    created_at: 1,
+                    documents: Vec::new(),
+                    changes: Vec::new(),
+                    dropped: Vec::new(),
+                },
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        });
+        Handler::new(Module::new(
+            SubcRunnerClient::new(
+                PathBuf::from("unused-flow-connection"),
+                Arc::new(ChildScopes::new("flow")),
+            ),
+            crate::pass::Settings::default(),
+            Some(db),
+            None,
+        ))
+    }
+
+    fn flow_scope() -> ScopeStamp {
+        let mut scope = ScopeStamp::new(
+            Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+            "flow-scope",
+            1,
+            ScopeKind::Worker,
+        );
+        scope.owner_authorized = true;
+        scope.attributes.flow_id = Some("flow-docs".into());
+        scope
+    }
+
+    fn basal() -> Principal {
+        Principal::Reserved {
+            module_id: "basal".into(),
+        }
+    }
+
+    /// Bind a route on `channel` to `target`, declaring `role` when given.
+    async fn bind(
+        handler: &Handler,
+        channel: u16,
+        target: RouteTarget,
+        role: Option<(&str, &str)>,
+        principal: Principal,
+        scope: ScopeStamp,
+    ) {
+        let mut request = RouteBindRequest::new(
+            subc_client_rs::RouteHandle::detached(channel, 1),
+            target,
+            BindIdentity::new("flow", "flow-docs"),
+        );
+        request.principal = Some(principal);
+        request.scope = Some(scope);
+        request.role_versions = role.map(|(name, version)| {
+            std::collections::BTreeMap::from([(name.to_owned(), version.to_owned())])
+        });
+        let decision = handler.on_bind(&request).await;
+        assert!(format!("{decision:?}").contains("Accept"), "{decision:?}");
+    }
+
+    /// The answer's error code, or `ok` with its body.
+    async fn call(handler: &Handler, channel: u16, body: Value) -> (String, Value) {
+        let bytes = serde_json::to_vec(&body).unwrap();
+        match handler
+            .flow_request(channel, &bytes)
+            .await
+            .expect("a flow route")
+        {
+            HandlerOutcome::Response(reply) => {
+                ("ok".into(), serde_json::from_slice(&reply).unwrap())
+            }
+            HandlerOutcome::Error { code, .. } | HandlerOutcome::ErrorWithDetail { code, .. } => {
+                (code, Value::Null)
+            }
+            _ => panic!("unexpected answer"),
+        }
+    }
+
+    fn events_get() -> Value {
+        json!({"method": "events_get", "params": {
+            "event_key": format!("{PROJECT}:1"), "event_name": "docs_proposal", "version": 1,
+        }})
+    }
+
+    #[tokio::test]
+    async fn a_flow_route_reads_a_proposal_and_its_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = handler(dir.path());
+        let management = RouteTarget::ManagementSurface {
+            module_id: crate::MODULE_ID.into(),
+        };
+        bind(&handler, 20, management, None, basal(), flow_scope()).await;
+        let (code, reply) = call(&handler, 20, events_get()).await;
+        assert_eq!(code, "ok");
+        assert_eq!(reply["result"]["event_key"], format!("{PROJECT}:1"));
+        assert_eq!(reply["result"]["event_name"], "docs_proposal");
+        let (code, reply) = call(
+            &handler,
+            20,
+            json!({"method": "docs_proposals.state", "params": {"proposal_id": 1}}),
+        )
+        .await;
+        assert_eq!(code, "ok");
+        assert_eq!(reply, json!({"result": {"state": "pending"}}));
+    }
+
+    #[tokio::test]
+    async fn every_other_call_on_a_flow_route_is_refused_on_every_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = handler(dir.path());
+        let tool = RouteTarget::ToolProvider {
+            module_id: crate::MODULE_ID.into(),
+        };
+        let management = RouteTarget::ManagementSurface {
+            module_id: crate::MODULE_ID.into(),
+        };
+        let app = RouteTarget::InternalService {
+            module_id: crate::MODULE_ID.into(),
+            service_id: crate::app_read::ROLE.0.into(),
+        };
+        bind(&handler, 30, tool, Some(TOOL_ROLE), basal(), flow_scope()).await;
+        bind(&handler, 31, management, None, basal(), flow_scope()).await;
+        bind(
+            &handler,
+            32,
+            app,
+            Some(crate::app_read::ROLE),
+            basal(),
+            flow_scope(),
+        )
+        .await;
+        let cases = [
+            // A `ctx_*` tool call on the tool provider.
+            (
+                30,
+                json!({"name": "ctx_memory", "arguments": {"action": "list"}}),
+            ),
+            (30, json!({"name": "tool.catalog", "arguments": {}})),
+            // An app read, a person's command, and a runner's op on the
+            // management surface.
+            (
+                31,
+                json!({"method": "memories.stats", "params": {"level": "global"}}),
+            ),
+            (31, json!({"method": "commands.describe", "params": {}})),
+            (31, json!({"method": "compaction.setup", "params": {}})),
+            (
+                31,
+                json!({"method": "subagent_invocations.read", "params": {}}),
+            ),
+            // An app read on the app-read service.
+            (
+                32,
+                json!({"method": "dreamer.docs_proposal", "params": {"project": PROJECT}}),
+            ),
+            // A body that isn't a request.
+            (31, json!("events_get")),
+        ];
+        for (channel, body) in cases {
+            let (code, _) = call(&handler, channel, body.clone()).await;
+            assert_eq!(code, "flow_route_not_admitted", "{body}");
+        }
+        // The flow operations are admitted on any surface the flow bound.
+        assert_eq!(call(&handler, 30, events_get()).await.0, "ok");
+        assert_eq!(call(&handler, 32, events_get()).await.0, "ok");
+    }
+
+    #[tokio::test]
+    async fn a_flow_operation_needs_the_carrier_and_an_authorized_flow_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = handler(dir.path());
+        let management = || RouteTarget::ManagementSurface {
+            module_id: crate::MODULE_ID.into(),
+        };
+        let mut unauthorized = flow_scope();
+        unauthorized.owner_authorized = false;
+        let mut foreign = flow_scope();
+        foreign.owner = Principal::Direct;
+        let mut codemode = flow_scope();
+        codemode.attributes.run_id = Some("run-1".into());
+        let cases = [
+            (40, Principal::Direct, flow_scope()),
+            (
+                41,
+                Principal::Reserved {
+                    module_id: "callosum".into(),
+                },
+                flow_scope(),
+            ),
+            (42, basal(), unauthorized),
+            (43, basal(), foreign),
+            (44, basal(), codemode),
+        ];
+        for (channel, principal, scope) in cases {
+            bind(&handler, channel, management(), None, principal, scope).await;
+            let (code, _) = call(&handler, channel, events_get()).await;
+            assert_eq!(code, "caller_forbidden", "channel {channel}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_route_bound_under_no_flow_is_not_a_flow_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = handler(dir.path());
+        let mut request = RouteBindRequest::new(
+            subc_client_rs::RouteHandle::detached(50, 1),
+            RouteTarget::ManagementSurface {
+                module_id: crate::MODULE_ID.into(),
+            },
+            BindIdentity::new("", "command-test"),
+        );
+        request.principal = Some(basal());
+        handler.on_bind(&request).await;
+        assert!(handler.flow_request(50, b"{}").await.is_none());
+    }
+
+    #[test]
+    fn the_manifest_declares_flow_scopes_the_flow_operations_and_the_event() {
+        let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
+        let claims = manifest["capabilities"]["provides"].as_array().unwrap();
+        assert!(claims.contains(&json!("flow-scopes/v1")));
+        let surface = manifest["provides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["role"] == "management_surface")
+            .unwrap();
+        for op in ["events_get", "docs_proposals.state"] {
+            let declared = surface["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|operation| operation["name"] == op)
+                .unwrap_or_else(|| panic!("{op} is declared"));
+            assert_eq!(declared["kind"], "query", "{op}");
+        }
+        assert_eq!(
+            manifest["events"],
+            json!([{
+                "name": "docs_proposal",
+                "version": 1,
+                "headers": ["event_key", "project_id"],
+                "summary": "Magic Context proposed edits to a project's ARCHITECTURE.md and STRUCTURE.md",
+            }])
+        );
+        subc_protocol::manifest::validate_hello_event_declarations(&json!({"manifest": manifest}))
+            .unwrap();
     }
 }

@@ -123,6 +123,13 @@ pub(crate) trait Task: Send + Sync {
         let _ = embedding;
         Box::pin(std::future::ready(self.batches(context)))
     }
+    /// Why the run that just planned for `owner` sends nothing, when its
+    /// planning ended on a reason worth recording with the run (a gate that
+    /// held the model back). Taking it clears it. The default has none.
+    fn skip_reason(&self, owner: &Owner) -> Option<String> {
+        let _ = owner;
+        None
+    }
 }
 
 /// One message of a run, and how its accepted reply is written.
@@ -143,6 +150,18 @@ pub(crate) trait Batch: TaskInput + Send {
     /// branch, instead of whatever worktree that session was in.
     fn folder(&self) -> Option<&str> {
         None
+    }
+    /// Whether what the batch writes is memories, so an applied change tells
+    /// the memory pages. A batch that writes something else tells its own
+    /// readers in [`Batch::after_commit`].
+    fn changes_memories(&self) -> bool {
+        true
+    }
+    /// What follows a committed [`Batch::apply`] outside the store: files the
+    /// batch keeps next to its rows, and the readers it tells. The default
+    /// does nothing.
+    fn after_commit(&self, db: &ContextDb) {
+        let _ = db;
     }
 }
 

@@ -302,6 +302,14 @@ pub(super) fn declarations() -> Vec<Command> {
         "reversible",
     ));
     commands.push(command(
+        "docs_proposal_dismiss".into(),
+        "Dismiss docs proposal".into(),
+        "Sets the dreamer's proposed edits to the project's ARCHITECTURE.md and STRUCTURE.md aside, so neither the dreamer page nor the project's head agent offers them again. The documents stay as they are.".into(),
+        SubjectKind::Project,
+        vec![Arg::new("proposal_id", ArgKind::Number, "Docs proposal id")],
+        "reversible",
+    ));
+    commands.push(command(
         "note_edit".into(),
         "Edit note".into(),
         "Replaces the text of one of the project's notes.".into(),
@@ -543,9 +551,12 @@ fn plan<'a, C: crate::client::RunnerClient + crate::routing::Router + Send + Syn
     args: &Map<String, Value>,
 ) -> Result<Plan<'a>, ErrorBody> {
     let project = match id {
-        "dreamer_run_now" | "dreamer_undo_run" | "note_edit" | "note_dismiss" | "note_delete" => {
-            Some(project_of(subject, context.project_known)?)
-        }
+        "dreamer_run_now"
+        | "dreamer_undo_run"
+        | "docs_proposal_dismiss"
+        | "note_edit"
+        | "note_dismiss"
+        | "note_delete" => Some(project_of(subject, context.project_known)?),
         _ => {
             // A project memory command names the project too.
             if matches!(subject, Subject::Project { .. }) {
@@ -568,6 +579,7 @@ fn plan<'a, C: crate::client::RunnerClient + crate::routing::Router + Send + Syn
             super::dreamer::run_now(context, db, project, args, &stamp)
         }
         ("dreamer_undo_run", Some(project)) => super::dreamer::undo_run(db, project, args, &stamp),
+        ("docs_proposal_dismiss", Some(project)) => super::docs::dismiss(db, project, args, &stamp),
         ("note_edit" | "note_dismiss" | "note_delete", Some(project)) => {
             super::notes::plan(db, id, project, args, &stamp)
         }

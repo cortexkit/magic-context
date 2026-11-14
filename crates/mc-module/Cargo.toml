@@ -62,6 +62,15 @@ cortexkit-project-identity = "=0.1.4"
 # Profile versions compare as semantic versions.
 semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# The module publishes its bus events itself, as Plexus does (`bus.rs`): a
+# NATS credential from ck-bus, a JetStream publish, the fleet's subject names.
+cortexkit-bus-nats = "=0.4.0"
+cortexkit-bus-trait = "=0.3.1"
+cortexkit-bus-naming = "=0.3.4"
+async-nats = { version = "0.50", default-features = false }
+async-trait = "0.1"
+# Credential tokens are wiped from memory when dropped.
+zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["fs"] }
@@ -79,6 +88,8 @@ mc-mock-runner = { workspace = true }
 tempfile = "3"
 filetime = "0.2"
 tracing-subscriber = "0.3"
+# An in-memory bus for the notice publisher's tests.
+cortexkit-bus-inmemory = "=0.3.2"
 
 [[bin]]
 name = "ck-mc"

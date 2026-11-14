@@ -23,6 +23,8 @@ pub(crate) mod curate_replay_tests;
 #[cfg(test)]
 mod curate_workspace_replay_tests;
 #[cfg(test)]
+mod docs_replay_tests;
+#[cfg(test)]
 mod lift_replay_tests;
 #[cfg(test)]
 mod map_replay_tests;
@@ -46,6 +48,7 @@ pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
         Box::new(tasks::curate::Curate),
         Box::new(tasks::curate_workspace::CurateWorkspace),
         Box::new(tasks::lift_workspace::LiftWorkspace),
+        Box::new(tasks::maintain_docs::MaintainDocs::default()),
         Box::new(tasks::map_memories::MapMemories),
         Box::new(tasks::reflect_events::ReflectEvents),
         Box::new(tasks::refresh_primers::RefreshPrimers),

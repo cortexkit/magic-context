@@ -114,6 +114,9 @@ struct Inner<C> {
     /// Wakes the rounds that move a 0.49 store's project rows when a Setup
     /// names a project id this process hasn't seen.
     legacy_wake: Arc<crate::legacy_projects::Wake>,
+    /// The publisher of the docs-upkeep proposals' bus notices, once the
+    /// process set one ([`Module::publish_docs_notices_with`]).
+    docs_notices: std::sync::OnceLock<Arc<crate::bus::DocsNotices>>,
 }
 
 enum Job {
@@ -281,6 +284,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 active_projects: Mutex::new(HashMap::new()),
                 dreamer,
                 legacy_wake: Arc::default(),
+                docs_notices: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -312,6 +316,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         self.inner.agent_data.handle(self, caller, body).await
     }
 
+    /// The module's `context.db`, when it has one.
+    pub(crate) fn store_db(&self) -> Option<&ContextDb> {
+        self.inner.db.as_deref()
+    }
+
     /// An app read, refused for a session a move holds before the
     /// projection is asked.
     pub async fn app_request(
@@ -320,6 +329,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         params: Value,
     ) -> Result<Value, cortexkit_role_compaction::wire::Refusal> {
         self.app_gate(&params)?;
+        if method == crate::app_read::docs::METHOD {
+            // A proposal read stores the status the documents show, so it is
+            // answered from the writable store, not the read-only replica.
+            let known = match params.get("project").and_then(Value::as_str) {
+                Some(project) => self.inner.app_read.knows_project(project).await,
+                None => false,
+            };
+            return crate::app_read::docs::read(self.inner.db.as_deref(), known, &params);
+        }
         if !matches!(method, "context.head" | "context.head_section") {
             return self.inner.app_read.read(method, params).await;
         }
@@ -814,6 +832,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         });
     }
 
+    /// Publish the docs-upkeep proposals' bus notices through `notices` in
+    /// the dreamer's rounds ([`crate::bus`]). Only the first call takes
+    /// effect; a module without one publishes none.
+    pub fn publish_docs_notices_with(&self, notices: crate::bus::DocsNotices) {
+        let _ = self.inner.docs_notices.set(Arc::new(notices));
+    }
+
     /// Run the dreamer once a minute, the first time after upkeep's quiet
     /// period. Each round learns the projects of the sessions set up in this
     /// process (with the memory profile a session of each resolved, or the
@@ -849,6 +874,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         );
                     }
                     engine.tick(&db, &module.inner.client, &settings, now);
+                }
+                // Unsent proposal notices are retried every round, also
+                // after the person switched the dreamer off.
+                if let Some(notices) = module.inner.docs_notices.get() {
+                    notices.publish(&db).await;
                 }
                 tokio::time::sleep(crate::dreamer::engine::TICK).await;
             }

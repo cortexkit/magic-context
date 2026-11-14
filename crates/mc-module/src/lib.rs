@@ -46,6 +46,7 @@
 
 pub mod agent_data;
 pub mod app_read;
+pub mod bus;
 pub mod calibration;
 pub mod catalog;
 pub mod caveman;
@@ -59,6 +60,7 @@ pub(crate) mod context_migrations;
 pub mod context_read;
 pub mod count;
 pub mod decay;
+pub(crate) mod docs_proposals;
 pub(crate) mod dreamer;
 pub mod embedding;
 pub mod expand;

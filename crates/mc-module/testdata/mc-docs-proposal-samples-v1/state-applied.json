@@ -1,0 +1,14 @@
+{
+  "name": "state-applied",
+  "request": {
+    "method": "docs_proposals.state",
+    "params": {
+      "proposal_id": 1
+    }
+  },
+  "response": {
+    "result": {
+      "state": "applied"
+    }
+  }
+}

@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from
 import { join, relative } from "node:path";
 import { cleanupRegisteredTestTempDirs, createTestTempDir } from "../../src/shared/test-temp-dir";
 import {
+    DOCS_TRAJECTORY,
     MAP_TRAJECTORY,
     type ProviderAnswer,
     REFLECT_TRAJECTORY,
@@ -431,5 +432,45 @@ describe("verify-run", () => {
         await expect(runRequest({ requestPath: verify.requestPath, key: KEY, send: stub([]).send })).rejects.toThrow(
             "a verify request needs --checkout",
         );
+    });
+
+    it("runs a docs-upkeep request with the read-only tools into docs.trajectory.json", async () => {
+        const { dir, checkout, folder, requestPath } = fixture();
+        writeFileSync(
+            requestPath,
+            readFileSync(requestPath, "utf8")
+                .replace('"kind":"verify"', '"kind":"maintain-docs"')
+                .replace('"task":"swe:verify"', '"task":"swe:maintain-docs"'),
+        );
+        const before = listing(dir);
+        const answer =
+            '[{"file": "ARCHITECTURE.md", "action": "replace", "heading": "## Core", "text": "## Core\\nalpha runs first.", "reason": "src/a.rs says so."}]';
+        const model = stub([toolReply([["read", { path: "src/a.rs" }]]), finalReply(answer)]);
+        const trajectory = await runRequest({ requestPath, checkout, key: KEY, send: model.send });
+        expect(trajectory).toMatchObject({ kind: "maintain-docs", stopReason: "final" });
+        expect(trajectory.final).toEqual({ text: answer, completeManifest: true });
+        expect((model.bodies[0] as { tools: unknown }).tools).toEqual(TOOLS);
+        expect(listing(dir)).toEqual([...before, relative(dir, join(folder, DOCS_TRAJECTORY))].sort());
+
+        for (const [text, complete] of [
+            ["[]", true],
+            ["Nothing to change.\n```json\n[]\n```", true],
+            ["The documents are right: []", true],
+            ["Nothing to change.", false],
+            ['{"changes": 1}', false],
+        ] as const) {
+            const again = fixture();
+            writeFileSync(
+                again.requestPath,
+                readFileSync(again.requestPath, "utf8").replace('"kind":"verify"', '"kind":"maintain-docs"'),
+            );
+            const run = await runRequest({
+                requestPath: again.requestPath,
+                checkout: again.checkout,
+                key: KEY,
+                send: stub([finalReply(text)]).send,
+            });
+            expect([text, run.final]).toEqual([text, { text, completeManifest: complete }]);
+        }
     });
 });

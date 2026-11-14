@@ -5,8 +5,9 @@
  * The request is one that a ck-mc replay harness wrote (in
  * `crates/mc-module/src/dreamer/`): a `verify.request.json`
  * (`verify_replay_tests.rs`), `map.request.json` (`map_replay_tests.rs`),
- * `refresh.request.json` (`primer_replay_tests.rs`) or `reflect.request.json`
- * (`reflect_replay_tests.rs`), holding the system and user text a batch of
+ * `refresh.request.json` (`primer_replay_tests.rs`), `reflect.request.json`
+ * (`reflect_replay_tests.rs`) or `docs.request.json` (`docs_replay_tests.rs`),
+ * holding the system and user text a batch of
  * that kind sends, the model settings, and the step bound the module's plan
  * gives the run. This runner plays the runner's part: for a kind that reads
  * code it offers `read` (with a line range), `grep` and `glob`, confined to
@@ -96,6 +97,26 @@ export function completeAnswer(text: string): boolean {
     });
 }
 
+/**
+ * Whether `text` holds a docs-upkeep answer as the module reads one: a JSON
+ * array (an empty one included), as the whole text, inside the first code
+ * fence, or from the first `[` to the last `]`.
+ */
+export function completeArray(text: string): boolean {
+    const fence = text.match(/```[^\n\[]*\n?([\s\S]*?)```/);
+    const start = text.indexOf("[");
+    const end = text.lastIndexOf("]");
+    const candidates = [text, fence?.[1] ?? null, start >= 0 && end >= start ? text.slice(start, end + 1) : null];
+    return candidates.some((candidate) => {
+        if (candidate === null) return false;
+        try {
+            return Array.isArray(JSON.parse(candidate.trim()));
+        } catch {
+            return false;
+        }
+    });
+}
+
 /** The task kinds this runner replays. */
 export const KINDS: Readonly<Record<string, ReplayKind>> = {
     verify: { trajectory: "verify.trajectory.json", complete: (text) => completeManifest(text, "verify"), tools: true },
@@ -116,11 +137,13 @@ export const KINDS: Readonly<Record<string, ReplayKind>> = {
         complete: (text) => completeManifest(text, "learnings") || /<learnings\b[^>]*\/>/i.test(text),
         tools: false,
     },
+    "maintain-docs": { trajectory: "docs.trajectory.json", complete: completeArray, tools: true },
 };
 export const TRAJECTORY = KINDS.verify.trajectory;
 export const MAP_TRAJECTORY = KINDS["map-memories"].trajectory;
 export const REFRESH_TRAJECTORY = KINDS["refresh-primers"].trajectory;
 export const REFLECT_TRAJECTORY = KINDS["reflect-events"].trajectory;
+export const DOCS_TRAJECTORY = KINDS["maintain-docs"].trajectory;
 
 /** How a request of `kind` runs; an unknown kind is refused. */
 export function kindOf(kind: string): ReplayKind {

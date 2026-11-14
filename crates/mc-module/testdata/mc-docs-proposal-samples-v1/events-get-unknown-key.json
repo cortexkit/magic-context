@@ -1,0 +1,17 @@
+{
+  "name": "events-get-unknown-key",
+  "request": {
+    "method": "events_get",
+    "params": {
+      "event_key": "pj-docs:999",
+      "event_name": "docs_proposal",
+      "version": 1
+    }
+  },
+  "response": {
+    "error": {
+      "code": "event_not_visible",
+      "message": "Magic Context published no such event."
+    }
+  }
+}

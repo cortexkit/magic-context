@@ -1,7 +1,7 @@
 # Dreamer replay
 
-Replays ck-mc's `verify`, `verify-broad`, `map-memories`, `refresh-primers` and
-`reflect-events` dreamer tasks on a real project, so every request and every
+Replays ck-mc's `verify`, `verify-broad`, `map-memories`, `refresh-primers`,
+`reflect-events` and `maintain-docs` dreamer tasks on a real project, so every request and every
 step of a model's work can be read before the tasks are switched on. Nothing
 here writes to a live store.
 
@@ -83,6 +83,42 @@ It reads the batch's `reflect.reply.json` (from `send.ts`) or
 `reflect.trajectory.json` (from `verify-run.ts`), or the file
 `REFLECT_REPLAY_REPLY` names.
 
+### Docs upkeep
+
+The docs task reads the change since the commit it last processed. Its test
+takes that commit instead of the task's stored one:
+
+```sh
+DOCS_REPLAY_STORE=/path/to/context-copy.db \
+DOCS_REPLAY_CHECKOUT=/path/to/project \
+DOCS_REPLAY_PROJECT=<project id in the store> \
+DOCS_REPLAY_FROM_COMMIT=<commit to read the change from> \
+DREAMER_REPLAY_OUT=/path/to/new-output-folder \
+  cargo test --locked -p mc-module --lib dreamer::docs_replay_tests::docs_requests -- --ignored --nocapture
+```
+
+It writes `maintain-docs/run-0/docs.request.json`: the system and user text,
+the settings, and the commits the change runs between. When the task's gate
+sends nothing (no change outside the documents, nothing the documents name, a
+document with uncommitted edits), the manifest's `skipped` says why and no
+request is written. The test refuses a store, checkout or output folder inside
+the live data folder, and copies the store as the others do; the project's
+pending proposals in the copy are set aside so planning never judges them
+against the checkout.
+
+The apply step applies a reply to a throwaway copy of the replay's store with
+the task's own checks, and prints and writes (`docs.apply.json`) each kept
+change, each dropped one with its reason, and each document's diff. It writes
+nothing into the checkout:
+
+```sh
+DREAMER_REPLAY_OUT=/path/to/the-output-folder \
+  cargo test --locked -p mc-module --lib dreamer::docs_replay_tests::docs_apply -- --ignored --nocapture
+```
+
+It reads the run's `docs.reply.json` or `docs.trajectory.json`, or the file
+`DOCS_REPLAY_REPLY` names.
+
 ## 2. Run one request
 
 `verify-run.ts` sends one request of any of these kinds to DeepSeek's
@@ -91,8 +127,8 @@ offers `read` (with a line range), `grep` and `glob`, confined to the checkout
 (no path outside it, no symlink out of it), and runs the tool loop until the
 model answers or the request's step bound is reached; a reflect request gets no
 tools and needs no checkout. It writes the trajectory beside the request, as
-`verify.trajectory.json`, `map.trajectory.json`, `refresh.trajectory.json` or
-`reflect.trajectory.json`, with every request body, every reply as returned
+`verify.trajectory.json`, `map.trajectory.json`, `refresh.trajectory.json`,
+`reflect.trajectory.json` or `docs.trajectory.json`, with every request body, every reply as returned
 (reasoning included) and every tool call with its full input and output. It
 never overwrites a trajectory and writes nothing else. A request of any other
 kind is refused.
@@ -115,10 +151,15 @@ bun packages/plugin/scripts/dreamer-replay/with-deepseek-key.ts -- \
 
 bun packages/plugin/scripts/dreamer-replay/with-deepseek-key.ts -- \
   --request /path/to/new-output-folder/reflect/batch-0/reflect.request.json
+
+bun packages/plugin/scripts/dreamer-replay/with-deepseek-key.ts -- \
+  --request /path/to/new-output-folder/maintain-docs/run-0/docs.request.json \
+  --checkout /path/to/project
 ```
 
 `verify-run.ts` also takes `--model`, `--endpoint` and `--temperature` (0.1 by
 default). The trajectory's `final.completeManifest` says whether the final
 message held the one answer the module requires of the request's kind:
 `<verify>…</verify>` for verify, `<mappings>…</mappings>` for map,
-`{"answer": "…"}` for a primer, and `<learnings>…</learnings>` for reflect.
+`{"answer": "…"}` for a primer, `<learnings>…</learnings>` for reflect, and a
+JSON array (`[]` included) for docs upkeep.

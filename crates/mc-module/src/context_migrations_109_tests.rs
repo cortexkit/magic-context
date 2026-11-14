@@ -61,8 +61,7 @@ fn migration_109_gives_every_memory_an_empty_line_and_keeps_the_rest() {
         .any(|column| column == "source_branch"));
     let before = memory_rows(&conn, &before_columns);
 
-    assert_eq!(upgrade(&mut conn, 108).unwrap(), 109);
-    assert_eq!(SCHEMA_VERSION, 109);
+    assert_eq!(upgrade_through(&mut conn, 108, 109).unwrap(), 109);
 
     let after_columns = columns(&conn);
     assert_eq!(

@@ -1,0 +1,15 @@
+{
+  "name": "memories-get-not-found",
+  "request": {
+    "method": "memories.get",
+    "params": {
+      "id": 999
+    }
+  },
+  "response": {
+    "error": {
+      "code": "memory_not_found",
+      "message": "No memory matches the id."
+    }
+  }
+}

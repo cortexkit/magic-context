@@ -83,6 +83,7 @@ pub fn default_schedule(kind: &str) -> &'static str {
         "classify-memories" => "0 6 * * *",
         "reflect-events" => "0 5 * * *",
         "review-user-memories" | "promote-primers" | "refresh-primers" => "0 3 * * *",
+        "maintain-docs" => "30 5 * * *",
         _ => "",
     }
 }
@@ -1229,7 +1230,11 @@ impl Engine {
             task.plan(&context, embedding.as_ref()).await
         };
         match batches {
-            Ok(batches) if batches.is_empty() => end.outcome = "nothing_to_do".into(),
+            Ok(batches) if batches.is_empty() => {
+                end.outcome = "nothing_to_do".into();
+                // A gate that held the model back says why on the run.
+                end.error = task.skip_reason(&owner);
+            }
             Ok(batches) => {
                 self.send_batches(
                     db, client, settings, due, locks, demand, run_id, root, reader, batches,
@@ -1327,7 +1332,8 @@ impl Engine {
             record_batch(end, &reply);
             match apply(db, locks, &self.holder, batch.as_ref(), &reply, run_id) {
                 Ok(Some(applied)) => {
-                    if applied.applied > 0 {
+                    batch.after_commit(db);
+                    if applied.applied > 0 && batch.changes_memories() {
                         use crate::app_read::Change;
                         let change = match due.owner.level.as_str() {
                             "project" => Some(Change::project_memories(&due.owner.owner_id)),

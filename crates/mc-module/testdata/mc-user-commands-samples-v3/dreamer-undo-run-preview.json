@@ -1,0 +1,42 @@
+{
+  "available": true,
+  "effect": "Reverts 1 memory change of dreamer run 1 as one undo; 1 changed since stays as it is.",
+  "facts": [
+    {
+      "label": "Memories restored",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Left alone",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "table": {
+    "columns": [
+      "Undo"
+    ],
+    "rows": [
+      {
+        "cells": [
+          {
+            "state": "ready"
+          }
+        ],
+        "label": "Memory 9"
+      },
+      {
+        "cells": [
+          {
+            "state": "stale"
+          }
+        ],
+        "label": "Memory 10 changed after the run"
+      }
+    ]
+  },
+  "version": "6060482894b3cb04af8933fb54868b0f2672974bab6b6a7831836806b185337b"
+}

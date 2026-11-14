@@ -1,0 +1,42 @@
+{
+  "name": "docs-proposal",
+  "request": {
+    "method": "dreamer.docs_proposal",
+    "params": {
+      "project": "pj-docs"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "dreamer.docs_proposal",
+      "proposal": {
+        "created_at_ms": 1700000000000,
+        "documents": [
+          {
+            "changes": [
+              {
+                "action": "replace",
+                "heading": "## Core",
+                "reason": "src/parser.rs moved to src/parse/."
+              }
+            ],
+            "diff": "diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md\nindex c55b9aa..4b4ed03 100644\n--- a/ARCHITECTURE.md\n+++ b/ARCHITECTURE.md\n@@ -1,7 +1,7 @@\n # Architecture\n \n ## Core\n-The parser lives in src/parser.rs.\n+The parser lives in src/parse/ now.\n \n ## Guard\n <!-- mc:protected START hand-authored -->\n",
+            "name": "ARCHITECTURE.md"
+          }
+        ],
+        "dropped": [
+          {
+            "action": "add",
+            "file": "STRUCTURE.md",
+            "heading": "## History",
+            "reason": "the text holds a date (2026-11-14)"
+          }
+        ],
+        "id": 1,
+        "status": "pending"
+      },
+      "schema": 1
+    }
+  }
+}

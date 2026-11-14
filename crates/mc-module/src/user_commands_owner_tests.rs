@@ -300,6 +300,7 @@ async fn describe_declares_every_owner_command_with_its_subject_kind_and_effect(
         "observation_dismiss",
         "dreamer_run_now",
         "dreamer_undo_run",
+        "docs_proposal_dismiss",
         "note_edit",
         "note_dismiss",
         "note_delete",
@@ -1336,6 +1337,7 @@ async fn owner_commands_record_real_handler_samples() {
         )
         .unwrap();
     }
+    let proposal = docs_proposal(&mut conn, PROJECT, "/nonexistent/pj-owner");
     let note_edit = note(&conn, PROJECT, "Check the fold.");
     let note_dismiss = note(&conn, PROJECT, "Ask about caching.");
     let note_delete = note(&conn, PROJECT, "Old reminder.");
@@ -1393,6 +1395,11 @@ async fn owner_commands_record_real_handler_samples() {
         ),
         ("observation_dismiss", computer(), json!({"ids": "2"})),
         ("dreamer_undo_run", project(), json!({"run_id": run})),
+        (
+            "docs_proposal_dismiss",
+            project(),
+            json!({"proposal_id": proposal}),
+        ),
         (
             "note_edit",
             project(),
@@ -1494,11 +1501,11 @@ async fn owner_commands_record_real_handler_samples() {
             .await
             .unwrap(),
     );
-    let dir = std::env::var_os("MC_USER_COMMAND_SAMPLES_V2_DIR")
+    let dir = std::env::var_os("MC_USER_COMMAND_SAMPLES_V3_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("testdata/mc-user-commands-samples-v2")
+                .join("testdata/mc-user-commands-samples-v3")
         });
     let update = std::env::var_os("MC_UPDATE_USER_COMMAND_SAMPLES").is_some();
     if update {
@@ -1524,4 +1531,139 @@ async fn owner_commands_record_real_handler_samples() {
         std::fs::read_to_string(dir.join("SHA256SUMS")).unwrap_or_default(),
         sums
     );
+}
+
+/// Store a pending docs-upkeep proposal of `project` read in `checkout`, as
+/// the docs task does: one change to `ARCHITECTURE.md`, based on `# A\n`.
+fn docs_proposal(conn: &mut Connection, project: &str, checkout: &str) -> i64 {
+    use crate::docs_proposals::{insert, DocumentResult, NewProposal, SectionChange};
+    let tx = conn.transaction().unwrap();
+    let stored = insert(
+        &tx,
+        &NewProposal {
+            project: project.into(),
+            run_id: None,
+            checkout: checkout.into(),
+            base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            created_at: 1_700_000_000_000,
+            documents: vec![
+                DocumentResult {
+                    name: "ARCHITECTURE.md",
+                    base: Some("# A\n".into()),
+                    result: Some("# A\nB.\n".into()),
+                    diff:
+                        "--- a/ARCHITECTURE.md\n+++ b/ARCHITECTURE.md\n@@ -1 +1,2 @@\n # A\n+B.\n"
+                            .into(),
+                },
+                DocumentResult {
+                    name: "STRUCTURE.md",
+                    base: None,
+                    result: None,
+                    diff: String::new(),
+                },
+            ],
+            changes: vec![SectionChange {
+                file: "ARCHITECTURE.md".into(),
+                action: "replace".into(),
+                heading: "# A".into(),
+                text: "# A\nB.".into(),
+                reason: "The code says B.".into(),
+            }],
+            dropped: Vec::new(),
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    stored.id
+}
+
+fn docs_status(conn: &Connection, id: i64) -> String {
+    conn.query_row(
+        "SELECT status FROM docs_proposals WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn docs_proposal_dismiss_sets_the_pending_proposal_aside() {
+    let owner = Owner::new();
+    let mut conn = owner.conn();
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("ARCHITECTURE.md"), "# A\n").unwrap();
+    let id = docs_proposal(&mut conn, PROJECT, checkout.path().to_str().unwrap());
+    let copy = crate::docs_proposals::file::write(checkout.path(), id, "# Docs update proposal\n")
+        .unwrap();
+    let args = json!({"proposal_id": id});
+    let (preview, answer) = owner
+        .apply(
+            "docs_proposal_dismiss",
+            project(),
+            args.clone(),
+            "dismiss-docs",
+        )
+        .await;
+    // The preview names the proposal.
+    let effect = preview["effect"].as_str().unwrap();
+    assert!(
+        effect
+            == format!(
+                "Sets docs proposal {id} aside (1 change to ARCHITECTURE.md); the documents stay as they are."
+            ),
+        "{effect}"
+    );
+    assert_eq!(answer["outcome"], "applied", "{answer}");
+    assert_eq!(docs_status(&conn, id), "dismissed");
+    assert!(!copy.exists(), "the markdown copy goes with it");
+    // Nothing is left to dismiss.
+    let again = owner
+        .preview("docs_proposal_dismiss", project(), args)
+        .await
+        .unwrap();
+    assert_eq!(again["available"], false);
+    assert_eq!(again["reason"], "nothing_to_change");
+}
+
+#[tokio::test]
+async fn docs_proposal_dismiss_offers_only_a_pending_proposal_of_its_project() {
+    let owner = Owner::new();
+    let mut conn = owner.conn();
+    // Applied by hand since: reading it finds it applied, nothing to dismiss.
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("ARCHITECTURE.md"), "# A\nB.\n").unwrap();
+    let applied = docs_proposal(&mut conn, PROJECT, checkout.path().to_str().unwrap());
+    let preview = owner
+        .preview(
+            "docs_proposal_dismiss",
+            project(),
+            json!({"proposal_id": applied}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview["available"], false);
+    assert_eq!(docs_status(&conn, applied), "applied");
+    // Another project's proposal is not this project's to dismiss.
+    let other = docs_proposal(&mut conn, OTHER, "/nonexistent/other");
+    let refused = owner
+        .preview(
+            "docs_proposal_dismiss",
+            project(),
+            json!({"proposal_id": other}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, wire::INVALID_PARAMS);
+    assert_eq!(refused.detail.unwrap()["field"], "args.proposal_id");
+    // A project the app reads don't know is no subject.
+    let refused = owner
+        .preview(
+            "docs_proposal_dismiss",
+            json!({"kind": "project", "project_id": OTHER}),
+            json!({"proposal_id": other}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, wire::UNKNOWN_SUBJECT);
+    assert_eq!(docs_status(&conn, other), "pending");
 }

@@ -1,0 +1,18 @@
+{
+  "available": true,
+  "effect": "Sets docs proposal 1 aside (1 change to ARCHITECTURE.md); the documents stay as they are.",
+  "facts": [
+    {
+      "label": "Proposal",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Changes",
+      "noun": "changes",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "version": "da052009aa421fe6357574650c859428f04035bee7c5d8db7be93d7f759c4277"
+}

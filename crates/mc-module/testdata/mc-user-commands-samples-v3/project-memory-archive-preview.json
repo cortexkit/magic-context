@@ -1,0 +1,19 @@
+{
+  "available": true,
+  "effect": "Archives 1 project memory; agents stop seeing them. Restore brings them back.",
+  "facts": [
+    {
+      "label": "Memories",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Already archived",
+      "noun": "memories",
+      "unit": "count",
+      "value": 0.0
+    }
+  ],
+  "version": "5ab82cf85ad309ea83b9cde2107f4551353c86d036550a24d31aab25a85f7062"
+}

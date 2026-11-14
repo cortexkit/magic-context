@@ -1,0 +1,11 @@
+{
+  "facts": [
+    {
+      "label": "Observations dismissed",
+      "noun": "observations",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "outcome": "applied"
+}

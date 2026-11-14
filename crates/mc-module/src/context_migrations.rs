@@ -26,7 +26,7 @@ mod catch_up_tests;
 pub const PLUGIN_SCHEMA_VERSION: u32 = crate::context_db::PLUGIN_SCHEMA_VERSION;
 
 /// The schema version this build reads and writes.
-pub const SCHEMA_VERSION: u32 = 109;
+pub const SCHEMA_VERSION: u32 = 110;
 
 struct Migration {
     version: u32,
@@ -63,6 +63,12 @@ const MIGRATIONS: &[Migration] = &[
         description: "the git line each memory was learned on",
         rebuilds_referenced_table: false,
         up: memory_lines_109,
+    },
+    Migration {
+        version: 110,
+        description: "the docs-upkeep task's proposals",
+        rebuilds_referenced_table: false,
+        up: docs_proposals_110,
     },
 ];
 
@@ -604,6 +610,10 @@ mod tests_108;
 #[path = "context_migrations_109_tests.rs"]
 mod tests_109;
 
+#[cfg(test)]
+#[path = "context_migrations_110_tests.rs"]
+mod tests_110;
+
 /// The module's dreamer state, replacing the 0.49 plugin's.
 ///
 /// The plugin kept one queue and one lease per project, and a run record for
@@ -822,5 +832,52 @@ fn memory_lines_109(tx: &Transaction) -> rusqlite::Result<()> {
     tx.execute_batch(
         "ALTER TABLE memories ADD COLUMN source_branch TEXT;
          ALTER TABLE memories ADD COLUMN source_commit TEXT;",
+    )
+}
+
+/// The proposals of the docs-upkeep task (`maintain-docs`): edits to a
+/// project's `ARCHITECTURE.md` and `STRUCTURE.md` that a person or an agent
+/// may apply ([`crate::docs_proposals`]). The task never writes the files.
+///
+/// A row keeps what the proposal was based on and what it leads to: the
+/// commit of the main checkout it read (`checkout`), and each document's
+/// SHA-256 as read and as it would be once applied (null for a document that
+/// doesn't exist). Its status is checked against the files whenever it is
+/// read: `pending` while both documents still have their base hashes,
+/// `applied` once both have the result hashes, `stale` when they changed any
+/// other way or a newer proposal replaced it, `dismissed` when the person set
+/// it aside. A project has at most one pending proposal.
+///
+/// `body` is the proposal as the event `docs_proposal` serves it, written
+/// once when the proposal is made and never again, so the digest its notice
+/// carries always matches. `published_at` is null until that notice is on
+/// the bus: the row is its own outbox.
+fn docs_proposals_110(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE docs_proposals (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           project TEXT NOT NULL,
+           run_id INTEGER,
+           created_at INTEGER NOT NULL,
+           checkout TEXT NOT NULL,
+           base_commit TEXT NOT NULL,
+           architecture_base_sha256 TEXT,
+           architecture_result_sha256 TEXT,
+           structure_base_sha256 TEXT,
+           structure_result_sha256 TEXT,
+           changes_json TEXT NOT NULL,
+           dropped_json TEXT NOT NULL,
+           status TEXT NOT NULL
+             CHECK (status IN ('pending', 'applied', 'stale', 'dismissed')),
+           status_at INTEGER NOT NULL,
+           body TEXT NOT NULL,
+           published_at INTEGER
+         );
+         CREATE INDEX idx_docs_proposals_project
+           ON docs_proposals(project, status, id DESC);
+         CREATE UNIQUE INDEX idx_docs_proposals_one_pending
+           ON docs_proposals(project) WHERE status = 'pending';
+         CREATE INDEX idx_docs_proposals_unpublished
+           ON docs_proposals(id) WHERE published_at IS NULL AND status = 'pending';",
     )
 }

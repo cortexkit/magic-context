@@ -884,7 +884,7 @@
       {
         "id": "swe:maintain-docs",
         "kind": "maintain-docs",
-        "enabled": false,
+        "enabled": true,
         "reads": [
           "repo-files",
           "git"

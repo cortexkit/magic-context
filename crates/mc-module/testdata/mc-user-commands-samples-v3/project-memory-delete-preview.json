@@ -1,0 +1,19 @@
+{
+  "available": true,
+  "effect": "Deletes 1 project memory for good, with their history, embeddings and search entries.",
+  "facts": [
+    {
+      "label": "Memories",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "History entries",
+      "noun": "entries",
+      "unit": "count",
+      "value": 0.0
+    }
+  ],
+  "version": "1fe1c1c5c91b43a2c9eae57d5da421e5d58bf6e057097eefc38766be4020efa0"
+}

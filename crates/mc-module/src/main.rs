@@ -105,6 +105,10 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     );
     module.spawn_upkeep();
     module.spawn_memory_sync();
+    // The dreamer's rounds announce new docs proposals on the bus.
+    module.publish_docs_notices_with(mc_module::bus::DocsNotices::through_ckbus(
+        connection_file.clone(),
+    ));
     module.spawn_dreamer();
     module.spawn_legacy_projects();
     // An install a move started before a crash is finished in every build:

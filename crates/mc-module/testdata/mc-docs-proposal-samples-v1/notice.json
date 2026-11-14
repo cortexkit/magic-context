@@ -1,0 +1,11 @@
+{
+  "body": "",
+  "headers": {
+    "Ck-Content-Digest": "e9f2ef2de335559f1dcd07c2a5fe4a0727771301ea37c8c52b25f48860e5f93f",
+    "Nats-Msg-Id": "pj-docs:1",
+    "event_key": "pj-docs:1",
+    "project_id": "pj-docs"
+  },
+  "name": "notice",
+  "subject": "ck.box_test.event.magic-context.docs_proposal.v1"
+}

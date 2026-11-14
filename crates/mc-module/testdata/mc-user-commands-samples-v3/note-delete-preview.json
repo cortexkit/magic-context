@@ -1,0 +1,13 @@
+{
+  "available": true,
+  "effect": "Deletes 1 note of this project for good.",
+  "facts": [
+    {
+      "label": "Notes",
+      "noun": "notes",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "version": "6606514c4da5a55a056fcdf2be333e2b830ee0370e909964194e69541ebe9b75"
+}

@@ -1,0 +1,19 @@
+{
+  "available": true,
+  "effect": "Saves this observation as a global memory under Preferences; the review task skips it.",
+  "facts": [
+    {
+      "label": "Memories",
+      "noun": "memories",
+      "unit": "count",
+      "value": 1.0
+    },
+    {
+      "label": "Text length",
+      "noun": "characters",
+      "unit": "count",
+      "value": 20.0
+    }
+  ],
+  "version": "bb2af35a5cb654bc1467c17605f06ce0105c0bd985c33e202433ee5e9f1f7212"
+}

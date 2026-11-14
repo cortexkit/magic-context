@@ -1,0 +1,10 @@
+{
+  "code": "invalid_params",
+  "detail": {
+    "field": "args.ids",
+    "ids": [
+      1
+    ]
+  },
+  "message": "Memory 1 is not among this subject's workspace memories."
+}

@@ -600,6 +600,11 @@ pub const NOT_MOVED: &[NotMoved] = &[
         install: Install::Untouched(NO_MOVED_ROWS),
     },
     NotMoved {
+        name: "docs_proposals",
+        reason: "edits to a checkout's documents on this machine; a receiver's dreamer proposes its own",
+        install: Install::Untouched(NO_MOVED_ROWS),
+    },
+    NotMoved {
         name: "dream_locks",
         reason: "a lock a dreamer run on this machine holds",
         install: Install::Untouched(NO_MOVED_ROWS),

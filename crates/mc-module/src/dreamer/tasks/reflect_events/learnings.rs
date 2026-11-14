@@ -184,7 +184,9 @@ pub(crate) fn quotation_mark(text: &str) -> Option<char> {
     })
 }
 
-fn date_pattern() -> &'static Regex {
+/// A calendar date in the forms a model writes them; no learning or
+/// document text the dreamer writes may hold one.
+pub(crate) fn date_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         re(r"(?i)\b(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}/\d{1,2}/20\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+20\d{2})\b")

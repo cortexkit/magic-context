@@ -182,6 +182,15 @@ pub const DREAM_DEMANDS: &[DreamDemand] = &[
         reads_code: true,
         max_steps: 40,
     },
+    // Docs upkeep reads the code a change touches before it proposes an
+    // edit, with the same step bound as mapping and verifying.
+    DreamDemand {
+        kind: "maintain-docs",
+        iq: 60,
+        context_window: 200_000,
+        reads_code: true,
+        max_steps: 60,
+    },
 ];
 
 /// The largest reply a dreamer task asks its runner for, capped further by

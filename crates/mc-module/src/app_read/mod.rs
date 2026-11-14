@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 mod cache;
+pub(crate) mod docs;
 mod dreamer;
 pub(crate) mod head;
 pub(crate) mod idle;
@@ -1182,3 +1183,5 @@ mod sessions_tests;
 mod samples_v15_tests;
 #[cfg(test)]
 mod samples_v16_tests;
+#[cfg(test)]
+mod samples_v17_tests;

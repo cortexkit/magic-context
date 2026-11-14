@@ -7,6 +7,7 @@ pub mod compress_cues;
 pub mod curate;
 pub mod curate_workspace;
 pub mod lift_workspace;
+pub mod maintain_docs;
 pub mod map_memories;
 pub mod reflect_events;
 pub mod refresh_primers;

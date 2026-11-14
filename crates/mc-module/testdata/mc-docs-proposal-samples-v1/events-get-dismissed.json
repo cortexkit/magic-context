@@ -1,0 +1,20 @@
+{
+  "name": "events-get-dismissed",
+  "request": {
+    "method": "events_get",
+    "params": {
+      "event_key": "pj-docs:1",
+      "event_name": "docs_proposal",
+      "version": 1
+    }
+  },
+  "response": {
+    "result": {
+      "body": "{\"created_at_ms\":1700000000000,\"documents\":[{\"changes\":[{\"action\":\"replace\",\"heading\":\"## Core\",\"reason\":\"src/parser.rs moved to src/parse/.\"}],\"diff\":\"diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md\\nindex c55b9aa..4b4ed03 100644\\n--- a/ARCHITECTURE.md\\n+++ b/ARCHITECTURE.md\\n@@ -1,7 +1,7 @@\\n # Architecture\\n \\n ## Core\\n-The parser lives in src/parser.rs.\\n+The parser lives in src/parse/ now.\\n \\n ## Guard\\n <!-- mc:protected START hand-authored -->\\n\",\"name\":\"ARCHITECTURE.md\"}],\"dropped\":[],\"file\":\".cortexkit/magic-context/docs-update-proposals/1.md\",\"id\":1,\"project_id\":\"pj-docs\",\"status\":\"pending\"}",
+      "digest": "e9f2ef2de335559f1dcd07c2a5fe4a0727771301ea37c8c52b25f48860e5f93f",
+      "event_key": "pj-docs:1",
+      "event_name": "docs_proposal",
+      "published_at": 1700000060000
+    }
+  }
+}

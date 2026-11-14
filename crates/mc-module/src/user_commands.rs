@@ -7,6 +7,7 @@ use cortexkit_role_user_commands as wire;
 use serde_json::Value;
 use wire::{Command, ErrorBody, ModulePreviewRequest, ModuleRunRequest, RunReply, Subject};
 
+mod docs;
 mod dreamer;
 mod memories;
 mod notes;

@@ -1,0 +1,36 @@
+{
+  "available": true,
+  "effect": "Replaces this note's text; agents see the new text.",
+  "facts": [
+    {
+      "label": "Notes",
+      "noun": "notes",
+      "unit": "count",
+      "value": 1.0
+    }
+  ],
+  "table": {
+    "columns": [
+      "Now",
+      "After"
+    ],
+    "rows": [
+      {
+        "cells": [
+          {
+            "noun": "characters",
+            "unit": "count",
+            "value": 15.0
+          },
+          {
+            "noun": "characters",
+            "unit": "count",
+            "value": 21.0
+          }
+        ],
+        "label": "Text length"
+      }
+    ]
+  },
+  "version": "d82f8543a9f91c2a59b06579fd6ed7620a99369b8aa28d654e4cc567fb0af072"
+}
