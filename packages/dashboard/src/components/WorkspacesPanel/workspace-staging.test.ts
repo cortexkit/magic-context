@@ -51,6 +51,7 @@ describe("workspace staged editor helpers", () => {
     stage.addMembers.push({ project_path: "git:b", display_name: "svc-b", display_path: "/b" });
     stage.removeMembers.push("git:a");
     stage.shareCategories = toggleShareCategory(stage.shareCategories, "NAMING");
+    stage.categoriesEdited = true;
 
     expect(workspaceStageDirty(ws, stage)).toBe(true);
     expect(workspaceStageToPayload(ws, stage)).toEqual({
@@ -62,6 +63,35 @@ describe("workspace staged editor helpers", () => {
       shareCategories: ["CONSTRAINTS", "NAMING"],
     });
     expect(workspaceStageDirty(ws, createWorkspaceStage(ws))).toBe(false);
+  });
+
+  it("#given only members changed #then the save does not speak for share categories", () => {
+    const ws = workspace({ share_categories: ["NAMING"] });
+    const stage = createWorkspaceStage(ws);
+    stage.addMembers.push({ project_path: "git:b", display_name: "svc-b", display_path: "/b" });
+    // categoriesEdited is false — categories are not sent even though staged vs
+    // live values differ (stale snapshot from panel open).
+
+    const payload = workspaceStageToPayload(ws, stage);
+    expect(workspaceStageDirty(ws, stage)).toBe(true);
+    expect("shareCategories" in payload).toBe(false);
+  });
+
+  it("#given workspace refetched before save #then a rename-only save does not resend stale categories", () => {
+    // Simulate: panel opened with NAMING, another window disables NAMING, panel
+    // refetches (live workspace now has []), user saves a rename without touching
+    // the checkboxes.  The save must not re-enable NAMING.
+    const wsAtOpen = workspace({ share_categories: ["NAMING"] });
+    const stage = createWorkspaceStage(wsAtOpen);
+    stage.rename = " team-renamed ";
+    // categoriesEdited remains false — user never touched the checkboxes.
+
+    // The "live" workspace (after refetch) has NAMING removed.
+    const wsAfterRefetch = workspace({ share_categories: [] });
+    const payload = workspaceStageToPayload(wsAfterRefetch, stage);
+    expect(payload.rename).toBe("team-renamed");
+    expect(workspaceStageDirty(wsAfterRefetch, stage)).toBe(true);
+    expect("shareCategories" in payload).toBe(false);
   });
 
   it("#given the panel source #then member rows use Index rather than For", () => {

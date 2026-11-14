@@ -62,6 +62,32 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
     min: 4.5,
   },
   { label: "error-text on error-bg", fg: "error-text", bg: "error-bg", min: 4.5 },
+  // The project grid error banner and the context-menu explanations are text the
+  // reviewer singled out: each must clear AA in BOTH themes, not just light.
+  {
+    label: "grid error text (70% error-text over text-primary) on error-bg",
+    fg: { tint: "error-text", percent: 70, over: "text-primary" },
+    bg: "error-bg",
+    min: 4.5,
+  },
+  ...["bg-elevated", "bg-elevated-hover"].map((bg) => ({
+    label: `context-menu explanation (70% text-secondary over text-primary) on ${bg}`,
+    fg: { tint: "text-secondary", percent: 70, over: "text-primary" },
+    bg,
+    min: 4.5,
+  })),
+  ...["bg-elevated", "bg-elevated-hover"].map((bg) => ({
+    label: `disabled menu row (50% text-muted over text-primary) on ${bg}`,
+    fg: { tint: "text-muted", percent: 50, over: "text-primary" },
+    bg,
+    min: 4.5,
+  })),
+  ...["bg-elevated", "bg-elevated-hover"].map((bg) => ({
+    label: `current workspace label (70% accent over text-primary) on ${bg}`,
+    fg: { tint: "accent", percent: 70, over: "text-primary" },
+    bg,
+    min: 4.5,
+  })),
   { label: "danger on bg-card", fg: "danger", bg: "bg-card", min: 4.5 },
   { label: "danger on bg-input", fg: "danger", bg: "bg-input", min: 4.5 },
   {

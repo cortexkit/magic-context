@@ -72,7 +72,10 @@ struct ApplyWorkspaceChangesArgs {
     add_members: Vec<workspaces::WorkspaceMemberChange>,
     remove_members: Vec<String>,
     set_display_names: Vec<workspaces::WorkspaceDisplayNameChange>,
-    share_categories: Vec<String>,
+    /// Absent means "this save does not speak for the share categories"; only a
+    /// save that actually edits them should send a value.
+    #[serde(default)]
+    share_categories: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

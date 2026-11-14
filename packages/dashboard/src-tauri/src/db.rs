@@ -1135,6 +1135,11 @@ pub struct ProjectCard {
     pub workspace_name: Option<String>,
     /// Newest primary-session activity; the grid sorts by this descending.
     pub last_activity_ms: i64,
+    /// True for the user's home directory, which cannot join a workspace
+    /// (workspaces exist to keep unrelated repos apart; home is where they all
+    /// live). Surfaced so the UI can explain the refusal instead of letting the
+    /// save fail.
+    pub is_home_project: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -5440,6 +5445,9 @@ pub fn get_project_cards(conn: &Connection) -> Vec<ProjectCard> {
     let workspace_by_identity = workspace_name_by_identity(conn);
     // identity → representative real directory (resolves dir:<hash> to its cwd).
     let dir_by_identity = session_directories_by_identity();
+    // Resolved once: the home probe canonicalizes the home directory, and asking
+    // it per card would repeat that filesystem call for every project.
+    let home_project = crate::workspaces::HomeProject::resolve();
 
     let mut cards: Vec<ProjectCard> = groups
         .into_iter()
@@ -5459,8 +5467,12 @@ pub fn get_project_cards(conn: &Connection) -> Vec<ProjectCard> {
             };
             let mut harnesses: Vec<Harness> = accum.harnesses.into_iter().collect();
             harnesses.sort();
+            let is_home_project = home_project
+                .as_ref()
+                .is_some_and(|home| home.matches(&identity, &primary_path));
             ProjectCard {
                 workspace_name: workspace_by_identity.get(&identity).cloned(),
+                is_home_project,
                 identity,
                 display_name,
                 primary_path,
@@ -10470,6 +10482,121 @@ mod session_identity_map_tests {
             assert_eq!(card.harnesses, vec![Harness::Opencode2]);
             assert_eq!(card.session_count, 1);
             assert_eq!(card.memory_count, 1);
+        });
+    }
+
+    #[test]
+    fn get_project_cards_flags_the_home_directory_identity_without_a_matching_path() {
+        with_temp_data_home(|data_home| {
+            // A card's identity and its resolved directory can disagree: identities
+            // are hashed from a canonicalized home at session time, while the
+            // representative directory may be empty or point elsewhere. The home
+            // flag must follow the identity too, not just the path.
+            let home = dirs::home_dir().expect("home dir");
+            let canonical_home = std::fs::canonicalize(&home).expect("canonical home");
+            let digest = md5::compute(canonical_home.to_string_lossy().as_bytes());
+            let home_identity = format!("dir:{}", &format!("{digest:x}")[..12]);
+
+            let temp = tempfile::tempdir().expect("projects");
+            let elsewhere = temp.path().join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).expect("elsewhere dir");
+            let elsewhere_path = elsewhere.to_string_lossy().to_string();
+
+            let context = create_context_db(data_home, true);
+            insert_session_project(&context, "home-session", "opencode2", &home_identity);
+            insert_session_project(&context, "other-session", "opencode2", "dir:deadbeef0000");
+            context
+                .execute(
+                    "INSERT INTO memories (project_path, status) VALUES (?1, 'active')",
+                    [&home_identity],
+                )
+                .expect("insert memory");
+            context
+                .execute(
+                    "INSERT INTO memories (project_path, status) VALUES ('dir:deadbeef0000', 'active')",
+                    [],
+                )
+                .expect("insert memory");
+
+            let oc = create_opencode2_db(data_home);
+            oc.execute(
+                "INSERT INTO project (id, name, worktree) VALUES ('p_elsewhere', NULL, ?1)",
+                [elsewhere_path.as_str()],
+            )
+            .expect("insert project");
+            for (session, updated) in [("home-session", 100), ("other-session", 200)] {
+                oc.execute(
+                    "INSERT INTO session_v2
+                     (id, title, project_id, directory, time_updated, time_archived)
+                     VALUES (?1, ?1, 'p_elsewhere', ?2, ?3, NULL)",
+                    (session, elsewhere_path.as_str(), updated),
+                )
+                .expect("insert session");
+            }
+            drop(oc);
+
+            let cards = get_project_cards(&context);
+            let home_card = cards
+                .iter()
+                .find(|card| card.identity == home_identity)
+                .expect("home card");
+            assert!(
+                home_card.is_home_project,
+                "a card carrying home's identity is the home project even when its path is elsewhere"
+            );
+            assert_eq!(home_card.primary_path, elsewhere_path);
+
+            let other_card = cards
+                .iter()
+                .find(|card| card.identity == "dir:deadbeef0000")
+                .expect("other card");
+            assert!(
+                !other_card.is_home_project,
+                "a project outside home must stay addable to a workspace"
+            );
+        });
+    }
+
+    #[test]
+    fn get_project_cards_flags_a_card_whose_directory_is_the_home_directory() {
+        with_temp_data_home(|data_home| {
+            let home = dirs::home_dir().expect("home dir");
+            let home_path = std::fs::canonicalize(&home)
+                .expect("canonical home")
+                .to_string_lossy()
+                .to_string();
+
+            let context = create_context_db(data_home, true);
+            insert_session_project(&context, "ses_home", "opencode2", "dir:0123456789ab");
+            context
+                .execute(
+                    "INSERT INTO memories (project_path, status) VALUES ('dir:0123456789ab', 'active')",
+                    [],
+                )
+                .expect("insert memory");
+
+            let oc = create_opencode2_db(data_home);
+            oc.execute(
+                "INSERT INTO project (id, name, worktree) VALUES ('p_home', NULL, ?1)",
+                [home_path.as_str()],
+            )
+            .expect("insert project");
+            oc.execute(
+                "INSERT INTO session_v2
+                 (id, title, project_id, directory, time_updated, time_archived)
+                 VALUES ('ses_home', 'Home', 'p_home', ?1, 100, NULL)",
+                [home_path.as_str()],
+            )
+            .expect("insert session");
+            drop(oc);
+
+            let cards = get_project_cards(&context);
+            assert_eq!(cards.len(), 1);
+            assert_eq!(cards[0].primary_path, home_path);
+            assert!(
+                cards[0].is_home_project,
+                "a project whose resolved directory is home must be flagged"
+            );
         });
     }
 

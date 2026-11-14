@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
+import FloatingLayer from "../shared/FloatingLayer";
 import { pickerAccessibleName } from "./a11y-state";
-import FloatingLayer from "./FloatingLayer";
 import { commitTypedModelValue, getTypedModelSelection } from "./model-selection";
 
 export { commitTypedModelValue, getTypedModelSelection } from "./model-selection";

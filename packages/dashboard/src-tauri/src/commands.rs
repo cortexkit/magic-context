@@ -162,7 +162,7 @@ pub fn apply_workspace_changes(
     add_members: Vec<crate::workspaces::WorkspaceMemberChange>,
     remove_members: Vec<String>,
     set_display_names: Vec<crate::workspaces::WorkspaceDisplayNameChange>,
-    share_categories: Vec<String>,
+    share_categories: Option<Vec<String>>,
 ) -> Result<(), String> {
     let path = state.get_db_path()?;
     let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
