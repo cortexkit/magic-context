@@ -237,10 +237,10 @@ fn correction<'a>(
     }
 }
 
-/// The project's events most tests read: three older host incidents from
-/// two sessions, two new ones from two sessions, a new correction from one
-/// session, and a new incident of another project. The watermark is at the
-/// third event.
+/// The project's events most tests read: three older host incidents and two
+/// new ones, each on a day of its own, a new correction alone in its group,
+/// and a new incident of another project. The watermark is at the third
+/// event.
 fn fixture() -> Store {
     let store = store();
     store.events(&[
@@ -334,13 +334,13 @@ fn the_profile_declares_both_event_kinds_with_their_grouping_fields() {
 }
 
 #[test]
-fn a_group_is_sent_with_a_new_event_and_events_from_enough_sessions() {
+fn a_group_is_sent_with_a_new_event_and_events_from_enough_days() {
     let store = fixture();
     let groups = with_context(&store, None, |context| {
         ReflectEvents.prepare(context, NOW).unwrap().groups
     });
-    // The correction has a new event from one session only, and the other
-    // project's incident is not this project's.
+    // The correction has one event, so one day, and the other project's
+    // incident is not this project's.
     assert_eq!(groups.len(), 1);
     let group = &groups[0];
     assert_eq!(group.value, "host_integration");
@@ -354,34 +354,36 @@ fn a_group_is_sent_with_a_new_event_and_events_from_enough_sessions() {
         "new events newest first, then older ones newest first"
     );
     assert_eq!(group.new, HashSet::from([4, 5]));
-    assert_eq!(group.sessions(), 2);
+    assert_eq!(group.days(), 5);
 }
 
 #[test]
-fn older_events_count_towards_the_sessions_but_a_group_needs_a_new_one() {
+fn older_events_count_towards_the_days_but_a_group_needs_a_new_one() {
     let kinds = event_kinds(&prompt_profile(None).unwrap(), &declaration());
-    let event = |id: i64, session: &str, value: &str, days: i64| Event {
+    let event = |id: i64, value: &str, days: i64| Event {
         id,
-        session: ("opencode".into(), session.into()),
         kind: "causal_incident".into(),
         fields: BTreeMap::from([("affected_surface".into(), value.into())]),
         created_at: NOW - days * DAY_MS,
     };
     let since = NOW - OLDER_DAYS * DAY_MS;
     let events = vec![
-        // One new event from one session, and an older one from another.
-        event(10, "a", "environment", 1),
-        event(3, "b", "environment", 30),
-        // Only older events, from two sessions.
-        event(2, "a", "provider_sdk", 30),
-        event(1, "b", "provider_sdk", 40),
-        // A new event, and the other session's only event too old to show.
-        event(11, "a", "ui", 1),
-        event(0, "b", "ui", OLDER_DAYS + 1),
+        // One new event, and an older one on another day.
+        event(10, "environment", 1),
+        event(3, "environment", 30),
+        // Only older events, on two days.
+        event(2, "provider_sdk", 30),
+        event(1, "provider_sdk", 40),
+        // A new event and an older one on the same day: one day.
+        event(13, "tool_protocol", 1),
+        event(4, "tool_protocol", 1),
+        // A new event, and the only other one too old to show.
+        event(11, "ui", 1),
+        event(0, "ui", OLDER_DAYS + 1),
         // No grouping field.
         Event {
             fields: BTreeMap::new(),
-            ..event(12, "b", "", 1)
+            ..event(12, "", 1)
         },
     ];
     let sent = groups(&kinds, &events, 5, since, 2);
@@ -392,15 +394,15 @@ fn older_events_count_towards_the_sessions_but_a_group_needs_a_new_one() {
         vec!["environment"]
     );
     assert_eq!(sent[0].new, HashSet::from([10]));
-    // With a proof count of one, the lone new event is enough.
+    // With a proof count of one, one day is enough.
     let one = groups(&kinds, &events, 5, since, 1);
     assert_eq!(
         one.iter()
             .map(|group| group.value.as_str())
             .collect::<Vec<_>>(),
-        vec!["environment", "ui"]
+        vec!["environment", "tool_protocol", "ui"]
     );
-    assert_eq!(one[1].events.len(), 1, "the too-old event is not shown");
+    assert_eq!(one[2].events.len(), 1, "the too-old event is not shown");
 }
 
 #[test]
@@ -408,7 +410,6 @@ fn a_group_shows_at_most_thirty_events_new_ones_first() {
     let kinds = event_kinds(&prompt_profile(None).unwrap(), &declaration());
     let event = |id: i64, days: i64| Event {
         id,
-        session: ("opencode".into(), format!("s{}", id % 3)),
         kind: "causal_incident".into(),
         fields: BTreeMap::from([("affected_surface".into(), "environment".into())]),
         created_at: NOW - days * DAY_MS,
@@ -441,18 +442,18 @@ fn the_message_fills_the_input_frame_byte_for_byte() {
     let store = fixture();
     let batches = store.plan();
     assert_eq!(batches.len(), 1);
-    let event = |id: i64, session: &str, new: &str, summary: &str| {
+    let event = |id: i64, day: &str, new: &str, summary: &str| {
         format!(
-            "<event id=\"e{id}\" session=\"{session}\" new=\"{new}\">\nsummary: {summary}\naffected_surface: host_integration\nsymptom: the run vanished\ncause_summary: a config write\ndisposition: workaround\nevidence: the host log\n</event>"
+            "<event id=\"e{id}\" day=\"{day}\" new=\"{new}\">\nsummary: {summary}\naffected_surface: host_integration\nsymptom: the run vanished\ncause_summary: a config write\ndisposition: workaround\nevidence: the host log\n</event>"
         )
     };
     let expected = format!(
-        "## Find the patterns in this project's events\n\n**Project:** pj-reflect\n\nEvents marked `new=\"yes\"` arrived since the last run. The other events in a group are older events of the same kind, shown so that a pattern can span a long time.\n\n<existing-memories>\nMemories that already exist on these subjects. Do not write them again.\n[1] CONSTRAINTS: The host restarts the runner on every config change.\n</existing-memories>\n\n<group kind=\"incident\" affected_surface=\"host_integration\" sessions=\"2\">\n{}\n{}\n{}\n{}\n{}\n</group>",
-        event(5, "s1", "yes", "The host restarted the runner mid-run"),
-        event(4, "s2", "yes", "The host restarted the runner again"),
-        event(3, "s1", "no", "The host restarted the runner twice"),
-        event(2, "s2", "no", "The host restarted the runner after an update"),
-        event(1, "s1", "no", "The host restarted the runner during a build"),
+        "## Find the patterns in this project's events\n\n**Project:** pj-reflect\n\nEvents marked `new=\"yes\"` arrived since the last run. The other events in a group are older events of the same kind, shown so that a pattern can span a long time.\n\n<existing-memories>\nMemories that already exist on these subjects. Do not write them again.\n[1] CONSTRAINTS: The host restarts the runner on every config change.\n</existing-memories>\n\n<group kind=\"incident\" affected_surface=\"host_integration\" days=\"5\">\n{}\n{}\n{}\n{}\n{}\n</group>",
+        event(5, "d1", "yes", "The host restarted the runner mid-run"),
+        event(4, "d2", "yes", "The host restarted the runner again"),
+        event(3, "d3", "no", "The host restarted the runner twice"),
+        event(2, "d4", "no", "The host restarted the runner after an update"),
+        event(1, "d5", "no", "The host restarted the runner during a build"),
     );
     assert_eq!(batches[0].message(), expected);
     // The system prompt is the profile's, with its output contract.
@@ -472,7 +473,7 @@ fn an_empty_existing_block_is_left_out_and_aliases_restart_per_message() {
     let message = batches[0].message();
     assert!(!message.contains("<existing-memories>"));
     assert!(message.contains(
-        "<group kind=\"correction\" correction_source=\"self_review\" sessions=\"2\">\n<event id=\"e2\" session=\"s1\" new=\"yes\">\nsummary: Checked the lock order again\nbefore_strategy: guessed the schema\ncorrection_source: self_review\ncorrection_signal: read the migration first\nafter_strategy: read the migration\nevidence: the session\n</event>"
+        "<group kind=\"correction\" correction_source=\"self_review\" days=\"2\">\n<event id=\"e2\" day=\"d1\" new=\"yes\">\nsummary: Checked the lock order again\nbefore_strategy: guessed the schema\ncorrection_source: self_review\ncorrection_signal: read the migration first\nafter_strategy: read the migration\nevidence: the session\n</event>"
     ));
     assert!(
         !message.contains("ses-"),
@@ -556,8 +557,8 @@ fn every_check_drops_a_learning_that_fails_it_with_its_reason() {
             "e6 is not an event of this message",
         ),
         (
-            learning("memory", "CONSTRAINTS", "e5,e3", good),
-            "the cited events come from 1 session(s), fewer than 2",
+            learning("memory", "CONSTRAINTS", "e5", good),
+            "the cited events come from 1 day(s), fewer than 2",
         ),
         (
             learning("memory", "CONSTRAINTS", "e1,e2", good),
@@ -641,6 +642,44 @@ fn every_check_drops_a_learning_that_fails_it_with_its_reason() {
     assert_eq!(
         written.applied.dropped[0],
         "learning 1 (note CONSTRAINTS, e4,e5): note is not a route (memory or observation)"
+    );
+}
+
+#[test]
+fn events_of_two_sessions_on_one_day_count_as_one_day() {
+    // What counts is the days the events happened on, not their sessions: a
+    // head agent's whole history is one session, and two sessions can share
+    // a day.
+    let store = store();
+    store.events(&[
+        correction(1, "ses-b", "self_review", "Checked the lock order twice", 3),
+        correction(2, "ses-c", "self_review", "Checked the lock order again", 1),
+        correction(3, "ses-b", "self_review", "Checked it once more", 1),
+    ]);
+    let batch = store.plan().remove(0);
+    let written = store.write(
+        &batch,
+        &learnings(&[
+            learning(
+                "memory",
+                "CONSTRAINTS",
+                "e2,e3",
+                "Confirm which locks a change takes before editing it.",
+            ),
+            learning(
+                "memory",
+                "CONSTRAINTS",
+                "e1,e3",
+                "Read the lock order before a change that takes locks.",
+            ),
+        ]),
+    );
+    assert_eq!(
+        written.refusals,
+        vec![
+            Some("the cited events come from 1 day(s), fewer than 2".into()),
+            None
+        ]
     );
 }
 
@@ -843,18 +882,14 @@ fn the_watermark_moves_to_the_newest_event_read_only_when_the_last_message_is_ap
         .map(|index| format!("event {index} {long}"))
         .collect();
     for (index, summary) in summaries.iter().enumerate() {
-        // Each surface gets every fourth event, from the two sessions in turn.
-        let session = if (index / 4) % 2 == 0 {
-            "ses-a"
-        } else {
-            "ses-b"
-        };
+        // Each surface gets every fourth event, on two days in turn.
+        let day = 1 + (index as i64 / 4) % 2;
         stored.push(incident(
             index as i64 + 1,
-            session,
+            "ses-a",
             surfaces[index % 4],
             summary,
-            1,
+            day,
         ));
     }
     store.events(&stored);
@@ -881,7 +916,7 @@ fn the_watermark_moves_to_the_newest_event_read_only_when_the_last_message_is_ap
 #[test]
 fn a_run_without_a_group_worth_sending_moves_the_watermark_and_sends_nothing() {
     let store = fixture();
-    // Only the correction from one session is new.
+    // Only the correction, alone on its day, is new.
     store.set_watermark(5);
     assert!(store.plan().is_empty());
     assert_eq!(store.watermark(), Some(json!({"event": 6})));

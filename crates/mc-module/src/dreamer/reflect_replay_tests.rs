@@ -482,13 +482,11 @@ fn the_harness_writes_requests_and_applies_a_reply_to_a_copy() {
     assert_eq!(request["settings"]["maxSteps"], 1);
     assert_eq!(request["groups"][0]["events"], json!([2, 1]));
     let user = request["messages"][1]["content"].as_str().unwrap();
-    assert!(
-        user.contains("<group kind=\"incident\" affected_surface=\"environment\" sessions=\"2\">")
-    );
+    assert!(user.contains("<group kind=\"incident\" affected_surface=\"environment\" days=\"2\">"));
     std::fs::write(
         batch_dir(&replay, 0).join("reflect.reply.json"),
         json!({"ok": true, "body": {"choices": [{"message": {"content":
-            "<learnings>\n<learning route=\"memory\" category=\"CONSTRAINTS\" events=\"e1,e2\">Write only inside the worktree; the sandbox refuses every other path.</learning>\n<learning route=\"memory\" category=\"CONSTRAINTS\" events=\"e1\">One session only.</learning>\n</learnings>"
+            "<learnings>\n<learning route=\"memory\" category=\"CONSTRAINTS\" events=\"e1,e2\">Write only inside the worktree; the sandbox refuses every other path.</learning>\n<learning route=\"memory\" category=\"CONSTRAINTS\" events=\"e1\">One day only.</learning>\n</learnings>"
         }}]}})
         .to_string(),
     )
@@ -513,6 +511,6 @@ fn the_harness_writes_requests_and_applies_a_reply_to_a_copy() {
     assert_eq!(report["learnings"][0]["dropped"], Value::Null);
     assert_eq!(
         report["learnings"][1]["dropped"],
-        "the cited events come from 1 session(s), fewer than 2"
+        "the cited events come from 1 day(s), fewer than 2"
     );
 }

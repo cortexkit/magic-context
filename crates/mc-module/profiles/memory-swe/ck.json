@@ -120,8 +120,8 @@
     },
     {
       "path": "prompts/dreamer/reflect-patterns/system.md",
-      "sha256": "4d7ba966da2130b24352c0efe23a72468349a82bf3c79d25a391a8b66295780a",
-      "bytes": 2911
+      "sha256": "06488eaa54cd5097f38d9f9c125d6710e037fd38dac41c7f13b90af9519e9c26",
+      "bytes": 2971
     },
     {
       "path": "prompts/dreamer/reflect-patterns/user.md",

@@ -11,7 +11,10 @@
 //! The module groups before a model reads: incidents by the surface they
 //! happened on, corrections by what made the agent change (the profile's
 //! `group_events_by`). A group goes to the model only when it holds a new
-//! event and events from at least the profile's `min_proof_count` sessions.
+//! event and events from at least the profile's `min_proof_count` days.
+//! Days, not sessions: a head agent's whole history is one long session, so
+//! a mistake that keeps coming back there comes back on different days. The
+//! day is the event's calendar date in the machine's local time.
 //! It shows the group's new events and fills up to [`GROUP_EVENTS`] with its
 //! newest older events of the last [`OLDER_DAYS`] days, each with every field
 //! the summarizer stored. Next to the groups, a message shows the project's
@@ -23,7 +26,7 @@
 //! The model answers one `<learnings>` list ([`learnings`]). The module
 //! checks each learning on its own and drops one that fails with its reason
 //! ([`ReflectBatch::write`]): it must cite only events of its message, from
-//! at least `min_proof_count` sessions and at least one of them new, name a
+//! at least `min_proof_count` days and at least one of them new, name a
 //! category of its route, hold no quotation mark, date, frustration phrase
 //! or copied run of the events' words, fit the memory size cap, and repeat
 //! no live memory. A project memory is written under the project's lock in
@@ -34,6 +37,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use chrono::{DateTime, Local, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
@@ -139,7 +143,7 @@ pub(crate) fn event_kinds(profile: &Profile, declaration: &Value) -> Vec<EventKi
         .collect()
 }
 
-/// The proof count `declaration` asks for: events from this many sessions.
+/// The proof count `declaration` asks for: events from this many days.
 pub(crate) fn min_proof(declaration: &Value) -> usize {
     declaration["settings"]["min_proof_count"]
         .as_u64()
@@ -153,8 +157,6 @@ pub(crate) fn min_proof(declaration: &Value) -> usize {
 pub(crate) struct Event {
     /// Its row id, shown as `e<id>`.
     pub id: i64,
-    /// Its session, as its harness and session id.
-    pub session: (String, String),
     /// The summarizer's tag for its kind.
     pub kind: String,
     /// Every field it stored, by name; a value that is not text is its
@@ -189,6 +191,13 @@ impl Event {
     fn texts(&self) -> Vec<String> {
         self.fields.values().cloned().collect()
     }
+
+    /// The day it happened: its calendar date in the machine's local time.
+    pub(crate) fn day(&self) -> NaiveDate {
+        DateTime::from_timestamp_millis(self.created_at)
+            .map(|instant| instant.with_timezone(&Local).date_naive())
+            .unwrap_or_default()
+    }
 }
 
 fn fields_of(json: &str) -> BTreeMap<String, String> {
@@ -219,7 +228,7 @@ pub(crate) fn read_events(
 ) -> rusqlite::Result<Vec<Event>> {
     let tags: Vec<&str> = kinds.iter().map(|kind| kind.tag.as_str()).collect();
     conn.prepare(
-        "SELECT e.id, e.harness, e.session_id, e.kind, e.fields_json, e.created_at
+        "SELECT e.id, e.kind, e.fields_json, e.created_at
            FROM compartment_events e
            JOIN session_projects p ON p.session_id = e.session_id AND p.harness = e.harness
           WHERE p.project_path = ?1 AND e.kind IN (SELECT value FROM json_each(?2))
@@ -236,10 +245,9 @@ pub(crate) fn read_events(
         |row| {
             Ok(Event {
                 id: row.get(0)?,
-                session: (row.get(1)?, row.get(2)?),
-                kind: row.get(3)?,
-                fields: fields_of(&row.get::<_, String>(4)?),
-                created_at: row.get(5)?,
+                kind: row.get(1)?,
+                fields: fields_of(&row.get::<_, String>(2)?),
+                created_at: row.get(3)?,
             })
         },
     )?
@@ -295,11 +303,11 @@ pub(crate) struct Group {
 }
 
 impl Group {
-    /// The sessions its events come from.
-    pub(crate) fn sessions(&self) -> usize {
+    /// The days its events happened on.
+    pub(crate) fn days(&self) -> usize {
         self.events
             .iter()
-            .map(|event| &event.session)
+            .map(Event::day)
             .collect::<HashSet<_>>()
             .len()
     }
@@ -317,7 +325,7 @@ fn newest_first(events: &mut [Event]) {
 
 /// The groups worth sending among `events`, in the kinds' order and then by
 /// value: each holds a new event (id after `after`) and events from at least
-/// `min_proof` sessions. A group shows all its new events (at most
+/// `min_proof` days. A group shows all its new events (at most
 /// [`GROUP_EVENTS`], newest first) and fills up to that many with its
 /// newest older events no older than `since`. An event without its kind's
 /// grouping field belongs to no group.
@@ -366,7 +374,7 @@ pub(crate) fn groups(
                 events: new,
                 new: fresh,
             };
-            (group.sessions() >= min_proof).then_some(group)
+            (group.days() >= min_proof).then_some(group)
         })
         .collect()
 }
@@ -491,24 +499,24 @@ fn attribute(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// The short names one message gives the sessions of its events (`s1`,
-/// `s2`, …), in the order the message first shows each. A session's real id
-/// never reaches the model.
+/// The short names one message gives the days of its events (`d1`, `d2`,
+/// …), in the order the message first shows each. The model sees which
+/// events share a day, but never a date it could copy into a learning.
 #[derive(Default)]
 pub(crate) struct Aliases {
-    seen: Vec<(String, String)>,
+    seen: Vec<NaiveDate>,
 }
 
 impl Aliases {
-    fn of(&mut self, session: &(String, String)) -> String {
-        let at = match self.seen.iter().position(|seen| seen == session) {
+    fn of(&mut self, day: NaiveDate) -> String {
+        let at = match self.seen.iter().position(|seen| *seen == day) {
             Some(at) => at,
             None => {
-                self.seen.push(session.clone());
+                self.seen.push(day);
                 self.seen.len() - 1
             }
         };
-        format!("s{}", at + 1)
+        format!("d{}", at + 1)
     }
 }
 
@@ -524,9 +532,9 @@ fn group_text(kind: &EventKind, group: &Group, aliases: &mut Aliases) -> String 
                 .map(|(name, value)| format!("{name}: {value}"))
                 .collect();
             format!(
-                "<event id=\"e{}\" session=\"{}\" new=\"{}\">\n{}\n</event>",
+                "<event id=\"e{}\" day=\"{}\" new=\"{}\">\n{}\n</event>",
                 event.id,
-                aliases.of(&event.session),
+                aliases.of(event.day()),
                 if group.new.contains(&event.id) {
                     "yes"
                 } else {
@@ -537,11 +545,11 @@ fn group_text(kind: &EventKind, group: &Group, aliases: &mut Aliases) -> String 
         })
         .collect();
     format!(
-        "<group kind=\"{}\" {}=\"{}\" sessions=\"{}\">\n{}\n</group>",
+        "<group kind=\"{}\" {}=\"{}\" days=\"{}\">\n{}\n</group>",
         attribute(&kind.label),
         kind.key,
         attribute(&group.value),
-        group.sessions(),
+        group.days(),
         events.join("\n")
     )
 }
@@ -765,7 +773,7 @@ impl ReflectEvents {
                         shown.insert(
                             event.id,
                             Shown {
-                                session: event.session.clone(),
+                                day: event.day(),
                                 new: group.new.contains(&event.id),
                                 texts: event.texts(),
                             },
@@ -797,7 +805,7 @@ impl ReflectEvents {
                                 "kind": kind.label,
                                 "key": kind.key,
                                 "value": group.value,
-                                "sessions": group.sessions(),
+                                "days": group.days(),
                                 "events": group.events.iter().map(|event| event.id).collect::<Vec<_>>(),
                                 "new": group.events.iter().filter(|event| group.new.contains(&event.id)).map(|event| event.id).collect::<Vec<_>>(),
                             })
@@ -905,7 +913,7 @@ pub(crate) fn categories(profile: &Profile, declaration: &Value) -> Vec<Category
 /// An event a message shows, as a learning citing it is checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Shown {
-    session: (String, String),
+    day: NaiveDate,
     new: bool,
     /// Its field values, for the copied-words check.
     texts: Vec<String>,
@@ -1089,14 +1097,14 @@ impl ReflectBatch {
                 None => return Ok(Err(format!("e{id} is not an event of this message"))),
             }
         }
-        let sessions = cited
+        let days = cited
             .iter()
-            .map(|shown| &shown.session)
+            .map(|shown| shown.day)
             .collect::<HashSet<_>>()
             .len();
-        if sessions < self.min_proof {
+        if days < self.min_proof {
             return Ok(Err(format!(
-                "the cited events come from {sessions} session(s), fewer than {}",
+                "the cited events come from {days} day(s), fewer than {}",
                 self.min_proof
             )));
         }
