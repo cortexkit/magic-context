@@ -116,13 +116,22 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn child_plans(&self, _child: &Child) -> impl Future<Output = bool> + Send {
         async { false }
     }
-    /// The code-reading tools AFT's `reader` preset serves in the child's
-    /// project folder: its `tool.catalog` answer, fetched under the same
-    /// scope the runner will fetch it under, so the plan's composition lists
-    /// exactly what the runner will get.
-    fn reader_catalog(
+    /// The modules the daemon lists as ready tool providers (they claim
+    /// `tool-provider/v1` in their manifest), by module id. A client that
+    /// can't ask the daemon lists none, so no code-reading task runs.
+    fn tool_providers(&self) -> impl Future<Output = Result<Vec<String>, ClientError>> + Send {
+        async { Ok(Vec::new()) }
+    }
+    /// Module `provider`'s `tool.catalog` answer in the child's project
+    /// folder, for `preset` or, with `None`, for a request without one
+    /// (whose answer lists the presets the provider serves). Fetched under
+    /// the same scope the runner will fetch the plan's tool item under, so
+    /// the plan's composition lists exactly what the runner will get.
+    fn tool_catalog(
         &self,
         _child: &Child,
+        _provider: &str,
+        _preset: Option<&str>,
     ) -> impl Future<
         Output = Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError>,
     > + Send {

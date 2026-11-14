@@ -527,3 +527,173 @@ fn a_task_reading_files_or_git_needs_them_on_this_machine() {
         None
     );
 }
+
+/// A one-batch stand-in for task kind `kind`, accepting the reply `"ok"`.
+struct Kinded(&'static str);
+
+impl Task for Kinded {
+    fn kind(&self) -> &'static str {
+        self.0
+    }
+    fn batches(&self, _: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String> {
+        Ok(vec![Box::new(FakeBatch(0))])
+    }
+}
+
+/// An engine running stand-ins for classify (reads no code), map and
+/// verify (read code), for a project in a folder with git history.
+fn reading_engine() -> (tempfile::TempDir, Arc<Engine>) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let engine = Arc::new(Engine::new(
+        "this",
+        vec![
+            Box::new(Kinded("classify-memories")),
+            Box::new(Kinded("map-memories")),
+            Box::new(Kinded("verify")),
+        ],
+    ));
+    (dir, engine)
+}
+
+/// Each schedule's task, last status, last error and failures in a row.
+fn schedules(db: &ContextDb) -> Vec<(String, Option<String>, Option<String>, i64)> {
+    db.with_connection(|conn| {
+        conn.prepare(
+            "SELECT task, last_status, last_error, failures FROM dream_schedules ORDER BY task",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+    })
+    .unwrap()
+}
+
+const NO_READER: &str = "no code-reading tools: no module provides tool-provider/v1";
+
+#[tokio::test]
+async fn without_a_tool_provider_that_reads_code_map_and_verify_are_skipped_and_classify_runs() {
+    let (_dir, db) = store();
+    let (folder, engine) = reading_engine();
+    let root = folder.path().to_str().unwrap();
+    let mut client = Client::new(&["p/a"], &[Ends::Reply("ok")]);
+    client.providers = Vec::new();
+    let client = Arc::new(client);
+    engine.see_project(&db, PROJECT, root, profile(), &Settings::default(), 1);
+    make_due(&db);
+    // One run of a project at a time: a round per task.
+    for _ in 0..3 {
+        engine.tick(&db, &client, &Settings::default(), now_ms());
+        settled(&engine).await;
+    }
+    assert_eq!(
+        schedules(&db),
+        [
+            (
+                "swe:classify-memories".into(),
+                Some("applied".into()),
+                None,
+                0
+            ),
+            (
+                "swe:map-memories".into(),
+                Some("skipped".into()),
+                Some(NO_READER.into()),
+                0
+            ),
+            (
+                "swe:verify".into(),
+                Some("skipped".into()),
+                Some(NO_READER.into()),
+                0
+            ),
+        ]
+    );
+    // Only classify ran: the skipped tasks left no run and sent nothing.
+    let ran: Vec<String> = runs(&db).into_iter().map(|run| run.0).collect();
+    assert_eq!(ran, ["swe:classify-memories"]);
+    assert_eq!(client.sends.lock().unwrap().len(), 1);
+    assert_eq!(locks(&db), 0);
+}
+
+#[tokio::test]
+async fn a_code_reading_run_reads_with_the_tool_provider_that_reads_code_whatever_its_id() {
+    let (_dir, db) = store();
+    let (folder, engine) = reading_engine();
+    let root = folder.path().to_str().unwrap();
+    let mut client = Client::new(&["p/a"], &[Ends::Reply("ok")]);
+    client.plans = vec!["ra"];
+    client.providers = vec!["code-reader"];
+    client.catalog = Ok(vec![("cat", &["code.read/v1"][..])]);
+    let client = Arc::new(client);
+    engine.see_project(&db, PROJECT, root, profile(), &Settings::default(), 1);
+    let (task, _) = engine
+        .run_now(&db, &client, &Settings::default(), PROJECT, "verify")
+        .unwrap();
+    assert_eq!(task, "swe:verify");
+    settled(&engine).await;
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    let plan = sends[0].1.plan.as_ref().expect("a plan");
+    assert_eq!(
+        plan["tool_items"],
+        json!([{"params": {}, "preset": "reader", "provider": "code-reader"}])
+    );
+    assert_eq!(
+        plan["composition"]["providers"][0]["provider"],
+        "code-reader"
+    );
+}
+
+/// A run the person starts on a stack without a reader ends as skipped:
+/// not a failure, so nothing counts toward failing.
+#[tokio::test]
+async fn a_started_run_without_a_reader_ends_as_skipped_not_failed() {
+    let (_dir, db) = store();
+    let (folder, engine) = reading_engine();
+    let root = folder.path().to_str().unwrap();
+    let mut client = Client::new(&["p/a"], &[]);
+    client.providers = Vec::new();
+    let client = Arc::new(client);
+    engine.see_project(&db, PROJECT, root, profile(), &Settings::default(), 1);
+    engine
+        .run_now(&db, &client, &Settings::default(), PROJECT, "map-memories")
+        .unwrap();
+    settled(&engine).await;
+    let run: (String, Option<String>, Option<String>, Option<String>) = db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT task, outcome, failure_class, error FROM dream_task_runs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        run,
+        (
+            "swe:map-memories".into(),
+            Some("skipped".into()),
+            None,
+            Some(NO_READER.into())
+        )
+    );
+    let map = schedules(&db)
+        .into_iter()
+        .find(|row| row.0 == "swe:map-memories")
+        .unwrap();
+    assert_eq!(
+        map,
+        (
+            "swe:map-memories".into(),
+            Some("skipped".into()),
+            Some(NO_READER.into()),
+            0
+        )
+    );
+    assert!(client.sends.lock().unwrap().is_empty());
+    assert_eq!(locks(&db), 0);
+}

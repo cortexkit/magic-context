@@ -580,9 +580,17 @@ impl RunnerClient for SubcRunnerClient {
             .await
     }
 
-    async fn reader_catalog(
+    async fn tool_providers(&self) -> Result<Vec<String>, ClientError> {
+        self.ready_participants(cortexkit_role_tool_provider::PROVIDES)
+            .await
+            .map_err(ClientError::new)
+    }
+
+    async fn tool_catalog(
         &self,
         child: &Child,
+        provider: &str,
+        preset: Option<&str>,
     ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
         let root = child.project_root.as_deref().ok_or_else(|| {
             ClientError::new("tool.catalog: the run has no project folder to read in")
@@ -593,16 +601,17 @@ impl RunnerClient for SubcRunnerClient {
             .await
             .map_err(|error| ClientError::new(format!("tool.catalog: child scope: {error}")))?;
         // The same provider, preset, params and scope the runner fetches the
-        // plan's tool item with, under the child's own identity.
+        // plan's tool item with, under the child's own identity. A request
+        // without a preset carries none, as the role requires.
         let provider = SessionRef::new(
-            crate::dreamer::plan::READER_PROVIDER.to_owned(),
+            provider.to_owned(),
             child.session.harness.clone(),
             child.session.session.clone(),
         );
-        let request = json!({
-            "preset": crate::dreamer::plan::reader_preset(),
-            "params": {},
-        });
+        let mut request = json!({"params": {}});
+        if let Some(preset) = preset {
+            request["preset"] = json!(preset);
+        }
         let reply = self
             .call_raw(
                 &provider,

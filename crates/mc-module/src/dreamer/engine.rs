@@ -661,6 +661,7 @@ impl Engine {
                         run_id,
                         Some(&*members),
                         &locks,
+                        None,
                     )
                     .await;
                 (Some(run_id), end)
@@ -772,6 +773,16 @@ impl Engine {
             settle(Settled::Skipped { reason: missing });
             return;
         }
+        // A task that reads code needs a tool provider to read it with.
+        // Without one it can't run on this stack, and is skipped the same way
+        // as a task whose project folder is missing.
+        let reader = match reader_for(client, &kind, root).await {
+            Ok(reader) => reader,
+            Err(missing) => {
+                settle(Settled::Skipped { reason: missing });
+                return;
+            }
+        };
         let members = match self.members_for(client, &due.owner, &kind).await {
             Ok(members) => members,
             Err(settled) => {
@@ -818,6 +829,7 @@ impl Engine {
                     run_id,
                     members.as_deref(),
                     std::slice::from_ref(&due.owner),
+                    reader.as_deref(),
                 )
                 .await
             }
@@ -889,6 +901,11 @@ impl Engine {
         let settled = match end.outcome.as_str() {
             "failed" | "lock_lost" => Settled::Failed {
                 error: end.error.clone().unwrap_or_default(),
+            },
+            // A run the person started that found no tool provider to read
+            // code with: not a failure, and not a wait.
+            "skipped" => Settled::Skipped {
+                reason: end.error.clone().unwrap_or_default(),
             },
             "waiting" => Settled::Waiting {
                 until: end
@@ -1065,21 +1082,49 @@ impl Engine {
                 .await
                 .ok()
                 .flatten();
-            let end = engine
-                .run_task(
-                    &db,
-                    &*client,
-                    &settings,
-                    &due,
-                    &kind,
-                    &declaration,
-                    &root,
-                    &profile,
-                    run_id,
-                    members.as_deref(),
-                    std::slice::from_ref(&due.owner),
-                )
-                .await;
+            let end = match reader_for(&*client, &kind, &root).await {
+                Ok(reader) => {
+                    engine
+                        .run_task(
+                            &db,
+                            &*client,
+                            &settings,
+                            &due,
+                            &kind,
+                            &declaration,
+                            &root,
+                            &profile,
+                            run_id,
+                            members.as_deref(),
+                            std::slice::from_ref(&due.owner),
+                            reader.as_deref(),
+                        )
+                        .await
+                }
+                // The run is already recorded, so it ends as skipped, which
+                // settles its schedule as a scheduled run's skip does.
+                Err(missing) => {
+                    let end = RunEnd {
+                        outcome: "skipped".into(),
+                        error: Some(missing),
+                        ..RunEnd::default()
+                    };
+                    tracing::info!(
+                        "ck-mc: dreamer: run {run_id} {} for {}: skipped ({})",
+                        due.task,
+                        due.owner.owner_id,
+                        end.error.as_deref().unwrap_or_default()
+                    );
+                    if let Err(error) =
+                        db.with_connection(|conn| store::finish_run(conn, run_id, &end, now_ms()))
+                    {
+                        tracing::warn!(
+                            "ck-mc: dreamer: recording run {run_id}'s end failed: {error}"
+                        );
+                    }
+                    end
+                }
+            };
             engine.finish_due(&db, &due, &end);
             engine
                 .running
@@ -1094,7 +1139,8 @@ impl Engine {
     /// `workspace` is what the run is given of its workspace
     /// ([`TaskContext::workspace`]), and `locks` the owners whose locks the
     /// run holds, all of which it renews before each batch and checks before
-    /// each write.
+    /// each write. `reader` is the tool provider a task that reads code
+    /// reads with ([`reader_for`]).
     #[allow(clippy::too_many_arguments)]
     async fn run_task<C: RunnerClient + Router>(
         &self,
@@ -1109,6 +1155,7 @@ impl Engine {
         run_id: i64,
         workspace: Option<&WorkspaceMembers>,
         locks: &[OwnerKey],
+        reader: Option<&str>,
     ) -> RunEnd {
         let mut end = RunEnd::default();
         let (task, demand) = match (self.task(kind), demand(kind)) {
@@ -1148,7 +1195,8 @@ impl Engine {
             Ok(batches) if batches.is_empty() => end.outcome = "nothing_to_do".into(),
             Ok(batches) => {
                 self.send_batches(
-                    db, client, settings, due, locks, demand, run_id, root, batches, &mut end,
+                    db, client, settings, due, locks, demand, run_id, root, reader, batches,
+                    &mut end,
                 )
                 .await
             }
@@ -1187,6 +1235,7 @@ impl Engine {
         demand: &'static crate::routing::DreamDemand,
         run_id: i64,
         root: &str,
+        reader: Option<&str>,
         batches: Vec<Box<dyn Batch>>,
         end: &mut RunEnd,
     ) {
@@ -1220,6 +1269,7 @@ impl Engine {
                 demand,
                 run_id: &format!("{name}.{index}"),
                 project_root: batch.folder().unwrap_or(root),
+                reader,
             };
             let reply = match run::run(client, &job, batch.as_ref()).await {
                 Ok(reply) => reply,
@@ -1387,6 +1437,21 @@ fn whose(owner: &OwnerKey) -> &'static str {
 
 fn demand(kind: &str) -> Option<&'static crate::routing::DreamDemand> {
     DREAM_DEMANDS.iter().find(|demand| demand.kind == kind)
+}
+
+/// The tool provider a task of `kind` reads code with in `root`
+/// ([`super::plan::select_reader`]); `None` for a task that reads no code.
+/// `Err` says what is missing when a task that reads code has none: it can't
+/// run on this stack, which is neither a failure nor a wait.
+async fn reader_for<C: RunnerClient>(
+    client: &C,
+    kind: &str,
+    root: &str,
+) -> Result<Option<String>, String> {
+    if !demand(kind).is_some_and(|demand| demand.reads_code) {
+        return Ok(None);
+    }
+    super::plan::select_reader(client, root).await.map(Some)
 }
 
 /// Why a task can't run on this machine: it reads the project's files and

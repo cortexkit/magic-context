@@ -412,8 +412,10 @@ pub fn lock_holder(
 /// How a run ended, for its record.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunEnd {
-    /// `applied`, `nothing_to_do`, `waiting`, `failed`, `budget_stopped` or
-    /// `lock_lost`.
+    /// `applied`, `nothing_to_do`, `waiting`, `failed`, `budget_stopped`,
+    /// `lock_lost`, or `skipped` for a run the person started that could not
+    /// run on this stack (a task that reads code, and no tool provider to
+    /// read it with).
     pub outcome: String,
     pub failure_class: Option<String>,
     pub error: Option<String>,

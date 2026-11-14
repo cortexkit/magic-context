@@ -572,7 +572,11 @@ async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides()
         ],
     );
     client.plans = vec!["ra", "rb"];
-    client.catalog = Ok(vec![("read", &[]), ("grep", &[]), ("glob", &[])]);
+    client.catalog = Ok(vec![
+        ("read", &["code.read/v1"]),
+        ("grep", &[]),
+        ("glob", &[]),
+    ]);
     let client = Arc::new(client);
     let root = fixture.repo.path().to_str().unwrap().to_owned();
     engine.see_project(

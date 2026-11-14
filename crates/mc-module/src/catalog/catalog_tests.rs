@@ -1094,7 +1094,7 @@ fn a_dreamer_text_item_serves_its_own_text_and_no_tools() {
         capabilities: vec!["code.read/v1".into()],
     }];
     let system = "You check memories against the code.\nAnswer with one manifest.";
-    let plan = crate::dreamer::plan::plan(&tools, crate::MODULE_ID, system).unwrap();
+    let plan = crate::dreamer::plan::plan(&tools, "aft", crate::MODULE_ID, system).unwrap();
     let item = &plan["system_text_items"][0];
     let request = json!({
         "params": {},

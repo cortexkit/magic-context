@@ -2604,6 +2604,7 @@ const TEMPLATE_DATA = [
 "unknown pending operation \"\x01\"; ignoring",
 "[magic-context] hidden child \x01 removing",
 "prefix trim: placing boundary \x01 failed:",
+"ck-mc: dreamer: run \x01 \x01 for \x01: skipped (\x01)",
 "system prompt hash changed: \x01 → \x01 (len=\x01)",
 "transform refused degraded pass site=\x01:",
 "[dreamer] compress-cues chunk failed: \x01",

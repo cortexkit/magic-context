@@ -13,8 +13,8 @@
 //! message goes out the module lists each memory's likely files: the paths
 //! its text names that the checkout tracks, and for a memory naming none, the
 //! files where a bounded literal search finds the code names it mentions. The
-//! model reads the checkout with AFT's read-only tools ([`super::super::plan`])
-//! and answers with one `<mappings>` manifest.
+//! model reads the checkout with a tool provider's read-only tools
+//! ([`super::super::plan`]) and answers with one `<mappings>` manifest.
 //!
 //! The manifest is checked one entry at a time. An id the batch didn't send,
 //! or a memory changed since the batch read it, is dropped with its reason.

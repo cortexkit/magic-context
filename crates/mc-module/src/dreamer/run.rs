@@ -7,7 +7,8 @@
 //! input under the task's system prompt, no tools, one model step, and one
 //! reply that the task reads.
 //!
-//! A task that reads the project's code gets AFT's read-only tools instead:
+//! A task that reads the project's code gets a tool provider's read-only
+//! tools instead (the engine chose the provider, [`super::plan::select_reader`]):
 //! its child is created with a fetch plan ([`super::plan`]) on a runner that
 //! takes plans, and its run may take as many steps as the task's kind
 //! allows. A runner without plans can't run such a task, so its model counts
@@ -69,6 +70,9 @@ pub struct TaskRun<'a> {
     /// The folder the child runs in: the project's root, where the runner
     /// creates it under Magic Context's scope for that folder.
     pub project_root: &'a str,
+    /// The tool provider whose `reader` preset a code-reading child reads
+    /// with; `None` for a task that reads no code.
+    pub reader: Option<&'a str>,
 }
 
 /// A run that got a reply the task accepted.
@@ -158,6 +162,12 @@ pub async fn run<C: RunnerClient + Router>(
         };
         let model = routing::model_of(&answer);
         let plan = if job.demand.reads_code {
+            let Some(reader) = job.reader else {
+                report(Outcome::Cancelled, None).await;
+                return Err(TaskError::Failed(
+                    "the task reads code, and no tool provider was chosen to read it with".into(),
+                ));
+            };
             let child = Child {
                 session: SessionRef::new(
                     answer.runner.module.clone(),
@@ -166,7 +176,7 @@ pub async fn run<C: RunnerClient + Router>(
                 ),
                 project_root: Some(job.project_root.to_owned()),
             };
-            match reader_plan(client, &child, task.system()).await {
+            match reader_plan(client, &child, reader, task.system()).await {
                 Ok(plan) => Some(PlanRun {
                     plan,
                     max_steps: job.demand.max_steps,
@@ -275,11 +285,12 @@ enum ReaderPlan {
     Tools(String),
 }
 
-/// The plan a code-reading child of `child`'s runner is created with: AFT's
-/// reader tools in the project's folder, and `system` as its text.
+/// The plan a code-reading child of `child`'s runner is created with:
+/// `reader`'s reader tools in the child's folder, and `system` as its text.
 async fn reader_plan<C: RunnerClient>(
     client: &C,
     child: &Child,
+    reader: &str,
     system: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, ReaderPlan> {
     if !client.child_plans(child).await {
@@ -289,11 +300,11 @@ async fn reader_plan<C: RunnerClient>(
         )));
     }
     let answer = client
-        .reader_catalog(child)
+        .tool_catalog(child, reader, Some(super::plan::reader_preset()))
         .await
         .map_err(|error| ReaderPlan::Tools(format!("the code-reading tools: {error}")))?;
-    let tools = super::plan::reader_tools(&answer).map_err(ReaderPlan::Tools)?;
-    match super::plan::plan(&tools, crate::MODULE_ID, system).map_err(ReaderPlan::Tools)? {
+    let tools = super::plan::reader_tools(reader, &answer).map_err(ReaderPlan::Tools)?;
+    match super::plan::plan(&tools, reader, crate::MODULE_ID, system).map_err(ReaderPlan::Tools)? {
         serde_json::Value::Object(plan) => Ok(plan),
         _ => unreachable!("a plan is an object"),
     }

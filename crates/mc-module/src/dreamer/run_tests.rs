@@ -29,6 +29,10 @@ pub(crate) enum Ends {
     Full(u64),
 }
 
+/// A reader catalog as the tests give it: each tool with its capabilities,
+/// or why the provider did not answer.
+pub(crate) type Catalog = Result<Vec<(&'static str, &'static [&'static str])>, &'static str>;
+
 /// Routing offers `routes` in order, each on runner `rx` with harness `hx`
 /// unless `no_harness` names it; an excluded route is skipped. `refuse`
 /// answers every select with that refusal instead. The runner ends each run
@@ -45,8 +49,18 @@ pub(crate) struct Client {
     pub(crate) sends: Mutex<Vec<(Child, SendRequest)>>,
     /// The runners that take fetch plans.
     pub(crate) plans: Vec<&'static str>,
-    /// AFT's reader catalog, as (tool, capabilities), or why it isn't there.
-    pub(crate) catalog: Result<Vec<(&'static str, &'static [&'static str])>, &'static str>,
+    /// The modules the daemon lists as tool providers, in the order it
+    /// lists them.
+    pub(crate) providers: Vec<&'static str>,
+    /// Every listed provider's reader catalog, as (tool, capabilities), or
+    /// why it isn't there, unless `catalogs` names the provider.
+    pub(crate) catalog: Catalog,
+    /// Reader catalogs of single providers, in place of `catalog`.
+    pub(crate) catalogs: Vec<(&'static str, Catalog)>,
+    /// Providers whose answer without a preset lists no `reader` preset.
+    pub(crate) no_reader_preset: Vec<&'static str>,
+    /// Each catalog request: the provider and the preset it asked for.
+    pub(crate) asked: Mutex<Vec<(String, Option<String>)>>,
     /// What Entorhinal answers every call with; `None` for no answer.
     pub(crate) entorhinal: Option<serde_json::Value>,
 }
@@ -63,7 +77,11 @@ impl Client {
             reports: Mutex::default(),
             sends: Mutex::default(),
             plans: Vec::new(),
+            providers: vec!["aft"],
             catalog: Err("no reader in this test"),
+            catalogs: Vec::new(),
+            no_reader_preset: Vec::new(),
+            asked: Mutex::default(),
             entorhinal: None,
         }
     }
@@ -89,12 +107,34 @@ impl RunnerClient for Client {
     async fn child_plans(&self, child: &Child) -> bool {
         self.plans.contains(&child.session.runner.as_str())
     }
-    async fn reader_catalog(
+    async fn tool_providers(&self) -> Result<Vec<String>, ClientError> {
+        Ok(self.providers.iter().map(|id| (*id).to_owned()).collect())
+    }
+    async fn tool_catalog(
         &self,
         _: &Child,
+        provider: &str,
+        preset: Option<&str>,
     ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
-        let tools = self.catalog.clone().map_err(ClientError::new)?;
+        self.asked
+            .lock()
+            .unwrap()
+            .push((provider.to_owned(), preset.map(str::to_owned)));
+        let tools = self
+            .catalogs
+            .iter()
+            .find(|(named, _)| *named == provider)
+            .map_or_else(|| self.catalog.clone(), |(_, catalog)| catalog.clone())
+            .map_err(ClientError::new)?;
         let mut answer = cortexkit_role_tool_provider::catalog::CatalogAnswer::default();
+        // Only an answer to a request without a preset lists the presets.
+        if preset.is_none() {
+            answer.presets = if self.no_reader_preset.contains(&provider) {
+                vec!["worker".into()]
+            } else {
+                vec!["reader".into(), "worker".into()]
+            };
+        }
         answer.tools = tools
             .into_iter()
             .map(|(name, capabilities)| {
@@ -267,6 +307,7 @@ fn job() -> TaskRun<'static> {
         demand: classify(),
         run_id: "17",
         project_root: "/work/project",
+        reader: None,
     }
 }
 
@@ -461,6 +502,7 @@ fn verify() -> TaskRun<'static> {
             .unwrap(),
         run_id: "18",
         project_root: "/work/project",
+        reader: Some("aft"),
     }
 }
 
@@ -504,7 +546,7 @@ async fn a_code_reading_task_gets_the_reader_tools_through_a_plan() {
 async fn a_runner_without_plans_is_passed_over() {
     let mut client = Client::new(&["p/a", "p/b"], &[Ends::Reply("ok")]);
     client.plans = vec!["rb"];
-    client.catalog = Ok(vec![("read", &[])]);
+    client.catalog = Ok(vec![("read", &["code.read/v1"])]);
     let reply = run(&client, &verify(), &Task { fits: true }).await.unwrap();
     assert_eq!(reply.runner, "rb");
     assert_eq!(client.children(), ["mc-dream:18:1.0"]);
