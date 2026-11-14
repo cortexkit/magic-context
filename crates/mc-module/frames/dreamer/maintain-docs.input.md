@@ -1,12 +1,10 @@
-Project: ⟦projectIdentity⟧
-Existing docs: ARCHITECTURE.md exists; STRUCTURE.md missing.
-Current combined token count: ⟦docsCurrentTokens⟧. Combined budget: ⟦docsBudget⟧ tokens.
+The two documents hold ⟦docs.tokens⟧ tokens together. Their budget is ⟦docs.budget⟧ tokens.
 
-Host-collected code changes (diff stat and hunks, or file/line ranges when oversized):
-⟦docsChangeSet⟧
+<code-changes>
+⟦changes.text⟧
+</code-changes>
 
-Current ARCHITECTURE.md:
-⟦ARCHITECTURE.md contents⟧
-
-Current STRUCTURE.md:
-(missing)
+<document name="⟦document.name⟧">
+⟦document.text⟧
+</document>
+<document name="⟦document.name⟧" missing="yes"></document>
