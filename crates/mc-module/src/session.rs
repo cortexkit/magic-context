@@ -364,9 +364,9 @@ pub struct Unconfirmed {
     /// Setup offers it again and the runner's answer says it holds it.
     #[serde(skip)]
     accepted: bool,
-    /// The readings under an older view that this accepted view excused,
-    /// at most [`EXCUSED_PER_VIEW`] different ones: each one's prompt size
-    /// and the view it named. Two measured requests can follow acceptance
+    /// The readings under an older view that this accepted view excused, at
+    /// most two different ones: each one's prompt size and the view it
+    /// named. Two measured requests can follow acceptance
     /// under an older view: the one already in flight when the runner
     /// accepted (a session has one step in flight at a time), and the one
     /// request a runner may render before it takes a view it accepted
@@ -377,11 +377,6 @@ pub struct Unconfirmed {
     #[serde(skip)]
     excused: Vec<(u64, u64)>,
 }
-
-/// How many different readings under an older view one accepted view
-/// excuses ([`Unconfirmed::excused`]): the request in flight when the runner
-/// accepted, and the one request it may render before taking the view.
-const EXCUSED_PER_VIEW: usize = 2;
 
 /// The state a view's acceptance replaced.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1717,27 +1712,21 @@ impl Session {
     /// (`accepted`) as one of the requests the runner can still measure
     /// under the older view after accepting ([`Unconfirmed::excused`]): the
     /// accepted views record it, and a repeat of it is excused again. A
-    /// different reading once an accepted view has excused
-    /// [`EXCUSED_PER_VIEW`] readings stops every accepted view counting, and
-    /// returns false.
+    /// different reading once an accepted view has excused two stops every
+    /// accepted view counting, and returns false.
     fn excuse_in_flight(&mut self, tokens: u64, view: u64, accepted: u64) -> bool {
         let reading = (tokens, view);
         let earlier = self
             .unconfirmed
             .iter()
             .filter(|pending| pending.accepted)
-            .find(|pending| {
-                pending.excused.len() >= EXCUSED_PER_VIEW && !pending.excused.contains(&reading)
-            })
-            .map(|pending| {
-                pending
-                    .excused
-                    .iter()
-                    .map(|(size, named)| format!("{size} tokens from view {named}"))
-                    .collect::<Vec<_>>()
-                    .join(" and ")
+            .find_map(|pending| match pending.excused[..] {
+                [first, second] if !pending.excused.contains(&reading) => Some((first, second)),
+                _ => None,
             });
-        let Some(earlier) = earlier else {
+        let Some(((first_tokens, first_view), (second_tokens, second_view))) = earlier else {
+            // No accepted view holds two other readings, so each has room
+            // for this one unless it already holds it.
             for pending in self
                 .unconfirmed
                 .iter_mut()
@@ -1753,7 +1742,7 @@ impl Session {
             pending.accepted = false;
         }
         tracing::warn!(
-            "ck-mc: session {}: runner accepted view {accepted} but measured a later request without it ({tokens} tokens from view {view}, after {earlier}); counting readings against the applied view {}",
+            "ck-mc: session {}: runner accepted view {accepted} but measured a later request without it ({tokens} tokens from view {view}, after {first_tokens} tokens from view {first_view} and {second_tokens} tokens from view {second_view}); counting readings against the applied view {}",
             self.key.session,
             self.newest_applied
         );
