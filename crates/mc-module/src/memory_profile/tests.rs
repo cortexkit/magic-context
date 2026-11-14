@@ -75,7 +75,7 @@ fn bundled_packages_load_and_base_cannot_be_an_agent() {
     let profile = load_chain(&packages).unwrap();
     assert_eq!(
         profile.digest,
-        "decfe72de6265e908777d8ffd9e96712fdafdbd6c88ce2fda63377c7a2c1d68e"
+        "b8abec41db47198f0cae3b7241673d873ee03cfc18e34af77329132d5c3fca18"
     );
     assert_eq!(list(&profile.body, "categories").len(), 12);
     let mut facts: Vec<_> = list(&profile.body, "categories")

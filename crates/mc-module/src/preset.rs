@@ -86,9 +86,16 @@ mod tests {
     /// preset of a tools-only route).
     /// Test-only modules ending in `_tests.rs` may also name presets in the
     /// Setup requests they construct; they do not define production gates.
+    /// The dreamer's guidance reader spells `"head"` as core's audience role
+    /// for workspace guidance, which is not a preset of this module.
     #[test]
     fn no_gate_outside_the_preset_tables_names_a_preset() {
-        const ALLOWED: &[&str] = &["preset.rs", "catalog.rs", "transport.rs"];
+        const ALLOWED: &[&str] = &[
+            "preset.rs",
+            "catalog.rs",
+            "transport.rs",
+            "dreamer/guidance.rs",
+        ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();
         let mut folders = vec![root.clone()];
