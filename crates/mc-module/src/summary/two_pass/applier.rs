@@ -460,8 +460,9 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
             None => {
                 // Turn two's `new` is the two-pass form of fact promotion, so
                 // it is placed the same way, with the historian as its actor.
-                // A workspace memory is filed as `ctx_memory` files one: owned
-                // by the workspace, with the project as its source project.
+                // A workspace memory is filed the way the agent's memory tool
+                // (`ctx_memory`) files one: owned by the workspace, with the
+                // project as its source project.
                 let ordinals = fact_ordinals(&tx, admission.fact_id)?;
                 let placer = crate::memory_levels::Placer {
                     authority: admission.authority,

@@ -71,7 +71,7 @@ fn fill(template: &str, values: &[(&str, &str)]) -> String {
             let written = format!("⟦{name}⟧");
             marker
                 .starts_with(&written)
-                .then(|| (written.len(), *value))
+                .then_some((written.len(), *value))
         });
         match found {
             Some((length, value)) => {

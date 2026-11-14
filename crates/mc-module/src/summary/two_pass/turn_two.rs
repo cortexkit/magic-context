@@ -1174,9 +1174,10 @@ impl<C: RunnerClient> Resolver<'_, C> {
         if authority.workspace_id.as_deref() != Some(workspace) {
             return refused("the project is no longer in the workspace the request named");
         }
-        // As for `ctx_memory`: only a context that names the project can
+        // The same conditions the agent's memory tool (`ctx_memory`) sets
+        // for a workspace write: only a context that names the project can
         // vouch for its workspace, and the profile must allow the category
-        // there.
+        // at the workspace level.
         if authority.project_id.is_none() {
             return refused("the session's memory context names no project");
         }
