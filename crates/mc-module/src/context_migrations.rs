@@ -26,7 +26,7 @@ mod catch_up_tests;
 pub const PLUGIN_SCHEMA_VERSION: u32 = crate::context_db::PLUGIN_SCHEMA_VERSION;
 
 /// The schema version this build reads and writes.
-pub const SCHEMA_VERSION: u32 = 108;
+pub const SCHEMA_VERSION: u32 = 109;
 
 struct Migration {
     version: u32,
@@ -57,6 +57,12 @@ const MIGRATIONS: &[Migration] = &[
         description: "indexed git commits keyed by project and sha",
         rebuilds_referenced_table: true,
         up: git_commits_per_project_108,
+    },
+    Migration {
+        version: 109,
+        description: "the git line each memory was learned on",
+        rebuilds_referenced_table: false,
+        up: memory_lines_109,
     },
 ];
 
@@ -594,6 +600,10 @@ mod tests;
 #[path = "context_migrations_108_tests.rs"]
 mod tests_108;
 
+#[cfg(test)]
+#[path = "context_migrations_109_tests.rs"]
+mod tests_109;
+
 /// The module's dreamer state, replacing the 0.49 plugin's.
 ///
 /// The plugin kept one queue and one lease per project, and a run record for
@@ -794,5 +804,22 @@ fn git_commits_per_project_108(tx: &Transaction) -> rusqlite::Result<()> {
              INSERT INTO git_commit_fts_rowid_map (fts_rowid, project_path, sha)
              VALUES (last_insert_rowid(), NEW.project_path, NEW.sha);
          END;",
+    )
+}
+
+/// The git line a memory was learned on: the branch checked out in the
+/// writing session's folder (null when its HEAD was detached) and the commit
+/// it was at.
+///
+/// A repository can have several live lines at once (a release branch and
+/// the next version's branch, each in its own worktree), and a memory true on
+/// one may be false on another. The dreamer's verify tasks check a memory
+/// that names its line against that branch's newest commit. A memory without
+/// one, every memory written before this version among them, is changed only
+/// where the code it names is the same on every live line.
+fn memory_lines_109(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE memories ADD COLUMN source_branch TEXT;
+         ALTER TABLE memories ADD COLUMN source_commit TEXT;",
     )
 }

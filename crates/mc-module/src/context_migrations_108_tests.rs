@@ -225,8 +225,7 @@ fn every_commit_vector_and_search_hit_survives_migration_108() {
         .collect();
     assert_eq!(vectors_before[0].len() + vectors_before[1].len(), 4);
 
-    assert_eq!(upgrade(&mut conn, 107).unwrap(), i64::from(SCHEMA_VERSION));
-    assert_eq!(SCHEMA_VERSION, 108);
+    assert_eq!(upgrade_through(&mut conn, 107, 108).unwrap(), 108);
 
     // Every commit keeps its project, its rowid and every column.
     assert_eq!(commits(&conn), commits_before);
