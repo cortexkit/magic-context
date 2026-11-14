@@ -440,7 +440,13 @@ fn store_in_batches(
     clock: &(impl Fn() -> i64 + Sync),
 ) -> rusqlite::Result<Option<(usize, usize, usize)>> {
     let (mut inserted, mut updated, mut evicted) = (0, 0, 0);
-    for (index, batch) in commits.rchunks(STORE_BATCH).enumerate() {
+    // A sweep with nothing new still stores once, so a lowered cap evicts.
+    let batches: Vec<&[Commit]> = if commits.is_empty() {
+        vec![&[]]
+    } else {
+        commits.rchunks(STORE_BATCH).collect()
+    };
+    for (index, batch) in batches.into_iter().enumerate() {
         if index > 0 && !db.with_connection(|conn| renew_lease(conn, project, holder, clock()))? {
             return Ok(None);
         }
@@ -1465,6 +1471,49 @@ mod tests {
             "{report:?}"
         );
         assert_eq!(count(&db, "SELECT COUNT(*) FROM git_commits"), 450);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_with_nothing_new_still_evicts_past_a_lowered_cap() {
+        let dir = scratch("nothing-new");
+        let db = database(&dir);
+        let now = 1_800_000_000_000;
+        // A minute apart, so the newest commit stored is the branch's tip and
+        // the next sweep reads nothing.
+        let repo = imported_repository(&dir, 3, now / 1000 - 3600);
+        let plan = |max_commits| Plan {
+            memory: false,
+            embedding: None,
+            git: Some(GitIndexing {
+                since_days: 3650,
+                max_commits,
+            }),
+        };
+        let report = run_project(&db, PROJECT, &repo, &plan(3), &|| now).await;
+        assert!(
+            matches!(report.sweep, Some(Sweep::Indexed { inserted: 3, .. })),
+            "{report:?}"
+        );
+        let later = now + SWEEP_COOLDOWN_MS;
+        let report = run_project(&db, PROJECT, &repo, &plan(2), &|| later).await;
+        assert!(
+            matches!(
+                report.sweep,
+                Some(Sweep::Indexed {
+                    scanned: 0,
+                    evicted: 1,
+                    ..
+                })
+            ),
+            "{report:?}"
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM git_commits WHERE message LIKE 'commit 0000%'"
+            ),
+            0
+        );
     }
 
     #[tokio::test]
