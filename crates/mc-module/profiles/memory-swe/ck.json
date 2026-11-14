@@ -140,18 +140,18 @@
     },
     {
       "path": "prompts/dreamer/verify/system.md",
-      "sha256": "27f28104200925f91c7be1a38395520879beb62bf6513b5d196490b6bc0fda7a",
-      "bytes": 3452
+      "sha256": "dfc1b1a0032de3a334bc024bd30cd33d2be585594cc669507180506414e2f940",
+      "bytes": 3519
     },
     {
       "path": "prompts/dreamer/verify/user.diff-evidence.md",
-      "sha256": "1e36ea382a89ad224e9afef3e529aacb14d66b960c020bb212a97bc6349910d3",
-      "bytes": 858
+      "sha256": "3bd463d19ff786159aef9aef761a112a3c5d9db0400316480ec99de9c7c53094",
+      "bytes": 885
     },
     {
       "path": "prompts/dreamer/verify-broad/user.md",
-      "sha256": "8d595b1d32f988652f1483acac2f34c46417f5c4208522cf38f8316bc6f65c95",
-      "bytes": 731
+      "sha256": "70adc108fa7734a8744d5254453de8ff595f70f4b84e68a319fbadd3dfdc4f42",
+      "bytes": 758
     },
     {
       "path": "prompts/events/causal_incident.historian.md",

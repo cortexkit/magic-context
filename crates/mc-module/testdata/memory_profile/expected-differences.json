@@ -808,12 +808,12 @@
       "document": "dreamer/swe:verify-broad/user",
       "class": "ruling",
       "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
-      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
+      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked. A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
       "today": [
         "Check each memory's claim against its backing files. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
       ],
       "rendered": [
-        "Check each memory's claim against its backing files, or, when it has none, by searching the checkout for the paths and names it cites. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip, unless everything they cite is gone), then output ONE <verify> manifest covering every id."
+        "Check each memory's claim against its backing files, or, when it has none, by searching the checkout for the paths and names it cites. Decide verified / update / archive / skip (verified only on evidence, skip when unsure; behavioral directives only permit verified or skip, unless everything they cite is gone), then output ONE <verify> manifest covering every id."
       ]
     },
     {
@@ -1011,6 +1011,54 @@
       ],
       "rendered": [
         "For each memory below, find the repo file(s) it makes a claim about, or mark it file-independent. Behavioral process/workflow directives stay file-independent even when they name files. When \"Likely files\" are listed, those paths either occur in the memory or match its identifiers in a bounded literal source search — START there only for code claims: confirm each actually backs the claim (a quick read/outline), drop any that don't, add others only if genuinely needed. Search from scratch only when no likely files are given. Use at most 3 tool calls per memory, and reuse prior reads. Leave uncertain ids unmapped and move on. When you are done, answer with ONE <mappings> manifest in your final message."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): archiving needs positive evidence and uncertainty means skip.",
+      "why": "A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
+      "today": [
+        "- VERIFIED — still accurate. Keep it as-is."
+      ],
+      "rendered": [
+        "- VERIFIED — the code you read supports it, or the diff leaves its claim untouched. Keep it as-is."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): archiving needs positive evidence and uncertainty means skip.",
+      "why": "A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
+      "today": [
+        "BE CONSERVATIVE ABOUT ARCHIVING. Wrong archival of a TRUE memory is the worst possible outcome — far worse than leaving a slightly-stale memory. If you cannot find the code, or you are unsure, or it might still be true somewhere you didn't look: mark it VERIFIED or SKIPPED, never archived. Archive ONLY when you have positive evidence the code contradicts a code fact."
+      ],
+      "rendered": [
+        "BE CONSERVATIVE ABOUT ARCHIVING. Wrong archival of a TRUE memory is the worst possible outcome — far worse than leaving a slightly-stale memory. If you cannot find the code, or you are unsure, or it might still be true somewhere you didn't look: mark it SKIPPED, never archived. Archive ONLY when you have positive evidence the code contradicts a code fact."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): archiving needs positive evidence and uncertainty means skip.",
+      "why": "A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
+      "today": [
+        "- Default to VERIFIED. skip when code cannot decide the claim. update and archive are the exceptions, not the norm."
+      ],
+      "rendered": [
+        "- VERIFIED needs evidence. When you are unsure, or code cannot decide the claim, SKIP. update and archive are the exceptions, not the norm."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/user.diff-evidence",
+      "class": "ruling",
+      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): archiving needs positive evidence and uncertainty means skip.",
+      "why": "A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
+      "today": [
+        "The git diff below is the evidence. If changed hunks do not touch a claim, mark it verified without opening files. Open files only when a diff suggests the claim may have changed. A rename or deletion requires an update or archive when positively supported; do not archive on uncertainty. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
+      ],
+      "rendered": [
+        "The git diff below is the evidence. If changed hunks do not touch a claim, mark it verified without opening files. Open files only when a diff suggests the claim may have changed. A rename or deletion requires an update or archive when positively supported; do not archive on uncertainty. Decide verified / update / archive / skip (verified only on evidence, skip when unsure; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
       ]
     }
   ]
