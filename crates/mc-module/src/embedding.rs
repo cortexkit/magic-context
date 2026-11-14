@@ -418,9 +418,9 @@ enum RequestFailure {
 /// The HTTP client for one endpoint, built on first use and kept for the
 /// life of the process: no redirects, no proxy, and a timeout set on each
 /// request. Settings build a new [`Provider`] for every session and every
-/// transform pass, so the client is kept per endpoint, like the endpoint's
-/// failure circuit; requests then
-/// reuse its open connections instead of paying a new TCP and TLS
+/// transform pass, so the client is kept per endpoint, as the endpoint's
+/// [`Circuit`] (which stops requests after repeated failures) is. Requests
+/// then reuse its open connections instead of paying a new TCP and TLS
 /// handshake each time. `None` when a client cannot be built; the next
 /// request tries again.
 fn client_for(endpoint: &str) -> Option<reqwest::Client> {
