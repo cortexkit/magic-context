@@ -813,8 +813,9 @@ fn git_commits_per_project_108(tx: &Transaction) -> rusqlite::Result<()> {
 ///
 /// A repository can have several live lines at once (a release branch and
 /// the next version's branch, each in its own worktree), and a memory true on
-/// one may be false on another. The dreamer's verify tasks check a memory
-/// that names its line against that branch's newest commit. A memory without
+/// one may be false on another. The verify tasks (the background memory
+/// upkeep in `dreamer`) check a memory that names its line against that
+/// branch's newest commit. A memory without
 /// one, every memory written before this version among them, is changed only
 /// where the code it names is the same on every live line.
 fn memory_lines_109(tx: &Transaction) -> rusqlite::Result<()> {
