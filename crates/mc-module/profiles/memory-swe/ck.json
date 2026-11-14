@@ -90,13 +90,13 @@
     },
     {
       "path": "prompts/dreamer/map-memories/system.md",
-      "sha256": "611aec29f87ce2ae03c82863337e59fc39f9780ebdab76330d2d37f6423dc0bd",
-      "bytes": 3130
+      "sha256": "c0f4b8e3e35bc826762e5d58d5c5b4ac93a216295e7d9e9b805b61e8b13e83b0",
+      "bytes": 3171
     },
     {
       "path": "prompts/dreamer/map-memories/user.md",
-      "sha256": "715e0a2b77b2d70895df73ffb53ad0895c028595de60bec23c35a418b8ff5d2a",
-      "bytes": 807
+      "sha256": "edb0d88772815083eacbffe297214e72427a02c7ec432de317b5b02f70b490b0",
+      "bytes": 819
     },
     {
       "path": "prompts/dreamer/reflect-patterns/gate.system.md",
