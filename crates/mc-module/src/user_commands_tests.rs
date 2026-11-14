@@ -429,7 +429,7 @@ async fn user_commands_record_real_handler_samples() {
     let mut samples = std::collections::BTreeMap::new();
     // This set is the 0.1.0 description: the session commands alone. The
     // full description, with the commands on memories, observations, the
-    // dreamer and notes, is in `mc-user-commands-samples-v3`.
+    // dreamer and notes, is in `mc-user-commands-samples-v4`.
     samples.insert(
         "describe.json",
         serde_json::to_value(wire::DescribeReply::new(commands::session_commands()).unwrap())

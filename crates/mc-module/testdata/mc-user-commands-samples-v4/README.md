@@ -1,4 +1,4 @@
-# ck-mc user-command samples, version 3
+# ck-mc user-command samples, version 4
 
 These wire bodies come from ck-mc's real command handlers (`commands.describe`,
 `commands.preview` and `commands.run` through the module's command entry point,
@@ -7,7 +7,8 @@ stores. They hold the person's commands on memories, observations, the
 dreamer, docs proposals and notes (user-commands 0.1.2 subjects). Version 1
 keeps the session commands (`flush`, `status`, `wrapup`) and their samples.
 
-Version 3 is version 2 with one command added, `docs_proposal_dismiss`, and
+Version 4 is version 2 (as tagged `mc-user-commands-samples-v3`, with the
+wrapup palette text fix) with one command added, `docs_proposal_dismiss`, and
 `maintain-docs` among `dreamer_run_now`'s task kinds. So `describe.json` and
 the run-now previews (whose versions hash the choice list) change, and
 `docs-proposal-dismiss-preview.json` and `docs-proposal-dismiss-run.json` are

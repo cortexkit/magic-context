@@ -1505,7 +1505,7 @@ async fn owner_commands_record_real_handler_samples() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("testdata/mc-user-commands-samples-v3")
+                .join("testdata/mc-user-commands-samples-v4")
         });
     let update = std::env::var_os("MC_UPDATE_USER_COMMAND_SAMPLES").is_some();
     if update {
