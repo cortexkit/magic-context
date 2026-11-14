@@ -38,7 +38,8 @@ command -v "$GH_BIN" >/dev/null 2>&1 || die "gh binary '$GH_BIN' not found (set 
 # Resolve repo (owner/repo) from REPO env or the origin remote.
 if [[ -z "${REPO:-}" ]]; then
     origin_url="$(git remote get-url origin 2>/dev/null || true)"
-    REPO="$(printf '%s' "$origin_url" | sed -E 's#^.*github\.com[/:]([^/]+/[^/]+?)(\.git)?$#\1#')"
+    # Two plain substitutions: a lazy `+?` is not POSIX, and BSD sed refuses it.
+    REPO="$(printf '%s' "$origin_url" | sed -E 's#^.*github\.com[/:]##; s#\.git$##')"
 fi
 [[ -n "${REPO:-}" && "$REPO" == */* ]] || die "could not resolve owner/repo (set REPO=owner/repo)"
 
