@@ -91,7 +91,7 @@ fn refuse_live(store: &Path) {
 
 /// Copy `from` to `to` through a read-only connection, then bring the copy
 /// to this build's schema. Returns the schema the source had.
-fn migrated_copy(from: &Path, to: &Path) -> i64 {
+pub(super) fn migrated_copy(from: &Path, to: &Path) -> i64 {
     let source = Connection::open_with_flags(
         from,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,

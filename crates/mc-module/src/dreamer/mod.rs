@@ -19,6 +19,8 @@ pub mod tasks;
 #[cfg(test)]
 mod curate_replay_tests;
 #[cfg(test)]
+mod map_replay_tests;
+#[cfg(test)]
 mod replay_tests;
 #[cfg(test)]
 mod verify_replay_tests;

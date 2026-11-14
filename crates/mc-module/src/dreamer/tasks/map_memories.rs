@@ -733,7 +733,7 @@ impl MapMemories {
                     system,
                     named: message,
                     inputs: chunk.to_vec(),
-                    message: OnceLock::new(),
+                    sent: OnceLock::new(),
                     read: chunk
                         .iter()
                         .map(|input| {
@@ -798,10 +798,19 @@ pub(crate) struct MapBatch {
     /// The message with only the paths the memories name.
     named: String,
     inputs: Vec<Input>,
-    /// The message as sent, with the code-name search's files added; made
-    /// once, on first use.
-    message: OnceLock<String>,
+    /// The memories and message as sent, with the code-name search's files
+    /// added; made once, on first use.
+    sent: OnceLock<Sent>,
     read: Vec<Seen>,
+}
+
+/// What a map batch sends: each memory with the likely files its message
+/// lists, and the message itself.
+struct Sent {
+    /// Only the replay harness reads these; the message already shows them.
+    #[cfg_attr(not(test), allow(dead_code))]
+    inputs: Vec<Input>,
+    message: String,
 }
 
 impl MapBatch {
@@ -811,7 +820,33 @@ impl MapBatch {
 
     /// The message this batch sends.
     pub(crate) fn message(&self) -> &str {
-        self.message.get_or_init(|| {
+        &self.sent().message
+    }
+
+    /// Each memory as the message shows it, with the likely files it lists.
+    #[cfg(test)]
+    pub(crate) fn sent_inputs(&self) -> &[Input] {
+        &self.sent().inputs
+    }
+
+    /// Each memory with only the likely files its own text names, before the
+    /// code-name search.
+    #[cfg(test)]
+    pub(crate) fn named_inputs(&self) -> &[Input] {
+        &self.inputs
+    }
+
+    /// Each memory as the batch read it: its id and revision.
+    #[cfg(test)]
+    pub(crate) fn read(&self) -> Vec<(i64, i64)> {
+        self.read
+            .iter()
+            .map(|memory| (memory.id, memory.revision))
+            .collect()
+    }
+
+    fn sent(&self) -> &Sent {
+        self.sent.get_or_init(|| {
             let mut inputs = self.inputs.clone();
             let checkout = &self.run.checkout;
             seed_code_names(
@@ -821,14 +856,20 @@ impl MapBatch {
                 |path| checkout.file(path).is_ok(),
             );
             if inputs == self.inputs {
-                return self.named.clone();
+                return Sent {
+                    inputs,
+                    message: self.named.clone(),
+                };
             }
             // The documents rendered once already, so this can't fail; the
             // message without the searched files stands in if it does.
-            self.run
-                .render(&inputs)
-                .map(|(_, message)| message)
-                .unwrap_or_else(|_| self.named.clone())
+            match self.run.render(&inputs) {
+                Ok((_, message)) => Sent { inputs, message },
+                Err(_) => Sent {
+                    inputs: self.inputs.clone(),
+                    message: self.named.clone(),
+                },
+            }
         })
     }
 

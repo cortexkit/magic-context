@@ -42,20 +42,20 @@ use crate::summary::fit::Window;
 const REQUEST: &str = "verify.request.json";
 /// A window large enough for any batch, so the message written is the one
 /// every model that can take it is sent.
-const ANY_WINDOW: u64 = 10_000_000;
+pub(super) const ANY_WINDOW: u64 = 10_000_000;
 
-fn env(name: &str) -> Option<String> {
+pub(super) fn env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
-fn required(name: &str, what: &str) -> String {
+pub(super) fn required(name: &str, what: &str) -> String {
     env(name).unwrap_or_else(|| panic!("set {name} to {what}"))
 }
 
-fn write_json(path: &Path, value: &Value) {
+pub(super) fn write_json(path: &Path, value: &Value) {
     std::fs::create_dir_all(path.parent().expect("a file has a folder")).expect("create folder");
     let text = serde_json::to_string_pretty(value).expect("JSON serializes") + "\n";
     std::fs::write(path, text).unwrap_or_else(|error| panic!("{}: {error}", path.display()));

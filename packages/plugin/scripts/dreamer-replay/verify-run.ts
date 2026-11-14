@@ -1,19 +1,21 @@
 /**
- * Send one recorded dreamer verify request to a model, with read-only tools
- * over one checkout, and write the model's whole trajectory beside it.
+ * Send one recorded dreamer request to a model, with read-only tools over
+ * one checkout, and write the model's whole trajectory beside it.
  *
- * The request is a `verify.request.json` that ck-mc's replay harness wrote
- * (`crates/mc-module/src/dreamer/verify_replay_tests.rs`): the system and
- * user text a verify batch sends, the model settings, and the step bound
- * the module's plan gives the run. This runner plays the runner's part: it
- * offers `read` (with a line range), `grep` and `glob`, confined to the
- * checkout, and runs the tool loop until the model answers without a tool
- * call or the step bound is reached.
+ * The request is a `verify.request.json` or `map.request.json` that one of
+ * ck-mc's replay harnesses wrote (`verify_replay_tests.rs` and
+ * `map_replay_tests.rs` in `crates/mc-module/src/dreamer/`): the system and
+ * user text a `verify`, `verify-broad` or `map-memories` batch sends, the
+ * model settings, and the step bound the module's plan gives the run. This
+ * runner plays the runner's part: it offers `read` (with a line range),
+ * `grep` and `glob`, confined to the checkout, and runs the tool loop until
+ * the model answers without a tool call or the step bound is reached.
  *
- * Everything goes to `verify.trajectory.json` in the request's folder: each
- * request body sent, each reply as the provider returned it (reasoning
- * included), and each tool call with its full input and output. Nothing is
- * written anywhere else, and an existing trajectory is never overwritten.
+ * Everything goes to the request kind's trajectory file in the request's
+ * folder (`verify.trajectory.json` or `map.trajectory.json`): each request
+ * body sent, each reply as the provider returned it (reasoning included),
+ * and each tool call with its full input and output. Nothing is written
+ * anywhere else, and an existing trajectory is never overwritten.
  *
  * The provider key is read from standard input, never from arguments, the
  * environment or a file, and is never written: any text that contains it is
@@ -22,6 +24,8 @@
  *
  *   bun packages/plugin/scripts/dreamer-replay/verify-run.ts \
  *     --request <out>/verify/batch-0/verify.request.json --checkout <path> < key
+ *   bun packages/plugin/scripts/dreamer-replay/verify-run.ts \
+ *     --request <out>/map-memories/batch-0/map.request.json --checkout <path> < key
  */
 import {
     existsSync,
@@ -37,7 +41,34 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const DEFAULT_ENDPOINT = "https://api.deepseek.com/v1/chat/completions";
 export const DEFAULT_TEMPERATURE = 0.1;
-export const TRAJECTORY = "verify.trajectory.json";
+
+/**
+ * The task kinds this runner replays: the root element of the one manifest
+ * the module requires the final message to hold, and the file the
+ * trajectory is written to.
+ */
+export const KINDS: Readonly<Record<string, { manifest: string; trajectory: string }>> = {
+    verify: { manifest: "verify", trajectory: "verify.trajectory.json" },
+    "verify-broad": { manifest: "verify", trajectory: "verify.trajectory.json" },
+    "map-memories": { manifest: "mappings", trajectory: "map.trajectory.json" },
+};
+export const TRAJECTORY = KINDS.verify.trajectory;
+export const MAP_TRAJECTORY = KINDS["map-memories"].trajectory;
+
+/** How a request of `kind` runs; an unknown kind is refused. */
+export function kindOf(kind: string): { manifest: string; trajectory: string } {
+    const known = Object.hasOwn(KINDS, kind) ? KINDS[kind] : undefined;
+    if (!known) throw new Error(`${kind} is not a task kind this runner replays (${Object.keys(KINDS).join(", ")})`);
+    return known;
+}
+
+/**
+ * Whether `text` holds a whole `<root>` manifest, opening and closing tag,
+ * as the module reads one: case-insensitive, with any attributes.
+ */
+export function completeManifest(text: string, root: string): boolean {
+    return new RegExp(`<${root}\\b[^>]*>[\\s\\S]*?</${root}>`, "i").test(text);
+}
 
 /** How much one tool call may return, so one call can't fill the window. */
 const READ_MAX_LINES = 2000;
@@ -50,8 +81,8 @@ const GREP_MAX_FILE_BYTES = 2 * 1024 * 1024;
 /** Retries for a provider answer that may succeed on a second try. */
 const RETRIES = 2;
 
-/** One recorded verify request, as the replay harness writes it. */
-export interface VerifyRequest {
+/** One recorded request, as a replay harness writes it. */
+export interface ReplayRequest {
     task: string;
     kind: string;
     batch: number;
@@ -408,11 +439,12 @@ async function sendWithRetries(
 }
 
 /** Run one request's tool loop and write its trajectory beside it. */
-export async function runVerify(options: RunOptions): Promise<Trajectory> {
+export async function runRequest(options: RunOptions): Promise<Trajectory> {
     const now = options.now ?? Date.now;
     const requestPath = resolve(options.requestPath);
-    const request = JSON.parse(readFileSync(requestPath, "utf8")) as VerifyRequest;
-    const output = join(dirname(requestPath), TRAJECTORY);
+    const request = JSON.parse(readFileSync(requestPath, "utf8")) as ReplayRequest;
+    const kind = kindOf(request.kind);
+    const output = join(dirname(requestPath), kind.trajectory);
     if (existsSync(output)) throw new Error(`${output} already exists; a replay is never overwritten`);
     if (!options.key.trim()) throw new Error("no provider key on standard input");
     const checkout = new Checkout(options.checkout);
@@ -495,7 +527,7 @@ export async function runVerify(options: RunOptions): Promise<Trajectory> {
         const calls = message.tool_calls ?? [];
         if (!calls.length) {
             const text = message.content ?? "";
-            trajectory.final = { text, completeManifest: /<verify\b[^>]*>[\s\S]*?<\/verify>/i.test(text) };
+            trajectory.final = { text, completeManifest: completeManifest(text, kind.manifest) };
             trajectory.stopReason = "final";
             break;
         }
@@ -543,14 +575,14 @@ if (import.meta.main) {
     const checkout = option(args, "--checkout");
     if (!requestPath || !checkout) {
         console.error(
-            "usage: bun verify-run.ts --request <verify.request.json> --checkout <path> [--model m] [--endpoint url] [--temperature t] < key",
+            "usage: bun verify-run.ts --request <verify.request.json|map.request.json> --checkout <path> [--model m] [--endpoint url] [--temperature t] < key",
         );
         process.exit(2);
     }
     const temperature = option(args, "--temperature");
     const key = (await Bun.stdin.text()).trim();
     try {
-        const trajectory = await runVerify({
+        const trajectory = await runRequest({
             requestPath,
             checkout,
             key,
@@ -560,7 +592,7 @@ if (import.meta.main) {
         });
         console.log(
             JSON.stringify({
-                trajectory: join(dirname(resolve(requestPath)), TRAJECTORY),
+                trajectory: join(dirname(resolve(requestPath)), kindOf(trajectory.kind).trajectory),
                 stopReason: trajectory.stopReason,
                 steps: trajectory.steps.length,
                 toolCalls: trajectory.steps.reduce((sum, step) => sum + step.toolCalls.length, 0),
