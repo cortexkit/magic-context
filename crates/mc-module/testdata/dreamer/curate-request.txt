@@ -20,7 +20,7 @@ You read only what this message gives you: the memories, the project documents a
 - Do not merge memories that state different facts, even when they are about the same subject.
 - Do not change a memory marked `protected`.
 
-Most memories need no change. A good answer often changes only a few of them.
+Most memories need no change. These are a real project's memories, not a test: nothing was planted for you to find, and nobody counts your changes. When a part needs nothing, an empty list is the right answer.
 
 ## Categories
 

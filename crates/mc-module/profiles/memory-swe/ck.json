@@ -70,8 +70,8 @@
     },
     {
       "path": "prompts/dreamer/curate/system.md",
-      "sha256": "624a25ad7642393d5fe13e401bee4e96e85202fbc489c49b73d363bfb5ef8964",
-      "bytes": 2119
+      "sha256": "23a83c25c72c7975dbe1e4bbe0ee15dbc2bbff14ab4303ded293b99de9ac5a41",
+      "bytes": 2251
     },
     {
       "path": "prompts/dreamer/curate/user.md",

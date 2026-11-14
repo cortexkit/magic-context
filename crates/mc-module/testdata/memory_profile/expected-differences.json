@@ -651,7 +651,7 @@
       "document": "dreamer/swe:curate/system",
       "class": "ruling",
       "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): curate hands back one list of changes, may archive duplicates, one-off details and rule-less lessons, and makes no formatting-only edits.",
-      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks.",
+      "why": "0.49 curate kept almost everything: its prompt forbade archiving without a survivor and protected any rule-shaped text, and its 25 Oct run mostly added backticks. A replay on real memories (13 Nov) showed the model treating the part as a graded test with planted errors; the prompt now says it is not one.",
       "today": [
         "Project memory uses exactly 5 categories. Every memory belongs to one:"
       ],
@@ -663,7 +663,7 @@
         "- Do not merge memories that state different facts, even when they are about the same subject.",
         "- Do not change a memory marked `protected`.",
         "",
-        "Most memories need no change. A good answer often changes only a few of them.",
+        "Most memories need no change. These are a real project's memories, not a test: nothing was planted for you to find, and nobody counts your changes. When a part needs nothing, an empty list is the right answer.",
         "",
         "## Categories",
         "",
