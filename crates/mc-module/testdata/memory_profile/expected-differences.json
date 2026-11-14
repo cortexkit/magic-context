@@ -1060,6 +1060,16 @@
       "rendered": [
         "The git diff below is the evidence. If changed hunks do not touch a claim, mark it verified without opening files. Open files only when a diff suggests the claim may have changed. A rename or deletion requires an update or archive when positively supported; do not archive on uncertainty. Decide verified / update / archive / skip (verified only on evidence, skip when unsure; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
       ]
+    },
+    {
+      "document": "dreamer/swe:map-memories/system",
+      "class": "ruling",
+      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): verify may archive a rule whose subject is gone from the code, so a memory about removed code must reach verify unmapped, not as file-independent.",
+      "why": "A map replay on real code (14 Nov) marked memories about this project's own removed tables and settings file-independent because the searches found nothing; a missing subject now stays unmapped.",
+      "today": [],
+      "rendered": [
+        "- A memory about THIS project's own code (a table, setting, function, type or file it says the project has) is never file-independent, even when your searches find none of it: leave it unmapped. The code may have been renamed or removed, and deciding that is verify's job, not yours."
+      ]
     }
   ]
 }
