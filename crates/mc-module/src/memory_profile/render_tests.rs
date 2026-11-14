@@ -168,6 +168,12 @@ const STANDALONE: &[(&str, &str)] = &[
         "historian/turn-two.check.user",
         "memory_profile/today/historian/turn-two.check.user.md",
     ),
+    // The module adds this rule after the decisions frame for a project in
+    // a workspace of two or more projects; no profile places it.
+    (
+        "historian/turn-two.decisions.workspace",
+        "memory_profile/today/historian/turn-two.decisions.workspace.md",
+    ),
     (
         "historian/turn-two.user",
         "memory_profile/today/historian/turn-two.user.md",

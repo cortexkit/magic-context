@@ -89,7 +89,10 @@ pub struct AddedClause {
 pub struct Source {
     pub id: i64,
     pub revision: i64,
-    pub project: String,
+    /// The memory's level (`project`, `workspace`, …) and its owner at
+    /// that level.
+    pub level: String,
+    pub owner: String,
     pub status: String,
     pub content: String,
 }
@@ -101,6 +104,10 @@ pub struct Revision {
     /// `edit`, `merge` or `replaces`.
     pub action: String,
     pub project: String,
+    /// The project's workspace, when the request that made the decision
+    /// showed its memories: they may then be revised too, each keeping its
+    /// level.
+    pub workspace: Option<String>,
     /// The sources with the revisions the decision read.
     pub expected: Vec<(i64, i64)>,
     pub survivor: i64,
@@ -158,6 +165,26 @@ fn existing_operand(id: i64, revision: i64, ordinal: usize) -> String {
     json!([id, revision, ordinal]).to_string()
 }
 
+/// Whether a decision about `project` may change `source`: a memory of the
+/// project, or of its `workspace` when the request showed that workspace's
+/// memories.
+pub fn in_scope(source: &Source, project: &str, workspace: Option<&str>) -> bool {
+    match source.level.as_str() {
+        "project" => source.owner == project,
+        "workspace" => workspace == Some(source.owner.as_str()),
+        _ => false,
+    }
+}
+
+/// Whether the sources of a merge are filed at more than one level. Their
+/// memories would have to become one at a single level, so such a merge is
+/// refused.
+pub fn mixed_levels(sources: &[Source]) -> bool {
+    sources
+        .windows(2)
+        .any(|pair| (&pair[0].level, &pair[0].owner) != (&pair[1].level, &pair[1].owner))
+}
+
 fn proposed_operand(key: &str, index: usize, text: &str) -> String {
     json!([key, "proposed", index, lifecycle_text_hash(text)]).to_string()
 }
@@ -207,11 +234,14 @@ pub fn plan(decision: &Revision, context: &Context<'_>) -> Result<Plan, &'static
         return Err("shape");
     }
     if context.sources.iter().any(|source| {
-        source.project != decision.project
+        !in_scope(source, &decision.project, decision.workspace.as_deref())
             || source.status == "archived"
             || expected.get(&source.id) != Some(&source.revision)
     }) {
         return Err("source_revision");
+    }
+    if decision.action == "merge" && mixed_levels(context.sources) {
+        return Err("merge_mixed_levels");
     }
     let mut changed = std::collections::BTreeMap::new();
     for change in &decision.changes {
@@ -593,6 +623,7 @@ mod tests {
             key: value["key"].as_str().unwrap().to_owned(),
             action: value["action"].as_str().unwrap().to_owned(),
             project: value["projectPath"].as_str().unwrap().to_owned(),
+            workspace: None,
             expected: value["expectedSources"]
                 .as_array()
                 .unwrap()
@@ -627,7 +658,8 @@ mod tests {
                 .map(|source| Source {
                     id: source["id"].as_i64().unwrap(),
                     revision: source["revision"].as_i64().unwrap(),
-                    project: source["projectPath"].as_str().unwrap().to_owned(),
+                    level: "project".to_owned(),
+                    owner: source["projectPath"].as_str().unwrap().to_owned(),
                     status: source["status"].as_str().unwrap().to_owned(),
                     content: source["content"].as_str().unwrap().to_owned(),
                 })

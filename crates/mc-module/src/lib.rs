@@ -118,6 +118,7 @@ pub mod upkeep;
 mod user_commands;
 pub mod view_builder;
 pub mod workspace;
+pub(crate) mod workspace_members;
 
 /// Magic Context's module id, as runners and core name it.
 pub const MODULE_ID: &str = "magic-context";

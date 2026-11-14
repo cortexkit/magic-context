@@ -1035,6 +1035,7 @@ fn a_cue_leaves_a_second_turn_edit_read_before_it_applicable() {
         key: "turn-two:after-cue".into(),
         action: "edit".into(),
         project: PROJECT.into(),
+        workspace: None,
         expected: vec![(1, 1)],
         survivor: 1,
         final_text: "Rule 1, revised.".into(),

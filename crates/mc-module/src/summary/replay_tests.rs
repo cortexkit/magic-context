@@ -31,6 +31,28 @@
 //! (a folder of synthetic chunks), and optionally `SUMMARY_REPLAY_LANGUAGE`,
 //! the user's `language` setting, which adds the content-language directive
 //! to the system prompt as a run with that setting does.
+//!
+//! The second turn takes three more optional inputs. Without them it runs on
+//! an empty store, for a project in no workspace, and its requests are the
+//! ones it wrote before these inputs existed.
+//!
+//! - `SUMMARY_REPLAY_STORE`: a copy of a `context.db` whose memories are the
+//!   facts' neighbours. A path inside the live data folder
+//!   (`~/.local/share/cortexkit/`) is refused. The file is opened read-only
+//!   and copied once (`VACUUM INTO`) into a throwaway folder, where only the
+//!   copy is brought to this build's schema; each case's second turn then
+//!   runs on a fresh copy of that. The given file is never written. The
+//!   project's own open second turns and waiting facts in the copy run along
+//!   as they would in the module.
+//! - `SUMMARY_REPLAY_PROJECT`: the project's id, as its memories name their
+//!   owner (default `summary-replay`).
+//! - `SUMMARY_REPLAY_WORKSPACE`: the project's workspace, as JSON
+//!   `{"name": "CortexKit", "projects": ["magic-context", "subc"]}`, with
+//!   `SUMMARY_REPLAY_WORKSPACE_ID` its id as the store's workspace memories
+//!   name their owner (default `summary-replay-workspace`). Every second
+//!   turn is then sent as for a project of that workspace: with two or more
+//!   projects the request carries the workspace rule, and the workspace's
+//!   memories in the store copy are neighbours too.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -143,6 +165,101 @@ fn language() -> Option<String> {
     std::env::var("SUMMARY_REPLAY_LANGUAGE")
         .ok()
         .filter(|value| !value.trim().is_empty())
+}
+
+fn env_text(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// The workspace every second turn is sent for (`SUMMARY_REPLAY_WORKSPACE`).
+struct ReplayWorkspace {
+    id: String,
+    name: String,
+    projects: Vec<String>,
+}
+
+fn replay_workspace() -> Option<ReplayWorkspace> {
+    let text = env_text("SUMMARY_REPLAY_WORKSPACE")?;
+    let value: Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("SUMMARY_REPLAY_WORKSPACE is not JSON: {error}"));
+    let name = value["name"]
+        .as_str()
+        .expect("SUMMARY_REPLAY_WORKSPACE names no \"name\"")
+        .to_owned();
+    let projects = value["projects"]
+        .as_array()
+        .expect("SUMMARY_REPLAY_WORKSPACE lists no \"projects\"")
+        .iter()
+        .map(|project| {
+            project
+                .as_str()
+                .expect("a project name is a string")
+                .to_owned()
+        })
+        .collect();
+    Some(ReplayWorkspace {
+        id: env_text("SUMMARY_REPLAY_WORKSPACE_ID")
+            .unwrap_or_else(|| "summary-replay-workspace".to_owned()),
+        name,
+        projects,
+    })
+}
+
+/// What every case's second turn runs with besides its chunk.
+struct SecondTurnInputs {
+    /// The migrated store copy each second turn gets a fresh copy of; an
+    /// empty store without one.
+    store: Option<PathBuf>,
+    project: String,
+    workspace: Option<ReplayWorkspace>,
+}
+
+impl SecondTurnInputs {
+    /// The session's writer authority: a project of the replay's workspace,
+    /// under the bundled coding profile. None without a workspace, as before.
+    fn authority(&self) -> Option<crate::memory_levels::Authority> {
+        let workspace = self.workspace.as_ref()?;
+        let records: Vec<Value> = serde_json::from_str(include_str!(
+            "../../testdata/entorhinal-memory-context-v1/context-project.json"
+        ))
+        .expect("the context sample parses");
+        let mut result = records[0]["reply"]["result"].clone();
+        result["domain"] = Value::Null;
+        let context = crate::memory_profile::resolve(
+            &crate::memory_context::ContextAnswer::Answer(
+                serde_json::from_value(result).expect("a project context"),
+            ),
+            &crate::memory_context::ContextAnswer::NotAnswering,
+            &[],
+        );
+        let mut authority =
+            crate::memory_levels::Authority::from_context(&context).expect("an authority");
+        authority.project_id = Some(self.project.clone());
+        authority.workspace_id = Some(workspace.id.clone());
+        Some(authority)
+    }
+
+    /// Entorhinal's answer about the replay's workspace: its projects, under
+    /// made-up ids.
+    fn entorhinal(&self) -> Option<Value> {
+        let workspace = self.workspace.as_ref()?;
+        Some(json!({"result": {
+            "workspaces": [{"workspaceId": workspace.id, "name": workspace.name, "root": null}],
+            "projects": workspace.projects.iter().enumerate().map(|(index, name)| json!({
+                "projectId": format!("summary-replay-{index}"),
+                "name": name,
+                "roots": [],
+                "implicit": false,
+                "refKind": "local",
+                "workspaceId": workspace.id,
+            })).collect::<Vec<_>>(),
+            "generation": 1,
+            "incarnation": "summary-replay",
+        }}))
+    }
 }
 
 fn read_json(path: &Path) -> Result<Value, String> {
@@ -666,9 +783,15 @@ impl SecondTurn {
 /// and reply in `dir`: the reply is checked with the module's parser and
 /// validator, published in a throwaway store as a first turn publishes it,
 /// and the second turn the module sends from that store is captured from a
-/// stand-in runner that answers nothing. The store holds no memories, so
-/// every fact shows no neighbours.
-async fn second_turn(case: &Case, arm: &str, dir: &Path, language: Option<&str>) -> SecondTurn {
+/// stand-in runner that answers nothing. The store is empty, so every fact
+/// shows no neighbours, unless `inputs` names a store copy.
+async fn second_turn(
+    case: &Case,
+    arm: &str,
+    dir: &Path,
+    language: Option<&str>,
+    inputs: &SecondTurnInputs,
+) -> SecondTurn {
     let Ok(first) = read_json(&dir.join("turn-one.request.json")) else {
         return SecondTurn::not_sent("no turn-one request");
     };
@@ -701,8 +824,16 @@ async fn second_turn(case: &Case, arm: &str, dir: &Path, language: Option<&str>)
             }
         };
     let store = tempfile::tempdir().expect("a throwaway folder");
-    let db =
-        ContextDb::create_for_tests(&store.path().join("context.db")).expect("a throwaway store");
+    let db = match &inputs.store {
+        Some(copy) => {
+            let path = store.path().join("context.db");
+            std::fs::copy(copy, &path).expect("copy the migrated store");
+            ContextDb::open(&path).expect("open the store copy")
+        }
+        None => ContextDb::create_for_tests(&store.path().join("context.db"))
+            .expect("a throwaway store"),
+    };
+    let project = inputs.project.as_str();
     let now = crate::memory_writes::now_ms();
     let child = format!("{}:{CHILD}:summary-replay:turn-one", case.session);
     let send = db
@@ -710,7 +841,7 @@ async fn second_turn(case: &Case, arm: &str, dir: &Path, language: Option<&str>)
             turn_one::allocate(
                 conn,
                 &turn_one::SendInput {
-                    project: PROJECT,
+                    project,
                     session: &case.session,
                     harness: HARNESS,
                     carrier: &format!("ck-mc:{RUNNER}"),
@@ -724,7 +855,7 @@ async fn second_turn(case: &Case, arm: &str, dir: &Path, language: Option<&str>)
         .expect("record the first turn's send");
     let publication = turn_one::Publication {
         send: send.clone(),
-        project: PROJECT.to_owned(),
+        project: project.to_owned(),
         session: case.session.clone(),
         // Every line reached the summarizer whole: the replay never cuts a
         // chunk.
@@ -764,10 +895,11 @@ async fn second_turn(case: &Case, arm: &str, dir: &Path, language: Option<&str>)
             request: None,
         };
     }
-    let client = super::run::session_class_tests::Client::new(false);
+    let mut client = super::run::session_class_tests::Client::new(false);
+    client.entorhinal = inputs.entorhinal();
     let job = turn_two::Job {
         owner: SessionRef::new(RUNNER, HARNESS, case.session.clone()),
-        project: PROJECT.to_owned(),
+        project: project.to_owned(),
         project_root: None,
         continuation: Continuation {
             child: Child {
@@ -785,7 +917,7 @@ async fn second_turn(case: &Case, arm: &str, dir: &Path, language: Option<&str>)
         memory_enabled: true,
         auto_promote: true,
         embedding: None,
-        authority: None,
+        authority: inputs.authority(),
     };
     // The stand-in runner answers every send with an empty reply, so the
     // outcome says nothing about the replay; only the send matters.
@@ -831,6 +963,19 @@ async fn second_turn(case: &Case, arm: &str, dir: &Path, language: Option<&str>)
 async fn turn_two_requests() {
     let out = out_dir();
     let language = language();
+    // The store copy is migrated once, outside the output folder.
+    let template = tempfile::tempdir().expect("a folder for the store copy");
+    let store = env_path("SUMMARY_REPLAY_STORE").map(|store| {
+        crate::dreamer::curate_replay_tests::refuse_live(&store);
+        let copy = template.path().join("context.db");
+        crate::dreamer::curate_replay_tests::migrated_copy(&store, &copy);
+        copy
+    });
+    let inputs = SecondTurnInputs {
+        store,
+        project: env_text("SUMMARY_REPLAY_PROJECT").unwrap_or_else(|| PROJECT.to_owned()),
+        workspace: replay_workspace(),
+    };
     for (_, _, case) in load_cases() {
         let Ok(case) = case else { continue };
         for arm in ARMS {
@@ -838,7 +983,7 @@ async fn turn_two_requests() {
             if !dir.exists() {
                 continue;
             }
-            let turn = second_turn(&case, arm, &dir, language.as_deref()).await;
+            let turn = second_turn(&case, arm, &dir, language.as_deref(), &inputs).await;
             let path = dir.join("turn-two.request.json");
             match &turn.request {
                 Some(request) => write_request(&path, request),
@@ -958,5 +1103,44 @@ mod harness_checks {
         );
         assert!(text(14, 14, "U", "[14] A: Wrong role.").is_err());
         assert!(text(15, 16, "U", "[15] U: Wrong range.").is_err());
+    }
+
+    /// Without a workspace the second turn runs as it always did; with one,
+    /// Entorhinal's stand-in answer lists the workspace's projects and the
+    /// session belongs to it.
+    #[test]
+    fn a_replay_workspace_is_answered_for_every_second_turn() {
+        let mut inputs = SecondTurnInputs {
+            store: None,
+            project: PROJECT.to_owned(),
+            workspace: None,
+        };
+        assert!(inputs.authority().is_none());
+        assert!(inputs.entorhinal().is_none());
+        inputs.workspace = Some(ReplayWorkspace {
+            id: "ws-replay".into(),
+            name: "CortexKit".into(),
+            projects: vec!["subc".into(), "magic-context".into()],
+        });
+        let authority = inputs.authority().unwrap();
+        assert_eq!(authority.workspace_id.as_deref(), Some("ws-replay"));
+        assert_eq!(authority.project_id.as_deref(), Some(PROJECT));
+        let reply: cortexkit_project_identity::Outcome<cortexkit_project_identity::EnumerateReply> =
+            serde_json::from_value(inputs.entorhinal().unwrap()).unwrap();
+        let cortexkit_project_identity::Outcome::Success(reply) = reply else {
+            panic!("not an answer");
+        };
+        let crate::workspace_members::Lookup::Members(members) =
+            crate::workspace_members::members_of(&reply.result, "ws-replay")
+        else {
+            panic!("no members");
+        };
+        assert_eq!(members.name, "CortexKit");
+        let names: Vec<&str> = members
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect();
+        assert_eq!(names, ["magic-context", "subc"]);
     }
 }

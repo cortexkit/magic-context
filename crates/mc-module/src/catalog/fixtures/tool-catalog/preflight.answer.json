@@ -1,6 +1,6 @@
 {
-  "generation": "20a195157d1a0f7a60a3ad0173f8b10d7641a447d7a87204b667f46781e8e9be",
-  "catalog_digest": "20a195157d1a0f7a60a3ad0173f8b10d7641a447d7a87204b667f46781e8e9be",
+  "generation": "bbf0fc63b5ff0ecbf7ade287f3a7768b9b4980d077e02a12ba1dedecd651c1e8",
+  "catalog_digest": "bbf0fc63b5ff0ecbf7ade287f3a7768b9b4980d077e02a12ba1dedecd651c1e8",
   "tools": [
     {
       "name": "ctx_note",
@@ -132,7 +132,7 @@
               "workspace",
               "global"
             ],
-            "description": "Where a write goes: project (default) for this project; workspace for every project in this project's workspace; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly."
+            "description": "Where a write goes: project (the default) for this project; workspace for a fact that clearly holds for every project in this project's workspace, since it then appears in all their sessions; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly. When unsure, use project."
           }
         },
         "required": [

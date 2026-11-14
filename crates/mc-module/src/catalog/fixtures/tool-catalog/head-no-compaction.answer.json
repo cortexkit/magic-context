@@ -1,6 +1,6 @@
 {
-  "generation": "3771ab6587f7c44f8d88ae2acbef5f3b81f5b7c9f70fccfeaade8dc7a8a48abe",
-  "catalog_digest": "3771ab6587f7c44f8d88ae2acbef5f3b81f5b7c9f70fccfeaade8dc7a8a48abe",
+  "generation": "8c0adf8ca74aa17ae7dfd9937e3e1aaf6a13dc1e22c199b3fe530e4c20e21aef",
+  "catalog_digest": "8c0adf8ca74aa17ae7dfd9937e3e1aaf6a13dc1e22c199b3fe530e4c20e21aef",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -133,7 +133,7 @@
               "workspace",
               "global"
             ],
-            "description": "Where a write goes: project (default) for this project; workspace for every project in this project's workspace; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly."
+            "description": "Where a write goes: project (the default) for this project; workspace for a fact that clearly holds for every project in this project's workspace, since it then appears in all their sessions; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly. When unsure, use project."
           }
         },
         "required": [
@@ -198,7 +198,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive: what earlier sessions said and decided, commits and notes. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.\n\n`ctx_memory` pins facts about this project that stay true for the months this work lasts, for you and for every other agent working on this project. Pin one when you learn something that must not have to be found again, and especially when it cost you several turns to find. Pinned facts are not shown to you automatically: `ctx_search` recalls them.\n\n`ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says \"take a note\", it always goes in the tray.",
     "item_digest": "73c679706bf3e65cc5f7a3de7e7d52600e8e9d071e8b5bdc074ee66cc316bec0",
-    "preflight_digest": "7394695b9cb3e21de3df400772511c5e0f570413de4213648f8a5a86c2d19384",
+    "preflight_digest": "6ea39188b86616853a22081ffc00b7b36ef3403d845ab349123363e231112912",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

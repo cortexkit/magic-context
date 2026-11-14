@@ -1095,6 +1095,7 @@ fn a_classification_makes_a_second_turn_edit_read_before_it_stale() {
         key: key.into(),
         action: "edit".into(),
         project: PROJECT.into(),
+        workspace: None,
         expected: vec![(1, read)],
         survivor: 1,
         final_text: "Rule 1, revised.".into(),

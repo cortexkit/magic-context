@@ -73,7 +73,7 @@ fn write_file(path: &Path, text: &str) {
 }
 
 /// Refuse a store inside the live data folder: the replay reads copies only.
-fn refuse_live(store: &Path) {
+pub(crate) fn refuse_live(store: &Path) {
     let resolved = store
         .canonicalize()
         .unwrap_or_else(|error| panic!("{}: {error}", store.display()));
@@ -91,7 +91,7 @@ fn refuse_live(store: &Path) {
 
 /// Copy `from` to `to` through a read-only connection, then bring the copy
 /// to this build's schema. Returns the schema the source had.
-pub(super) fn migrated_copy(from: &Path, to: &Path) -> i64 {
+pub(crate) fn migrated_copy(from: &Path, to: &Path) -> i64 {
     let source = Connection::open_with_flags(
         from,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,

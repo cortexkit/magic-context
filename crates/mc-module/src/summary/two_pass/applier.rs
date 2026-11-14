@@ -16,11 +16,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::constants::MAX_STAGE2_ATTEMPTS;
-use super::gates::{Plan, Revision, Source};
+use super::gates::{in_scope, mixed_levels, Plan, Revision, Source};
 use super::text::{lifecycle_text_hash, split_memory_clauses};
 use crate::memory_writes::{
     archive, category_ttl_ms, get_memory, history_json, history_snapshot, insert_memory,
-    memory_by_hash, normalized_hash, now_ms, record_history, update_content, History,
+    memory_by_hash_at, normalized_hash, now_ms, record_history, update_content, History,
 };
 
 /// What a decision did, in the plugin's `ApplierReceipt` shape, so either
@@ -300,9 +300,13 @@ pub struct Admission<'a> {
     pub conflict_target: Option<i64>,
     pub fact_id: i64,
     pub reservation: Option<&'a Reservation>,
-    /// The session's writer authority, for a new memory's project-level
-    /// placement record, written in the same transaction as the memory.
+    /// The session's writer authority, for a new memory's level record,
+    /// written in the same transaction as the memory.
     pub authority: Option<&'a crate::memory_levels::Authority>,
+    /// Where a new memory is filed: the project when `None`, or the
+    /// project's workspace. A memory of the workspace names the project as
+    /// its source.
+    pub owner: Option<&'a crate::memory_levels::Owner>,
     /// The calendar date the fact's text says it stops holding.
     pub expires: Option<&'a str>,
 }
@@ -402,7 +406,14 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
         let hash = normalized_hash(admission.content);
         let category_id =
             crate::memory_levels::category_id(admission.category, admission.authority);
-        let matched = memory_by_hash(&tx, admission.project, &category_id, &hash)?;
+        let owner = admission
+            .owner
+            .cloned()
+            .unwrap_or_else(|| crate::memory_levels::Owner {
+                kind: "project".into(),
+                id: admission.project.to_owned(),
+            });
+        let matched = memory_by_hash_at(&tx, &owner, &category_id, &hash)?;
         if let Some(archived) = matched
             .as_ref()
             .filter(|matched| matched.status == "archived")
@@ -413,9 +424,9 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
             let cross: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM memories
-                      WHERE level = 'project' AND owner_id = ?1 AND category != ?2 AND normalized_hash = ?3
-                        AND content = ?4 AND status != 'archived' ORDER BY id LIMIT 1",
-                    params![admission.project, category_id, hash, admission.content],
+                      WHERE level = ?1 AND owner_id = ?2 AND category != ?3 AND normalized_hash = ?4
+                        AND content = ?5 AND status != 'archived' ORDER BY id LIMIT 1",
+                    params![owner.kind, owner.id, category_id, hash, admission.content],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -449,6 +460,8 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
             None => {
                 // Turn two's `new` is the two-pass form of fact promotion, so
                 // it is placed the same way, with the historian as its actor.
+                // A workspace memory is filed as `ctx_memory` files one: owned
+                // by the workspace, with the project as its source project.
                 let ordinals = fact_ordinals(&tx, admission.fact_id)?;
                 let placer = crate::memory_levels::Placer {
                     authority: admission.authority,
@@ -459,7 +472,7 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                 let new_row = crate::memory_levels::NewRow::decide(
                     &placer,
                     admission.project,
-                    None,
+                    admission.owner,
                     admission.category,
                 )?;
                 let memory = insert_memory(
@@ -557,17 +570,17 @@ pub fn sources(conn: &Connection, expected: &[(i64, i64)]) -> rusqlite::Result<V
     for (id, _) in expected {
         let row = conn
             .query_row(
-                "SELECT id, revision, CASE level WHEN 'project' THEN owner_id ELSE '' END,
-                        COALESCE(status, 'active'), content
+                "SELECT id, revision, level, owner_id, COALESCE(status, 'active'), content
                    FROM memories WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Source {
                         id: row.get(0)?,
                         revision: row.get(1)?,
-                        project: row.get(2)?,
-                        status: row.get(3)?,
-                        content: row.get(4)?,
+                        level: row.get(2)?,
+                        owner: row.get(3)?,
+                        status: row.get(4)?,
+                        content: row.get(5)?,
                     })
                 },
             )
@@ -678,12 +691,19 @@ pub fn commit_revision(
             !current.iter().any(|source| {
                 source.id == *id
                     && source.revision == *revision
-                    && source.project == decision.project
+                    && in_scope(source, &decision.project, decision.workspace.as_deref())
                     && source.status != "archived"
             })
         });
     if moved {
         let receipt = failure(&tx, &request, "cas_loss", true)?;
+        tx.commit()?;
+        return Ok(receipt);
+    }
+    // The gates refuse this before any check is sent; a merge never joins
+    // memories filed at different levels.
+    if decision.action == "merge" && mixed_levels(&current) {
+        let receipt = failure(&tx, &request, "merge_mixed_levels", false)?;
         tx.commit()?;
         return Ok(receipt);
     }

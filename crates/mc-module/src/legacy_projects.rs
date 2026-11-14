@@ -52,9 +52,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cortexkit_project_identity::{
-    EnumerateParams, EnumerateReply, Outcome, RefKind, Request, RootIdentity,
-};
+use cortexkit_project_identity::{EnumerateReply, RefKind, RootIdentity};
 use cortexkit_role_compaction::read::SessionRef;
 use tokio::sync::Notify;
 
@@ -75,9 +73,6 @@ const BACKSTOP: Duration = Duration::from_secs(60 * 60);
 /// shared connection get it before the next batch takes it again.
 const BETWEEN_BATCHES: Duration = Duration::from_millis(20);
 
-/// How long one `enumerate` may take.
-const ENUMERATE_DEADLINE: Duration = Duration::from_secs(2);
-
 /// The bind identity `enumerate` is asked under. It concerns no session.
 fn identity() -> SessionRef {
     SessionRef::new(crate::MODULE_ID, "magic-context", "legacy-projects")
@@ -86,21 +81,7 @@ fn identity() -> SessionRef {
 /// Ask Entorhinal for every project. `None` when it doesn't answer, refuses,
 /// or answers something that doesn't decode.
 async fn enumerate<C: RunnerClient>(client: &C) -> Option<EnumerateReply> {
-    let request = Request::new("enumerate", EnumerateParams::new(None));
-    let body = serde_json::to_vec(&request).expect("an enumerate request is JSON");
-    let bytes = match tokio::time::timeout(
-        ENUMERATE_DEADLINE,
-        client.entorhinal_call(&identity(), body),
-    )
-    .await
-    {
-        Ok(Some(Ok(bytes))) => bytes,
-        _ => return None,
-    };
-    match serde_json::from_slice::<Outcome<EnumerateReply>>(&bytes) {
-        Ok(Outcome::Success(success)) => Some(success.result),
-        _ => None,
-    }
+    crate::workspace_members::enumerate(client, &identity(), None).await
 }
 
 /// Each local project's bound folders, as `(project id, folder)`. Only a

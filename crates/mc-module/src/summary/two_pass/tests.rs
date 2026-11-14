@@ -230,6 +230,7 @@ mod envelope_parity {
                     revision: int(&neighbour["revision"]),
                     category: neighbour["category"].as_str().unwrap().to_owned(),
                     content: neighbour["content"].as_str().unwrap().to_owned(),
+                    workspace: false,
                 })
                 .collect(),
         }
@@ -336,6 +337,7 @@ mod envelope_parity {
                 &items,
                 case["lexical_only"].as_bool().unwrap(),
                 deferred,
+                None,
             );
             assert_eq!(prompt, case["prompt"].as_str().unwrap(), "{}", case["name"]);
         }
@@ -359,6 +361,7 @@ mod envelope_parity {
                 &items,
                 false,
                 max,
+                None,
             );
             let ids: Vec<i64> = fitted.facts.iter().map(|fact| fact.fact_id).collect();
             let item_ids: Vec<i64> = fitted.items.iter().map(|item| item.item).collect();

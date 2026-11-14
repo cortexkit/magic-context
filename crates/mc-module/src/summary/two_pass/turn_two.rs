@@ -21,6 +21,16 @@
 //! identity. A send whose outcome is unknown is reattached by sending it
 //! again under the same send id, which a runner answers with the run it
 //! already started.
+//!
+//! Workspace level: a project in a workspace of two or more projects (its
+//! memory context's workspace, as Entorhinal lists that workspace's
+//! projects) is sent one more decision rule, and its facts' neighbours
+//! include the workspace's memories, marked as such. Only then may a `new`
+//! decision store its memory for the workspace, and an `edit`, `replaces`
+//! or `merge` change a workspace memory, which keeps its level; a merge of
+//! memories at different levels is refused. The stage's request records the
+//! workspace, so resolving its reply, recovery included, knows what the
+//! request showed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
@@ -43,7 +53,9 @@ use super::text::{
 use crate::client::{Child, RunnerClient};
 use crate::context_db::ContextDb;
 use crate::summary::account_wait::{AccountWait, SendKind};
+use crate::summary::prompts::WorkspaceRule;
 use crate::summary::run::{self, Continuation, Model, SummaryError};
+use crate::workspace_members::Lookup;
 
 pub const STAGE: &str = "turn_two";
 /// The second turn's prompt bound in UTF-16 units: whole facts and items
@@ -350,22 +362,86 @@ fn publication_session(conn: &Connection, publication: &str) -> rusqlite::Result
         .unwrap_or_default())
 }
 
-/// A memory as a neighbour: live, with its revision.
-fn neighbour_of(conn: &Connection, project: &str, id: i64) -> rusqlite::Result<Option<Neighbour>> {
+/// A memory as a neighbour: live, with its revision. A memory of the
+/// project's `workspace` is one too when the request shows them.
+fn neighbour_of(
+    conn: &Connection,
+    project: &str,
+    workspace: Option<&str>,
+    id: i64,
+) -> rusqlite::Result<Option<Neighbour>> {
     conn.query_row(
-        "SELECT id, revision, origin_category, content FROM memories
-         WHERE id = ?1 AND level = 'project' AND owner_id = ?2 AND COALESCE(status, 'active') != 'archived'",
-        params![id, project],
+        "SELECT id, revision, origin_category, content, level FROM memories
+         WHERE id = ?1 AND ((level = 'project' AND owner_id = ?2) OR (level = 'workspace' AND owner_id = ?3))
+           AND COALESCE(status, 'active') != 'archived'",
+        params![id, project, workspace],
         |row| {
             Ok(Neighbour {
                 id: row.get(0)?,
                 revision: row.get(1)?,
                 category: row.get(2)?,
                 content: row.get(3)?,
+                workspace: row.get::<_, String>(4)? == "workspace",
             })
         },
     )
     .optional()
+}
+
+/// The workspace's live memories whose words match `fact`, best first, as
+/// [`crate::search::sources::memory_words`] finds a project's.
+fn workspace_words(conn: &Connection, workspace: &str, fact: &str, limit: usize) -> Vec<i64> {
+    let query = fact.trim();
+    if query.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let read = |fts: &str| -> Vec<i64> {
+        if fts.is_empty() {
+            return Vec::new();
+        }
+        let found = || -> rusqlite::Result<Vec<i64>> {
+            conn.prepare_cached(
+                "SELECT memories.id FROM memories_fts INNER JOIN memories ON memories.id = memories_fts.rowid
+                  WHERE memories.level = 'workspace' AND memories.owner_id = ?1
+                    AND memories.status IN ('active', 'permanent')
+                    AND (memories.expires_at IS NULL OR memories.expires_at > ?2)
+                    AND memories_fts MATCH ?3
+                  ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?4",
+            )?
+            .query_map(
+                params![workspace, crate::memory_writes::now_ms(), fts, limit as i64],
+                |row| row.get(0),
+            )?
+            .collect()
+        };
+        found().unwrap_or_default()
+    };
+    let ids = read(&crate::search::text::sanitize_fts_query(query));
+    if ids.is_empty() {
+        read(&crate::search::text::relaxed_fts_query(query))
+    } else {
+        ids
+    }
+}
+
+/// Every vector the workspace's memories have under `model`.
+fn workspace_vectors(conn: &Connection, workspace: &str, model: &str) -> Vec<(i64, Vec<f32>)> {
+    let found = || -> rusqlite::Result<Vec<(i64, Vec<u8>)>> {
+        conn.prepare_cached(
+            "SELECT e.memory_id, e.embedding FROM memory_embeddings e
+               JOIN memories m ON m.id = e.memory_id
+              WHERE m.level = 'workspace' AND m.owner_id = ?1 AND e.model_id = ?2",
+        )?
+        .query_map(params![workspace, model], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect()
+    };
+    found()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(id, blob)| Some((id, crate::embedding::decode(&blob)?)))
+        .collect()
 }
 
 const STOP_WORDS: &str = "a an the is are was were be been to of for in on at with by from and or not no it its this that as must should always never use only project user agent when after before every all can do does into than then same both";
@@ -410,19 +486,36 @@ fn rank_neighbours(
 
 /// A fact's neighbouring memories by words and, with an embedding, by
 /// meaning (`retrieveTurnTwoNeighbours`). The flag is true when meaning
-/// played no part.
+/// played no part. With `workspace`, the workspace's memories are
+/// candidates too, and the candidate list grows by one share so the
+/// project's own candidates keep the room they have without it.
 fn neighbours(
     conn: &Connection,
     project: &str,
+    workspace: Option<&str>,
     fact: &str,
     query: Option<(&[f32], &str)>,
 ) -> rusqlite::Result<(Vec<Neighbour>, bool)> {
-    let lexical =
+    let mut lexical =
         crate::search::sources::memory_words(conn, project, fact, NEIGHBOUR_SHORTLIST_CAP);
+    if let Some(workspace) = workspace {
+        lexical.extend(workspace_words(
+            conn,
+            workspace,
+            fact,
+            NEIGHBOUR_SHORTLIST_CAP,
+        ));
+    }
     let mut semantic: Vec<i64> = Vec::new();
     let mut scores = BTreeMap::new();
     if let Some((vector, model)) = query {
-        let stored = crate::search::sources::memory_vectors(conn, project, model);
+        let mut stored: Vec<(i64, Vec<f32>)> =
+            crate::search::sources::memory_vectors(conn, project, model)
+                .into_iter()
+                .collect();
+        if let Some(workspace) = workspace {
+            stored.extend(workspace_vectors(conn, workspace, model));
+        }
         let mut scored: Vec<(i64, f64)> = stored
             .iter()
             .filter(|(_, stored)| stored.len() == vector.len())
@@ -434,7 +527,7 @@ fn neighbours(
             semantic.push(id);
         }
     }
-    let cap = NEIGHBOUR_SHORTLIST_CAP * 2;
+    let cap = NEIGHBOUR_SHORTLIST_CAP * if workspace.is_some() { 3 } else { 2 };
     let mut ordered: Vec<i64> = Vec::new();
     for id in lexical {
         if ordered.len() < cap && !ordered.contains(&id) {
@@ -445,13 +538,13 @@ fn neighbours(
         if ordered.len() >= cap {
             break;
         }
-        if !ordered.contains(id) && neighbour_of(conn, project, *id)?.is_some() {
+        if !ordered.contains(id) && neighbour_of(conn, project, workspace, *id)?.is_some() {
             ordered.push(*id);
         }
     }
     let mut candidates = Vec::new();
     for id in ordered {
-        candidates.extend(neighbour_of(conn, project, id)?);
+        candidates.extend(neighbour_of(conn, project, workspace, id)?);
     }
     Ok((
         rank_neighbours(fact, candidates, &scores),
@@ -853,6 +946,8 @@ impl<C: RunnerClient> Resolver<'_, C> {
         }
         let sent = sent_attempts(&row.request);
         let items = sent_items(&row.request);
+        // The workspace whose rule and memories the request showed, if any.
+        let workspace = row.request["workspace"].as_str();
         let parsed = envelope::parse(
             reply["text"].as_str().unwrap_or(""),
             reply["lengthCapped"].as_bool().unwrap_or(false),
@@ -904,6 +999,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                     envelope.decisions.get(&fact.id),
                     &reservation,
                     stage,
+                    workspace,
                 )
                 .await?
             {
@@ -942,7 +1038,8 @@ impl<C: RunnerClient> Resolver<'_, C> {
         Ok(Ok(()))
     }
 
-    /// Resolve one fact from its decision (`resolveFact`).
+    /// Resolve one fact from its decision (`resolveFact`). `workspace` is
+    /// the workspace the request showed, if any.
     async fn fact(
         &self,
         fact: &FactRow,
@@ -950,6 +1047,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
         entry: Option<&Entry>,
         reservation: &Reservation,
         stage: &str,
+        workspace: Option<&str>,
     ) -> Result<Result<(), Stopped>, String> {
         let decision = match entry {
             Some(Entry::Decision(decision)) => decision.as_ref(),
@@ -983,7 +1081,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
             "new" | "conflict" => {
                 let conflict = decision.action == "conflict";
                 if conflict && !self.auto_promote {
-                    let target = self.live_target(&fact.project, decision.target_id)?;
+                    let target = self.live_target(&fact.project, None, decision.target_id)?;
                     return match target {
                         None => {
                             self.pending(fact, reservation, &key, "conflict_target", None, None)
@@ -1008,6 +1106,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                 } else {
                     envelope::apply_decided_prefix(&fact.content, decision.decided)
                 };
+                let owner = self.new_owner(fact, decision, workspace);
                 self.db
                     .with_connection(|conn| {
                         applier::admit(
@@ -1025,6 +1124,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                                 fact_id: fact.id,
                                 reservation: Some(reservation),
                                 authority: self.authority.as_ref(),
+                                owner: owner.as_ref(),
                                 expires: decision.expires.as_deref().filter(|_| !conflict),
                             },
                         )
@@ -1032,25 +1132,85 @@ impl<C: RunnerClient> Resolver<'_, C> {
                     .map(|_| Ok(()))
                     .map_err(|error| error.to_string())
             }
-            "covered" => self.covered(fact, reservation, &key, decision).map(Ok),
-            "edit" | "replaces" | "merge" => self.revision(fact, reservation, &key, decision).await,
+            "covered" => self
+                .covered(fact, reservation, &key, decision, workspace)
+                .map(Ok),
+            "edit" | "replaces" | "merge" => {
+                self.revision(fact, reservation, &key, decision, workspace)
+                    .await
+            }
             _ => self
                 .pending(fact, reservation, &key, "malformed_decision", None, None)
                 .map(Ok),
         }
     }
 
-    /// A live memory of the project, with its revision.
-    fn live_target(&self, project: &str, id: Option<i64>) -> Result<Option<(i64, i64)>, String> {
+    /// Where a `new` decision's memory is filed: the project's workspace when
+    /// the decision asks for it and the request carried the workspace rule,
+    /// else the project (`None`). A decision that asked for the workspace
+    /// and doesn't get it is noted in the log.
+    fn new_owner(
+        &self,
+        fact: &FactRow,
+        decision: &Decision,
+        workspace: Option<&str>,
+    ) -> Option<crate::memory_levels::Owner> {
+        if decision.action != "new" || decision.level.as_deref() != Some("workspace") {
+            return None;
+        }
+        let refused = |why: &str| {
+            tracing::info!(
+                "ck-mc: turn two: fact {} asked to be stored for the workspace, but {why}; it is stored for its project",
+                fact.id
+            );
+            None
+        };
+        let Some(workspace) = workspace else {
+            return refused("its request carried no workspace rule");
+        };
+        let Some(authority) = self.authority.as_ref() else {
+            return refused("the session has no memory context");
+        };
+        if authority.workspace_id.as_deref() != Some(workspace) {
+            return refused("the project is no longer in the workspace the request named");
+        }
+        // As for `ctx_memory`: only a context that names the project can
+        // vouch for its workspace, and the profile must allow the category
+        // there.
+        if authority.project_id.is_none() {
+            return refused("the session's memory context names no project");
+        }
+        let category_id = crate::memory_levels::category_id(&fact.category, Some(authority));
+        if !authority.allows(&category_id, "workspace") {
+            return refused(&format!(
+                "the memory profile does not allow {} memories at the workspace level",
+                fact.category
+            ));
+        }
+        Some(crate::memory_levels::Owner {
+            kind: "workspace".into(),
+            id: workspace.to_owned(),
+        })
+    }
+
+    /// A live memory of the project, with its revision, or of its
+    /// `workspace` when one is given.
+    fn live_target(
+        &self,
+        project: &str,
+        workspace: Option<&str>,
+        id: Option<i64>,
+    ) -> Result<Option<(i64, i64)>, String> {
         let Some(id) = id else {
             return Ok(None);
         };
         self.db
             .with_connection(|conn| {
                 conn.query_row(
-                    "SELECT id, revision FROM memories WHERE id = ?1 AND level = 'project' AND owner_id = ?2
+                    "SELECT id, revision FROM memories
+                     WHERE id = ?1 AND ((level = 'project' AND owner_id = ?2) OR (level = 'workspace' AND owner_id = ?3))
                        AND COALESCE(status, 'active') != 'archived'",
-                    params![id, project],
+                    params![id, project, workspace],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
@@ -1068,8 +1228,11 @@ impl<C: RunnerClient> Resolver<'_, C> {
         reservation: &Reservation,
         key: &str,
         decision: &Decision,
+        workspace: Option<&str>,
     ) -> Result<(), String> {
-        let Some((target, revision)) = self.live_target(&fact.project, decision.target_id)? else {
+        let Some((target, revision)) =
+            self.live_target(&fact.project, workspace, decision.target_id)?
+        else {
             return self.pending(fact, reservation, key, "covered_target", None, None);
         };
         if Some(revision) != decision.revision {
@@ -1158,6 +1321,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
         reservation: &Reservation,
         key: &str,
         decision: &Decision,
+        workspace: Option<&str>,
     ) -> Result<Result<(), Stopped>, String> {
         let expected: Vec<(i64, i64)> = if decision.action == "merge" {
             decision.sources.clone().unwrap_or_default()
@@ -1194,7 +1358,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
         // is left to the commit, which retries it as a compare-and-swap loss.
         let mut current = Vec::new();
         for (id, _) in &expected {
-            current.push(self.live_target(&fact.project, Some(*id))?);
+            current.push(self.live_target(&fact.project, workspace, Some(*id))?);
         }
         if current
             .iter()
@@ -1236,6 +1400,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
             key: key.to_owned(),
             action: decision.action.clone(),
             project: fact.project.clone(),
+            workspace: workspace.map(str::to_owned),
             expected: expected.clone(),
             survivor: if decision.action == "merge" {
                 decision.survivor_id.unwrap_or(-1)
@@ -1273,12 +1438,13 @@ impl<C: RunnerClient> Resolver<'_, C> {
                 .map(|_| Ok(()))
                 .map_err(|error| error.to_string())
         };
-        // A source of the project archived or revised since the decision
-        // read it: the decision is stale, not wrong, so it is retried.
+        // A source of the project (or of the workspace the request showed)
+        // archived or revised since the decision read it: the decision is
+        // stale, not wrong, so it is retried.
         if expected.iter().any(|(id, revision)| {
             sources.iter().any(|source| {
                 source.id == *id
-                    && source.project == fact.project
+                    && gates::in_scope(source, &fact.project, workspace)
                     && (source.status == "archived" || source.revision != *revision)
             })
         }) {
@@ -1484,6 +1650,7 @@ fn reserve(
     facts: &[FactRow],
     prompt_facts: &BTreeMap<i64, PromptFact>,
     lexical_only: bool,
+    rule: Option<&Rule>,
 ) -> rusqlite::Result<Option<Reserved>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let publication = &job.continuation.publication_id;
@@ -1539,6 +1706,7 @@ fn reserve(
         &item_views,
         lexical_only,
         PROMPT_MAX,
+        rule.map(|rule| &rule.text),
     );
     let selected: BTreeSet<i64> = fitted.facts.iter().map(|fact| fact.fact_id).collect();
     for fact in &available {
@@ -1568,13 +1736,19 @@ fn reserve(
         .filter(|fact| selected.contains(&fact.id))
         .map(|fact| (fact.id.to_string(), json!(fact.attempts)))
         .collect();
-    let request = json!({
+    let mut request = json!({
         "model": carrier.stage_model_json(),
         "factAttempts": attempts,
         "items": fitted.items.iter().map(|item| item.item).collect::<Vec<_>>(),
         "lexicalOnly": lexical_only,
         "prompt": fitted.prompt,
     });
+    // Resolving the reply needs to know the request showed the workspace:
+    // only then may a decision store a memory there or change one of its
+    // memories.
+    if let Some(rule) = rule {
+        request["workspace"] = json!(rule.workspace);
+    }
     tx.execute(
         "UPDATE memory_stage_attempts SET request_json = ?2 WHERE stage_key = ?1",
         params![stage, request.to_string()],
@@ -1787,11 +1961,61 @@ pub async fn run<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Outc
     }
 }
 
+/// The workspace rule a send carries, and the workspace it names.
+#[derive(Clone, Debug)]
+struct Rule {
+    workspace: String,
+    text: WorkspaceRule,
+}
+
+/// The workspace rule for this send. It is sent only when the session's
+/// project is in a workspace that holds two or more projects, by its
+/// memory context's workspace and Entorhinal's list of that workspace's
+/// projects. Without an answer from Entorhinal no rule is sent, so every
+/// new memory stays with its project; that is logged once per workspace.
+async fn workspace_rule<C: RunnerClient>(client: &C, job: &Job) -> Option<Rule> {
+    let workspace = job.authority.as_ref()?.workspace_id.clone()?;
+    match crate::workspace_members::workspace_members(client, &workspace).await {
+        Lookup::Members(members) if members.members.len() >= 2 => Some(Rule {
+            workspace,
+            text: WorkspaceRule {
+                name: members.name.clone(),
+                projects: members
+                    .members
+                    .iter()
+                    .map(|member| member.name.clone())
+                    .collect(),
+            },
+        }),
+        Lookup::Members(_) | Lookup::Unknown => None,
+        Lookup::NotAnswering => {
+            static LOGGED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+            let first = LOGGED
+                .get_or_init(Default::default)
+                .lock()
+                .expect("logged workspaces")
+                .insert(workspace.clone());
+            if first {
+                tracing::warn!(
+                    "ck-mc: turn two: Entorhinal did not say which projects workspace {workspace} holds; the second turn offers no workspace level, so new memories stay with their project"
+                );
+            }
+            None
+        }
+    }
+}
+
 async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<Outcome, String> {
     let carrier = Carrier::of(job);
     let facts = db
         .with_connection(|conn| select_facts(conn, &job.project, &job.continuation.publication_id))
         .map_err(|error| error.to_string())?;
+    let rule = if facts.is_empty() {
+        None
+    } else {
+        workspace_rule(client, job).await
+    };
+    let workspace = rule.as_ref().map(|rule| rule.workspace.as_str());
     // One query embedding per fact, under the provider's current model.
     let mut prompt_facts = BTreeMap::new();
     let mut lexical_only = false;
@@ -1807,7 +2031,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
                 Ok((
                     fact_blocks(conn, fact.id)?,
                     publication_session(conn, &fact.publication)?,
-                    neighbours(conn, &job.project, &fact.content, query)?,
+                    neighbours(conn, &job.project, workspace, &fact.content, query)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
@@ -1837,7 +2061,17 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
         );
     }
     let reserved = db
-        .with_connection(|conn| reserve(conn, job, &carrier, &facts, &prompt_facts, lexical_only))
+        .with_connection(|conn| {
+            reserve(
+                conn,
+                job,
+                &carrier,
+                &facts,
+                &prompt_facts,
+                lexical_only,
+                rule.as_ref(),
+            )
+        })
         .map_err(|error| error.to_string())?;
     let Some(reserved) = reserved else {
         return Ok(Outcome::NothingToSend);
@@ -1916,3 +2150,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
 #[cfg(test)]
 #[path = "turn_two_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod workspace_tests;

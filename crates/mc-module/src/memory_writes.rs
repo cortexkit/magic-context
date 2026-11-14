@@ -173,20 +173,10 @@ pub(crate) const PROTECTED: &str = "(COALESCE(m.safety_critical, 0) = 1 OR m.sta
     OR EXISTS(SELECT 1 FROM memory_history h JOIN memory_journal j ON j.decision_key = h.decision_key
                WHERE h.memory_id = m.id AND j.operation LIKE 'person\\_%' ESCAPE '\\'))";
 
-/// The project memory filed under `category_id` with this text. A live row
-/// comes first: archived history rows may repeat a text, live ones never do.
-pub(crate) fn memory_by_hash(
-    conn: &Connection,
-    project: &str,
-    category_id: &str,
-    hash: &str,
-) -> rusqlite::Result<Option<MemoryRow>> {
-    memory_by_hash_at(conn, &project_owner(project), category_id, hash)
-}
-
-/// The memory of `owner` filed under `category_id` with this text, live
-/// rows first, as [`memory_by_hash`] finds a project's.
-fn memory_by_hash_at(
+/// The memory of `owner` filed under `category_id` with this text. A live
+/// row comes first: archived history rows may repeat a text, live ones never
+/// do.
+pub(crate) fn memory_by_hash_at(
     conn: &Connection,
     owner: &Owner,
     category_id: &str,

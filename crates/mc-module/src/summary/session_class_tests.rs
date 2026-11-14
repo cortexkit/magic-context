@@ -14,6 +14,13 @@ pub(crate) struct Client {
     /// Declares `session_retention` with these limits when set.
     pub retention: Option<SessionRetention>,
     pub sends: Mutex<Vec<(Child, SendRequest)>>,
+    /// The text every run ends with; none when unset.
+    pub reply: Option<String>,
+    /// Entorhinal's answer to every read, as the reply's JSON; none when
+    /// unset, as without Entorhinal.
+    pub entorhinal: Option<serde_json::Value>,
+    /// The Entorhinal reads asked, as their request JSON.
+    pub entorhinal_calls: Mutex<Vec<serde_json::Value>>,
     discoveries: AtomicUsize,
 }
 
@@ -25,6 +32,9 @@ impl Client {
             refuse_temperature: false,
             retention: None,
             sends: Mutex::new(vec![]),
+            reply: None,
+            entorhinal: None,
+            entorhinal_calls: Mutex::new(vec![]),
             discoveries: AtomicUsize::new(0),
         }
     }
@@ -74,7 +84,28 @@ impl RunnerClient for Client {
         Ok(reply)
     }
     async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
-        Ok(RunResult::new("run", states::COMPLETED))
+        let mut result = RunResult::new("run", states::COMPLETED);
+        if let Some(text) = &self.reply {
+            result.final_message = Some(
+                serde_json::from_value(
+                    serde_json::json!({"ordinal": 2, "mid": "m2", "text": text}),
+                )
+                .expect("a final message"),
+            );
+        }
+        Ok(result)
+    }
+    async fn entorhinal_call(
+        &self,
+        _: &SessionRef,
+        body: Vec<u8>,
+    ) -> Option<Result<Vec<u8>, crate::client::EntorhinalRefusal>> {
+        self.entorhinal_calls
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&body).expect("a JSON request"));
+        let reply = self.entorhinal.as_ref()?;
+        Some(Ok(serde_json::to_vec(reply).expect("a JSON reply")))
     }
 }
 

@@ -1,6 +1,6 @@
 {
-  "generation": "258d0ed4b061c32c66b5cbc5573508cece8dcf03ec8b72de6b18dccc8d174f6d",
-  "catalog_digest": "258d0ed4b061c32c66b5cbc5573508cece8dcf03ec8b72de6b18dccc8d174f6d",
+  "generation": "b3dc03c735f7b759eb75f963b93bab158f35105f21fc1750ca20b5ed6a36062a",
+  "catalog_digest": "b3dc03c735f7b759eb75f963b93bab158f35105f21fc1750ca20b5ed6a36062a",
   "presets": [
     "head",
     "worker",
@@ -138,7 +138,7 @@
               "workspace",
               "global"
             ],
-            "description": "Where a write goes: project (default) for this project; workspace for every project in this project's workspace; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly."
+            "description": "Where a write goes: project (the default) for this project; workspace for a fact that clearly holds for every project in this project's workspace, since it then appears in all their sessions; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly. When unsure, use project."
           }
         },
         "required": [

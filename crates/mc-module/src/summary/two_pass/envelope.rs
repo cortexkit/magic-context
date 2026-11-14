@@ -6,7 +6,7 @@
 //! one JSON object of the expected shape is an envelope failure, and every
 //! fact of that send is retried.
 
-use crate::summary::prompts::SummaryPrompts;
+use crate::summary::prompts::{SummaryPrompts, WorkspaceRule};
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
@@ -66,6 +66,9 @@ pub struct Decision {
     pub clauses: Option<Vec<i64>>,
     /// `new` only: an accepted decision not built yet, stored as `Decided: …`.
     pub decided: Option<bool>,
+    /// `new` only: `project` or `workspace`, where the memory is stored. The
+    /// workspace is taken only when the request named it.
+    pub level: Option<String>,
     /// `new`, `edit`, `replaces`, `merge`: the calendar date (`YYYY-MM-DD`)
     /// the memory's own text says it stops holding. Such a memory is hidden
     /// after that day.
@@ -257,8 +260,8 @@ fn parse_decision(raw: &Map<String, Value>, fact_id: i64, ordinal: usize) -> Opt
         return None;
     }
     let check = raw.get("check")?.as_str()?.to_owned();
-    // `decided` belongs to `new` only.
-    if action != "new" && raw.contains_key("decided") {
+    // `decided` and `level` belong to `new` only.
+    if action != "new" && (raw.contains_key("decided") || raw.contains_key("level")) {
         return None;
     }
     // `expires` belongs to the actions that write a memory's text, and must
@@ -282,6 +285,13 @@ fn parse_decision(raw: &Map<String, Value>, fact_id: i64, ordinal: usize) -> Opt
             match raw.get("decided") {
                 None => {}
                 Some(Value::Bool(decided)) => decision.decided = Some(*decided),
+                Some(_) => return None,
+            }
+            match raw.get("level") {
+                None => {}
+                Some(Value::String(level)) if level == "project" || level == "workspace" => {
+                    decision.level = Some(level.clone());
+                }
                 Some(_) => return None,
             }
             Some(decision)
@@ -464,6 +474,8 @@ pub struct Neighbour {
     pub revision: i64,
     pub category: String,
     pub content: String,
+    /// Stored for the project's workspace rather than for the project.
+    pub workspace: bool,
 }
 
 /// One fact as the prompt shows it.
@@ -513,10 +525,15 @@ fn render_neighbour(neighbour: &Neighbour) -> String {
         .map(|clause| format!("  c{}: {}", clause.ordinal, clause.text))
         .collect();
     format!(
-        "- #{} rev {} [{}]\n{}",
+        "- #{} rev {} [{}]{}\n{}",
         neighbour.id,
         neighbour.revision,
         neighbour.category,
+        if neighbour.workspace {
+            " (workspace)"
+        } else {
+            ""
+        },
         clauses.join("\n")
     )
 }
@@ -524,15 +541,17 @@ fn render_neighbour(neighbour: &Neighbour) -> String {
 /// The turn-two prompt. Shared evidence and memories are printed once, under
 /// stable references; each fact lists the references it may use. Citations
 /// are checked only against the fact's own blocks. Memories are never cut.
+/// With `workspace`, the instruction carries the workspace rule.
 pub fn build_prompt(
     prompts: &SummaryPrompts,
     facts: &[PromptFact],
     items: &[PromptItem],
     lexical_only: bool,
     deferred: (usize, usize),
+    workspace: Option<&WorkspaceRule>,
 ) -> String {
     let ids: Vec<i64> = facts.iter().map(|fact| fact.fact_id).collect();
-    let mut lines = vec![prompts.turn_two(&ids)];
+    let mut lines = vec![prompts.turn_two_in(&ids, workspace)];
     if lexical_only {
         lines.push(LEXICAL_ONLY_NOTICE.to_owned());
     }
@@ -655,13 +674,21 @@ pub fn fit(
     items: &[PromptItem],
     lexical_only: bool,
     max_length: usize,
+    workspace: Option<&WorkspaceRule>,
 ) -> Fitted {
     let backlog: Vec<&PromptFact> = facts.iter().filter(|fact| fact.backlog).collect();
     let fresh: Vec<&PromptFact> = facts.iter().filter(|fact| !fact.backlog).collect();
     // Measured with the worst-case coverage notice, as the plugin does.
     let worst = (facts.len(), items.len());
     let render = |facts: &[PromptFact], items: &[PromptItem]| {
-        length(&build_prompt(prompts, facts, items, lexical_only, worst))
+        length(&build_prompt(
+            prompts,
+            facts,
+            items,
+            lexical_only,
+            worst,
+            workspace,
+        ))
     };
     let backlog_limit = (max_length as f64 * BACKLOG_SHARE).floor() as usize;
     let mut old: Vec<PromptFact> = Vec::new();
@@ -705,7 +732,14 @@ pub fn fit(
         }
     }
     let deferred = (facts.len() - chosen.len(), items.len() - kept_items.len());
-    let prompt = build_prompt(prompts, &chosen, &kept_items, lexical_only, deferred);
+    let prompt = build_prompt(
+        prompts,
+        &chosen,
+        &kept_items,
+        lexical_only,
+        deferred,
+        workspace,
+    );
     Fitted {
         facts: chosen,
         items: kept_items,

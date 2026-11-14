@@ -54,6 +54,7 @@ pub(crate) const FRAMES: &[(&str, &str)] = &[
     frame!("historian/turn-two.check.support.system"),
     frame!("historian/turn-two.check.user"),
     frame!("historian/turn-two.decisions"),
+    frame!("historian/turn-two.decisions.workspace"),
     frame!("historian/turn-two.user"),
     frame!("main-agent/ctx_memory.description.full"),
     frame!("main-agent/ctx_memory.description.light"),

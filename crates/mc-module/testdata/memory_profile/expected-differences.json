@@ -27,6 +27,16 @@
     {
       "document": "historian/system",
       "class": "ruling",
+      "ruling": "§11.17, narrowed by Ufuk on 2026-11-14",
+      "why": "A new memory goes to the project unless it clearly holds for every project in the project's workspace, because a workspace memory appears in all of that workspace's sessions. Turn two's `new` decision takes an optional level, offered only when the turn-two message carries the workspace rule (a workspace of two or more projects); edits, replacements and merges keep the level of the memory they change.",
+      "today": [],
+      "rendered": [
+        "- `new` takes an optional string `level`, only when the turn-two message names this project's workspace: `\"workspace\"` stores the memory for every project in that workspace; leaving it out stores it for this project. `edit`, `replaces` and `merge` keep the level of the memory they change."
+      ]
+    },
+    {
+      "document": "historian/system",
+      "class": "ruling",
       "ruling": "§11.11",
       "why": "causal_incident regains the optional produced_fact link to the CONSTRAINTS fact it produced, so that constraint carries its evidence from the start.",
       "today": [],
