@@ -238,7 +238,7 @@ fn status_takes_kinds_and_switches_from_the_profile_the_engine_holds() {
     assert_eq!(tasks[2]["kind"], "curate");
     assert_eq!(tasks[2]["schedule"]["every"], "week");
     assert_eq!(
-        (tasks[3]["kind"].clone(), tasks[3]["enabled"].clone()),
+        (tasks[4]["kind"].clone(), tasks[4]["enabled"].clone()),
         (json!("map-memories"), json!(true))
     );
 }
