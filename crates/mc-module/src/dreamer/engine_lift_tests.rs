@@ -115,7 +115,7 @@ fn level(db: &ContextDb, id: i64) -> String {
 }
 
 #[tokio::test]
-async fn a_round_with_the_bundled_profile_never_starts_a_lift() {
+async fn a_round_with_the_bundled_profile_lifts_a_shared_workspace_once() {
     let (_dir, db) = store();
     // Every task the module runs, the bundled profile as it ships, and a
     // workspace Entorhinal lists with two projects. The scheduled tasks'
@@ -137,10 +137,12 @@ async fn a_round_with_the_bundled_profile_never_starts_a_lift() {
     engine.tick(&db, &client, &Settings::default(), now_ms());
     settled(&engine).await;
 
-    assert!(client.sends.lock().unwrap().is_empty());
-    assert!(runs(&db).is_empty());
-    assert_eq!(record(&db), store::OnceRecord::default());
-    assert_eq!(level(&db, 1), "project");
+    // The bundled profile ships the lift on: the first round runs it once
+    // for the shared workspace, and the memory the reply places moves.
+    assert_eq!(client.sends.lock().unwrap().len(), 1);
+    assert_eq!(runs(&db).len(), 1);
+    assert_ne!(record(&db), store::OnceRecord::default());
+    assert_eq!(level(&db, 1), "workspace");
 }
 
 #[tokio::test]

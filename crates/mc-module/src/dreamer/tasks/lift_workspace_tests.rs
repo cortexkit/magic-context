@@ -191,13 +191,13 @@ fn file(path: &str) -> String {
 }
 
 #[test]
-fn the_bundled_profile_registers_the_lift_switched_off_and_renders_its_texts_unchanged() {
+fn the_bundled_profile_registers_the_lift_switched_on_and_renders_its_texts_unchanged() {
     let profile = prompt_profile(None).unwrap();
     let declaration = declaration(&profile);
     assert_eq!(declaration["kind"], KIND);
-    // A person reads a replay's report before the lift runs for real; until
-    // then the bundled profile declares it off.
-    assert_eq!(declaration["enabled"], false);
+    // On: the workspace's curate runs after a lift that moves memories, and
+    // merges the copies of one rule that several projects lift.
+    assert_eq!(declaration["enabled"], true);
     assert!(crate::dreamer::tasks()
         .iter()
         .any(|task| task.kind() == KIND && task.once()));

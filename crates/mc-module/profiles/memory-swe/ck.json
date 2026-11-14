@@ -826,7 +826,7 @@
       {
         "id": "swe:lift-workspace",
         "kind": "lift-workspace",
-        "enabled": false,
+        "enabled": true,
         "reads": [
           "memory-pool"
         ],
