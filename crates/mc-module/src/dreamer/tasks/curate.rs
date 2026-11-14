@@ -1690,6 +1690,9 @@ impl CurateBatch {
                 bump(tx, &memory)?;
                 update_content(tx, memory.id, &parts[0], &normalized_hash(&parts[0]))?;
                 let source = self.source_project(tx, memory.id)?;
+                // Each new part carries the git line of the memory it was
+                // split from; the first part is that memory and keeps it.
+                let line = crate::memory_line::of_memory(tx, memory.id)?;
                 let mut ids = vec![memory.id];
                 for part in &parts[1..] {
                     let written = self.insert_beside(
@@ -1700,6 +1703,7 @@ impl CurateBatch {
                         child,
                         importance,
                     )?;
+                    crate::memory_line::stamp(tx, written.id, line.as_ref())?;
                     created(tx, &placer, written.id, CreateKind::Create, now)?;
                     before.push(None);
                     ids.push(written.id);
@@ -1798,6 +1802,8 @@ impl CurateBatch {
             [serde_json::to_string(&ids).expect("ids serialize")],
             |row| row.get(0),
         )?;
+        // The survivor carries the git line every source shares, or none.
+        let line = crate::memory_line::shared(tx, &ids)?;
         for source in sources {
             bump(tx, source)?;
         }
@@ -1827,6 +1833,7 @@ impl CurateBatch {
                 written.id
             }
         };
+        crate::memory_line::stamp(tx, survivor, line.as_ref())?;
         let mut merged_from: BTreeSet<i64> = ids.iter().copied().collect();
         for source in sources {
             if let Some(prior) = source

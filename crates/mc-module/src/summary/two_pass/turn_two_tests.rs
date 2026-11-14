@@ -368,6 +368,7 @@ async fn account_wait_fact_check_stops_the_stage_and_forgets_the_check() {
             memory_enabled: true,
             auto_promote: true,
             authority: None,
+            line: None,
         };
         let check = Check {
             kind: gates::CheckKind::Disproof,

@@ -59,6 +59,18 @@ impl Fixture {
         }
     }
 
+    /// [`Fixture::new`] with the first commit on branch `branch`.
+    pub(crate) fn on(branch: &str, files: &[(&str, &str)]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+        Self {
+            repo: Repo::on(branch, files),
+            _dir: dir,
+            db,
+            profile: prompt_profile(None).unwrap(),
+        }
+    }
+
     pub(crate) fn insert(&self, rows: &[Row]) {
         self.db.with_connection(|conn| {
             let tx = conn.transaction().unwrap();
@@ -119,9 +131,24 @@ impl Fixture {
 
     /// The batches a run of the task plans now, under `declaration`.
     pub(crate) fn batches_under(&self, broad: bool, declaration: &Value) -> Vec<VerifyBatch> {
+        self.plan_at(broad, declaration, self.repo.path())
+    }
+
+    /// The batches a run started from a session in `root` plans now.
+    pub(crate) fn batches_at(&self, broad: bool, root: &std::path::Path) -> Vec<VerifyBatch> {
+        let declaration = self.declaration(if broad { VERIFY_BROAD } else { VERIFY });
+        self.plan_at(broad, &declaration, root)
+    }
+
+    fn plan_at(
+        &self,
+        broad: bool,
+        declaration: &Value,
+        root: &std::path::Path,
+    ) -> Vec<VerifyBatch> {
         let owner = Owner::Project {
             id: PROJECT.into(),
-            root: self.repo.path().to_str().unwrap().into(),
+            root: root.to_str().unwrap().into(),
         };
         Verify { broad }
             .plan_batches(&TaskContext {
@@ -456,6 +483,7 @@ fn a_search_cut_by_its_limits_lists_nothing_and_puts_nobody_first() {
         files: Vec::new(),
         verified_at: 0,
         verified_commit: None,
+        branch: None,
         checked_at: 0,
     };
     let checkout = fixture.repo.checkout();
@@ -488,6 +516,7 @@ fn the_diff_frame_keeps_the_plugins_shape_and_bounds_long_diffs() {
         files: vec!["src/a.ts".into()],
         verified_at: 1,
         verified_commit: None,
+        branch: None,
         checked_at: 1,
     };
     let diff = "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";

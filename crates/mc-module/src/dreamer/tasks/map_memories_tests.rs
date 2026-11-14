@@ -14,8 +14,8 @@ use crate::memory_writes::normalized_hash;
 
 const PROJECT: &str = "pj-map";
 
-/// A git checkout in a folder of its own, with `files` written and added to
-/// git's index; `untracked` are written and left out.
+/// A git checkout in a folder of its own, with `files` written and
+/// committed; `untracked` are written and left out.
 struct Repo {
     dir: tempfile::TempDir,
 }
@@ -31,6 +31,25 @@ fn git(root: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
+/// Commit what git's index holds in `root`, as the tests' author.
+fn commit(root: &Path) {
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "commit",
+        ],
+    );
+}
+
 impl Repo {
     fn new(files: &[(&str, &str)], untracked: &[(&str, &str)]) -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -44,6 +63,7 @@ impl Repo {
             let mut args = vec!["add", "--"];
             args.extend(files.iter().map(|(path, _)| *path));
             git(dir.path(), &args);
+            commit(dir.path());
         }
         Self { dir }
     }
@@ -756,6 +776,7 @@ fn a_file_must_be_tracked_present_and_inside_the_checkout() {
         .unwrap();
     std::os::unix::fs::symlink(root.join("src"), root.join("folder.rs")).unwrap();
     git(root, &["add", "src/escape.rs", "folder.rs"]);
+    commit(root);
     std::fs::remove_file(root.join("web/app.ts")).unwrap();
     let batch = &store.batches()[0];
     let applied = store.apply(
@@ -1044,4 +1065,53 @@ fn undoing_the_run_puts_back_the_mappings_it_replaced_unless_they_changed_since(
         .with_connection(|conn| person::plan_run_undo(conn, &owner, 12))
         .unwrap();
     assert!(again.mappings.is_empty());
+}
+
+#[test]
+fn a_run_from_a_worktree_maps_to_files_the_main_checkouts_last_commit_holds() {
+    let store = store(&[row(1)]);
+    let root = store.repo.root();
+    // A worktree whose branch committed a file the main checkout lacks.
+    let outer = tempfile::tempdir().unwrap();
+    let worktree = outer.path().join("wt");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wip",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(worktree.join("src/wip.rs"), "fn wip() {}\n").unwrap();
+    git(&worktree, &["add", "src/wip.rs"]);
+    commit(&worktree);
+    // The main checkout's index holds a file no commit has yet.
+    std::fs::write(root.join("src/staged.rs"), "fn staged() {}\n").unwrap();
+    git(root, &["add", "src/staged.rs"]);
+    let batches = with_context(&store.db, &worktree, |context| {
+        MapMemories.plan_batches(context).unwrap()
+    });
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    // The child session reads the main checkout, not the worktree.
+    assert_eq!(
+        Path::new(batch.folder().unwrap()).canonicalize().unwrap(),
+        root.canonicalize().unwrap()
+    );
+    let applied = store.apply(
+        batch,
+        &manifest(&[(1, "files=\"src/view.rs,src/staged.rs,src/wip.rs\"")]),
+        6,
+    );
+    assert_eq!(
+        applied.dropped,
+        [
+            "memory 1: src/staged.rs is not in the checkout's last commit",
+            "memory 1: src/wip.rs is not a file git tracks in the checkout",
+        ]
+    );
+    assert_eq!(store.mapped(1), [mapped("src/view.rs", MAPPER)]);
 }

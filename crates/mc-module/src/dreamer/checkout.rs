@@ -2,6 +2,12 @@
 //! git tracks, the commit it is at, what changed since an earlier commit,
 //! and a bounded literal search over the tracked files.
 //!
+//! A checkout is either a folder git works in, read with its uncommitted
+//! changes, or a temporary copy of one commit of the repository
+//! ([`Checkout::open_copy`]), read exactly as that commit holds it. In a
+//! copy, git runs in the repository and every history and diff question ends
+//! at the copied commit instead of a working tree.
+//!
 //! The verify tasks use it twice. Before a batch is sent, the module looks
 //! up each path and code name a memory cites, so the model is told which
 //! ones a plain search did not find. When a reply archives a memory because
@@ -20,8 +26,10 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use super::branches::Copy;
+
 /// How long one git command may run before it is killed.
-const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Output past this many bytes is a failure, not a truncated answer.
 const GIT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
@@ -56,9 +64,17 @@ pub(crate) struct Search {
 
 /// A project's checkout at the moment it was opened.
 pub(crate) struct Checkout {
-    /// The folder, canonical, so a resolved file can be checked to be
-    /// inside it.
+    /// The folder the files are read from, canonical, so a resolved file can
+    /// be checked to be inside it.
     root: PathBuf,
+    /// The folder git runs in: `root` itself, or for a copy the repository
+    /// it was copied from.
+    repo: PathBuf,
+    /// For a copy, the commit it holds: history and diffs end there instead
+    /// of at a working tree.
+    at: Option<String>,
+    /// For a copy, its folder, deleted when the checkout is dropped.
+    _copy: Option<Copy>,
     /// Every path git tracks, relative to the root, with `/` separators.
     tracked: BTreeSet<String>,
     /// The names at the top of the checkout (see [`Checkout::top_level`]).
@@ -82,6 +98,54 @@ impl Checkout {
                 root.display()
             )
         })?;
+        let head = run_git(&root, &["rev-parse", "HEAD"])
+            .ok()
+            .map(|text| text.trim().to_owned())
+            .filter(|text| is_commit(text));
+        Ok(Self::with(root.clone(), root, None, None, &listed, head))
+    }
+
+    /// A temporary copy of `commit` of the repository at `repo`, made with
+    /// `git archive` so the repository itself is left as it was. The copy's
+    /// folder is deleted when the checkout is dropped.
+    pub(crate) fn open_copy(repo: &Path, commit: &str) -> Result<Self, String> {
+        if !is_commit(commit) {
+            return Err(format!("{commit} is not a commit id"));
+        }
+        let repo = repo
+            .canonicalize()
+            .map_err(|error| format!("the repository {}: {error}", repo.display()))?;
+        let listed = run_git(
+            &repo,
+            &["ls-tree", "-r", "-z", "--name-only", "--full-tree", commit],
+        )
+        .map_err(|error| format!("listing the files of {commit}: {error}"))?;
+        let copy = Copy::extract(&repo, commit)?;
+        let root = copy
+            .path()
+            .canonicalize()
+            .map_err(|error| format!("the copy of {commit}: {error}"))?;
+        let mut checkout = Self::with(
+            root,
+            repo,
+            Some(commit.to_owned()),
+            Some(copy),
+            &listed,
+            Some(commit.to_owned()),
+        );
+        // A copy is read as its commit holds it; nothing in it is ignored.
+        checkout.top_level.remove(".cortexkit");
+        Ok(checkout)
+    }
+
+    fn with(
+        root: PathBuf,
+        repo: PathBuf,
+        at: Option<String>,
+        copy: Option<Copy>,
+        listed: &str,
+        head: Option<String>,
+    ) -> Self {
         let tracked: BTreeSet<String> = listed
             .split('\0')
             .filter(|path| !path.is_empty())
@@ -95,23 +159,34 @@ impl Checkout {
             .chain([".cortexkit"])
             .map(str::to_owned)
             .collect();
-        let head = run_git(&root, &["rev-parse", "HEAD"])
-            .ok()
-            .map(|text| text.trim().to_owned())
-            .filter(|text| is_commit(text));
-        Ok(Self {
+        Self {
             root,
+            repo,
+            at,
+            _copy: copy,
             tracked,
             top_level,
             head,
             cited_paths: OnceLock::new(),
-        })
+        }
     }
 
     /// The commit checked out when the checkout was opened, when there is
     /// one.
     pub(crate) fn head(&self) -> Option<&str> {
         self.head.as_deref()
+    }
+
+    /// The folder the checkout's files are read from: the working folder,
+    /// or the copy's.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Whether the checkout is a temporary copy of one commit.
+    #[cfg(test)]
+    pub(crate) fn is_copy(&self) -> bool {
+        self.at.is_some()
     }
 
     /// The files and folders at the top of the checkout: the first part of
@@ -174,12 +249,10 @@ impl Checkout {
         }
         let itself = format!(":(glob)**/{escaped}");
         let inside = format!(":(glob)**/{escaped}/**");
-        run_git_within(
-            &self.root,
-            &["log", "--format=%H", "-1", "--", &itself, &inside],
-            timeout,
-        )
-        .map(|listed| names_a_commit(&listed))
+        let mut args = vec!["log", "--format=%H", "-1"];
+        args.extend(self.at.as_deref());
+        args.extend(["--", itself.as_str(), inside.as_str()]);
+        run_git_within(&self.repo, &args, timeout).map(|listed| names_a_commit(&listed))
     }
 
     /// Whether some commit of the checked-out history added or removed
@@ -187,19 +260,16 @@ impl Checkout {
     /// `Err` when git fails or runs longer than `timeout`.
     pub(crate) fn text_in_history(&self, text: &str, timeout: Duration) -> Result<bool, String> {
         let pickaxe = format!("-S{text}");
-        run_git_within(
-            &self.root,
-            &[
-                "log",
-                &pickaxe,
-                "--no-ext-diff",
-                "--no-textconv",
-                "--format=%H",
-                "-1",
-            ],
-            timeout,
-        )
-        .map(|listed| names_a_commit(&listed))
+        let mut args = vec![
+            "log",
+            pickaxe.as_str(),
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=%H",
+            "-1",
+        ];
+        args.extend(self.at.as_deref());
+        run_git_within(&self.repo, &args, timeout).map(|listed| names_a_commit(&listed))
     }
 
     /// Look for each of `names` as literal bytes in the tracked paths and in
@@ -253,17 +323,16 @@ impl Checkout {
     }
 
     /// The tracked files that differ between `commit` and the working tree,
-    /// uncommitted changes included. `None` when git can't tell, for
-    /// example because the commit is gone.
+    /// uncommitted changes included, or for a copy its commit. `None` when
+    /// git can't tell, for example because the commit is gone.
     pub(crate) fn changed_since(&self, commit: &str) -> Option<BTreeSet<String>> {
         if !is_commit(commit) {
             return None;
         }
-        let listed = run_git(
-            &self.root,
-            &["diff", "--name-only", "--no-renames", "-z", commit, "--"],
-        )
-        .ok()?;
+        let mut args = vec!["diff", "--name-only", "--no-renames", "-z", commit];
+        args.extend(self.at.as_deref());
+        args.push("--");
+        let listed = run_git(&self.repo, &args).ok()?;
         Some(
             listed
                 .split('\0')
@@ -273,14 +342,20 @@ impl Checkout {
         )
     }
 
-    /// The tracked files with uncommitted changes.
+    /// The tracked files with uncommitted changes; none in a copy.
     pub(crate) fn uncommitted(&self) -> Option<BTreeSet<String>> {
+        if self.at.is_some() {
+            return Some(BTreeSet::new());
+        }
         self.changed_since(self.head()?)
     }
 
     /// When the last commit touching `file` was made, in milliseconds.
     pub(crate) fn last_commit_ms(&self, file: &str) -> Option<i64> {
-        run_git(&self.root, &["log", "-1", "--format=%ct", "--", file])
+        let mut args = vec!["log", "-1", "--format=%ct"];
+        args.extend(self.at.as_deref());
+        args.extend(["--", file]);
+        run_git(&self.repo, &args)
             .ok()?
             .trim()
             .parse::<i64>()
@@ -288,24 +363,16 @@ impl Checkout {
             .map(|seconds| seconds.saturating_mul(1_000))
     }
 
-    /// `file`'s changes from `base` to the working tree, as a unified diff.
+    /// `file`'s changes from `base` to the working tree, or for a copy to its
+    /// commit, as a unified diff.
     pub(crate) fn diff(&self, base: &str, file: &str) -> Option<String> {
         if !is_commit(base) {
             return None;
         }
-        run_git(
-            &self.root,
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-color",
-                base,
-                "--",
-                file,
-            ],
-        )
-        .ok()
+        let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--no-color", base];
+        args.extend(self.at.as_deref());
+        args.extend(["--", file]);
+        run_git(&self.repo, &args).ok()
     }
 }
 
@@ -336,7 +403,7 @@ pub(crate) fn clean_path(cited: &str) -> Option<String> {
         .then_some(path)
 }
 
-fn is_commit(text: &str) -> bool {
+pub(crate) fn is_commit(text: &str) -> bool {
     text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -421,7 +488,35 @@ fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// [`run_git`], killing git after `timeout`.
-fn run_git_within(root: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
+pub(crate) fn run_git_within(
+    root: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    let output = run_git_output(root, args, timeout)?;
+    if output.code != Some(0) {
+        return Err(output.stderr.trim().chars().take(500).collect());
+    }
+    Ok(output.stdout)
+}
+
+/// What a git command that ran to its end printed, and how it exited.
+pub(crate) struct GitOutput {
+    /// Its exit code; `None` when a signal ended it.
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run git in `root`, killing it after `timeout`. `Err` when it can't be
+/// started, runs past `timeout` or prints more than [`GIT_MAX_OUTPUT`];
+/// otherwise what it printed and its exit code, whatever that is, for a
+/// command whose exit code is its answer (`git grep -q`).
+pub(crate) fn run_git_output(
+    root: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<GitOutput, String> {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -473,12 +568,15 @@ fn run_git_within(root: &Path, args: &[&str], timeout: Duration) -> Result<Strin
     let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
     match status {
         None => Err(format!("git {} timed out", args.first().unwrap_or(&""))),
-        Some(status) if !status.success() => Err(stderr.trim().chars().take(500).collect()),
         Some(_) if stdout.len() > GIT_MAX_OUTPUT => Err(format!(
             "git {} printed too much",
             args.first().unwrap_or(&"")
         )),
-        Some(_) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
+        Some(status) => Ok(GitOutput {
+            code: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr,
+        }),
     }
 }
 

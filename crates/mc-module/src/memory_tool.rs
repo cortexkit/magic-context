@@ -499,6 +499,7 @@ mod tests {
             session: "placeholder-session",
             project: "dir:placeholder-project",
             authority: None,
+            line: None,
         };
         for category in CATEGORIES {
             let content = format!("Placeholder arguments preserve the Rust fact for {category}.");

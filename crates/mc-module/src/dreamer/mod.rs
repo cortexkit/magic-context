@@ -7,6 +7,7 @@
 //! to a model routing picks ([`run`]); its reply proposes changes, and
 //! nothing it proposes is written until it passes the task's own checks.
 
+pub mod branches;
 pub mod checkout;
 pub mod cron;
 pub mod engine;

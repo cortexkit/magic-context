@@ -3229,11 +3229,23 @@ impl Session {
                     .project
                     .as_ref()
                     .ok_or("Error: Could not resolve project identity for memory action: the session has no project.")?;
+                // A memory the agent saves or rewrites records the git line
+                // its session's folder is on now.
+                let writes = matches!(
+                    input.get("action").and_then(Value::as_str),
+                    Some("write" | "update" | "merge")
+                );
+                let line = if writes {
+                    crate::memory_line::of_folder_async(Some(project.root.clone())).await
+                } else {
+                    None
+                };
                 let who = crate::memory_writes::Writer {
                     harness: &self.key.harness,
                     session: &self.key.session,
                     project: &project.id,
                     authority: self.authority.as_ref(),
+                    line: line.as_ref(),
                 };
                 // The newest message the session has seen: a fact the agent
                 // passes to the user-profile review names it as its source.

@@ -1219,7 +1219,7 @@ impl Engine {
             let job = TaskRun {
                 demand,
                 run_id: &format!("{name}.{index}"),
-                project_root: root,
+                project_root: batch.folder().unwrap_or(root),
             };
             let reply = match run::run(client, &job, batch.as_ref()).await {
                 Ok(reply) => reply,

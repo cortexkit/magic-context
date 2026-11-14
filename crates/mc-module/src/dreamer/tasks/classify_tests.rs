@@ -1113,7 +1113,7 @@ fn a_classification_makes_a_second_turn_edit_read_before_it_stale() {
         store
             .db
             .with_connection(|conn| {
-                applier::commit_revision(conn, &edit(key, read), &plan, 1, None, None)
+                applier::commit_revision(conn, &edit(key, read), &plan, 1, None, None, None)
             })
             .unwrap()
     };

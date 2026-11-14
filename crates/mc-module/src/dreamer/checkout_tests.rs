@@ -21,31 +21,41 @@ impl Repo {
         repo
     }
 
+    /// A repository whose first commit, on branch `branch`, holds `files`.
+    pub(crate) fn on(branch: &str, files: &[(&str, &str)]) -> Self {
+        let repo = Self {
+            dir: tempfile::tempdir().unwrap(),
+        };
+        repo.git(&["init", "-q"]);
+        repo.git(&["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")]);
+        repo.write(files);
+        repo.commit("first");
+        repo
+    }
+
+    /// A worktree of this repository in a new temporary folder, on a new
+    /// branch `branch` from the current commit. The folder lives as long as
+    /// the returned guard.
+    pub(crate) fn worktree(&self, branch: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let outer = tempfile::tempdir().unwrap();
+        let path = outer.path().join("wt");
+        self.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            path.to_str().unwrap(),
+        ]);
+        (outer, path)
+    }
+
     pub(crate) fn path(&self) -> &Path {
         self.dir.path()
     }
 
     pub(crate) fn git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args([
-                "-c",
-                "user.name=test",
-                "-c",
-                "user.email=test@example.com",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .current_dir(self.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
+        git_at(self.path(), args)
     }
 
     pub(crate) fn write(&self, files: &[(&str, &str)]) {
@@ -77,6 +87,43 @@ impl Repo {
     pub(crate) fn checkout(&self) -> Checkout {
         Checkout::open(self.path()).unwrap()
     }
+}
+
+/// Run git with `args` in `dir` as the tests' author; what it printed.
+pub(crate) fn git_at(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Write `files` (path, text) under `dir` and commit everything there; the
+/// new commit's id.
+pub(crate) fn commit_at(dir: &Path, files: &[(&str, &str)], message: &str) -> String {
+    for (path, text) in files {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    git_at(dir, &["add", "-A"]);
+    git_at(dir, &["commit", "-q", "--allow-empty", "-m", message]);
+    git_at(dir, &["rev-parse", "HEAD"]).trim().to_owned()
 }
 
 #[test]

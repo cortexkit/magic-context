@@ -1455,6 +1455,7 @@ fn save(db: &ContextDb, project: &str, tag: &str, content: &str) -> i64 {
         session: "ses-render-sim",
         project,
         authority: None,
+        line: None,
     };
     db.with_connection(|conn| memory_writes::save(conn, &writer, tag, content))
         .expect("save a memory")

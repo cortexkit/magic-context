@@ -10,13 +10,13 @@ use crate::memory_writes::{self, SaveLevel, Writer};
 use crate::summary::run::session_class_tests::Client;
 use crate::workspace_members::tests::answer;
 
-const PROJECT: &str = "project";
+pub(super) const PROJECT: &str = "project";
 /// The second turn's child: the first turn's.
 const CHILD: &str = "summary-child";
 
 /// A writer authority as Entorhinal's context gives one for a project with
 /// no domain (the bundled software profile), placed in `workspace`.
-fn authority(workspace: Option<&str>) -> Authority {
+pub(super) fn authority(workspace: Option<&str>) -> Authority {
     let records: Vec<Value> = serde_json::from_str(include_str!(
         "../../../testdata/entorhinal-memory-context-v1/context-project.json"
     ))
@@ -34,7 +34,7 @@ fn authority(workspace: Option<&str>) -> Authority {
     authority
 }
 
-fn job(authority: Option<Authority>) -> Job {
+pub(super) fn job(authority: Option<Authority>) -> Job {
     Job {
         owner: SessionRef::new("runner", "pi", "head"),
         project: PROJECT.into(),
@@ -62,7 +62,7 @@ fn job(authority: Option<Authority>) -> Job {
 /// A store with one committed publication holding one candidate fact (id
 /// 1), a project memory and a memory of `workspace` that both share its
 /// words. Returns the two memories' ids.
-fn store(workspace: &str) -> (tempfile::TempDir, ContextDb, i64, i64) {
+pub(super) fn store(workspace: &str) -> (tempfile::TempDir, ContextDb, i64, i64) {
     let dir = tempfile::tempdir().unwrap();
     let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
     db.with_connection(|conn| {
@@ -80,6 +80,7 @@ fn store(workspace: &str) -> (tempfile::TempDir, ContextDb, i64, i64) {
         session: "head",
         project: PROJECT,
         authority: Some(&authority),
+        line: None,
     };
     let save = |level, content: &str| {
         db.with_connection(|conn| memory_writes::save_at(conn, &who, level, "CONSTRAINTS", content))
@@ -112,7 +113,7 @@ fn entorhinal(workspace: &str, projects: &[&str]) -> Value {
     answer(&[(workspace, "CortexKit")], &projects)
 }
 
-fn client(entorhinal: Option<Value>, reply: Option<Value>) -> Client {
+pub(super) fn client(entorhinal: Option<Value>, reply: Option<Value>) -> Client {
     let mut client = Client::new(false);
     client.entorhinal = entorhinal;
     client.reply = reply.map(|reply| reply.to_string());
@@ -141,7 +142,7 @@ fn sent(client: &Client, db: &ContextDb) -> (String, Value) {
 }
 
 /// The second turn's reply: `decision` for fact 1.
-fn reply(decision: Value) -> Value {
+pub(super) fn reply(decision: Value) -> Value {
     let mut decision = decision;
     decision["fact_id"] = json!(1);
     decision["check"] = json!("U settles it at [3]. Passes.");
@@ -221,7 +222,7 @@ async fn a_workspace_of_several_projects_gets_the_rule_and_its_memories() {
 }
 
 /// A stored memory's level, owner, source project and text.
-fn memory(db: &ContextDb, id: i64) -> (String, String, Option<String>, String) {
+pub(super) fn memory(db: &ContextDb, id: i64) -> (String, String, Option<String>, String) {
     db.with_connection(|conn| {
         conn.query_row(
             "SELECT level, owner_id, source_project_id, content FROM memories WHERE id = ?1",
@@ -233,7 +234,7 @@ fn memory(db: &ContextDb, id: i64) -> (String, String, Option<String>, String) {
 }
 
 /// The fact's state, reason and the memory it resolved to.
-fn fact(db: &ContextDb) -> (String, String, Option<i64>) {
+pub(super) fn fact(db: &ContextDb) -> (String, String, Option<i64>) {
     db.with_connection(|conn| {
         conn.query_row(
             "SELECT state, reason, matched_memory_id FROM memory_pending_facts WHERE id = 1",
@@ -432,7 +433,7 @@ fn a_revised_workspace_memory_stays_at_the_workspace() {
     let authority = authority(Some("ws-edit"));
     let commit = |revision: &Revision| {
         db.with_connection(|conn| {
-            applier::commit_revision(conn, revision, &plan, 1, None, Some(&authority))
+            applier::commit_revision(conn, revision, &plan, 1, None, Some(&authority), None)
         })
         .unwrap()
     };

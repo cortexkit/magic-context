@@ -858,6 +858,9 @@ struct Resolver<'a, C> {
     memory_enabled: bool,
     auto_promote: bool,
     authority: Option<crate::memory_levels::Authority>,
+    /// The git line of the summarized session's folder, read when the reply
+    /// came in: the memories the reply writes record it.
+    line: Option<crate::memory_line::Line>,
 }
 
 /// Why resolving a stage stopped before every fact was resolved.
@@ -1126,6 +1129,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                                 authority: self.authority.as_ref(),
                                 owner: owner.as_ref(),
                                 expires: decision.expires.as_deref().filter(|_| !conflict),
+                                line: self.line.as_ref(),
                             },
                         )
                     })
@@ -1485,6 +1489,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                     fact.id,
                     Some(reservation),
                     self.authority.as_ref(),
+                    self.line.as_ref(),
                 )
             })
             .map(|_| Ok(()))
@@ -1923,6 +1928,7 @@ async fn recover_one<C: RunnerClient>(
         memory_enabled: job.memory_enabled,
         auto_promote: job.auto_promote,
         authority: job.authority.clone(),
+        line: crate::memory_line::of_folder_async(job.project_root.clone()).await,
     };
     match resolver.stage(stage).await? {
         Ok(()) => {}
@@ -2130,6 +2136,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
         memory_enabled: job.memory_enabled,
         auto_promote: job.auto_promote,
         authority: job.authority.clone(),
+        line: crate::memory_line::of_folder_async(job.project_root.clone()).await,
     };
     let done = resolver.stage(&reserved.stage).await?;
     if let Err(Stopped::AccountWait(wait)) = done {
@@ -2155,3 +2162,7 @@ mod tests;
 #[cfg(test)]
 #[path = "workspace_tests.rs"]
 mod workspace_tests;
+
+#[cfg(test)]
+#[path = "line_tests.rs"]
+mod line_tests;

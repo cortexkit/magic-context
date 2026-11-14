@@ -18,12 +18,18 @@
 //!
 //! The manifest is checked one entry at a time. An id the batch didn't send,
 //! or a memory changed since the batch read it, is dropped with its reason.
-//! Each file must be tracked by git, exist, and stay inside the checkout once
-//! its links are resolved. `independent="true"` is stored as the
+//! Each file must be tracked by git, be in the checkout's last commit, exist,
+//! and stay inside the checkout once its links are resolved: a file only a
+//! working copy holds may never be committed, and no branch would back the
+//! memory with it. `independent="true"` is stored as the
 //! file-independent mark (one row with an empty path). An entry whose files
 //! all fail, or that maps a directive-shaped project rule to files, is stored
 //! as file-independent too, marked `host_rejected_fallback`, so the memory is
 //! not sent again on every run. A memory the reply leaves out stays unmapped.
+//!
+//! The run reads the repository's main checkout, whatever worktree the
+//! session that started it was in ([`crate::dreamer::branches::main_checkout`]):
+//! a worktree may sit on an old base or hold half-finished edits.
 //!
 //! A mapping is not part of what a memory says: writing one leaves the
 //! memory's row and revision alone and keeps no undo-history row. Each
@@ -43,6 +49,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
 use super::classify::{attribute, body, describe_shape, re};
+use crate::dreamer::branches::main_checkout;
 use crate::dreamer::run::{TaskInput, TaskReply};
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
 use crate::memory_profile::Profile;
@@ -341,6 +348,7 @@ pub(crate) fn seed_code_names(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refused {
     Untracked,
+    Uncommitted,
     Missing,
     Outside,
     NotAFile,
@@ -350,6 +358,7 @@ impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Untracked => "is not a file git tracks in the checkout",
+            Self::Uncommitted => "is not in the checkout's last commit",
             Self::Missing => "is not in the checkout",
             Self::Outside => "leads outside the checkout once its links are resolved",
             Self::NotAFile => "is not a file",
@@ -358,15 +367,18 @@ impl std::fmt::Display for Refused {
 }
 
 /// The project's checkout as one run sees it: its folder with links
-/// resolved, and the paths git tracked there when the run began.
+/// resolved, the paths git tracked there when the run began, and the paths
+/// its last commit holds.
 pub(crate) struct Checkout {
     pub root: PathBuf,
     pub tracked: HashSet<String>,
+    pub committed: HashSet<String>,
 }
 
 impl Checkout {
     /// Read the checkout at `root`. Refused when the folder can't be
-    /// resolved or git can't list what it tracks.
+    /// resolved, or git can't list what it tracks or what its last commit
+    /// holds.
     pub(crate) fn open(root: &Path) -> Result<Self, String> {
         let root = root
             .canonicalize()
@@ -383,23 +395,46 @@ impl Checkout {
                 root.display()
             )
         })?;
-        let tracked = listed
-            .split(|byte| *byte == 0)
-            .filter_map(|bytes| std::str::from_utf8(bytes).ok())
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-            .collect();
-        Ok(Self { root, tracked })
+        let paths = |listed: Vec<u8>| -> HashSet<String> {
+            listed
+                .split(|byte| *byte == 0)
+                .filter_map(|bytes| std::str::from_utf8(bytes).ok())
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let tracked = paths(listed);
+        let committed = run_git(
+            &root,
+            &["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD"],
+            LIST_TIMEOUT,
+            LIST_MAX_OUTPUT,
+        )
+        .map_err(|error| {
+            format!(
+                "listing the files of the last commit in {}: {error}",
+                root.display()
+            )
+        })?;
+        Ok(Self {
+            root,
+            tracked,
+            committed: paths(committed),
+        })
     }
 
-    /// `path` as the mapping records it, when it names a file git tracks
-    /// that exists and, with its links resolved, stays inside the checkout.
-    /// A leading `./` and backslashes are accepted.
+    /// `path` as the mapping records it, when it names a file git tracks,
+    /// the last commit holds, and that exists and, with its links resolved,
+    /// stays inside the checkout. A leading `./` and backslashes are
+    /// accepted.
     pub(crate) fn file(&self, path: &str) -> Result<String, Refused> {
         let path = path.replace('\\', "/");
         let path = path.strip_prefix("./").unwrap_or(&path);
         if !self.tracked.contains(path) {
             return Err(Refused::Untracked);
+        }
+        if !self.committed.contains(path) {
+            return Err(Refused::Uncommitted);
         }
         let resolved = self
             .root
@@ -685,6 +720,8 @@ pub(crate) struct Run {
     task_id: String,
     project: String,
     checkout: Checkout,
+    /// The checkout's folder, where each batch's child session reads.
+    folder: String,
     extensions: Vec<String>,
     seeds: usize,
 }
@@ -699,7 +736,7 @@ impl MapMemories {
             .db
             .with_connection(|conn| live_memories(conn, project))
             .map_err(|error| format!("reading the memories of {project}: {error}"))?;
-        let checkout = Checkout::open(Path::new(root))?;
+        let checkout = Checkout::open(&main_checkout(Path::new(root))?)?;
         let extensions = extensions(context.declaration);
         let seeds = seeds(context.declaration);
         let pattern = path_pattern(&extensions);
@@ -712,6 +749,7 @@ impl MapMemories {
             profile: context.profile.clone(),
             task_id: context.task_id().to_owned(),
             project: project.clone(),
+            folder: checkout.root.to_string_lossy().into_owned(),
             checkout,
             extensions,
             seeds,
@@ -901,6 +939,10 @@ impl Batch for MapBatch {
         let proposals = validate_manifest(&reply.text, &self.ids())?;
         self.write(tx, &proposals, run)
             .map_err(|error| format!("writing mappings: {error}"))
+    }
+
+    fn folder(&self) -> Option<&str> {
+        Some(&self.run.folder)
     }
 }
 

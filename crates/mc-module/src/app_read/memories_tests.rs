@@ -318,6 +318,7 @@ fn history_the_memory_tool_writes_reads_as_the_agents() {
         session: "s",
         project: PROJECT,
         authority: None,
+        line: None,
     };
     let saved = db
         .with_connection(|conn| {

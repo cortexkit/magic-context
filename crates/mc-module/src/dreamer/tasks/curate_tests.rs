@@ -1603,3 +1603,57 @@ fn without_a_workspace_of_two_projects_the_request_is_the_same_as_before() {
         shared.contains("\n[40] PROJECT_RULES: Use the gate script before delivering a change.\n")
     );
 }
+
+/// The git line memory `id` was learned on, as stored.
+fn line_of(store: &Store, id: i64) -> Option<crate::memory_line::Line> {
+    store
+        .db
+        .with_connection(|conn| crate::memory_line::of_memory(conn, id))
+        .unwrap()
+}
+
+#[test]
+fn a_split_part_and_a_merge_survivor_carry_the_line_their_sources_share() {
+    let commit = "c".repeat(40);
+    let next = Some(crate::memory_line::Line {
+        branch: Some("next".into()),
+        commit: Some(commit.clone()),
+    });
+    let on_next = |store: &Store, ids: &str| {
+        store.execute(&format!(
+            "UPDATE memories SET source_branch = 'next', source_commit = '{commit}' WHERE id IN ({ids})"
+        ));
+    };
+    let merge =
+        "<merge ids=\"1,2\">Run `cargo fmt --all` in crates/mc-module before every commit.</merge>";
+
+    // A split's new part carries the line of the memory it came from.
+    let store = fixture();
+    on_next(&store, "4");
+    let batch = store.rules();
+    let applied = store.apply(
+        &batch,
+        &list("<split id=\"4\"><part>The release checklist lives in docs/release.md and needs 2 sign-offs.</part><part>Release tags use the vX.Y.Z form.</part></split>"),
+        RUN,
+    );
+    assert_eq!(applied.applied, 1, "{applied:?}");
+    let added: i64 = store.value("SELECT MAX(id) FROM memories");
+    assert_eq!(line_of(&store, added), next);
+    assert_eq!(line_of(&store, 4), next);
+
+    // A merge of memories on one branch carries it.
+    let store = fixture();
+    on_next(&store, "1, 2");
+    let batch = store.rules();
+    assert_eq!(store.apply(&batch, &list(merge), RUN).applied, 1);
+    let survivor: i64 = store.value("SELECT MAX(id) FROM memories");
+    assert_eq!(line_of(&store, survivor), next);
+
+    // A merge of a memory on a branch with one that names none carries none.
+    let store = fixture();
+    on_next(&store, "1");
+    let batch = store.rules();
+    assert_eq!(store.apply(&batch, &list(merge), RUN).applied, 1);
+    let survivor: i64 = store.value("SELECT MAX(id) FROM memories");
+    assert_eq!(line_of(&store, survivor), None);
+}

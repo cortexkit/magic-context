@@ -1051,7 +1051,7 @@ fn a_cue_leaves_a_second_turn_edit_read_before_it_applicable() {
     };
     let outcome = store
         .db
-        .with_connection(|conn| applier::commit_revision(conn, &edit, &plan, 1, None, None))
+        .with_connection(|conn| applier::commit_revision(conn, &edit, &plan, 1, None, None, None))
         .unwrap();
     assert_eq!(outcome.state, "applied", "{}", outcome.reason);
     // The new text has no cue yet, so it is sent again.

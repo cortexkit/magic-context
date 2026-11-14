@@ -188,6 +188,7 @@ async fn ctx_memory_largest_get_fits_and_leaves_storage_whole() {
                         session: "s1",
                         project: "dir:output-test",
                         authority: None,
+                        line: None,
                     },
                     "PROJECT_RULES",
                     &format!("{i} {content}"),

@@ -211,6 +211,7 @@ fn agent_update(conn: &mut Connection, id: i64, content: &str) {
             session: "s1",
             project: PROJECT,
             authority: None,
+            line: None,
         },
         &crate::memory_writes::Change {
             operation: crate::memory_writes::Operation::Update,

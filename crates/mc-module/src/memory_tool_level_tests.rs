@@ -53,6 +53,7 @@ fn writer(authority: Option<&Authority>) -> Writer<'_> {
         session: "s1",
         project: PROJECT,
         authority,
+        line: None,
     }
 }
 

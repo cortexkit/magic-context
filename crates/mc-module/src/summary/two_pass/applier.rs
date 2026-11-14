@@ -309,6 +309,9 @@ pub struct Admission<'a> {
     pub owner: Option<&'a crate::memory_levels::Owner>,
     /// The calendar date the fact's text says it stops holding.
     pub expires: Option<&'a str>,
+    /// The git line of the summarized session's folder
+    /// ([`crate::memory_line`]), which a new memory records.
+    pub line: Option<&'a crate::memory_line::Line>,
 }
 
 /// Give a memory the end date its text states: it is hidden after that day.
@@ -495,6 +498,7 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                 if let Some(date) = admission.expires {
                     set_end_date(&tx, memory.id, date)?;
                 }
+                crate::memory_line::stamp(&tx, memory.id, admission.line)?;
                 crate::memory_levels::created(
                     &tx,
                     &placer,
@@ -666,7 +670,10 @@ fn inherited_safety(
 /// rewrites the survivor and archives the other sources as superseded by
 /// it; `replaces` inserts a new memory and archives the source as superseded
 /// by it. Kept clauses keep their evidence, and the survivor inherits the
-/// sources' safety assessment.
+/// sources' safety assessment. An `edit` or `replaces` writes the fact the
+/// summarized session learned, so its memory records `line`, that session
+/// folder's git line; a `merge` survivor carries the line its sources share,
+/// or none ([`crate::memory_line`]).
 pub fn commit_revision(
     conn: &mut Connection,
     decision: &Revision,
@@ -674,6 +681,7 @@ pub fn commit_revision(
     fact_id: i64,
     reservation: Option<&Reservation>,
     authority: Option<&crate::memory_levels::Authority>,
+    line: Option<&crate::memory_line::Line>,
 ) -> Result<Receipt, Error> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(existing) = read_receipt(&tx, &decision.key)? {
@@ -730,6 +738,14 @@ pub fn commit_revision(
     for source in &current {
         before.push(history_snapshot(&tx, source.id)?);
     }
+    let line = if decision.action == "merge" {
+        crate::memory_line::shared(
+            &tx,
+            &current.iter().map(|source| source.id).collect::<Vec<_>>(),
+        )?
+    } else {
+        line.cloned()
+    };
     let survivor =
         get_memory(&tx, decision.survivor)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let survivor_importance: Option<i64> = tx.query_row(
@@ -886,6 +902,7 @@ pub fn commit_revision(
             }
         }
     }
+    crate::memory_line::stamp(&tx, survivor_id, line.as_ref())?;
     let mut after: Vec<Option<Value>> = Vec::new();
     for source in &current {
         after.push(history_snapshot(&tx, source.id)?);

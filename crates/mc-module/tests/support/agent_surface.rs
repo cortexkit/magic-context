@@ -680,6 +680,7 @@ fn surface_memory_accepts_legacy_categories_at_runtime() {
         session: "surface",
         project: "p",
         authority: None,
+        line: None,
     };
     for category in [
         "ARCHITECTURE_DECISIONS",

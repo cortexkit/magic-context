@@ -33,6 +33,7 @@ fn store() -> (tempfile::TempDir, Arc<ContextDb>, String, i64) {
                 session: "asking",
                 project: PROJECT,
                 authority: None,
+                line: None,
             },
             "PROJECT_RULES",
             "The store keeps one row per memory.",

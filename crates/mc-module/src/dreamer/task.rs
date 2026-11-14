@@ -106,6 +106,13 @@ pub(crate) trait Batch: TaskInput + Send {
         reply: &TaskReply,
         run: i64,
     ) -> Result<Applied, String>;
+    /// The folder the batch's child session works in, when it is not the
+    /// folder of the session the run's project was learned from: the code
+    /// reading tasks read the repository's main checkout, or a copy of one
+    /// branch, instead of whatever worktree that session was in.
+    fn folder(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// What applying a batch did.

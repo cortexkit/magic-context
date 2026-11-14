@@ -25,6 +25,20 @@
 //! A batch holds twenty memories. The model reads code with the read-only
 //! tools and answers with one `<verify>` manifest ([`manifest`]); each
 //! verdict is checked and written on its own ([`apply`]).
+//!
+//! Which code a memory is checked against depends on the git line it was
+//! learned on ([`crate::memory_line`]). The tasks never read the folder of
+//! the session that started them, which may be a worktree on an old base:
+//! - a memory that names its branch is checked against that branch's
+//!   newest commit, in the repository's main checkout when that branch is
+//!   checked out there, and otherwise in a temporary copy of the commit
+//!   that is deleted after the run; a branch that is gone stands for the
+//!   default branch. Batches never mix two such commits;
+//! - any other memory is checked in the main checkout, and a rewrite or an
+//!   archive of it is applied only where every live branch agrees ([`live`]).
+//!
+//! A repository with a single live line checks every memory in its main
+//! checkout as before.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -34,6 +48,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, Transaction};
 use serde_json::Value;
 
+use crate::dreamer::branches::{main_checkout, Refs};
 use crate::dreamer::checkout::{Checkout, Limits, SEARCH_LIMITS};
 use crate::dreamer::run::{TaskInput, TaskReply};
 use crate::dreamer::task::{document_prompts, Applied, Batch, Owner, Task, TaskContext};
@@ -42,9 +57,11 @@ use crate::summary::fit::Window;
 
 mod apply;
 pub(crate) mod cites;
+mod live;
 pub(crate) mod manifest;
 
 use cites::Cite;
+use live::Gate;
 use manifest::{parse_manifest, Decision};
 
 /// The kinds memory profiles name.
@@ -82,6 +99,9 @@ pub(crate) struct Memory {
     pub verified_commit: Option<String>,
     /// When a verify task last decided anything about it, a skip included.
     pub checked_at: i64,
+    /// The branch it was learned on ([`crate::memory_line`]); `None` when
+    /// it names none.
+    pub branch: Option<String>,
 }
 
 /// The project's live memories in `categories`, unexpired, in the order the
@@ -113,7 +133,8 @@ pub(crate) fn live_memories(
         }
     }
     let mut statement = conn.prepare(
-        "SELECT id, origin_category, category, content, revision, COALESCE(verified_at, 0), metadata_json
+        "SELECT id, origin_category, category, content, revision, COALESCE(verified_at, 0), metadata_json,
+                source_branch
            FROM memories
           WHERE level = 'project' AND owner_id = ?1 AND status IN ('active', 'permanent')
             AND superseded_by_memory_id IS NULL AND (expires_at IS NULL OR expires_at > ?2)
@@ -128,11 +149,12 @@ pub(crate) fn live_memories(
             row.get::<_, i64>(4)?,
             row.get::<_, i64>(5)?,
             row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     let mut memories = Vec::new();
     for row in rows {
-        let (id, tag, category, content, revision, column_verified_at, metadata) = row?;
+        let (id, tag, category, content, revision, column_verified_at, metadata, branch) = row?;
         if !categories.contains(&category) {
             continue;
         }
@@ -175,6 +197,7 @@ pub(crate) fn live_memories(
             verified_at,
             verified_commit,
             checked_at,
+            branch: branch.filter(|branch| !branch.is_empty()),
         });
     }
     Ok(memories)
@@ -270,8 +293,8 @@ pub(crate) fn changed(memory: &Memory, changes: &Changes) -> bool {
 
 /// The order of a broad run: memories none of whose citations was found
 /// first, then the least recently checked, then by id.
-pub(crate) fn broad_order<'a>(pool: &'a [Memory], gone: &HashSet<i64>) -> Vec<&'a Memory> {
-    let mut ordered: Vec<&Memory> = pool.iter().collect();
+pub(crate) fn broad_order<'a>(pool: &[&'a Memory], gone: &HashSet<i64>) -> Vec<&'a Memory> {
+    let mut ordered: Vec<&Memory> = pool.to_vec();
     ordered.sort_by_key(|memory| (!gone.contains(&memory.id), memory.checked_at, memory.id));
     ordered
 }
@@ -534,6 +557,33 @@ struct Planned<'a> {
     evidence: Option<Evidence>,
 }
 
+/// Where a group of memories is checked.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Target {
+    /// The main checkout, as it is.
+    Main,
+    /// A temporary copy of `commit`, the newest commit of `branch`.
+    Copy { branch: String, commit: String },
+}
+
+/// The memories of one run checked in one place, and how each is checked.
+struct Group<'a> {
+    memories: Vec<&'a Memory>,
+    /// Memories checked against their own line: the branch they name, or
+    /// the default branch when that one is gone. Every other memory of the
+    /// main checkout's group passes the live-branch check before it changes.
+    lined: HashSet<i64>,
+}
+
+/// The batches planned for one group, with what they share.
+struct Plans<'a> {
+    target: Target,
+    checkout: Arc<Checkout>,
+    lined: HashSet<i64>,
+    plans: Vec<Planned<'a>>,
+    lookup: Lookup,
+}
+
 impl Verify {
     /// The run's batches for the context's owner, in order.
     pub(crate) fn plan_batches(
@@ -568,55 +618,50 @@ impl Verify {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let checkout = Arc::new(Checkout::open(Path::new(root))?);
-        let mut plans: Vec<Planned<'_>> = Vec::new();
-        let lookup;
-        if self.broad {
-            lookup = look_up(&checkout, &candidates, &SEARCH_LIMITS);
-            for chunk in broad_order(&pool, &lookup.gone).chunks(BATCH_SIZE) {
-                plans.push(Planned {
-                    memories: chunk.to_vec(),
-                    evidence: None,
-                });
-            }
+        // The main checkout, whatever worktree the run's session was in.
+        let main = main_checkout(Path::new(root))?;
+        let refs = if candidates.iter().any(|memory| memory.branch.is_some()) {
+            Some(Refs::read(&main)?)
         } else {
-            let changes = Changes::read(&checkout, &candidates);
-            let selected: Vec<&Memory> = candidates
-                .into_iter()
-                .filter(|memory| changed(memory, &changes))
-                .collect();
-            let (verified, never): (Vec<&Memory>, Vec<&Memory>) = selected
-                .into_iter()
-                .partition(|memory| memory.verified_at > 0);
-            for chunk in verified.chunks(BATCH_SIZE) {
-                plans.push(Planned {
-                    memories: chunk.to_vec(),
-                    evidence: evidence(&checkout, chunk),
-                });
-            }
-            for chunk in never.chunks(BATCH_SIZE) {
-                plans.push(Planned {
-                    memories: chunk.to_vec(),
-                    evidence: None,
-                });
-            }
-            let read: Vec<&Memory> = plans
-                .iter()
-                .filter(|plan| plan.evidence.is_none())
-                .flat_map(|plan| plan.memories.iter().copied())
-                .collect();
-            lookup = if read.is_empty() {
-                Lookup::default()
-            } else {
-                look_up(&checkout, &read, &SEARCH_LIMITS)
+            None
+        };
+        let main_branch = refs
+            .as_ref()
+            .and_then(|refs| refs.main_branch().map(str::to_owned));
+        let groups = group_by_line(&candidates, refs.as_ref());
+        let mut planned: Vec<Plans<'_>> = Vec::new();
+        for (target, group) in groups {
+            let checkout = match &target {
+                Target::Main => Checkout::open(&main)?,
+                Target::Copy { branch, commit } => match Checkout::open_copy(&main, commit) {
+                    Ok(copy) => copy,
+                    // Its memories stay as they are until a later run can
+                    // read their branch.
+                    Err(error) => {
+                        tracing::warn!(
+                            "ck-mc: dreamer: {} for {project}: the memories learned on {branch} are not checked this run: {error}",
+                            declared.task
+                        );
+                        continue;
+                    }
+                },
             };
-        }
-        if lookup.cut {
-            tracing::warn!(
-                "ck-mc: dreamer: {} for {project}: the plain search stopped after {} of the checkout's files; no citation is listed as not found",
-                declared.task,
-                lookup.files
-            );
+            let checkout = Arc::new(checkout);
+            let (plans, lookup) = self.plan_group(&checkout, &group.memories);
+            if lookup.cut {
+                tracing::warn!(
+                    "ck-mc: dreamer: {} for {project}: the plain search stopped after {} of the checkout's files; no citation is listed as not found",
+                    declared.task,
+                    lookup.files
+                );
+            }
+            planned.push(Plans {
+                target,
+                checkout,
+                lined: group.lined,
+                plans,
+                lookup,
+            });
         }
         // `verify` checks memories without a diff under its other message.
         let read_document = if self.broad {
@@ -624,17 +669,24 @@ impl Verify {
         } else {
             document("user_without_diff")
         };
-        plans
-            .into_iter()
-            .enumerate()
-            .map(|(index, plan)| {
+        let mut batches = Vec::new();
+        for group in planned {
+            let branch = match &group.target {
+                Target::Main => main_branch.clone(),
+                Target::Copy { branch, .. } => Some(branch.clone()),
+            };
+            for plan in group.plans {
                 let (frame, user, text) = match &plan.evidence {
                     Some(evidence) => (
                         DIFF_FRAME,
                         document("user"),
                         diff_input(&plan.memories, evidence),
                     ),
-                    None => (INPUT_FRAME, read_document, input(&plan.memories, &lookup)),
+                    None => (
+                        INPUT_FRAME,
+                        read_document,
+                        input(&plan.memories, &group.lookup),
+                    ),
                 };
                 let user = user.ok_or_else(|| {
                     format!(
@@ -654,36 +706,136 @@ impl Verify {
                     &[(frame, text.as_str())],
                     &[("projectIdentity", project.as_str())],
                 )?;
-                Ok(VerifyBatch {
+                let read: Vec<Read> = plan
+                    .memories
+                    .iter()
+                    .map(|memory| Read {
+                        id: memory.id,
+                        revision: memory.revision,
+                        files: memory.files.clone(),
+                        content: memory.content.clone(),
+                        lined: group.lined.contains(&memory.id),
+                    })
+                    .collect();
+                // A batch of the main checkout holding a memory without a
+                // line of its own checks the live branches before writing.
+                let gate = (group.target == Target::Main && read.iter().any(|read| !read.lined))
+                    .then(|| Gate::new(&main, HISTORY_TIMEOUT));
+                batches.push(VerifyBatch {
                     declared: Arc::clone(&declared),
-                    index,
+                    index: batches.len(),
                     project: project.clone(),
                     system,
                     message,
-                    read: plan
-                        .memories
-                        .iter()
-                        .map(|memory| Read {
-                            id: memory.id,
-                            revision: memory.revision,
-                            files: memory.files.clone(),
-                            content: memory.content.clone(),
-                        })
-                        .collect(),
+                    read,
                     diff: plan.evidence.is_some(),
                     search: plan.evidence.is_none().then_some(SearchRecord {
-                        names: lookup.names,
-                        files: lookup.files,
-                        cut: lookup.cut,
-                        elapsed_ms: lookup.elapsed_ms,
+                        names: group.lookup.names,
+                        files: group.lookup.files,
+                        cut: group.lookup.cut,
+                        elapsed_ms: group.lookup.elapsed_ms,
                     }),
-                    checkout: Arc::clone(&checkout),
+                    folder: group.checkout.root().to_string_lossy().into_owned(),
+                    checkout: Arc::clone(&group.checkout),
+                    branch: branch.clone(),
+                    gate,
                     history_timeout: HISTORY_TIMEOUT,
                     absence: Mutex::default(),
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        Ok(batches)
     }
+
+    /// The messages for `memories`, all checked in `checkout`, and the
+    /// plain search behind their `Not found` lines.
+    fn plan_group<'a>(
+        &self,
+        checkout: &Checkout,
+        memories: &[&'a Memory],
+    ) -> (Vec<Planned<'a>>, Lookup) {
+        let mut plans: Vec<Planned<'a>> = Vec::new();
+        if self.broad {
+            let lookup = look_up(checkout, memories, &SEARCH_LIMITS);
+            for chunk in broad_order(memories, &lookup.gone).chunks(BATCH_SIZE) {
+                plans.push(Planned {
+                    memories: chunk.to_vec(),
+                    evidence: None,
+                });
+            }
+            return (plans, lookup);
+        }
+        let changes = Changes::read(checkout, memories);
+        let selected: Vec<&Memory> = memories
+            .iter()
+            .copied()
+            .filter(|memory| changed(memory, &changes))
+            .collect();
+        let (verified, never): (Vec<&Memory>, Vec<&Memory>) = selected
+            .into_iter()
+            .partition(|memory| memory.verified_at > 0);
+        for chunk in verified.chunks(BATCH_SIZE) {
+            plans.push(Planned {
+                memories: chunk.to_vec(),
+                evidence: evidence(checkout, chunk),
+            });
+        }
+        for chunk in never.chunks(BATCH_SIZE) {
+            plans.push(Planned {
+                memories: chunk.to_vec(),
+                evidence: None,
+            });
+        }
+        let read: Vec<&Memory> = plans
+            .iter()
+            .filter(|plan| plan.evidence.is_none())
+            .flat_map(|plan| plan.memories.iter().copied())
+            .collect();
+        let lookup = if read.is_empty() {
+            Lookup::default()
+        } else {
+            look_up(checkout, &read, &SEARCH_LIMITS)
+        };
+        (plans, lookup)
+    }
+}
+
+/// Where each of `memories` is checked, the main checkout first and then
+/// each copied branch by name. A memory that names a branch is checked on
+/// that branch's newest commit, or on the default branch's when its own is
+/// gone; in the main checkout when that branch is checked out there. A
+/// memory that names none, or whose branch and the default branch are both
+/// unknown, is checked in the main checkout without a line of its own.
+fn group_by_line<'a>(memories: &[&'a Memory], refs: Option<&Refs>) -> BTreeMap<Target, Group<'a>> {
+    let mut groups: BTreeMap<Target, Group<'a>> = BTreeMap::new();
+    for memory in memories {
+        let line = memory
+            .branch
+            .as_deref()
+            .zip(refs)
+            .and_then(|(branch, refs)| {
+                refs.tip(branch)
+                    .map(|commit| (branch.to_owned(), commit.to_owned()))
+                    .or_else(|| refs.default_branch())
+                    .map(|(branch, commit)| {
+                        (refs.main_branch() == Some(branch.as_str()), branch, commit)
+                    })
+            });
+        let (target, lined) = match line {
+            Some((true, _, _)) => (Target::Main, true),
+            Some((false, branch, commit)) => (Target::Copy { branch, commit }, true),
+            None => (Target::Main, false),
+        };
+        let group = groups.entry(target).or_insert_with(|| Group {
+            memories: Vec::new(),
+            lined: HashSet::new(),
+        });
+        group.memories.push(memory);
+        if lined {
+            group.lined.insert(memory.id);
+        }
+    }
+    groups
 }
 
 impl Task for Verify {
@@ -713,6 +865,9 @@ pub(crate) struct Read {
     pub files: Vec<String>,
     /// Its text as the batch sent it.
     pub content: String,
+    /// Checked against its own line (see [`group_by_line`]); a memory that is not
+    /// changes only where every live branch agrees ([`live`]).
+    pub lined: bool,
 }
 
 /// The plain search behind a batch's `Not found` lines.
@@ -800,7 +955,17 @@ pub(crate) struct VerifyBatch {
     diff: bool,
     #[cfg_attr(not(test), allow(dead_code))]
     search: Option<SearchRecord>,
+    /// The folder the batch's child session reads: the main checkout, or a
+    /// copy of one branch.
+    folder: String,
     checkout: Arc<Checkout>,
+    /// The branch the checkout holds, which a rewrite of a memory checked
+    /// against its own line records with the checkout's commit; `None` when
+    /// the main checkout's HEAD is detached.
+    branch: Option<String>,
+    /// The live-branch check of the batch's memories without a line of
+    /// their own; `None` when it holds none.
+    gate: Option<Gate>,
     /// How long git may search the history for one `missing` a reply names
     /// ([`HISTORY_TIMEOUT`]).
     history_timeout: Duration,
@@ -825,6 +990,11 @@ impl VerifyBatch {
     #[cfg(test)]
     pub(crate) fn search(&self) -> Option<SearchRecord> {
         self.search
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkout(&self) -> &Checkout {
+        &self.checkout
     }
 
     /// The commit the batch's checkout was at when it was planned.
@@ -878,6 +1048,9 @@ impl TaskInput for VerifyBatch {
                 }
             }
         }
+        // The live branches are read here too, before the store's write
+        // lock is taken, for each change the write will check against them.
+        self.warm_gate(&verdicts);
         Ok(())
     }
 }
@@ -888,8 +1061,15 @@ impl Batch for VerifyBatch {
         self.write(tx, &verdicts, run)
             .map_err(|error| format!("writing verdicts: {error}"))
     }
+
+    fn folder(&self) -> Option<&str> {
+        Some(&self.folder)
+    }
 }
 
 #[cfg(test)]
 #[path = "verify_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod lines_tests;

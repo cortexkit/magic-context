@@ -76,6 +76,7 @@ pub(crate) mod memory_context;
 #[cfg(test)]
 pub(crate) mod memory_legacy;
 pub mod memory_levels;
+pub mod memory_line;
 pub mod memory_profile;
 /// The selection a head's memory blocks show.
 pub(crate) mod memory_render;

@@ -563,6 +563,10 @@ pub struct Writer<'a> {
     /// session may write. `None` leaves new memories unplaced and the
     /// session without a workspace.
     pub authority: Option<&'a crate::memory_levels::Authority>,
+    /// The git line checked out in the session's folder when the agent
+    /// called the tool ([`crate::memory_line`]): a memory it saves or
+    /// rewrites records it. `None` records none.
+    pub line: Option<&'a crate::memory_line::Line>,
 }
 
 impl Writer<'_> {
@@ -704,6 +708,7 @@ pub fn save_at(
                 "agent",
                 Some(50),
             )?;
+            crate::memory_line::stamp(&tx, memory.id, who.line)?;
             crate::memory_levels::created(
                 &tx,
                 &placer,
@@ -944,6 +949,8 @@ pub fn mutate(
                 "UPDATE memories SET category = ?2, origin_category = ?3 WHERE id = ?1",
                 params![first.id, category_id, category],
             )?;
+            // The agent wrote the new text in its session, on its line.
+            crate::memory_line::stamp(&tx, first.id, who.line)?;
             canonical = get_memory(&tx, first.id)?;
         }
         Operation::Archive => {
@@ -955,6 +962,12 @@ pub fn mutate(
         Operation::Merge => {
             let content = content.expect("checked");
             let hash = hash.as_deref().expect("checked");
+            // Read before any source changes: the survivor carries the line
+            // every source shares, or none.
+            let line = crate::memory_line::shared(
+                &tx,
+                &sources.iter().map(|source| source.id).collect::<Vec<_>>(),
+            )?;
             let survivor = match &duplicate {
                 Some(duplicate) => duplicate.clone(),
                 None => {
@@ -1025,6 +1038,7 @@ pub fn mutate(
                 ],
             )?;
             clear_derived(&tx, survivor.id)?;
+            crate::memory_line::stamp(&tx, survivor.id, line.as_ref())?;
             canonical = get_memory(&tx, survivor.id)?;
         }
     }

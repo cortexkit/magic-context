@@ -399,6 +399,7 @@ mod tests {
             session: "s1",
             project: "pj-a",
             authority: Some(&authority),
+            line: None,
         };
         let receipt = db
             .with_connection(|conn| memory_writes::save(conn, &who, "NAMING", "Call it the head."))
@@ -436,6 +437,7 @@ mod tests {
             session: "s1",
             project: "pj-a",
             authority: None,
+            line: None,
         };
         let receipt = db
             .with_connection(|conn| memory_writes::save(conn, &who, "NAMING", "No owner."))
@@ -456,6 +458,7 @@ mod tests {
             session: "s1",
             project: "pj-a",
             authority: Some(&authority),
+            line: None,
         };
         let first = db
             .with_connection(|conn| memory_writes::save(conn, &who, "NAMING", "First name."))
