@@ -694,6 +694,14 @@
               "value": "map-memories"
             },
             {
+              "label": "Reflect events",
+              "value": "reflect-events"
+            },
+            {
+              "label": "Refresh primers",
+              "value": "refresh-primers"
+            },
+            {
               "label": "Verify",
               "value": "verify"
             },
@@ -787,5 +795,5 @@
       "title": "Delete notes"
     }
   ],
-  "digest": "c7b76150ed078fb3d7ed0e363eddb037bd2bf1bd0ce71993920630ed3d7e10e6"
+  "digest": "59a1a16146d1a216ffdebb8668731cadadd22c73bf70b6c0a8fe8b1f4018dc5b"
 }
