@@ -657,17 +657,17 @@ pub(crate) struct ReviewBatch {
     system: String,
     message: String,
     /// Each live global memory the message shows, with the revision read.
-    memories: Vec<(i64, i64)>,
+    pub(crate) memories: Vec<(i64, i64)>,
     /// The memories shown that the person wrote or edited.
-    protected: HashSet<i64>,
+    pub(crate) protected: HashSet<i64>,
     /// The memories shown as unsorted, in id order.
-    unsorted: Vec<i64>,
+    pub(crate) unsorted: Vec<i64>,
     /// Each observation the message shows.
-    candidates: Vec<i64>,
+    pub(crate) candidates: Vec<i64>,
     /// The categories a change may file a memory under.
     categories: Vec<Category>,
     /// How many observations a promotion needs.
-    threshold: usize,
+    pub(crate) threshold: usize,
     /// The profile the prompts came from, recorded on each new memory.
     origin: Option<OriginProfile>,
 }

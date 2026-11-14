@@ -23,6 +23,8 @@ mod map_replay_tests;
 #[cfg(test)]
 mod replay_tests;
 #[cfg(test)]
+mod review_replay_tests;
+#[cfg(test)]
 mod verify_replay_tests;
 
 /// Every task kind the module runs. A profile's task of any other kind is
