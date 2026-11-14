@@ -17,5 +17,5 @@ Answer with ONE `<curate>` list and nothing after it. Put only the memories you 
 
 - `merge` names two or more memories from your list. The merged text replaces all of them.
 - `of` names a memory from your list, from the memories every session sees, or from the similar memories.
-- `quote` copies one line of the project documents exactly.
+- `quote` copies one line of the project documents or the workspace guidance exactly.
 - `<curate></curate>` with nothing inside is a valid answer.

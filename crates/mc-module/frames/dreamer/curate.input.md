@@ -2,6 +2,11 @@
 ⟦docs⟧
 </project-documents>
 
+<workspace-guidance>
+Every agent in this project's workspace reads this at the start of every session.
+⟦guidance⟧
+</workspace-guidance>
+
 <always-shown>
 Every session already sees these memories, from any category. Use them to find duplicates. Do not change them.
 [⟦shown.id⟧] ⟦shown.category⟧: ⟦shown.content⟧

@@ -10,10 +10,12 @@ Answer with ONE `<curate>` list and nothing after it. Put only the memories you 
 <part>The second fact</part>
 </split>
 <archive id="40" reason="duplicate" of="12"/>
+<archive id="41" reason="duplicate" quote="The exact line from the workspace guidance"/>
 <archive id="42" reason="one-off" why="a chat room id"/>
 <archive id="43" reason="lesson" why="a story with no rule"/>
 </curate>
 
 - `merge` names two or more memories from your list. The merged text replaces all of them.
 - `of` names a memory from your list, from the similar memories, or from the person's memories every session sees.
+- `quote` copies one line of the workspace guidance exactly.
 - `<curate></curate>` with nothing inside is a valid answer.
