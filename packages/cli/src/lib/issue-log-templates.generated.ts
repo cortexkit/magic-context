@@ -1207,6 +1207,7 @@ const TEMPLATE_DATA = [
 "Pi publication skipped reason=number_write_failed; serving managed context",
 "[dreamer] \x01: skipped (no ordinary parent session is available on this host)",
 "EMERGENCY: usage=\x01% — notified user, evaluating available emergency reclaim",
+"ck-mc: context.db migration 108 drops \x01 commit vectors whose commit is gone",
 "transform: usage=\x01% (\x01 tokens, limit=\x01) decision=\x01 EMERGENCY=true busting=true",
 "ck-mc: session \x01: summary skipped: drain budget spent (\x01 tokens this window)",
 "historian boundary moved off a row the host does not serve: \x01-\x01 -> (dropped)",
