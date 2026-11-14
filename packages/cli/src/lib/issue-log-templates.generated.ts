@@ -2168,6 +2168,7 @@ const TEMPLATE_DATA = [
 "[magic-context-pi] embedding failed for memory \x01:",
 "[magic-context-pi] proactively embedded memory \x01.",
 "[magic-context] startup maintenance failed for \x01:",
+"ck-mc: session \x01: summary model \x01 on \x01/\x01 (decision \x01)",
 "[\x01] all models exhausted; tried: \x01; last error: \x01: \x01",
 "[dreamer] WARNING: dropping Pi model not found: \x01\x020m",
 "[dreamer] WARNING: dropping Pi model not found: \x01",

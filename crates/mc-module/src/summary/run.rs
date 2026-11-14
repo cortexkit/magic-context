@@ -206,6 +206,17 @@ pub async fn run<C: RunnerClient + Router>(
                 return Err(failure.unwrap_or_else(|| error.to_string()).into());
             }
         };
+        // Routing picks the model per attempt and ck-mc keeps no other record
+        // of it, so this line is the only place to see which model wrote a
+        // session's summaries.
+        tracing::info!(
+            "ck-mc: session {}: summary model {} on {}/{} (decision {})",
+            job.session.session,
+            answer.route.route_key(),
+            job.session.runner,
+            child_harness,
+            answer.decision_id,
+        );
         tried.push(answer.route.route_key());
         let window = fit::Window {
             counter: crate::count::Counter::for_model(Some(&answer.route.route_key())),
