@@ -22,7 +22,7 @@ Rules:
 - Many CONSTRAINTS are HYBRID: "external system does X, and OUR code handles it here." Map those to the HANDLING code (you can verify the handling, even though you can't verify the external behavior). Only mark independent when there is NO local code that implements or handles the fact.
 - Prefer the most specific file(s); do not pad with tangential files. Most memories map to one file; some to a few.
 - Mark independent="true" only for the file-independent cases above; an investigation that runs out of calls stays unmapped.
-- A memory about THIS project's own code (a table, setting, function, type or file it says the project has) is never file-independent, even when your searches find none of it: leave it unmapped. The code may have been renamed or removed, and deciding that is verify's job, not yours.
+- A memory about THIS project's own code (a table, setting, function, type or file it says the project has) is never file-independent, even when your searches find none of it: leave it unmapped. The code may have been renamed or removed; a later verification pass decides that, not you.
 === user ===
 ## Map these memories to their backing files
 

@@ -158,8 +158,9 @@ fn a_memory_cites_each_thing_once_and_at_most_sixteen() {
     assert_eq!(cites(&many, &top_level()).len(), MAX_CITES);
 }
 
-/// English phrases and a number written with slashes, which a verify-broad
-/// batch over this project's checkout once listed as missing paths.
+/// English phrases and a number written with slashes, which a broad verify
+/// batch (one that checks memories whether or not they are mapped to files)
+/// over this project's checkout once listed as missing paths.
 const SLASHED_PROSE: [&str; 10] = [
     "prompt/input/output",
     "SOFT/SOFT+/HARD",

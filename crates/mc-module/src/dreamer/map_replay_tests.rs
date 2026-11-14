@@ -166,8 +166,8 @@ fn request(batch: &MapBatch, index: usize, args: &Args, commit: Option<&str>) ->
         "model": args.model,
         // What the module asks the runner for: a reply of at most this many
         // tokens (less when the model's own limit is lower), at most this
-        // many model steps, and AFT's read-only reader tools in the
-        // project's folder.
+        // many model steps, and the read-only code tools (read, grep, glob
+        // and code navigation) confined to the project's folder.
         "settings": {
             "maxOutputTokens": DREAM_OUTPUT_TOKENS,
             "maxSteps": demand().max_steps,

@@ -90,8 +90,8 @@
     },
     {
       "path": "prompts/dreamer/map-memories/system.md",
-      "sha256": "9366e0289b78eb66446f5af8ba9da94d5f5f0a58e391193ff0ded04b77434918",
-      "bytes": 3455
+      "sha256": "aa703844bd0bd8d45e4834a05d4c8605820d6fc09f20d246f0f5fe83c0860ccc",
+      "bytes": 3458
     },
     {
       "path": "prompts/dreamer/map-memories/user.md",

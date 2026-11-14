@@ -1068,7 +1068,7 @@
       "why": "A map replay on real code (14 Nov) marked memories about this project's own removed tables and settings file-independent because the searches found nothing; a missing subject now stays unmapped.",
       "today": [],
       "rendered": [
-        "- A memory about THIS project's own code (a table, setting, function, type or file it says the project has) is never file-independent, even when your searches find none of it: leave it unmapped. The code may have been renamed or removed, and deciding that is verify's job, not yours."
+        "- A memory about THIS project's own code (a table, setting, function, type or file it says the project has) is never file-independent, even when your searches find none of it: leave it unmapped. The code may have been renamed or removed; a later verification pass decides that, not you."
       ]
     }
   ]
