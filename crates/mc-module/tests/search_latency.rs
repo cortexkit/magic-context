@@ -50,8 +50,8 @@ const DIMS: usize = 1024;
 const LONG_SESSION: &str = "ses_long_running";
 const LONG_MESSAGES: i64 = 3_000;
 const LONG_SUMMARIZED: i64 = 2_500;
-/// A session with nothing indexed yet, like the new head sessions in the
-/// live log whose first `ctx_search` was slow.
+/// A session with nothing indexed yet, as any session is right after its
+/// Setup.
 const NEW_SESSION: &str = "ses_fresh";
 
 const PROJECT_MEMORIES: usize = 5_244;
@@ -819,6 +819,42 @@ fn message_diagnostics(conn: &Connection, case: &Case, query: &str, prototype: b
                 ms(ranked_took)
             );
         }
+        // The plugin's session filter (`message-fts-session-filter.ts`): the
+        // unary `+` keeps SQLite from restarting the full-text query for each
+        // mapped row, so every match's rowid is checked against the session's
+        // rowids once, before any content column is read. The session-id test
+        // stays, as in the plugin.
+        let screened = "SELECT {columns} FROM message_history_fts
+              WHERE +message_history_fts.rowid IN (
+                        SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id = ?1)
+                AND message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2 {tail}";
+        let (found, took) = count(
+            conn,
+            &screened
+                .replace("{columns}", "COUNT(*)")
+                .replace("{tail}", ""),
+            params![case.session, matching],
+        );
+        let (ranked, ranked_took) = timed(|| {
+            let sql = screened
+                .replace("{columns}", "message_ordinal")
+                .replace("{tail}", "ORDER BY bm25(message_history_fts) LIMIT ?3");
+            let mut statement = conn.prepare(&sql).unwrap();
+            let rows = statement
+                .query_map(params![case.session, matching, (TIER * 3) as i64], |row| {
+                    row.get::<_, rusqlite::types::Value>(0)
+                })
+                .unwrap()
+                .count();
+            rows
+        });
+        println!(
+            "MESSAGES {} | {query} | {form}: screened by the session's rowid map as the plugin does: {found} in the session ({:.0} ms), ranked top {} ({ranked} rows, {:.0} ms)",
+            case.label,
+            ms(took),
+            TIER * 3,
+            ms(ranked_took)
+        );
         // A narrower bound that needs no schema change: the session's own
         // span of rows, which the full-text index can seek to.
         let (low, high): (Option<i64>, Option<i64>) = conn
