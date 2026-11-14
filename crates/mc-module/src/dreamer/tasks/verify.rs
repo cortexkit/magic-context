@@ -653,6 +653,7 @@ impl Verify {
                             id: memory.id,
                             revision: memory.revision,
                             files: memory.files.clone(),
+                            content: memory.content.clone(),
                         })
                         .collect(),
                     diff: plan.evidence.is_some(),
@@ -695,6 +696,8 @@ pub(crate) struct Read {
     pub revision: i64,
     /// The files it was mapped to.
     pub files: Vec<String>,
+    /// Its text as the batch sent it.
+    pub content: String,
 }
 
 /// The plain search behind a batch's `Not found` lines.
@@ -715,21 +718,20 @@ pub(crate) enum Absence {
     Undecided(String),
 }
 
-/// Look `missing` up as a path when it is shaped like one, and as a code
-/// name otherwise, searching no further than `limits`.
-fn look_for(checkout: &Checkout, missing: &str, limits: &Limits) -> Absence {
-    if cites::path_shaped(missing) {
-        return match checkout.has_path(missing) {
-            Some(true) => Absence::Present,
-            Some(false) => Absence::Absent,
-            None => Absence::Undecided(format!("{missing} is not a path inside the checkout")),
-        };
-    }
-    if !cites::name_shaped(missing) {
-        return Absence::Undecided(format!(
-            "{missing} is neither a path nor a code name the module can look up"
-        ));
-    }
+/// Whether what `cite` names is in the checkout: a path among the tracked
+/// files and folders, a code name as literal text, searching no further than
+/// `limits`.
+fn look_for(checkout: &Checkout, cite: &Cite, limits: &Limits) -> Absence {
+    let missing = match cite {
+        Cite::Path(path) => {
+            return match checkout.has_path(path) {
+                Some(true) => Absence::Present,
+                Some(false) => Absence::Absent,
+                None => Absence::Undecided(format!("{path} is not a path inside the checkout")),
+            };
+        }
+        Cite::Name(name) => name.as_str(),
+    };
     let search = checkout.search(&[missing], limits);
     if search.found[0] {
         Absence::Present
@@ -763,7 +765,7 @@ pub(crate) struct VerifyBatch {
     /// What each `missing` a reply names was found to be. The lookup runs
     /// when the reply is accepted, before the store's write lock is taken,
     /// and the write reads the answer from here.
-    absence: Mutex<HashMap<String, Absence>>,
+    absence: Mutex<HashMap<Cite, Absence>>,
 }
 
 impl VerifyBatch {
@@ -791,15 +793,15 @@ impl VerifyBatch {
         self.read.iter().map(|read| read.id).collect()
     }
 
-    fn absence(&self, missing: &str) -> Absence {
-        if let Some(known) = self.absence.lock().expect("absence cache").get(missing) {
+    fn absence(&self, cite: &Cite) -> Absence {
+        if let Some(known) = self.absence.lock().expect("absence cache").get(cite) {
             return known.clone();
         }
-        let found = look_for(&self.checkout, missing, &SEARCH_LIMITS);
+        let found = look_for(&self.checkout, cite, &SEARCH_LIMITS);
         self.absence
             .lock()
             .expect("absence cache")
-            .insert(missing.to_owned(), found.clone());
+            .insert(cite.clone(), found.clone());
         found
     }
 }
@@ -819,7 +821,13 @@ impl TaskInput for VerifyBatch {
         let verdicts = parse_manifest(reply, &self.ids())?;
         for verdict in &verdicts {
             if let (Decision::Archive, Some(missing)) = (verdict.decision, &verdict.missing) {
-                self.absence(missing);
+                let read = self.read.iter().find(|read| read.id == verdict.id);
+                if let Some(cite) = read
+                    .map(|read| cites::cites(&read.content))
+                    .and_then(|cited| cited.into_iter().find(|cite| cite.text() == missing))
+                {
+                    self.absence(&cite);
+                }
             }
         }
         Ok(())

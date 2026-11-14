@@ -15,7 +15,7 @@ fn a_memory_cites_spans_paths_and_code_names_in_order() {
     assert_eq!(
         texts(
             "Use `transform_route_retired` from crates/mc-module/src/dreamer/task.rs and \
-             `ContextDb::open()`; the McStore type, the run_git helper and the mc-module \
+             `ContextDb::open()`; the McStore type, the run_git helper and the `mc-module` \
              crate, see verify.rs."
         ),
         [
@@ -57,13 +57,87 @@ fn plain_english_ids_urls_and_placeholders_are_not_citations() {
     }
     // Tokens inside a skipped span are still read on their own.
     assert_eq!(
-        texts("Keys look like `dream-run:<id>:…`."),
-        ["name:dream-run"]
+        texts("Keys look like `ctx_reduce(drop=…)`."),
+        ["name:ctx_reduce"]
+    );
+    // A package name is neither a path of the checkout nor, bare and
+    // hyphenated, a code name.
+    assert!(texts("The package @cortexkit/claustrum-client").is_empty());
+}
+
+/// Hyphenated words a real verify-broad batch was told were "not found",
+/// each from a behavioural rule that cited nothing else.
+const ENGLISH_COMPOUNDS: [&str; 18] = [
+    "audit-flagged",
+    "checklist-verification",
+    "non-unique",
+    "Maintain-memory",
+    "release-bound",
+    "cross-validate",
+    "30-60s",
+    "Team-mode",
+    "channel-facing",
+    "re-classifying",
+    "stop-if-absent",
+    "Prevention-starves-recovery",
+    "test-confirmed",
+    "per-seat",
+    "zero-delta",
+    "late-arriving",
+    "Timer-bracket",
+    "distribution-shape",
+];
+
+#[test]
+fn a_bare_hyphenated_word_is_never_a_citation() {
+    for word in ENGLISH_COMPOUNDS {
+        assert!(
+            texts(&format!(
+                "When intentionally keeping an {word} pattern, add inline comments."
+            ))
+            .is_empty(),
+            "{word}"
+        );
+        assert!(texts(word).is_empty(), "{word} alone");
+    }
+    // A code name written inside a compound still counts.
+    assert_eq!(texts("A ContextDb-backed reader."), ["name:ContextDb"]);
+}
+
+#[test]
+fn backticked_kebab_flags_paths_and_qualified_or_dotted_names_are_citations() {
+    assert_eq!(texts("The `mc-module` crate."), ["name:mc-module"]);
+    assert_eq!(
+        texts("Pass --shared-context-db to share it."),
+        ["name:--shared-context-db"]
     );
     assert_eq!(
-        texts("The package @cortexkit/claustrum-client"),
-        ["name:claustrum-client"]
+        texts("It lives in crates/mc-module now."),
+        ["path:crates/mc-module"]
     );
+    assert_eq!(
+        texts("Reads go through session.entries first."),
+        ["name:session.entries"]
+    );
+    assert_eq!(
+        texts("It fails with compaction_unavailable."),
+        ["name:compaction_unavailable"]
+    );
+    assert_eq!(
+        texts("Pi sessions use RecipeLane::Pi."),
+        ["name:RecipeLane::Pi"]
+    );
+    assert_eq!(texts("MAX_CITES caps it."), ["name:MAX_CITES"]);
+    // Abbreviations, host names, file-like product names and an em dash
+    // written as two hyphens are none of these.
+    for prose in [
+        "e.g. this, i.e. that",
+        "See docs.cortexkit.io for it.",
+        "Built on node.js today.",
+        "It works--mostly.",
+    ] {
+        assert!(texts(prose).is_empty(), "{prose}: {:?}", texts(prose));
+    }
 }
 
 #[test]
@@ -88,18 +162,5 @@ fn shapes_for_a_missing_citation() {
     }
     for not_path in ["and/or", "src/shared", "/etc/x.rs", "node.js", "@x/y-z"] {
         assert!(!path_shaped(not_path), "{not_path}");
-    }
-    for name in ["transform_route_retired", "McStore", "mc-module", "$ref_x"] {
-        assert!(name_shaped(name), "{name}");
-    }
-    for not_name in [
-        "ContextDb::open",
-        "m.revision",
-        "the old module",
-        "abc",
-        "9lives",
-        "ask_a0ff68d975ba1b60",
-    ] {
-        assert!(!name_shaped(not_name), "{not_name}");
     }
 }

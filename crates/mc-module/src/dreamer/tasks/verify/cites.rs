@@ -1,14 +1,22 @@
 //! The paths and code names a memory cites, picked out of its text so the
 //! module can look each up in the checkout before a verify batch is sent.
 //!
-//! Three kinds of text count: a backticked span without spaces, a
-//! path-shaped token (`crates/x/y.rs`, `task.rs`, `crates/mc-module`), and an
-//! identifier of four or more characters written in `snake_case`,
-//! `camelCase`/`PascalCase` or `kebab-case`. Plain English words, hyphenated
-//! ones like `read-only` included, are left out, and so are ids (a segment of
-//! eight or more hexadecimal characters with a digit), which name a session
-//! or a commit rather than code. A token inside a span or path already taken
-//! is not taken again.
+//! What counts, each at least four characters:
+//! - a backticked span without spaces (`` `mc-module` ``);
+//! - a path-shaped token (`crates/x/y.rs`, `task.rs`, `crates/mc-module`);
+//! - a qualified name (`RecipeLane::Pi`) or a dotted operation name
+//!   (`session.entries`);
+//! - a command-line flag (`--shared-context-db`);
+//! - an identifier written in `snake_case`, `SCREAMING_SNAKE`, or
+//!   `camelCase`/`PascalCase` with an inner capital.
+//!
+//! A bare hyphenated word is never a code name, however it looks: English
+//! makes compounds freely (`audit-flagged`, `zero-delta`, `Team-mode`), and no
+//! word list can tell them from a `kebab-case` name, which counts only when
+//! it is backticked, path-shaped or a flag. Plain English words are left out,
+//! and so are ids (a segment of eight or more hexadecimal characters with a
+//! digit), which name a session or a commit rather than code. A token inside
+//! a span, path or name already taken is not taken again.
 
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -30,13 +38,18 @@ const EXTENSIONS: &[&str] = &[
     "wasm",
 ];
 
+/// The ends of host names, which a dotted operation name never has.
+const DOMAINS: &[&str] = &[
+    "com", "org", "net", "io", "dev", "ai", "app", "co", "uk", "de", "edu",
+];
+
 /// Product names that look like file names.
 const NOT_FILES: &[&str] = &[
     "node.js", "next.js", "vue.js", "nuxt.js", "deno.js", "three.js",
 ];
 
-/// Common English words, lowercase. A backticked span that is one of them,
-/// or a hyphenated token made only of them, is not a code name.
+/// Common English words, lowercase. A backticked span that is one of them is
+/// not a code name.
 const COMMON: &[&str] = &[
     "a", "about", "above", "after", "again", "against", "all", "also", "always", "an", "and",
     "any", "are", "as", "at", "back", "be", "because", "been", "before", "being", "below", "best",
@@ -60,7 +73,7 @@ const COMMON: &[&str] = &[
 ];
 
 /// One thing a memory cites.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Cite {
     /// A file or folder, as the memory writes it.
     Path(String),
@@ -85,6 +98,8 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
 pub(crate) fn cites(content: &str) -> Vec<Cite> {
     static SPAN: OnceLock<Regex> = OnceLock::new();
     static PATH: OnceLock<Regex> = OnceLock::new();
+    static QUALIFIED: OnceLock<Regex> = OnceLock::new();
+    static DOTTED: OnceLock<Regex> = OnceLock::new();
     static WORD: OnceLock<Regex> = OnceLock::new();
     let mut found: Vec<(usize, Cite)> = Vec::new();
     let mut covered: Vec<Range<usize>> = Vec::new();
@@ -116,11 +131,58 @@ pub(crate) fn cites(content: &str) -> Vec<Cite> {
         covered.push(range.clone());
         found.push((range.start, Cite::Path(text.to_owned())));
     }
-    for token in re(&WORD, r"[A-Za-z0-9_$]+(?:-[A-Za-z0-9_$]+)*").find_iter(content) {
-        if overlaps(&covered, &token.range()) || !identifier(token.as_str()) {
+    let before = |at: usize| content[..at].chars().next_back();
+    let word_char = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$');
+    for token in re(
+        &QUALIFIED,
+        r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+",
+    )
+    .find_iter(content)
+    {
+        let range = token.range();
+        if overlaps(&covered, &range)
+            || before(range.start).is_some_and(word_char)
+            || token.as_str().chars().count() < MIN_LEN
+            || is_id(token.as_str())
+        {
             continue;
         }
-        found.push((token.start(), Cite::Name(token.as_str().to_owned())));
+        covered.push(range.clone());
+        found.push((range.start, Cite::Name(token.as_str().to_owned())));
+    }
+    for token in re(&DOTTED, r"[a-z][a-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+").find_iter(content) {
+        let range = token.range();
+        if overlaps(&covered, &range) || !operation_name(content, range.clone()) {
+            continue;
+        }
+        covered.push(range.clone());
+        found.push((range.start, Cite::Name(token.as_str().to_owned())));
+    }
+    for token in re(&WORD, r"[A-Za-z0-9_$]+(?:-[A-Za-z0-9_$]+)*").find_iter(content) {
+        let range = token.range();
+        if overlaps(&covered, &range) {
+            continue;
+        }
+        let text = token.as_str();
+        // `--name`, after a space or the start, is a command-line flag.
+        let flag = range.start >= 2
+            && content[..range.start].ends_with("--")
+            && !before(range.start - 2).is_some_and(|ch| word_char(ch) || ch == '-');
+        if flag {
+            if text.chars().any(|ch| ch.is_ascii_alphabetic()) && text.chars().count() >= 2 {
+                found.push((range.start - 2, Cite::Name(format!("--{text}"))));
+            }
+            continue;
+        }
+        // A bare hyphenated word is English; only a code name written
+        // inside it (`ContextDb-backed`) counts.
+        let mut at = range.start;
+        for part in text.split('-') {
+            if identifier(part) {
+                found.push((at, Cite::Name(part.to_owned())));
+            }
+            at += part.len() + 1;
+        }
     }
 
     found.sort_by_key(|(at, _)| *at);
@@ -190,17 +252,25 @@ pub(crate) fn path_shaped(token: &str) -> bool {
         })
 }
 
-/// Whether `token` is a code name the module can look up as literal text:
-/// letters, digits, `_`, `$` and `-`, starting with a letter, `_` or `$`,
-/// at least four characters, and not an id.
-pub(crate) fn name_shaped(token: &str) -> bool {
-    let mut chars = token.chars();
-    token.chars().count() >= MIN_LEN
-        && chars
-            .next()
-            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '-'))
-        && !is_id(token)
+/// Whether the dotted token at `range` of `content` is an operation name
+/// (`session.entries`) rather than an abbreviation, a host name, a file name
+/// or part of a path: each part two or more characters, not after a word
+/// character, `/`, `@` or `.`, not before `/`, and not ending in a host
+/// name's end or a file extension.
+fn operation_name(content: &str, range: Range<usize>) -> bool {
+    let text = &content[range.clone()];
+    let previous = content[..range.start].chars().next_back();
+    let next = content[range.end..].chars().next();
+    let last = text.rsplit('.').next().unwrap_or_default();
+    text.chars().count() >= MIN_LEN
+        && text.split('.').all(|part| part.chars().count() >= 2)
+        && !previous.is_some_and(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '/' | '@' | '.')
+        })
+        && next != Some('/')
+        && !DOMAINS.contains(&last)
+        && !EXTENSIONS.contains(&last)
+        && !is_id(text)
 }
 
 /// A session, run or commit id rather than a code name: some part, between
@@ -213,21 +283,14 @@ fn is_id(token: &str) -> bool {
     })
 }
 
-/// Whether a word-shaped token is a code name: `snake_case`, `camelCase` or
-/// `PascalCase` with an inner capital, or `kebab-case` not made only of
-/// common words or numbers.
+/// Whether a word without hyphens is a code name: `snake_case` (and
+/// `SCREAMING_SNAKE`), or `camelCase`/`PascalCase` with an inner capital.
 fn identifier(token: &str) -> bool {
     if token.chars().count() < MIN_LEN
         || !token.chars().any(|ch| ch.is_ascii_alphabetic())
         || is_id(token)
     {
         return false;
-    }
-    if token.contains('-') {
-        return token.split('-').any(|part| {
-            let part = part.to_lowercase();
-            !COMMON.contains(&part.as_str()) && !part.bytes().all(|byte| byte.is_ascii_digit())
-        });
     }
     if token.contains('_') {
         return token

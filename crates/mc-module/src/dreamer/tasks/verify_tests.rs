@@ -379,6 +379,45 @@ fn verify_broad_puts_memories_whose_citations_are_all_gone_first_then_the_least_
     );
 }
 
+/// A behavioural rule whose only hyphenated words are English cites
+/// nothing, so nothing it cites can be missing: it neither goes first nor
+/// gets a `Not found` line, as rules in a real verify-broad batch did.
+#[test]
+fn a_memory_citing_nothing_never_goes_first() {
+    let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
+    fixture.insert(&[
+        Row {
+            checked_at: Some(100),
+            ..row(1, "`live_function` runs first.")
+        },
+        Row {
+            tag: "PROJECT_RULES",
+            checked_at: Some(500),
+            ..row(
+                2,
+                "When intentionally keeping an audit-flagged pattern, add inline comments; zero-delta runs are release-bound.",
+            )
+        },
+    ]);
+    let batches = fixture.batches(true);
+    assert_eq!(batches.iter().map(ids).collect::<Vec<_>>(), [vec![1, 2]]);
+    assert!(
+        !batches[0].message.contains("Not found by a plain search"),
+        "{}",
+        batches[0].message
+    );
+    let pool = fixture
+        .db
+        .with_connection(|conn| live_memories(conn, PROJECT, &["swe:project-rules".to_owned()], 0))
+        .unwrap();
+    let lookup = look_up(
+        &fixture.repo.checkout(),
+        &pool.iter().collect::<Vec<_>>(),
+        &SEARCH_LIMITS,
+    );
+    assert!(lookup.gone.is_empty() && lookup.not_found.is_empty());
+}
+
 #[test]
 fn a_broad_run_sends_twenty_memories_a_batch_and_only_covered_categories() {
     let fixture = Fixture::new(&[("README.md", "readme\n")]);

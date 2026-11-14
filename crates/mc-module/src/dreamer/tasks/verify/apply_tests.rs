@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use super::super::cites::Cite;
 use super::super::tests::{row, Fixture, Row};
 use super::super::{look_for, Absence};
 use crate::dreamer::checkout::Limits;
@@ -229,7 +230,7 @@ fn an_archive_naming_what_is_missing_needs_it_cited_and_gone() {
 }
 
 #[test]
-fn a_missing_name_the_memory_does_not_cite_or_the_module_cannot_look_up_is_refused() {
+fn a_missing_name_that_is_not_one_of_the_memorys_citations_is_refused() {
     let fixture = fixture();
     let batch = plan_one(&fixture);
     let applied = fixture.apply(
@@ -246,16 +247,37 @@ fn a_missing_name_the_memory_does_not_cite_or_the_module_cannot_look_up_is_refus
             "memory 2: missing=\"the old timer\" is not a path or name the memory cites",
         ]
     );
+    // The rule a real reply could have archived: its text holds the word,
+    // which is kebab-shaped and in no file, but it is English, not a
+    // citation, so the rule's subject can't be shown gone.
     let fixture = Fixture::new(&[("a.rs", "\n")]);
-    fixture.insert(&[row(1, "It uses ContextDb::open_gone here.")]);
+    fixture.insert(&[Row {
+        tag: "PROJECT_RULES",
+        ..row(
+            1,
+            "When intentionally keeping an audit-flagged pattern, add inline comments explaining why.",
+        )
+    }]);
+    let batch = plan_one(&fixture);
     let applied = fixture.apply(
-        &plan_one(&fixture),
-        &manifest(r#"<archive id="1" missing="ContextDb::open_gone"/>"#),
+        &batch,
+        &manifest(r#"<archive id="1" reason="no audit flags remain" missing="audit-flagged"/>"#),
     );
     assert_eq!(
         applied.dropped,
-        ["memory 1: whether ContextDb::open_gone is gone is undecided: ContextDb::open_gone is neither a path nor a code name the module can look up"]
+        ["memory 1: missing=\"audit-flagged\" is not a path or name the memory cites"]
     );
+    assert_eq!(fixture.memory(1).0, "active");
+    // A qualified name the memory cites, gone from the checkout, still
+    // archives.
+    let fixture = Fixture::new(&[("a.rs", "\n")]);
+    fixture.insert(&[row(1, "Pi sessions run through RecipeLane::Pi.")]);
+    let applied = fixture.apply(
+        &plan_one(&fixture),
+        &manifest(r#"<archive id="1" missing="RecipeLane::Pi"/>"#),
+    );
+    assert_eq!((applied.applied, applied.dropped.len()), (1, 0));
+    assert_eq!(fixture.memory(1).0, "archived");
 }
 
 #[test]
@@ -267,18 +289,21 @@ fn a_name_whose_search_was_cut_is_undecided() {
         max_time: std::time::Duration::from_secs(60),
     };
     assert!(matches!(
-        look_for(&checkout, "gone_function", &cut),
+        look_for(&checkout, &Cite::Name("gone_function".into()), &cut),
         Absence::Undecided(why) if why.contains("stopped after 0 files")
     ));
     assert_eq!(
         look_for(
             &checkout,
-            "gone_function",
+            &Cite::Name("gone_function".into()),
             &crate::dreamer::checkout::SEARCH_LIMITS
         ),
         Absence::Absent
     );
-    assert_eq!(look_for(&checkout, "src/live.rs", &cut), Absence::Present);
+    assert_eq!(
+        look_for(&checkout, &Cite::Path("src/live.rs".into()), &cut),
+        Absence::Present
+    );
 }
 
 #[test]

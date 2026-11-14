@@ -16,8 +16,9 @@
 //!   memory of the category;
 //! - `archive` never touches a protected memory (safety-critical, permanent,
 //!   a policy, or written or edited by the person, as curate protects them);
-//!   with `missing` it needs the memory to cite that path or name and the
-//!   checkout not to hold it; without it, it needs evidence in `reason`, and
+//!   with `missing` it needs that path or name to be one of the memory's
+//!   citations as [`super::cites`] reads them, and the checkout not to hold
+//!   it; without it, it needs evidence in `reason`, and
 //!   is refused for a directive-shaped rule.
 //!
 //! A verification or check changes no text, so it advances neither the
@@ -40,6 +41,7 @@ use regex::Regex;
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
+use super::cites::cites;
 use super::manifest::{js_trim, Decision, Verdict};
 use super::{Absence, VerifyBatch};
 use crate::dreamer::task::Applied;
@@ -243,12 +245,17 @@ impl VerifyBatch {
                 .is_empty()
                 .then(|| "an archive without missing= needs the code's evidence in reason".into());
         };
-        if missing.chars().any(char::is_whitespace) || !current.content.contains(missing.as_str()) {
+        // Only something the module itself reads as a citation of this
+        // memory can be gone: text that merely occurs in it may be English.
+        let Some(cite) = cites(&current.content)
+            .into_iter()
+            .find(|cite| cite.text() == missing)
+        else {
             return Some(format!(
                 "missing={missing:?} is not a path or name the memory cites"
             ));
-        }
-        match self.absence(missing) {
+        };
+        match self.absence(&cite) {
             Absence::Absent => None,
             Absence::Present => Some(format!("{missing} is still in the checkout")),
             Absence::Undecided(why) => {
