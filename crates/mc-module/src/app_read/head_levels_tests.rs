@@ -73,8 +73,8 @@ fn update_items_name_the_level_and_category_of_their_lines() {
 }
 
 /// A head whose delta holds only `lines`, each one committed update entry,
-/// with a baseline that matches the served `m[0]`, so the read trusts the
-/// committed lines.
+/// with a baseline that matches the head's first message as served (`m[0]`,
+/// the frozen baseline), so the read trusts the committed lines.
 fn with_update_lines(lines: &[(Form, &str)]) -> ReadState {
     let m0 = crate::summary::head::HISTORY_EMPTY.to_owned();
     let m1 = format!(
