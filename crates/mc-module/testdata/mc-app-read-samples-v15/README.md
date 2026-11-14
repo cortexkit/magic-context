@@ -1,7 +1,7 @@
 # mc-app-read-samples-v15
 
-Generated examples for the internal `mc-app-read/v1` service. Admission, role
-versions and the `{"result": ...}` envelope have not changed. v15 adds two
+Generated examples for the internal `mc-app-read/v1` service. Who may call it, the
+`mc-app-read/v1` version and the `{"result": ...}` envelope have not changed. v15 adds two
 facts to the `context.head` outline: the level of each memory block, and the
 level and category of each memory update. Every v14 example these don't touch
 is copied byte for byte.
@@ -137,9 +137,9 @@ none), `superseded_by?` and `history`, newest first. A history entry has `at`,
 | `summary` | the summarizer's second turn | |
 | `agent` | the agent, through its memory tool (`ctx_memory`) | |
 | `dreamer` | a dreamer task run | `run_id` (link to `dreamer.run`), `task` (profile task id) |
-| `person` | the person (the 0.49 dashboard's edit or restore) | |
+| `person` | the person (an edit or restore made in the Magic Context 0.49 dashboard, the last plugin release) | |
 
-History the 0.49 dreamer wrote names its 0.49 task (`curate`, `verify`,
+History written by the 0.49 dreamer (the plugin's, before the module had one) names its old task (`curate`, `verify`,
 `expire`) in `task` and has no `run_id`. An entry whose writer the store doesn't
 record has no `writer`. Unknown ids answer `memory_not_found`.
 
@@ -288,8 +288,8 @@ The v12 README, unchanged except that its headings sit one level lower. Its
 samples are copied into this folder byte for byte; its regeneration command
 regenerates the v12 folder.
 
-Generated examples for the internal `mc-app-read/v1` service. Admission, role
-versions and the `{"result": ...}` envelope have not changed. `context.head`
+Generated examples for the internal `mc-app-read/v1` service. Who may call it, the
+`mc-app-read/v1` version and the `{"result": ...}` envelope have not changed. `context.head`
 now returns an **outline**, not bulk text or image data; there is no v11 shape
 compatibility mode. The seven unrelated v11 JSON examples are copied byte for
 byte. The v11 folder, including its README and checksums, is frozen and tested.
