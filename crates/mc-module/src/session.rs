@@ -3143,15 +3143,25 @@ impl Session {
                 db.with_connection(|conn| crate::memory_tool::run(conn, &who, input))
             }
             "ctx_search" => {
-                let db = self
-                    .db
-                    .as_ref()
-                    .ok_or("ctx_search needs the context store")?;
+                let db = Arc::clone(
+                    self.db
+                        .as_ref()
+                        .ok_or("ctx_search needs the context store")?,
+                );
                 let empty = std::collections::BTreeMap::new();
-                let mut scope = self.search_scope(settings, &empty);
-                if let Some(answer) =
-                    db.with_connection(|conn| crate::search::by_ids(conn, &scope, input))
-                {
+                let scope = Arc::new(crate::search::OwnedScope::of(
+                    &self.search_scope(settings, &empty),
+                ));
+                let by_ids = {
+                    let (db, scope, input) = (Arc::clone(&db), Arc::clone(&scope), input.clone());
+                    on_blocking_thread(move || {
+                        db.with_search_reader(|conn, _| {
+                            crate::search::by_ids(conn, &scope.scope(None), &input)
+                        })
+                    })
+                    .await
+                };
+                if let Some(answer) = by_ids {
                     return answer;
                 }
                 // Embedded once, before the store is touched, so the request
@@ -3172,14 +3182,7 @@ impl Session {
                     }
                     _ => None,
                 };
-                scope.semantic = embedded.as_ref().map(|(vector, model_id, chunk_model_id)| {
-                    crate::search::sources::Semantic {
-                        vector,
-                        model_id,
-                        chunk_model_id,
-                    }
-                });
-                self.search_reranked(client, settings, db, &scope, input)
+                self.search_reranked(client, settings, db, scope, embedded, input)
                     .await
             }
             "ctx_note" => {
@@ -3222,8 +3225,9 @@ impl Session {
         &self,
         client: &C,
         settings: &Settings,
-        db: &ContextDb,
-        scope: &crate::search::Scope<'_>,
+        db: Arc<ContextDb>,
+        scope: Arc<crate::search::OwnedScope>,
+        embedded: Option<(Vec<f32>, String, String)>,
         input: &Value,
     ) -> Result<String, String> {
         use crate::search::rerank::{self, Reranker, Skipped};
@@ -3253,8 +3257,16 @@ impl Session {
             (Reranker::Remote(remote), _) if prose => Some(remote.top_n),
             _ => None,
         };
-        let mut prepared =
-            db.with_connection(|conn| crate::search::prepare(conn, scope, input, pool))?;
+        let mut prepared = {
+            let (db, scope, input) = (Arc::clone(&db), Arc::clone(&scope), input.clone());
+            on_blocking_thread(move || {
+                db.with_search_reader(|conn, coverage| {
+                    let scope = scope.scope(embedded.as_ref().map(semantic));
+                    crate::search::prepare(conn, coverage, &scope, &input, pool)
+                })
+            })
+            .await?
+        };
         let mut skipped_note = None;
         if !prepared.candidates().is_empty() {
             let texts = prepared.candidates().to_vec();
@@ -3277,6 +3289,12 @@ impl Session {
                 Ok(scores) => prepared.reorder(&scores),
                 Err(Skipped(reason)) => {
                     rerank::log_fallback(&reason);
+                    // A Synapse that refused the scores is asked for its
+                    // model again on the next search, in case the pin is
+                    // what it refused.
+                    if settings.rerank == Reranker::Synapse {
+                        rerank::forget_synapse_pin();
+                    }
                     // Only a hosted reranker's skip is shown to the model, as
                     // the plugin does.
                     if matches!(settings.rerank, Reranker::Remote(_)) {
@@ -3285,7 +3303,10 @@ impl Session {
                 }
             }
         }
-        let mut answer = db.with_connection(|conn| crate::search::finish(conn, scope, prepared));
+        let mut answer = on_blocking_thread(move || {
+            db.with_connection(|conn| crate::search::finish(conn, &scope.scope(None), prepared))
+        })
+        .await;
         if let Some(line) = skipped_note {
             answer.push('\n');
             answer.push_str(&line);
@@ -3389,40 +3410,15 @@ impl Session {
                 None => None,
             };
             let empty = std::collections::BTreeMap::new();
-            let scope = self.search_scope(settings, &empty);
-            let cutoff = scope.cutoff;
-            let visible_messages = scope.visible_messages;
-            let seen = scope.seen.clone();
-            let key = self.key.clone();
-            let project = self.project.clone();
-            let (memory_enabled, git_commits_enabled, git_repository) = (
-                scope.memory_enabled,
-                scope.git_commits_enabled,
-                scope.git_repository,
-            );
+            let scope = crate::search::OwnedScope::of(&self.search_scope(settings, &empty));
             let (db, prompt) = (db.clone(), prompt.clone());
-            // SQLite and its connection mutex are synchronous. Keep both off
+            // SQLite and its connections are synchronous. Keep both off
             // the session worker so the deadline can expire during the read.
             tokio::task::spawn_blocking(move || {
-                let scope = crate::search::Scope {
-                    harness: &key.harness,
-                    session: &key.session,
-                    project: project.as_ref().map(|project| project.id.as_str()),
-                    cutoff,
-                    visible_messages,
-                    seen: &seen,
-                    memory_enabled,
-                    git_commits_enabled,
-                    git_repository,
-                    semantic: embedded.as_ref().map(|(vector, model_id, chunk_model_id)| {
-                        crate::search::sources::Semantic {
-                            vector,
-                            model_id,
-                            chunk_model_id,
-                        }
-                    }),
-                };
-                db.with_connection(|conn| crate::search::auto_hits(conn, &scope, &prompt))
+                db.with_search_reader(|conn, coverage| {
+                    let scope = scope.scope(embedded.as_ref().map(semantic));
+                    crate::search::auto_hits(conn, coverage, &scope, &prompt)
+                })
             })
             .await
             .unwrap_or_default()
@@ -5603,6 +5599,32 @@ impl Session {
             }
         }
         self.build(settings, None, false, None)
+    }
+}
+
+/// The borrowed form of a query embedding and the model ids it is compared
+/// under.
+fn semantic(
+    (vector, model_id, chunk_model_id): &(Vec<f32>, String, String),
+) -> crate::search::sources::Semantic<'_> {
+    crate::search::sources::Semantic {
+        vector,
+        model_id,
+        chunk_model_id,
+    }
+}
+
+/// Run synchronous store work on Tokio's blocking pool and wait for it.
+/// SQLite and the connection locks block, so a call waiting for a
+/// connection on the session worker would hold one of the runtime's worker
+/// threads, and every task scheduled on it would wait too. The session's
+/// worker still waits for the answer, so its jobs keep their order. A panic
+/// in `work` carries on here, as it would have inline.
+async fn on_blocking_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => panic!("ck-mc: a store read was cancelled: {error}"),
     }
 }
 

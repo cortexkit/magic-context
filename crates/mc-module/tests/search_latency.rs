@@ -1,6 +1,5 @@
 //! Where a `ctx_search` call spends its time on a store the size of the live
-//! one, stage by stage, alone and next to other work that shares the module's
-//! one `context.db` connection.
+//! one, stage by stage, alone and next to other work on the same store.
 //!
 //! It is ignored because it first builds a store of several gigabytes. Run it
 //! on Linux, in release mode, and read its report on standard output:
@@ -641,11 +640,14 @@ fn scope<'a>(
 /// The lane depth `search::collect` uses for the default limit of ten.
 const TIER: usize = 30;
 
-/// The reads one `ctx_search` makes while it holds the connection, in the
-/// order `search::collect` makes them and with the same arguments, each
-/// timed on its own. `rerank` adds what a reranked search reads besides.
+/// The reads one `ctx_search` makes on its read connection, in the order
+/// `search::collect` makes them and with the same arguments, each timed on
+/// its own. `rerank` adds what a reranked search reads besides. `coverage`
+/// is the connection's rowid-map proof, so the first run of a session pays
+/// for the proof and later ones reuse it while the store is unchanged.
 fn lanes(
     conn: &Connection,
+    coverage: &mut messages::Coverage,
     case: &Case,
     query: &str,
     semantic: Option<sources::Semantic<'_>>,
@@ -668,6 +670,11 @@ fn lanes(
         timed(|| sources::search_primers(conn, PROJECT, query, TIER, None, semantic, None));
     stages.push(("primers", took));
     let probes = search::text::literal_probes(query);
+    let (reach, took) = timed(|| messages::reach(conn, coverage, case.session, None));
+    stages.push((
+        "messages: reach (rowid-map coverage, kept per connection)",
+        took,
+    ));
     let (_, took) = timed(|| {
         messages::count_live_matches(
             conn,
@@ -676,6 +683,7 @@ fn lanes(
             case.cutoff,
             None,
             case.visible.as_ref(),
+            reach,
         )
     });
     stages.push(("messages: live-match counts", took));
@@ -686,8 +694,27 @@ fn lanes(
         dates: None,
         visible: case.visible.as_ref(),
     };
-    let (_, took) = timed(|| messages::search(conn, case.session, &wanted, case.cutoff, true));
-    stages.push(("messages: ranked search", took));
+    // A reranked search reads its candidate pool from the same reads.
+    let depths: &[usize] = if rerank { &[TIER, 75] } else { &[TIER] };
+    let (_, took) = timed(|| {
+        messages::search_at(
+            conn,
+            case.session,
+            &wanted,
+            depths,
+            case.cutoff,
+            true,
+            reach,
+        )
+    });
+    stages.push((
+        if rerank {
+            "messages: ranked search with the rerank's pool (one read)"
+        } else {
+            "messages: ranked search"
+        },
+        took,
+    ));
     if let Some(semantic) = semantic {
         let (_, took) = timed(|| {
             sources::search_chunks(
@@ -701,14 +728,6 @@ fn lanes(
             )
         });
         stages.push(("history-chunk vectors", took));
-    }
-    if rerank {
-        let deeper = messages::Query {
-            limit: 75,
-            ..wanted
-        };
-        let (_, took) = timed(|| messages::search(conn, case.session, &deeper, case.cutoff, true));
-        stages.push(("messages: rerank's deeper read", took));
     }
     let (_, took) =
         timed(|| sources::search_commits(conn, PROJECT, query, TIER, None, semantic, None));
@@ -729,7 +748,11 @@ fn count(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> (i64, D
 
 /// Why the message lane costs what it does: how many documents its full-text
 /// queries match across every session, the per-session work, and what a
-/// query restricted to the session's own rows costs instead.
+/// query restricted to the session's own rows costs instead. Each search is
+/// timed both ways the lane can reach the session's rows: screened by its
+/// rowid map (what `ctx_search` now does for a covered session) and through
+/// every match's session id (what it did before, and still does for a
+/// session with unmapped rows), with the two results compared.
 fn message_diagnostics(conn: &Connection, case: &Case, query: &str, prototype: bool) {
     let strict = search::text::sanitize_fts_query(query);
     let relaxed = search::text::relaxed_fts_query(query);
@@ -741,16 +764,63 @@ fn message_diagnostics(conn: &Connection, case: &Case, query: &str, prototype: b
         dates: None,
         visible: case.visible.as_ref(),
     };
-    let (strict_hits, strict_took) =
-        timed(|| messages::search(conn, case.session, &wanted, case.cutoff, false).len());
-    let (all_hits, all_took) =
-        timed(|| messages::search(conn, case.session, &wanted, case.cutoff, true).len());
+    let (reach, proof_took) =
+        timed(|| messages::reach(conn, &mut messages::Coverage::default(), case.session, None));
     println!(
-        "MESSAGES {} | {query} | strict form only: {strict_hits} hits {:.0} ms; with the relaxed fallback: {all_hits} hits {:.0} ms",
+        "MESSAGES {} | {query} | reach {reach:?}, with a fresh rowid-map coverage proof: {:.0} ms",
         case.label,
-        ms(strict_took),
-        ms(all_took)
+        ms(proof_took)
     );
+    for (way, reach) in [
+        ("screened", reach),
+        ("unscreened", messages::Reach::Unmapped),
+    ] {
+        let (strict_hits, strict_took) = timed(|| {
+            messages::search(conn, case.session, &wanted, case.cutoff, false, reach).len()
+        });
+        let (all_hits, all_took) =
+            timed(|| messages::search(conn, case.session, &wanted, case.cutoff, true, reach).len());
+        let (_, both_took) = timed(|| {
+            messages::search_at(
+                conn,
+                case.session,
+                &wanted,
+                &[TIER, 75],
+                case.cutoff,
+                true,
+                reach,
+            )
+        });
+        println!(
+            "MESSAGES {} | {query} | {way}: strict form only: {strict_hits} hits {:.0} ms; with the relaxed fallback: {all_hits} hits {:.0} ms; both rerank depths from one read: {:.0} ms",
+            case.label,
+            ms(strict_took),
+            ms(all_took),
+            ms(both_took)
+        );
+    }
+    let same = messages::search_at(
+        conn,
+        case.session,
+        &wanted,
+        &[TIER, 75],
+        case.cutoff,
+        true,
+        reach,
+    ) == messages::search_at(
+        conn,
+        case.session,
+        &wanted,
+        &[TIER, 75],
+        case.cutoff,
+        true,
+        messages::Reach::Unmapped,
+    );
+    println!(
+        "MESSAGES {} | {query} | screened and unscreened results identical: {same}",
+        case.label
+    );
+    assert!(same, "{} {query}", case.label);
     for (form, fts) in [("strict", &strict), ("relaxed", &relaxed)] {
         if fts.is_empty() {
             continue;
@@ -1044,17 +1114,20 @@ fn repository(dir: &Path, tag: usize, count: usize, vocabulary: &Vocabulary) -> 
     repo
 }
 
-/// Run `searches` full `ctx_search` reads one after another for the new
-/// session, each timed from asking for the connection, and return each
-/// one's wait for the connection and its total time.
+/// Run `searches` full `ctx_search` reads one after another for the session
+/// of `cases()[case]`, as a `ctx_search` makes them: the lanes on a read
+/// connection, then the retrieval counts on the shared one. Each is timed
+/// from asking for the read connection; returns each one's wait for it and
+/// its total time.
 fn search_series(
     db: &ContextDb,
+    case: usize,
     searches: usize,
     vector: &[f32],
     pause: Duration,
 ) -> Vec<(Duration, Duration)> {
     let cases = cases();
-    let case = &cases[0];
+    let case = &cases[case];
     let seen = BTreeMap::new();
     let semantic = sources::Semantic {
         vector,
@@ -1067,12 +1140,14 @@ fn search_series(
         .map(|_| {
             std::thread::sleep(pause);
             let started = Instant::now();
-            let wait = db.with_connection(|conn| {
+            let (wait, prepared) = db.with_search_reader(|conn, coverage| {
                 let wait = started.elapsed();
-                let prepared = search::prepare(conn, &scope, &input, None).unwrap();
-                search::finish(conn, &scope, prepared);
-                wait
+                (
+                    wait,
+                    search::prepare(conn, coverage, &scope, &input, None).unwrap(),
+                )
             });
+            db.with_connection(|conn| search::finish(conn, &scope, prepared));
             (wait, started.elapsed())
         })
         .collect()
@@ -1185,9 +1260,9 @@ fn ctx_search_latency_on_a_live_sized_store() {
             let rerank = search::rerank::is_prose_query(query);
             let mut runs: Vec<Vec<(&'static str, Duration)>> = Vec::new();
             for _ in 0..repeats {
-                runs.push(
-                    db.with_connection(|conn| lanes(conn, &case, query, Some(semantic), rerank)),
-                );
+                runs.push(db.with_search_reader(|conn, coverage| {
+                    lanes(conn, coverage, &case, query, Some(semantic), rerank)
+                }));
             }
             let total_first: Duration = runs[0].iter().map(|(_, took)| *took).sum();
             for (index, (stage, first)) in runs[0].iter().enumerate() {
@@ -1221,13 +1296,13 @@ fn ctx_search_latency_on_a_live_sized_store() {
                 let mut prepares = Vec::new();
                 let mut finishes = Vec::new();
                 for _ in 0..repeats {
-                    db.with_connection(|conn| {
-                        let (prepared, prepare) =
-                            timed(|| search::prepare(conn, &scope, &input, pool).unwrap());
-                        let (_, finish) = timed(|| search::finish(conn, &scope, prepared));
-                        prepares.push(prepare);
-                        finishes.push(finish);
+                    let (prepared, prepare) = db.with_search_reader(|conn, coverage| {
+                        timed(|| search::prepare(conn, coverage, &scope, &input, pool).unwrap())
                     });
+                    let (_, finish) =
+                        db.with_connection(|conn| timed(|| search::finish(conn, &scope, prepared)));
+                    prepares.push(prepare);
+                    finishes.push(finish);
                 }
                 println!(
                     "CALL {} | {query} | {label} | prepare first {:.1} ms, median {:.1} ms | finish (retrieval counts and reply) median {:.1} ms",
@@ -1237,14 +1312,18 @@ fn ctx_search_latency_on_a_live_sized_store() {
                     ms(median(finishes))
                 );
             }
-            db.with_connection(|conn| message_diagnostics(conn, &case, query, prototype));
+            db.with_search_reader(|conn, _| message_diagnostics(conn, &case, query, prototype));
         }
         let scope = scope(&case, &seen, Some(semantic));
         let holds: Vec<Duration> = (0..repeats)
-            .map(|_| db.with_connection(|conn| timed(|| search::auto_hits(conn, &scope, PROMPT)).1))
+            .map(|_| {
+                db.with_search_reader(|conn, coverage| {
+                    timed(|| search::auto_hits(conn, coverage, &scope, PROMPT)).1
+                })
+            })
             .collect();
         println!(
-            "AUTO {} | memory hint on a {}-character prompt holds the connection: first {:.1} ms, median {:.1} ms",
+            "AUTO {} | memory hint on a {}-character prompt holds its read connection: first {:.1} ms, median {:.1} ms",
             case.label,
             PROMPT.len(),
             ms(holds[0]),
@@ -1289,34 +1368,40 @@ fn ctx_search_latency_on_a_live_sized_store() {
         ms(median(builds))
     );
 
-    // 3. Searches from several sessions at once: one connection, so each
-    // waits for the ones before it.
-    for concurrent in [1usize, 2, 4, 8] {
-        let barrier = Arc::new(Barrier::new(concurrent));
-        let results: Vec<(Duration, Duration)> = std::thread::scope(|threads| {
-            let handles: Vec<_> = (0..concurrent)
-                .map(|_| {
-                    let (db, barrier, vector) = (Arc::clone(&db), Arc::clone(&barrier), &vector);
-                    threads.spawn(move || {
-                        barrier.wait();
-                        search_series(&db, 1, vector, Duration::ZERO)[0]
+    // 3. Searches from several sessions at once, each on a read connection
+    // of its own (at most four), for a new and for a long session.
+    for (index, case) in cases().iter().enumerate() {
+        for concurrent in [1usize, 2, 4, 8] {
+            let barrier = Arc::new(Barrier::new(concurrent));
+            let results: Vec<(Duration, Duration)> = std::thread::scope(|threads| {
+                let handles: Vec<_> = (0..concurrent)
+                    .map(|_| {
+                        let (db, barrier, vector) =
+                            (Arc::clone(&db), Arc::clone(&barrier), &vector);
+                        threads.spawn(move || {
+                            barrier.wait();
+                            search_series(&db, index, 1, vector, Duration::ZERO)[0]
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap())
-                .collect()
-        });
-        summarize(&format!("CONCURRENT {concurrent} at once"), &results);
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect()
+            });
+            summarize(
+                &format!("CONCURRENT {} {concurrent} at once", case.label),
+                &results,
+            );
+        }
     }
 
     // 4. A one-statement read, as a Setup or a `ctx_memory` call makes,
-    // asked for 100 ms after a search took the connection.
+    // asked for 100 ms after a search of the long session started.
     let small_wait = std::thread::scope(|threads| {
         let searcher = {
             let (db, vector) = (Arc::clone(&db), &vector);
-            threads.spawn(move || search_series(&db, 1, vector, Duration::ZERO))
+            threads.spawn(move || search_series(&db, 1, 1, vector, Duration::ZERO))
         };
         std::thread::sleep(Duration::from_millis(100));
         let started = Instant::now();
@@ -1327,19 +1412,20 @@ fn ctx_search_latency_on_a_live_sized_store() {
             .unwrap()
         });
         let waited = started.elapsed();
-        searcher.join().unwrap();
-        waited
+        let search = searcher.join().unwrap()[0];
+        (waited, search.1)
     });
     println!(
-        "SMALL a one-row read asked for during a search waited {:.0} ms for the connection",
-        ms(small_wait)
+        "SMALL a one-row read asked for 100 ms into a search waited {:.0} ms for the connection; the search took {:.0} ms",
+        ms(small_wait.0),
+        ms(small_wait.1)
     );
 
     // 5. Searches alone, then while upkeep runs: a project's memory batch
     // and, for a project new to the store, its first commit sweep (2,000
     // commits stored, then up to 500 embedded in batches of 16), round after
     // round on fresh repositories.
-    let alone = search_series(&db, 6, &vector, Duration::from_millis(50));
+    let alone = search_series(&db, 1, 6, &vector, Duration::from_millis(50));
     summarize("UPKEEP searches alone", &alone);
     let vocabulary = Vocabulary::new();
     let repos: Vec<_> = (0..8)
@@ -1396,7 +1482,7 @@ fn ctx_search_latency_on_a_live_sized_store() {
         })
     };
     std::thread::sleep(Duration::from_millis(200));
-    let during = search_series(&db, 6, &vector, Duration::from_millis(50));
+    let during = search_series(&db, 1, 6, &vector, Duration::from_millis(50));
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let rounds = upkeep.join().unwrap();
     summarize("UPKEEP searches during upkeep", &during);
@@ -1503,10 +1589,11 @@ async fn timer_lateness(stop: Arc<std::sync::atomic::AtomicBool>) -> Duration {
 /// point: a `ctx_memory` call sent while a `ctx_search` of the same session
 /// runs is answered only after the search, because one worker per session
 /// takes that session's jobs one at a time. A `ctx_memory` of another
-/// session waits only while the search holds the one `context.db`
-/// connection. Then several searches at once on a small runtime: each
-/// blocks a Tokio worker thread while it waits for the connection, so
-/// unrelated tasks (here a timer) run late too.
+/// session is timed beside it: it waited for the whole search while
+/// searches read on the one shared `context.db` connection. Then several
+/// searches at once on a small runtime, with a timer measuring how late the
+/// runtime runs unrelated tasks: a search that waits for a connection on a
+/// Tokio worker thread holds that thread.
 ///
 /// ```text
 /// cargo test --locked --release -p mc-module --test search_latency \

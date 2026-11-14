@@ -16,8 +16,9 @@
 //! a 30-second background limit and a 5-second explicit-search limit; a response
 //! for another model is refused. A failed query embed only drops semantic scores.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -31,6 +32,8 @@ use circuit::{Attempt, Circuit};
 
 #[cfg(test)]
 pub(crate) mod circuit_tests;
+#[cfg(test)]
+mod client_tests;
 #[cfg(test)]
 mod dimensions_tests;
 /// History chunks are sized for this many input tokens when the user names
@@ -365,14 +368,10 @@ impl Provider {
         if let Some(dimensions) = self.dimensions {
             body["dimensions"] = json!(dimensions);
         }
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .timeout(timeout)
-            .build()
-            .map_err(|_| RequestFailure::Unavailable)?;
+        let client = client_for(&self.endpoint).ok_or(RequestFailure::Unavailable)?;
         let mut request = client
             .post(format!("{}/embeddings", self.endpoint))
+            .timeout(timeout)
             .header("content-type", "application/json");
         if let Some(key) = &self.api_key {
             request = request.header("authorization", format!("Bearer {key}"));
@@ -414,6 +413,32 @@ impl Provider {
 enum RequestFailure {
     RateLimited,
     Unavailable,
+}
+
+/// The HTTP client for one endpoint, built on first use and kept for the
+/// life of the process: no redirects, no proxy, and a timeout set on each
+/// request. Settings build a new [`Provider`] for every session and pass,
+/// so the client is kept per endpoint, as the circuit is; requests then
+/// reuse its open connections instead of paying a new TCP and TLS
+/// handshake each time. `None` when a client cannot be built; the next
+/// request tries again.
+fn client_for(endpoint: &str) -> Option<reqwest::Client> {
+    static CLIENTS: OnceLock<Mutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
+    let mut clients = CLIENTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = endpoint.trim_end_matches('/');
+    if let Some(client) = clients.get(key) {
+        return Some(client.clone());
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .ok()?;
+    clients.insert(key.to_owned(), client.clone());
+    Some(client)
 }
 
 /// Cut `input` to about `budget` tokens at a character boundary, keeping its

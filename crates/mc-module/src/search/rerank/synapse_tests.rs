@@ -75,8 +75,12 @@ async fn catalog_success_resets_the_next_absence_to_thirty_seconds() {
     assert!(cache.pin(client.call("models.list")).await.is_err());
     tokio::time::advance(Duration::from_secs(600)).await;
     assert!(cache.pin(client.call("models.list")).await.is_ok());
+    // Each pin is reused for a minute, so the catalog is asked again only
+    // once that has passed.
+    tokio::time::advance(PIN_REUSE).await;
     assert!(cache.pin(client.call("models.list")).await.is_ok());
     assert_eq!(client.calls(), 4);
+    tokio::time::advance(PIN_REUSE).await;
     assert!(cache.pin(client.call("models.list")).await.is_err());
     tokio::time::advance(Duration::from_secs(29)).await;
     assert!(cache.pin(client.call("models.list")).await.is_err());
@@ -209,4 +213,39 @@ async fn absent_synapse_logs_the_existing_fallback_once_even_after_reprobes() {
         1,
         "{text}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pin_is_reused_for_a_minute_and_then_asked_for_again() {
+    let cache = SynapseCatalog::new();
+    let client = FakeSynapse::new([catalog(), catalog()]);
+    let pinned = cache.pin(client.call("models.list")).await.unwrap();
+    tokio::time::advance(PIN_REUSE - Duration::from_millis(1)).await;
+    assert_eq!(cache.pin(client.call("models.list")).await, Ok(pinned));
+    assert_eq!(client.calls(), 1);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(cache.pin(client.call("models.list")).await.is_ok());
+    assert_eq!(client.calls(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_pin_is_not_reused() {
+    let cache = SynapseCatalog::new();
+    let client = FakeSynapse::new([catalog(), Err("deadline_exceeded".into()), catalog()]);
+    assert!(cache.pin(client.call("models.list")).await.is_ok());
+    tokio::time::advance(PIN_REUSE).await;
+    assert!(cache.pin(client.call("models.list")).await.is_err());
+    // Neither the failure nor the expired pin answers the next search.
+    assert!(cache.pin(client.call("models.list")).await.is_ok());
+    assert_eq!(client.calls(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_forgotten_pin_is_asked_for_again_at_once() {
+    let cache = SynapseCatalog::new();
+    let client = FakeSynapse::new([catalog(), catalog()]);
+    assert!(cache.pin(client.call("models.list")).await.is_ok());
+    cache.forget();
+    assert!(cache.pin(client.call("models.list")).await.is_ok());
+    assert_eq!(client.calls(), 2);
 }

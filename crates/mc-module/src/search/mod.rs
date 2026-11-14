@@ -39,6 +39,8 @@ const PRIMER_BOOST: f64 = 1.25;
 const SOURCES: [&str; 5] = ["memory", "message", "git_commit", "primer", "note"];
 /// Reciprocal-rank constant for fusing message and summary hits.
 const RRF_K: f64 = 60.0;
+/// How deep a reranked search reads the message lane for its candidates.
+const RERANK_MESSAGE_DEPTH: usize = 75;
 
 /// What a search may read for one session.
 pub struct Scope<'a> {
@@ -63,6 +65,54 @@ pub struct Scope<'a> {
     /// The query's embedding, when the session has an embedding provider and
     /// the endpoint answered.
     pub semantic: Option<sources::Semantic<'a>>,
+}
+
+/// What a [`Scope`] names, owned, so a search can run on a blocking thread.
+/// The query's embedding is kept apart and lent to [`OwnedScope::scope`].
+#[derive(Clone, Debug)]
+pub struct OwnedScope {
+    pub harness: String,
+    pub session: String,
+    pub project: Option<String>,
+    pub cutoff: i64,
+    pub visible_messages: Option<BTreeSet<i64>>,
+    pub seen: BTreeMap<i64, String>,
+    pub memory_enabled: bool,
+    pub git_commits_enabled: bool,
+    pub git_repository: Option<bool>,
+}
+
+impl OwnedScope {
+    /// A copy of everything `scope` names but its embedding.
+    pub fn of(scope: &Scope) -> Self {
+        Self {
+            harness: scope.harness.to_owned(),
+            session: scope.session.to_owned(),
+            project: scope.project.map(str::to_owned),
+            cutoff: scope.cutoff,
+            visible_messages: scope.visible_messages.clone(),
+            seen: scope.seen.clone(),
+            memory_enabled: scope.memory_enabled,
+            git_commits_enabled: scope.git_commits_enabled,
+            git_repository: scope.git_repository,
+        }
+    }
+
+    /// The scope this names, with `semantic` as its query embedding.
+    pub fn scope<'a>(&'a self, semantic: Option<sources::Semantic<'a>>) -> Scope<'a> {
+        Scope {
+            harness: &self.harness,
+            session: &self.session,
+            project: self.project.as_deref(),
+            cutoff: self.cutoff,
+            visible_messages: self.visible_messages.clone(),
+            seen: &self.seen,
+            memory_enabled: self.memory_enabled,
+            git_commits_enabled: self.git_commits_enabled,
+            git_repository: self.git_repository,
+            semantic,
+        }
+    }
 }
 
 /// One search result, from whichever lane found it.
@@ -544,11 +594,7 @@ fn visible_memories(conn: &Connection, project: &str, scope: &Scope) -> BTreeSet
 
 /// The answer to a query made only of memory ids, or `None` when the query
 /// is not one or names no current memory; then the full search runs.
-pub fn by_ids(
-    conn: &mut Connection,
-    scope: &Scope,
-    input: &Value,
-) -> Option<Result<String, String>> {
+pub fn by_ids(conn: &Connection, scope: &Scope, input: &Value) -> Option<Result<String, String>> {
     let request = match parse(input) {
         Ok(request) => request,
         Err(error) => return Some(Err(error)),
@@ -677,6 +723,7 @@ fn fuse_history(messages: Vec<MessageHit>, chunks: Vec<ChunkHit>, limit: usize) 
 /// does neither.
 fn collect(
     conn: &Connection,
+    coverage: &mut messages::Coverage,
     scope: &Scope,
     request: &Request,
     explicit: bool,
@@ -753,6 +800,7 @@ fn collect(
         }
     }
     if active("message") {
+        let reach = messages::reach(conn, coverage, scope.session, dates);
         if explicit {
             diagnostics.live_message_matches = messages::count_live_matches(
                 conn,
@@ -761,10 +809,30 @@ fn collect(
                 scope.cutoff,
                 dates,
                 scope.visible_messages.as_ref(),
+                reach,
             );
             diagnostics.visibility_from_view = scope.visible_messages.is_some();
         }
-        let found = messages::search(conn, scope.session, &wanted, scope.cutoff, explicit);
+        // A rerank also reads the message lane deeper, as the plugin's
+        // capture limit does, so the baseline's own ranking is unchanged.
+        // Both depths come from the same reads.
+        let depths: &[usize] = if lanes.is_some() {
+            &[tier, RERANK_MESSAGE_DEPTH]
+        } else {
+            &[tier]
+        };
+        let mut depths = messages::search_at(
+            conn,
+            scope.session,
+            &wanted,
+            depths,
+            scope.cutoff,
+            explicit,
+            reach,
+        )
+        .into_iter();
+        let found = depths.next().unwrap_or_default();
+        let deeper = depths.next().unwrap_or_default();
         let chunks = match (scope.semantic, project) {
             (Some(semantic), Some(project)) => sources::search_chunks(
                 conn,
@@ -778,18 +846,11 @@ fn collect(
             _ => Vec::new(),
         };
         if let Some(lanes) = lanes.as_deref_mut() {
-            // The message lane is read deeper on its own, as the plugin's
-            // capture limit does, so the baseline's own ranking is unchanged.
-            let deeper = messages::Query {
-                limit: 75,
-                ..wanted
-            };
-            lanes.message_fts =
-                messages::search(conn, scope.session, &deeper, scope.cutoff, explicit)
-                    .into_iter()
-                    .take(rerank::LANE_LIMIT)
-                    .map(Hit::Message)
-                    .collect();
+            lanes.message_fts = deeper
+                .into_iter()
+                .take(rerank::LANE_LIMIT)
+                .map(Hit::Message)
+                .collect();
             lanes.chunk_vector = chunks
                 .iter()
                 .take(rerank::LANE_LIMIT)
@@ -874,9 +935,11 @@ impl Prepared {
 }
 
 /// Score one `ctx_search` call over every lane. With `pool`, a reranker
-/// will score up to that many fused candidates (see [`rerank`]).
+/// will score up to that many fused candidates (see [`rerank`]). `coverage`
+/// belongs to `conn` (see [`messages::Coverage`]).
 pub fn prepare(
     conn: &Connection,
+    coverage: &mut messages::Coverage,
     scope: &Scope,
     input: &Value,
     pool: Option<usize>,
@@ -886,6 +949,7 @@ pub fn prepare(
     let mut lanes = pool.map(|_| rerank::Lanes::default());
     let hits = collect(
         conn,
+        coverage,
         scope,
         &request,
         true,
@@ -939,7 +1003,7 @@ pub fn finish(conn: &mut Connection, scope: &Scope, prepared: Prepared) -> Strin
 /// Run one `ctx_search` call over every lane without a rerank; a query of
 /// memory ids is answered by [`by_ids`] first.
 pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String, String> {
-    let prepared = prepare(conn, scope, input, None)?;
+    let prepared = prepare(conn, &mut messages::Coverage::default(), scope, input, None)?;
     Ok(finish(conn, scope, prepared))
 }
 
@@ -953,7 +1017,12 @@ pub const AUTO_SOURCES: [&str; 3] = ["memory", "message", "git_commit"];
 /// probes, and retrievals not counted. Each comes with the relevance the
 /// hint threshold applies to: word overlap with the prompt for hits found
 /// by words, the hit's own score for hits found by meaning.
-pub fn auto_hits(conn: &Connection, scope: &Scope, prompt: &str) -> Vec<(Hit, f64)> {
+pub fn auto_hits(
+    conn: &Connection,
+    coverage: &mut messages::Coverage,
+    scope: &Scope,
+    prompt: &str,
+) -> Vec<(Hit, f64)> {
     let request = Request {
         query: prompt,
         dates: None,
@@ -966,14 +1035,22 @@ pub fn auto_hits(conn: &Connection, scope: &Scope, prompt: &str) -> Vec<(Hit, f6
         ),
     };
     let mut diagnostics = Diagnostics::default();
-    collect(conn, scope, &request, false, &mut diagnostics, None)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|hit| {
-            let relevance = hint_relevance(&hit, prompt);
-            (hit, relevance)
-        })
-        .collect()
+    collect(
+        conn,
+        coverage,
+        scope,
+        &request,
+        false,
+        &mut diagnostics,
+        None,
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .map(|hit| {
+        let relevance = hint_relevance(&hit, prompt);
+        (hit, relevance)
+    })
+    .collect()
 }
 
 fn hint_relevance(hit: &Hit, prompt: &str) -> f64 {

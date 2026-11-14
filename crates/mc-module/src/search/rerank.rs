@@ -477,34 +477,61 @@ pub struct Pinned {
 pub struct Skipped(pub String);
 
 /// Pin Synapse's catalog unless the daemon recently refused the module by name.
-/// One daemon serves the process, so sessions share the absence, not a model pin.
+/// One daemon serves the process, so sessions share the absence, and a pin
+/// is reused for a minute instead of asking on every prose search.
 pub async fn pin_synapse(
     catalog: impl Future<Output = Result<Value, String>>,
 ) -> Result<Pinned, Skipped> {
-    static CATALOG: SynapseCatalog = SynapseCatalog::new();
-    CATALOG.pin(catalog).await
+    SYNAPSE_CATALOG.pin(catalog).await
 }
+
+/// Drop the reused pin, so the next search asks the catalog again.
+pub fn forget_synapse_pin() {
+    SYNAPSE_CATALOG.forget();
+}
+
+static SYNAPSE_CATALOG: SynapseCatalog = SynapseCatalog::new();
+
+/// How long a pin from a catalog answer is reused. A failed pin is never
+/// kept, so a Synapse that comes back is asked on the next search.
+const PIN_REUSE: Duration = Duration::from_secs(60);
 
 struct SynapseCatalog {
     retry_at: Mutex<Option<tokio::time::Instant>>,
+    /// The last pin and when the catalog gave it.
+    pinned: Mutex<Option<(Pinned, tokio::time::Instant)>>,
 }
 
 impl SynapseCatalog {
     const fn new() -> Self {
         Self {
             retry_at: Mutex::new(None),
+            pinned: Mutex::new(None),
         }
+    }
+
+    fn forget(&self) {
+        *self.pinned.lock().expect("Synapse pin") = None;
     }
 
     async fn pin(
         &self,
         catalog: impl Future<Output = Result<Value, String>>,
     ) -> Result<Pinned, Skipped> {
+        if let Some((pin, at)) = self.pinned.lock().expect("Synapse pin").clone() {
+            if tokio::time::Instant::now() < at + PIN_REUSE {
+                return Ok(pin);
+            }
+        }
         let previous = *self.retry_at.lock().expect("Synapse availability");
         if previous.is_some_and(|retry_at| tokio::time::Instant::now() < retry_at) {
             return Err(Skipped("unknown_module".into()));
         }
         let result = catalog.await.map_err(Skipped).and_then(pin);
+        *self.pinned.lock().expect("Synapse pin") = result
+            .as_ref()
+            .ok()
+            .map(|pin| (pin.clone(), tokio::time::Instant::now()));
         let mut retry_at = self.retry_at.lock().expect("Synapse availability");
         match &result {
             Ok(_) => *retry_at = None,
