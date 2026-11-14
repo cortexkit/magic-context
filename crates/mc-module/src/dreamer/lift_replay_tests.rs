@@ -22,6 +22,9 @@
 //! - `LIFT_REPLAY_STORE`: a copy of a `context.db`. A path inside the live
 //!   data folder (`~/.local/share/cortexkit/`) is refused, and the copy is
 //!   opened read-only. Only the first test reads it.
+//! - `LIFT_REPLAY_PROJECT_NAME` (optional): the project's name among the
+//!   workspace's projects, which the message then shows as the project;
+//!   without it the message shows the project's id.
 //! - `LIFT_REPLAY_PROJECT`: the project's id, as its memories name their
 //!   owner. Only the first test reads it.
 //! - `LIFT_REPLAY_WORKSPACE`: the workspace as JSON, `{"id": "…", "name":
@@ -212,7 +215,18 @@ fn lift_requests() {
         r#"{"id": "<workspace id>", "name": "<display name>", "projects": ["<project name>", …]}"#,
     ))
     .expect("LIFT_REPLAY_WORKSPACE is JSON");
-    let workspace = workspace_of(&workspace_json);
+    let mut workspace = workspace_of(&workspace_json);
+    // The run names the project by the name the workspace lists for its id;
+    // the JSON lists names only, so `LIFT_REPLAY_PROJECT_NAME` says which
+    // one is this project.
+    if let Some(name) = env("LIFT_REPLAY_PROJECT_NAME") {
+        let member = workspace
+            .members
+            .iter_mut()
+            .find(|member| member.name == name)
+            .expect("LIFT_REPLAY_PROJECT_NAME is one of the workspace's projects");
+        member.project_id = project.clone();
+    }
     assert!(
         workspace.members.len() >= 2,
         "a workspace of fewer than two projects gets no lift run"

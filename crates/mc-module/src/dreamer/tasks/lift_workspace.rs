@@ -104,6 +104,17 @@ pub(crate) fn project_names(workspace: &WorkspaceMembers) -> String {
     names.join(", ")
 }
 
+/// The project's name as the workspace lists it, so the model can tell
+/// which memories speak of this project; its id when the workspace doesn't
+/// list it by id (a replay that knows only names).
+pub(crate) fn project_name<'a>(workspace: &'a WorkspaceMembers, project: &'a str) -> &'a str {
+    workspace
+        .members
+        .iter()
+        .find(|member| member.project_id == project)
+        .map_or(project, |member| member.name.as_str())
+}
+
 /// The text that fills the task's input frame: each memory in the frame's
 /// own shape.
 pub(crate) fn input(memories: &[Memory]) -> String {
@@ -276,7 +287,7 @@ impl LiftWorkspace {
                     "user",
                     &[(INPUT_FRAME, text.as_str())],
                     &[
-                        ("projectIdentity", project.as_str()),
+                        ("project.name", project_name(workspace, project)),
                         ("workspace.name", workspace.name.as_str()),
                         ("workspace.count", count.as_str()),
                         ("workspace.projects", projects.as_str()),

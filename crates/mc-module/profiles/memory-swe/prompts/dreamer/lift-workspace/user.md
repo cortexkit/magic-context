@@ -1,6 +1,6 @@
 ## Task: Place Project Memories
 
-**Project:** ⟦projectIdentity⟧
+**Project:** ⟦project.name⟧
 **Workspace:** ⟦workspace.name⟧, with ⟦workspace.count⟧ projects: ⟦workspace.projects⟧
 
 Decide for EVERY memory below whether it moves to the workspace. Emit one <place> manifest covering every id.

@@ -222,7 +222,8 @@ fn the_bundled_profile_registers_the_lift_switched_off_and_renders_its_texts_unc
     // The message names the project and the workspace with its projects,
     // sorted, then lists the memories in the input frame's shape.
     let message = file("profiles/memory-swe/prompts/dreamer/lift-workspace/user.md")
-        .replace("⟦projectIdentity⟧", PROJECT)
+        // The members carry no ids here, so the project is named by its id.
+        .replace("⟦project.name⟧", PROJECT)
         .replace("⟦workspace.name⟧", "CortexKit")
         .replace("⟦workspace.count⟧", "3")
         .replace("⟦workspace.projects⟧", "entorhinal, magic-context, subc")

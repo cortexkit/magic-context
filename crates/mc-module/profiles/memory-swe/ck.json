@@ -80,13 +80,13 @@
     },
     {
       "path": "prompts/dreamer/lift-workspace/system.md",
-      "sha256": "4c463a27838db4790f1af09237113ea2de1946c37e23790db33b5d24cb56530a",
-      "bytes": 1849
+      "sha256": "23abd90aa9e3fae7a501747a82b902665431896a1bfe67bd9b8bd62be84fa0db",
+      "bytes": 2483
     },
     {
       "path": "prompts/dreamer/lift-workspace/user.md",
-      "sha256": "5ee0924923db109f9c8da390d56fb83ffcc50af0e09cb6a1d457ac15e496254b",
-      "bytes": 309
+      "sha256": "6cf948a589c9871d9370bb5edffcbf5e86dacf662942e95ce3899ae937b0b53a",
+      "bytes": 306
     },
     {
       "path": "prompts/dreamer/maintain-docs/system.md",
