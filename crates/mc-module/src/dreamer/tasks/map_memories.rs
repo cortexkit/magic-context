@@ -692,7 +692,9 @@ pub(crate) struct Run {
 impl MapMemories {
     /// The run's batches for the context's owner, in order.
     pub(crate) fn plan_batches(&self, context: &TaskContext<'_>) -> Result<Vec<MapBatch>, String> {
-        let Owner::Project { id: project, root } = context.owner;
+        let Owner::Project { id: project, root } = context.owner else {
+            return Err(format!("{KIND} works on a project's memories only"));
+        };
         let live = context
             .db
             .with_connection(|conn| live_memories(conn, project))

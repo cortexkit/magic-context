@@ -710,7 +710,9 @@ impl Curate {
         resume: Option<&Resume>,
         only: Option<&str>,
     ) -> Result<Vec<CurateBatch>, String> {
-        let Owner::Project { id: project, root } = context.owner;
+        let Owner::Project { id: project, root } = context.owner else {
+            return Err(format!("{KIND} works on a project's memories only"));
+        };
         let mut categories = categories(context.profile, context.declaration);
         if let Some(only) = only {
             categories.retain(|category| category.id == only || category.tag == only);
@@ -850,7 +852,9 @@ impl Task for Curate {
     }
 
     fn batches(&self, context: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String> {
-        let Owner::Project { id: project, .. } = context.owner;
+        let Owner::Project { id: project, .. } = context.owner else {
+            return Err(format!("{KIND} works on a project's memories only"));
+        };
         let task = context.declaration["id"].as_str().unwrap_or(KIND);
         let resume = context
             .db

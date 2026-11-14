@@ -1,9 +1,9 @@
 //! The `review-user-memories` task, the global review: read the summarizer's
 //! pending observations about the person next to the person's live global
 //! memories, and let a model decide which recurring traits become global
-//! memories, which existing ones to rewrite or archive, and which
-//! observations it has reviewed. It is the only writer of global memories
-//! besides the person, and its run calls no tools.
+//! memories, which existing ones to rewrite, archive or file under a
+//! category, and which observations it has reviewed. It is the only writer
+//! of global memories besides the person, and its run calls no tools.
 //!
 //! Ported from the 0.49 plugin's review
 //! (`packages/plugin/src/features/magic-context/user-memory/`), which wrote
@@ -13,11 +13,22 @@
 //!   observations this review was shown and that are still pending, and a
 //!   user category the review declares that global memories may use; its
 //!   text must not repeat a live global memory;
-//! - an update or archive names a live global memory this review was shown,
-//!   unchanged since it was read. An update keeps the memory's category,
-//!   except that a line the 0.50 migration moved without one
-//!   (`mc:user-unsorted`) is filed under the category the update names;
+//! - an update, archive or refile names a live global memory this review was
+//!   shown, unchanged since it was read, and no other entry of the reply
+//!   names it. An update keeps the memory's category, except that a line the
+//!   0.50 migration moved without one (`mc:user-unsorted`, shown as
+//!   `UNSORTED`) is filed under the category the update names; a refile files
+//!   such a line and leaves its text as it is;
+//! - a memory the person wrote or edited is shown as `protected`, and is
+//!   never updated or archived;
 //! - only observations this review was shown are taken out of review.
+//!
+//! A run is due when enough observations for one promotion wait, or while
+//! any global memory is still unsorted. Before it reads, observations that
+//! have waited longer than 30 days leave review, as the 0.49 review's
+//! candidates decayed. One message carries every filed global memory and,
+//! within about 12,000 tokens of text, the unsorted lines and then the
+//! oldest observations; the rest waits for the next run.
 //!
 //! A promoted memory gets no importance: the classifier scores it later.
 //! Every write keeps the memory's revision and undo history, under a
@@ -30,6 +41,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Map, Value};
 
 use crate::context_migrations::{LIVE, USER_UNSORTED_CATEGORY};
+use crate::count::Counter;
 use crate::dreamer::run::{TaskInput, TaskReply};
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
 use crate::memory_levels::{NewRow, OriginProfile};
@@ -62,6 +74,20 @@ const SESSION_CHARS: usize = 12;
 /// user-profile lines moved from the 0.49 plugin carry, since this task is
 /// the 0.49 review's successor.
 const SOURCE_TYPE: &str = "user-review";
+/// How long an observation may wait for review before it leaves the queue
+/// unreviewed: the 0.49 review's candidate decay. A real trait recurs well
+/// within it; a one-off never gathers the observations a promotion needs.
+pub(crate) const OBSERVATION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// About how many tokens of memory and observation text one message holds,
+/// counted with the module's own counter, as curate counts its parts.
+pub(crate) const MESSAGE_TOKENS: u64 = 12_000;
+/// Whether a memory row was written or edited by the person, as SQL over
+/// `memories m`: the rule curate protects such memories by. The person's own
+/// writes record their journal operation as `person_<what>`, and a memory
+/// the person created from the apps names `person` as its source.
+const PERSON_WRITTEN: &str = "(m.source_type = 'person'
+    OR EXISTS(SELECT 1 FROM memory_history h JOIN memory_journal j ON j.decision_key = h.decision_key
+               WHERE h.memory_id = m.id AND j.operation LIKE 'person\\_%' ESCAPE '\\'))";
 
 /// A user category the review may file a global memory under.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,14 +142,26 @@ pub(crate) struct Memory {
     pub tag: String,
     pub content: String,
     pub revision: i64,
+    /// Written or edited by the person: the review may not update or archive
+    /// it.
+    pub protected: bool,
+}
+
+impl Memory {
+    /// Moved by the 0.50 migration without a category, and not filed since.
+    pub(crate) fn unsorted(&self) -> bool {
+        self.category_id == USER_UNSORTED_CATEGORY
+    }
 }
 
 /// The person's live global memories, by id.
 pub(crate) fn live_memories(conn: &Connection) -> rusqlite::Result<Vec<Memory>> {
     conn.prepare(&format!(
-        "SELECT id, category, origin_category, content, revision FROM memories
-          WHERE level = ?1 AND owner_id = ?2 AND {LIVE} AND superseded_by_memory_id IS NULL
-          ORDER BY id"
+        "SELECT m.id, m.category, m.origin_category, m.content, m.revision, {PERSON_WRITTEN}
+           FROM memories m
+          WHERE m.level = ?1 AND m.owner_id = ?2 AND (m.status IS NULL OR m.status IN ('active', 'permanent'))
+            AND m.superseded_by_memory_id IS NULL
+          ORDER BY m.id"
     ))?
     .query_map(params![LEVEL, OWNER], |row| {
         Ok(Memory {
@@ -132,6 +170,7 @@ pub(crate) fn live_memories(conn: &Connection) -> rusqlite::Result<Vec<Memory>> 
             tag: row.get(2)?,
             content: row.get(3)?,
             revision: row.get(4)?,
+            protected: row.get(5)?,
         })
     })?
     .collect()
@@ -170,7 +209,7 @@ pub(crate) fn pending_candidates(conn: &Connection) -> rusqlite::Result<Vec<Cand
 /// [`UNSORTED`] for a line the 0.50 migration moved without a category, and
 /// otherwise the tag it was written under.
 fn shown_tag(memory: &Memory, tags: &HashMap<String, String>) -> String {
-    if memory.category_id == USER_UNSORTED_CATEGORY {
+    if memory.unsorted() {
         return UNSORTED.to_owned();
     }
     tags.get(&memory.category_id)
@@ -179,16 +218,23 @@ fn shown_tag(memory: &Memory, tags: &HashMap<String, String>) -> String {
 }
 
 /// The text that fills the task's input frame: the live memories, each with
-/// the tag it is shown under, then the pending observations, each in the
-/// frame's own shape. The lists keep the 0.49 review's order and its
-/// `(none)` for an empty memory list.
+/// the tag it is shown under and `protected` after it when the person wrote
+/// or edited it, then the pending observations, each in the frame's own
+/// shape. The lists keep the 0.49 review's order and its `(none)` for an
+/// empty memory list.
 pub(crate) fn input(memories: &[(Memory, String)], candidates: &[Candidate]) -> String {
     let memories = if memories.is_empty() {
         "(none)".to_owned()
     } else {
         memories
             .iter()
-            .map(|(memory, tag)| format!("- Memory #{} [{tag}]: \"{}\"", memory.id, memory.content))
+            .map(|(memory, tag)| {
+                let mark = if memory.protected { ", protected" } else { "" };
+                format!(
+                    "- Memory #{} [{tag}{mark}]: \"{}\"",
+                    memory.id, memory.content
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -240,6 +286,14 @@ pub(crate) struct Dismissal {
     pub reason: Option<String>,
 }
 
+/// A category for an unsorted memory, its text kept, as a reply proposes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Refile {
+    pub memory_id: i64,
+    /// The category the reply names, as written; empty when it names none.
+    pub category: String,
+}
+
 /// What a reply proposes. An entry the reply wrote in a shape no change can
 /// be read from is kept as why it is dropped, so the rest still apply.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -247,15 +301,33 @@ pub(crate) struct Verdict {
     pub promote: Vec<Result<Promotion, String>>,
     pub update: Vec<Result<Update, String>>,
     pub dismiss: Vec<Result<Dismissal, String>>,
+    pub refile: Vec<Result<Refile, String>>,
     /// The observations the reply lists as reviewed, each once.
     pub consume: Vec<Result<i64, String>>,
 }
 
 impl Verdict {
-    /// How many changes the reply proposes: each entry of the three lists,
-    /// and each observation it lists as reviewed.
+    /// How many changes the reply proposes: each entry of the four lists of
+    /// memory changes, and each observation it lists as reviewed.
     fn proposals(&self) -> usize {
-        self.promote.len() + self.update.len() + self.dismiss.len() + self.consume.len()
+        self.promote.len()
+            + self.update.len()
+            + self.dismiss.len()
+            + self.refile.len()
+            + self.consume.len()
+    }
+
+    /// How many entries of the update, dismissal and refile lists name each
+    /// memory.
+    fn named(&self) -> HashMap<i64, usize> {
+        let mut named = HashMap::new();
+        let ids = (self.update.iter().flatten().map(|entry| entry.memory_id))
+            .chain(self.dismiss.iter().flatten().map(|entry| entry.memory_id))
+            .chain(self.refile.iter().flatten().map(|entry| entry.memory_id));
+        for id in ids {
+            *named.entry(id).or_default() += 1;
+        }
+        named
     }
 }
 
@@ -373,6 +445,19 @@ pub(crate) fn parse_verdict(reply: &str) -> Result<Verdict, String> {
             })
         })
         .collect();
+    let refile = list(&object, "refile")?
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| -> Result<Refile, String> {
+            let memory_id = entry["memory_id"]
+                .as_i64()
+                .ok_or_else(|| format!("refile {} names no memory id", index + 1))?;
+            Ok(Refile {
+                memory_id,
+                category: text(entry, "category").unwrap_or_default(),
+            })
+        })
+        .collect();
     let mut listed = HashSet::new();
     let consume = list(&object, "consume_candidate_ids")?
         .iter()
@@ -385,17 +470,82 @@ pub(crate) fn parse_verdict(reply: &str) -> Result<Verdict, String> {
         promote,
         update,
         dismiss,
+        refile,
         consume,
     })
+}
+
+/// Take every observation that has waited longer than
+/// [`OBSERVATION_TTL_MS`] at `now` out of review, unreviewed: it is marked,
+/// not deleted. Returns how many left.
+pub(crate) fn decay(conn: &Connection, now: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE memory_observations SET consumed_at = ?1
+          WHERE consumed_at IS NULL AND created_at < ?2",
+        params![now, now - OBSERVATION_TTL_MS],
+    )
+}
+
+/// What one message shows: every filed memory, then, while the text of all
+/// it shows stays within `budget` tokens, the unsorted lines in id order and
+/// then the observations oldest first. The first of those that doesn't fit
+/// ends the message, so nothing older is passed over; the first one always
+/// goes in, however long, so every run moves the queue on.
+pub(crate) fn fit(
+    memories: &[Memory],
+    candidates: &[Candidate],
+    counter: Counter,
+    budget: u64,
+) -> (Vec<Memory>, Vec<Candidate>) {
+    let mut used: u64 = memories
+        .iter()
+        .filter(|memory| !memory.unsorted())
+        .map(|memory| counter.count(&memory.content))
+        .sum();
+    let mut added = false;
+    let mut room = |text: &str| {
+        let cost = counter.count(text);
+        if added && used + cost > budget {
+            return false;
+        }
+        used += cost;
+        added = true;
+        true
+    };
+    let mut unsorted = HashSet::new();
+    let mut full = false;
+    for memory in memories.iter().filter(|memory| memory.unsorted()) {
+        if !room(&memory.content) {
+            full = true;
+            break;
+        }
+        unsorted.insert(memory.id);
+    }
+    let mut shown_candidates = Vec::new();
+    if !full {
+        for candidate in candidates {
+            if !room(&candidate.content) {
+                break;
+            }
+            shown_candidates.push(candidate.clone());
+        }
+    }
+    let shown_memories = memories
+        .iter()
+        .filter(|memory| !memory.unsorted() || unsorted.contains(&memory.id))
+        .cloned()
+        .collect();
+    (shown_memories, shown_candidates)
 }
 
 /// The task kind.
 pub(crate) struct ReviewUserMemories;
 
 impl ReviewUserMemories {
-    /// The run's batch: one message with every pending observation and
-    /// every live global memory, as the 0.49 review sent them, when at least
-    /// enough observations for one promotion are pending.
+    /// The run's batch: one message with the person's global memories and
+    /// the oldest observations waiting, when enough observations for one
+    /// promotion wait or a global memory is still unsorted. Observations that
+    /// waited too long leave review first.
     pub(crate) fn plan_batches(
         &self,
         context: &TaskContext<'_>,
@@ -407,15 +557,30 @@ impl ReviewUserMemories {
             .as_u64()
             .filter(|threshold| *threshold > 0)
             .map_or(PROMOTION_THRESHOLD, |threshold| threshold as usize);
-        let (memories, candidates) = context
+        let (decayed, memories, candidates) = context
             .db
             .with_connection(|conn| {
-                Ok::<_, rusqlite::Error>((live_memories(conn)?, pending_candidates(conn)?))
+                Ok::<_, rusqlite::Error>((
+                    decay(conn, now_ms())?,
+                    live_memories(conn)?,
+                    pending_candidates(conn)?,
+                ))
             })
             .map_err(|error| format!("reading the person's memories and observations: {error}"))?;
-        if candidates.len() < threshold {
+        if decayed > 0 {
+            tracing::info!(
+                "ck-mc: dreamer: {decayed} observation(s) about the person waited over 30 days and left review"
+            );
+        }
+        if candidates.len() < threshold && !memories.iter().any(Memory::unsorted) {
             return Ok(Vec::new());
         }
+        let (memories, candidates) = fit(
+            &memories,
+            &candidates,
+            Counter::for_model(None),
+            MESSAGE_TOKENS,
+        );
         let profile = context.profile;
         let tags: HashMap<String, String> = profile.body["categories"]
             .as_array()
@@ -446,6 +611,16 @@ impl ReviewUserMemories {
             memories: memories
                 .iter()
                 .map(|memory| (memory.id, memory.revision))
+                .collect(),
+            protected: memories
+                .iter()
+                .filter(|memory| memory.protected)
+                .map(|memory| memory.id)
+                .collect(),
+            unsorted: memories
+                .iter()
+                .filter(|memory| memory.unsorted())
+                .map(|memory| memory.id)
                 .collect(),
             candidates: candidates.iter().map(|candidate| candidate.id).collect(),
             categories: categories(profile, context.declaration),
@@ -483,6 +658,10 @@ pub(crate) struct ReviewBatch {
     message: String,
     /// Each live global memory the message shows, with the revision read.
     memories: Vec<(i64, i64)>,
+    /// The memories shown that the person wrote or edited.
+    protected: HashSet<i64>,
+    /// The memories shown as unsorted, in id order.
+    unsorted: Vec<i64>,
     /// Each observation the message shows.
     candidates: Vec<i64>,
     /// The categories a change may file a memory under.
@@ -561,8 +740,8 @@ struct Writes<'a> {
     applied: Applied,
     /// Decisions recorded, which number the next one's key.
     decisions: usize,
-    /// Memories an earlier entry of the reply changed.
-    changed: HashSet<i64>,
+    /// How many update, dismissal and refile entries name each memory.
+    named: HashMap<i64, usize>,
     /// Observations to take out of review, each with whether the reply
     /// listed it itself.
     consumed: Vec<(i64, bool)>,
@@ -619,7 +798,6 @@ impl Writes<'_> {
             "UPDATE memory_journal SET before_json = ?2, after_json = ?2 WHERE decision_key = ?1",
             params![key, history_json(&decision)],
         )?;
-        self.changed.insert(id);
         self.applied.applied += 1;
         Ok(())
     }
@@ -635,11 +813,12 @@ impl Writes<'_> {
 
 impl ReviewBatch {
     /// Write what `verdict` proposes and passes its checks, in `tx`: the
-    /// promotions, then the updates, then the archives, then the
+    /// promotions, then the updates, the archives and the refiles, then the
     /// observations taken out of review. An observation behind a written
     /// promotion or update leaves review even when the reply forgot to list
     /// it, as in the 0.49 review, so the next review doesn't promote the same
-    /// trait again.
+    /// trait again. An unsorted memory the message showed that is still
+    /// unsorted afterwards is listed as left unsorted; it stays as it is.
     fn write(
         &self,
         tx: &Transaction<'_>,
@@ -655,7 +834,7 @@ impl ReviewBatch {
                 ..Applied::default()
             },
             decisions: 0,
-            changed: HashSet::new(),
+            named: verdict.named(),
             consumed: Vec::new(),
         };
         // Every observation the batch showed, as it is before this reply
@@ -685,6 +864,12 @@ impl ReviewBatch {
                 Err(reason) => writes.drop(reason.clone()),
             }
         }
+        for refile in &verdict.refile {
+            match refile {
+                Ok(refile) => self.refile(&mut writes, refile)?,
+                Err(reason) => writes.drop(reason.clone()),
+            }
+        }
         for id in &verdict.consume {
             match id {
                 Ok(id) if !self.candidates.contains(id) => writes.drop(format!(
@@ -708,6 +893,22 @@ impl ReviewBatch {
                 writes.applied.applied += 1;
             }
         }
+        for id in &self.unsorted {
+            let still: bool = tx
+                .query_row(
+                    &format!(
+                        "SELECT category = ?2 AND {LIVE} AND superseded_by_memory_id IS NULL
+                           FROM memories WHERE id = ?1"
+                    ),
+                    params![id, USER_UNSORTED_CATEGORY],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if still {
+                writes.drop(format!("memory #{id} left unsorted"));
+            }
+        }
         Ok(writes.applied)
     }
 
@@ -726,9 +927,9 @@ impl ReviewBatch {
             ));
             return Ok(None);
         };
-        if writes.changed.contains(&id) {
+        if writes.named.get(&id).copied().unwrap_or(0) > 1 {
             writes.drop(format!(
-                "{about}: an earlier entry of the reply already changed it"
+                "{about}: #{id} is named by more than one entry of the reply"
             ));
             return Ok(None);
         }
@@ -850,6 +1051,12 @@ impl ReviewBatch {
         let Some(memory) = self.fresh(writes, id, &about)? else {
             return Ok(());
         };
+        if self.protected.contains(&id) {
+            writes.drop(format!(
+                "{about}: the person wrote or edited it, so the review may not change it"
+            ));
+            return Ok(());
+        }
         // A filed memory keeps its category; a line moved without one is
         // filed where the update says.
         let refile = match &update.category {
@@ -896,14 +1103,7 @@ impl ReviewBatch {
         if rewritten {
             update_content(tx, id, &update.content, &hash)?;
         } else {
-            // Clause evidence is kept per revision; the text stays, so its
-            // evidence moves to the new revision with it.
-            tx.execute(
-                "INSERT OR IGNORE INTO memory_clause_evidence(memory_id, revision, clause_ordinal, text_hash, evidence_json)
-                 SELECT memory_id, revision + 1, clause_ordinal, text_hash, evidence_json
-                   FROM memory_clause_evidence WHERE memory_id = ?1 AND revision = ?2",
-                params![id, memory.revision],
-            )?;
+            carry_evidence(tx, id, memory.revision)?;
         }
         if let Some(category) = refile {
             tx.execute(
@@ -941,6 +1141,12 @@ impl ReviewBatch {
         let Some(memory) = self.fresh(writes, id, &about)? else {
             return Ok(());
         };
+        if self.protected.contains(&id) {
+            writes.drop(format!(
+                "{about}: the person wrote or edited it, so the review may not archive it"
+            ));
+            return Ok(());
+        }
         let Some(before) = history_snapshot(tx, id)? else {
             writes.drop(format!(
                 "{about}: the memory holds a row the undo history can't record"
@@ -963,6 +1169,64 @@ impl ReviewBatch {
         )?;
         Ok(())
     }
+
+    /// File an unsorted memory under the category the reply names, its text
+    /// as it is. The person's own lines may be filed too: filing changes
+    /// nothing they wrote.
+    fn refile(&self, writes: &mut Writes<'_>, refile: &Refile) -> rusqlite::Result<()> {
+        let tx = writes.tx;
+        let id = refile.memory_id;
+        let about = format!("refile of memory #{id}");
+        let Some(memory) = self.fresh(writes, id, &about)? else {
+            return Ok(());
+        };
+        if memory.category_id != USER_UNSORTED_CATEGORY {
+            writes.drop(format!(
+                "{about}: it is not {UNSORTED}, so it keeps its category ({})",
+                memory.category
+            ));
+            return Ok(());
+        }
+        let Some(category) = resolve(&self.categories, &refile.category) else {
+            writes.drop(if refile.category.is_empty() {
+                format!("{about} names no category")
+            } else {
+                format!(
+                    "{about}: {} is not a user category this review may file a global memory under",
+                    refile.category
+                )
+            });
+            return Ok(());
+        };
+        let Some(before) = history_snapshot(tx, id)? else {
+            writes.drop(format!(
+                "{about}: the memory holds a row the undo history can't record"
+            ));
+            return Ok(());
+        };
+        tx.execute(
+            "UPDATE memories SET revision = revision + 1, category = ?2, origin_category = ?3, updated_at = ?4
+              WHERE id = ?1",
+            params![id, category.id, category.tag, writes.now],
+        )?;
+        carry_evidence(tx, id, memory.revision)?;
+        let after = written(tx, id)?;
+        writes.record("refile", Some(before), after, id, json!([]))?;
+        Ok(())
+    }
+}
+
+/// Clause evidence is kept per revision. When a write keeps a memory's text
+/// and advances its revision past `revision`, the evidence for the text moves
+/// to the new revision with it.
+fn carry_evidence(tx: &Transaction<'_>, id: i64, revision: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO memory_clause_evidence(memory_id, revision, clause_ordinal, text_hash, evidence_json)
+         SELECT memory_id, revision + 1, clause_ordinal, text_hash, evidence_json
+           FROM memory_clause_evidence WHERE memory_id = ?1 AND revision = ?2",
+        params![id, revision],
+    )
+    .map(drop)
 }
 
 /// The history snapshot of a row this batch just wrote. Its values are ones

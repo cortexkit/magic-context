@@ -87,7 +87,7 @@ impl Store {
                         proposed,
                         session,
                         project,
-                        1_000 + id,
+                        now_ms() - 24 * 60 * 60 * 1000 + id,
                         consumed.then_some(5_i64)
                     ],
                 )
@@ -113,7 +113,20 @@ impl Store {
         batches.remove(0)
     }
 
+    /// Apply `text` to `batch` as run `run`. The fixture's unsorted line is
+    /// left unsorted by every reply that doesn't name it, which adds the same
+    /// entry to every dropped list; it is taken out here, and the tests on
+    /// unsorted lines read it with [`Self::apply_all`].
     fn apply(&self, batch: &ReviewBatch, text: &str, run: i64) -> Applied {
+        let mut applied = self.apply_all(batch, text, run);
+        applied
+            .dropped
+            .retain(|reason| reason != "memory #2 left unsorted");
+        applied
+    }
+
+    /// Apply `text` to `batch` as run `run`: everything applying did.
+    fn apply_all(&self, batch: &ReviewBatch, text: &str, run: i64) -> Applied {
         self.db.with_connection(|conn| {
             let tx = conn.transaction().unwrap();
             let applied = batch.apply(&tx, &reply(text), run).unwrap();
@@ -263,9 +276,10 @@ fn reply(text: &str) -> TaskReply {
 /// The person's memories and observations most tests start from:
 /// - memory 1, a filed communication trait; memory 2, a line the 0.50
 ///   migration moved without a category; memory 3, a filed engineering
-///   practice; memory 4, archived; memory 5, a project's;
+///   practice; memory 4, archived; memory 5, a project's; memory 6, a
+///   boundary the person wrote from the apps;
 /// - observations 101-103 about replies, 104 moved from 0.49 with no
-///   proposed category, and 105 already taken out of review.
+///   proposed category, and 105 already taken out of review, all a day old.
 fn fixture() -> Store {
     let store = store();
     store.global(
@@ -304,6 +318,8 @@ fn fixture() -> Store {
         "Use bun",
         "active",
     );
+    store.global(6, "base:boundaries", "BOUNDARIES", "Asks before pushing");
+    store.execute("UPDATE memories SET source_type = 'person' WHERE id = 6");
     store.observation(
         101,
         "Asked for a shorter reply",
@@ -355,6 +371,16 @@ fn the_input_follows_its_frame_line_for_line() {
         tag: "COMMUNICATION".into(),
         content: "Prefers concise answers".into(),
         revision: 1,
+        protected: false,
+    };
+    // A memory the person wrote or edited is marked after its tag.
+    let written = Memory {
+        id: 2,
+        category_id: "base:boundaries".into(),
+        tag: "BOUNDARIES".into(),
+        content: "Asks before pushing".into(),
+        revision: 3,
+        protected: true,
     };
     let candidate = |id: i64, session: &str, proposed: Option<&str>, content: &str| Candidate {
         id,
@@ -379,6 +405,8 @@ fn the_input_follows_its_frame_line_for_line() {
     let filled = frame
         .replace("⟦stableMemory.category⟧", "COMMUNICATION")
         .replace("⟦stableMemory.content⟧", "Prefers concise answers")
+        .replace("⟦stableMemory2.category⟧", "BOUNDARIES")
+        .replace("⟦stableMemory2.content⟧", "Asks before pushing")
         // The 0.49 review showed a session id's first twelve characters.
         .replace("⟦sid1⟧", "ses_01234567")
         .replace("⟦candidate1.category⟧", "COMMUNICATION")
@@ -393,7 +421,13 @@ fn the_input_follows_its_frame_line_for_line() {
     let filled = filled.trim_end_matches('\n');
     assert!(!filled.contains('⟦'), "{filled}");
     assert_eq!(
-        input(&[(memory, "COMMUNICATION".into())], &candidates),
+        input(
+            &[
+                (memory, "COMMUNICATION".into()),
+                (written, "BOUNDARIES".into())
+            ],
+            &candidates
+        ),
         filled
     );
     // With no live memories the list reads `(none)`, as in 0.49.
@@ -410,13 +444,18 @@ fn a_run_shows_every_live_global_memory_and_pending_observation() {
     let batch = store.batch();
     // Archived memories, other owners' memories and observations already
     // taken out of review are not shown.
-    assert_eq!(batch.memories, [(1, 1), (2, 1), (3, 1)]);
+    assert_eq!(batch.memories, [(1, 1), (2, 1), (3, 1), (6, 1)]);
     assert_eq!(batch.candidates, [101, 102, 103, 104]);
+    assert_eq!(batch.unsorted, [2]);
+    assert_eq!(batch.protected, HashSet::from([6]));
     // A line moved without a category reads UNSORTED; a filed one shows its
-    // category's tag.
+    // category's tag; one the person wrote is marked protected.
     assert!(batch
         .message
         .contains("- Memory #1 [COMMUNICATION]: \"Prefers concise answers\"\n- Memory #2 [UNSORTED]: \"Expects changes to be tested\"\n- Memory #3 [ENGINEERING_PRACTICE]:"));
+    assert!(batch
+        .message
+        .contains("- Memory #6 [BOUNDARIES, protected]: \"Asks before pushing\"\n"));
     assert!(batch.message.contains(
         "- Candidate #101 [session ses_aaaaaaaa, proposed COMMUNICATION]: \"Asked for a shorter reply\""
     ));
@@ -458,10 +497,14 @@ fn a_run_shows_every_live_global_memory_and_pending_observation() {
 }
 
 #[test]
-fn a_run_needs_enough_pending_observations_for_one_promotion() {
+fn a_run_needs_enough_pending_observations_for_one_promotion_or_an_unsorted_line() {
     let store = fixture();
     store.execute("UPDATE memory_observations SET consumed_at = 9 WHERE id IN (103, 104)");
-    // Two pending observations can't back a promotion: nothing is sent.
+    // Two pending observations can't back a promotion, but an unsorted line
+    // still needs filing: the run goes ahead.
+    assert_eq!(store.batch().candidates, [101, 102]);
+    // With every line filed there is nothing to send.
+    store.execute("UPDATE memories SET category = 'base:working-style' WHERE id = 2");
     assert!(store.batches().is_empty());
     // A task setting lowers the threshold.
     let batches = with_context(
@@ -472,6 +515,147 @@ fn a_run_needs_enough_pending_observations_for_one_promotion() {
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].threshold, 2);
     assert_eq!(batches[0].candidates, [101, 102]);
+    // An unsorted line alone, with no observation waiting, is a run too.
+    store.execute(
+        "UPDATE memory_observations SET consumed_at = 9;
+         UPDATE memories SET category = 'mc:user-unsorted' WHERE id = 2;",
+    );
+    let batch = store.batch();
+    assert!(batch.candidates.is_empty());
+    assert_eq!(batch.unsorted, [2]);
+}
+
+#[test]
+fn observations_waiting_over_thirty_days_leave_review_unreviewed() {
+    let store = fixture();
+    let day = 24 * 60 * 60 * 1000;
+    store.execute(&format!(
+        "UPDATE memory_observations SET created_at = {} WHERE id = 101;
+         UPDATE memory_observations SET created_at = {} WHERE id = 102;",
+        now_ms() - 31 * day,
+        now_ms() - 29 * day,
+    ));
+    let batch = store.batch();
+    assert_eq!(batch.candidates, [102, 103, 104]);
+    // It is marked out of review, not deleted.
+    assert_eq!(store.pending(), [102, 103, 104]);
+    let kept: i64 = store
+        .db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memory_observations WHERE id = 101 AND consumed_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(kept, 1);
+}
+
+#[test]
+fn a_message_holds_the_unsorted_lines_then_the_oldest_observations_within_its_budget() {
+    let counter = Counter::for_model(None);
+    let memory = |id: i64, category: &str, content: &str| Memory {
+        id,
+        category_id: category.into(),
+        tag: "T".into(),
+        content: content.into(),
+        revision: 1,
+        protected: false,
+    };
+    let candidate = |id: i64, content: &str| Candidate {
+        id,
+        content: content.into(),
+        proposed: None,
+        session: "s".into(),
+    };
+    let words = |count: usize| vec!["word"; count].join(" ");
+    let filed = memory(1, "base:communication", &words(50));
+    let unsorted = [
+        memory(2, USER_UNSORTED_CATEGORY, &words(30)),
+        memory(3, USER_UNSORTED_CATEGORY, &words(30)),
+    ];
+    let candidates = [
+        candidate(10, &words(30)),
+        candidate(11, &words(5)),
+        candidate(12, &words(5)),
+    ];
+    let memories = [filed.clone(), unsorted[0].clone(), unsorted[1].clone()];
+    let cost = |text: &str| counter.count(text);
+    let ids = |(memories, candidates): (Vec<Memory>, Vec<Candidate>)| {
+        (
+            memories.iter().map(|memory| memory.id).collect::<Vec<_>>(),
+            candidates
+                .iter()
+                .map(|candidate| candidate.id)
+                .collect::<Vec<_>>(),
+        )
+    };
+    // Everything fits a large budget.
+    assert_eq!(
+        ids(fit(&memories, &candidates, counter, MESSAGE_TOKENS)),
+        (vec![1, 2, 3], vec![10, 11, 12])
+    );
+    // Room for the filed line, both unsorted lines and the oldest
+    // observation: the newer ones wait, though they are shorter.
+    let budget = cost(&filed.content)
+        + cost(&unsorted[0].content)
+        + cost(&unsorted[1].content)
+        + cost(&candidates[0].content);
+    assert_eq!(
+        ids(fit(&memories, &candidates, counter, budget)),
+        (vec![1, 2, 3], vec![10])
+    );
+    // Unsorted lines come before any observation.
+    let budget = cost(&filed.content) + cost(&unsorted[0].content);
+    assert_eq!(
+        ids(fit(&memories, &candidates, counter, budget)),
+        (vec![1, 2], vec![])
+    );
+    // Filed lines are always shown, and the first waiting item goes in even
+    // when nothing else fits.
+    assert_eq!(
+        ids(fit(&memories, &candidates, counter, 1)),
+        (vec![1, 2], vec![])
+    );
+    assert_eq!(
+        ids(fit(&memories[..1], &candidates, counter, 1)),
+        (vec![1], vec![10])
+    );
+
+    // A run reads with the module's budget: forty observations of about
+    // five hundred tokens each don't all fit one message.
+    let store = fixture();
+    store.execute("UPDATE memories SET category = 'base:working-style' WHERE id = 2");
+    for id in 200..240 {
+        store.observation(id, &words(500), None, "ses_long", None, false);
+    }
+    let batch = store.batch();
+    let shown = batch.candidates.len();
+    assert!(shown > 4 && shown < 44, "{shown}");
+    // The oldest go first.
+    assert_eq!(batch.candidates[..4], [101, 102, 103, 104]);
+    assert_eq!(
+        batch.candidates[4..],
+        (200..200 + shown as i64 - 4).collect::<Vec<_>>()[..]
+    );
+    let text: u64 = store
+        .db
+        .with_connection(|conn| {
+            Ok::<_, rusqlite::Error>(
+                live_memories(conn)?
+                    .iter()
+                    .map(|memory| counter.count(&memory.content))
+                    .sum::<u64>()
+                    + pending_candidates(conn)?
+                        .iter()
+                        .filter(|candidate| batch.candidates.contains(&candidate.id))
+                        .map(|candidate| counter.count(&candidate.content))
+                        .sum::<u64>(),
+            )
+        })
+        .unwrap();
+    assert!(text <= MESSAGE_TOKENS, "{text}");
 }
 
 #[test]
@@ -988,15 +1172,19 @@ fn an_update_needs_a_live_shown_memory_unchanged_since_the_review_read_it() {
     );
     assert_eq!(store.stored(1).4, "Prefers very concise answers");
 
-    // One entry per memory: a second change to it is dropped.
+    // One entry per memory: a memory two entries name is changed by neither.
     let (applied, store) = run_reply(
         r#"{"update_existing": [{"memory_id": 1, "content": "Prefers concise, direct answers", "category": "COMMUNICATION"}],
             "dismiss_existing": [{"memory_id": 1, "reason": "duplicate"}]}"#,
     );
     assert_eq!(
         applied.dropped,
-        ["dismissal of memory #1: an earlier entry of the reply already changed it"]
+        [
+            "update of memory #1: #1 is named by more than one entry of the reply",
+            "dismissal of memory #1: #1 is named by more than one entry of the reply"
+        ]
     );
+    assert_eq!(store.stored(1).4, "Prefers concise answers");
     assert_eq!(store.stored(1).5, "active");
 }
 
@@ -1180,4 +1368,224 @@ async fn a_due_review_runs_once_for_the_machine_through_the_engine() {
         })
         .unwrap();
     assert_eq!(pending, 0);
+}
+
+/// A reply with only `refile` entries.
+fn refiles(entries: &str) -> String {
+    format!(r#"{{"refile": [{entries}]}}"#)
+}
+
+#[test]
+fn a_refile_files_an_unsorted_memory_and_keeps_its_text() {
+    let store = fixture();
+    store.execute(
+        "INSERT INTO memory_clause_evidence(memory_id, revision, clause_ordinal, text_hash, evidence_json)
+         VALUES (2, 1, 0, 'hash', '{}')",
+    );
+    let batch = store.batch();
+    let applied = store.apply_all(
+        &batch,
+        &refiles(r#"{"memory_id": 2, "category": "ENGINEERING_PRACTICE"}"#),
+        7,
+    );
+    assert_eq!(
+        applied,
+        Applied {
+            proposed: 1,
+            applied: 1,
+            dropped: Vec::new()
+        }
+    );
+    let (_, _, category, tag, content, status, revision, ..) = store.stored(2);
+    assert_eq!(
+        (
+            category.as_str(),
+            tag.as_str(),
+            content.as_str(),
+            status.as_str(),
+            revision
+        ),
+        (
+            "swe:engineering-practice",
+            "ENGINEERING_PRACTICE",
+            "Expects changes to be tested",
+            "active",
+            2
+        )
+    );
+    // One history decision naming the run, with the row before and after.
+    let history = store.history();
+    assert_eq!(history.len(), 1);
+    let (id, revision, key, before, after) = &history[0];
+    assert_eq!(
+        (*id, *revision, key.as_str()),
+        (2, 1, "dream-run:7:review-user-memories:0")
+    );
+    assert_eq!(before["categoryId"], USER_UNSORTED_CATEGORY);
+    assert_eq!(after["categoryId"], "swe:engineering-practice");
+    assert_eq!(before["content"], after["content"]);
+    assert_eq!(store.journal()[0].2["operation"], "refile");
+    // The text's clause evidence moves to the new revision with it.
+    let evidence: Vec<i64> = store.db.with_connection(|conn| {
+        conn.prepare(
+            "SELECT revision FROM memory_clause_evidence WHERE memory_id = 2 ORDER BY revision",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    });
+    assert_eq!(evidence, [1, 2]);
+}
+
+#[test]
+fn a_refile_is_dropped_for_a_filed_memory_an_unusable_category_or_a_memory_named_twice() {
+    for (reply, reasons) in [
+        (
+            refiles(r#"{"memory_id": 1, "category": "PREFERENCES"}"#),
+            vec!["refile of memory #1: it is not UNSORTED, so it keeps its category (COMMUNICATION)"],
+        ),
+        (
+            refiles(r#"{"memory_id": 2, "category": "TONE"}"#),
+            vec!["refile of memory #2: TONE is not a user category this review may file a global memory under"],
+        ),
+        (
+            refiles(r#"{"memory_id": 2, "category": "PROJECT_RULES"}"#),
+            vec!["refile of memory #2: PROJECT_RULES is not a user category this review may file a global memory under"],
+        ),
+        (
+            refiles(r#"{"memory_id": 2, "category": "UNSORTED"}"#),
+            vec!["refile of memory #2: UNSORTED is not a user category this review may file a global memory under"],
+        ),
+        (
+            refiles(r#"{"memory_id": 2}"#),
+            vec!["refile of memory #2 names no category"],
+        ),
+        (
+            refiles(r#"{"memory_id": 4, "category": "PREFERENCES"}"#),
+            vec!["refile of memory #4: #4 is not a live global memory this review was shown"],
+        ),
+        (
+            refiles(r#"{"category": "PREFERENCES"}"#),
+            vec!["refile 1 names no memory id"],
+        ),
+        (
+            r#"{"update_existing": [{"memory_id": 2, "content": "Expects every change to be tested", "category": "ENGINEERING_PRACTICE"}],
+                "refile": [{"memory_id": 2, "category": "WORKING_STYLE"}]}"#
+                .to_owned(),
+            vec![
+                "update of memory #2: #2 is named by more than one entry of the reply",
+                "refile of memory #2: #2 is named by more than one entry of the reply",
+            ],
+        ),
+        (
+            refiles(
+                r#"{"memory_id": 2, "category": "WORKING_STYLE"}, {"memory_id": 2, "category": "BOUNDARIES"}"#,
+            ),
+            vec![
+                "refile of memory #2: #2 is named by more than one entry of the reply",
+                "refile of memory #2: #2 is named by more than one entry of the reply",
+            ],
+        ),
+    ] {
+        let store = fixture();
+        let batch = store.batch();
+        let applied = store.apply_all(&batch, &reply, 7);
+        // Only the entry is dropped; the memory stays unsorted and says so.
+        let mut expected: Vec<String> = reasons.iter().map(|reason| reason.to_string()).collect();
+        expected.push("memory #2 left unsorted".into());
+        assert_eq!(applied.dropped, expected, "{reply}");
+        assert_eq!(applied.applied, 0, "{reply}");
+        assert_eq!(store.stored(1).2, "base:communication", "{reply}");
+        assert_eq!(store.stored(2).2, USER_UNSORTED_CATEGORY, "{reply}");
+        assert!(store.history().is_empty(), "{reply}");
+    }
+}
+
+#[test]
+fn an_unsorted_memory_the_reply_leaves_out_stays_and_is_listed() {
+    let store = fixture();
+    store.global(7, USER_UNSORTED_CATEGORY, "USER_MEMORY", "Works late");
+    let batch = store.batch();
+    assert_eq!(batch.unsorted, [2, 7]);
+    // A reply that names neither applies the rest and lists both.
+    let applied = store.apply_all(&batch, r#"{"consume_candidate_ids": [101]}"#, 7);
+    assert_eq!(
+        applied,
+        Applied {
+            proposed: 1,
+            applied: 1,
+            dropped: vec![
+                "memory #2 left unsorted".into(),
+                "memory #7 left unsorted".into()
+            ]
+        }
+    );
+    assert_eq!(store.stored(2).2, USER_UNSORTED_CATEGORY);
+    assert_eq!(store.pending(), [102, 103, 104]);
+
+    // An update without a category leaves the line unsorted too; a
+    // dismissed one is no longer listed.
+    let store = fixture();
+    store.global(7, USER_UNSORTED_CATEGORY, "USER_MEMORY", "Works late");
+    let batch = store.batch();
+    let applied = store.apply_all(
+        &batch,
+        r#"{"update_existing": [{"memory_id": 2, "content": "Expects every change to be tested"}],
+            "dismiss_existing": [{"memory_id": 7, "reason": "one-off"}]}"#,
+        7,
+    );
+    assert_eq!(applied.applied, 2);
+    assert_eq!(applied.dropped, ["memory #2 left unsorted"]);
+    assert_eq!(store.stored(2).4, "Expects every change to be tested");
+    assert_eq!(store.stored(7).5, "archived");
+}
+
+#[test]
+fn a_memory_the_person_wrote_or_edited_is_never_updated_or_archived() {
+    let store = fixture();
+    // Memory 1 was edited by the person: its history names a person_edit.
+    // Memory 3 was edited by an agent.
+    store.execute(
+        "UPDATE memories SET revision = 2 WHERE id IN (1, 3);
+         INSERT INTO memory_history(memory_id, revision, previous_text, after_text, applied_at, reason,
+                                    evidence_json, source_ids_json, decision_key)
+         VALUES (1, 1, 'Prefers short answers', 'Prefers concise answers', 5, 'person_edit', '[]', '[1]', 'person-key');
+         INSERT INTO memory_journal(project_path, decision_key, operation, receipt_json, applied_at)
+         VALUES ('self', 'person-key', 'person_edit', '{}', 5);
+         INSERT INTO memory_history(memory_id, revision, previous_text, after_text, applied_at, reason,
+                                    evidence_json, source_ids_json, decision_key)
+         VALUES (3, 1, 'a', 'b', 5, 'edit', '[]', '[3]', 'agent-key');
+         INSERT INTO memory_journal(project_path, decision_key, operation, receipt_json, applied_at)
+         VALUES ('self', 'agent-key', 'edit', '{}', 5);",
+    );
+    let batch = store.batch();
+    // Memory 6 the person wrote from the apps; memory 1 they edited; memory 3
+    // was edited by someone else.
+    assert_eq!(batch.protected, HashSet::from([1, 6]));
+    assert!(batch
+        .message
+        .contains("- Memory #1 [COMMUNICATION, protected]: \"Prefers concise answers\""));
+    assert!(batch
+        .message
+        .contains("- Memory #3 [ENGINEERING_PRACTICE]: \"Runs the test suite on a build server\""));
+    let applied = store.apply(
+        &batch,
+        r#"{"update_existing": [{"memory_id": 1, "content": "Prefers concise, direct answers", "category": "COMMUNICATION"},
+                               {"memory_id": 3, "content": "Runs tests on a build server", "category": "ENGINEERING_PRACTICE"}],
+            "dismiss_existing": [{"memory_id": 6, "reason": "stale"}]}"#,
+        7,
+    );
+    assert_eq!(
+        applied.dropped,
+        [
+            "update of memory #1: the person wrote or edited it, so the review may not change it",
+            "dismissal of memory #6: the person wrote or edited it, so the review may not archive it",
+        ]
+    );
+    assert_eq!(applied.applied, 1);
+    assert_eq!(store.stored(1).4, "Prefers concise answers");
+    assert_eq!(store.stored(6).5, "active");
+    assert_eq!(store.stored(3).4, "Runs tests on a build server");
 }
