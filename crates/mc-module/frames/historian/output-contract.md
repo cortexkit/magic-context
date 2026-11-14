@@ -12,6 +12,7 @@ One decision per `fact_id`. Actions: `new`, `covered`, `conflict`, `edit`, `merg
 - Every decision requires integer `fact_id`, string `check` and string `action`. Write `check` first: one or two short sentences naming the line that states the fact and the line that settles it, by ordinal, and why it passes or fails "What becomes a memory".
 - `new`, `edit`, `replaces` and `merge` take an optional string `expires`: the calendar date (`YYYY-MM-DD`) the memory stops holding, only when its text states that date as its end. Never give one for a rule that ends on an event or holds "for now".
 - `new` and `abstain` need no other fields. `new` takes an optional boolean `decided`: set it to `true` when the fact is an accepted decision that isn't built and its text doesn't start with `Decided:`, and the stored memory gets that prefix. Never use it for anything else.
+- `new` takes an optional string `level`, only when the turn-two message names this project's workspace: `"workspace"` stores the memory for every project in that workspace; leaving it out stores it for this project. `edit`, `replaces` and `merge` keep the level of the memory they change.
 - `conflict` requires integer `target_id`.
 - `covered` requires integer `target_id`, integer `revision` and a nonempty `clauses` array of integer clause indices; string `excerpt` is optional.
 - `edit` and `replaces` require integer `target_id`, integer `revision`, arrays `kept` and string `final_text`; arrays `removed`, `replaced` and `added` are optional (absent means empty).

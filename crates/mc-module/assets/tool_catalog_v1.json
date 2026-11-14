@@ -322,7 +322,7 @@
         "category": "Kind of fact: the new fact's kind for write; on update/merge, the memory's current category to keep it. Archive and get ignore it.",
         "ids": "Memory ids from <project-memory> or <workspace-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list.",
         "reason": "Why it is being archived (optional).",
-        "level": "Where a write goes: project (default) for this project; workspace for every project in this project's workspace; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly."
+        "level": "Where a write goes: project (the default) for this project; workspace for a fact that clearly holds for every project in this project's workspace, since it then appears in all their sessions; global for a fact about the person, which is passed to the review that keeps the user profile instead of being saved directly. When unsure, use project."
       },
       "ctx_search": {
         "query": "A natural-language question carrying the exact terms you expect in the answer.",
