@@ -1,19 +1,36 @@
-//! The tagged sample set `mc-app-read-samples-v14`: the v13 set with the
-//! `context.head` and `context.head_section` samples written again, because
-//! memory levels changed the head: a user profile line is a global memory,
-//! so its edit is an update line in `m[1]` like any memory's, and every
-//! update line names its level. The owner reads (memories, the dreamer, a
+//! The tagged sample set `mc-app-read-samples-v15`: the v14 set with the
+//! `context.head` samples that show memories written again, because the
+//! outline now names levels: each `memory` section carries the level of its
+//! block (the workspace's or the project's), and each `memory_updates` item
+//! the `level` and `category` its line names. One sample is added, a head
+//! with both memory blocks. The owner reads (memories, the dreamer, a
 //! project's sessions, notes and candidate facts) and their watch notices
-//! are read from the fixture store as in v13. The v12 and v13 folders stay
-//! as they were tagged.
+//! are read from the fixture store as in v13. The v12, v13 and v14 folders
+//! stay as they were tagged.
 //!
 //! Regenerate deliberately from the workspace root:
 //! `MC_REGENERATE_APP_READ_SAMPLES=1 cargo test --locked -p mc-module --lib
-//! app_read::samples_v14_tests::samples_v14 -- --exact`. Set the variable
+//! app_read::samples_v15_tests::samples_v15 -- --exact`. Set the variable
 //! to an output directory instead of `1` for a read-only checkout.
 
 use super::fixture_tests::{head, Fixture, EMPTY, FORMS, PROJECT};
 use super::*;
+
+/// The v14 samples v15 writes again: every head outline with a memory
+/// section or a memory update. Every other v14 file is copied unchanged.
+const CHANGED: [&str; 8] = [
+    "head-empty-delta.json",
+    "head-no-items.json",
+    "head-no-mural.json",
+    "head-other.json",
+    "head-pending-view.json",
+    "head-shared.json",
+    "head-utf8.json",
+    "head.json",
+];
+
+/// The samples v15 adds to v14's.
+const ADDED: [&str; 1] = ["head-workspace.json"];
 
 /// Times and cursors that change from run to run, fixed as v12 fixes them.
 const AS_OF_MS: u64 = 1_700_000_000_000;
@@ -37,7 +54,7 @@ fn notice_sample(name: &str, params: &Value, mut notice: Value) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn samples_v14() {
+async fn samples_v15() {
     let mut samples = BTreeMap::<String, Vec<u8>>::new();
     let v12 =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v12");
@@ -51,7 +68,9 @@ async fn samples_v14() {
     let copied = samples.len();
     let mut rewritten = BTreeMap::new();
     super::head::tests::head_samples(&mut rewritten);
-    assert!(rewritten.keys().all(|name| samples.contains_key(name)));
+    assert!(rewritten
+        .keys()
+        .all(|name| samples.contains_key(name) || ADDED.contains(&name.as_str())));
     samples.extend(rewritten.clone());
     let fixture = Fixture::new();
     let mut replica = fixture.replica();
@@ -275,9 +294,9 @@ async fn samples_v14() {
         let notice = watch.recv().await.unwrap().unwrap();
         samples.insert(format!("{name}.json"), notice_sample(name, &params, notice));
     }
-    assert_eq!(samples.len(), copied + 47);
+    assert_eq!(samples.len(), copied + 47 + ADDED.len());
     let mut root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v14");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v15");
     let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
     let regenerate = output.is_some();
     if let Some(output) = output.filter(|value| value != "1") {
@@ -325,4 +344,29 @@ async fn samples_v14() {
             "{name} differs from v12"
         );
     }
+    // Against v14: the changed samples differ, every other v14 file is
+    // copied byte for byte, and only the added samples are new.
+    let v14 =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v14");
+    let mut in_v14 = std::collections::BTreeSet::new();
+    let v14_sums = std::fs::read_to_string(v14.join("SHA256SUMS")).unwrap();
+    for line in v14_sums.lines() {
+        let (_, name) = line.split_once("  ").unwrap();
+        in_v14.insert(name);
+        let changed = std::fs::read(root.join(name)).unwrap_or_else(|_| panic!("missing {name}"))
+            != std::fs::read(v14.join(name)).unwrap();
+        assert_eq!(
+            changed,
+            CHANGED.contains(&name),
+            "{name}: changed from v14 is {changed}"
+        );
+    }
+    assert_eq!(
+        samples
+            .keys()
+            .filter(|name| !in_v14.contains(name.as_str()))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ADDED
+    );
 }

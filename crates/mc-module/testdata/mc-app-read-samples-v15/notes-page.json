@@ -1,0 +1,52 @@
+{
+  "name": "notes-page",
+  "request": {
+    "method": "notes.page",
+    "params": {
+      "limit": 3,
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "next": "mcc1.WyJub3Rlcy5wYWdlIiwiMTk3NWIxNGRmYzAyZDU2MSIsWzE3MDAwMDAxNTAwMDAsMl1d",
+      "notes": [
+        {
+          "condition": "a new host release is out",
+          "content": "Bump the pinned host.",
+          "created_at": 1700000300000,
+          "id": 4,
+          "ready_reason": "host 1.4.2 was released",
+          "status": "ready",
+          "type": "smart",
+          "updated_at": 1700000400000
+        },
+        {
+          "condition": "the replay fix is merged to main",
+          "content": "Re-run the replay once the fix merges.",
+          "created_at": 1700000200000,
+          "id": 3,
+          "status": "pending",
+          "type": "smart",
+          "updated_at": 1700000200000
+        },
+        {
+          "content": "Old reminder.",
+          "created_at": 1700000100000,
+          "id": 2,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "status": "dismissed",
+          "type": "session",
+          "updated_at": 1700000150000
+        }
+      ],
+      "op": "notes.page",
+      "schema": 1
+    }
+  }
+}

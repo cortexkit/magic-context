@@ -1,0 +1,30 @@
+{
+  "name": "watch",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode2",
+          "runner": "thalamus-harness",
+          "session": "s"
+        }
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "cursor": "abc:0",
+      "kind": "resync",
+      "op": "context.watch",
+      "schema": 1,
+      "sessions": [
+        {
+          "harness": "opencode2",
+          "runner": "thalamus-harness",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

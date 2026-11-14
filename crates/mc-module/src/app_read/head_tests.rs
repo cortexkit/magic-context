@@ -6,6 +6,19 @@ use cortexkit_role_compaction::view::Edit;
 use std::collections::BTreeMap;
 
 pub(super) fn rendered(mural: bool, empty: bool, mismatch: bool) -> (ReadState, Vec<String>) {
+    rendered_with(mural, empty, mismatch, false)
+}
+
+/// [`rendered`], and with `workspace` one workspace memory as well, so the
+/// baseline carries the workspace's memory block before the project's. The
+/// delta's changes are the same either way: the project memory's edit and
+/// the user profile line's.
+pub(super) fn rendered_with(
+    mural: bool,
+    empty: bool,
+    mismatch: bool,
+    workspace: bool,
+) -> (ReadState, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("ARCHITECTURE.md"),
@@ -41,7 +54,7 @@ pub(super) fn rendered(mural: bool, empty: bool, mismatch: bool) -> (ReadState, 
             },
         )
     };
-    let rows = [
+    let mut rows = vec![
         memory(
             1,
             "project",
@@ -50,6 +63,14 @@ pub(super) fn rendered(mural: bool, empty: bool, mismatch: bool) -> (ReadState, 
         ),
         memory(2, "global", "USER", "Prefer concise explanations."),
     ];
+    if workspace {
+        rows.push(memory(
+            3,
+            "workspace",
+            "CONSTRAINTS",
+            "Every project in the workspace shares one store file.",
+        ));
+    }
     let classes = std::collections::HashMap::new();
     let mut inputs = Inputs {
         counter: Counter::for_model(Some("provider/model")),
@@ -492,7 +513,8 @@ fn unchanged_slots_share_their_text_and_baseline() {
 
 /// The `context.head` and `context.head_section` samples as this build
 /// writes them, by file name. The tagged sets carry them: v12 first, v14
-/// since the memory levels changed the head ([`crate::head_memories`]).
+/// since the memory levels changed the head ([`crate::head_memories`]), v15
+/// since the outline names each memory block's and update line's level.
 pub(in crate::app_read) fn head_samples(samples: &mut BTreeMap<String, Vec<u8>>) {
     for name in [
         "head",
@@ -505,11 +527,13 @@ pub(in crate::app_read) fn head_samples(samples: &mut BTreeMap<String, Vec<u8>>)
         "head-no-items",
         "head-other",
         "head-shared",
+        "head-workspace",
     ] {
-        let (mut state, _) = rendered(
+        let (mut state, _) = rendered_with(
             name != "head-no-mural",
             name == "head-empty-delta",
             name == "head-no-items",
+            name == "head-workspace",
         );
         if name == "head-other" {
             state = with_other(state);

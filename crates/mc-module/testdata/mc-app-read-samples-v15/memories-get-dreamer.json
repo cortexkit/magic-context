@@ -1,0 +1,53 @@
+{
+  "name": "memories-get-dreamer",
+  "request": {
+    "method": "memories.get",
+    "params": {
+      "id": 3
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "memory": {
+        "category": "swe:constraints",
+        "content": "The provider caps a request at 200 000 tokens.",
+        "created_at": 1700000003000,
+        "embedded": false,
+        "first_seen_at": 1700000003000,
+        "history": [
+          {
+            "after": "The provider caps a request at 200 000 tokens.",
+            "at": 1700003690000,
+            "before": "The provider caps a request at 200 000 tokens.",
+            "reason": "classify-memories",
+            "revision": 2,
+            "run_id": 2,
+            "task": "swe:classify-memories",
+            "writer": "dreamer"
+          }
+        ],
+        "id": 3,
+        "importance": 80,
+        "last_seen_at": 1700000003000,
+        "level": "project",
+        "merged_from": [],
+        "owner": "pj-sample",
+        "retrieval_count": 0,
+        "revision": 2,
+        "safety_critical": false,
+        "seen_count": 1,
+        "sensitive": false,
+        "shareable": false,
+        "source": {
+          "session": "s",
+          "type": "historian"
+        },
+        "status": "active",
+        "updated_at": 1700003690000
+      },
+      "op": "memories.get",
+      "schema": 1
+    }
+  }
+}

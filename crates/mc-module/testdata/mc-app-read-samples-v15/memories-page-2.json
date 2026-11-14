@@ -1,0 +1,94 @@
+{
+  "name": "memories-page-2",
+  "request": {
+    "method": "memories.page",
+    "params": {
+      "cursor": "mcc1.WyJtZW1vcmllcy5wYWdlIiwiZjVlOGI1NjUxZTQyMTU5NSIsWyJzd2U6Y29uc3RyYWludHMiLDgwLDE3MDAwMDM2OTAwMDAsM11d",
+      "level": "project",
+      "limit": 3,
+      "owner": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "level": "project",
+      "memories": [
+        {
+          "category": "swe:naming",
+          "content": "Call the long-lived agent the head, never the main agent.",
+          "created_at": 1700000004000,
+          "embedded": false,
+          "first_seen_at": 1700000004000,
+          "id": 4,
+          "importance": 50,
+          "last_seen_at": 1700000004000,
+          "level": "project",
+          "owner": "pj-sample",
+          "retrieval_count": 0,
+          "revision": 2,
+          "seen_count": 1,
+          "sensitive": false,
+          "shareable": false,
+          "source": {
+            "session": "s",
+            "type": "historian"
+          },
+          "status": "active",
+          "updated_at": 1700000300000
+        },
+        {
+          "category": "swe:project-rules",
+          "content": "Never push to main without a review.",
+          "created_at": 1700000007000,
+          "embedded": false,
+          "first_seen_at": 1700000007000,
+          "id": 7,
+          "importance": 95,
+          "last_seen_at": 1700000007000,
+          "level": "project",
+          "owner": "pj-sample",
+          "retrieval_count": 0,
+          "revision": 1,
+          "safety_critical": true,
+          "seen_count": 1,
+          "sensitive": true,
+          "shareable": false,
+          "source": {
+            "session": "s",
+            "type": "historian"
+          },
+          "status": "permanent",
+          "updated_at": 1700000007000
+        },
+        {
+          "category": "swe:project-rules",
+          "content": "Run the release script from the repository root, never from a package.",
+          "created_at": 1700000001000,
+          "cue": "release from root",
+          "embedded": true,
+          "first_seen_at": 1700000001000,
+          "id": 1,
+          "importance": 90,
+          "last_seen_at": 1700000001000,
+          "level": "project",
+          "owner": "pj-sample",
+          "retrieval_count": 7,
+          "revision": 2,
+          "seen_count": 3,
+          "sensitive": false,
+          "shareable": false,
+          "source": {
+            "session": "s",
+            "type": "agent"
+          },
+          "status": "active",
+          "updated_at": 1700000100000
+        }
+      ],
+      "op": "memories.page",
+      "owner": "pj-sample",
+      "schema": 1
+    }
+  }
+}

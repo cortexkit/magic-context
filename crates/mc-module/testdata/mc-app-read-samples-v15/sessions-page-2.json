@@ -1,0 +1,29 @@
+{
+  "name": "sessions-page-2",
+  "request": {
+    "method": "sessions.page",
+    "params": {
+      "cursor": "mcc1.WyJzZXNzaW9ucy5wYWdlIiwiNTE1MzQyMjRkMTI5NDMxNCIsWzE3MDAwMDgwMDAwMDAsInRoYWxhbXVzLWhhcm5lc3MiLCJvcGVuY29kZTIiLCJzLXdvcmtlciJdXQ",
+      "limit": 2,
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "sessions.page",
+      "schema": 1,
+      "sessions": [
+        {
+          "last_activity_at": 1700007000000,
+          "preset": "reader",
+          "session": {
+            "harness": "pi",
+            "runner": "thalamus-harness",
+            "session": "s-reader"
+          }
+        }
+      ]
+    }
+  }
+}

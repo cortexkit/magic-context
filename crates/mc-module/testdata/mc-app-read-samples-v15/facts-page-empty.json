@@ -1,0 +1,17 @@
+{
+  "name": "facts-page-empty",
+  "request": {
+    "method": "facts.page",
+    "params": {
+      "project": "pj-empty"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "facts": [],
+      "op": "facts.page",
+      "schema": 1
+    }
+  }
+}

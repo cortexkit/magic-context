@@ -1,0 +1,20 @@
+{
+  "name": "reply-too-large",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "meta",
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "error": {
+      "code": "reply_too_large",
+      "message": "App reply for session_data.read exceeds the frame budget."
+    }
+  }
+}

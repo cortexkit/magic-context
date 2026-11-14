@@ -300,6 +300,9 @@ fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal>
                 }
             }
             "memory" => {
+                if let Some(level) = memory_level(text) {
+                    section["level"] = json!(level);
+                }
                 if let Some(items) = memory_items(text, counter) {
                     section["items"] = json!(items);
                 }
@@ -320,7 +323,15 @@ fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal>
                                 known = false;
                                 break;
                             };
-                            items.push(json!({"form":match entry.form { Form::Full=>"full",Form::Marker=>"marker",Form::Overflow=>"overflow" },"start":start,"len":line.len()}));
+                            let mut item = json!({"form":match entry.form { Form::Full=>"full",Form::Marker=>"marker",Form::Overflow=>"overflow" },"start":start,"len":line.len()});
+                            let (level, category) = update_attributes(&line);
+                            if let Some(level) = level {
+                                item["level"] = json!(level);
+                            }
+                            if let Some(category) = category {
+                                item["category"] = json!(category);
+                            }
+                            items.push(item);
                             cursor = start + line.len();
                         }
                     }
@@ -350,6 +361,47 @@ fn message(slot: &Slot, head: &Head, counter: Counter) -> Result<Value, Refusal>
             json!({"open":"<session-history-since>","close":"</session-history-since>"});
     }
     Ok(message)
+}
+
+/// The level a `memory` section's wrapper names. `split` cuts a memory
+/// section only at `<workspace-memory>` (the workspace's memories) or
+/// `<project-memory>` (the project's), so the opening tag says which.
+fn memory_level(text: &str) -> Option<&'static str> {
+    [
+        ("<workspace-memory>", "workspace"),
+        ("<project-memory>", "project"),
+    ]
+    .into_iter()
+    .find(|(open, _)| text.starts_with(open))
+    .map(|(_, level)| level)
+}
+
+/// The `level` and `category` attributes of a memory-update line's opening
+/// tag, for example `<updated id="1" level="global" category="USER">`.
+/// Each is `None` when the line doesn't carry it: update lines written
+/// before memories had levels have no `level`, and the out-of-date markers
+/// and the overflow line have neither. Attribute values are escaped, so the
+/// first `>` ends the opening tag.
+fn update_attributes(line: &str) -> (Option<String>, Option<String>) {
+    static ATTRIBUTE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"\s([A-Za-z_-]+)="([^"]*)""#).expect("update attributes")
+    });
+    let Some(open) = line
+        .trim_start()
+        .strip_prefix('<')
+        .and_then(|rest| rest.split_once('>'))
+        .map(|(open, _)| open)
+    else {
+        return (None, None);
+    };
+    let attribute = |name: &str| {
+        ATTRIBUTE
+            .captures_iter(open)
+            .find(|m| &m[1] == name)
+            .map(|m| unescape(&m[2]))
+            .filter(|value| !value.is_empty())
+    };
+    (attribute("level"), attribute("category"))
 }
 
 fn unescape(text: &str) -> String {
@@ -449,3 +501,7 @@ pub(super) mod tests;
 #[cfg(test)]
 #[path = "head_v12_tests.rs"]
 mod v12_tests;
+
+#[cfg(test)]
+#[path = "head_levels_tests.rs"]
+mod levels_tests;

@@ -1,0 +1,40 @@
+{
+  "name": "cache-why",
+  "request": {
+    "method": "context.cache_why",
+    "params": {
+      "producers": [
+        {
+          "producer_ref": "runner-step"
+        }
+      ],
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "decisions": [],
+      "join": "unavailable",
+      "join_reason": "runner_step_identity_not_recorded",
+      "managed": {
+        "by": "ck_mc",
+        "value": true
+      },
+      "missing": [],
+      "next_cursor": null,
+      "op": "context.cache_why",
+      "producer_ref_kind": null,
+      "retention": {
+        "max_rows": 256,
+        "oldest_retained_at_ms": 40
+      },
+      "schema": 1,
+      "session_kind": "mode3"
+    }
+  }
+}
