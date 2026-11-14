@@ -1364,13 +1364,27 @@ impl Rewrite<'_> {
         self.plan.phase("renumber/message_history_fts");
         let rows = crate::move_batches::message_rows(self.conn, self.session)?;
         let ordinal_update = crate::move_batches::ordinal_update(self.conn)?;
-        self.stats.borrow_mut()["search_rows"] = rows
-            .iter()
-            .filter(|(_, mid)| self.numbering.entry_of(mid).flatten().is_some())
-            .count()
-            .into();
+        // A message can hold two search rows: an old indexer filed a row
+        // under the id of the message after it (seen on a real head). The map
+        // keeps one row per message number, so only one row per entry stays,
+        // the newest, and the others are deleted with the rows of messages
+        // the move doesn't keep. The count the end of the move checks is the
+        // rows that stay.
+        let mut newest: HashMap<u64, i64> = HashMap::new();
+        for (rowid, mid) in &rows {
+            if let Some(entry) = self.numbering.entry_of(mid).flatten() {
+                let kept = newest.entry(entry).or_insert(*rowid);
+                *kept = (*kept).max(*rowid);
+            }
+        }
+        self.stats.borrow_mut()["search_rows"] = newest.len().into();
+        let mut done = HashSet::new();
         for (rowid, mid) in rows {
-            match self.numbering.entry_of(&mid).flatten() {
+            if !done.insert(rowid) {
+                continue;
+            }
+            let entry = self.numbering.entry_of(&mid).flatten();
+            match entry.filter(|entry| newest.get(entry) == Some(&rowid)) {
                 Some(entry) => self.plan.execute(
                     // The validated UNINDEXED content-column path avoids
                     // reindexing unchanged tokens on every small commit.
@@ -1407,13 +1421,19 @@ impl Rewrite<'_> {
             )?;
         }
         self.plan.phase("renumber/message_fts_rowid_map/insert");
+        // The plan's statements run after this read, so a search row the
+        // move deletes is still here: only the row kept for each entry gets a
+        // map row.
         let mut kept = HashSet::new();
         for (_, rowid, time, mid) in mapped {
-            let ordinal = mid
+            let entry = mid
                 .as_deref()
                 .and_then(|mid| self.numbering.entry_of(mid).flatten())
-                .map(|n| n as i64);
-            if let Some(ordinal) = ordinal.filter(|ordinal| kept.insert(*ordinal)) {
+                .filter(|entry| newest.get(entry) == Some(&rowid));
+            if let Some(ordinal) = entry
+                .map(|n| n as i64)
+                .filter(|ordinal| kept.insert(*ordinal))
+            {
                 self.plan.execute(
                     "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
                      VALUES (?1, ?2, ?3, ?4)",
