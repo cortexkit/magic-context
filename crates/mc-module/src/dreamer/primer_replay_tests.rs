@@ -77,7 +77,8 @@ impl Args {
     }
 }
 
-/// What one primer's child is sent, as the runner reads it.
+/// What the child session that refreshes one primer is sent, as the runner
+/// reads it.
 fn request(batch: &RefreshBatch, index: usize, task: &str, args: &Args) -> Value {
     let demand = DREAM_DEMANDS
         .iter()

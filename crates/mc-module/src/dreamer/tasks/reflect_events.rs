@@ -1,7 +1,8 @@
 //! The `reflect-events` task: find the mistakes that keep coming back in a
 //! project's work, and write each as one learning every later session reads.
 //!
-//! It replaces 0.49's retrospective. It reads only what the summarizer
+//! It replaces 0.49's retrospective, which had a model scan the person's own
+//! lines in recent transcripts for corrections. It reads only what the summarizer
 //! already stored: the project's `causal_incident` and `trajectory_correction`
 //! events (`compartment_events`), from the sessions `session_projects` names
 //! as the project's. Events are new when they arrived after the task's
@@ -67,7 +68,8 @@ pub(crate) const EXISTING_EACH: usize = 8;
 /// than this on its own is a message by itself.
 pub(crate) const REQUEST_TOKENS: u64 = 24_000;
 /// The longest learning, in UTF-16 units: the most text any dreamer task
-/// may write into one memory (verify's update cap).
+/// may write into one memory (the cap the verify task puts on a corrected
+/// memory).
 pub(crate) const MAX_CONTENT: usize = 20_000;
 /// The proof count a declaration without one asks for.
 const DEFAULT_MIN_PROOF: usize = 2;
@@ -928,7 +930,7 @@ pub(crate) struct ReflectBatch {
     /// and an observation name as their origin.
     profile: OriginProfile,
     /// The project's workspace, when it shares memories; an observation
-    /// names it as the summarizer's do.
+    /// records its id, as the observations the summarizer stores do.
     workspace: Option<String>,
     /// The newest event the run read, where the watermark moves once this
     /// message is applied. Only the run's last message carries it, so a run

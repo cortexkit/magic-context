@@ -230,8 +230,8 @@ impl RefreshPrimers {
         self.refresh_up_to(context, PER_RUN)
     }
 
-    /// [`Self::refresh_batches`] with room for `limit` primers: a replay
-    /// may ask for every stale primer.
+    /// [`Self::refresh_batches`] with room for `limit` primers: the replay
+    /// harness may ask for more than one run refreshes.
     pub(crate) fn refresh_up_to(
         &self,
         context: &TaskContext<'_>,

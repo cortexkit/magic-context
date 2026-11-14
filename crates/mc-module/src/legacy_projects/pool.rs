@@ -52,7 +52,8 @@ const COPIED: &[&str] = &[
 
 /// Moved from a contested key to its first target by id and never copied: a
 /// session's project mapping. A session belongs to one project, so its row
-/// goes where the key's original rows go (the rule its commits follow), and
+/// goes where the key's original rows go (to the first target, as a commit's
+/// original row does), and
 /// a read of a project's sessions (the dreamer's reflect task, which reads
 /// the stored events of the project's sessions) still finds it.
 const FIRST_ONLY: &[&str] = &["session_projects"];
