@@ -55,6 +55,16 @@ const TODAY: &[(&str, &str)] = &[
         "dreamer/swe:curate/user",
         "memory_profile/today/dreamer/curate.user.md",
     ),
+    // Workspace curate is new in the module; its today's text is the text
+    // it was registered with.
+    (
+        "dreamer/swe:curate-workspace/system",
+        "memory_profile/today/dreamer/curate-workspace.system.md",
+    ),
+    (
+        "dreamer/swe:curate-workspace/user",
+        "memory_profile/today/dreamer/curate-workspace.user.md",
+    ),
     (
         "dreamer/swe:compress-cues/system",
         "memory_profile/today/dreamer/compress-cues.system.md",

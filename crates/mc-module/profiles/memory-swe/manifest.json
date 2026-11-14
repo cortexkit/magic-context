@@ -466,6 +466,34 @@
         }
       },
       {
+        "id": "swe:curate-workspace",
+        "kind": "curate-workspace",
+        "enabled": true,
+        "reads": [
+          "memory-pool"
+        ],
+        "evidence": [
+          "memory-pool"
+        ],
+        "actions": [
+          "merge",
+          "shorten",
+          "split",
+          "archive"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:curate-workspace/system",
+          "user": "dreamer/swe:curate-workspace/user"
+        }
+      },
+      {
         "id": "swe:compress-cues",
         "kind": "compress-cues",
         "enabled": true,
@@ -855,6 +883,22 @@
           {
             "id": "body",
             "file": "prompts/dreamer/curate/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:curate-workspace/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/curate-workspace/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:curate-workspace/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/curate-workspace/user.md"
           }
         ]
       },

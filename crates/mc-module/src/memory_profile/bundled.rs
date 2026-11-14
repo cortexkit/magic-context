@@ -60,6 +60,8 @@ fn build_packages() -> Vec<Package> {
             ("prompts/dreamer/classify-memories/user.md".into(), include_bytes!("../../profiles/memory-swe/prompts/dreamer/classify-memories/user.md").to_vec()),
             ("prompts/dreamer/compress-cues/system.md".into(), include_bytes!("../../profiles/memory-swe/prompts/dreamer/compress-cues/system.md").to_vec()),
             ("prompts/dreamer/compress-cues/user.md".into(), include_bytes!("../../profiles/memory-swe/prompts/dreamer/compress-cues/user.md").to_vec()),
+            ("prompts/dreamer/curate-workspace/system.md".into(), include_bytes!("../../profiles/memory-swe/prompts/dreamer/curate-workspace/system.md").to_vec()),
+            ("prompts/dreamer/curate-workspace/user.md".into(), include_bytes!("../../profiles/memory-swe/prompts/dreamer/curate-workspace/user.md").to_vec()),
             ("prompts/dreamer/curate/system.md".into(), include_bytes!("../../profiles/memory-swe/prompts/dreamer/curate/system.md").to_vec()),
             ("prompts/dreamer/curate/user.md".into(), include_bytes!("../../profiles/memory-swe/prompts/dreamer/curate/user.md").to_vec()),
             ("prompts/dreamer/lift-workspace/system.md".into(), include_bytes!("../../profiles/memory-swe/prompts/dreamer/lift-workspace/system.md").to_vec()),

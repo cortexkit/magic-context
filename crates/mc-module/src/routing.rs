@@ -131,6 +131,15 @@ pub const DREAM_DEMANDS: &[DreamDemand] = &[
         reads_code: false,
         max_steps: 1,
     },
+    // Curating a workspace's shared memories is the same work as curating a
+    // project's, on a pool gathered from several projects.
+    DreamDemand {
+        kind: "curate-workspace",
+        iq: 50,
+        context_window: 128_000,
+        reads_code: false,
+        max_steps: 1,
+    },
     DreamDemand {
         kind: "compress-cues",
         iq: 30,

@@ -69,6 +69,16 @@
       "bytes": 221
     },
     {
+      "path": "prompts/dreamer/curate-workspace/system.md",
+      "sha256": "edf82c196b80d4088913826e9713cd1649c73547ee099eea639e0e8db22d7b00",
+      "bytes": 2696
+    },
+    {
+      "path": "prompts/dreamer/curate-workspace/user.md",
+      "sha256": "48639720258c3b6633a6c996210b1a9c9caad46bf8d6d834c8412cad18f0182c",
+      "bytes": 180
+    },
+    {
       "path": "prompts/dreamer/curate/system.md",
       "sha256": "23a83c25c72c7975dbe1e4bbe0ee15dbc2bbff14ab4303ded293b99de9ac5a41",
       "bytes": 2251
@@ -728,6 +738,34 @@
         }
       },
       {
+        "id": "swe:curate-workspace",
+        "kind": "curate-workspace",
+        "enabled": true,
+        "reads": [
+          "memory-pool"
+        ],
+        "evidence": [
+          "memory-pool"
+        ],
+        "actions": [
+          "merge",
+          "shorten",
+          "split",
+          "archive"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:curate-workspace/system",
+          "user": "dreamer/swe:curate-workspace/user"
+        }
+      },
+      {
         "id": "swe:compress-cues",
         "kind": "compress-cues",
         "enabled": true,
@@ -1117,6 +1155,22 @@
           {
             "id": "body",
             "file": "prompts/dreamer/curate/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:curate-workspace/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/curate-workspace/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:curate-workspace/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/curate-workspace/user.md"
           }
         ]
       },
