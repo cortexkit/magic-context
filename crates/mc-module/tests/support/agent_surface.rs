@@ -470,9 +470,47 @@ async fn surface_hint_deadline_includes_waiting_for_the_database() {
     });
     session.db = Some(db.clone());
     db.with_connection(|conn| conn.execute("INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at) VALUES ('aaaaaaa', 'p', 'aaaaaaa', 'Fix zebra parser crash on empty input', 'a', 1, 1)", [])).unwrap();
-    let (ready, held) = std::sync::mpsc::channel();
+    // The hint reads on a search connection of its own; its read is held
+    // there for longer than the deadline.
+    let crate::context_db::SearchPause { reached, release } = db.pause_next_search_read();
     let handle = std::thread::spawn(move || {
-        db.with_connection(|_| {
+        let _ = reached.recv_timeout(std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_millis(1300));
+        let _ = release.send(());
+    });
+    let settings = Settings {
+        git_commits_enabled: true,
+        ..Settings::default()
+    };
+    let start = std::time::Instant::now();
+    let answer = session
+        .pre_user(&settings, "Fix zebra parser crash on empty input", 1000)
+        .await;
+    let elapsed = start.elapsed();
+    handle.join().unwrap();
+    assert_eq!(answer.append, None, "{answer:?}; took {elapsed:?}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1200),
+        "{elapsed:?}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn surface_hint_reads_while_the_shared_connection_is_busy() {
+    let (dir, db) = database();
+    let mut session = session("head");
+    session.project = Some(Project {
+        id: "p".into(),
+        root: dir.to_string_lossy().into(),
+    });
+    session.db = Some(db.clone());
+    db.with_connection(|conn| conn.execute("INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at) VALUES ('aaaaaaa', 'p', 'aaaaaaa', 'Fix zebra parser crash on empty input', 'a', 1, 1)", [])).unwrap();
+    // Another call holds the shared connection for longer than the deadline.
+    let (ready, held) = std::sync::mpsc::channel();
+    let holder = db.clone();
+    let handle = std::thread::spawn(move || {
+        holder.with_connection(|_| {
             ready.send(()).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(1300));
         })
@@ -488,7 +526,8 @@ async fn surface_hint_deadline_includes_waiting_for_the_database() {
         .await;
     let elapsed = start.elapsed();
     handle.join().unwrap();
-    assert_eq!(answer.append, None, "{answer:?}; took {elapsed:?}");
+    let hint = answer.append.unwrap_or_default();
+    assert!(hint.contains("zebra parser"), "{hint}; took {elapsed:?}");
     assert!(
         elapsed < std::time::Duration::from_millis(1200),
         "{elapsed:?}"
