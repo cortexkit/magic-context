@@ -627,6 +627,7 @@ fn scope<'a>(
         harness: HARNESS,
         session: case.session,
         project: Some(PROJECT),
+        workspace: None,
         cutoff: case.cutoff,
         visible_messages: case.visible.clone(),
         seen,
@@ -659,11 +660,15 @@ fn lanes(
     } else {
         TIER
     };
-    let (_, took) = timed(|| sources::workspace_memories(conn, PROJECT).unwrap().len());
+    let owners = sources::MemoryOwners {
+        project: Some(PROJECT),
+        workspace: None,
+    };
+    let (_, took) = timed(|| sources::searchable_memories(conn, owners).unwrap().len());
     stages.push(("memories: in-view check (reads all)", took));
     let visible = BTreeSet::new();
     let (_, took) = timed(|| {
-        sources::search_memories(conn, PROJECT, query, TIER, &visible, None, semantic, None)
+        sources::search_memories(conn, owners, query, TIER, &visible, None, semantic, None)
     });
     stages.push(("memories: words + vectors", took));
     let (_, took) =

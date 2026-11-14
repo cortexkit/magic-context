@@ -1,5 +1,5 @@
 //! `ctx_search`: one query over the session's earlier messages, the
-//! project's and workspace-shared memories, git commits and primers, and the session's notes.
+//! memories of its project and of its workspace, git commits and primers, and the session's notes.
 //! Argument rules, scoring, ordering and the reply follow the TypeScript
 //! tool (`tools/ctx-search` and `features/magic-context/search.ts`), so an
 //! agent reads the same in both.
@@ -19,6 +19,8 @@ pub mod text;
 
 #[cfg(test)]
 mod hint_tests;
+#[cfg(test)]
+mod memory_level_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,7 +28,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use messages::{DateRange, MessageHit};
-use sources::{ChunkHit, CommitHit, MemoryHit, NoteHit, PrimerHit};
+use sources::{ChunkHit, CommitHit, MemoryHit, MemoryLevel, MemoryOwners, NoteHit, PrimerHit};
 
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 25;
@@ -49,6 +51,10 @@ pub struct Scope<'a> {
     /// The project whose memories, commits and primers are searched; `None`
     /// when the session has no project.
     pub project: Option<&'a str>,
+    /// The workspace whose workspace-level memories are searched besides
+    /// the project's: the session's current one, from its memory context.
+    /// `None` when the session is in no workspace.
+    pub workspace: Option<&'a str>,
     /// Messages after this number are in the model's view already and are
     /// not returned.
     pub cutoff: i64,
@@ -67,6 +73,16 @@ pub struct Scope<'a> {
     pub semantic: Option<sources::Semantic<'a>>,
 }
 
+impl<'a> Scope<'a> {
+    /// Whose memories the search reads: the project's and the workspace's.
+    fn memory_owners(&self) -> MemoryOwners<'a> {
+        MemoryOwners {
+            project: self.project,
+            workspace: self.workspace,
+        }
+    }
+}
+
 /// What a [`Scope`] names, owned, so a search can run on a blocking thread.
 /// The query's embedding is kept apart and lent to [`OwnedScope::scope`].
 #[derive(Clone, Debug)]
@@ -74,6 +90,7 @@ pub struct OwnedScope {
     pub harness: String,
     pub session: String,
     pub project: Option<String>,
+    pub workspace: Option<String>,
     pub cutoff: i64,
     pub visible_messages: Option<BTreeSet<i64>>,
     pub seen: BTreeMap<i64, String>,
@@ -89,6 +106,7 @@ impl OwnedScope {
             harness: scope.harness.to_owned(),
             session: scope.session.to_owned(),
             project: scope.project.map(str::to_owned),
+            workspace: scope.workspace.map(str::to_owned),
             cutoff: scope.cutoff,
             visible_messages: scope.visible_messages.clone(),
             seen: scope.seen.clone(),
@@ -104,6 +122,7 @@ impl OwnedScope {
             harness: &self.harness,
             session: &self.session,
             project: self.project.as_deref(),
+            workspace: self.workspace.as_deref(),
             cutoff: self.cutoff,
             visible_messages: self.visible_messages.clone(),
             seen: &self.seen,
@@ -179,7 +198,9 @@ fn compare(left: &Hit, right: &Hit) -> std::cmp::Ordering {
 
 #[derive(Default)]
 struct Diagnostics {
-    suppressed_visible: Vec<i64>,
+    /// Memories the search found that the head already shows, by id, with
+    /// the level whose block shows each.
+    suppressed_visible: Vec<(i64, MemoryLevel)>,
     live_message_matches: u64,
     visibility_from_view: bool,
     no_git_repository: bool,
@@ -344,10 +365,12 @@ fn format_hit(hit: &Hit, index: usize, session: &str, now: i64) -> String {
             hit.score,
             hit.id,
             hit.category,
-            hit.source_name
-                .as_ref()
-                .map(|name| format!(" source={name}"))
-                .unwrap_or_default(),
+            // A project hit has no level part, so its line reads as it did
+            // before workspace memories were searched.
+            match hit.level {
+                MemoryLevel::Project => "",
+                MemoryLevel::Workspace => " level=workspace",
+            },
             hit.match_type,
             hit.content
         ),
@@ -410,17 +433,27 @@ fn diagnostic_lines(hits: &[Hit], diagnostics: &Diagnostics) -> Vec<String> {
         let noun = if count == 1 { "match" } else { "matches" };
         let ids = visible
             .iter()
-            .map(i64::to_string)
+            .map(|(id, _)| id.to_string())
             .collect::<Vec<_>>()
             .join(", ");
+        // The head shows each level's memories in its own block.
+        let shown_in = |level: MemoryLevel| visible.iter().any(|(_, shown)| *shown == level);
+        let block = match (
+            shown_in(MemoryLevel::Project),
+            shown_in(MemoryLevel::Workspace),
+        ) {
+            (true, true) => "project-memory and workspace-memory blocks",
+            (false, true) => "workspace-memory block",
+            _ => "project-memory block",
+        };
         if hits.iter().any(|hit| matches!(hit, Hit::Memory(_))) {
             lines.push(format!(
-                "Memories: {count} additional {noun} suppressed because {} already visible in your project-memory block (ids {ids}).",
+                "Memories: {count} additional {noun} suppressed because {} already visible in your {block} (ids {ids}).",
                 if count == 1 { "it is" } else { "they are" }
             ));
         } else {
             lines.push(format!(
-                "Memories: {count} {noun} found, all already visible in your project-memory block (ids {ids})."
+                "Memories: {count} {noun} found, all already visible in your {block} (ids {ids})."
             ));
         }
     }
@@ -487,19 +520,19 @@ fn format_results(query: &str, hits: &[Hit], session: &str, diagnostics: &Diagno
 }
 
 /// Memories by id, in the order asked, leaving out ones the model sees.
-/// `None` when no id names a current memory in the workspace pool.
+/// `None` when no id names a current memory `owners` own.
 fn memories_by_id(
     conn: &Connection,
-    project: &str,
+    owners: MemoryOwners<'_>,
     ids: &[i64],
     limit: usize,
     visible: &BTreeSet<i64>,
     dates: Option<DateRange>,
     diagnostics: &mut Diagnostics,
 ) -> Option<Vec<Hit>> {
-    let memories = sources::workspace_memories(conn, project).unwrap_or_default();
+    let memories = sources::searchable_memories(conn, owners).unwrap_or_default();
     let mut hits = Vec::new();
-    let mut suppressed = BTreeSet::new();
+    let mut suppressed = BTreeMap::new();
     for id in ids {
         let Some(memory) = memories.iter().find(|memory| {
             memory.id == *id && dates.is_none_or(|dates| dates.contains(memory.created_at))
@@ -507,13 +540,13 @@ fn memories_by_id(
             continue;
         };
         if visible.contains(id) {
-            suppressed.insert(*id);
+            suppressed.insert(*id, memory.level);
             continue;
         }
         let rank = hits.len();
         hits.push(Hit::Memory(MemoryHit {
             id: memory.id,
-            source_name: memory.source_name.clone(),
+            level: memory.level,
             category: memory.category.clone(),
             content: text::preview(&memory.content),
             hint_content: memory.content.clone(),
@@ -582,9 +615,9 @@ fn parse(input: &Value) -> Result<Request<'_>, String> {
     })
 }
 
-/// The memories whose current text the head shows.
-fn visible_memories(conn: &Connection, project: &str, scope: &Scope) -> BTreeSet<i64> {
-    sources::workspace_memories(conn, project)
+/// The memories `owners` own whose current text the head shows.
+fn visible_memories(conn: &Connection, owners: MemoryOwners<'_>, scope: &Scope) -> BTreeSet<i64> {
+    sources::searchable_memories(conn, owners)
         .unwrap_or_default()
         .iter()
         .filter(|memory| scope.seen.get(&memory.id) == Some(&memory.content))
@@ -603,13 +636,13 @@ pub fn by_ids(conn: &Connection, scope: &Scope, input: &Value) -> Option<Result<
         return None;
     }
     let ids = id_query(request.query)?;
-    let project = scope.project?;
-    let visible = visible_memories(conn, project, scope);
+    let owners = Some(scope.memory_owners()).filter(MemoryOwners::any)?;
+    let visible = visible_memories(conn, owners, scope);
     let mut diagnostics = Diagnostics::default();
     let limit = request.tool_limit.max(ids.len());
     let found = memories_by_id(
         conn,
-        project,
+        owners,
         &ids,
         limit,
         &visible,
@@ -733,9 +766,12 @@ fn collect(
     let (query, dates) = (request.query, request.dates);
     let active = |source: &str| request.active(source);
     let project = scope.project;
-    let visible = project
-        .map(|project| visible_memories(conn, project, scope))
-        .unwrap_or_default();
+    let owners = scope.memory_owners();
+    let visible = if owners.any() {
+        visible_memories(conn, owners, scope)
+    } else {
+        BTreeSet::new()
+    };
     let limit = request.tool_limit.clamp(1, MAX_LIMIT);
     let tier = (limit * 3).max(DEFAULT_LIMIT);
     let probes = if explicit {
@@ -760,11 +796,11 @@ fn collect(
         tier
     };
     let mut hits: Vec<Hit> = Vec::new();
-    if let Some(project) = project.filter(|_| active("memory") && scope.memory_enabled) {
+    if owners.any() && active("memory") && scope.memory_enabled {
         let mut halves = lanes.is_some().then(sources::Halves::default);
         let (found, suppressed) = sources::search_memories(
             conn,
-            project,
+            owners,
             query,
             tier,
             &visible,

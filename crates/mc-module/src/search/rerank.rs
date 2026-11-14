@@ -779,12 +779,12 @@ mod synapse_tests;
 mod tests {
     use super::*;
     use crate::search::messages::MessageHit;
-    use crate::search::sources::{ChunkHit, MemoryHit};
+    use crate::search::sources::{ChunkHit, MemoryHit, MemoryLevel};
 
     fn memory(id: i64) -> Hit {
         Hit::Memory(MemoryHit {
             id,
-            source_name: None,
+            level: MemoryLevel::Project,
             category: "ARCHITECTURE".into(),
             content: format!("memory {id}"),
             hint_content: format!("memory {id}"),

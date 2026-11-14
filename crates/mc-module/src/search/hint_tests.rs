@@ -3,7 +3,7 @@ use super::*;
 fn memory(preview: &str, full_content: &str) -> Hit {
     Hit::Memory(MemoryHit {
         id: 1,
-        source_name: None,
+        level: MemoryLevel::Project,
         category: "WORKFLOW_RULES".into(),
         content: preview.into(),
         hint_content: full_content.into(),
@@ -105,6 +105,7 @@ fn memory_hint_scores_use_full_text_but_search_output_keeps_the_preview() {
             harness: "mock",
             session: "hint-session",
             project: Some("hint-project"),
+            workspace: None,
             cutoff: i64::MAX,
             visible_messages: None,
             seen: &seen,

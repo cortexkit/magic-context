@@ -335,6 +335,7 @@ fn scope<'a>(
         harness: "mock",
         session,
         project: None,
+        workspace: None,
         cutoff: i64::MAX,
         visible_messages: None,
         seen,

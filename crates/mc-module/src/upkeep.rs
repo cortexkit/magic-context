@@ -1418,6 +1418,7 @@ mod tests {
                     harness: "mock",
                     session: "ses-shared",
                     project: Some(project),
+                    workspace: None,
                     cutoff: i64::MAX,
                     visible_messages: None,
                     seen: &seen,

@@ -120,10 +120,46 @@ fn linear_decay(rank: usize, total: usize) -> f64 {
     (1.0 - rank as f64 / total as f64).max(0.0)
 }
 
+/// The level of a memory `ctx_search` reads: the session's project's own,
+/// or its workspace's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryLevel {
+    Project,
+    Workspace,
+}
+
+/// Whose memories `ctx_search` reads for one session: the project-level
+/// memories its project owns and, when the session is in a workspace, the
+/// workspace-level memories that workspace owns. These are the levels the
+/// history head draws from (`head_memories::read_rows`), apart from global
+/// memories: the full-text index leaves those out, and the head shows the
+/// person's profile in full already.
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryOwners<'a> {
+    /// The session's project; `None` when it has none.
+    pub project: Option<&'a str>,
+    /// The session's current workspace, from its memory context; `None`
+    /// when it is in none.
+    pub workspace: Option<&'a str>,
+}
+
+impl MemoryOwners<'_> {
+    /// Whether these owners could own any memory.
+    pub fn any(&self) -> bool {
+        self.project.is_some() || self.workspace.is_some()
+    }
+}
+
+/// The condition a `memories` row aliased `m` meets when one of
+/// [`MemoryOwners`] owns it, with the project bound to `?1` and the
+/// workspace to `?2`. An owner bound as NULL matches no row.
+const OWNED_BY: &str = "((m.level = 'project' AND m.owner_id = ?1)
+    OR (m.level = 'workspace' AND m.owner_id = ?2))";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryHit {
     pub id: i64,
-    pub source_name: Option<String>,
+    pub level: MemoryLevel,
     pub category: String,
     pub content: String,
     /// Keep full text internal for hint scoring; tool replies use only `content`.
@@ -135,29 +171,30 @@ pub struct MemoryHit {
 #[derive(Clone, Debug)]
 pub struct SearchMemory {
     pub id: i64,
-    pub source_name: Option<String>,
+    pub level: MemoryLevel,
     pub category: String,
     pub content: String,
     pub created_at: i64,
 }
 
-/// The workspace pool, with no placement exclusion: active/permanent, not expired.
-pub fn workspace_memories(conn: &Connection, project: &str) -> rusqlite::Result<Vec<SearchMemory>> {
-    let workspace = crate::workspace::Workspace::resolve(conn, project)?;
-    let sql = format!(
-        "SELECT id, origin_category, content, created_at, owner_id FROM memories m
-          WHERE {} AND status IN ('active', 'permanent')
-            AND (expires_at IS NULL OR expires_at > ?4)",
-        workspace.predicate(conn, "m")?
-    );
-    let mut statement = conn.prepare_cached(&sql)?;
-    let [all, own, categories] = workspace.bindings();
-    let rows = statement.query_map(params![all, own, categories, now_ms()], |row| {
+/// Every current memory `owners` own: active or permanent, not expired.
+pub fn searchable_memories(
+    conn: &Connection,
+    owners: MemoryOwners<'_>,
+) -> rusqlite::Result<Vec<SearchMemory>> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT m.id, m.origin_category, m.content, m.created_at, m.level FROM memories m
+          WHERE {OWNED_BY} AND m.status IN ('active', 'permanent')
+            AND (m.expires_at IS NULL OR m.expires_at > ?3)"
+    ))?;
+    let rows = statement.query_map(params![owners.project, owners.workspace, now_ms()], |row| {
         Ok(SearchMemory {
             id: row.get(0)?,
-            source_name: workspace
-                .source_name(&row.get::<_, String>(4)?)
-                .map(str::to_owned),
+            level: if row.get::<_, String>(4)? == "workspace" {
+                MemoryLevel::Workspace
+            } else {
+                MemoryLevel::Project
+            },
             category: row.get(1)?,
             content: row.get(2)?,
             created_at: row.get(3)?,
@@ -204,29 +241,23 @@ pub(crate) fn memory_vectors(
 
 fn memory_fts_ids(
     conn: &Connection,
-    project: &str,
+    owners: MemoryOwners<'_>,
     fts: &str,
     dates: Option<DateRange>,
 ) -> Vec<i64> {
     let read = || -> rusqlite::Result<Vec<i64>> {
-        let workspace = crate::workspace::Workspace::resolve(conn, project)?;
-        let sql = format!(
-            "SELECT memories.id FROM memories_fts
-            JOIN memories ON memories.id = memories_fts.rowid WHERE {}
-            AND memories.status IN ('active','permanent')
-            AND (memories.expires_at IS NULL OR memories.expires_at > ?4)
-            AND memories.created_at BETWEEN ?5 AND ?6 AND memories_fts MATCH ?7
-            ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?8",
-            workspace.predicate(conn, "memories")?
-        );
-        let mut statement = conn.prepare_cached(&sql)?;
-        let [all, own, categories] = workspace.bindings();
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT m.id FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+              WHERE {OWNED_BY} AND m.status IN ('active','permanent')
+                AND (m.expires_at IS NULL OR m.expires_at > ?3)
+                AND m.created_at BETWEEN ?4 AND ?5 AND memories_fts MATCH ?6
+              ORDER BY bm25(memories_fts), m.updated_at DESC, m.id ASC LIMIT ?7"
+        ))?;
         let (from, to) = dates.map_or((i64::MIN, i64::MAX), |dates| (dates.from, dates.to));
         let rows = statement.query_map(
             params![
-                all,
-                own,
-                categories,
+                owners.project,
+                owners.workspace,
                 now_ms(),
                 from,
                 to,
@@ -273,24 +304,25 @@ fn memory_fts_ids_limited(
     read().unwrap_or_default()
 }
 
-/// Memories ranked by full-text match and meaning. `visible` memories (the
-/// head shows their current text) are left out and returned separately, so
-/// the reply can say the search found them.
+/// Memories `owners` own, ranked by full-text match and meaning. `visible`
+/// memories (the head shows their current text) are left out and returned
+/// separately with their levels, so the reply can say the search found them
+/// and which block shows them.
 ///
 /// Vectors are read as stored: a memory without one for this provider is
 /// found by words only until the embedding drain gives it one.
 #[allow(clippy::too_many_arguments)]
 pub fn search_memories(
     conn: &Connection,
-    project: &str,
+    owners: MemoryOwners<'_>,
     query: &str,
     limit: usize,
     visible: &BTreeSet<i64>,
     dates: Option<DateRange>,
     semantic: Option<Semantic<'_>>,
     halves: Option<&mut Halves<MemoryHit>>,
-) -> (Vec<MemoryHit>, Vec<i64>) {
-    let memories: Vec<SearchMemory> = workspace_memories(conn, project)
+) -> (Vec<MemoryHit>, Vec<(i64, MemoryLevel)>) {
+    let memories: Vec<SearchMemory> = searchable_memories(conn, owners)
         .unwrap_or_default()
         .into_iter()
         .filter(|memory| dates.is_none_or(|dates| dates.contains(memory.created_at)))
@@ -299,9 +331,9 @@ pub fn search_memories(
         return (Vec::new(), Vec::new());
     }
     let trimmed = query.trim();
-    let mut ids = memory_fts_ids(conn, project, &sanitize_fts_query(trimmed), dates);
+    let mut ids = memory_fts_ids(conn, owners, &sanitize_fts_query(trimmed), dates);
     if ids.is_empty() {
-        ids = memory_fts_ids(conn, project, &relaxed_fts_query(trimmed), dates);
+        ids = memory_fts_ids(conn, owners, &relaxed_fts_query(trimmed), dates);
     }
     let fts: BTreeMap<i64, f64> = ids
         .iter()
@@ -334,7 +366,7 @@ pub fn search_memories(
                     let score = scores.get(&memory.id)? * factor;
                     (score > 0.0).then(|| MemoryHit {
                         id: memory.id,
-                        source_name: memory.source_name.clone(),
+                        level: memory.level,
                         category: memory.category.clone(),
                         content: preview(&memory.content),
                         hint_content: memory.content.clone(),
@@ -360,12 +392,12 @@ pub fn search_memories(
             continue;
         };
         if visible.contains(&memory.id) {
-            suppressed.push(memory.id);
+            suppressed.push((memory.id, memory.level));
             continue;
         }
         hits.push(MemoryHit {
             id: memory.id,
-            source_name: memory.source_name.clone(),
+            level: memory.level,
             category: memory.category.clone(),
             content: preview(&memory.content),
             hint_content: memory.content.clone(),

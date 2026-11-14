@@ -3432,8 +3432,9 @@ impl Session {
     }
 
     /// What a search may read for this session: messages up to the last
-    /// summary (later ones are in the model's view), and memories other than
-    /// those the history head shows in full. The head is the two messages a
+    /// summary (later ones are in the model's view), and the memories of its
+    /// project and of its current workspace other than those the history head
+    /// shows in full. The head is the two messages a
     /// view inserts at the start of the request: the baseline of summaries,
     /// docs and memories, and what changed since that baseline.
     fn search_scope<'a>(
@@ -3449,6 +3450,12 @@ impl Session {
             harness: &self.key.harness,
             session: &self.key.session,
             project: self.project.as_ref().map(|project| project.id.as_str()),
+            // The workspace the head reads too: Entorhinal's, from the memory
+            // context, which follows the project when it moves.
+            workspace: self
+                .memory_context
+                .as_ref()
+                .and_then(|context| context.workspace_id.as_deref()),
             cutoff: self
                 .summaries
                 .last()

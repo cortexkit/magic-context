@@ -1,6 +1,13 @@
 //! Local workspace membership and the shared memory policy from the plugin.
 //! Membership comes from context.db, not the memory profile and ownership
 //! snapshot frozen for a session.
+//!
+//! This is the 0.49 dashboard's sharing, which let a project read its
+//! workspace siblings' project memories by category. Neither the history
+//! head nor `ctx_search` uses it: both read memories by level and owner, the
+//! session's project and its Entorhinal workspace (`head_memories`,
+//! `search::sources`). The 0.49 renderers in `memory_legacy` and the tests
+//! that compare against them still do.
 
 use std::collections::BTreeMap;
 
@@ -464,92 +471,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod search_tests {
-    use super::*;
-    use crate::search::sources::{search_memories, Halves, Semantic};
-    use std::collections::BTreeSet;
-
-    #[test]
-    fn word_and_vector_search_share_eligibility_sources_dates_and_visible_suppression() {
-        let conn = crate::context_db::ContextDb::fresh_in_memory();
-        conn.execute_batch("INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(1,'Example',0,0);
-            INSERT INTO workspace_members VALUES(1,'pj-a','Alpha','/a',0),(1,'pj-b','Beta','/b',0);
-            INSERT INTO v22_identity_rekey_map VALUES('git:old-b','pj-b',0);
-            INSERT INTO memories(id,level, owner_id,category, origin_category,content,normalized_hash,shareable,scope,first_seen_at,created_at,updated_at,last_seen_at)
-                VALUES(1,'project', 'git:old-b','swe:constraints', 'CONSTRAINTS','zebra constraint','h1',1,'project',0,50,0,0),
-                      (2,'project', 'pj-b','swe:naming', 'NAMING','zebra naming','h2',1,'project',0,50,0,0),
-                      (3,'project', 'pj-b','swe:constraints', 'CONSTRAINTS','zebra private','h3',0,'project',0,50,0,0);
-            ").unwrap();
-        let vector: Vec<u8> = [1.0_f32, 0.0]
-            .iter()
-            .flat_map(|n| n.to_le_bytes())
-            .collect();
-        for id in 1..=3 {
-            conn.execute(
-                "INSERT INTO memory_embeddings VALUES(?1,?2,'test')",
-                params![id, vector],
-            )
-            .unwrap();
-        }
-        let mut halves = Halves::default();
-        let semantic = Semantic {
-            vector: &[1.0, 0.0],
-            model_id: "test",
-            chunk_model_id: "test",
-        };
-        let (hits, suppressed) = search_memories(
-            &conn,
-            "pj-a",
-            "zebra",
-            10,
-            &BTreeSet::new(),
-            None,
-            Some(semantic),
-            Some(&mut halves),
-        );
-        assert!(suppressed.is_empty());
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].id, 1);
-        assert_eq!(hits[0].source_name.as_deref(), Some("Beta"));
-        assert_eq!(hits[0].match_type, "hybrid");
-        assert_eq!(halves.words.len(), 1);
-        assert_eq!(halves.meaning.len(), 1);
-        let (hits, suppressed) = search_memories(
-            &conn,
-            "pj-a",
-            "zebra",
-            10,
-            &BTreeSet::from([1]),
-            None,
-            None,
-            None,
-        );
-        assert!(hits.is_empty());
-        assert_eq!(suppressed, [1]);
-        let (hits, _) = search_memories(
-            &conn,
-            "pj-a",
-            "zebra",
-            10,
-            &BTreeSet::new(),
-            Some(crate::search::messages::DateRange { from: 51, to: 100 }),
-            Some(semantic),
-            None,
-        );
-        assert!(hits.is_empty());
-        let (hits, _) = search_memories(
-            &conn,
-            "pj-a",
-            "zebra missingword",
-            10,
-            &BTreeSet::new(),
-            None,
-            None,
-            None,
-        );
-        assert_eq!(hits.len(), 1, "relaxed FTS must span workspace members too");
-    }
-
+mod memory_line_tests {
     #[test]
     fn memory_update_lines_name_their_level_and_escape_text() {
         assert_eq!(
