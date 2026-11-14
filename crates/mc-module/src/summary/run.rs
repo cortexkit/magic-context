@@ -38,7 +38,12 @@ use cortexkit_role_routing::report::Outcome;
 
 /// Flash-class summarizers echo their examples back above this.
 const TEMPERATURE: f64 = 0.1;
-const MAX_OUTPUT_TOKENS: u64 = 32_000;
+/// The most output a summary run asks for, before the model's own limit and
+/// a quarter of its window cut it further. A reasoning summarizer spends much
+/// of it thinking: Gemini 3.8 Flash on high used 36,111 tokens reasoning and
+/// 5,797 writing for a 180-message chunk, so a 32,000 cap cut the summary off
+/// before it began.
+const MAX_OUTPUT_TOKENS: u64 = 65_536;
 /// How long a run may take before it counts as failed.
 const RUN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
