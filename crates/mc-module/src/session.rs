@@ -351,10 +351,12 @@ pub struct Unconfirmed {
     /// with an acceptance, or the view went out as a ride's answer. Until
     /// then ck-mc has only handed it over, and the call may have failed.
     /// The runner keeps an accepted view pending until its next step and
-    /// reports the view before it as applied until then, so every request it
-    /// renders after accepting carries this view; a reading under an older
-    /// view measured a request sent before the runner took it
-    /// ([`Session::judge_reading`]).
+    /// reports the view before it as applied until then. A view it accepts
+    /// between a tool's answer and the request that follows takes force one
+    /// request late, so at most one request it renders after accepting goes
+    /// out without this view, and every later one carries it; a reading
+    /// under an older view measured a request sent before the runner took
+    /// it ([`Session::judge_reading`]).
     ///
     /// Not saved. After ck-mc restarts it can't tell whether the runner
     /// still holds the view (it may never have received a ride's answer
@@ -362,16 +364,24 @@ pub struct Unconfirmed {
     /// Setup offers it again and the runner's answer says it holds it.
     #[serde(skip)]
     accepted: bool,
-    /// The one reading under an older view that this accepted view excused:
-    /// its prompt size and the view it named. A session has one step in
-    /// flight at a time, and an accepted view takes force at the runner's
-    /// next step, so at most one measured request can follow acceptance
-    /// under an older view: the one already in flight. A second, different
-    /// one means the runner rendered a request after accepting the view
+    /// The readings under an older view that this accepted view excused,
+    /// at most [`EXCUSED_PER_VIEW`] different ones: each one's prompt size
+    /// and the view it named. Two measured requests can follow acceptance
+    /// under an older view: the one already in flight when the runner
+    /// accepted (a session has one step in flight at a time), and the one
+    /// request a runner may render before it takes a view it accepted
+    /// between a tool's answer and that request. A runner takes an accepted
+    /// view one request late at most, never two, so a third, different
+    /// reading means the runner rendered a request after accepting the view
     /// without it ([`Session::judge_reading`]). Not saved, like `accepted`.
     #[serde(skip)]
-    excused: Option<(u64, u64)>,
+    excused: Vec<(u64, u64)>,
 }
+
+/// How many different readings under an older view one accepted view
+/// excuses ([`Unconfirmed::excused`]): the request in flight when the runner
+/// accepted, and the one request it may render before taking the view.
+const EXCUSED_PER_VIEW: usize = 2;
 
 /// The state a view's acceptance replaced.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1006,7 +1016,7 @@ impl Session {
         // `Unconfirmed::accepted`).
         for pending in &mut self.unconfirmed {
             pending.accepted = false;
-            pending.excused = None;
+            pending.excused.clear();
         }
         // Like refused_once, the retry guard survives in an unconfirmed
         // view's rollback snapshot, not in a separate store column.
@@ -1619,11 +1629,15 @@ impl Session {
     /// A reading older than a view the runner accepted from ck-mc but does
     /// not apply yet is stale for the same reason ([`Session::newest_accepted`]):
     /// the runner keeps an accepted view pending until its next step and
-    /// reports the view before it as applied until then, but every request it
-    /// renders from then on carries the accepted view. A session has one step
-    /// in flight at a time, so only the request already in flight when the
-    /// runner accepted can be measured under the older view: the accepted
-    /// views excuse one such measurement, and its repeats. A second,
+    /// reports the view before it as applied until then, and renders every
+    /// request from then on with the accepted view but at most one. Two
+    /// requests can be measured under the older view after acceptance: the
+    /// one already in flight when the runner accepted (a session has one
+    /// step in flight at a time), and, when the runner accepted between a
+    /// tool's answer and the request that follows it, that request, which a
+    /// runner may render before it takes the view. A runner takes an
+    /// accepted view one request late at most, never two, so the accepted
+    /// views excuse two such measurements, and their repeats. A third,
     /// different one shows the runner rendered a later request without the
     /// view it accepted. ck-mc then stops counting the accepted views, warns
     /// once, and judges this reading and later ones by the applied view
@@ -1700,24 +1714,38 @@ impl Session {
     }
 
     /// Excuse a reading under an older view than the newest accepted one
-    /// (`accepted`) as the request in flight when the runner accepted: the
+    /// (`accepted`) as one of the requests the runner can still measure
+    /// under the older view after accepting ([`Unconfirmed::excused`]): the
     /// accepted views record it, and a repeat of it is excused again. A
-    /// different reading after one was excused stops every accepted view
-    /// counting, and returns false.
+    /// different reading once an accepted view has excused
+    /// [`EXCUSED_PER_VIEW`] readings stops every accepted view counting, and
+    /// returns false.
     fn excuse_in_flight(&mut self, tokens: u64, view: u64, accepted: u64) -> bool {
         let reading = (tokens, view);
         let earlier = self
             .unconfirmed
             .iter()
             .filter(|pending| pending.accepted)
-            .find_map(|pending| pending.excused.filter(|excused| *excused != reading));
-        let Some((earlier_tokens, earlier_view)) = earlier else {
+            .find(|pending| {
+                pending.excused.len() >= EXCUSED_PER_VIEW && !pending.excused.contains(&reading)
+            })
+            .map(|pending| {
+                pending
+                    .excused
+                    .iter()
+                    .map(|(size, named)| format!("{size} tokens from view {named}"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            });
+        let Some(earlier) = earlier else {
             for pending in self
                 .unconfirmed
                 .iter_mut()
                 .filter(|pending| pending.accepted)
             {
-                pending.excused = Some(reading);
+                if !pending.excused.contains(&reading) {
+                    pending.excused.push(reading);
+                }
             }
             return true;
         };
@@ -1725,7 +1753,7 @@ impl Session {
             pending.accepted = false;
         }
         tracing::warn!(
-            "ck-mc: session {}: runner accepted view {accepted} but measured a later request without it ({tokens} tokens from view {view}, after {earlier_tokens} tokens from view {earlier_view}); counting readings against the applied view {}",
+            "ck-mc: session {}: runner accepted view {accepted} but measured a later request without it ({tokens} tokens from view {view}, after {earlier}); counting readings against the applied view {}",
             self.key.session,
             self.newest_applied
         );
@@ -4793,7 +4821,7 @@ impl Session {
         // the view, and its readings are judged afresh from here.
         for pending in &mut self.unconfirmed {
             pending.accepted = false;
-            pending.excused = None;
+            pending.excused.clear();
         }
         let Some(view) = self.unconfirmed.last().map(|pending| pending.view.clone()) else {
             return;
@@ -4975,7 +5003,7 @@ impl Session {
             before,
             built_through: self.index.cursor().map(|cursor| cursor.ordinal),
             accepted: false,
-            excused: None,
+            excused: Vec::new(),
         });
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {

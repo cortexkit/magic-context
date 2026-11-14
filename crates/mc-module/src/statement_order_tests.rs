@@ -307,7 +307,7 @@ fn reading_state(session: &Session) -> String {
             session
                 .unconfirmed
                 .iter()
-                .map(|waiting| (waiting.view.version, waiting.accepted, waiting.excused))
+                .map(|waiting| (waiting.view.version, waiting.accepted, &waiting.excused))
                 .collect::<Vec<_>>(),
             session.keep_requested,
             session.emergency_latched,
