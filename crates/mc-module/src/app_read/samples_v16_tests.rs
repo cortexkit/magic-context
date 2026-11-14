@@ -1,8 +1,9 @@
 //! The tagged sample set `mc-app-read-samples-v16`: the v15 set with one
 //! example added, `token-breakdown-long.json`, a token breakdown read from a
-//! real long head session so the apps can test realistic proportions. It
-//! isn't generated: the module's stored checkpoint for that session was
-//! copied into the sample's envelope. So the test checks the set rather than
+//! real session of a long-running primary agent (one that works with the
+//! person for weeks), so the apps can test realistic proportions. It isn't
+//! generated: the module's stored checkpoint for that session was copied
+//! into the sample's envelope. So the test checks the set rather than
 //! writing it: v15 is copied byte for byte, the checksums are current, and
 //! the added row reads and writes back through the module's own breakdown
 //! type unchanged.

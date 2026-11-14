@@ -12,9 +12,10 @@
 //! happened on, corrections by what made the agent change (the profile's
 //! `group_events_by`). A group goes to the model only when it holds a new
 //! event and events from at least the profile's `min_proof_count` days.
-//! Days, not sessions: a head agent's whole history is one long session, so
-//! a mistake that keeps coming back there comes back on different days. The
-//! day is the event's calendar date in the machine's local time.
+//! Days, not sessions: an agent that works with the person for weeks keeps
+//! its whole history in one long session, so a mistake that keeps coming back
+//! there comes back on different days. The day is the event's calendar date
+//! in the machine's local time.
 //! A run reads only events of the last [`WINDOW_DAYS`] days, new ones
 //! included: a first run finds every stored event new, and rules drawn from
 //! months-old work describe code and habits that have since moved on. A group

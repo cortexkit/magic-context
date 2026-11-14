@@ -651,9 +651,9 @@ fn every_check_drops_a_learning_that_fails_it_with_its_reason() {
 
 #[test]
 fn events_of_two_sessions_on_one_day_count_as_one_day() {
-    // What counts is the days the events happened on, not their sessions: a
-    // head agent's whole history is one session, and two sessions can share
-    // a day.
+    // What counts is the days the events happened on, not their sessions: an
+    // agent that works with the person for weeks keeps its whole history in
+    // one session, and two sessions can share a day.
     let store = store();
     store.events(&[
         correction(1, "ses-b", "self_review", "Checked the lock order twice", 3),
