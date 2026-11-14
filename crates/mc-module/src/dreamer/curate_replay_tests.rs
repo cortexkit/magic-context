@@ -176,6 +176,7 @@ fn curate_requests() {
         owner: &owner,
         profile: &profile,
         declaration: &declaration,
+        workspace: None,
     };
     let live = db
         .with_connection(|conn| {

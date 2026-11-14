@@ -249,6 +249,7 @@ fn with_context<T>(db: &ContextDb, root: &Path, body: impl FnOnce(&TaskContext<'
         owner: &owner,
         profile: &profile,
         declaration: &declaration,
+        workspace: None,
     })
 }
 

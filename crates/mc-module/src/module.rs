@@ -808,8 +808,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// Run the dreamer once a minute, the first time after upkeep's quiet
     /// period. Each round learns the projects of the sessions set up in this
     /// process (with the memory profile a session of each resolved, or the
-    /// bundled one) and starts the tasks that are due. The person's
-    /// `dreamer.disable` stops new runs from the next round.
+    /// bundled one, and the workspace its memory context names) and starts
+    /// the tasks that are due. The person's `dreamer.disable` stops new runs
+    /// from the next round.
     pub fn spawn_dreamer(&self) {
         let (Some(db), Some(engine)) = (self.inner.db.clone(), self.inner.dreamer.clone()) else {
             return;
@@ -831,6 +832,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             Ok(profile) => engine.see_project(&db, &project, &root, Arc::new(profile), &settings, now),
                             Err(refusal) => tracing::warn!("ck-mc: dreamer: {project}'s memory profile can't load: {refusal:?}"),
                         }
+                        engine.see_workspace(
+                            &project,
+                            context
+                                .as_ref()
+                                .and_then(|context| context.workspace_id.as_deref()),
+                        );
                     }
                     engine.tick(&db, &module.inner.client, &settings, now);
                 }

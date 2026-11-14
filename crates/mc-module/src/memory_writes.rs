@@ -163,15 +163,31 @@ pub fn get_memory(conn: &Connection, id: i64) -> rusqlite::Result<Option<MemoryR
 /// at or above this.
 pub(crate) const SAFETY_CRITICAL_MIN_IMPORTANCE: i64 = 80;
 
+/// The SQL text of [`PERSON_WRITTEN`], in a macro so that [`PROTECTED`] is
+/// built from the same text.
+macro_rules! person_written {
+    () => {
+        "m.source_type = 'person'
+    OR EXISTS(SELECT 1 FROM memory_history h JOIN memory_journal j ON j.decision_key = h.decision_key
+               WHERE h.memory_id = m.id AND j.operation LIKE 'person\\_%' ESCAPE '\\')"
+    };
+}
+
+/// Whether the person wrote or edited a memory row, as SQL over `memories m`.
+/// The person's own writes record their journal operation as
+/// `person_<what>`, and a memory the person created from the apps names
+/// `person` as its source.
+pub(crate) const PERSON_WRITTEN: &str = concat!("(", person_written!(), ")");
+
 /// Whether a memory row is protected from the dreamer's archives and merges,
 /// as SQL over `memories m`: safety-critical, permanent, a policy, or written
-/// or edited by the person. The person's own writes record their journal
-/// operation as `person_<what>`, and a memory the person created from the
-/// apps names `person` as its source.
-pub(crate) const PROTECTED: &str = "(COALESCE(m.safety_critical, 0) = 1 OR m.status = 'permanent'
-    OR m.authority = 'policy' OR m.source_type = 'person'
-    OR EXISTS(SELECT 1 FROM memory_history h JOIN memory_journal j ON j.decision_key = h.decision_key
-               WHERE h.memory_id = m.id AND j.operation LIKE 'person\\_%' ESCAPE '\\'))";
+/// or edited by the person ([`PERSON_WRITTEN`]).
+pub(crate) const PROTECTED: &str = concat!(
+    "(COALESCE(m.safety_critical, 0) = 1 OR m.status = 'permanent'
+    OR m.authority = 'policy' OR ",
+    person_written!(),
+    ")"
+);
 
 /// The memory of `owner` filed under `category_id` with this text. A live
 /// row comes first: archived history rows may repeat a text, live ones never

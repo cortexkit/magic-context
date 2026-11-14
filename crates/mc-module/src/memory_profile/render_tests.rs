@@ -71,6 +71,16 @@ const TODAY: &[(&str, &str)] = &[
         "dreamer/swe:classify-memories/user",
         "memory_profile/today/dreamer/classify-memories.user.md",
     ),
+    // The workspace lift is new in the module; its today's text is the
+    // text it was registered with.
+    (
+        "dreamer/swe:lift-workspace/system",
+        "memory_profile/today/dreamer/lift-workspace.system.md",
+    ),
+    (
+        "dreamer/swe:lift-workspace/user",
+        "memory_profile/today/dreamer/lift-workspace.user.md",
+    ),
     (
         "dreamer/swe:reflect-patterns/gate.system",
         "memory_profile/today/dreamer/retrospective.gate.system.md",

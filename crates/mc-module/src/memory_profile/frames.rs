@@ -24,6 +24,8 @@ pub(crate) const FRAMES: &[(&str, &str)] = &[
     frame!("dreamer/compress-cues.output-contract"),
     frame!("dreamer/curate.input"),
     frame!("dreamer/curate.output-contract"),
+    frame!("dreamer/lift-workspace.input"),
+    frame!("dreamer/lift-workspace.output-contract"),
     frame!("dreamer/maintain-docs.input"),
     frame!("dreamer/maintain-docs.output-contract"),
     frame!("dreamer/map-memories.input"),

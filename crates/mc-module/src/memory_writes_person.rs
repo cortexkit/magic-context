@@ -530,12 +530,36 @@ pub(crate) fn restorable(memory: &MemoryRow, to: Option<&Value>) -> bool {
     let Some(to) = to else { return true };
     to["level"].as_str() == Some(memory.level.as_str())
         && to["projectPath"].as_str() == Some(memory.owner_id.as_str())
-        && to["content"]
-            .as_str()
-            .is_some_and(|text| !text.trim().is_empty())
+        && restorable_fields(to)
+}
+
+/// Whether `to` holds the fields a restore writes.
+fn restorable_fields(to: &Value) -> bool {
+    to["content"]
+        .as_str()
+        .is_some_and(|text| !text.trim().is_empty())
         && to["category"].is_string()
         && to["categoryId"].is_string()
         && to["status"].is_string()
+}
+
+/// Whether restoring `to` brings the memory back to `owner` from another
+/// level: the row before a dreamer run moved it (the workspace lift moves a
+/// project's memory to its workspace), while the memory sits elsewhere now.
+fn returns_to(memory: &MemoryRow, to: Option<&Value>, owner: &OwnerRef) -> bool {
+    to.is_some_and(|to| {
+        to["level"].as_str() == Some(owner.level.as_str())
+            && to["projectPath"].as_str() == Some(owner.owner_id.as_str())
+    }) && (memory.level != owner.level || memory.owner_id != owner.owner_id)
+}
+
+/// Whether undoing a run can restore `to` onto the memory: in place, or, for
+/// a memory the run moved away from `owner`, back to `owner`.
+fn run_restorable(memory: &MemoryRow, to: Option<&Value>, owner: &OwnerRef) -> bool {
+    match to {
+        Some(row) if returns_to(memory, to, owner) => restorable_fields(row),
+        _ => restorable(memory, to),
+    }
 }
 
 /// Write `to` back onto the memory: the row as it was before a change, or,
@@ -571,11 +595,14 @@ fn restore_row(
         carry_evidence(tx, memory.id, from, new_revision)?;
     }
     let superseded = to["supersededByMemoryId"].as_i64();
+    // The level and owner are written too: undoing a run that moved the
+    // memory to another level puts it back where it was.
     tx.execute(
         "UPDATE memories
             SET origin_category = ?2, category = ?3, importance = ?4, scope = ?5, status = ?6,
                 expires_at = ?7, superseded_by_memory_id = ?8, merged_from = ?9,
-                metadata_json = ?10, source_session_id = ?11, source_type = ?12, updated_at = ?13
+                metadata_json = ?10, source_session_id = ?11, source_type = ?12, updated_at = ?13,
+                level = COALESCE(?14, level), owner_id = COALESCE(?15, owner_id)
           WHERE id = ?1",
         params![
             memory.id,
@@ -590,7 +617,9 @@ fn restore_row(
             to["metadataJson"].as_str(),
             to["sourceSessionId"].as_str(),
             to["sourceType"].as_str(),
-            now
+            now,
+            to["level"].as_str(),
+            to["projectPath"].as_str()
         ],
     )?;
     tx.execute(
@@ -615,18 +644,34 @@ fn restore_row(
 /// ids: what its history decision records.
 type RestoredRows = (Vec<Option<Value>>, Vec<Option<Value>>, Vec<i64>);
 
-/// Restore each target to the row it holds in `to`, as one decision.
+/// Restore each target to the row it holds in `to`, as one decision. With
+/// `run`, a target a dreamer run moved away from `owner` may come back to it
+/// ([`run_restorable`]); without it every target must be the owner's.
 fn restore_all(
     tx: &Transaction,
     owner: &OwnerRef,
     targets: &[(Target, Option<Value>)],
+    run: bool,
 ) -> Result<RestoredRows, PersonError> {
     let (mut before, mut after, mut ids) = (Vec::new(), Vec::new(), Vec::new());
     for (target, to) in targets {
-        let memory = checked(tx, owner, *target)?;
-        if !restorable(&memory, to.as_ref()) {
-            return Err(PersonError::Stale);
-        }
+        let memory = if run {
+            let memory = get_memory(tx, target.id)?.ok_or(PersonError::Stale)?;
+            let at_owner = memory.level == owner.level && memory.owner_id == owner.owner_id;
+            if memory.revision != target.revision
+                || !(at_owner || returns_to(&memory, to.as_ref(), owner))
+                || !run_restorable(&memory, to.as_ref(), owner)
+            {
+                return Err(PersonError::Stale);
+            }
+            memory
+        } else {
+            let memory = checked(tx, owner, *target)?;
+            if !restorable(&memory, to.as_ref()) {
+                return Err(PersonError::Stale);
+            }
+            memory
+        };
         let plan = restored(&memory, to.as_ref());
         if plan.live
             && live_duplicate(tx, owner, &plan.category_id, &plan.hash, target.id)?.is_some()
@@ -651,7 +696,7 @@ pub(crate) fn undo(
     entry: &Entry,
 ) -> Result<Value, PersonError> {
     let tx = immediate(conn)?;
-    let (before, after, ids) = restore_all(&tx, owner, &[(target, entry.before.clone())])?;
+    let (before, after, ids) = restore_all(&tx, owner, &[(target, entry.before.clone())], false)?;
     let decision = record(
         &tx,
         owner,
@@ -762,12 +807,19 @@ pub(crate) fn plan_run_undo(
             plan.left.push((id, LeftAlone::Deleted));
             continue;
         };
-        if memory.level != owner.level || memory.owner_id != owner.owner_id {
+        // The memory must still be where the run left it: with the owner,
+        // or, for a run that moved it, at the level and owner its last
+        // change gave it.
+        let left_level = last["level"].as_str().unwrap_or(&owner.level);
+        let left_owner = last["projectPath"].as_str().unwrap_or(&owner.owner_id);
+        if memory.level != left_level || memory.owner_id != left_owner {
             plan.left.push((id, LeftAlone::Moved));
             continue;
         }
         let to = (!first.is_null()).then_some(first);
-        if last["revision"].as_i64() != Some(memory.revision) || !restorable(&memory, to.as_ref()) {
+        if last["revision"].as_i64() != Some(memory.revision)
+            || !run_restorable(&memory, to.as_ref(), owner)
+        {
             plan.left.push((id, LeftAlone::ChangedAfter));
             continue;
         }
@@ -818,7 +870,7 @@ pub(crate) fn undo_run(
     plan: &RunUndo,
 ) -> Result<Value, PersonError> {
     let tx = immediate(conn)?;
-    let (before, after, ids) = restore_all(&tx, owner, &plan.restore)?;
+    let (before, after, ids) = restore_all(&tx, owner, &plan.restore, true)?;
     let mut evidence = json!({"runId": run});
     if !plan.mappings.is_empty() {
         let mut restored = Vec::new();

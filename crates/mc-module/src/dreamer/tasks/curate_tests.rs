@@ -271,6 +271,7 @@ fn with_context<T>(
         owner: &owner,
         profile: &profile,
         declaration: &declaration,
+        workspace: None,
     })
 }
 

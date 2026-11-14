@@ -129,6 +129,7 @@ impl Fixture {
                 owner: &owner,
                 profile: &self.profile,
                 declaration,
+                workspace: None,
             })
             .unwrap()
     }

@@ -524,6 +524,31 @@
         }
       },
       {
+        "id": "swe:lift-workspace",
+        "kind": "lift-workspace",
+        "enabled": false,
+        "reads": [
+          "memory-pool"
+        ],
+        "evidence": [
+          "memory-pool"
+        ],
+        "actions": [
+          "set-level"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:lift-workspace/system",
+          "user": "dreamer/swe:lift-workspace/user"
+        }
+      },
+      {
         "id": "swe:reflect-patterns",
         "kind": "reflect-events",
         "enabled": true,
@@ -862,6 +887,22 @@
           {
             "id": "body",
             "file": "prompts/dreamer/classify-memories/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:lift-workspace/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/lift-workspace/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:lift-workspace/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/lift-workspace/user.md"
           }
         ]
       },

@@ -5,10 +5,13 @@
 //! and that the module implements, gets a schedule for the project; a task
 //! of the person's own memories (the global review) gets one schedule for
 //! the whole machine instead, and runs in the folder and with the profile of
-//! a project that declares it. Once a minute the engine starts every due
-//! task whose owner it can run in this process. There is no cap of the
-//! engine's own on how many run at once: provider limits come back from
-//! routing or the runner as waits.
+//! a project that declares it. A task that runs once per workspace (the
+//! workspace lift) gets no schedule: the engine starts it for a project
+//! whose workspace holds two or more projects, and records the workspace it
+//! completed for. Once a minute the engine starts every due task whose owner
+//! it can run in this process. There is no cap of the engine's own on how
+//! many run at once: provider limits come back from routing or the runner as
+//! waits.
 //!
 //! One run takes its owner's lock (one writer per owner's memories at a
 //! time), asks the task for its batches, and sends each to a model
@@ -31,6 +34,7 @@ use crate::client::RunnerClient;
 use crate::context_db::ContextDb;
 use crate::memory_profile::Profile;
 use crate::routing::{Router, DREAM_DEMANDS};
+use crate::workspace_members::{Lookup, WorkspaceMembers};
 
 /// How long a lock lasts without renewal: longer than one batch may take,
 /// so a live run always renews it before it lapses.
@@ -111,6 +115,10 @@ pub struct Engine {
     /// the task's prompts and categories. The choice changes only when that
     /// project is seen again with a profile that declares no such task.
     global: Mutex<Option<(String, Project)>>,
+    /// The workspace each project seen in this process is in, by its memory
+    /// context: what a task that runs once per workspace ([`Task::once`])
+    /// runs for. A project in no workspace has no entry.
+    workspaces: Mutex<HashMap<String, String>>,
     /// Owners with a run in progress in this process.
     running: Mutex<HashSet<OwnerKey>>,
 }
@@ -122,6 +130,7 @@ impl Engine {
             tasks,
             projects: Mutex::default(),
             global: Mutex::default(),
+            workspaces: Mutex::default(),
             running: Mutex::default(),
         }
     }
@@ -188,6 +197,28 @@ impl Engine {
             .is_some_and(|task| task.global())
     }
 
+    /// Whether `declaration` is a task that runs once per project and
+    /// workspace instead of on a schedule.
+    fn is_once(&self, declaration: &Value) -> bool {
+        self.task(declaration["kind"].as_str().unwrap_or_default())
+            .is_some_and(|task| task.once())
+    }
+
+    /// Learn which workspace `project` is in, from its memory context: the
+    /// workspace a task that runs once per workspace runs for. `None` for a
+    /// project in no workspace.
+    pub fn see_workspace(&self, project: &str, workspace: Option<&str>) {
+        let mut workspaces = self.workspaces.lock().expect("dreamer workspaces");
+        match workspace {
+            Some(workspace) => {
+                workspaces.insert(project.to_owned(), workspace.to_owned());
+            }
+            None => {
+                workspaces.remove(project);
+            }
+        }
+    }
+
     /// Learn `project` from a session set up for it, and schedule its tasks.
     /// A task of the person's own memories gets one schedule for the whole
     /// machine, however many projects declare it.
@@ -225,6 +256,11 @@ impl Engine {
         let global = OwnerKey::global();
         let scheduled = db.with_connection(|conn| {
             for declaration in self.declarations(&seen.profile) {
+                // A task that runs once per workspace never gets a schedule,
+                // whatever the settings say; the rounds start it instead.
+                if self.is_once(declaration) {
+                    continue;
+                }
                 let kind = declaration["kind"].as_str().unwrap_or_default();
                 let task = declaration["id"].as_str().unwrap_or(kind);
                 let owner = if self.is_global(declaration) {
@@ -321,6 +357,196 @@ impl Engine {
                 engine.running.lock().expect("dreamer runs").remove(&owner);
             });
         }
+        self.start_once(db, client, settings, now);
+    }
+
+    /// Start each task that runs once per workspace ([`Task::once`]) for
+    /// every project seen in this process whose workspace it has not
+    /// completed for yet, unless its last attempt is too recent to try
+    /// again ([`once_retry_at`]) or a run of the project is in progress.
+    /// Whether the workspace holds two or more projects is asked of
+    /// Entorhinal in the started task, before anything is locked or
+    /// recorded.
+    fn start_once<C: RunnerClient + Router + Send + Sync + 'static>(
+        self: &Arc<Self>,
+        db: &Arc<ContextDb>,
+        client: &Arc<C>,
+        settings: &Settings,
+        now: i64,
+    ) {
+        let candidates: Vec<(String, Project, String)> = {
+            let projects = self.projects.lock().expect("dreamer projects");
+            let workspaces = self.workspaces.lock().expect("dreamer workspaces");
+            projects
+                .iter()
+                .filter_map(|(id, project)| {
+                    Some((id.clone(), project.clone(), workspaces.get(id)?.clone()))
+                })
+                .collect()
+        };
+        for (project, seen, workspace) in candidates {
+            let declarations: Vec<Value> = self
+                .declarations(&seen.profile)
+                .into_iter()
+                .filter(|declaration| self.is_once(declaration))
+                .cloned()
+                .collect();
+            let owner = OwnerKey::project(&project);
+            for declaration in declarations {
+                let task = declaration["id"].as_str().unwrap_or_default().to_owned();
+                let record =
+                    match db.with_connection(|conn| store::once_record(conn, &owner, &task)) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            tracing::warn!(
+                            "ck-mc: dreamer: reading {task}'s record for {project} failed: {error}"
+                        );
+                            continue;
+                        }
+                    };
+                if once_retry_at(&record, &workspace).is_none_or(|at| at > now) {
+                    continue;
+                }
+                if !self
+                    .running
+                    .lock()
+                    .expect("dreamer runs")
+                    .insert(owner.clone())
+                {
+                    continue;
+                }
+                let engine = Arc::clone(self);
+                let (db, client, settings) = (Arc::clone(db), Arc::clone(client), settings.clone());
+                let (project, seen, workspace, owner) = (
+                    project.clone(),
+                    seen.clone(),
+                    workspace.clone(),
+                    owner.clone(),
+                );
+                tokio::spawn(async move {
+                    engine
+                        .run_once(
+                            &db,
+                            &*client,
+                            &settings,
+                            &project,
+                            &workspace,
+                            &seen,
+                            &declaration,
+                        )
+                        .await;
+                    engine.running.lock().expect("dreamer runs").remove(&owner);
+                });
+                // One run per project at a time: another such task waits for
+                // a later round.
+                break;
+            }
+        }
+    }
+
+    /// Run once-per-workspace `declaration` for `project` in `workspace`,
+    /// when Entorhinal lists two or more projects in that workspace, and
+    /// record how it ended. Without that answer nothing is locked or
+    /// recorded, so a later round asks again.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_once<C: RunnerClient + Router>(
+        &self,
+        db: &ContextDb,
+        client: &C,
+        settings: &Settings,
+        project: &str,
+        workspace: &str,
+        seen: &Project,
+        declaration: &Value,
+    ) {
+        let members = match crate::workspace_members::workspace_members(client, workspace).await {
+            Lookup::Members(members) if members.members.len() >= 2 => members,
+            // A workspace of one project has nothing to lift into, and one
+            // Entorhinal doesn't list or doesn't answer for is asked again on
+            // a later round. None of them counts as done.
+            Lookup::Members(_) | Lookup::Unknown | Lookup::NotAnswering => return,
+        };
+        let kind = declaration["kind"].as_str().unwrap_or_default();
+        let task = declaration["id"].as_str().unwrap_or(kind);
+        let owner = OwnerKey::project(project);
+        let now = now_ms();
+        match db.with_connection(|conn| {
+            store::lock(conn, &owner, &self.holder, task, now, now + LOCK_MS)
+        }) {
+            Ok(true) => {}
+            // Another writer holds the project's memories: a later round
+            // tries again.
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!("ck-mc: dreamer: locking {project} for {task} failed: {error}");
+                return;
+            }
+        }
+        // Another process may have completed the task between this round's
+        // check and the lock.
+        let done = db
+            .with_connection(|conn| store::once_record(conn, &owner, task))
+            .map(|record| record.done_for.as_deref() == Some(workspace));
+        if !matches!(done, Ok(false)) {
+            if let Err(error) = db.with_connection(|conn| store::unlock(conn, &owner, &self.holder))
+            {
+                tracing::warn!("ck-mc: dreamer: releasing {project}'s lock failed: {error}");
+            }
+            return;
+        }
+        let due = store::Due {
+            owner: owner.clone(),
+            task: task.to_owned(),
+            schedule: String::new(),
+            next_due_at: now,
+            failures: 0,
+            watermark: None,
+        };
+        let (run, end) = match begin_run(db, &due, kind, &seen.profile) {
+            Ok(run_id) => {
+                tracing::info!(
+                    "ck-mc: dreamer: run {run_id} {task} for {project} in workspace {workspace} started"
+                );
+                let end = self
+                    .run_task(
+                        db,
+                        client,
+                        settings,
+                        &due,
+                        kind,
+                        declaration,
+                        &seen.root,
+                        &seen.profile,
+                        run_id,
+                        Some(&*members),
+                    )
+                    .await;
+                (Some(run_id), end)
+            }
+            Err(error) => (
+                None,
+                RunEnd {
+                    outcome: "failed".into(),
+                    error: Some(error),
+                    ..RunEnd::default()
+                },
+            ),
+        };
+        if end.applied > 0 {
+            db.changed(crate::app_read::Change::Memories {
+                level: "workspace".into(),
+                owner: workspace.to_owned(),
+            });
+        }
+        if let Err(error) = db.with_connection(|conn| {
+            store::settle_once(conn, &owner, task, workspace, run, &end, now_ms())
+        }) {
+            tracing::warn!("ck-mc: dreamer: recording {task} for {project} failed: {error}");
+        }
+        if let Err(error) = db.with_connection(|conn| store::unlock(conn, &owner, &self.holder)) {
+            tracing::warn!("ck-mc: dreamer: releasing {project}'s lock failed: {error}");
+        }
+        tell(db, &owner);
     }
 
     /// Run one due task to its end and settle its schedule.
@@ -398,6 +624,7 @@ impl Engine {
                     root,
                     profile,
                     run_id,
+                    None,
                 )
                 .await
             }
@@ -595,6 +822,7 @@ impl Engine {
                     &root,
                     &profile,
                     run_id,
+                    None,
                 )
                 .await;
             engine.finish_due(&db, &due, &end);
@@ -607,6 +835,9 @@ impl Engine {
         Ok((task, run_id))
     }
 
+    /// Run one task to its end and record the end in its run's row.
+    /// `workspace` is the owner's workspace for a task that runs once per
+    /// workspace, and `None` for every other.
     #[allow(clippy::too_many_arguments)]
     async fn run_task<C: RunnerClient + Router>(
         &self,
@@ -619,6 +850,7 @@ impl Engine {
         root: &str,
         profile: &Profile,
         run_id: i64,
+        workspace: Option<&WorkspaceMembers>,
     ) -> RunEnd {
         let mut end = RunEnd::default();
         let (task, demand) = match (self.task(kind), demand(kind)) {
@@ -648,6 +880,7 @@ impl Engine {
                 owner: &owner,
                 profile,
                 declaration,
+                workspace,
             };
             task.batches(&context)
         };
@@ -916,6 +1149,26 @@ fn missing_evidence(declaration: &Value, root: &str) -> Option<String> {
     None
 }
 
+/// How long a once-per-workspace task whose run did not complete waits
+/// before a round tries it again: this long for each such run in a row, up
+/// to [`ONCE_RETRY_MAX`].
+const ONCE_RETRY: i64 = 60 * 60_000;
+const ONCE_RETRY_MAX: i64 = 24 * 60 * 60_000;
+
+/// When a once-per-workspace task with `record` may next run for
+/// `workspace`; `None` once a run completed for that workspace.
+fn once_retry_at(record: &store::OnceRecord, workspace: &str) -> Option<i64> {
+    if record.done_for.as_deref() == Some(workspace) {
+        return None;
+    }
+    match record.last_run_at {
+        Some(last) if record.failures > 0 => {
+            Some(last + (ONCE_RETRY * record.failures).min(ONCE_RETRY_MAX))
+        }
+        _ => Some(0),
+    }
+}
+
 fn now_ms() -> i64 {
     crate::summary::run::now_ms()
 }
@@ -923,3 +1176,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "engine_lift_tests.rs"]
+mod lift_tests;

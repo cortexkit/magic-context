@@ -79,6 +79,16 @@
       "bytes": 106
     },
     {
+      "path": "prompts/dreamer/lift-workspace/system.md",
+      "sha256": "4c463a27838db4790f1af09237113ea2de1946c37e23790db33b5d24cb56530a",
+      "bytes": 1849
+    },
+    {
+      "path": "prompts/dreamer/lift-workspace/user.md",
+      "sha256": "5ee0924923db109f9c8da390d56fb83ffcc50af0e09cb6a1d457ac15e496254b",
+      "bytes": 309
+    },
+    {
       "path": "prompts/dreamer/maintain-docs/system.md",
       "sha256": "5ce2bb160d955176c462cef322035da4d664106717c2f5da21fbaf0bea61dc43",
       "bytes": 430
@@ -776,6 +786,31 @@
         }
       },
       {
+        "id": "swe:lift-workspace",
+        "kind": "lift-workspace",
+        "enabled": false,
+        "reads": [
+          "memory-pool"
+        ],
+        "evidence": [
+          "memory-pool"
+        ],
+        "actions": [
+          "set-level"
+        ],
+        "categories": [
+          "swe:project-rules",
+          "swe:architecture",
+          "swe:constraints",
+          "swe:config-values",
+          "swe:naming"
+        ],
+        "prompts": {
+          "system": "dreamer/swe:lift-workspace/system",
+          "user": "dreamer/swe:lift-workspace/user"
+        }
+      },
+      {
         "id": "swe:reflect-patterns",
         "kind": "reflect-events",
         "enabled": true,
@@ -1114,6 +1149,22 @@
           {
             "id": "body",
             "file": "prompts/dreamer/classify-memories/user.md"
+          }
+        ]
+      },
+      "dreamer/swe:lift-workspace/system": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/lift-workspace/system.md"
+          }
+        ]
+      },
+      "dreamer/swe:lift-workspace/user": {
+        "sections": [
+          {
+            "id": "body",
+            "file": "prompts/dreamer/lift-workspace/user.md"
           }
         ]
       },

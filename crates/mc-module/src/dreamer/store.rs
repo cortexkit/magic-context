@@ -363,6 +363,92 @@ pub fn close_interrupted(conn: &Connection, now: i64) -> rusqlite::Result<usize>
     )
 }
 
+/// What an owner's row records for a task that runs once per project and
+/// workspace instead of on a schedule ([`super::task::Task::once`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OnceRecord {
+    /// The workspace a run of the task completed for, if one did.
+    pub done_for: Option<String>,
+    /// When the last run ended, and how.
+    pub last_run_at: Option<i64>,
+    pub last_status: Option<String>,
+    /// The runs since the last completed one that did not complete.
+    pub failures: i64,
+}
+
+/// The record of once-per-workspace `task` for `owner`; the default when
+/// it never ran.
+pub fn once_record(
+    conn: &Connection,
+    owner: &OwnerKey,
+    task: &str,
+) -> rusqlite::Result<OnceRecord> {
+    // Its last run's end and status, its failures, and its watermark.
+    type Stored = (Option<i64>, Option<String>, i64, Option<String>);
+    let row: Option<Stored> = conn
+        .query_row(
+            "SELECT last_run_at, last_status, failures, watermark_json FROM dream_schedules
+              WHERE level = ?1 AND owner_id = ?2 AND task = ?3",
+            params![owner.level, owner.owner_id, task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((last_run_at, last_status, failures, watermark)) = row else {
+        return Ok(OnceRecord::default());
+    };
+    let done_for = watermark
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value["workspace"].as_str().map(str::to_owned));
+    Ok(OnceRecord {
+        done_for,
+        last_run_at,
+        last_status,
+        failures,
+    })
+}
+
+/// Record how a run of once-per-workspace `task` for `owner` in `workspace`
+/// ended. A run that applied its batches or found nothing to do completes
+/// the task for that workspace, and its row names the workspace and the run;
+/// any other end counts one more failure and leaves the task to be tried
+/// again. The row has no schedule and no due time, so the scheduled rounds
+/// ([`due`]) never start it.
+#[allow(clippy::too_many_arguments)]
+pub fn settle_once(
+    conn: &Connection,
+    owner: &OwnerKey,
+    task: &str,
+    workspace: &str,
+    run: Option<i64>,
+    end: &RunEnd,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let done = matches!(end.outcome.as_str(), "applied" | "nothing_to_do");
+    let watermark =
+        done.then(|| serde_json::json!({"workspace": workspace, "run": run}).to_string());
+    conn.execute(
+        "INSERT INTO dream_schedules(level, owner_id, task, schedule, next_due_at, last_run_at,
+                                     last_status, last_error, failures, watermark_json)
+         VALUES (?1, ?2, ?3, '', NULL, ?4, ?5, ?6, CASE WHEN ?7 THEN 0 ELSE 1 END, ?8)
+         ON CONFLICT(level, owner_id, task) DO UPDATE
+            SET schedule = '', next_due_at = NULL, last_run_at = excluded.last_run_at,
+                last_status = excluded.last_status, last_error = excluded.last_error,
+                failures = CASE WHEN ?7 THEN 0 ELSE dream_schedules.failures + 1 END,
+                watermark_json = COALESCE(excluded.watermark_json, dream_schedules.watermark_json)",
+        params![
+            owner.level,
+            owner.owner_id,
+            task,
+            now,
+            end.outcome,
+            end.error,
+            done,
+            watermark
+        ],
+    )
+    .map(drop)
+}
+
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;

@@ -260,6 +260,7 @@ fn with_context<T>(
         owner: &Owner::Global,
         profile: &profile,
         declaration: &declaration,
+        workspace: None,
     })
 }
 
@@ -675,6 +676,7 @@ fn the_task_runs_only_for_the_person_and_once_per_machine() {
         },
         profile: &profile,
         declaration: &declaration,
+        workspace: None,
     });
     assert!(refused.is_err());
 }

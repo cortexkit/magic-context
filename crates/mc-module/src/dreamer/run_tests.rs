@@ -47,6 +47,8 @@ pub(crate) struct Client {
     pub(crate) plans: Vec<&'static str>,
     /// AFT's reader catalog, as (tool, capabilities), or why it isn't there.
     pub(crate) catalog: Result<Vec<(&'static str, &'static [&'static str])>, &'static str>,
+    /// What Entorhinal answers every call with; `None` for no answer.
+    pub(crate) entorhinal: Option<serde_json::Value>,
 }
 
 impl Client {
@@ -62,6 +64,7 @@ impl Client {
             sends: Mutex::default(),
             plans: Vec::new(),
             catalog: Err("no reader in this test"),
+            entorhinal: None,
         }
     }
 
@@ -75,6 +78,14 @@ impl Client {
 }
 
 impl RunnerClient for Client {
+    async fn entorhinal_call(
+        &self,
+        _: &SessionRef,
+        _: Vec<u8>,
+    ) -> Option<Result<Vec<u8>, crate::client::EntorhinalRefusal>> {
+        let reply = self.entorhinal.as_ref()?;
+        Some(Ok(serde_json::to_vec(reply).expect("a JSON reply")))
+    }
     async fn child_plans(&self, child: &Child) -> bool {
         self.plans.contains(&child.session.runner.as_str())
     }

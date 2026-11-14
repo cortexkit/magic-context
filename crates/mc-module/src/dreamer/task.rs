@@ -17,6 +17,7 @@ use serde_json::Value;
 use super::run::{TaskInput, TaskReply};
 use crate::context_db::ContextDb;
 use crate::memory_profile::{render, Profile, FRAMES};
+use crate::workspace_members::WorkspaceMembers;
 
 /// Whose memories a run reads and may change.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +38,10 @@ pub(crate) struct TaskContext<'a> {
     /// The profile's declaration of this task: its `id`, `actions`,
     /// `categories` and `settings`.
     pub declaration: &'a Value,
+    /// The workspace of the owner's project and its projects, as Entorhinal
+    /// listed them, for a task that works across a workspace
+    /// ([`Task::once`]). `None` for every other run.
+    pub workspace: Option<&'a WorkspaceMembers>,
 }
 
 impl TaskContext<'_> {
@@ -55,6 +60,14 @@ pub(crate) trait Task: Send + Sync {
     /// [`Owner::Global`], instead of once for each project whose profile
     /// declares it.
     fn global(&self) -> bool {
+        false
+    }
+    /// Whether the task runs once for each project and the workspace the
+    /// project is in, instead of on a schedule. The engine never schedules
+    /// such a task: it starts it for a project whose workspace holds two or
+    /// more projects, gives it that workspace, and records the workspace it
+    /// ran for.
+    fn once(&self) -> bool {
         false
     }
     /// The batches one run sends for the context's owner, in order. Empty

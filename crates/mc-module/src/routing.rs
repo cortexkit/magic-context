@@ -115,6 +115,15 @@ pub const DREAM_DEMANDS: &[DreamDemand] = &[
         reads_code: false,
         max_steps: 1,
     },
+    // Placing a memory for every project of a workspace is a judgment with
+    // a high bar, so it asks for what curate asks for.
+    DreamDemand {
+        kind: "lift-workspace",
+        iq: 50,
+        context_window: 64_000,
+        reads_code: false,
+        max_steps: 1,
+    },
     DreamDemand {
         kind: "curate",
         iq: 50,

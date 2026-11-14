@@ -219,6 +219,7 @@ fn write_requests(args: &Args) -> Value {
                 owner: &owner,
                 profile: &profile,
                 declaration: &declaration,
+                workspace: None,
             })
             .unwrap_or_else(|error| panic!("planning {task}: {error}"));
         let planned = batches.len();

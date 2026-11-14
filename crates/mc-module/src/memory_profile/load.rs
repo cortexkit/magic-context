@@ -682,6 +682,14 @@ fn interface(kind: &str) -> Option<Interface> {
                 "classify-memories.output-contract",
             ],
         ),
+        "lift-workspace" => (
+            &["memory-pool"][..],
+            &["set-level"][..],
+            &["system", "user"][..],
+            &[][..],
+            &[][..],
+            &["lift-workspace.input", "lift-workspace.output-contract"],
+        ),
         "reflect-events" => (
             &["historian-events", "session-transcripts", "memory-pool"][..],
             &["write-memory", "write-observation-candidate"][..],

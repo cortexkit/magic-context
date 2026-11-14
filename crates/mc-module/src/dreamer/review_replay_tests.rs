@@ -177,6 +177,7 @@ fn write_requests(store: &Path, out: &Path) -> Value {
             owner: &Owner::Global,
             profile: &profile,
             declaration: &declaration,
+            workspace: None,
         })
         .unwrap_or_else(|error| panic!("planning {task}: {error}"));
     let pending = ids(

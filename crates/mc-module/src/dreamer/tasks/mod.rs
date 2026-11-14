@@ -5,6 +5,7 @@
 pub mod classify;
 pub mod compress_cues;
 pub mod curate;
+pub mod lift_workspace;
 pub mod map_memories;
 pub mod review_user_memories;
 pub mod verify;
