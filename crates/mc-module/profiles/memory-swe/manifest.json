@@ -613,8 +613,6 @@
           "swe:trajectory-correction"
         ],
         "prompts": {
-          "gate_system": "dreamer/swe:reflect-patterns/gate.system",
-          "gate_user": "dreamer/swe:reflect-patterns/gate.user",
           "system": "dreamer/swe:reflect-patterns/system",
           "user": "dreamer/swe:reflect-patterns/user"
         },
@@ -666,8 +664,7 @@
         "categories": [],
         "prompts": {
           "system": "dreamer/swe:refresh-primers/system",
-          "user_raw": "dreamer/swe:refresh-primers/user.raw",
-          "user_closed_book": "dreamer/swe:refresh-primers/user.closed-book"
+          "user": "dreamer/swe:refresh-primers/user"
         }
       }
     ],
@@ -950,22 +947,6 @@
           }
         ]
       },
-      "dreamer/swe:reflect-patterns/gate.system": {
-        "sections": [
-          {
-            "id": "body",
-            "file": "prompts/dreamer/reflect-patterns/gate.system.md"
-          }
-        ]
-      },
-      "dreamer/swe:reflect-patterns/gate.user": {
-        "sections": [
-          {
-            "id": "body",
-            "file": "prompts/dreamer/reflect-patterns/gate.user.md"
-          }
-        ]
-      },
       "dreamer/swe:reflect-patterns/system": {
         "sections": [
           {
@@ -1006,19 +987,11 @@
           }
         ]
       },
-      "dreamer/swe:refresh-primers/user.raw": {
+      "dreamer/swe:refresh-primers/user": {
         "sections": [
           {
             "id": "body",
-            "file": "prompts/dreamer/refresh-primers/user.raw.md"
-          }
-        ]
-      },
-      "dreamer/swe:refresh-primers/user.closed-book": {
-        "sections": [
-          {
-            "id": "body",
-            "file": "prompts/dreamer/refresh-primers/user.closed-book.md"
+            "file": "prompts/dreamer/refresh-primers/user.md"
           }
         ]
       }

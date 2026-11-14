@@ -75,7 +75,7 @@ fn bundled_packages_load_and_base_cannot_be_an_agent() {
     let profile = load_chain(&packages).unwrap();
     assert_eq!(
         profile.digest,
-        "289b55213ad1c0b693605f931072924c12fd5f789726b14fb8545a476da20530"
+        "f77700866a586cca97ba306e8fcc2ec711b7a15020d8c45eca00a607d546e554"
     );
     assert_eq!(list(&profile.body, "categories").len(), 12);
     let mut facts: Vec<_> = list(&profile.body, "categories")
@@ -184,7 +184,7 @@ fn negative(index: usize, base: &mut Value, swe: &mut Value) {
         13 => s["extraction"]["events"][0]["fields"]["optional"].as_array_mut().unwrap().push("blast_radius".into()),
         14 => entry(s,"tasks","swe:curate")["actions"].as_array_mut().unwrap().push("set-scope".into()),
         15 => entry(s,"tasks","swe:curate")["reads"].as_array_mut().unwrap().push("git".into()),
-        16 => { entry(s,"tasks","swe:reflect-patterns")["prompts"].as_object_mut().unwrap().remove("gate_system"); }
+        16 => { entry(s,"tasks","swe:reflect-patterns")["prompts"].as_object_mut().unwrap().remove("system"); }
         17 => s["prompts"]["dreamer/swe:curate/system"]["sections"] = json!([{"id":"body","file":"prompts/dreamer/curate/user.md"}]),
         18 => entry(s,"tasks","swe:curate")["settings"] = json!({"min_proof_count":2}),
         19 => {
@@ -274,7 +274,7 @@ fn session(pins: Vec<Value>) -> ContextAnswer<SessionContext> {
 }
 
 fn swe_pin() -> Value {
-    json!({"kind":"memory-profile","name":"@cortexkit/memory-swe","version":"1.0.0","manifest_sha256":"ec5250e78dedba3457ce24d52ec4dadac0d42bf39acc4e4dcc6d29a295731fdc","archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","publisher_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","status":null})
+    json!({"kind":"memory-profile","name":"@cortexkit/memory-swe","version":"1.0.0","manifest_sha256":"5aa2db61af141be1141dec558f6bceb24ecd24886f90fe59b9ffe0ef4cb3176f","archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","publisher_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","status":null})
 }
 
 fn outcome(domain: Option<&str>, pins: Vec<Value>, installed: &[Profile]) -> MemoryContext {

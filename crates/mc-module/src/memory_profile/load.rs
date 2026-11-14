@@ -701,15 +701,10 @@ fn interface(kind: &str) -> Option<Interface> {
         "reflect-events" => (
             &["historian-events", "session-transcripts", "memory-pool"][..],
             &["write-memory", "write-observation-candidate"][..],
-            &["gate_system", "gate_user", "system", "user"][..],
+            &["system", "user"][..],
             &[][..],
             &["min_proof_count", "group_events_by"][..],
-            &[
-                "reflect-events.gate.input",
-                "reflect-events.gate.output-contract",
-                "reflect-events.input",
-                "reflect-events.output-contract",
-            ],
+            &["reflect-events.input", "reflect-events.output-contract"],
         ),
         "maintain-docs" => (
             &["repo-files", "git"][..],
@@ -722,14 +717,10 @@ fn interface(kind: &str) -> Option<Interface> {
         "refresh-primers" => (
             &["primers", "repo-files", "session-transcripts"][..],
             &["set-primer-answer"][..],
-            &["system", "user_raw", "user_closed_book"][..],
+            &["system", "user"][..],
             &[][..],
             &[][..],
-            &[
-                "refresh-primers.input.raw",
-                "refresh-primers.input.closed-book",
-                "refresh-primers.output-contract",
-            ],
+            &["refresh-primers.input", "refresh-primers.output-contract"],
         ),
         "review-user-memories" => (
             &["historian-user-observations", "user-profile"][..],

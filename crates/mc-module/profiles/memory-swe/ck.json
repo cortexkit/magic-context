@@ -119,39 +119,24 @@
       "bytes": 819
     },
     {
-      "path": "prompts/dreamer/reflect-patterns/gate.system.md",
-      "sha256": "31c4d5f830a68342ae8eb383b0612e760cf1a1aea856c3504baa4ea119d2bd36",
-      "bytes": 234
-    },
-    {
-      "path": "prompts/dreamer/reflect-patterns/gate.user.md",
-      "sha256": "ab97b925d913ee365f303799f9842b609a0a7faf0e60cd7be72647ea6308a573",
-      "bytes": 838
-    },
-    {
       "path": "prompts/dreamer/reflect-patterns/system.md",
-      "sha256": "7735e648b83b04f716446c3ec7b088013ae22fca10c6524ba517031f15fe49ed",
-      "bytes": 1319
+      "sha256": "4d7ba966da2130b24352c0efe23a72468349a82bf3c79d25a391a8b66295780a",
+      "bytes": 2911
     },
     {
       "path": "prompts/dreamer/reflect-patterns/user.md",
-      "sha256": "88255ce18a6f723bb8bf6e2f5de0c9f6c72c3a8f463027d9f66f710e9ef1a1fc",
-      "bytes": 1817
+      "sha256": "6a9715f26cc9f58b0a4d705e4ecb18185ce6e81e1607265cb3fa191794480689",
+      "bytes": 277
     },
     {
       "path": "prompts/dreamer/refresh-primers/system.md",
-      "sha256": "7a367bc6f600d9947b22187f4f6d436320f13acd348b8b3cc665b9cac4fb2abc",
-      "bytes": 665
+      "sha256": "7cfd825f280779b0eed8612bbc8f6291d66d8971ce5324e2599266d384eecfb4",
+      "bytes": 1308
     },
     {
-      "path": "prompts/dreamer/refresh-primers/user.closed-book.md",
-      "sha256": "35f75d2f69faf2e31138a9eb69fcad4ff1a49d1caa00144c1d49b6772156ca4c",
-      "bytes": 946
-    },
-    {
-      "path": "prompts/dreamer/refresh-primers/user.raw.md",
-      "sha256": "ffee57bc5ac1496d396f3dee84fdd8e306c670b113a347845b2dc471153e71d5",
-      "bytes": 938
+      "path": "prompts/dreamer/refresh-primers/user.md",
+      "sha256": "a92c773daa4c74b2d9c7268461eea08070f270a32908692f9b8a329eb5a1a40b",
+      "bytes": 113
     },
     {
       "path": "prompts/dreamer/review-user-memories/user.swe-categories.md",
@@ -885,8 +870,6 @@
           "swe:trajectory-correction"
         ],
         "prompts": {
-          "gate_system": "dreamer/swe:reflect-patterns/gate.system",
-          "gate_user": "dreamer/swe:reflect-patterns/gate.user",
           "system": "dreamer/swe:reflect-patterns/system",
           "user": "dreamer/swe:reflect-patterns/user"
         },
@@ -938,8 +921,7 @@
         "categories": [],
         "prompts": {
           "system": "dreamer/swe:refresh-primers/system",
-          "user_raw": "dreamer/swe:refresh-primers/user.raw",
-          "user_closed_book": "dreamer/swe:refresh-primers/user.closed-book"
+          "user": "dreamer/swe:refresh-primers/user"
         }
       }
     ],
@@ -1222,22 +1204,6 @@
           }
         ]
       },
-      "dreamer/swe:reflect-patterns/gate.system": {
-        "sections": [
-          {
-            "id": "body",
-            "file": "prompts/dreamer/reflect-patterns/gate.system.md"
-          }
-        ]
-      },
-      "dreamer/swe:reflect-patterns/gate.user": {
-        "sections": [
-          {
-            "id": "body",
-            "file": "prompts/dreamer/reflect-patterns/gate.user.md"
-          }
-        ]
-      },
       "dreamer/swe:reflect-patterns/system": {
         "sections": [
           {
@@ -1278,19 +1244,11 @@
           }
         ]
       },
-      "dreamer/swe:refresh-primers/user.raw": {
+      "dreamer/swe:refresh-primers/user": {
         "sections": [
           {
             "id": "body",
-            "file": "prompts/dreamer/refresh-primers/user.raw.md"
-          }
-        ]
-      },
-      "dreamer/swe:refresh-primers/user.closed-book": {
-        "sections": [
-          {
-            "id": "body",
-            "file": "prompts/dreamer/refresh-primers/user.closed-book.md"
+            "file": "prompts/dreamer/refresh-primers/user.md"
           }
         ]
       }

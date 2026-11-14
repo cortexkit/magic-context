@@ -113,7 +113,7 @@
   },
   {
     "name": "task prompt role missing",
-    "expect": "prompt role gate_system missing",
+    "expect": "prompt role system missing",
     "code": "task_interface_mismatch",
     "source": "resolved-swe/resolve.ts:830",
     "rule": "mc-memory-profile-v1.md:\u00a77.2:637"

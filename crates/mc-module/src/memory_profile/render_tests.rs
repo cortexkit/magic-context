@@ -91,21 +91,17 @@ const TODAY: &[(&str, &str)] = &[
         "dreamer/swe:lift-workspace/user",
         "memory_profile/today/dreamer/lift-workspace.user.md",
     ),
-    (
-        "dreamer/swe:reflect-patterns/gate.system",
-        "memory_profile/today/dreamer/retrospective.gate.system.md",
-    ),
-    (
-        "dreamer/swe:reflect-patterns/gate.user",
-        "memory_profile/today/dreamer/retrospective.gate.user.md",
-    ),
+    // Reflect-patterns replaces the 0.49 retrospective and reads only the
+    // summarizer's stored events, and primer refresh was rewritten for the
+    // module's code-reading children; their today's texts are the texts
+    // they were registered with.
     (
         "dreamer/swe:reflect-patterns/system",
-        "memory_profile/today/dreamer/retrospective.system.md",
+        "memory_profile/today/dreamer/reflect-patterns.system.md",
     ),
     (
         "dreamer/swe:reflect-patterns/user",
-        "memory_profile/today/dreamer/retrospective.user.md",
+        "memory_profile/today/dreamer/reflect-patterns.user.md",
     ),
     (
         "dreamer/swe:maintain-docs/system",
@@ -120,12 +116,8 @@ const TODAY: &[(&str, &str)] = &[
         "memory_profile/today/dreamer/refresh-primers.system.md",
     ),
     (
-        "dreamer/swe:refresh-primers/user.raw",
-        "memory_profile/today/dreamer/refresh-primers.user.raw.md",
-    ),
-    (
-        "dreamer/swe:refresh-primers/user.closed-book",
-        "memory_profile/today/dreamer/refresh-primers.user.closed-book.md",
+        "dreamer/swe:refresh-primers/user",
+        "memory_profile/today/dreamer/refresh-primers.user.md",
     ),
     (
         "dreamer/base:review-user-memories/system",
