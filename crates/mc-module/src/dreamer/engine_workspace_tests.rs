@@ -320,6 +320,149 @@ async fn a_project_curate_is_given_its_shared_workspace() {
     assert!(sent[0].contains("[40] PROJECT_RULES: Use the gate script before delivering a change."));
 }
 
+/// The guidance core serves in the curate tests.
+const GUIDANCE: &str = "# CortexKit\n\n- Deliver every change through the gate script.";
+
+/// Core's reply serving `GUIDANCE` for `workspace` to `audience`.
+fn served(workspace: &str, audience: &[&str]) -> Value {
+    json!({"result": {
+        "state": "served",
+        "workspace_id": workspace,
+        "root": "/work/cortexkit",
+        "digest": "7d6be4aee51113448d69c54466c66d85ebab93ac00fe59ca01b3c3542d6d4460",
+        "audience": audience,
+        "body": GUIDANCE,
+    }})
+}
+
+/// `text` as it appears inside a sent request's JSON.
+fn in_json(text: &str) -> String {
+    let quoted = serde_json::to_string(text).unwrap();
+    quoted[1..quoted.len() - 1].to_owned()
+}
+
+/// A project curate run of `pj-magic-context` in a workspace of two
+/// projects, with core answering `core`: the message it sent, its run's
+/// outcome, every call to core, and the lines it logged.
+async fn project_curate_with(
+    workspace: &str,
+    core: Option<Result<Value, crate::client::CoreRefusal>>,
+) -> (String, Option<String>, Vec<(String, Value)>, String) {
+    let (_dir, db) = store();
+    insert(
+        &db,
+        &[Row {
+            level: "project",
+            owner: "pj-magic-context".into(),
+            ..rule(1, "Run the gate script before delivering a change.")
+        }],
+    );
+    let engine = engine(&db, vec![Box::new(Curate)], workspace, &["magic-context"]);
+    let mut client = Client::new(&["p/a"], &[Ends::Reply("<curate></curate>")]);
+    client.entorhinal = Some(listing(workspace, &["magic-context", "subc"]));
+    client.core = core;
+    let client = Arc::new(client);
+    make_due(&db, &OwnerKey::project("pj-magic-context"), "swe:curate");
+    let capture = crate::test_log::capture();
+    round(&engine, &db, &client).await;
+    let log = capture.text();
+    let sent = sent(&client);
+    assert_eq!(sent.len(), 1);
+    let outcome = runs(&db).pop().and_then(|run| run.4);
+    let calls = client.core_calls.lock().unwrap().clone();
+    (sent[0].clone(), outcome, calls, log)
+}
+
+#[tokio::test]
+async fn a_project_curate_shows_the_guidance_core_serves_its_workspace() {
+    let workspace = "ws-guidance-project";
+    let (sent, outcome, calls, log) =
+        project_curate_with(workspace, Some(Ok(served(workspace, &["head", "mason"])))).await;
+    // The project has no documents and every session sees no other memory,
+    // so the guidance block is followed by the part.
+    assert!(sent.contains(&in_json(&format!(
+        "<workspace-guidance>\nEvery agent in this project's workspace reads this at the start of every session.\n{GUIDANCE}\n</workspace-guidance>\n\n<memories part=\"1 of 1\">"
+    ))));
+    assert_eq!(outcome.as_deref(), Some("nothing_to_do"));
+    // Asked once, for the project's workspace.
+    assert_eq!(
+        calls,
+        [(
+            "persona.workspace_document".to_owned(),
+            json!({"workspace_id": workspace})
+        )]
+    );
+    assert!(!log.contains("no workspace guidance"), "{log}");
+}
+
+#[tokio::test]
+async fn without_guidance_for_head_agents_a_curate_runs_on_and_logs_why_once() {
+    let workspace = "ws-guidance-none";
+    for (core, why) in [
+        (None, "core is not installed"),
+        (
+            Some(Ok(served(workspace, &["mason"]))),
+            "the guidance in /work/cortexkit is not for head agents (its audience: mason)",
+        ),
+        (
+            Some(Err(crate::client::CoreRefusal {
+                code: "workspace_index_unavailable".into(),
+                message: "the index is rebuilding".into(),
+                detail: Some(json!({"retryable": true, "retry_after_ms": 60000})),
+            })),
+            "core's workspace index is unavailable (workspace_index_unavailable, retryable after 60000 ms): the index is rebuilding; not asked again in this run",
+        ),
+    ] {
+        let (sent, outcome, calls, log) = project_curate_with(workspace, core).await;
+        assert!(!sent.contains("workspace-guidance"), "{why}: {sent}");
+        assert!(sent.contains("Run the gate script before delivering a change."));
+        assert_eq!(outcome.as_deref(), Some("nothing_to_do"), "{why}");
+        assert_eq!(calls.len(), 1, "{why}");
+        let line = format!("no workspace guidance shown ({why})");
+        assert_eq!(log.matches(&line).count(), 1, "{why}: {log}");
+        assert_eq!(log.matches("no workspace guidance").count(), 1, "{log}");
+        assert!(log.contains(" INFO "), "{log}");
+    }
+}
+
+#[tokio::test]
+async fn a_workspace_curate_shows_the_guidance_core_serves_its_workspace() {
+    let (_dir, db) = store();
+    let workspace = "ws-guidance-shared";
+    insert(
+        &db,
+        &[Row {
+            owner: workspace.into(),
+            ..rule(1, "Run `cargo fmt --all` before every commit.")
+        }],
+    );
+    let engine = engine(
+        &db,
+        vec![Box::new(CurateWorkspace)],
+        workspace,
+        &["subc", "magic-context"],
+    );
+    let mut client = Client::new(&["p/a"], &[Ends::Reply("<curate></curate>")]);
+    client.entorhinal = Some(listing(workspace, &["subc", "magic-context"]));
+    client.core = Some(Ok(served(workspace, &["head"])));
+    let client = Arc::new(client);
+    round(&engine, &db, &client).await;
+    make_due(&db, &OwnerKey::workspace(workspace), "swe:curate-workspace");
+    round(&engine, &db, &client).await;
+    let sent = sent(&client);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains(&in_json(&format!(
+        "<workspace-guidance>\nEvery agent in the workspace reads this at the start of every session.\n{GUIDANCE}\n</workspace-guidance>"
+    ))));
+    assert_eq!(
+        client.core_calls.lock().unwrap().clone(),
+        [(
+            "persona.workspace_document".to_owned(),
+            json!({"workspace_id": workspace})
+        )]
+    );
+}
+
 /// Lift replies: each places both rules of one project, moving the first
 /// or keeping both.
 const MOVE_1: &str = "<place>\n<memory id=\"1\" level=\"workspace\" reason=\"Holds for every project.\"/>\n<memory id=\"2\" level=\"project\"/>\n</place>";

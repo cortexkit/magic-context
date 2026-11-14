@@ -55,6 +55,11 @@ pub(crate) struct TaskContext<'a> {
     /// the project's workspace ([`Task::sees_workspace`]), when that
     /// workspace holds two or more projects. `None` for every other run.
     pub workspace: Option<&'a WorkspaceMembers>,
+    /// The workspace guidance the run's messages show, as core serves it to
+    /// head agents ([`super::guidance`]). Read only for a task that shows
+    /// it ([`Task::reads_guidance`]), and `None` whenever core serves no
+    /// guidance for head agents of the run's workspace.
+    pub guidance: Option<&'a str>,
 }
 
 impl TaskContext<'_> {
@@ -94,6 +99,13 @@ pub(crate) trait Task: Send + Sync {
     /// project's workspace. The engine then gives the run its workspace
     /// when Entorhinal lists two or more projects in it.
     fn sees_workspace(&self) -> bool {
+        false
+    }
+    /// Whether the task's messages show the workspace guidance core serves
+    /// ([`super::guidance`]). The engine then asks core for it once before
+    /// planning the run, for the workspace the run is given, and passes it
+    /// in [`TaskContext::guidance`].
+    fn reads_guidance(&self) -> bool {
         false
     }
     /// The batches one run sends for the context's owner, in order. Empty

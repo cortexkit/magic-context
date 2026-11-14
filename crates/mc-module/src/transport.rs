@@ -898,6 +898,56 @@ impl RunnerClient for SubcRunnerClient {
             .map_err(|_| DoorRefusal::unavailable(format!("{method} answer has no result")))
     }
 
+    /// On core's management surface. Core admits the call by the route's
+    /// attested caller, this module's own principal
+    /// (`reserved:magic-context`), so the bind identity grants nothing and
+    /// only says what the call is for.
+    async fn core_call(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Result<Value, crate::client::CoreRefusal> {
+        use crate::client::CoreRefusal;
+        let consumer = self.consumer().await.map_err(CoreRefusal::unavailable)?;
+        let reply = consumer
+            .call(
+                RouteTarget::ManagementSurface {
+                    module_id: "prefrontal-core".to_owned(),
+                },
+                BindIdentity::new("magic-context", "dreamer"),
+                wire::encode(method, &params),
+                CallOptions {
+                    timeout: deadline,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                // The daemon refuses to open a route to a module it doesn't
+                // have: core is not installed.
+                error
+                    if matches!(
+                        error
+                            .route_open_refusal()
+                            .map(|refusal| refusal.code.as_str()),
+                        Some("unknown_module")
+                    ) =>
+                {
+                    CoreRefusal::not_installed()
+                }
+                subc_client_rs::CallError::Module(body) => CoreRefusal {
+                    code: body.code,
+                    message: body.message,
+                    detail: body.detail,
+                },
+                other => CoreRefusal::unavailable(format!("{method}: {other:?}")),
+            })?;
+        serde_json::from_slice(&reply).map_err(|error| {
+            CoreRefusal::unavailable(format!("{method} answer is not JSON: {error}"))
+        })
+    }
+
     fn door_stream(&self) -> String {
         format!("reserved:{}", self.child_scopes.module_id())
     }

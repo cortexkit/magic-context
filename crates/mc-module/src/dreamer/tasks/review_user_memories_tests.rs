@@ -261,6 +261,7 @@ fn with_context<T>(
         profile: &profile,
         declaration: &declaration,
         workspace: None,
+        guidance: None,
     })
 }
 
@@ -678,6 +679,7 @@ fn the_task_runs_only_for_the_person_and_once_per_machine() {
         profile: &profile,
         declaration: &declaration,
         workspace: None,
+        guidance: None,
     });
     assert!(refused.is_err());
 }

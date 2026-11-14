@@ -70,8 +70,8 @@
     },
     {
       "path": "prompts/dreamer/curate-workspace/system.md",
-      "sha256": "edf82c196b80d4088913826e9713cd1649c73547ee099eea639e0e8db22d7b00",
-      "bytes": 2696
+      "sha256": "dd1b0cf80ce723333a10cb58e3a616d4a16fc2c28e33cc4bc93cc56044ffb7cc",
+      "bytes": 2800
     },
     {
       "path": "prompts/dreamer/curate-workspace/user.md",
@@ -80,8 +80,8 @@
     },
     {
       "path": "prompts/dreamer/curate/system.md",
-      "sha256": "23a83c25c72c7975dbe1e4bbe0ee15dbc2bbff14ab4303ded293b99de9ac5a41",
-      "bytes": 2251
+      "sha256": "d3f4d49820e3532e4294131cf9606241fab30b11bd1bba1a49a6e3624ce54f8a",
+      "bytes": 2301
     },
     {
       "path": "prompts/dreamer/curate/user.md",
@@ -100,13 +100,13 @@
     },
     {
       "path": "prompts/dreamer/maintain-docs/system.md",
-      "sha256": "5ce2bb160d955176c462cef322035da4d664106717c2f5da21fbaf0bea61dc43",
-      "bytes": 430
+      "sha256": "eaaaa8a99b0736ebb52e4e86d2e6708cbe52313abcb47998bf6d73ea321f9c58",
+      "bytes": 2046
     },
     {
       "path": "prompts/dreamer/maintain-docs/user.md",
-      "sha256": "1101f6936ff8c72d27bb25e9476a883daebccacd0e913fbd1c1a2100d2aced6c",
-      "bytes": 1000
+      "sha256": "ac8db76ba879edb996ee4635f56040af9e50f62c7b43402dac1fd513f4a69869",
+      "bytes": 124
     },
     {
       "path": "prompts/dreamer/map-memories/system.md",

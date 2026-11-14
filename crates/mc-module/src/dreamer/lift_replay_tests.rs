@@ -184,6 +184,7 @@ fn plan(db: &ContextDb, project: &str, workspace: &WorkspaceMembers) -> (Pool, V
                 profile: &profile,
                 declaration: &declaration,
                 workspace: Some(workspace),
+                guidance: None,
             },
             workspace,
         )

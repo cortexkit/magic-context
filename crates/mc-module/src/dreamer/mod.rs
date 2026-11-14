@@ -11,6 +11,7 @@ pub mod branches;
 pub mod checkout;
 pub mod cron;
 pub mod engine;
+pub mod guidance;
 pub mod plan;
 pub mod run;
 pub mod store;

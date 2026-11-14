@@ -260,6 +260,7 @@ fn write_requests(args: &Args) -> Value {
             profile: &profile,
             declaration: &declaration,
             workspace: None,
+            guidance: None,
         })
         .unwrap_or_else(|error| panic!("planning {TASK_ID}: {error}"));
     let planned = batches.len();
@@ -447,6 +448,7 @@ async fn a_request_holds_the_text_and_settings_a_run_sends() {
             profile: &fixture.profile,
             declaration: &declaration,
             workspace: None,
+            guidance: None,
         })
         .unwrap();
     let mut client = Client::new(&["p/a"], &[Ends::Reply("<mappings>\n</mappings>")]);

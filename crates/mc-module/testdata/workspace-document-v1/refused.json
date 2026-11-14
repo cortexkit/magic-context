@@ -1,0 +1,21 @@
+{
+  "reply": {
+    "result": {
+      "code": "workspace_prompt_missing_front_matter",
+      "message": "file must open with `---` front matter declaring `audience`",
+      "root": "/workspace/refused",
+      "state": "refused",
+      "workspace_id": "ws_refused"
+    }
+  },
+  "request": {
+    "method": "persona.workspace_document",
+    "params": {
+      "workspace_id": "ws_refused"
+    }
+  },
+  "route": {
+    "principal": "reserved:magic-context",
+    "surface": "management"
+  }
+}

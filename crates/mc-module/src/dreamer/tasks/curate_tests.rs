@@ -272,6 +272,7 @@ fn with_context<T>(
         profile: &profile,
         declaration: &declaration,
         workspace: None,
+        guidance: None,
     })
 }
 
@@ -612,6 +613,10 @@ fn the_input_follows_its_frame_line_for_line() {
             "⟦docs⟧",
             "<file name=\"ARCHITECTURE.md\">\nOne crate.\n</file>",
         )
+        .replace(
+            "⟦guidance⟧",
+            "# Shared guidance\n\nKeep the workspace rules.",
+        )
         .replace("⟦shown.id⟧", "20")
         .replace("⟦shown.category⟧", "ARCHITECTURE")
         .replace("⟦shown.content⟧", "The module owns the store.")
@@ -652,17 +657,48 @@ fn the_input_follows_its_frame_line_for_line() {
     ];
     let text = input(
         "<file name=\"ARCHITECTURE.md\">\nOne crate.\n</file>",
+        "# Shared guidance\n\nKeep the workspace rules.",
         &shown,
         &[&close],
         (2, 3),
         &memories,
     );
     assert_eq!(text, filled.trim_end_matches('\n'));
+    // Without the guidance, its block is left out whole and the others
+    // keep their bytes.
+    let guidance_block = &filled
+        [filled.find("<workspace-guidance>").unwrap()..filled.find("<always-shown>").unwrap()];
+    assert_eq!(
+        input(
+            "<file name=\"ARCHITECTURE.md\">\nOne crate.\n</file>",
+            "",
+            &shown,
+            &[&close],
+            (2, 3),
+            &memories,
+        ),
+        filled
+            .replacen(guidance_block, "", 1)
+            .trim_end_matches('\n')
+    );
     // A block with no lines is left out whole.
     let memories_block = &filled[filled.find("<memories").unwrap()..];
     assert_eq!(
-        input("", &[], &[], (2, 3), &memories),
+        input("", "", &[], &[], (2, 3), &memories),
         memories_block.trim_end_matches('\n')
+    );
+    // The guidance alone, before the memories.
+    let alone = format!("{guidance_block}{memories_block}");
+    assert_eq!(
+        input(
+            "",
+            "# Shared guidance\n\nKeep the workspace rules.",
+            &[],
+            &[],
+            (2, 3),
+            &memories
+        ),
+        alone.trim_end_matches('\n')
     );
 }
 
@@ -1147,24 +1183,30 @@ fn an_archive_needs_its_reason_and_what_it_repeats() {
         json!({"reason": "one-off", "why": "a room id and a date"})
     );
 
-    // A quote that holds the documents' escapes written out matches too.
+    // A quote that holds the documents' escapes written out matches too,
+    // and so does a line quoted with the whitespace around it.
     let store = fixture();
     let batch = store.rules();
     let applied = store.apply(
         &batch,
-        &list("<archive id=\"12\" reason=\"duplicate\" quote=\"A &lt;frame&gt; is filled by the module &amp; never\"/>"),
+        &list("<archive id=\"12\" reason=\"duplicate\" quote=\"A &lt;frame&gt; is filled by the module &amp; never by a profile.\"/>\n<archive id=\"5\" reason=\"duplicate\" quote=\"  Run scripts/gate.sh preflight before every delivery of a change. \"/>"),
         RUN,
     );
-    assert_eq!(applied.applied, 1, "{applied:?}");
+    assert_eq!(applied.applied, 2, "{applied:?}");
 
     let store = fixture();
     let batch = store.rules();
     for (change, label, why) in [
         ("<archive id=\"2\" reason=\"duplicate\" of=\"2\"/>", "archive 2", "duplicate of itself"),
         ("<archive id=\"2\" reason=\"duplicate\" of=\"999\"/>", "archive 2", "memory 999 was not shown"),
-        ("<archive id=\"2\" reason=\"duplicate\"/>", "archive 2", "names no memory (of) and no documents line"),
+        ("<archive id=\"2\" reason=\"duplicate\"/>", "archive 2", "names no memory (of) and no line of the project documents (quote)"),
         ("<archive id=\"12\" reason=\"duplicate\" quote=\"Run scripts/gate.sh\"/>", "archive 12", "shorter than 20 characters"),
-        ("<archive id=\"12\" reason=\"duplicate\" quote=\"Run the gate script before every delivery.\"/>", "archive 12", "not in the project documents"),
+        ("<archive id=\"12\" reason=\"duplicate\" quote=\"Run the gate script before every delivery.\"/>", "archive 12", "not one line of the project documents"),
+        // Part of a line, or two lines, is not one line.
+        ("<archive id=\"12\" reason=\"duplicate\" quote=\"Run scripts/gate.sh preflight before every delivery\"/>", "archive 12", "not one line of the project documents"),
+        ("<archive id=\"12\" reason=\"duplicate\" quote=\"# Layout Run scripts/gate.sh preflight before every delivery of a change.\"/>", "archive 12", "not one line of the project documents"),
+        // The documents block's own markup is never a line a memory repeats.
+        ("<archive id=\"12\" reason=\"duplicate\" quote=\"&lt;file name=&quot;ARCHITECTURE.md&quot;&gt;\"/>", "archive 12", "the quote is markup, not a line of the project documents"),
         ("<archive id=\"5\" reason=\"one-off\"/>", "archive 5", "a one-off archive says no why"),
         ("<archive id=\"11\" reason=\"lesson\" why=\" \"/>", "archive 11", "a lesson archive says no why"),
         ("<archive id=\"5\" reason=\"obsolete\" why=\"old\"/>", "archive 5", "obsolete is not an archive reason"),
@@ -1460,6 +1502,18 @@ impl Store {
         resume: Option<&Resume>,
         only: Option<&str>,
     ) -> Vec<CurateBatch> {
+        self.plan_with(workspace, None, resume, only)
+    }
+
+    /// The run's batches with the context's workspace `workspace` and the
+    /// workspace guidance `guidance`.
+    fn plan_with(
+        &self,
+        workspace: Option<&crate::workspace_members::WorkspaceMembers>,
+        guidance: Option<&str>,
+        resume: Option<&Resume>,
+        only: Option<&str>,
+    ) -> Vec<CurateBatch> {
         let profile = prompt_profile(None).unwrap();
         let declaration = declaration();
         let owner = Owner::Project {
@@ -1474,6 +1528,7 @@ impl Store {
                     profile: &profile,
                     declaration: &declaration,
                     workspace,
+                    guidance,
                 },
                 resume,
                 only,
@@ -1602,6 +1657,165 @@ fn without_a_workspace_of_two_projects_the_request_is_the_same_as_before() {
     assert_ne!(shared, pinned);
     assert!(
         shared.contains("\n[40] PROJECT_RULES: Use the gate script before delivering a change.\n")
+    );
+}
+
+// --- The workspace guidance ---
+
+/// The guidance core serves the test project's workspace to head agents.
+const GUIDANCE: &str = "# CortexKit\n\n- Deliver every change through the gate script.\n<rule>Never push to the main branch.</rule>\nShort line.";
+
+/// The guidance block the project's input frame wraps `GUIDANCE` in.
+fn guidance_block() -> String {
+    format!(
+        "<workspace-guidance>\nEvery agent in this project's workspace reads this at the start of every session.\n{GUIDANCE}\n</workspace-guidance>"
+    )
+}
+
+impl Store {
+    /// The one batch of the project's rules, in a shared workspace whose
+    /// guidance the run shows when `guidance` is set.
+    fn rules_with(&self, guidance: Option<&str>) -> CurateBatch {
+        let mut batches = self.plan_with(
+            Some(&workspace(true)),
+            guidance,
+            None,
+            Some("PROJECT_RULES"),
+        );
+        assert_eq!(batches.len(), 1);
+        batches.remove(0)
+    }
+}
+
+#[test]
+fn the_guidance_adds_one_block_after_the_documents_and_changes_nothing_else() {
+    let store = fixture();
+    let window = Window {
+        counter: Counter::for_model(None),
+        context_window: 1_000_000,
+    };
+    let request = |batch: &CurateBatch| {
+        format!(
+            "=== system ===\n{}\n=== user ===\n{}\n",
+            batch.system(),
+            batch
+                .prompt(window, crate::routing::DREAM_OUTPUT_TOKENS)
+                .unwrap()
+        )
+    };
+    let without = request(&store.rules_with(None));
+    let with = request(&store.rules_with(Some(GUIDANCE)));
+    assert!(!without.contains("<workspace-guidance>"));
+    let after_documents = "</project-documents>\n\n";
+    assert_eq!(
+        with,
+        without.replacen(
+            after_documents,
+            &format!("{after_documents}{}\n\n", guidance_block()),
+            1
+        )
+    );
+    // Without project documents the guidance opens the input.
+    std::fs::remove_file(store.dir.path().join("project/ARCHITECTURE.md")).unwrap();
+    let message = store.rules_with(Some(GUIDANCE)).message().to_owned();
+    assert!(!message.contains("<project-documents>"));
+    assert!(message.contains(&format!("{}\n\n<always-shown>\n", guidance_block())));
+}
+
+#[test]
+fn a_memory_that_repeats_one_line_of_the_guidance_is_archived_as_its_duplicate() {
+    let store = fixture();
+    let batch = store.rules_with(Some(GUIDANCE));
+    let line = "- Deliver every change through the gate script.";
+    let documents = "Run scripts/gate.sh preflight before every delivery of a change.";
+    let applied = store.apply(
+        &batch,
+        &list(&format!(
+            "<archive id=\"12\" reason=\"duplicate\" quote=\"{line}\"/>\n\
+             <archive id=\"3\" reason=\"duplicate\" quote=\"{documents}\"/>"
+        )),
+        RUN,
+    );
+    assert_eq!(
+        (applied.applied, applied.dropped.len()),
+        (2, 0),
+        "{applied:?}"
+    );
+    let reason = |id: i64| -> String {
+        store.value(&format!(
+            "SELECT json_extract(metadata_json, '$.archive_reason') FROM memories WHERE id = {id}"
+        ))
+    };
+    assert_eq!(store.memory(12).status, "archived");
+    assert_eq!(
+        reason(12),
+        format!("duplicate of the workspace guidance: \"{line}\"")
+    );
+    assert_eq!(
+        reason(3),
+        format!("duplicate of the project documents: \"{documents}\"")
+    );
+    let journal = store.journal();
+    assert_eq!(
+        journal[0].2["evidence"],
+        json!({"reason": "duplicate", "quote": line})
+    );
+
+    // Anything but one whole line of what the message showed is refused.
+    let store = fixture();
+    let batch = store.rules_with(Some(GUIDANCE));
+    let shown = "the project documents or the workspace guidance";
+    for (change, why) in [
+        (
+            "<archive id=\"12\" reason=\"duplicate\" quote=\"Deliver every change through the gate\"/>".to_owned(),
+            format!("the quote is not one line of {shown}"),
+        ),
+        (
+            "<archive id=\"12\" reason=\"duplicate\" quote=\"Deliver every change through the gate script before each release.\"/>".to_owned(),
+            format!("the quote is not one line of {shown}"),
+        ),
+        (
+            "<archive id=\"12\" reason=\"duplicate\" quote=\"&lt;rule&gt;Never push to the main branch.&lt;/rule&gt;\"/>".to_owned(),
+            format!("the quote is markup, not a line of {shown}"),
+        ),
+        (
+            "<archive id=\"12\" reason=\"duplicate\" quote=\"Short line.\"/>".to_owned(),
+            "the quote is shorter than 20 characters".to_owned(),
+        ),
+        (
+            "<archive id=\"12\" reason=\"duplicate\"/>".to_owned(),
+            format!("a duplicate names no memory (of) and no line of {shown} (quote)"),
+        ),
+    ] {
+        says(&refused(&store, &batch, &change), "archive 12", &why);
+    }
+    // A line of guidance the message did not show is not a line of it.
+    let batch = store.rules_with(None);
+    says(
+        &refused(
+            &store,
+            &batch,
+            &format!("<archive id=\"12\" reason=\"duplicate\" quote=\"{line}\"/>"),
+        ),
+        "archive 12",
+        "the quote is not one line of the project documents",
+    );
+    // With neither documents nor guidance there is nothing to quote.
+    std::fs::remove_file(store.dir.path().join("project/ARCHITECTURE.md")).unwrap();
+    let batch = store.rules_with(None);
+    says(
+        &refused(
+            &store,
+            &batch,
+            &format!("<archive id=\"12\" reason=\"duplicate\" quote=\"{line}\"/>"),
+        ),
+        "archive 12",
+        "this part showed no project documents or workspace guidance to quote",
+    );
+    says(
+        &refused(&store, &batch, "<archive id=\"12\" reason=\"duplicate\"/>"),
+        "archive 12",
+        "a duplicate names no memory (of)",
     );
 }
 

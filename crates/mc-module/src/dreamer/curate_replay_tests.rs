@@ -23,6 +23,12 @@
 //! - `CURATE_REPLAY_ROOT` (optional): the project's folder, whose
 //!   `ARCHITECTURE.md` and `STRUCTURE.md` the head shows every session.
 //!   Without it the requests have no project documents.
+//! - `CURATE_REPLAY_GUIDANCE_FILE` (optional): a file whose text stands in
+//!   for the workspace guidance core serves head agents, without the one
+//!   newline that ends a text file. The requests show it as a run shows
+//!   served guidance, under the same rules ([`super::guidance::shown`]);
+//!   give it the guidance's text, not a file with front matter. Without it
+//!   the requests show no guidance.
 //! - `DREAMER_REPLAY_OUT`: a new folder for the output: `store.db` (the
 //!   migrated copy), `manifest.json`, and one
 //!   `<tag>/part-<n>/curate.request.json` per part.
@@ -89,6 +95,21 @@ pub(crate) fn refuse_live(store: &Path) {
     }
 }
 
+/// The guidance a replay's requests show for the text of `file`, as if core
+/// served it to head agents; `None`, with why, when a run would not show
+/// it.
+pub(crate) fn guidance_from(file: &str) -> Option<String> {
+    let text = std::fs::read_to_string(file).unwrap_or_else(|error| panic!("{file}: {error}"));
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    match super::guidance::served(text) {
+        Ok(guidance) => Some(guidance),
+        Err(reason) => {
+            println!("no workspace guidance shown: {reason}");
+            None
+        }
+    }
+}
+
 /// Copy `from` to `to` through a read-only connection, then bring the copy
 /// to this build's schema. Returns the schema the source had.
 pub(crate) fn migrated_copy(from: &Path, to: &Path) -> i64 {
@@ -128,6 +149,8 @@ fn curate_requests() {
         "a category id (swe:naming) or tag (NAMING)",
     );
     let root = env("CURATE_REPLAY_ROOT");
+    let guidance_file = env("CURATE_REPLAY_GUIDANCE_FILE");
+    let guidance = guidance_file.as_deref().and_then(guidance_from);
     let out = PathBuf::from(required(
         "DREAMER_REPLAY_OUT",
         "a new folder for the replay's output",
@@ -177,6 +200,7 @@ fn curate_requests() {
         profile: &profile,
         declaration: &declaration,
         workspace: None,
+        guidance: guidance.as_deref(),
     };
     let live = db
         .with_connection(|conn| {
@@ -254,6 +278,8 @@ fn curate_requests() {
             "store": {"file": store, "sha256": digest, "schema": schema, "migratedTo": SCHEMA_VERSION},
             "copy": "store.db",
             "projectFolder": root,
+            "guidanceFile": guidance_file,
+            "guidanceShown": guidance.is_some(),
             "profile": {"name": profile.name, "version": profile.version, "digest": profile.digest},
             "task": TASK_ID,
             "category": {"id": chosen.id, "tag": chosen.tag},

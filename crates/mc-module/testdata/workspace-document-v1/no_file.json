@@ -1,0 +1,19 @@
+{
+  "reply": {
+    "result": {
+      "root": "/workspace/no_file",
+      "state": "no_file",
+      "workspace_id": "ws_no_file"
+    }
+  },
+  "request": {
+    "method": "persona.workspace_document",
+    "params": {
+      "workspace_id": "ws_no_file"
+    }
+  },
+  "route": {
+    "principal": "reserved:magic-context",
+    "surface": "management"
+  }
+}

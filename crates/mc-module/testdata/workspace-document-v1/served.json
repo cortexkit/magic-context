@@ -1,0 +1,29 @@
+{
+  "reply": {
+    "result": {
+      "audience": [
+        "athena",
+        "head",
+        "mason",
+        "oneshot",
+        "sidekick",
+        "spec"
+      ],
+      "body": "# Shared guidance\n\nKeep the workspace rules.",
+      "digest": "7d6be4aee51113448d69c54466c66d85ebab93ac00fe59ca01b3c3542d6d4460",
+      "root": "/workspace/served",
+      "state": "served",
+      "workspace_id": "ws_served"
+    }
+  },
+  "request": {
+    "method": "persona.workspace_document",
+    "params": {
+      "workspace_id": "ws_served"
+    }
+  },
+  "route": {
+    "principal": "reserved:magic-context",
+    "surface": "management"
+  }
+}

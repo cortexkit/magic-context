@@ -1200,6 +1200,23 @@ impl Engine {
             (Owner::Project { root, .. }, Some(source)) => source(root),
             _ => None,
         };
+        // Asked once per run, and not again within it whatever core answers:
+        // a run without the guidance still curates.
+        let guidance = if task.reads_guidance() {
+            match super::guidance::for_run(client, workspace).await {
+                Ok(guidance) => Some(guidance),
+                Err(reason) => {
+                    tracing::info!(
+                        "ck-mc: dreamer: run {run_id} {} for {}: no workspace guidance shown ({reason})",
+                        due.task,
+                        due.owner.owner_id
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let batches = {
             let context = TaskContext {
                 db,
@@ -1207,6 +1224,7 @@ impl Engine {
                 profile,
                 declaration,
                 workspace,
+                guidance: guidance.as_deref(),
             };
             task.plan(&context, embedding.as_ref()).await
         };

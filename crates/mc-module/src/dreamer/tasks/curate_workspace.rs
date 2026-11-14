@@ -11,11 +11,13 @@
 //! the workspace's live memories (level `workspace`, owned by the workspace).
 //!
 //! What differs is what the message shows. A workspace has no documents, so
-//! there are none to show or quote: an archive that quotes one is refused.
-//! The memories every session sees are the person's own (the global level),
-//! as the history head chooses them; a workspace memory that repeats one of
-//! them may be archived as its duplicate. The message names the workspace and
-//! its projects instead of a project.
+//! there are none to show or quote. It shows the workspace's guidance
+//! instead, as core serves it to head agents ([`crate::dreamer::guidance`]),
+//! and a workspace memory that repeats one of its lines may be archived by
+//! quoting the line. The memories every session sees are the person's own
+//! (the global level), as the history head chooses them; a workspace memory
+//! that repeats one of them may be archived as its duplicate. The message
+//! names the workspace and its projects instead of a project.
 //!
 //! The engine schedules the task once per workspace of two or more
 //! projects, and runs it in the folder of one of its projects seen in this
@@ -74,6 +76,7 @@ impl CurateWorkspace {
             context,
             &Scope::workspace(id),
             "",
+            context.guidance.unwrap_or_default(),
             &shown,
             &[
                 ("workspace.name", workspace.name.as_str()),
@@ -93,6 +96,12 @@ impl Task for CurateWorkspace {
     }
 
     fn workspace(&self) -> bool {
+        true
+    }
+
+    /// A workspace memory that repeats a line of the workspace's guidance
+    /// can then be archived as its duplicate.
+    fn reads_guidance(&self) -> bool {
         true
     }
 

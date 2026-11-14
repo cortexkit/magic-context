@@ -1800,6 +1800,7 @@ const TEMPLATE_DATA = [
 "[dreamer] domain lease busy (memory:\x01) — deferring \x01 task(s)",
 "[git-commits] read \x01 commits for \x01 (sinceMs=\x01 latestIndexed=\x01)\x021p",
 "[git-commits] sweep starting for \x01 (sinceDays=\x01 maxCommits=\x01)",
+"ck-mc: dreamer: run \x01 \x01 for \x01: no workspace guidance shown (\x01)",
 "pending ops WILL NOT APPLY — reason=\x01 pendingOps=\x01 context=\x01%",
 "[magic-context] storage-busy refusal stage=\x01 acquisition=\x01: \x01",
 "[magic-context] timer-triggered maintenance check failed: \x01",

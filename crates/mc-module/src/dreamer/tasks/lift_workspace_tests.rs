@@ -126,6 +126,7 @@ impl Store {
                     profile: &profile,
                     declaration: &declaration,
                     workspace: Some(workspace),
+                    guidance: None,
                 },
                 workspace,
             )

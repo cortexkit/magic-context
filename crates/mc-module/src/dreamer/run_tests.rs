@@ -63,6 +63,11 @@ pub(crate) struct Client {
     pub(crate) asked: Mutex<Vec<(String, Option<String>)>>,
     /// What Entorhinal answers every call with; `None` for no answer.
     pub(crate) entorhinal: Option<serde_json::Value>,
+    /// What core answers every call with; `None` for a core that is not
+    /// installed.
+    pub(crate) core: Option<Result<serde_json::Value, crate::client::CoreRefusal>>,
+    /// Each call to core: its method and params.
+    pub(crate) core_calls: Mutex<Vec<(String, serde_json::Value)>>,
 }
 
 impl Client {
@@ -83,6 +88,8 @@ impl Client {
             no_reader_preset: Vec::new(),
             asked: Mutex::default(),
             entorhinal: None,
+            core: None,
+            core_calls: Mutex::default(),
         }
     }
 
@@ -103,6 +110,20 @@ impl RunnerClient for Client {
     ) -> Option<Result<Vec<u8>, crate::client::EntorhinalRefusal>> {
         let reply = self.entorhinal.as_ref()?;
         Some(Ok(serde_json::to_vec(reply).expect("a JSON reply")))
+    }
+    async fn core_call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        _: std::time::Duration,
+    ) -> Result<serde_json::Value, crate::client::CoreRefusal> {
+        self.core_calls
+            .lock()
+            .unwrap()
+            .push((method.to_owned(), params));
+        self.core
+            .clone()
+            .unwrap_or_else(|| Err(crate::client::CoreRefusal::not_installed()))
     }
     async fn child_plans(&self, child: &Child) -> bool {
         self.plans.contains(&child.session.runner.as_str())

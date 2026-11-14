@@ -38,6 +38,13 @@
 //!   every category the task declares is planned, as a run plans them.
 //! - `CURATE_WORKSPACE_REPLAY_BATCHES` (optional): write only this many
 //!   batches, from the first. Without it every batch is written.
+//! - `CURATE_REPLAY_GUIDANCE_FILE` (optional): a file whose text stands in
+//!   for the workspace guidance core serves head agents, without the one
+//!   newline that ends a text file. The requests show it as a run shows
+//!   served guidance, under the same rules ([`super::guidance::shown`]);
+//!   give it the guidance's text, not a file with front matter. The manifest
+//!   keeps the text shown, so the second test plans the same requests.
+//!   Without it the requests show no guidance. Only the first test reads it.
 //! - `DREAMER_REPLAY_OUT`: the output folder. It gets `curate-workspace/`,
 //!   new for the first test, holding `store.db` (the migrated copy),
 //!   `applied.db` (the second test's copy with the replies applied),
@@ -52,7 +59,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::curate_replay_tests::{migrated_copy, refuse_live};
+use super::curate_replay_tests::{guidance_from, migrated_copy, refuse_live};
 use super::run::{child_session, TaskInput, TaskReply};
 use super::task::{Owner, TaskContext};
 use super::tasks::curate::{parse_list, pool, Change, CurateBatch, Scope, Written};
@@ -166,8 +173,14 @@ fn declaration(profile: &Profile) -> Value {
 }
 
 /// Plan `workspace`'s run on `db`, as the engine plans it, from its first
-/// part; `only` keeps one category.
-fn plan(db: &ContextDb, workspace: &WorkspaceMembers, only: Option<&str>) -> Vec<CurateBatch> {
+/// part, showing the workspace guidance `guidance`; `only` keeps one
+/// category.
+fn plan(
+    db: &ContextDb,
+    workspace: &WorkspaceMembers,
+    only: Option<&str>,
+    guidance: Option<&str>,
+) -> Vec<CurateBatch> {
     let profile = prompt_profile(None).expect("the bundled profile");
     let declaration = declaration(&profile);
     let owner = Owner::Workspace {
@@ -181,6 +194,7 @@ fn plan(db: &ContextDb, workspace: &WorkspaceMembers, only: Option<&str>) -> Vec
                 profile: &profile,
                 declaration: &declaration,
                 workspace: Some(workspace),
+                guidance,
             },
             None,
             only,
@@ -237,17 +251,21 @@ fn curate_workspace_requests() {
         "DREAMER_REPLAY_OUT",
         "a folder for the replay's output",
     ));
-    write_requests(&store, &workspace, only, limit, &out);
+    let guidance = env("CURATE_REPLAY_GUIDANCE_FILE").map(|file| (guidance_from(&file), file));
+    write_requests(&store, &workspace, only, limit, guidance, &out);
 }
 
 /// Copy `store` into `out`, plan the run of the workspace `workspace_json`
 /// describes (`only` one category, when named) and write its first `limit`
-/// requests (every one without it) and the manifest.
+/// requests (every one without it) and the manifest. `guidance` is the
+/// guidance the requests show, when a file stood in for it, with that
+/// file's path.
 fn write_requests(
     store: &Path,
     workspace_json: &Value,
     only: Option<String>,
     limit: Option<usize>,
+    guidance: Option<(Option<String>, String)>,
     out: &Path,
 ) {
     let workspace = workspace_of(workspace_json);
@@ -272,7 +290,8 @@ fn write_requests(
     let schema = migrated_copy(store, &copy);
     let db = ContextDb::open(&copy).expect("open the migrated copy");
 
-    let batches = plan(&db, &workspace, only.as_deref());
+    let (shown, guidance_file) = guidance.map_or((None, None), |(shown, file)| (shown, Some(file)));
+    let batches = plan(&db, &workspace, only.as_deref(), shown.as_deref());
     let written = limit.unwrap_or(batches.len()).min(batches.len());
     let counter = Counter::for_model(None);
     let settings = settings();
@@ -354,6 +373,8 @@ fn write_requests(
             "task": TASK_ID,
             "kind": KIND,
             "category": only,
+            "guidanceFile": guidance_file,
+            "guidance": shown,
             "settings": settings,
             "tokenCounts": "the module's estimate for a model it has no vocabulary for",
             "categories": live,
@@ -595,7 +616,12 @@ fn apply_report(out: &Path) {
     // The copy must plan the very requests that were sent: a reply answers
     // the request it was given, and applying it to another batch would pair
     // it with memories it never saw.
-    let batches = plan(&db, &workspace, only.as_deref());
+    let batches = plan(
+        &db,
+        &workspace,
+        only.as_deref(),
+        manifest["guidance"].as_str(),
+    );
     let listed = manifest["batches"]
         .as_array()
         .expect("the manifest lists the batches");
@@ -783,7 +809,7 @@ fn the_replay_reads_a_lift_replays_store_and_reports_every_change() {
         "name": "CortexKit",
         "projects": ["subc", "magic-context"],
     });
-    write_requests(&lift_output, &workspace, None, None, &out);
+    write_requests(&lift_output, &workspace, None, None, None, &out);
     let manifest = read_json(&folder(&out).join(MANIFEST));
     assert_eq!(manifest["plannedBatches"], 1);
     let request = read_json(&batch_dir(&out, 0).join(REQUEST));
@@ -812,7 +838,7 @@ fn the_replay_reads_a_lift_replays_store_and_reports_every_change() {
         "### archive 2 (PROJECT_RULES part 1 of 1, batch 0)\n\nMemory 2 · PROJECT_RULES:\n\n> Before committing, run `cargo fmt --all`.\n\nReason: duplicate, of:\n\nMemory 1 · PROJECT_RULES:\n\n> Run `cargo fmt --all` before every commit.\n"
     ), "{report}");
     assert!(
-        report.contains("Refused: a workspace has no documents to quote"),
+        report.contains("Refused: this part showed no workspace guidance to quote"),
         "{report}"
     );
     // The replay's own copy took the change; the input store did not.
@@ -826,4 +852,74 @@ fn the_replay_reads_a_lift_replays_store_and_reports_every_change() {
     };
     assert_eq!(status(&folder(&out).join(APPLIED)), "archived");
     assert_eq!(status(&lift_output), "active");
+}
+
+/// A guidance file stands in for the guidance core serves: the requests
+/// show its text as a run shows served guidance, the manifest keeps it, and
+/// the report applies a quote of one of its lines.
+#[test]
+fn a_guidance_file_stands_in_for_the_guidance_core_serves() {
+    use super::tasks::curate_workspace::tests::{insert, rule};
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("applied.db");
+    {
+        let db = ContextDb::create_for_tests(&source).unwrap();
+        insert(
+            &db,
+            &[
+                rule(1, "Run `cargo fmt --all` before every commit."),
+                rule(3, "Never commit a secret."),
+            ],
+        );
+    }
+    let file = dir.path().join("guidance.md");
+    std::fs::write(
+        &file,
+        "# Rules\n\nNever commit a secret to the repository.\n",
+    )
+    .unwrap();
+    let file = file.to_str().unwrap().to_owned();
+    let out = dir.path().join("replay");
+    let workspace = json!({
+        "id": super::tasks::curate_workspace::tests::WORKSPACE,
+        "name": "CortexKit",
+        "projects": ["subc", "magic-context"],
+    });
+    write_requests(
+        &source,
+        &workspace,
+        None,
+        None,
+        Some((guidance_from(&file), file.clone())),
+        &out,
+    );
+    let manifest = read_json(&folder(&out).join(MANIFEST));
+    // The file's last newline ends the file, not the guidance.
+    let guidance = "# Rules\n\nNever commit a secret to the repository.";
+    assert_eq!(manifest["guidance"], guidance);
+    assert_eq!(manifest["guidanceFile"], file);
+    let request = read_json(&batch_dir(&out, 0).join(REQUEST));
+    let user = request["messages"][1]["content"].as_str().unwrap();
+    assert!(user.contains(&format!(
+        "<workspace-guidance>\nEvery agent in the workspace reads this at the start of every session.\n{guidance}\n</workspace-guidance>\n\n"
+    )));
+
+    write_file(
+        &batch_dir(&out, 0).join(REPLY),
+        &pretty(&json!({
+            "ok": true,
+            "finishReason": "stop",
+            "sent": {"model": "m"},
+            "body": {"choices": [{"message": {"content":
+                "<curate>\n<archive id=\"3\" reason=\"duplicate\" quote=\"Never commit a secret to the repository.\"/>\n</curate>"
+            }}]},
+        })),
+    );
+    // The second test plans the same requests from the manifest's guidance.
+    apply_report(&out);
+    let report = std::fs::read_to_string(folder(&out).join(REPORT)).unwrap();
+    assert!(
+        report.contains("Changes written: **1**. Changes refused: 0."),
+        "{report}"
+    );
 }

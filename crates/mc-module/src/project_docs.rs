@@ -21,7 +21,9 @@ use std::path::Path;
 
 const PROJECT_DOC_FILES: [&str; 2] = ["ARCHITECTURE.md", "STRUCTURE.md"];
 const PROJECT_DOCS_DELIMITER: &str = "\n\n---\n\n";
-const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
+/// The most bytes one project document may hold; a larger one is left out
+/// whole. The curate tasks hold the workspace guidance to the same limit.
+pub(crate) const MAX_PROJECT_DOC_BYTES: u64 = 256 * 1024;
 
 /// The rendered `<project-docs>` block (empty when no readable doc) + the canonical
 /// content hash (empty hash string when no readable doc).

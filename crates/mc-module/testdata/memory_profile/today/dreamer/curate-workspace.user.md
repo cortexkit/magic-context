@@ -2,6 +2,11 @@
 
 **Workspace:** ⟦workspace.name⟧, with ⟦workspace.count⟧ projects: ⟦workspace.projects⟧
 
+<workspace-guidance>
+Every agent in the workspace reads this at the start of every session.
+⟦guidance⟧
+</workspace-guidance>
+
 <always-shown>
 Every session in the workspace already sees these memories of the person, from any category. Use them to find duplicates. Do not change them.
 [⟦shown.id⟧] ⟦shown.category⟧: ⟦shown.content⟧

@@ -195,6 +195,7 @@ fn with_context<T>(db: &ContextDb, body: impl FnOnce(&TaskContext<'_>) -> T) -> 
         profile: &profile,
         declaration: &declaration,
         workspace: None,
+        guidance: None,
     })
 }
 

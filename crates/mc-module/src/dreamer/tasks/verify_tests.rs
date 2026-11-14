@@ -157,6 +157,7 @@ impl Fixture {
                 profile: &self.profile,
                 declaration,
                 workspace: None,
+                guidance: None,
             })
             .unwrap()
     }

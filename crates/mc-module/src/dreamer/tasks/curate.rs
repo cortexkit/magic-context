@@ -3,20 +3,23 @@
 //! answers with one `<curate>` list of changes: merge memories that state
 //! the same fact, shorten a long memory to the fact it states, split one
 //! that states several, and archive what adds nothing (a duplicate of
-//! another memory or of the project documents, a one-off detail, or a story
-//! that states no rule).
+//! another memory, of the project documents or of the workspace guidance, a
+//! one-off detail, or a story that states no rule).
 //!
 //! One run covers every category the task declares, in the profile's
 //! category order. Each category is split into parts of at most
 //! [`PART_MEMORIES`] memories or about [`PART_TOKENS`] tokens of memory text,
 //! and each part is one message. A part also shows the project documents
-//! every session gets, the project memories the head shows every session
-//! (with the memories of the project's workspace it shows, when the
-//! workspace holds two or more projects), and the memories of the same
-//! category outside the part whose text is close to one inside it, so the
-//! model can find duplicates of all three. A project memory that repeats a
-//! workspace memory may be archived as its duplicate; the workspace memory
-//! itself is never changed here.
+//! every session gets, the workspace guidance every agent of the project's
+//! workspace reads ([`crate::dreamer::guidance`]), the project memories the
+//! head shows every session (with the memories of the project's workspace
+//! it shows, when the workspace holds two or more projects), and the
+//! memories of the same category outside the part whose text is close to
+//! one inside it, so the model can find duplicates of all four. A project
+//! memory that repeats a workspace memory may be archived as its duplicate;
+//! the workspace memory itself is never changed here. A memory that repeats
+//! a line of the documents or the guidance may be archived by quoting that
+//! line exactly.
 //!
 //! The model proposes and the batch decides. Each change is checked on its
 //! own and dropped with its reason when a check fails; the others still
@@ -74,8 +77,8 @@ const SIMILAR_EACH: usize = 3;
 const SIMILAR_MAX: usize = 20;
 /// Two memories' word sets this alike, or more, count as close text.
 const SIMILAR_JACCARD: f64 = 0.6;
-/// A quote from the project documents shorter than this can't show that a
-/// memory repeats them.
+/// A quoted line shorter than this can't show that a memory repeats the
+/// documents or the guidance it comes from.
 const MIN_QUOTE_CHARS: usize = 20;
 /// The reasons an archive may give.
 const ARCHIVE_REASONS: [&str; 3] = ["duplicate", "one-off", "lesson"];
@@ -140,12 +143,6 @@ impl Scope {
     /// `curate_workspace_merge`.
     fn journal_operation(&self, operation: &str) -> String {
         format!("{}_{operation}", self.kind.replace('-', "_"))
-    }
-
-    /// Only a project's documents are shown to every session, so only a
-    /// project's curate can archive a memory as repeating them.
-    fn has_documents(&self) -> bool {
-        self.level == "project"
     }
 }
 
@@ -463,18 +460,19 @@ fn frame_line_after(frame: &str, open: &str) -> &'static str {
 }
 
 /// The text that fills the project task's input frame, in the frame's own
-/// layout: the project documents, the memories every session sees, the
-/// similar memories, then the part's memories. A block with no lines is
-/// left out.
+/// layout: the project documents, the workspace guidance, the memories
+/// every session sees, the similar memories, then the part's memories. A
+/// block with no lines is left out.
 #[cfg(test)]
 pub(crate) fn input(
     docs: &str,
+    guidance: &str,
     shown: &[Shown],
     similar: &[&Memory],
     part: (usize, usize),
     memories: &[Memory],
 ) -> String {
-    input_in(INPUT_FRAME, docs, shown, similar, part, memories)
+    input_in(INPUT_FRAME, docs, guidance, shown, similar, part, memories)
 }
 
 /// [`input`] for input frame `frame`, whose blocks' standing instructions
@@ -483,6 +481,7 @@ pub(crate) fn input(
 pub(crate) fn input_in(
     frame: &str,
     docs: &str,
+    guidance: &str,
     shown: &[Shown],
     similar: &[&Memory],
     part: (usize, usize),
@@ -491,6 +490,12 @@ pub(crate) fn input_in(
     let mut blocks = Vec::new();
     if !docs.is_empty() {
         blocks.push(format!("<project-documents>\n{docs}\n</project-documents>"));
+    }
+    if !guidance.is_empty() {
+        blocks.push(format!(
+            "<workspace-guidance>\n{}\n{guidance}\n</workspace-guidance>",
+            frame_line_after(frame, "<workspace-guidance>")
+        ));
     }
     if !shown.is_empty() {
         let lines: Vec<String> = shown
@@ -544,8 +549,8 @@ pub(crate) enum Change {
     /// Replace a memory with one memory per fact it states.
     Split { id: i64, parts: Vec<String> },
     /// Archive a memory that adds nothing, for `reason`: `duplicate` (of a
-    /// memory, `of`, or of a line of the project documents, `quote`),
-    /// `one-off` or `lesson`, each with `why`.
+    /// memory, `of`, or of a line of the project documents or the workspace
+    /// guidance, `quote`), `one-off` or `lesson`, each with `why`.
     Archive {
         id: i64,
         reason: String,
@@ -843,14 +848,16 @@ struct Planned {
 
 /// The run's batches for `scope`'s memories, in order: every part of every
 /// category the context's declaration curates, from `resume` on. `only`
-/// keeps one category, by id or tag. Each part's message shows `docs` and
-/// the memories every session sees (`shown`, read at `now`), and fills the
-/// profile's markers with `values`, then the category's tag.
+/// keeps one category, by id or tag. Each part's message shows `docs`, the
+/// workspace guidance `guidance` (empty for none) and the memories every
+/// session sees (`shown`, read at `now`), and fills the profile's markers
+/// with `values`, then the category's tag.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan(
     context: &TaskContext<'_>,
     scope: &Scope,
     docs: &str,
+    guidance: &str,
     shown: &[Shown],
     values: &[(&str, &str)],
     now: i64,
@@ -937,6 +944,7 @@ pub(crate) fn plan(
             let text = input_in(
                 frame,
                 docs,
+                guidance,
                 &shown,
                 &close,
                 (part.number, part.count),
@@ -990,6 +998,7 @@ pub(crate) fn plan(
                     .map(|memory| (memory.id, (memory.level.clone(), memory.owner.clone())))
                     .collect(),
                 docs: docs.to_owned(),
+                guidance: guidance.to_owned(),
                 next,
             })
         })
@@ -1024,6 +1033,7 @@ impl Curate {
             context,
             &Scope::project(project),
             &project_documents(root),
+            context.guidance.unwrap_or_default(),
             &shown,
             &[("projectIdentity", project.as_str())],
             now,
@@ -1041,6 +1051,12 @@ impl Task for Curate {
     /// A project memory that repeats one of its workspace's can then be
     /// archived as that one's duplicate.
     fn sees_workspace(&self) -> bool {
+        true
+    }
+
+    /// A project memory that repeats a line of its workspace's guidance can
+    /// then be archived as its duplicate.
+    fn reads_guidance(&self) -> bool {
         true
     }
 
@@ -1090,6 +1106,9 @@ pub(crate) struct CurateBatch {
     /// The project documents the message shows, as it shows them; empty for
     /// a workspace, which has none.
     docs: String,
+    /// The workspace guidance the message shows, as core served it; empty
+    /// when it shows none.
+    guidance: String,
     /// Where the next run starts once this part is applied; `None` after
     /// the run's last part.
     pub(crate) next: Option<Resume>,
@@ -1538,10 +1557,34 @@ impl CurateBatch {
         Ok(Ok(Checked::Split { memory, parts }))
     }
 
-    /// Whether `quote` is in the project documents the message showed, as
-    /// shown or with its XML escapes written out.
-    fn quotes(&self, quote: &str) -> bool {
-        self.docs.contains(quote) || unescape(&self.docs).contains(quote)
+    /// What this part's message showed that a line may be quoted from, as
+    /// the reasons a quote is refused name it; `None` when it showed
+    /// neither the project documents nor the workspace guidance.
+    fn quotable(&self) -> Option<&'static str> {
+        match (self.docs.is_empty(), self.guidance.is_empty()) {
+            (false, false) => Some("the project documents or the workspace guidance"),
+            (false, true) => Some("the project documents"),
+            (true, false) => Some("the workspace guidance"),
+            (true, true) => None,
+        }
+    }
+
+    /// Where `quote` is one whole line, without its surrounding whitespace,
+    /// of what the message showed: the project documents (as shown, or with
+    /// their XML escapes written out), or else the workspace guidance.
+    fn quoted_in(&self, quote: &str) -> Option<&'static str> {
+        let is_line = |text: &str| {
+            text.lines()
+                .map(str::trim)
+                .any(|line| line == quote || unescape(line) == quote)
+        };
+        if is_line(&self.docs) {
+            Some("the project documents")
+        } else if is_line(&self.guidance) {
+            Some("the workspace guidance")
+        } else {
+            None
+        }
     }
 
     fn check_archive<'c>(
@@ -1563,14 +1606,6 @@ impl CurateBatch {
                 evidence,
             }))
         };
-        // A workspace has no documents every session sees, so nothing a
-        // workspace memory repeats can be quoted.
-        if !self.scope.has_documents() && quote.is_some_and(|quote| !quote.trim().is_empty()) {
-            return Ok(Err(format!(
-                "a {} has no documents to quote",
-                self.scope.level
-            )));
-        }
         match reason {
             "duplicate" => {
                 if let Some(of) = of {
@@ -1609,24 +1644,37 @@ impl CurateBatch {
                         json!({"reason": "duplicate", "of": of}),
                     );
                 }
-                if !self.scope.has_documents() {
-                    return Ok(Err("a duplicate names no memory (of)".into()));
-                }
-                let Some(quote) = quote.map(str::trim).filter(|quote| !quote.is_empty()) else {
-                    return Ok(Err(
-                        "a duplicate names no memory (of) and no documents line (quote)".into(),
-                    ));
+                let quote = quote.map(str::trim).filter(|quote| !quote.is_empty());
+                let Some(sources) = self.quotable() else {
+                    return Ok(Err(match quote {
+                        Some(_) if self.scope.level == "project" => {
+                            "this part showed no project documents or workspace guidance to quote"
+                                .into()
+                        }
+                        Some(_) => "this part showed no workspace guidance to quote".into(),
+                        None => "a duplicate names no memory (of)".into(),
+                    }));
+                };
+                let Some(quote) = quote else {
+                    return Ok(Err(format!(
+                        "a duplicate names no memory (of) and no line of {sources} (quote)"
+                    )));
                 };
                 if quote.chars().count() < MIN_QUOTE_CHARS {
                     return Ok(Err(format!(
                         "the quote is shorter than {MIN_QUOTE_CHARS} characters"
                     )));
                 }
-                if !self.quotes(quote) {
-                    return Ok(Err("the quote is not in the project documents".into()));
+                // A tag line is the message's own markup (a block's wrapper,
+                // a document's `<file>` line), never a rule a memory repeats.
+                if quote.starts_with('<') && quote.ends_with('>') {
+                    return Ok(Err(format!("the quote is markup, not a line of {sources}")));
                 }
+                let Some(source) = self.quoted_in(quote) else {
+                    return Ok(Err(format!("the quote is not one line of {sources}")));
+                };
                 archived(
-                    format!("duplicate of the project documents: \"{quote}\""),
+                    format!("duplicate of {source}: \"{quote}\""),
                     None,
                     json!({"reason": "duplicate", "quote": quote}),
                 )

@@ -119,6 +119,7 @@ fn plan(db: &ContextDb, profile: &Profile, project: &str, now: i64) -> Vec<Refle
         profile,
         declaration: &declaration,
         workspace: None,
+        guidance: None,
     };
     let prepared = ReflectEvents
         .prepare(&context, now)

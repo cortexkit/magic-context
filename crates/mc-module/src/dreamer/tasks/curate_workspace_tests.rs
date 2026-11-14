@@ -10,7 +10,7 @@ use super::*;
 use crate::context_db::ContextDb;
 use crate::dreamer::run::{TaskInput, TaskReply};
 use crate::dreamer::task::Applied;
-use crate::dreamer::tasks::curate::{parse_list, Written};
+use crate::dreamer::tasks::curate::{input_in, parse_list, Change, Memory, Shown, Written};
 use crate::memory_profile::prompt_profile;
 use crate::memory_writes::normalized_hash;
 use crate::memory_writes::person::{self, OwnerRef};
@@ -199,6 +199,17 @@ fn declaration() -> Value {
 impl Store {
     /// The run's batches for `workspace`, on the bundled profile.
     fn plan(&self, workspace: &WorkspaceMembers, only: Option<&str>) -> Vec<CurateBatch> {
+        self.plan_with(workspace, None, only)
+    }
+
+    /// The run's batches for `workspace`, showing the workspace guidance
+    /// `guidance`, on the bundled profile.
+    fn plan_with(
+        &self,
+        workspace: &WorkspaceMembers,
+        guidance: Option<&str>,
+        only: Option<&str>,
+    ) -> Vec<CurateBatch> {
         let profile = prompt_profile(None).unwrap();
         let declaration = declaration();
         let owner = Owner::Workspace {
@@ -212,6 +223,7 @@ impl Store {
                     profile: &profile,
                     declaration: &declaration,
                     workspace: Some(workspace),
+                    guidance,
                 },
                 None,
                 only,
@@ -450,6 +462,7 @@ fn similar_memories_come_from_the_workspaces_other_parts() {
                 profile: &profile,
                 declaration: &declaration,
                 workspace: Some(&workspace),
+                guidance: None,
             },
             Some(&resume),
             Some("PROJECT_RULES"),
@@ -627,10 +640,10 @@ fn a_change_that_fails_a_check_leaves_the_memory_as_it_is_and_says_why() {
     let store = fixture();
     let batch = store.rules();
     let cases: &[(&str, &str)] = &[
-        // A workspace has no documents to repeat.
+        // Without guidance the message shows nothing to quote.
         (
             "<archive id=\"3\" reason=\"duplicate\" quote=\"Every release needs two reviewers and a green CI run.\"/>",
-            "a workspace has no documents to quote",
+            "this part showed no workspace guidance to quote",
         ),
         (
             "<archive id=\"3\" reason=\"duplicate\"/>",
@@ -794,6 +807,220 @@ fn a_run_of_the_workspace_undoes_as_one() {
             original,
             "memory {}",
             index + 1
+        );
+    }
+}
+
+// --- The workspace guidance ---
+
+/// The guidance core serves the workspace to head agents.
+const GUIDANCE: &str = "# CortexKit\n\n- Every release needs two reviewers and a green CI run.\n<rule>Never push to the main branch.</rule>\nShort line.";
+
+#[test]
+fn the_parser_reads_every_change_the_output_contract_shows() {
+    let (_, contract) = crate::memory_profile::FRAMES
+        .iter()
+        .find(|(name, _)| *name == "dreamer/curate-workspace.output-contract")
+        .unwrap();
+    let example = &contract[contract.find("<curate>").unwrap()
+        ..contract.find("</curate>").unwrap() + "</curate>".len()];
+    let changes: Vec<Change> = parse_list(example)
+        .unwrap()
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    let archives: Vec<&Change> = changes
+        .iter()
+        .filter(|change| change.action() == "archive")
+        .collect();
+    assert_eq!(
+        archives,
+        [
+            &Change::Archive {
+                id: 40,
+                reason: "duplicate".into(),
+                of: Some(12),
+                quote: None,
+                why: None
+            },
+            &Change::Archive {
+                id: 41,
+                reason: "duplicate".into(),
+                of: None,
+                quote: Some("The exact line from the workspace guidance".into()),
+                why: None
+            },
+            &Change::Archive {
+                id: 42,
+                reason: "one-off".into(),
+                of: None,
+                quote: None,
+                why: Some("a chat room id".into())
+            },
+            &Change::Archive {
+                id: 43,
+                reason: "lesson".into(),
+                of: None,
+                quote: None,
+                why: Some("a story with no rule".into())
+            },
+        ]
+    );
+    assert_eq!(changes.len(), 7);
+}
+
+#[test]
+fn the_input_follows_its_frame_line_for_line() {
+    let (_, frame) = crate::memory_profile::FRAMES
+        .iter()
+        .find(|(name, _)| *name == INPUT_FRAME)
+        .unwrap();
+    let filled = frame
+        .replace("⟦guidance⟧", GUIDANCE)
+        .replace("⟦shown.id⟧", "30")
+        .replace("⟦shown.category⟧", "COMMUNICATION")
+        .replace("⟦shown.content⟧", "Always answer the person in English.")
+        .replace("⟦similar.id⟧", "2")
+        .replace("⟦similar.content⟧", "Before committing, run the formatter.")
+        .replace("⟦part⟧", "2")
+        .replace("⟦parts⟧", "3")
+        .replace("⟦memory.id⟧", "1")
+        .replace("⟦memory.content⟧", "Run the formatter.")
+        .replace("⟦memory2.id⟧", "5")
+        .replace("⟦memory2.content⟧", "Never force-push.");
+    let shown = [Shown {
+        id: 30,
+        tag: "COMMUNICATION".into(),
+        content: "Always answer the person in English.".into(),
+        level: "global".into(),
+        owner: String::new(),
+    }];
+    let close = Memory {
+        id: 2,
+        content: "Before committing, run the formatter.".into(),
+        revision: 1,
+        protected: false,
+    };
+    let memories = [
+        Memory {
+            id: 1,
+            content: "Run the formatter.".into(),
+            revision: 1,
+            protected: false,
+        },
+        Memory {
+            id: 5,
+            content: "Never force-push.".into(),
+            revision: 1,
+            protected: true,
+        },
+    ];
+    let input = |guidance: &str| {
+        input_in(
+            INPUT_FRAME,
+            "",
+            guidance,
+            &shown,
+            &[&close],
+            (2, 3),
+            &memories,
+        )
+    };
+    assert_eq!(input(GUIDANCE), filled.trim_end_matches('\n'));
+    // Without the guidance, its block is left out whole and the others
+    // keep their bytes.
+    let block = &filled
+        [filled.find("<workspace-guidance>").unwrap()..filled.find("<always-shown>").unwrap()];
+    assert_eq!(
+        input(""),
+        filled.replacen(block, "", 1).trim_end_matches('\n')
+    );
+}
+
+#[test]
+fn the_message_shows_the_guidance_before_the_persons_memories() {
+    let store = fixture();
+    let workspace = members(&["subc", "magic-context", "entorhinal"]);
+    let message = |guidance: Option<&str>| {
+        let mut batches = store.plan_with(&workspace, guidance, Some("PROJECT_RULES"));
+        assert_eq!(batches.len(), 1);
+        batches.remove(0).message().to_owned()
+    };
+    let block = format!(
+        "<workspace-guidance>\nEvery agent in the workspace reads this at the start of every session.\n{GUIDANCE}\n</workspace-guidance>\n\n"
+    );
+    let (with, without) = (message(Some(GUIDANCE)), message(None));
+    assert!(!without.contains("<workspace-guidance>"));
+    assert_eq!(
+        with,
+        without.replacen("<always-shown>", &format!("{block}<always-shown>"), 1)
+    );
+    assert!(with.contains(&format!(
+        "**Workspace:** CortexKit, with 3 projects: entorhinal, magic-context, subc\n\n{block}"
+    )));
+}
+
+#[test]
+fn a_workspace_memory_that_repeats_one_line_of_the_guidance_is_archived_as_its_duplicate() {
+    let line = "- Every release needs two reviewers and a green CI run.";
+    let store = fixture();
+    let workspace = members(&["subc", "magic-context", "entorhinal"]);
+    let batch = store
+        .plan_with(&workspace, Some(GUIDANCE), Some("PROJECT_RULES"))
+        .remove(0);
+    let written = store.write(
+        &batch,
+        &format!("<archive id=\"3\" reason=\"duplicate\" quote=\" {line} \"/>"),
+    );
+    assert_eq!(written.refusals, [None], "{written:?}");
+    let archived = store.memory(3);
+    assert_eq!(
+        (archived.status.as_str(), archived.superseded_by),
+        ("archived", None)
+    );
+    let reason: String = store
+        .value("SELECT json_extract(metadata_json, '$.archive_reason') FROM memories WHERE id = 3");
+    assert_eq!(
+        reason,
+        format!("duplicate of the workspace guidance: \"{line}\"")
+    );
+    let journal = store.journal();
+    assert_eq!(
+        journal[0].3["evidence"],
+        serde_json::json!({"reason": "duplicate", "quote": line})
+    );
+
+    // Anything but one whole line of the guidance is refused.
+    let store = fixture();
+    let batch = store
+        .plan_with(&workspace, Some(GUIDANCE), Some("PROJECT_RULES"))
+        .remove(0);
+    for (changes, why) in [
+        (
+            "<archive id=\"4\" reason=\"duplicate\" quote=\"Every release needs two reviewers\"/>",
+            "the quote is not one line of the workspace guidance",
+        ),
+        (
+            "<archive id=\"4\" reason=\"duplicate\" quote=\"The release checklist lives in docs/release.md.\"/>",
+            "the quote is not one line of the workspace guidance",
+        ),
+        (
+            "<archive id=\"4\" reason=\"duplicate\" quote=\"&lt;rule&gt;Never push to the main branch.&lt;/rule&gt;\"/>",
+            "the quote is markup, not a line of the workspace guidance",
+        ),
+        (
+            "<archive id=\"4\" reason=\"duplicate\" quote=\"Short line.\"/>",
+            "the quote is shorter than 20 characters",
+        ),
+        (
+            "<archive id=\"4\" reason=\"duplicate\"/>",
+            "a duplicate names no memory (of) and no line of the workspace guidance (quote)",
+        ),
+    ] {
+        assert_eq!(
+            refused(&store, &batch, changes),
+            [Some(why.to_owned())],
+            "{changes}"
         );
     }
 }

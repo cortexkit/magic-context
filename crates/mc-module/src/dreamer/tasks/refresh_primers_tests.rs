@@ -87,6 +87,7 @@ impl Store {
             profile: &profile,
             declaration: &declaration,
             workspace: None,
+            guidance: None,
         })
     }
 
