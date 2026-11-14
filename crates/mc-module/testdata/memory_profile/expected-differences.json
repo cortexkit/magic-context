@@ -880,12 +880,13 @@
       "document": "dreamer/base:review-user-memories/user",
       "class": "ruling",
       "ruling": "Dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13: the user-profile review files each trait under a user category; MC added the category field its rules already asked for (the 0.49 output contract had none) and shows each memory's and candidate's category in the input.",
-      "why": "The review's rules tell the model to choose a user category, but the 0.49 output format had nowhere to put it, and lines moved from 0.49 have no category until the review files them.",
+      "why": "The review's rules tell the model to choose a user category, but the 0.49 output format had nowhere to put it, and lines moved from 0.49 have no category until the review files them. A memory the person wrote or edited is shown marked protected, and the review may not update or dismiss it (cleanup design §3, Protection).",
       "today": [
         "- Memory #1: \"⟦stableMemory.content⟧\""
       ],
       "rendered": [
-        "- Memory #1 [⟦stableMemory.category⟧]: \"⟦stableMemory.content⟧\""
+        "- Memory #1 [⟦stableMemory.category⟧]: \"⟦stableMemory.content⟧\"",
+        "- Memory #2 [⟦stableMemory2.category⟧, protected]: \"⟦stableMemory2.content⟧\""
       ]
     },
     {
@@ -978,12 +979,13 @@
       "document": "dreamer/base:review-user-memories/user",
       "class": "ruling",
       "ruling": "Ufuk's memory-profiles approval (ask_4407e8a9759e5d29): the existing user memories become global memories through the global review's one-time reclassification into base or coding categories (memory-profiles-final-shape.md §11).",
-      "why": "Lines moved from 0.49 have no category (shown as UNSORTED); refile lets the review file each one without rewriting its text. Consumed candidates are marked consumed, not deleted, so the contract no longer says deleted.",
+      "why": "Lines moved from 0.49 have no category (shown as UNSORTED); refile lets the review file each one without rewriting its text. Consumed candidates are marked consumed, not deleted, so the contract no longer says deleted. A memory the person wrote or edited is shown marked protected, and the review may not update or dismiss it (cleanup design §3, Protection).",
       "today": [
         "- `consume_candidate_ids`: ALL candidate IDs that were reviewed (promoted, merged, or rejected) — they will be deleted from the candidate pool"
       ],
       "rendered": [
         "- `refile`: every memory shown as `UNSORTED` that you neither update nor dismiss, each with the one user category it belongs to. Its text stays as it is. Name each `UNSORTED` memory exactly once, in `update_existing`, `dismiss_existing` or `refile`.",
+        "- A memory marked `protected` is one the person wrote or edited themselves. Never name it in `update_existing` or `dismiss_existing`. Still read it: a candidate it already covers is consumed, not promoted.",
         "- `consume_candidate_ids`: ALL candidate IDs that were reviewed (promoted, merged, or rejected) — they leave the candidate pool"
       ]
     },

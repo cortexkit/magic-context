@@ -23,6 +23,7 @@ Return valid JSON (no markdown fencing):
 - `category`: the one user category tag, from the list above, that the memory belongs to. For an update, give the memory's current category, unless it is shown as `UNSORTED`: such a memory was kept from an earlier version without a category, so give the category it belongs to.
 - `dismiss_existing`: existing stable memories that are no longer valid
 - `refile`: every memory shown as `UNSORTED` that you neither update nor dismiss, each with the one user category it belongs to. Its text stays as it is. Name each `UNSORTED` memory exactly once, in `update_existing`, `dismiss_existing` or `refile`.
+- A memory marked `protected` is one the person wrote or edited themselves. Never name it in `update_existing` or `dismiss_existing`. Still read it: a candidate it already covers is consumed, not promoted.
 - `consume_candidate_ids`: ALL candidate IDs that were reviewed (promoted, merged, or rejected) — they leave the candidate pool
 
 If no promotions are warranted, return empty arrays. Always consume reviewed candidates so they don't accumulate indefinitely.

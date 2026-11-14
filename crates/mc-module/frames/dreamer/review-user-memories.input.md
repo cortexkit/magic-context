@@ -1,5 +1,6 @@
 ### Current Stable User Memories
 - Memory #1 [⟦stableMemory.category⟧]: "⟦stableMemory.content⟧"
+- Memory #2 [⟦stableMemory2.category⟧, protected]: "⟦stableMemory2.content⟧"
 
 ### Candidate Observations (from recent historian runs)
 - Candidate #1 [session ⟦sid1⟧, proposed ⟦candidate1.category⟧]: "⟦candidate1.content⟧"
