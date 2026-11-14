@@ -1,0 +1,27 @@
+{
+  "name": "head-invalid-6",
+  "request": {
+    "method": "context.head_section",
+    "params": {
+      "max_bytes": 1024,
+      "offset": 1038,
+      "section": 0,
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      },
+      "slot": "baseline",
+      "view": 7
+    }
+  },
+  "response": {
+    "error": {
+      "code": "invalid_params",
+      "detail": {
+        "field": "offset"
+      },
+      "message": "Invalid offset."
+    }
+  }
+}

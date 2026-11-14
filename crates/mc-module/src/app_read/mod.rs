@@ -1180,3 +1180,5 @@ mod sessions_tests;
 
 #[cfg(test)]
 mod samples_v15_tests;
+#[cfg(test)]
+mod samples_v16_tests;
