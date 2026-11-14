@@ -109,6 +109,33 @@ fn live_branches_are_the_default_branch_and_every_worktree_head_once_per_commit(
 }
 
 #[test]
+fn a_worktree_head_the_default_branch_already_contains_is_not_live() {
+    let repo = Repo::on("master", &[("a.rs", "one\n")]);
+    // A side checkout left on the first commit while master moved on.
+    let (_old, old) = repo.worktree("old");
+    let first = git_at(&old, &["rev-parse", "HEAD"]).trim().to_owned();
+    let second = commit_at(repo.path(), &[("a.rs", "two\n")], "second");
+    // A branch with a commit of its own stays live.
+    let (_outer, feature) = repo.worktree("feature");
+    let own = commit_at(&feature, &[("a.rs", "three\n")], "own");
+    let refs = Refs::read(repo.path()).unwrap();
+    // The default branch comes first; git lists linked worktrees in no
+    // fixed order, so the rest compare as sets.
+    let commits = |live: Vec<LiveBranch>| {
+        let mut rest: Vec<String> = live.iter().skip(1).map(|b| b.commit.clone()).collect();
+        rest.sort();
+        (live[0].commit.clone(), rest)
+    };
+    let mut expected = vec![first.clone(), own.clone()];
+    expected.sort();
+    assert_eq!(commits(refs.live()), (second.clone(), expected));
+    assert_eq!(
+        commits(refs.live_in(repo.path()).unwrap()),
+        (second, vec![own])
+    );
+}
+
+#[test]
 fn the_default_branch_is_origins_head_then_a_local_main_or_master() {
     let upstream = Repo::on("trunk", &[("a.rs", "one\n")]);
     let outer = tempfile::tempdir().unwrap();

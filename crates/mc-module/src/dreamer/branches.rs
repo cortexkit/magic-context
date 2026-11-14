@@ -176,6 +176,55 @@ impl Refs {
         }
         live
     }
+
+    /// [`Refs::live`] without the worktree heads the default branch already
+    /// contains. Such a checkout has no commit of its own: it holds older
+    /// code of the default branch's line, which the default branch
+    /// supersedes, so a memory needs no protection on its account. Busy
+    /// repositories collect many of these (old side checkouts, worktrees left
+    /// on an earlier commit), and each one would otherwise make files differ
+    /// and keep verify from changing any old memory that names them. `Err`
+    /// when git fails or runs out of time on one of the checks.
+    pub(crate) fn live_in(&self, repo: &Path) -> Result<Vec<LiveBranch>, String> {
+        let live = self.live();
+        let Some(default) = live
+            .first()
+            .cloned()
+            .filter(|_| self.default_branch().is_some())
+        else {
+            return Ok(live);
+        };
+        let mut kept = vec![default.clone()];
+        for branch in live.into_iter().skip(1) {
+            if !contains(repo, &default.commit, &branch.commit)? {
+                kept.push(branch);
+            }
+        }
+        Ok(kept)
+    }
+}
+
+/// Whether commit `ancestor` is in the history of commit `tip`.
+fn contains(repo: &Path, tip: &str, ancestor: &str) -> Result<bool, String> {
+    if !is_commit(tip) || !is_commit(ancestor) {
+        return Err(format!("{ancestor} or {tip} is not a commit id"));
+    }
+    let output = run_git_output(
+        repo,
+        &["merge-base", "--is-ancestor", ancestor, tip],
+        GIT_TIMEOUT,
+    )?;
+    match output.code {
+        Some(0) => Ok(true),
+        // `git merge-base --is-ancestor` exits 1 when it is not.
+        Some(1) if output.stderr.trim().is_empty() => Ok(false),
+        _ => Err(format!(
+            "checking whether {} contains {}: {}",
+            short(tip),
+            short(ancestor),
+            output.stderr.trim().chars().take(300).collect::<String>()
+        )),
+    }
 }
 
 /// The worktrees `git worktree list --porcelain` lists, in order, without a

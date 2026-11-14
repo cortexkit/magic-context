@@ -15,7 +15,8 @@
 //!   absent from every live branch.
 //!
 //! The live branches are the default branch and the head of every worktree
-//! ([`Refs::live`]). With one live branch every check passes, so a project on
+//! that has commits the default branch doesn't contain ([`Refs::live_in`]).
+//! With one live branch every check passes, so a project on
 //! a single line behaves as it did before lines were recorded. The branches
 //! are read once per batch, when its reply is accepted; a git command that
 //! fails or runs out of time refuses the change, and the memory stays.
@@ -42,7 +43,7 @@ pub(crate) struct Live {
 
 impl Live {
     fn read(repo: &Path) -> Result<Self, String> {
-        let branches = Refs::read(repo)?.live();
+        let branches = Refs::read(repo)?.live_in(repo)?;
         if branches.len() < 2 {
             return Ok(Self {
                 branches,
