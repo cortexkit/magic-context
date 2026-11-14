@@ -238,10 +238,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .as_ref()
             .map(|db| crate::search::background::Background::new(client.clone(), db.path.clone()));
         let dreamer = db.as_ref().map(|_| {
-            Arc::new(crate::dreamer::engine::Engine::new(
-                format!("ck-mc:{}", std::process::id()),
-                crate::dreamer::tasks(),
-            ))
+            // A project's dreamer run embeds text with the provider the
+            // person's settings configure for its folder, read when the run
+            // starts.
+            let settings = config.clone();
+            Arc::new(
+                crate::dreamer::engine::Engine::new(
+                    format!("ck-mc:{}", std::process::id()),
+                    crate::dreamer::tasks(),
+                )
+                .with_embedding(Arc::new(move |root: &str| {
+                    settings.resolve(Some(root), "", 0).embedding
+                })),
+            )
         });
         // The app reads hear of every change the module's writers make to
         // the rows they show, and read the settings and the dreamer's task

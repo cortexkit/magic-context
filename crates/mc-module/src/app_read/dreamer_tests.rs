@@ -219,6 +219,8 @@ fn status_takes_kinds_and_switches_from_the_profile_the_engine_holds() {
             json!("compress-cues"),
             json!("curate"),
             json!("map-memories"),
+            json!("reflect-events"),
+            json!("refresh-primers"),
             json!("verify"),
             json!("verify-broad")
         ]

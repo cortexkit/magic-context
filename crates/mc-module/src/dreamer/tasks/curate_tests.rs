@@ -282,6 +282,7 @@ fn reply(text: &str) -> TaskReply {
         runner: "r".into(),
         child: "mc-dream:7.0:0.0".into(),
         usage: None,
+        steps: None,
     }
 }
 

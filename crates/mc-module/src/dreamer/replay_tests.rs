@@ -734,6 +734,7 @@ fn apply_batch(db: &ContextDb, out: &Path, index: usize, planned: &Planned) -> B
         // The child the engine's first attempt at this batch would run in.
         child: child_session(&format!("{RUN}.{index}"), 0, 0),
         usage: None,
+        steps: None,
     };
     let applied = db.with_connection(|conn| {
         let last: i64 = conn

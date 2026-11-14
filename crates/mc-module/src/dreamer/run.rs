@@ -83,6 +83,9 @@ pub struct TaskReply {
     pub runner: String,
     pub child: String,
     pub usage: Option<StepUsage>,
+    /// The model steps the child's run took, when the runner reported them.
+    /// A run that took more than one step made at least one tool call.
+    pub steps: Option<u64>,
 }
 
 /// Why a run ended without a usable reply.
@@ -240,6 +243,7 @@ pub async fn run<C: RunnerClient + Router>(
                             runner: answer.runner.module.clone(),
                             child: child.session.session,
                             usage,
+                            steps: reply.steps,
                         })
                     }
                     Err(problem) => {

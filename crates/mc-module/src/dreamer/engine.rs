@@ -129,7 +129,14 @@ pub struct Engine {
     running: Mutex<HashSet<OwnerKey>>,
     /// Workspaces whose schedules a round is checking with Entorhinal.
     checking: Mutex<HashSet<String>>,
+    /// The embedding provider the person's settings configure for a
+    /// project's folder, when they configure one. A project's run plans
+    /// with it ([`Task::plan`]); without a source no run has one.
+    embedding: Option<EmbeddingSource>,
 }
+
+/// Where a run finds the embedding provider for a project's folder.
+pub type EmbeddingSource = Arc<dyn Fn(&str) -> Option<crate::embedding::Provider> + Send + Sync>;
 
 impl Engine {
     pub fn new(holder: impl Into<String>, tasks: Vec<Box<dyn Task>>) -> Self {
@@ -141,7 +148,15 @@ impl Engine {
             workspaces: Mutex::default(),
             running: Mutex::default(),
             checking: Mutex::default(),
+            embedding: None,
         }
+    }
+
+    /// The engine with `source` as where a project's runs find their
+    /// embedding provider.
+    pub fn with_embedding(mut self, source: EmbeddingSource) -> Self {
+        self.embedding = Some(source);
+        self
     }
 
     /// Close the runs a stopped process left open. Called once at start.
@@ -1181,6 +1196,10 @@ impl Engine {
                 root: root.to_owned(),
             },
         };
+        let embedding = match (&owner, &self.embedding) {
+            (Owner::Project { root, .. }, Some(source)) => source(root),
+            _ => None,
+        };
         let batches = {
             let context = TaskContext {
                 db,
@@ -1189,7 +1208,7 @@ impl Engine {
                 declaration,
                 workspace,
             };
-            task.batches(&context)
+            task.plan(&context, embedding.as_ref()).await
         };
         match batches {
             Ok(batches) if batches.is_empty() => end.outcome = "nothing_to_do".into(),

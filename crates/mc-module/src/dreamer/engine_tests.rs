@@ -483,6 +483,7 @@ fn a_reply_is_not_applied_once_the_lock_passed_to_another_writer() {
         runner: "ra".into(),
         child: "c".into(),
         usage: None,
+        steps: None,
     };
     assert_eq!(
         apply(

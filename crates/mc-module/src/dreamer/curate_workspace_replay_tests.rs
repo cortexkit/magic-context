@@ -438,6 +438,7 @@ fn apply_batch(db: &ContextDb, out: &Path, index: usize, batch: &CurateBatch, ru
         // The child the engine's first attempt at this batch would run in.
         child: child_session(&format!("{run}.{index}"), 0, 0),
         usage: None,
+        steps: None,
     };
     let entries = match parse_list(&reply.text) {
         Ok(entries) => entries,

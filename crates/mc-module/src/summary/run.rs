@@ -712,6 +712,10 @@ pub(crate) struct Reply {
     pub text: String,
     /// The reply stopped at its output limit.
     pub length_capped: bool,
+    /// The model steps the run took, when the runner reported its usage.
+    /// Each tool call needs a step after it, so a run of more than one step
+    /// made at least one tool call.
+    pub steps: Option<u64>,
 }
 
 /// Retry timing stays typed until the first-turn retry loop consumes it.
@@ -841,6 +845,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
     }
     Ok(Reply {
         length_capped: result.finish == Some(Finish::Length),
+        steps: result.usage.as_ref().map(|usage| usage.steps),
         text: result
             .final_message
             .map(|message| message.text)

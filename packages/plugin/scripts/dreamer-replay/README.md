@@ -1,14 +1,15 @@
 # Dreamer replay
 
-Replays ck-mc's `verify`, `verify-broad` and `map-memories` dreamer tasks on a
-real project, so every request and every step of a model's work can be read
-before the tasks are switched on. Nothing here writes to a live store.
+Replays ck-mc's `verify`, `verify-broad`, `map-memories`, `refresh-primers` and
+`reflect-events` dreamer tasks on a real project, so every request and every
+step of a model's work can be read before the tasks are switched on. Nothing
+here writes to a live store.
 
 ## 1. Write the requests
 
 An ignored Rust test plans each task on a copy of a store and the project's git
-checkout, exactly as a run plans it, and writes one request per batch. Both
-tests read the same variables:
+checkout, exactly as a run plans it, and writes one request per batch. The
+verify, map and primer tests read the same variables:
 
 ```sh
 DREAMER_REPLAY_STORE=/path/to/context-copy.db \
@@ -18,13 +19,16 @@ DREAMER_REPLAY_OUT=/path/to/new-output-folder \
   cargo test --locked -p mc-module --lib dreamer::verify_replay_tests::verify_requests -- --ignored --nocapture
 ```
 
-For the map task, run `dreamer::map_replay_tests::map_requests` instead, with
-the same variables and a new output folder.
+For the map task, run `dreamer::map_replay_tests::map_requests` instead, and
+for the primers `dreamer::primer_replay_tests::primer_requests`, with the same
+variables and a new output folder.
 
 Optional: `DREAMER_REPLAY_BATCHES=<n>` to write only the first batches of each
 task, and `DREAMER_REPLAY_MODEL` for the model a request names
 (`deepseek-flash` by default). The verify test also takes
-`DREAMER_REPLAY_KINDS=verify` or `verify-broad` (both by default).
+`DREAMER_REPLAY_KINDS=verify` or `verify-broad` (both by default). The primer
+test takes `PRIMER_REPLAY_LIMIT=<n>` to write more primers than one run
+refreshes (5).
 
 The output folder gets `store.db` (the copy the run was planned on),
 `manifest.json`, and one request per batch:
@@ -38,23 +42,60 @@ The output folder gets `store.db` (the copy the run was planned on),
   likely files its message lists and where they came from (the paths its text
   names, or the module's search of the checkout for the code names it
   mentions).
+- `refresh-primers/primer-<n>/refresh.request.json` for the primers: the system
+  and user text, the same settings, and the primer. The test first runs the
+  task's promotion on the copy (by question text, as a run without an embedding
+  provider does), so the copy holds the primers the run would refresh.
 
-The map test refuses a store, checkout or output folder inside the live data
-folder (`~/.local/share/cortexkit/`), opens the store read-only, copies it with
-`VACUUM INTO`, and brings the copy to the module's schema before planning.
+The map and primer tests refuse a store, checkout or output folder inside the
+live data folder (`~/.local/share/cortexkit/`), open the store read-only, copy
+it with `VACUUM INTO`, and bring the copy to the module's schema before
+planning.
+
+### Reflect
+
+The reflect task reads no code, so its test takes no checkout:
+
+```sh
+REFLECT_REPLAY_STORE=/path/to/context-copy.db \
+REFLECT_REPLAY_PROJECT=<project id in session_projects> \
+DREAMER_REPLAY_OUT=/path/to/new-output-folder \
+  cargo test --locked -p mc-module --lib dreamer::reflect_replay_tests::reflect_requests -- --ignored --nocapture
+```
+
+It writes `reflect/batch-<n>/reflect.request.json` per message: the system and
+user text, the settings, the groups the message shows and the existing
+memories. Optional: `REFLECT_REPLAY_SINCE_EVENT=<event id>` treats the events
+up to that id as read by an earlier run; without it every event is new unless
+the copy holds a watermark.
+
+Once a reply is beside a request, the apply step applies it to a throwaway copy
+of the replay's `store.db` with the task's own checks, and prints and writes
+(`reflect.apply.json`) every learning written and every one dropped, with why:
+
+```sh
+DREAMER_REPLAY_OUT=/path/to/the-output-folder \
+REFLECT_REPLAY_BATCH=0 \
+  cargo test --locked -p mc-module --lib dreamer::reflect_replay_tests::reflect_apply -- --ignored --nocapture
+```
+
+It reads the batch's `reflect.reply.json` (from `send.ts`) or
+`reflect.trajectory.json` (from `verify-run.ts`), or the file
+`REFLECT_REPLAY_REPLY` names.
 
 ## 2. Run one request
 
-`verify-run.ts` sends one request of either kind to DeepSeek's chat-completions
-API and plays the runner's part: it offers `read` (with a line range), `grep`
-and `glob`, confined to the checkout (no path outside it, no symlink out of
-it), and runs the tool loop until the model answers or the request's step bound
-is reached. It writes the trajectory beside the request, as
-`verify.trajectory.json` for a verify request and `map.trajectory.json` for a
-map request, with every request body, every reply as returned (reasoning
-included) and every tool call with its full input and output. It never
-overwrites a trajectory and writes nothing else. A request of any other kind is
-refused.
+`verify-run.ts` sends one request of any of these kinds to DeepSeek's
+chat-completions API and plays the runner's part. For a kind that reads code it
+offers `read` (with a line range), `grep` and `glob`, confined to the checkout
+(no path outside it, no symlink out of it), and runs the tool loop until the
+model answers or the request's step bound is reached; a reflect request gets no
+tools and needs no checkout. It writes the trajectory beside the request, as
+`verify.trajectory.json`, `map.trajectory.json`, `refresh.trajectory.json` or
+`reflect.trajectory.json`, with every request body, every reply as returned
+(reasoning included) and every tool call with its full input and output. It
+never overwrites a trajectory and writes nothing else. A request of any other
+kind is refused.
 
 The key comes from the vault, through the e2e harness's credential client, and
 reaches the runner only on standard input:
@@ -67,9 +108,17 @@ bun packages/plugin/scripts/dreamer-replay/with-deepseek-key.ts -- \
 bun packages/plugin/scripts/dreamer-replay/with-deepseek-key.ts -- \
   --request /path/to/new-output-folder/map-memories/batch-0/map.request.json \
   --checkout /path/to/project
+
+bun packages/plugin/scripts/dreamer-replay/with-deepseek-key.ts -- \
+  --request /path/to/new-output-folder/refresh-primers/primer-0/refresh.request.json \
+  --checkout /path/to/project
+
+bun packages/plugin/scripts/dreamer-replay/with-deepseek-key.ts -- \
+  --request /path/to/new-output-folder/reflect/batch-0/reflect.request.json
 ```
 
 `verify-run.ts` also takes `--model`, `--endpoint` and `--temperature` (0.1 by
 default). The trajectory's `final.completeManifest` says whether the final
-message held one complete manifest of the request's kind, which the module
-requires: `<verify>…</verify>` for verify, `<mappings>…</mappings>` for map.
+message held the one answer the module requires of the request's kind:
+`<verify>…</verify>` for verify, `<mappings>…</mappings>` for map,
+`{"answer": "…"}` for a primer, and `<learnings>…</learnings>` for reflect.

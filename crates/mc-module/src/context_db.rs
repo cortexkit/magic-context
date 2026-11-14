@@ -1127,7 +1127,8 @@ mod tests {
     /// its events stay out of every project's reads.
     #[test]
     fn a_publish_records_the_sessions_project_only_when_it_has_one() {
-        let dir = std::env::temp_dir().join(format!("ck-mc-session-project-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ck-mc-session-project-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
@@ -1152,10 +1153,24 @@ mod tests {
         };
         db.publish_summaries("opencode", "loose", &[summary(0)], None, &recall(None), 3)
             .unwrap();
-        db.publish_summaries("opencode", "s1", &[summary(0)], None, &recall(Some("pj-a")), 4)
-            .unwrap();
-        db.publish_summaries("opencode", "s1", &[summary(1)], None, &recall(Some("pj-b")), 5)
-            .unwrap();
+        db.publish_summaries(
+            "opencode",
+            "s1",
+            &[summary(0)],
+            None,
+            &recall(Some("pj-a")),
+            4,
+        )
+        .unwrap();
+        db.publish_summaries(
+            "opencode",
+            "s1",
+            &[summary(1)],
+            None,
+            &recall(Some("pj-b")),
+            5,
+        )
+        .unwrap();
         db.with_connection(|conn| {
             let rows: Vec<(String, String, i64)> = conn
                 .prepare("SELECT session_id, project_path, updated_at FROM session_projects ORDER BY session_id")
@@ -1249,7 +1264,9 @@ pub struct PrimerSource {
 }
 
 /// A primer question normalized as the plugin's `normalizePrimerQuestion`.
-fn normalize_primer_question(question: &str) -> String {
+/// Primer promotion normalizes a primer's own question the same way to
+/// match it against these.
+pub(crate) fn normalize_primer_question(question: &str) -> String {
     let lowered = question
         .trim()
         .to_lowercase()
@@ -1271,7 +1288,11 @@ fn store_recall(
     recall: &Recall,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
-    if let Some(project) = recall.project.as_deref().filter(|project| !project.is_empty()) {
+    if let Some(project) = recall
+        .project
+        .as_deref()
+        .filter(|project| !project.is_empty())
+    {
         // A session belongs to one project: the newest publish names it.
         tx.execute(
             "INSERT INTO session_projects (session_id, harness, project_path, updated_at)

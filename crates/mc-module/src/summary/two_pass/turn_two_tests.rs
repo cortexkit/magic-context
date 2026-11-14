@@ -108,6 +108,7 @@ fn turn_two_child_harness_does_not_change_check_keys_or_reported_profiles() {
     let reply = run::Reply {
         text: "reply".into(),
         length_capped: false,
+        steps: None,
     };
     record_reply(&conn, "same", &same_harness, &reply).unwrap();
     record_reply(&conn, "other", &other_harness, &reply).unwrap();

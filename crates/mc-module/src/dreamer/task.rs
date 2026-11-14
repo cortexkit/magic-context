@@ -12,13 +12,20 @@
 //! its input frame with the rows it read, so the input's shape stays the
 //! module's while its guidance is the profile's.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use serde_json::Value;
 
 use super::run::{TaskInput, TaskReply};
 use crate::context_db::ContextDb;
+use crate::embedding::Provider;
 use crate::memory_profile::{render, Profile, FRAMES};
 use crate::workspace_members::WorkspaceMembers;
 
+/// A run's batches, once planning them (which may wait on the network) ends.
+pub(crate) type Planning<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<Box<dyn Batch>>, String>> + Send + 'a>>;
 /// Whose memories a run reads and may change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Owner {
@@ -92,6 +99,18 @@ pub(crate) trait Task: Send + Sync {
     /// The batches one run sends for the context's owner, in order. Empty
     /// when there is nothing to do; the run then sends nothing.
     fn batches(&self, context: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String>;
+    /// The run's batches, for a task whose planning embeds text with the
+    /// project's embedding provider (`embedding`, when one is configured)
+    /// and so waits on the network. The engine plans every run through
+    /// here; the default is [`Task::batches`], which needs neither.
+    fn plan<'a>(
+        &'a self,
+        context: &'a TaskContext<'a>,
+        embedding: Option<&'a Provider>,
+    ) -> Planning<'a> {
+        let _ = embedding;
+        Box::pin(std::future::ready(self.batches(context)))
+    }
 }
 
 /// One message of a run, and how its accepted reply is written.

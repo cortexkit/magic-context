@@ -26,6 +26,10 @@ mod lift_replay_tests;
 #[cfg(test)]
 mod map_replay_tests;
 #[cfg(test)]
+mod primer_replay_tests;
+#[cfg(test)]
+mod reflect_replay_tests;
+#[cfg(test)]
 mod replay_tests;
 #[cfg(test)]
 mod review_replay_tests;
@@ -42,6 +46,8 @@ pub(crate) fn tasks() -> Vec<Box<dyn task::Task>> {
         Box::new(tasks::curate_workspace::CurateWorkspace),
         Box::new(tasks::lift_workspace::LiftWorkspace),
         Box::new(tasks::map_memories::MapMemories),
+        Box::new(tasks::reflect_events::ReflectEvents),
+        Box::new(tasks::refresh_primers::RefreshPrimers),
         Box::new(tasks::verify::Verify { broad: false }),
         Box::new(tasks::verify::Verify { broad: true }),
         Box::new(tasks::review_user_memories::ReviewUserMemories),

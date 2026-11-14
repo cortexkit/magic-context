@@ -175,6 +175,7 @@ impl Fixture {
             runner: "r".into(),
             child: "child".into(),
             usage: None,
+            steps: None,
         };
         self.db.with_connection(|conn| {
             let tx = conn.transaction().unwrap();

@@ -1177,7 +1177,7 @@ fn formatting_key(text: &str) -> String {
 
 /// A live memory of `scope`'s owner, in any category, other than `except`,
 /// whose text has `hash`.
-fn live_with_hash(
+pub(crate) fn live_with_hash(
     tx: &Transaction<'_>,
     scope: &Scope,
     hash: &str,

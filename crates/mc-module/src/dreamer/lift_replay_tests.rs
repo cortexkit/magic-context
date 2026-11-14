@@ -388,6 +388,7 @@ fn apply_batch(db: &ContextDb, out: &Path, index: usize, batch: &LiftBatch, run:
         // The child the engine's first attempt at this batch would run in.
         child: child_session(&format!("{run}.{index}"), 0, 0),
         usage: None,
+        steps: None,
     };
     // The batch's own apply, which reads the manifest and places what it
     // says; the report needs the moves and refusals it found, so the two

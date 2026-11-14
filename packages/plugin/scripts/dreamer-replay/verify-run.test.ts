@@ -5,6 +5,8 @@ import { cleanupRegisteredTestTempDirs, createTestTempDir } from "../../src/shar
 import {
     MAP_TRAJECTORY,
     type ProviderAnswer,
+    REFLECT_TRAJECTORY,
+    REFRESH_TRAJECTORY,
     runRequest,
     TOOLS,
     TRAJECTORY,
@@ -353,5 +355,81 @@ describe("verify-run", () => {
                 server.stop(true);
             }
         }
+    });
+
+    it("runs a primer request with the read-only tools into refresh.trajectory.json", async () => {
+        const { dir, checkout, folder, requestPath } = fixture();
+        writeFileSync(
+            requestPath,
+            readFileSync(requestPath, "utf8")
+                .replace('"kind":"verify"', '"kind":"refresh-primers"')
+                .replace('"task":"swe:verify"', '"task":"swe:refresh-primers"'),
+        );
+        const before = listing(dir);
+        const answer = '{"answer": "alpha runs first, in src/a.rs."}';
+        const model = stub([toolReply([["read", { path: "src/a.rs" }]]), finalReply(answer)]);
+        const trajectory = await runRequest({ requestPath, checkout, key: KEY, send: model.send });
+        expect(trajectory).toMatchObject({ kind: "refresh-primers", stopReason: "final" });
+        expect(trajectory.final).toEqual({ text: answer, completeManifest: true });
+        expect(trajectory.steps[0].toolCalls[0].output).toContain("1: fn alpha() {}");
+        expect((model.bodies[0] as { tools: unknown }).tools).toEqual(TOOLS);
+        expect(listing(dir)).toEqual([...before, relative(dir, join(folder, REFRESH_TRAJECTORY))].sort());
+
+        for (const [text, complete] of [
+            ['```json\n{"answer": "Fenced."}\n```', true],
+            ['{"answer": ""}', true],
+            ["I could not find the code.", false],
+            ['{"answer": 4}', false],
+        ] as const) {
+            const again = fixture();
+            writeFileSync(
+                again.requestPath,
+                readFileSync(again.requestPath, "utf8").replace('"kind":"verify"', '"kind":"refresh-primers"'),
+            );
+            const run = await runRequest({
+                requestPath: again.requestPath,
+                checkout: again.checkout,
+                key: KEY,
+                send: stub([finalReply(text)]).send,
+            });
+            expect([text, run.final]).toEqual([text, { text, completeManifest: complete }]);
+        }
+    });
+
+    it("runs a reflect request without tools or a checkout into reflect.trajectory.json", async () => {
+        const { dir, folder, requestPath } = fixture(1);
+        writeFileSync(
+            requestPath,
+            readFileSync(requestPath, "utf8")
+                .replace('"kind":"verify"', '"kind":"reflect-events"')
+                .replace('"task":"swe:verify"', '"task":"swe:reflect-patterns"'),
+        );
+        const before = listing(dir);
+        const list = '<learnings>\n<learning route="memory" category="CONSTRAINTS" events="e1,e2">Plan around it.</learning>\n</learnings>';
+        const model = stub([finalReply(list)]);
+        const trajectory = await runRequest({ requestPath, key: KEY, send: model.send });
+        expect(trajectory).toMatchObject({ kind: "reflect-events", stopReason: "final", checkout: null });
+        expect(trajectory.final).toEqual({ text: list, completeManifest: true });
+        expect(model.bodies[0]).not.toHaveProperty("tools");
+        expect(listing(dir)).toEqual([...before, relative(dir, join(folder, REFLECT_TRAJECTORY))].sort());
+
+        for (const [text, complete] of [
+            ["Nothing recurs.\n<learnings/>", true],
+            ["Nothing recurs.", false],
+        ] as const) {
+            const again = fixture(1);
+            writeFileSync(
+                again.requestPath,
+                readFileSync(again.requestPath, "utf8").replace('"kind":"verify"', '"kind":"reflect-events"'),
+            );
+            const run = await runRequest({ requestPath: again.requestPath, key: KEY, send: stub([finalReply(text)]).send });
+            expect(run.final).toEqual({ text, completeManifest: complete });
+        }
+
+        // A kind that reads code refuses to run without a checkout.
+        const verify = fixture();
+        await expect(runRequest({ requestPath: verify.requestPath, key: KEY, send: stub([]).send })).rejects.toThrow(
+            "a verify request needs --checkout",
+        );
     });
 });
