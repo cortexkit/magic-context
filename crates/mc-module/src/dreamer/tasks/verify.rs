@@ -532,7 +532,10 @@ impl Verify {
         context: &TaskContext<'_>,
     ) -> Result<Vec<VerifyBatch>, String> {
         let Owner::Project { id: project, root } = context.owner else {
-            return Err(format!("{} works on a project's memories only", self.kind()));
+            return Err(format!(
+                "{} works on a project's memories only",
+                self.kind()
+            ));
         };
         let declared = Arc::new(Declared::of(context.declaration, self.kind()));
         let document = |key: &str| context.declaration["prompts"][key].as_str();
