@@ -75,7 +75,7 @@ fn bundled_packages_load_and_base_cannot_be_an_agent() {
     let profile = load_chain(&packages).unwrap();
     assert_eq!(
         profile.digest,
-        "f77700866a586cca97ba306e8fcc2ec711b7a15020d8c45eca00a607d546e554"
+        "24498eb9af3f7b39dad94198824c948de2cb76a8f2083d220a863d8dae57bab8"
     );
     assert_eq!(list(&profile.body, "categories").len(), 12);
     let mut facts: Vec<_> = list(&profile.body, "categories")
@@ -274,7 +274,7 @@ fn session(pins: Vec<Value>) -> ContextAnswer<SessionContext> {
 }
 
 fn swe_pin() -> Value {
-    json!({"kind":"memory-profile","name":"@cortexkit/memory-swe","version":"1.0.0","manifest_sha256":"5aa2db61af141be1141dec558f6bceb24ecd24886f90fe59b9ffe0ef4cb3176f","archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","publisher_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","status":null})
+    json!({"kind":"memory-profile","name":"@cortexkit/memory-swe","version":"1.0.0","manifest_sha256":"82cb7f94f35346d7c2ad73a8f23dcb0abd41336f7da48fdb4ef67f3e70d3aa37","archive_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","publisher_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","status":null})
 }
 
 fn outcome(domain: Option<&str>, pins: Vec<Value>, installed: &[Profile]) -> MemoryContext {
