@@ -85,6 +85,21 @@ fn env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Give `project`'s id to the workspace member called `name`. A run names
+/// the project by the name the workspace lists for its id, and the
+/// workspace JSON lists names only; without a name the message shows the id.
+fn name_project(workspace: &mut WorkspaceMembers, project: &str, name: Option<&str>) {
+    let Some(name) = name else {
+        return;
+    };
+    let member = workspace
+        .members
+        .iter_mut()
+        .find(|member| member.name == name)
+        .expect("LIFT_REPLAY_PROJECT_NAME is one of the workspace's projects");
+    member.project_id = project.to_owned();
+}
+
 fn required(name: &str, what: &str) -> String {
     env(name).unwrap_or_else(|| panic!("set {name} to {what}"))
 }
@@ -216,17 +231,8 @@ fn lift_requests() {
     ))
     .expect("LIFT_REPLAY_WORKSPACE is JSON");
     let mut workspace = workspace_of(&workspace_json);
-    // The run names the project by the name the workspace lists for its id;
-    // the JSON lists names only, so `LIFT_REPLAY_PROJECT_NAME` says which
-    // one is this project.
-    if let Some(name) = env("LIFT_REPLAY_PROJECT_NAME") {
-        let member = workspace
-            .members
-            .iter_mut()
-            .find(|member| member.name == name)
-            .expect("LIFT_REPLAY_PROJECT_NAME is one of the workspace's projects");
-        member.project_id = project.clone();
-    }
+    let project_name = env("LIFT_REPLAY_PROJECT_NAME");
+    name_project(&mut workspace, &project, project_name.as_deref());
     assert!(
         workspace.members.len() >= 2,
         "a workspace of fewer than two projects gets no lift run"
@@ -301,6 +307,7 @@ fn lift_requests() {
         &out.join(FOLDER).join(MANIFEST),
         &pretty(&json!({
             "project": project,
+            "projectName": project_name,
             "workspace": workspace_json,
             "store": {"file": store, "sha256": digest, "schema": schema, "migratedTo": SCHEMA_VERSION},
             "copy": STORE,
@@ -439,7 +446,8 @@ fn lift_apply_report() {
         .as_str()
         .expect("the manifest names the project")
         .to_owned();
-    let workspace = workspace_of(&manifest["workspace"]);
+    let mut workspace = workspace_of(&manifest["workspace"]);
+    name_project(&mut workspace, &project, manifest["projectName"].as_str());
     let source = out.join(STORE);
     assert!(
         source.exists(),
