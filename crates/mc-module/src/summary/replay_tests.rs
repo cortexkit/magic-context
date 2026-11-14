@@ -42,8 +42,8 @@
 //!   and copied once (`VACUUM INTO`) into a throwaway folder, where only the
 //!   copy is brought to this build's schema; each case's second turn then
 //!   runs on a fresh copy of that. The given file is never written. The
-//!   project's own open second turns and waiting facts in the copy run along
-//!   as they would in the module.
+//!   project's own unfinished second-turn work and facts still waiting for a
+//!   second turn in the copy are sent along, as they would be in the module.
 //! - `SUMMARY_REPLAY_PROJECT`: the project's id, as its memories name their
 //!   owner (default `summary-replay`).
 //! - `SUMMARY_REPLAY_WORKSPACE`: the project's workspace, as JSON

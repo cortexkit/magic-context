@@ -50,7 +50,8 @@ impl WorkspaceRule {
     }
 }
 
-/// An MC frame's text, without the newline that ends its file.
+/// The text of one of Magic Context's own frames (`frames/`), without the
+/// newline that ends its file.
 fn frame(name: &str) -> &'static str {
     let (_, text) = FRAMES
         .iter()

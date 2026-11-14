@@ -55,8 +55,9 @@ pub(crate) enum Lookup {
     NotAnswering,
 }
 
-/// The bind identity a workspace read is asked under. It concerns no
-/// session: the answer is shared by every session of the workspace.
+/// The session reference Entorhinal's workspace read is made under. It
+/// names no real session, because the answer is shared by every session of
+/// the workspace.
 fn identity() -> SessionRef {
     SessionRef::new(crate::MODULE_ID, "magic-context", "workspace-members")
 }
