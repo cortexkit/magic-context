@@ -1,7 +1,15 @@
+use std::collections::BTreeSet;
+
 use super::*;
+use crate::dreamer::checkout::tests::Repo;
+
+/// The top level of the checkout these tests cite against.
+fn top_level() -> BTreeSet<String> {
+    ["crates", "packages", "docs"].map(str::to_owned).into()
+}
 
 fn texts(content: &str) -> Vec<String> {
-    cites(content)
+    cites(content, &top_level())
         .iter()
         .map(|cite| match cite {
             Cite::Path(text) => format!("path:{text}"),
@@ -147,7 +155,62 @@ fn a_memory_cites_each_thing_once_and_at_most_sixteen() {
         ["name:run_git"]
     );
     let many: String = (0..30).map(|n| format!("name_{n} ")).collect();
-    assert_eq!(cites(&many).len(), MAX_CITES);
+    assert_eq!(cites(&many, &top_level()).len(), MAX_CITES);
+}
+
+/// English phrases and a number written with slashes, which a verify-broad
+/// batch over this project's checkout once listed as missing paths.
+const SLASHED_PROSE: [&str; 10] = [
+    "prompt/input/output",
+    "SOFT/SOFT+/HARD",
+    "project/user-facing",
+    "Task/Athena/bash/board",
+    "SUBC/Thalamus/MC",
+    "CI-green/gated/mutation-proved",
+    "py/sh/bash/zsh/rb/pl/etc",
+    "platform-matrix/reachability",
+    "FFI/TinyCC-disabled",
+    "38520/",
+];
+
+#[test]
+fn words_joined_by_slashes_are_a_path_only_when_shaped_like_the_checkouts() {
+    let repo = Repo::new(&[
+        ("crates/a.rs", "\n"),
+        ("packages/b.ts", "\n"),
+        ("docs/c.md", "\n"),
+    ]);
+    let checkout = repo.checkout();
+    let top_level = checkout.top_level();
+    for prose in SLASHED_PROSE {
+        for content in [prose.to_owned(), format!("Every {prose} step is checked.")] {
+            let found = cites(&content, top_level);
+            assert!(
+                found.iter().all(|cite| !matches!(cite, Cite::Path(_))),
+                "{content}: {found:?}"
+            );
+        }
+    }
+    // A file name at the end, a name at the top of the checkout (`.cortexkit`
+    // always among them) or `./` at the start makes a path.
+    for path in [
+        "crates/mc-module/src/x.rs",
+        "packages/plugin",
+        "docs/cache-policy/",
+        ".cortexkit/release-notes/",
+        "./scripts/a.sh",
+    ] {
+        assert_eq!(
+            cites(&format!("See {path} for it."), top_level),
+            [Cite::Path(path.to_owned())],
+            "{path}"
+        );
+    }
+    // A backticked span keeps its own rule.
+    assert_eq!(
+        texts("The `prompt/input/output` folder."),
+        ["path:prompt/input/output"]
+    );
 }
 
 #[test]

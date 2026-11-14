@@ -523,6 +523,9 @@ async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides()
     use crate::dreamer::run::tests::{Client, Ends};
 
     let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("src/gone.rs", "fn gone_function() {}\n")]);
     fixture.insert(&[
         row(1, "`live_function` runs first."),
         row(2, "`gone_function` does it."),

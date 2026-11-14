@@ -63,6 +63,17 @@ impl Repo {
         self.git(&["rev-parse", "HEAD"]).trim().to_owned()
     }
 
+    /// Commit `files` (path, text), then delete them in a later commit, so
+    /// the history holds them and the working tree does not.
+    pub(crate) fn add_then_remove(&self, files: &[(&str, &str)]) {
+        self.write(files);
+        self.commit("add");
+        for (path, _) in files {
+            std::fs::remove_file(self.path().join(path)).unwrap();
+        }
+        self.commit("remove");
+    }
+
     pub(crate) fn checkout(&self) -> Checkout {
         Checkout::open(self.path()).unwrap()
     }
@@ -119,6 +130,62 @@ fn a_checkout_lists_tracked_files_and_finds_cited_paths_by_their_tail() {
     );
     assert_eq!(checkout.tracked_file("untracked.rs"), None);
     assert_eq!(checkout.tracked_file("crates/mc-module"), None);
+}
+
+#[test]
+fn the_top_level_is_every_tracked_paths_first_part_and_cortexkit() {
+    let repo = Repo::new(&[
+        ("crates/a/src/lib.rs", "\n"),
+        ("docs/guide.md", "\n"),
+        ("README.md", "\n"),
+    ]);
+    repo.write(&[("untracked/x.rs", "\n")]);
+    assert_eq!(
+        repo.checkout()
+            .top_level()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [".cortexkit", "README.md", "crates", "docs"]
+    );
+}
+
+#[test]
+fn the_history_holds_what_some_commit_added_or_removed() {
+    let repo = Repo::new(&[("src/live.rs", "fn live_name() {}\n")]);
+    repo.add_then_remove(&[("crates/old/src/dreamer/gone.rs", "fn removed_name() {}\n")]);
+    let checkout = repo.checkout();
+    let wait = Duration::from_secs(30);
+    for removed in [
+        "crates/old/src/dreamer/gone.rs",
+        "dreamer/gone.rs",
+        "./src/dreamer/gone.rs:4",
+        "crates/old",
+        "old/src/",
+    ] {
+        assert_eq!(
+            checkout.path_in_history(removed, wait),
+            Ok(true),
+            "{removed}"
+        );
+    }
+    for never in ["src/gone.rs", "ask.rs", "crates/new", "old/sr", "gone.rs*"] {
+        assert_eq!(checkout.path_in_history(never, wait), Ok(false), "{never}");
+    }
+    assert!(checkout.path_in_history("/etc/passwd", wait).is_err());
+    assert_eq!(checkout.text_in_history("removed_name", wait), Ok(true));
+    assert_eq!(checkout.text_in_history("live_name", wait), Ok(true));
+    assert_eq!(checkout.text_in_history("never_name", wait), Ok(false));
+    // The text is literal, not a pattern.
+    assert_eq!(checkout.text_in_history("removed_.ame", wait), Ok(false));
+    // A lookup that runs past its time is killed and tells no answer.
+    let timed_out = checkout.text_in_history("removed_name", Duration::ZERO);
+    assert!(
+        timed_out
+            .as_ref()
+            .is_err_and(|why| why.contains("timed out")),
+        "{timed_out:?}"
+    );
 }
 
 #[cfg(unix)]

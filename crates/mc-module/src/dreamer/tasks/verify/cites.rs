@@ -3,12 +3,20 @@
 //!
 //! What counts, each at least four characters:
 //! - a backticked span without spaces (`` `mc-module` ``);
-//! - a path-shaped token (`crates/x/y.rs`, `task.rs`, `crates/mc-module`);
+//! - a path-shaped token (`crates/x/y.rs`, `task.rs`, `crates/mc-module`),
+//!   see [`bare_path`];
 //! - a qualified name (`RecipeLane::Pi`) or a dotted operation name
 //!   (`session.entries`);
 //! - a command-line flag (`--shared-context-db`);
 //! - an identifier written in `snake_case`, `SCREAMING_SNAKE`, or
 //!   `camelCase`/`PascalCase` with an inner capital.
+//!
+//! A bare word joined by slashes is a path only when it looks like one of
+//! the checkout's: it ends in a file name, starts at a name the checkout's
+//! top level holds, or starts with `./`. English joins words with slashes
+//! (`prompt/input/output`, `project/user-facing`), and such a phrase, read
+//! as a path, would be absent from every checkout, so a rule that cites
+//! nothing else would look like one whose subject is gone.
 //!
 //! A bare hyphenated word is never a code name, however it looks: English
 //! makes compounds freely (`audit-flagged`, `zero-delta`, `Team-mode`), and no
@@ -18,6 +26,7 @@
 //! digit), which name a session or a commit rather than code. A token inside
 //! a span, path or name already taken is not taken again.
 
+use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::OnceLock;
 
@@ -94,8 +103,10 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
 }
 
 /// What `content` cites, in the order it first appears, at most
-/// [`MAX_CITES`].
-pub(crate) fn cites(content: &str) -> Vec<Cite> {
+/// [`MAX_CITES`]. `top_level` holds the names at the top of the checkout
+/// the memory is checked against (`Checkout::top_level`), which decide
+/// whether a bare word joined by slashes is a path.
+pub(crate) fn cites(content: &str, top_level: &BTreeSet<String>) -> Vec<Cite> {
     static SPAN: OnceLock<Regex> = OnceLock::new();
     static PATH: OnceLock<Regex> = OnceLock::new();
     static QUALIFIED: OnceLock<Regex> = OnceLock::new();
@@ -125,7 +136,7 @@ pub(crate) fn cites(content: &str) -> Vec<Cite> {
         let text = token.as_str().trim_end_matches(['.', '-']);
         // A run that follows `~` or `:` is a home-folder path or a URL.
         let before = content[..range.start].chars().next_back();
-        if matches!(before, Some('~' | ':' | '\\')) || !path_shaped(text) {
+        if matches!(before, Some('~' | ':' | '\\')) || !bare_path(text, top_level) {
             continue;
         }
         covered.push(range.clone());
@@ -224,22 +235,14 @@ fn span_cite(raw: &str) -> Option<Cite> {
     Some(Cite::Name(text.to_owned()))
 }
 
-/// Whether `token` reads as a file or folder path inside a checkout: a file
-/// name with a known extension, or a path with a `/` that a sentence would
-/// not hold (`and/or`), because it ends in `/`, has two or more `/`, or
-/// one of its parts holds `_`, `-` or `.`.
+/// Whether a backticked `token` reads as a file or folder path inside a
+/// checkout: a file name with a known extension, or a path with a `/` that
+/// a sentence would not hold (`and/or`), because it ends in `/`, has two or
+/// more `/`, or one of its parts holds `_`, `-` or `.`.
 pub(crate) fn path_shaped(token: &str) -> bool {
-    // `@scope/package` names a package, not a file of the checkout.
-    if token.chars().count() < MIN_LEN || token.starts_with('@') || clean_path(token).is_none() {
+    if !relative_path(token) {
         return false;
     }
-    let file_name = |name: &str| {
-        name.rsplit_once('.').is_some_and(|(stem, extension)| {
-            !stem.is_empty()
-                && EXTENSIONS.contains(&extension)
-                && !NOT_FILES.contains(&name.to_lowercase().as_str())
-        })
-    };
     if !token.contains('/') {
         return file_name(token);
     }
@@ -250,6 +253,48 @@ pub(crate) fn path_shaped(token: &str) -> bool {
         || parts.iter().any(|part| {
             part.contains(['_', '-', '.']) && part.chars().any(|ch| ch.is_ascii_alphabetic())
         })
+}
+
+/// Whether a bare (unbackticked) `token` reads as a file or folder path
+/// inside a checkout whose top level holds `top_level`. Without a `/` it
+/// must be a file name with a known extension. With one, a sentence holds
+/// such words too (`prompt/input/output`, `SOFT/SOFT+/HARD`, `38520/`), so
+/// it must start or end like a path: its last part is a file name, its
+/// first part is a name at the top of the checkout (`crates/mc-module`,
+/// `docs/cache-policy/`), or it starts with `./`, `../`, `~/` or `/`.
+/// Digits and slashes alone are a number. A path that leaves the checkout
+/// (`../x`, `~/x`, `/x`) is shaped like a path but never counts, as with a
+/// backticked one: the checkout can't hold it.
+fn bare_path(token: &str, top_level: &BTreeSet<String>) -> bool {
+    if !token.contains('/') {
+        return path_shaped(token);
+    }
+    if !relative_path(token) || token.chars().all(|ch| ch.is_ascii_digit() || ch == '/') {
+        return false;
+    }
+    let parts: Vec<&str> = token.trim_end_matches('/').split('/').collect();
+    file_name(parts.last().copied().unwrap_or_default())
+        || top_level.contains(parts[0])
+        || ["./", "../", "~/", "/"]
+            .iter()
+            .any(|start| token.starts_with(start))
+}
+
+/// Whether `token` could be a path inside a checkout at all: long enough,
+/// not a package name (`@scope/package`), and relative without leaving the
+/// folder it starts in.
+fn relative_path(token: &str) -> bool {
+    token.chars().count() >= MIN_LEN && !token.starts_with('@') && clean_path(token).is_some()
+}
+
+/// Whether `name` is a file name: a stem and a known extension, and not a
+/// product named like a file (`node.js`).
+fn file_name(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && EXTENSIONS.contains(&extension)
+            && !NOT_FILES.contains(&name.to_lowercase().as_str())
+    })
 }
 
 /// Whether the dotted token at `range` of `content` is an operation name

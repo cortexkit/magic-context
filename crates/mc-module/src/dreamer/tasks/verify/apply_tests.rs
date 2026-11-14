@@ -5,14 +5,17 @@ use super::super::tests::{row, Fixture, Row};
 use super::super::{look_for, Absence};
 use crate::dreamer::checkout::Limits;
 
-/// A checkout with one live source file, and a store holding memory 1 (an
-/// architecture fact citing `live_function`) and memory 2 (one citing only
-/// what is gone).
+/// A checkout with one live source file and one removed in a later commit,
+/// and a store holding memory 1 (an architecture fact citing
+/// `live_function`) and memory 2 (one citing only what was removed).
 fn fixture() -> Fixture {
     let fixture = Fixture::new(&[
         ("src/live.rs", "fn live_function() {}\n"),
         ("src/other.rs", "fn other() {}\n"),
     ]);
+    fixture
+        .repo
+        .add_then_remove(&[("src/old/gone.rs", "fn gone_function() {}\n")]);
     fixture.insert(&[
         row(
             1,
@@ -271,6 +274,9 @@ fn a_missing_name_that_is_not_one_of_the_memorys_citations_is_refused() {
     // A qualified name the memory cites, gone from the checkout, still
     // archives.
     let fixture = Fixture::new(&[("a.rs", "\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("src/lane.rs", "RecipeLane::Pi\n")]);
     fixture.insert(&[row(1, "Pi sessions run through RecipeLane::Pi.")]);
     let applied = fixture.apply(
         &plan_one(&fixture),
@@ -323,8 +329,66 @@ fn the_missing_lookup_runs_when_the_reply_is_accepted_not_inside_the_write() {
 }
 
 #[test]
+fn an_archive_needs_what_is_missing_to_have_been_in_the_history() {
+    let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("src/old/removed.rs", "fn removed_function() {}\n")]);
+    fixture.insert(&[
+        // Another module's parameter, which this repository never held.
+        row(1, "Settle requires merged_ref."),
+        // A file that was never here.
+        row(2, "The timer lives in src/old/never.rs."),
+        // A name added in one commit and deleted in a later one.
+        row(3, "removed_function registers the timer."),
+        // A file added and deleted likewise.
+        row(4, "The timer lives in src/old/removed.rs."),
+    ]);
+    let applied = fixture.apply(
+        &plan_one(&fixture),
+        &manifest(
+            r#"<archive id="1" missing="merged_ref"/>
+<archive id="2" missing="src/old/never.rs"/>
+<archive id="3" missing="removed_function"/>
+<archive id="4" missing="src/old/removed.rs"/>"#,
+        ),
+    );
+    let mut dropped = applied.dropped.clone();
+    dropped.sort();
+    assert_eq!(
+        dropped,
+        [
+            "memory 1: merged_ref was never in this repository",
+            "memory 2: src/old/never.rs was never in this repository",
+        ]
+    );
+    assert_eq!(applied.applied, 2);
+    let statuses: Vec<String> = (1..=4).map(|id| fixture.memory(id).0).collect();
+    assert_eq!(statuses, ["active", "active", "archived", "archived"]);
+}
+
+#[test]
+fn an_archive_whose_history_search_runs_out_of_time_is_dropped() {
+    let fixture = fixture();
+    let mut batch = plan_one(&fixture);
+    batch.history_timeout = std::time::Duration::ZERO;
+    let applied = fixture.apply(
+        &batch,
+        &manifest(r#"<archive id="2" missing="gone_function"/>"#),
+    );
+    assert_eq!(
+        applied.dropped,
+        ["memory 2: whether gone_function is gone is undecided: searching the history for it failed: git log timed out"]
+    );
+    assert_eq!(fixture.memory(2).0, "active");
+}
+
+#[test]
 fn an_archive_without_missing_needs_a_reason_and_is_refused_for_a_directive() {
     let fixture = Fixture::new(&[("a.rs", "\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("gone_settings.toml", "x = 1\n")]);
     fixture.insert(&[
         row(1, "The cache holds ten entries."),
         row(2, "The cache holds twenty entries."),
@@ -373,6 +437,9 @@ fn an_archive_without_missing_needs_a_reason_and_is_refused_for_a_directive() {
 #[test]
 fn a_protected_memory_is_never_archived_but_may_be_verified_updated_or_skipped() {
     let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("src/old/other.rs", "fn gone_other() {}\n")]);
     fixture.insert(&[
         row(1, "`gone_guard` in src/old/guard.rs stops every delete."),
         row(2, "`gone_helper` cleans the queue."),
@@ -441,6 +508,9 @@ fn undoing_a_verify_run_puts_back_its_rows_and_the_mappings_it_replaced() {
         ("src/live.rs", "fn live_function(a: u8) {}\n"),
         ("src/other.rs", "fn other() {}\n"),
     ]);
+    fixture
+        .repo
+        .add_then_remove(&[("src/old/gone.rs", "fn gone_function() {}\n")]);
     fixture.insert(&[
         row(1, "`live_function` is defined in the live module."),
         Row {

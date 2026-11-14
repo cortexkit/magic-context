@@ -29,6 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rusqlite::{params, Connection, Transaction};
 use serde_json::Value;
@@ -58,6 +59,9 @@ pub(crate) const BATCH_SIZE: usize = 20;
 /// Above this many UTF-16 units of diff in one batch, each file shows its
 /// changed line ranges instead (0.49's bound).
 const DIFF_BOUND: usize = 36_000;
+/// How long git may search the checked-out history for one path or name a
+/// reply calls missing before the archive is dropped as undecided.
+const HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One live project memory as the task reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,7 +297,12 @@ pub(crate) struct Lookup {
 pub(crate) fn look_up(checkout: &Checkout, memories: &[&Memory], limits: &Limits) -> Lookup {
     let cited: Vec<(i64, Vec<Cite>)> = memories
         .iter()
-        .map(|memory| (memory.id, cites::cites(&memory.content)))
+        .map(|memory| {
+            (
+                memory.id,
+                cites::cites(&memory.content, checkout.top_level()),
+            )
+        })
         .collect();
     let mut names: Vec<&str> = Vec::new();
     let mut slots: HashMap<&str, usize> = HashMap::new();
@@ -669,6 +678,7 @@ impl Verify {
                         elapsed_ms: lookup.elapsed_ms,
                     }),
                     checkout: Arc::clone(&checkout),
+                    history_timeout: HISTORY_TIMEOUT,
                     absence: Mutex::default(),
                 })
             })
@@ -717,8 +727,15 @@ pub(crate) struct SearchRecord {
 /// Whether a path or code name a reply calls missing is gone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Absence {
+    /// Not in the checkout. Once [`in_history`] has run, also held by some
+    /// commit of the checked-out history: removed.
     Absent,
     Present,
+    /// Not in the checkout, and no commit of its history ever held it: the
+    /// memory's subject was never in this repository (another module's
+    /// parameter, a host's variable), so its absence says nothing about
+    /// whether the memory still holds.
+    Never,
     /// The module can't tell, and why.
     Undecided(String),
 }
@@ -750,6 +767,23 @@ fn look_for(checkout: &Checkout, cite: &Cite, limits: &Limits) -> Absence {
     }
 }
 
+/// Whether what `cite` names, already absent from the checkout, was ever in
+/// its checked-out history: a path some commit touched, a code name some
+/// commit added or removed. [`Absence::Absent`] when it was, so it was
+/// removed; [`Absence::Never`] when not; undecided when git fails or runs
+/// past `timeout`.
+fn in_history(checkout: &Checkout, cite: &Cite, timeout: Duration) -> Absence {
+    let held = match cite {
+        Cite::Path(path) => checkout.path_in_history(path, timeout),
+        Cite::Name(name) => checkout.text_in_history(name, timeout),
+    };
+    match held {
+        Ok(true) => Absence::Absent,
+        Ok(false) => Absence::Never,
+        Err(why) => Absence::Undecided(format!("searching the history for it failed: {why}")),
+    }
+}
+
 /// One message of a verify run.
 pub(crate) struct VerifyBatch {
     declared: Arc<Declared>,
@@ -767,9 +801,13 @@ pub(crate) struct VerifyBatch {
     #[cfg_attr(not(test), allow(dead_code))]
     search: Option<SearchRecord>,
     checkout: Arc<Checkout>,
-    /// What each `missing` a reply names was found to be. The lookup runs
-    /// when the reply is accepted, before the store's write lock is taken,
-    /// and the write reads the answer from here.
+    /// How long git may search the history for one `missing` a reply names
+    /// ([`HISTORY_TIMEOUT`]).
+    history_timeout: Duration,
+    /// What each `missing` a reply names was found to be: whether the
+    /// checkout holds it and, when not, whether its history ever did. The
+    /// lookups run when the reply is accepted, before the store's write lock
+    /// is taken, and the write reads the answer from here.
     absence: Mutex<HashMap<Cite, Absence>>,
 }
 
@@ -802,7 +840,12 @@ impl VerifyBatch {
         if let Some(known) = self.absence.lock().expect("absence cache").get(cite) {
             return known.clone();
         }
-        let found = look_for(&self.checkout, cite, &SEARCH_LIMITS);
+        let mut found = look_for(&self.checkout, cite, &SEARCH_LIMITS);
+        // Only what the history once held can have been removed. Git is
+        // asked only here, for a proposed archive, never while planning.
+        if found == Absence::Absent {
+            found = in_history(&self.checkout, cite, self.history_timeout);
+        }
         self.absence
             .lock()
             .expect("absence cache")
@@ -828,7 +871,7 @@ impl TaskInput for VerifyBatch {
             if let (Decision::Archive, Some(missing)) = (verdict.decision, &verdict.missing) {
                 let read = self.read.iter().find(|read| read.id == verdict.id);
                 if let Some(cite) = read
-                    .map(|read| cites::cites(&read.content))
+                    .map(|read| cites::cites(&read.content, self.checkout.top_level()))
                     .and_then(|cited| cited.into_iter().find(|cite| cite.text() == missing))
                 {
                     self.absence(&cite);

@@ -17,9 +17,10 @@
 //! - `archive` never touches a protected memory (safety-critical, permanent,
 //!   a policy, or written or edited by the person, as curate protects them);
 //!   with `missing` it needs that path or name to be one of the memory's
-//!   citations as [`super::cites`] reads them, and the checkout not to hold
-//!   it; without it, it needs evidence in `reason`, and
-//!   is refused for a directive-shaped rule.
+//!   citations as [`super::cites`] reads them, the checkout not to hold it,
+//!   and some commit of the checked-out history to have held it, so it was
+//!   removed rather than never here; without it, it needs evidence in
+//!   `reason`, and is refused for a directive-shaped rule.
 //!
 //! A verification or check changes no text, so it advances neither the
 //! revision nor `updated_at` and leaves no history row, as a classification
@@ -247,7 +248,7 @@ impl VerifyBatch {
         };
         // Only something the module itself reads as a citation of this
         // memory can be gone: text that merely occurs in it may be English.
-        let Some(cite) = cites(&current.content)
+        let Some(cite) = cites(&current.content, self.checkout.top_level())
             .into_iter()
             .find(|cite| cite.text() == missing)
         else {
@@ -258,6 +259,7 @@ impl VerifyBatch {
         match self.absence(&cite) {
             Absence::Absent => None,
             Absence::Present => Some(format!("{missing} is still in the checkout")),
+            Absence::Never => Some(format!("{missing} was never in this repository")),
             Absence::Undecided(why) => {
                 Some(format!("whether {missing} is gone is undecided: {why}"))
             }

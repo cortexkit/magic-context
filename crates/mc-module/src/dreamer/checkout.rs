@@ -6,7 +6,8 @@
 //! up each path and code name a memory cites, so the model is told which
 //! ones a plain search did not find. When a reply archives a memory because
 //! everything it cites is gone, the module looks the name the reply gives up
-//! again before anything is written.
+//! again before anything is written, and asks git whether the checked-out
+//! history ever held it: a name that was never here was not removed.
 //!
 //! Git runs with a timeout and a cap on what it prints, as the upkeep's
 //! commit indexer runs it, and never with an external diff or text
@@ -60,6 +61,8 @@ pub(crate) struct Checkout {
     root: PathBuf,
     /// Every path git tracks, relative to the root, with `/` separators.
     tracked: BTreeSet<String>,
+    /// The names at the top of the checkout (see [`Checkout::top_level`]).
+    top_level: BTreeSet<String>,
     head: Option<String>,
     /// Every tracked file and folder under each name it can be cited by,
     /// built on first use (see [`Checkout::has_path`]).
@@ -79,9 +82,17 @@ impl Checkout {
                 root.display()
             )
         })?;
-        let tracked = listed
+        let tracked: BTreeSet<String> = listed
             .split('\0')
             .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
+        // `.cortexkit` holds the project's local notes, which git may ignore
+        // in part or in whole, and memories cite paths inside it.
+        let top_level = tracked
+            .iter()
+            .filter_map(|path| path.split('/').next())
+            .chain([".cortexkit"])
             .map(str::to_owned)
             .collect();
         let head = run_git(&root, &["rev-parse", "HEAD"])
@@ -91,6 +102,7 @@ impl Checkout {
         Ok(Self {
             root,
             tracked,
+            top_level,
             head,
             cited_paths: OnceLock::new(),
         })
@@ -100,6 +112,12 @@ impl Checkout {
     /// one.
     pub(crate) fn head(&self) -> Option<&str> {
         self.head.as_deref()
+    }
+
+    /// The files and folders at the top of the checkout: the first part of
+    /// every tracked path, and `.cortexkit`.
+    pub(crate) fn top_level(&self) -> &BTreeSet<String> {
+        &self.top_level
     }
 
     /// `relative` as a tracked file path, when it names a tracked file that
@@ -137,6 +155,51 @@ impl Checkout {
             known
         });
         Some(known.contains(&path))
+    }
+
+    /// Whether some commit of the checked-out history touched a file at the
+    /// path `cited` or under it, the path matched whole or by its end as
+    /// [`Checkout::has_path`] matches it. `Err` when `cited` holds no path,
+    /// or git fails or runs longer than `timeout`.
+    pub(crate) fn path_in_history(&self, cited: &str, timeout: Duration) -> Result<bool, String> {
+        let path = clean_path(cited).ok_or_else(|| format!("{cited} is not a path"))?;
+        // A glob pathspec, so the path is matched under any folder; the
+        // characters a glob reads are escaped to stand for themselves.
+        let mut escaped = String::with_capacity(path.len());
+        for ch in path.chars() {
+            if matches!(ch, '*' | '?' | '[' | '\\') {
+                escaped.push('\\');
+            }
+            escaped.push(ch);
+        }
+        let itself = format!(":(glob)**/{escaped}");
+        let inside = format!(":(glob)**/{escaped}/**");
+        run_git_within(
+            &self.root,
+            &["log", "--format=%H", "-1", "--", &itself, &inside],
+            timeout,
+        )
+        .map(|listed| names_a_commit(&listed))
+    }
+
+    /// Whether some commit of the checked-out history added or removed
+    /// `text` as literal text in a file (git's pickaxe, `git log -S`).
+    /// `Err` when git fails or runs longer than `timeout`.
+    pub(crate) fn text_in_history(&self, text: &str, timeout: Duration) -> Result<bool, String> {
+        let pickaxe = format!("-S{text}");
+        run_git_within(
+            &self.root,
+            &[
+                "log",
+                &pickaxe,
+                "--no-ext-diff",
+                "--no-textconv",
+                "--format=%H",
+                "-1",
+            ],
+            timeout,
+        )
+        .map(|listed| names_a_commit(&listed))
     }
 
     /// Look for each of `names` as literal bytes in the tracked paths and in
@@ -277,6 +340,14 @@ fn is_commit(text: &str) -> bool {
     text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Whether `git log --format=%H` printed a commit id.
+fn names_a_commit(listed: &str) -> bool {
+    listed.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && line.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 /// Finds which of many names occur in a text, each at most once. Every
 /// position of the text is compared with the names that start with the same
 /// four bytes, so names that overlap each other in the text are all found.
@@ -343,8 +414,14 @@ impl<'a> Matcher<'a> {
     }
 }
 
-/// Run git in `root` and return what it prints, or why it failed.
+/// Run git in `root` and return what it prints, or why it failed, killing
+/// it after [`GIT_TIMEOUT`].
 fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
+    run_git_within(root, args, GIT_TIMEOUT)
+}
+
+/// [`run_git`], killing git after `timeout`.
+fn run_git_within(root: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -375,7 +452,7 @@ fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
         let _ = stderr.read_to_end(&mut bytes);
         bytes
     });
-    let deadline = Instant::now() + GIT_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
