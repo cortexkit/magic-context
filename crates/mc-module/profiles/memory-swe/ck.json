@@ -130,8 +130,8 @@
     },
     {
       "path": "prompts/dreamer/refresh-primers/system.md",
-      "sha256": "9d8a11424c4589ab28a3c704f156bf375dfc4c0de45d97dd81381faa3698fef0",
-      "bytes": 1754
+      "sha256": "e5933b7a662b9ab545ec634d6b43f5a8052a2e4ecf5f6d605230483eac79bb13",
+      "bytes": 2078
     },
     {
       "path": "prompts/dreamer/refresh-primers/user.md",
