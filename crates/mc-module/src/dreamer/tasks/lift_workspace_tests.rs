@@ -195,8 +195,8 @@ fn the_bundled_profile_registers_the_lift_switched_off_and_renders_its_texts_unc
     let profile = prompt_profile(None).unwrap();
     let declaration = declaration(&profile);
     assert_eq!(declaration["kind"], KIND);
-    // Ufuk reads a replay's report before the lift runs for real; until then
-    // the bundled profile declares it off.
+    // A person reads a replay's report before the lift runs for real; until
+    // then the bundled profile declares it off.
     assert_eq!(declaration["enabled"], false);
     assert!(crate::dreamer::tasks()
         .iter()

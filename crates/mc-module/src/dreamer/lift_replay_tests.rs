@@ -1,6 +1,7 @@
 //! A replay of the `lift-workspace` task on a copy of a real store: the
 //! requests a run would send for one project, and later a report of what
-//! the replies would move, for Ufuk to read before the lift runs for real.
+//! the replies would move, for a person to read before the lift runs for
+//! real.
 //!
 //! Nothing here calls a provider or Entorhinal, or writes to the store it
 //! reads. [`lift_requests`] copies the store it is given through a read-only

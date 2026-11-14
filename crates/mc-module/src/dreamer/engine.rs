@@ -394,16 +394,16 @@ impl Engine {
             let owner = OwnerKey::project(&project);
             for declaration in declarations {
                 let task = declaration["id"].as_str().unwrap_or_default().to_owned();
-                let record =
-                    match db.with_connection(|conn| store::once_record(conn, &owner, &task)) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            tracing::warn!(
+                let record = db.with_connection(|conn| store::once_record(conn, &owner, &task));
+                let record = match record {
+                    Ok(record) => record,
+                    Err(error) => {
+                        tracing::warn!(
                             "ck-mc: dreamer: reading {task}'s record for {project} failed: {error}"
                         );
-                            continue;
-                        }
-                    };
+                        continue;
+                    }
+                };
                 if once_retry_at(&record, &workspace).is_none_or(|at| at > now) {
                     continue;
                 }

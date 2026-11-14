@@ -11,9 +11,9 @@
 //! projects, and never on a schedule: the engine starts it and records the
 //! workspace it ran for ([`super::super::engine`]). It reads the project's
 //! live memories (active or permanent, not expired) and leaves out those the
-//! person wrote or edited ([`PERSON_WRITTEN`], the test curate's protection
-//! uses): the person chose where those belong. A batch holds forty memories,
-//! in id order.
+//! person wrote or edited ([`PERSON_WRITTEN`], the same check that keeps
+//! them out of the curate task's archives and merges): the person chose
+//! where those belong. A batch holds forty memories, in id order.
 //!
 //! A move keeps the row: the same id and text, its level becomes
 //! `workspace`, its owner the workspace, and the project stays recorded as
