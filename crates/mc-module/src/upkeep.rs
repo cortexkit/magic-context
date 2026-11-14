@@ -362,7 +362,8 @@ async fn embed_commits(
         let rows = db.with_connection(|conn| -> rusqlite::Result<Vec<(String, String)>> {
             let mut statement = conn.prepare(
                 "SELECT c.sha, c.message FROM git_commits c \
-                 LEFT JOIN git_commit_embeddings e ON c.sha = e.sha AND e.model_id = ?1 \
+                 LEFT JOIN git_commit_embeddings e \
+                     ON e.project_path = c.project_path AND e.sha = c.sha AND e.model_id = ?1 \
                  WHERE c.project_path = ?2 AND e.sha IS NULL \
                  ORDER BY c.committed_at DESC LIMIT ?3",
             )?;
@@ -387,14 +388,20 @@ async fn embed_commits(
             let mut saved = 0;
             {
                 let mut statement = transaction.prepare(
-                    "INSERT INTO git_commit_embeddings (sha, embedding, model_id, created_at) \
-                     VALUES (?1, ?2, ?3, ?4) \
-                     ON CONFLICT(sha, model_id) DO UPDATE SET \
+                    "INSERT INTO git_commit_embeddings (project_path, sha, embedding, model_id, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT(project_path, sha, model_id) DO UPDATE SET \
                      embedding = excluded.embedding, created_at = excluded.created_at",
                 )?;
                 for ((sha, _), vector) in rows.iter().zip(vectors) {
                     if let Some(vector) = vector {
-                        saved += statement.execute(params![sha, encode(&vector), model_id, now])?;
+                        saved += statement.execute(params![
+                            project,
+                            sha,
+                            encode(&vector),
+                            model_id,
+                            now
+                        ])?;
                     }
                 }
             }
@@ -427,14 +434,15 @@ fn store_commits(
             .prepare("SELECT sha FROM git_commits WHERE project_path = ?1")?
             .query_map(params![project], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        // The plugin's upsert: an unchanged message is skipped by the WHERE
-        // clause, so only real changes count and fire the search index's
-        // triggers.
+        // The plugin's upsert, per project: an unchanged message is skipped
+        // by the WHERE clause, so only real changes count and fire the search
+        // index's triggers. A commit another project already indexed gets a
+        // row of this project's own.
         let mut statement = transaction.prepare(
             "INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT(sha) DO UPDATE SET \
-                 project_path = excluded.project_path, short_sha = excluded.short_sha, \
+             ON CONFLICT(project_path, sha) DO UPDATE SET \
+                 short_sha = excluded.short_sha, \
                  message = excluded.message, author = excluded.author, \
                  committed_at = excluded.committed_at, indexed_at = excluded.indexed_at \
              WHERE git_commits.message != excluded.message",
@@ -1301,6 +1309,87 @@ mod tests {
             rows
         });
         assert_eq!(kept, newest_two);
+    }
+
+    /// Two projects can be clones of one repository (a fork, or a clone
+    /// without an origin). Each project's sweep stores the shared commits
+    /// as its own, with their vectors, and `ctx_search`'s commit source
+    /// finds them in each, by words and by meaning.
+    #[tokio::test]
+    async fn two_projects_sharing_history_each_index_and_find_the_commits() {
+        let dir = scratch("shared");
+        let db = database(&dir);
+        let repo = repository(
+            &dir,
+            &["Fix the zebra parser crash", "Add the release checklist"],
+        );
+        let (url, _, _) = endpoint().await;
+        let provider = Provider::for_test(&url, "mock-embed");
+        let plan = Plan {
+            memory: false,
+            embedding: Some(provider.clone()),
+            git: Some(GitIndexing {
+                since_days: 3650,
+                max_commits: 2000,
+            }),
+        };
+        let now = 1_800_000_000_000;
+        let projects = [PROJECT, "pj-upkeep-fork"];
+        for project in projects {
+            let report = run_project(&db, project, &repo, &plan, &|| now).await;
+            assert!(
+                matches!(
+                    report.sweep,
+                    Some(Sweep::Indexed {
+                        inserted: 2,
+                        embedded: 2,
+                        ..
+                    })
+                ),
+                "{project}: {report:?}"
+            );
+        }
+        let model_id = provider.model_id();
+        let seen = std::collections::BTreeMap::new();
+        for project in projects {
+            for (query, semantic, lane) in [
+                // Only stemming matches "zebras crashes", so the hit comes
+                // from the project's own full-text entry.
+                ("zebras crashes", None, "match=fts"),
+                (
+                    "unrelated words",
+                    Some(crate::search::sources::Semantic {
+                        vector: &[1.0, 0.0],
+                        model_id: &model_id,
+                        chunk_model_id: "",
+                    }),
+                    "match=semantic",
+                ),
+            ] {
+                let scope = crate::search::Scope {
+                    harness: "mock",
+                    session: "ses-shared",
+                    project: Some(project),
+                    cutoff: i64::MAX,
+                    visible_messages: None,
+                    seen: &seen,
+                    memory_enabled: false,
+                    git_commits_enabled: true,
+                    git_repository: Some(true),
+                    semantic,
+                };
+                let input = serde_json::json!({"query": query, "sources": ["git_commit"]});
+                let output = db
+                    .with_connection(|conn| crate::search::run(conn, &scope, &input))
+                    .unwrap();
+                assert!(
+                    output.contains("[git_commit]")
+                        && output.contains(lane)
+                        && output.contains("Fix the zebra parser crash"),
+                    "{project}, {query}: {output}"
+                );
+            }
+        }
     }
 
     #[test]

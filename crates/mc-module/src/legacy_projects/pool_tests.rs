@@ -61,8 +61,8 @@ fn note(conn: &Connection, kind: &str, project: &str, content: &str) -> i64 {
 
 /// The knowledge and session rows a 0.49 project leaves: a live memory with
 /// history and a verification, an archived one it superseded, a smart note,
-/// a session note, the session's project mapping and a commit. Returns the
-/// two memories' ids.
+/// a session note, the session's project mapping and a commit with a vector.
+/// Returns the two memories' ids.
 fn legacy_project(conn: &Connection) -> (i64, i64) {
     // The archived memory comes first, so a batch can copy it before the
     // memory it points at.
@@ -89,7 +89,24 @@ fn legacy_project(conn: &Connection) -> (i64, i64) {
         [KEY],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO git_commit_embeddings (project_path, sha, embedding, model_id, created_at)
+         VALUES (?1, '0123abcd0123abcd', x'0000803f', 'mock-embed', 1)",
+        [KEY],
+    )
+    .unwrap();
     (live, old)
+}
+
+/// The commit of [`legacy_project`] in `project`: its rows, its vectors
+/// and its full-text entries there.
+fn commit_in(conn: &Connection, project: &str) -> [i64; 3] {
+    [
+        "SELECT count(*) FROM git_commits WHERE project_path = ?1 AND sha = '0123abcd0123abcd'",
+        "SELECT count(*) FROM git_commit_embeddings WHERE project_path = ?1 AND sha = '0123abcd0123abcd'",
+        "SELECT count(*) FROM git_commits_fts WHERE git_commits_fts MATCH 'first' AND project_path = ?1",
+    ]
+    .map(|sql| count(conn, sql, project))
 }
 
 fn count(conn: &Connection, sql: &str, project: &str) -> i64 {
@@ -178,6 +195,9 @@ fn a_key_one_project_claims_moves_whole_and_a_rerun_moves_nothing() {
         );
         // Every row moved, the memories with their ids.
         assert!(store::keys_with_rows(conn).unwrap().is_empty());
+        // The commit's vector and search entry went with it.
+        assert_eq!(commit_in(conn, "pj-a"), [1, 1, 1]);
+        assert_eq!(commit_in(conn, KEY), [0, 0, 0]);
         let owners: Vec<(i64, String, Option<String>)> = conn
             .prepare("SELECT id, owner_id, source_project_id FROM memories ORDER BY id")
             .unwrap()
@@ -319,9 +339,18 @@ fn a_key_two_projects_claim_gives_each_its_own_copy_with_history() {
         );
         assert_eq!(count(conn, "SELECT count(*) FROM session_projects WHERE project_path = ?1", KEY), 1);
         assert_eq!(count(conn, "SELECT count(*) FROM session_projects WHERE project_path <> ?1", KEY), 0);
-        // A commit can belong to one project only: the first.
-        assert_eq!(count(conn, "SELECT count(*) FROM git_commits WHERE project_path = ?1", "pj-a"), 1);
-        assert_eq!(count(conn, "SELECT count(*) FROM git_commits WHERE project_path = ?1", "pj-b"), 0);
+        // Each project gets the commit, with its vector and its search entry.
+        assert_eq!(commit_in(conn, "pj-a"), [1, 1, 1]);
+        assert_eq!(commit_in(conn, "pj-b"), [1, 1, 1]);
+        assert_eq!(commit_in(conn, KEY), [0, 0, 0]);
+        for table in ["git_commits", "git_commit_embeddings"] {
+            assert_eq!(
+                count(conn, &format!("SELECT count(*) FROM identity_merge_log WHERE action = 'copied' AND to_identity = ?1 AND table_name = '{table}'"), "pj-b"),
+                1,
+                "{table}"
+            );
+        }
+        assert_eq!(done["pj-b"]["git_commit_embeddings"], 1);
         assert_eq!(memories_of(conn, KEY), 0, "no memory is left under the key");
         assert_eq!(
             count(conn, "SELECT count(*) FROM identity_merge_log WHERE action = 'copied' AND to_identity = ?1 AND table_name = 'memories'", "pj-b"),
@@ -402,7 +431,7 @@ fn keys_in_different_workspaces_hold_a_move() {
 }
 
 /// A table added later with a project column must be sorted on purpose:
-/// copied, moved to the first project, or left under a contested key.
+/// copied to every project of a contested key, or left under it.
 #[test]
 fn every_project_keyed_table_is_sorted_for_a_contested_key() {
     let conn = ContextDb::fresh_in_memory();
@@ -411,10 +440,8 @@ fn every_project_keyed_table_is_sorted_for_a_contested_key() {
         .into_iter()
         .map(|table| table.name)
         .collect();
-    let (copied, first_only) = pool::contested_tables();
-    let sorted: BTreeSet<String> = copied
+    let sorted: BTreeSet<String> = pool::contested_tables()
         .iter()
-        .chain(first_only)
         .chain(pool::LEFT)
         .map(|name| (*name).to_owned())
         .collect();

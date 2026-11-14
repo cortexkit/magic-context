@@ -13,8 +13,8 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 /// and `owner_id` and is handled on its own (see the `memories` module).
 pub(super) const PROJECT_COLUMNS: &[&str] = &["project_path", "project_identity", "project_id"];
 
-/// Full-text tables and their shadow tables mirror another table through
-/// triggers, so they follow when that table changes.
+/// Full-text tables, their shadow tables and their rowid maps mirror another
+/// table through triggers, so they follow when that table changes.
 const DERIVED_SUFFIXES: &[&str] = &[
     "_fts",
     "_fts_data",
@@ -22,7 +22,16 @@ const DERIVED_SUFFIXES: &[&str] = &[
     "_fts_content",
     "_fts_docsize",
     "_fts_config",
+    "_fts_rowid_map",
 ];
+
+/// Project-keyed tables whose rows hang off a row of another project-keyed
+/// table through a foreign key that cascades on update and delete. They
+/// are never handled on their own: re-keying the parent re-keys them, a
+/// parent deleted on a collision takes them along, and a copied parent
+/// copies them (`pool::copy_step`). Handled alone, a child re-keyed before
+/// its parent would name a parent that doesn't exist yet.
+const FOLLOW_THEIR_PARENT: &[&str] = &["git_commit_embeddings"];
 
 /// Project-keyed tables whose rows never move. A rescore snapshot is
 /// immutable: a trigger refuses any change to its project. Released 0.49
@@ -86,8 +95,8 @@ impl Table {
     }
 }
 
-/// Every table with a project column, by name, without the derived and
-/// never-moved ones.
+/// Every table with a project column, by name, without the derived,
+/// never-moved and parent-following ones.
 pub(super) fn discover(conn: &Connection) -> rusqlite::Result<Vec<Table>> {
     let candidates: Vec<(String, Option<String>)> = conn
         .prepare(
@@ -102,7 +111,10 @@ pub(super) fn discover(conn: &Connection) -> rusqlite::Result<Vec<Table>> {
             .as_deref()
             .is_some_and(|sql| sql.to_uppercase().contains("VIRTUAL TABLE"))
             || DERIVED_SUFFIXES.iter().any(|suffix| name.ends_with(suffix));
-        if derived || NEVER_MOVED.contains(&name.as_str()) {
+        if derived
+            || NEVER_MOVED.contains(&name.as_str())
+            || FOLLOW_THEIR_PARENT.contains(&name.as_str())
+        {
             continue;
         }
         let columns = column_names(conn, &name)?;

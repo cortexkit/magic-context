@@ -34,11 +34,13 @@ pub(crate) enum Held {
 /// Tables a contested key's rows are copied from: knowledge about the
 /// project, which each project the folder belongs to should have. The
 /// embedding bookkeeping goes with the copied memory vectors, so each
-/// project's copies count as embedded. Notes are copied only when they are
+/// project's copies count as embedded; a commit's copy takes the commit's
+/// vectors along for the same reason. Notes are copied only when they are
 /// not a session's own.
 const COPIED: &[&str] = &[
     "embedding_identity_active",
     "embedding_registrations",
+    "git_commits",
     "memory_embedding_watermarks",
     "memory_journal",
     "notes",
@@ -48,18 +50,12 @@ const COPIED: &[&str] = &[
     "retrospective_processed_windows",
 ];
 
-/// Moved to the first project of a contested key and not copied: a commit's
-/// sha is its table's primary key, so it can't belong to two projects. The
-/// other projects can't hold those commits until the schema allows it.
-const FIRST_ONLY: &[&str] = &["git_commits"];
-
 /// Left under a contested key: one session's state, mappings and caches
 /// (a session ran in one folder, and no row says which project's folder
 /// that was), per-project caches each project builds for itself, workspace
 /// membership (a project is in one workspace, under a unique display
-/// name). The copy leaves every
-/// table outside [`COPIED`] and [`FIRST_ONLY`]; this list names the ones
-/// sorted on purpose, and a test fails when a table is in no list.
+/// name). The copy leaves every table outside [`COPIED`]; this list names
+/// the ones sorted on purpose, and a test fails when a table is in no list.
 #[cfg(test)]
 pub(super) const LEFT: &[&str] = &[
     "compartment_chunk_embeddings",
@@ -87,10 +83,10 @@ pub(super) const LEFT: &[&str] = &[
     "workspace_members",
 ];
 
-/// The tables a contested key's rows are copied from and moved from.
+/// The tables a contested key's rows are copied from.
 #[cfg(test)]
-pub(super) fn contested_tables() -> (&'static [&'static str], &'static [&'static str]) {
-    (COPIED, FIRST_ONLY)
+pub(super) fn contested_tables() -> &'static [&'static str] {
+    COPIED
 }
 
 /// Which of a table's rows count as knowledge: a session's own notes don't.
@@ -323,13 +319,10 @@ pub(crate) fn copy_step(
         left -= sources.len();
     }
     let tables = progress.tables(&tx)?;
-    let named = |list: &[&str]| -> Vec<&Table> {
-        tables
-            .iter()
-            .filter(|table| list.contains(&table.name.as_str()))
-            .collect()
-    };
-    let knowledge: Vec<&Table> = named(COPIED).into_iter().chain(named(FIRST_ONLY)).collect();
+    let knowledge: Vec<&Table> = tables
+        .iter()
+        .filter(|table| COPIED.contains(&table.name.as_str()))
+        .collect();
     for table in &knowledge {
         if left == 0 {
             break;
@@ -338,22 +331,30 @@ pub(crate) fn copy_step(
         if rows.is_empty() {
             continue;
         }
-        if COPIED.contains(&table.name.as_str()) {
-            for to in &extras {
-                // Memories come first, so a copied watermark can name the
-                // copies every memory batch before it made.
-                let ids = if table.name == "memory_embedding_watermarks" {
-                    progress.copies(&tx, from, to)?.map.clone()
-                } else {
-                    BTreeMap::new()
-                };
-                for row in &rows {
-                    let adjusted = copy_adjustments(&table.name, row, to, &ids);
-                    store::copy_row(&tx, table, row, from, to, now, adjusted)?;
+        let vectors = if table.name == "git_commits" {
+            commit_vectors(&tx)?
+        } else {
+            None
+        };
+        for to in &extras {
+            // Memories come first, so a copied watermark can name the
+            // copies every memory batch before it made.
+            let ids = if table.name == "memory_embedding_watermarks" {
+                progress.copies(&tx, from, to)?.map.clone()
+            } else {
+                BTreeMap::new()
+            };
+            for row in &rows {
+                let adjusted = copy_adjustments(&table.name, row, to, &ids);
+                store::copy_row(&tx, table, row, from, to, now, adjusted)?;
+                if let Some(vectors) = &vectors {
+                    let copied = copy_commit_vectors(&tx, vectors, row, from, to, now)?;
+                    add(&mut done, to, &vectors.name, copied);
                 }
-                add(&mut done, to, &table.name, rows.len() as u64);
             }
+            add(&mut done, to, &table.name, rows.len() as u64);
         }
+        // A moved commit's vectors follow it through their foreign key.
         for row in &rows {
             store::move_row(&tx, table, row, from, first, now)?;
         }
@@ -367,6 +368,64 @@ pub(crate) fn copy_step(
     after_rows(&tx, from, None, &reached, now)?;
     tx.commit()?;
     Ok(Outcome::Done(done))
+}
+
+/// The table of commit vectors, when the store has one.
+fn commit_vectors(conn: &Connection) -> rusqlite::Result<Option<Table>> {
+    if !store::table_exists(conn, "git_commit_embeddings")? {
+        return Ok(None);
+    }
+    store::shape(conn, "git_commit_embeddings", "project_path", None).map(Some)
+}
+
+/// Copy the vectors of `commit`, a commit of `from`, to `to`'s row of the
+/// same commit, which the copy just made or `to` already had. A vector `to`
+/// already has for a model stays as it is. Returns the vectors copied.
+fn copy_commit_vectors(
+    conn: &Connection,
+    vectors: &Table,
+    commit: &Row,
+    from: &str,
+    to: &str,
+    now: i64,
+) -> rusqlite::Result<u64> {
+    let sha = commit.get("sha");
+    let mut copied = 0;
+    for vector in store::rows(
+        conn,
+        vectors,
+        "project_path = ? AND sha = ?",
+        &[Value::Text(from.to_owned()), sha.clone()],
+    )? {
+        let held = conn
+            .prepare_cached(
+                "SELECT 1 FROM git_commit_embeddings
+                  WHERE project_path = ?1 AND sha = ?2 AND model_id = ?3",
+            )?
+            .exists(params![to, sha, vector.get("model_id")])?;
+        if held {
+            continue;
+        }
+        let key = store::row_key(vectors, &vector);
+        let made = store::insert_copy(
+            conn,
+            vectors,
+            &vector,
+            &[("project_path", Value::Text(to.to_owned()))],
+        )?;
+        store::log(
+            conn,
+            from,
+            to,
+            &vectors.name,
+            &key,
+            "copied",
+            Some(&made),
+            now,
+        )?;
+        copied += 1;
+    }
+    Ok(copied)
 }
 /// What a copied row changes besides its project, so the copy stays valid
 /// beside the original: a journal entry's decision key is unique, and an

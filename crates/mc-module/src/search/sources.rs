@@ -624,7 +624,8 @@ pub fn search_commits(
     } else {
         read(
             "SELECT c.sha, c.short_sha, c.message, c.committed_at FROM git_commits_fts
-              INNER JOIN git_commits c ON c.sha = git_commits_fts.sha
+              INNER JOIN git_commits c
+                 ON c.project_path = git_commits_fts.project_path AND c.sha = git_commits_fts.sha
               WHERE c.project_path = ?1 AND c.committed_at BETWEEN ?2 AND ?3 AND git_commits_fts MATCH ?4
               ORDER BY bm25(git_commits_fts) LIMIT ?5",
             &fts,
@@ -660,7 +661,7 @@ pub fn search_commits(
         let stored: BTreeMap<String, Vec<f32>> = vectors(
             conn,
             "SELECT e.sha, e.embedding FROM git_commit_embeddings e
-               JOIN git_commits c ON c.sha = e.sha
+               JOIN git_commits c ON c.project_path = e.project_path AND c.sha = e.sha
               WHERE c.project_path = ?1 AND e.model_id = ?2",
             project,
             semantic.model_id,

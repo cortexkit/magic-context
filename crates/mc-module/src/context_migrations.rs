@@ -26,7 +26,7 @@ mod catch_up_tests;
 pub const PLUGIN_SCHEMA_VERSION: u32 = crate::context_db::PLUGIN_SCHEMA_VERSION;
 
 /// The schema version this build reads and writes.
-pub const SCHEMA_VERSION: u32 = 107;
+pub const SCHEMA_VERSION: u32 = 108;
 
 struct Migration {
     version: u32,
@@ -52,12 +52,25 @@ const MIGRATIONS: &[Migration] = &[
         rebuilds_referenced_table: false,
         up: dreamer_107,
     },
+    Migration {
+        version: 108,
+        description: "indexed git commits keyed by project and sha",
+        rebuilds_referenced_table: true,
+        up: git_commits_per_project_108,
+    },
 ];
 
 /// Apply every pending migration to a store at `found`. Returns the version
 /// the store is at afterwards. A store below [`RELEASED_PLUGIN_VERSION`] or
 /// above [`SCHEMA_VERSION`] is refused untouched.
 pub(crate) fn upgrade(connection: &mut Connection, found: i64) -> Result<i64, String> {
+    upgrade_through(connection, found, SCHEMA_VERSION)
+}
+
+/// [`upgrade`], stopping after migration `last`. A test brings a store to an
+/// earlier version this way, fills it through that version's writers, and
+/// then applies the next migration to rows as they really were.
+fn upgrade_through(connection: &mut Connection, found: i64, last: u32) -> Result<i64, String> {
     if found == i64::from(SCHEMA_VERSION) {
         return Ok(found);
     }
@@ -82,7 +95,7 @@ pub(crate) fn upgrade(connection: &mut Connection, found: i64) -> Result<i64, St
     let mut at = found;
     for migration in MIGRATIONS
         .iter()
-        .filter(|migration| i64::from(migration.version) > found)
+        .filter(|migration| i64::from(migration.version) > found && migration.version <= last)
     {
         apply(connection, migration)
             .map_err(|error| format!("migration {}: {error}", migration.version))?;
@@ -577,6 +590,10 @@ fn move_observations(tx: &Transaction) -> rusqlite::Result<()> {
 #[path = "context_migrations_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "context_migrations_108_tests.rs"]
+mod tests_108;
+
 /// The module's dreamer state, replacing the 0.49 plugin's.
 ///
 /// The plugin kept one queue and one lease per project, and a run record for
@@ -653,5 +670,129 @@ fn dreamer_107(tx: &Transaction) -> rusqlite::Result<()> {
          );
          CREATE INDEX idx_dream_task_runs_owner
            ON dream_task_runs(level, owner_id, started_at DESC);",
+    )
+}
+
+/// Indexed git commits keyed by project and sha.
+///
+/// The plugin keyed `git_commits`, its vectors and its full-text bookkeeping
+/// by sha alone, so a commit could belong to one project only. Two clones of
+/// one repository can be two projects (a fork, or a clone without an
+/// origin): the second project's sweep could never store a commit the first
+/// already held, and its searches never found it. From here each project
+/// holds its own row for every commit it indexed.
+///
+/// Every commit keeps its project and its rowid, and every vector its
+/// commit's project. A vector whose commit is already gone is dropped: no
+/// reader could reach it, since each one joins the commit. The vectors
+/// follow their commit through the foreign key when it is deleted or moves
+/// to another project. The full-text index is rebuilt from the commits, one
+/// entry per project and sha, so an entry a lost trigger left behind goes;
+/// its rowid map and triggers key on both columns.
+fn git_commits_per_project_108(tx: &Transaction) -> rusqlite::Result<()> {
+    let orphaned: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM git_commit_embeddings e
+          WHERE NOT EXISTS (SELECT 1 FROM git_commits c WHERE c.sha = e.sha)",
+        [],
+        |row| row.get(0),
+    )?;
+    if orphaned > 0 {
+        tracing::info!(
+            "ck-mc: context.db migration 108 drops {orphaned} commit vectors whose commit is gone"
+        );
+    }
+    tx.execute_batch(
+        "DROP TRIGGER IF EXISTS git_commits_fts_insert;
+         DROP TRIGGER IF EXISTS git_commits_fts_delete;
+         DROP TRIGGER IF EXISTS git_commits_fts_update;
+         DROP TABLE IF EXISTS git_commits_v108;
+         DROP TABLE IF EXISTS git_commit_embeddings_v108;
+
+         -- The plugin's columns in the plugin's order, keyed by project first.
+         CREATE TABLE git_commits_v108 (
+             sha TEXT NOT NULL,
+             project_path TEXT NOT NULL,
+             short_sha TEXT NOT NULL,
+             message TEXT NOT NULL,
+             author TEXT,
+             committed_at INTEGER NOT NULL,
+             indexed_at INTEGER NOT NULL,
+             PRIMARY KEY (project_path, sha)
+         );
+         INSERT INTO git_commits_v108
+                 (rowid, sha, project_path, short_sha, message, author, committed_at, indexed_at)
+             SELECT rowid, sha, project_path, short_sha, message, author, committed_at, indexed_at
+               FROM git_commits;
+
+         CREATE TABLE git_commit_embeddings_v108 (
+             project_path TEXT NOT NULL,
+             sha TEXT NOT NULL,
+             embedding BLOB NOT NULL,
+             model_id TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             PRIMARY KEY (project_path, sha, model_id),
+             FOREIGN KEY (project_path, sha) REFERENCES git_commits(project_path, sha)
+                 ON DELETE CASCADE ON UPDATE CASCADE
+         );
+         INSERT INTO git_commit_embeddings_v108 (project_path, sha, embedding, model_id, created_at)
+             SELECT c.project_path, e.sha, e.embedding, e.model_id, e.created_at
+               FROM git_commit_embeddings e JOIN git_commits c ON c.sha = e.sha;
+
+         DROP TABLE git_commit_embeddings;
+         DROP TABLE git_commits;
+         DROP TABLE IF EXISTS git_commit_fts_rowid_map;
+         ALTER TABLE git_commits_v108 RENAME TO git_commits;
+         ALTER TABLE git_commit_embeddings_v108 RENAME TO git_commit_embeddings;
+         -- The sweep and search read one project's commits, newest first.
+         CREATE INDEX idx_git_commits_project_time ON git_commits(project_path, committed_at DESC);
+
+         DELETE FROM git_commits_fts;
+         INSERT INTO git_commits_fts (sha, project_path, message)
+             SELECT sha, project_path, message FROM git_commits ORDER BY rowid;
+         -- Which full-text entry holds each commit, so a trigger can remove
+         -- exactly that entry when the commit changes or goes.
+         CREATE TABLE git_commit_fts_rowid_map (
+             fts_rowid INTEGER PRIMARY KEY,
+             project_path TEXT NOT NULL,
+             sha TEXT NOT NULL
+         );
+         INSERT INTO git_commit_fts_rowid_map (fts_rowid, project_path, sha)
+             SELECT rowid, project_path, sha FROM git_commits_fts;
+         CREATE INDEX idx_git_commit_fts_rowid_map_commit
+             ON git_commit_fts_rowid_map(project_path, sha);
+
+         CREATE TRIGGER git_commits_fts_insert AFTER INSERT ON git_commits BEGIN
+             DELETE FROM git_commits_fts WHERE rowid IN (
+                 SELECT fts_rowid FROM git_commit_fts_rowid_map
+                  WHERE project_path = NEW.project_path AND sha = NEW.sha
+             );
+             DELETE FROM git_commit_fts_rowid_map
+              WHERE project_path = NEW.project_path AND sha = NEW.sha;
+             INSERT INTO git_commits_fts (sha, project_path, message)
+             VALUES (NEW.sha, NEW.project_path, NEW.message);
+             INSERT INTO git_commit_fts_rowid_map (fts_rowid, project_path, sha)
+             VALUES (last_insert_rowid(), NEW.project_path, NEW.sha);
+         END;
+         CREATE TRIGGER git_commits_fts_delete AFTER DELETE ON git_commits BEGIN
+             DELETE FROM git_commits_fts WHERE rowid IN (
+                 SELECT fts_rowid FROM git_commit_fts_rowid_map
+                  WHERE project_path = OLD.project_path AND sha = OLD.sha
+             );
+             DELETE FROM git_commit_fts_rowid_map
+              WHERE project_path = OLD.project_path AND sha = OLD.sha;
+         END;
+         CREATE TRIGGER git_commits_fts_update
+             AFTER UPDATE OF message, project_path, sha ON git_commits BEGIN
+             DELETE FROM git_commits_fts WHERE rowid IN (
+                 SELECT fts_rowid FROM git_commit_fts_rowid_map
+                  WHERE project_path = OLD.project_path AND sha = OLD.sha
+             );
+             DELETE FROM git_commit_fts_rowid_map
+              WHERE project_path = OLD.project_path AND sha = OLD.sha;
+             INSERT INTO git_commits_fts (sha, project_path, message)
+             VALUES (NEW.sha, NEW.project_path, NEW.message);
+             INSERT INTO git_commit_fts_rowid_map (fts_rowid, project_path, sha)
+             VALUES (last_insert_rowid(), NEW.project_path, NEW.sha);
+         END;",
     )
 }

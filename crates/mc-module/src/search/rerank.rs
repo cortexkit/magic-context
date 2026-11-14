@@ -323,8 +323,17 @@ pub fn candidate_texts(
                     }
                 }
                 Hit::Commit(commit) => {
-                    let body = one("SELECT message FROM git_commits WHERE sha = ?1", &commit.sha)
-                        .unwrap_or_else(|| commit.content.clone());
+                    // Every project that indexed a commit holds its own row.
+                    let body: Option<String> = conn
+                        .query_row(
+                            "SELECT message FROM git_commits WHERE project_path = ?1 AND sha = ?2",
+                            params![project, commit.sha],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .ok()
+                        .flatten();
+                    let body = body.unwrap_or_else(|| commit.content.clone());
                     (format!("{} {}", commit.short_sha, first_line(&body)), body)
                 }
                 Hit::Note(note) => {

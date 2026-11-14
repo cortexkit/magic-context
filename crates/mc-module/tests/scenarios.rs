@@ -3658,7 +3658,8 @@ async fn ctx_search_finds_commits_and_memories_by_meaning_with_one_embedding_per
         )
         .unwrap();
         db.execute(
-            "INSERT INTO git_commit_embeddings (sha, embedding, model_id, created_at) VALUES (?1, ?2, ?3, 1)",
+            "INSERT INTO git_commit_embeddings (project_path, sha, embedding, model_id, created_at)
+             VALUES ('pj-test', ?1, ?2, ?3, 1)",
             rusqlite::params!["a".repeat(40), vector_blob(&[1.0, 0.0]), model_id],
         )
         .unwrap();
