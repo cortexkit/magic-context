@@ -45,7 +45,7 @@ use crate::memory_levels::{created, CreateKind, NewRow, Placer};
 use crate::memory_profile::{Profile, FRAMES};
 use crate::memory_writes::{
     archive, clear_derived, get_memory, history_json, history_snapshot, insert_memory,
-    normalized_hash, now_ms, record_history, update_content, History, MemoryRow,
+    normalized_hash, now_ms, record_history, update_content, History, MemoryRow, PROTECTED,
 };
 use crate::summary::fit::Window;
 use crate::summary::two_pass::gates::dropped_token;
@@ -127,15 +127,6 @@ pub(crate) struct Memory {
     /// person: no change of any kind may touch it.
     pub protected: bool,
 }
-
-/// Whether a memory row is protected, as SQL over `memories m`. The
-/// person's own writes record their journal operation as `person_<what>`,
-/// and a memory the person created from the apps names `person` as its
-/// source.
-const PROTECTED: &str = "(COALESCE(m.safety_critical, 0) = 1 OR m.status = 'permanent'
-    OR m.authority = 'policy' OR m.source_type = 'person'
-    OR EXISTS(SELECT 1 FROM memory_history h JOIN memory_journal j ON j.decision_key = h.decision_key
-               WHERE h.memory_id = m.id AND j.operation LIKE 'person\\_%' ESCAPE '\\'))";
 
 /// The live memories `project` keeps in `category` at `now`, by id.
 pub(crate) fn live_memories(

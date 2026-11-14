@@ -692,6 +692,14 @@
             {
               "label": "Map memories",
               "value": "map-memories"
+            },
+            {
+              "label": "Verify",
+              "value": "verify"
+            },
+            {
+              "label": "Verify broad",
+              "value": "verify-broad"
             }
           ]
         }
@@ -779,5 +787,5 @@
       "title": "Delete notes"
     }
   ],
-  "digest": "984a7021219593a7ab96394cd7b8deb5ea56f2f0b929d82b468e9ccd789b30b1"
+  "digest": "c7b76150ed078fb3d7ed0e363eddb037bd2bf1bd0ce71993920630ed3d7e10e6"
 }

@@ -14,16 +14,26 @@
 //!   20,000 characters, it may not drop more than half the old text unless
 //!   the reply marks it a consolidation, and it may not repeat another
 //!   memory of the category;
-//! - `archive` with `missing` needs the memory to cite that path or name and
-//!   the checkout not to hold it; `archive` without it needs evidence in
-//!   `reason`, and is refused for a directive-shaped rule.
+//! - `archive` never touches a protected memory (safety-critical, permanent,
+//!   a policy, or written or edited by the person, as curate protects them);
+//!   with `missing` it needs the memory to cite that path or name and the
+//!   checkout not to hold it; without it, it needs evidence in `reason`, and
+//!   is refused for a directive-shaped rule.
 //!
 //! A verification or check changes no text, so it advances neither the
 //! revision nor `updated_at` and leaves no history row, as a classification
 //! that confirms a row leaves none. An update or archive advances the
 //! revision and records the row before and after in the undo history, under
 //! a decision that names the run.
+//!
+//! Undoing the run puts back what it can: each updated or archived row, an
+//! archived memory's mapping (recorded with its decision), and each mapping a
+//! verification replaced (recorded once per batch, as map records its own).
+//! An update's mapping is not recorded: undoing it restores the older text,
+//! and restoring a text clears the mapping, as every text change does, so a
+//! recorded mapping would no longer match and would stop the whole undo.
 
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -33,10 +43,16 @@ use serde_json::{json, Value};
 use super::manifest::{js_trim, Decision, Verdict};
 use super::{Absence, VerifyBatch};
 use crate::dreamer::task::Applied;
-use crate::memory_writes::{
-    archive, get_memory, history_json, history_snapshot, normalized_hash, now_ms, record_history,
-    table_exists, update_content, History, MemoryRow,
+use crate::dreamer::tasks::map_memories::{
+    mapping_json, mapping_rows, put_mapping, MappingRow, MAPPER,
 };
+use crate::memory_writes::{
+    archive, clear_derived, get_memory, history_json, history_snapshot, normalized_hash, now_ms,
+    record_history, update_content, History, MemoryRow, PROTECTED,
+};
+
+/// A memory's mapping before and after a write, as the journal records it.
+type MappingChange = (i64, Vec<MappingRow>, Vec<MappingRow>);
 
 /// The category of project rules, whose directive-shaped memories 0.49 kept
 /// from being rewritten or archived on the code's evidence.
@@ -98,15 +114,19 @@ impl VerifyBatch {
             proposed: verdicts.len(),
             ..Applied::default()
         };
+        let mut remapped = Vec::new();
         for verdict in verdicts {
             let dropped = match self.check(tx, verdict)? {
                 Err(reason) => Some(reason),
-                Ok(current) => self.write_one(tx, verdict, &current, run, now)?,
+                Ok(current) => self.write_one(tx, verdict, &current, run, now, &mut remapped)?,
             };
             match dropped {
                 Some(reason) => applied.dropped.push(reason),
                 None => applied.applied += 1,
             }
+        }
+        if !remapped.is_empty() {
+            self.record_mappings(tx, run, &remapped, now)?;
         }
         Ok(applied)
     }
@@ -151,6 +171,11 @@ impl VerifyBatch {
             return Ok(Err(format!(
                 "memory {id} changed after the batch read it (revision {}, now {})",
                 read.revision, current.revision
+            )));
+        }
+        if verdict.decision == Decision::Archive && protected(tx, id)? {
+            return Ok(Err(format!(
+                "memory {id} is protected (safety-critical, permanent, a policy, or the person's own) and is never archived"
             )));
         }
         let refusal = match verdict.decision {
@@ -244,7 +269,8 @@ impl VerifyBatch {
     }
 
     /// Write `verdict`, which passed its checks. `Some` when it is dropped
-    /// after all, with why.
+    /// after all, with why. A mapping a verification replaces is added to
+    /// `remapped`.
     fn write_one(
         &self,
         tx: &Transaction<'_>,
@@ -252,6 +278,7 @@ impl VerifyBatch {
         current: &MemoryRow,
         run: i64,
         now: i64,
+        remapped: &mut Vec<MappingChange>,
     ) -> rusqlite::Result<Option<String>> {
         let id = verdict.id;
         let commit = self.commit();
@@ -279,7 +306,20 @@ impl VerifyBatch {
                 let files = if named.is_empty() {
                     self.tracked(&read_files)
                 } else {
-                    replace_mapping(tx, id, &named, now)?;
+                    let before = mapping_rows(tx, id)?;
+                    let mapped: BTreeSet<&str> =
+                        before.iter().map(|row| row.file_path.as_str()).collect();
+                    if mapped == named.iter().map(String::as_str).collect::<BTreeSet<_>>() {
+                        // The same files, checked again: not a new mapping.
+                        tx.execute(
+                            "UPDATE memory_verifications SET verified_at = ?2 WHERE memory_id = ?1",
+                            params![id, now],
+                        )?;
+                    } else {
+                        let after = mapping_of(&named, now);
+                        put_mapping(tx, id, &after)?;
+                        remapped.push((id, before, after));
+                    }
                     named
                 };
                 stamp_verified(tx, id, "confirmed", &files, commit, now)?;
@@ -303,7 +343,7 @@ impl VerifyBatch {
                 } else {
                     named
                 };
-                replace_mapping(tx, id, &files, now)?;
+                put_mapping(tx, id, &mapping_of(&files, now))?;
                 stamp_verified(tx, id, "updated", &files, commit, now)?;
                 let after = after_snapshot(tx, id)?;
                 self.record(
@@ -312,9 +352,9 @@ impl VerifyBatch {
                     id,
                     "update",
                     "verify_update",
-                    before,
-                    after,
+                    (before, after),
                     json!([]),
+                    None,
                     now,
                 )?;
                 Ok(None)
@@ -327,6 +367,7 @@ impl VerifyBatch {
                     ("", Some(missing)) => format!("{missing} is gone from the checkout"),
                     (reason, _) => reason.to_owned(),
                 };
+                let mapping = mapping_rows(tx, id)?;
                 tx.execute(
                     "UPDATE memories SET revision = revision + 1 WHERE id = ?1",
                     params![id],
@@ -334,24 +375,26 @@ impl VerifyBatch {
                 archive(tx, current, Some(&reason))?;
                 // An archived memory keeps no derived state, as an archive
                 // by the agent's memory tool keeps none.
+                clear_derived(tx, id)?;
                 tx.execute(
-                    "UPDATE memories SET shareable = 0, classified_at = NULL,
-                            verify_result = 'archived', verify_commit = ?2
-                      WHERE id = ?1",
+                    "UPDATE memories SET verify_result = 'archived', verify_commit = ?2 WHERE id = ?1",
                     params![id, commit],
                 )?;
-                tx.execute(
-                    "DELETE FROM memory_embeddings WHERE memory_id = ?1",
-                    params![id],
-                )?;
-                replace_mapping(tx, id, &[], now)?;
                 let after = after_snapshot(tx, id)?;
                 let evidence = match &verdict.missing {
                     Some(missing) => json!([{"missing": missing}]),
                     None => json!([]),
                 };
                 self.record(
-                    tx, run, id, "archive", &reason, before, after, evidence, now,
+                    tx,
+                    run,
+                    id,
+                    "archive",
+                    &reason,
+                    (before, after),
+                    evidence,
+                    (!mapping.is_empty()).then_some(mapping),
+                    now,
                 )?;
                 Ok(None)
             }
@@ -359,7 +402,8 @@ impl VerifyBatch {
     }
 
     /// Record one memory's change in the undo history and the journal, as
-    /// one decision named after the run.
+    /// one decision named after the run. `cleared` is the mapping the change
+    /// removed, which undoing the run puts back.
     #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
@@ -368,14 +412,14 @@ impl VerifyBatch {
         id: i64,
         operation: &str,
         reason: &str,
-        before: Value,
-        after: Value,
+        (before, after): (Value, Value),
         evidence: Value,
+        cleared: Option<Vec<MappingRow>>,
         now: i64,
     ) -> rusqlite::Result<()> {
         let key = format!("dream-run:{run}:{}:{}:{id}", self.declared.kind, self.index);
         let writer = format!("dreamer:{}", self.declared.kind);
-        let decision = record_history(
+        let mut decision = record_history(
             tx,
             &History {
                 key: &key,
@@ -391,6 +435,13 @@ impl VerifyBatch {
                 evidence,
             },
         )?;
+        if let Some(cleared) = cleared {
+            decision["mappings"] = json!([{
+                "memoryId": id,
+                "before": mapping_json(&cleared),
+                "after": mapping_json(&[]),
+            }]);
+        }
         // The journal row is written the way the other history writers
         // write theirs: the receipt first, then the whole decision in both
         // snapshot columns, where the undo view reads it.
@@ -411,6 +462,79 @@ impl VerifyBatch {
         )?;
         Ok(())
     }
+
+    /// Record the mappings this batch's verifications replaced as one
+    /// journal entry, each before and after, where undoing the run reads
+    /// them. The entry holds no memory rows.
+    fn record_mappings(
+        &self,
+        tx: &Transaction<'_>,
+        run: i64,
+        changes: &[MappingChange],
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let key = format!(
+            "dream-run:{run}:{}:{}:mappings",
+            self.declared.kind, self.index
+        );
+        let ids: Vec<i64> = changes.iter().map(|(id, _, _)| *id).collect();
+        let decision = json!({
+            "version": 1,
+            "decisionKey": key,
+            "projectPath": self.project,
+            "writer": format!("dreamer:{}", self.declared.kind),
+            "operation": MAPPING_OPERATION,
+            "reason": self.declared.kind,
+            "appliedAt": now,
+            "mappings": changes
+                .iter()
+                .map(|(id, before, after)| json!({
+                    "memoryId": id,
+                    "before": mapping_json(before),
+                    "after": mapping_json(after),
+                }))
+                .collect::<Vec<_>>(),
+        });
+        tx.execute(
+            "INSERT INTO memory_journal(project_path, decision_key, operation, receipt_json, applied_at,
+                                        before_json, after_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                self.project,
+                key,
+                MAPPING_OPERATION,
+                json!({"state": "applied", "reason": MAPPING_OPERATION, "memoryIds": ids}).to_string(),
+                now,
+                history_json(&decision)
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+/// The journal operation of the mappings a batch's verifications replaced.
+const MAPPING_OPERATION: &str = "verify_mapping";
+
+/// Whether memory `id` is protected from archives (see [`PROTECTED`]).
+fn protected(tx: &Transaction<'_>, id: i64) -> rusqlite::Result<bool> {
+    tx.query_row(
+        &format!("SELECT {PROTECTED} FROM memories m WHERE m.id = ?1"),
+        params![id],
+        |row| row.get(0),
+    )
+}
+
+/// `files` as mapping rows a verification wrote at `now`.
+fn mapping_of(files: &[String], now: i64) -> Vec<MappingRow> {
+    files
+        .iter()
+        .map(|file| MappingRow {
+            file_path: file.clone(),
+            mapping_origin: MAPPER.to_owned(),
+            verified_at: now,
+            mapped_at: now,
+        })
+        .collect()
 }
 
 fn unrecordable(id: i64) -> String {
@@ -423,30 +547,6 @@ fn after_snapshot(tx: &Transaction<'_>, id: i64) -> rusqlite::Result<Value> {
             "memory {id} has no history snapshot after its verification"
         ))
     })
-}
-
-/// Make `files` the memory's whole mapping.
-fn replace_mapping(
-    tx: &Transaction<'_>,
-    id: i64,
-    files: &[String],
-    now: i64,
-) -> rusqlite::Result<()> {
-    if !table_exists(tx, "memory_verifications")? {
-        return Ok(());
-    }
-    tx.execute(
-        "DELETE FROM memory_verifications WHERE memory_id = ?1",
-        params![id],
-    )?;
-    for file in files {
-        tx.execute(
-            "INSERT INTO memory_verifications(memory_id, file_path, verified_at, mapped_at, mapping_origin)
-             VALUES (?1, ?2, ?3, ?3, 'mapper')",
-            params![id, file, now],
-        )?;
-    }
-    Ok(())
 }
 
 /// Record that the memory was verified now, at `commit`, against `files`,

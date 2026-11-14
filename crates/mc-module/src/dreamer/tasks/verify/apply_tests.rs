@@ -344,3 +344,141 @@ fn an_archive_without_missing_needs_a_reason_and_is_refused_for_a_directive() {
         ]
     );
 }
+
+#[test]
+fn a_protected_memory_is_never_archived_but_may_be_verified_updated_or_skipped() {
+    let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
+    fixture.insert(&[
+        row(1, "`gone_guard` in src/old/guard.rs stops every delete."),
+        row(2, "`gone_helper` cleans the queue."),
+        row(3, "`gone_other` in src/old/other.rs does it."),
+        row(4, "live_function has exactly one caller."),
+        row(5, "live_function is defined once."),
+        row(6, "live_function never panics."),
+    ]);
+    // 1, 4 and 6 are safety-critical, 5 is permanent, and the person edited
+    // 2 in the apps; 3 is not protected.
+    fixture.execute(&format!(
+        "UPDATE memories SET safety_critical = 1 WHERE id IN (1, 4, 6);
+         UPDATE memories SET status = 'permanent' WHERE id = 5;
+         INSERT INTO memory_history(memory_id, revision, previous_text, applied_at, reason,
+                                    evidence_json, source_ids_json, decision_key)
+              VALUES (2, 0, 'before', 1, 'edited', '[]', '[2]', 'person-edit-2');
+         INSERT INTO memory_journal(project_path, decision_key, operation, receipt_json, applied_at)
+              VALUES ('{}', 'person-edit-2', 'person_edit', '{{}}', 1);",
+        super::super::tests::PROJECT
+    ));
+    let batch = plan_one(&fixture);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(
+            r#"<archive id="1" missing="gone_guard"/>
+<archive id="2" reason="the helper was removed" missing="gone_helper"/>
+<archive id="3" missing="gone_other"/>
+<update id="4" files="src/live.rs">live_function has exactly two callers.</update>
+<verified id="5" files="src/live.rs"/>
+<skip id="6"/>"#,
+        ),
+    );
+    assert_eq!(
+        applied.dropped,
+        [
+            "memory 1 is protected (safety-critical, permanent, a policy, or the person's own) and is never archived",
+            "memory 2 is protected (safety-critical, permanent, a policy, or the person's own) and is never archived",
+        ]
+    );
+    assert_eq!(applied.applied, 4);
+    let statuses: Vec<String> = (1..=6).map(|id| fixture.memory(id).0).collect();
+    assert_eq!(
+        statuses,
+        [
+            "active",
+            "active",
+            "archived",
+            "active",
+            "permanent",
+            "active"
+        ]
+    );
+    assert_eq!(
+        fixture.memory(4).1,
+        "live_function has exactly two callers."
+    );
+    assert!(fixture.memory(5).3.is_some());
+    assert!(fixture.memory(6).4["dreamerCheckedAt"].as_i64().is_some());
+}
+
+#[test]
+fn undoing_a_verify_run_puts_back_its_rows_and_the_mappings_it_replaced() {
+    use crate::memory_writes::person::{self, OwnerRef};
+
+    let fixture = Fixture::new(&[
+        ("src/live.rs", "fn live_function(a: u8) {}\n"),
+        ("src/other.rs", "fn other() {}\n"),
+    ]);
+    fixture.insert(&[
+        row(1, "`live_function` is defined in the live module."),
+        Row {
+            files: vec!["src/other.rs"],
+            ..row(2, "`gone_function` in src/old/gone.rs does the work.")
+        },
+        row(3, "live_function takes no arguments at all."),
+        Row {
+            files: vec!["src/live.rs"],
+            verified: Some((5, None)),
+            ..row(4, "live_function lives in src/live.rs.")
+        },
+    ]);
+    let batch = plan_one(&fixture);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(
+            r#"<verified id="1" files="src/live.rs"/>
+<verified id="4" files="src/live.rs"/>
+<update id="3" files="src/live.rs">live_function takes one argument.</update>
+<archive id="2" missing="gone_function"/>"#,
+        ),
+    );
+    assert_eq!((applied.applied, applied.dropped.len()), (4, 0));
+    assert_eq!(fixture.mapping(1), ["src/live.rs"]);
+    assert!(fixture.mapping(2).is_empty());
+    let owner = OwnerRef {
+        level: "project".into(),
+        owner_id: super::super::tests::PROJECT.into(),
+    };
+    let plan = fixture
+        .db
+        .with_connection(|conn| person::plan_run_undo(conn, &owner, 7))
+        .unwrap();
+    assert!(plan.left.is_empty(), "{:?}", plan.left);
+    assert_eq!(
+        plan.restore
+            .iter()
+            .map(|(target, _)| target.id)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    // 4 was checked against the same file again, which is no new mapping.
+    assert_eq!(
+        plan.mappings
+            .iter()
+            .map(|mapping| mapping.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    fixture
+        .db
+        .with_connection(|conn| person::undo_run(conn, &owner, 7, &plan))
+        .unwrap();
+    assert!(fixture.mapping(1).is_empty());
+    assert_eq!(fixture.memory(2).0, "active");
+    assert_eq!(fixture.mapping(2), ["src/other.rs"]);
+    assert_eq!(
+        fixture.memory(3).1,
+        "live_function takes no arguments at all."
+    );
+    // Restoring the older text cleared the update's mapping, as restoring
+    // any text does.
+    assert!(fixture.mapping(3).is_empty());
+    assert_eq!(fixture.mapping(4), ["src/live.rs"]);
+}
