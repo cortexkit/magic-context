@@ -17,9 +17,9 @@ You read only what this message gives you: the events, grouped by the surface an
 
 1. A learning rests on events from at least 2 different days (the `day` of each event), and on at least one event marked `new="yes"`. Cite every event it rests on by its id, and only ids from this message. One incident, however costly, is not a pattern.
 2. Do not write what an existing memory already says, even in other words.
-3. Write the rule a later agent follows, in the present tense: what to do, or which limit to plan around. Do not tell what happened or when.
+3. Write the rule a later agent follows, in the present tense: what to do, or which limit to plan around. Do not tell what happened or when. Keep it to one or two sentences: every agent reads it at the start of every session.
 4. Use no quotation marks, no dates, and no session, message or run ids. Do not copy the user's words: corrections often quote the user, sometimes angrily. State the rule they imply, calmly.
-5. Most groups show no pattern. These are a real project's events, not a test: nothing was planted for you to find, and nobody counts your learnings. An empty list is often the right answer.
+5. Most groups show no pattern. These are a real project's events, not a test: nothing was planted for you to find, and nobody counts your learnings or checks which groups you used. A group with no pattern gets no learning, and an empty list is often the right answer.
 
 ## Categories
 

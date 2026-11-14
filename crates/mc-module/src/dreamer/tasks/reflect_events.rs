@@ -15,9 +15,11 @@
 //! Days, not sessions: a head agent's whole history is one long session, so
 //! a mistake that keeps coming back there comes back on different days. The
 //! day is the event's calendar date in the machine's local time.
-//! It shows the group's new events and fills up to [`GROUP_EVENTS`] with its
-//! newest older events of the last [`OLDER_DAYS`] days, each with every field
-//! the summarizer stored. Next to the groups, a message shows the project's
+//! A run reads only events of the last [`WINDOW_DAYS`] days, new ones
+//! included: a first run finds every stored event new, and rules drawn from
+//! months-old work describe code and habits that have since moved on. A group
+//! shows its new events and fills up to [`GROUP_EVENTS`] with its newest
+//! older ones, each with every field the summarizer stored. Next to the groups, a message shows the project's
 //! live memories closest to each group's events, by meaning when the
 //! embedding provider and stored vectors allow it and by words otherwise,
 //! so the model doesn't write a memory that already exists. Groups are
@@ -63,8 +65,8 @@ pub(crate) const KIND: &str = "reflect-events";
 pub(crate) const INPUT_FRAME: &str = "dreamer/reflect-events.input";
 /// A group shows at most this many events.
 pub(crate) const GROUP_EVENTS: usize = 30;
-/// A group's older events come from at most this many days back.
-pub(crate) const OLDER_DAYS: i64 = 90;
+/// A run reads events from at most this many days back, new or older.
+pub(crate) const WINDOW_DAYS: i64 = 90;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// Each group brings at most this many existing memories along.
 pub(crate) const EXISTING_EACH: usize = 8;
@@ -216,14 +218,12 @@ fn fields_of(json: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The project's events of `kinds` that are new (id after `after`) or no
-/// older than `since`, newest id first. A project's events are those of the
+/// The project's events of `kinds` no older than `since`, newest id first. A project's events are those of the
 /// sessions `session_projects` names as its.
 pub(crate) fn read_events(
     conn: &Connection,
     project: &str,
     kinds: &[EventKind],
-    after: i64,
     since: i64,
 ) -> rusqlite::Result<Vec<Event>> {
     let tags: Vec<&str> = kinds.iter().map(|kind| kind.tag.as_str()).collect();
@@ -232,14 +232,13 @@ pub(crate) fn read_events(
            FROM compartment_events e
            JOIN session_projects p ON p.session_id = e.session_id AND p.harness = e.harness
           WHERE p.project_path = ?1 AND e.kind IN (SELECT value FROM json_each(?2))
-            AND (e.id > ?3 OR e.created_at >= ?4)
+            AND e.created_at >= ?3
           ORDER BY e.id DESC",
     )?
     .query_map(
         params![
             project,
             serde_json::to_string(&tags).expect("tags serialize"),
-            after,
             since
         ],
         |row| {
@@ -325,10 +324,10 @@ fn newest_first(events: &mut [Event]) {
 
 /// The groups worth sending among `events`, in the kinds' order and then by
 /// value: each holds a new event (id after `after`) and events from at least
-/// `min_proof` days. A group shows all its new events (at most
-/// [`GROUP_EVENTS`], newest first) and fills up to that many with its
-/// newest older events no older than `since`. An event without its kind's
-/// grouping field belongs to no group.
+/// `min_proof` days. Only events no older than `since` count, new ones too.
+/// A group shows all its new events (at most [`GROUP_EVENTS`], newest first)
+/// and fills up to that many with its newest older events. An event without
+/// its kind's grouping field belongs to no group.
 pub(crate) fn groups(
     kinds: &[EventKind],
     events: &[Event],
@@ -338,6 +337,9 @@ pub(crate) fn groups(
 ) -> Vec<Group> {
     let mut by_group: BTreeMap<(usize, String), (Vec<Event>, Vec<Event>)> = BTreeMap::new();
     for event in events {
+        if event.created_at < since {
+            continue;
+        }
         let Some(kind) = kinds.iter().position(|kind| kind.tag == event.kind) else {
             continue;
         };
@@ -352,7 +354,7 @@ pub(crate) fn groups(
         let (new, older) = by_group.entry((kind, value.to_owned())).or_default();
         if event.id > after {
             new.push(event.clone());
-        } else if event.created_at >= since {
+        } else {
             older.push(event.clone());
         }
     }
@@ -642,12 +644,12 @@ impl ReflectEvents {
                 "{task} declares no event kind the module can group"
             ));
         }
-        let since = now - OLDER_DAYS * DAY_MS;
+        let since = now - WINDOW_DAYS * DAY_MS;
         let (after, events) = context
             .db
             .with_connection(|conn| {
                 let after = stored_watermark(conn, project, &task)?;
-                Ok::<_, rusqlite::Error>((after, read_events(conn, project, &kinds, after, since)?))
+                Ok::<_, rusqlite::Error>((after, read_events(conn, project, &kinds, since)?))
             })
             .map_err(|error| format!("reading the events of {project}: {error}"))?;
         let newest = events

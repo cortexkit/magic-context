@@ -366,7 +366,7 @@ fn older_events_count_towards_the_days_but_a_group_needs_a_new_one() {
         fields: BTreeMap::from([("affected_surface".into(), value.into())]),
         created_at: NOW - days * DAY_MS,
     };
-    let since = NOW - OLDER_DAYS * DAY_MS;
+    let since = NOW - WINDOW_DAYS * DAY_MS;
     let events = vec![
         // One new event, and an older one on another day.
         event(10, "environment", 1),
@@ -379,7 +379,11 @@ fn older_events_count_towards_the_days_but_a_group_needs_a_new_one() {
         event(4, "tool_protocol", 1),
         // A new event, and the only other one too old to show.
         event(11, "ui", 1),
-        event(0, "ui", OLDER_DAYS + 1),
+        event(0, "ui", WINDOW_DAYS + 1),
+        // New, on two days, but older than the window: a first run finds
+        // every stored event new, and these are months old.
+        event(14, "model_behavior", WINDOW_DAYS + 1),
+        event(15, "model_behavior", WINDOW_DAYS + 2),
         // No grouping field.
         Event {
             fields: BTreeMap::new(),
@@ -414,7 +418,7 @@ fn a_group_shows_at_most_thirty_events_new_ones_first() {
         fields: BTreeMap::from([("affected_surface".into(), "environment".into())]),
         created_at: NOW - days * DAY_MS,
     };
-    let since = NOW - OLDER_DAYS * DAY_MS;
+    let since = NOW - WINDOW_DAYS * DAY_MS;
     // 35 new events: the 30 newest are shown.
     let many: Vec<Event> = (100..135).map(|id| event(id, 140 - id)).collect();
     let shown = &groups(&kinds, &many, 99, since, 2)[0];
