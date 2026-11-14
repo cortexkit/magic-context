@@ -579,7 +579,15 @@ async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides()
         ("glob", &[]),
     ]);
     let client = Arc::new(client);
-    let root = fixture.repo.path().to_str().unwrap().to_owned();
+    // Canonical, as git names the main checkout (macOS keeps temp folders
+    // under /private/var behind a /var link).
+    let root = fixture
+        .repo
+        .path()
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
     engine.see_project(
         &db,
         PROJECT,

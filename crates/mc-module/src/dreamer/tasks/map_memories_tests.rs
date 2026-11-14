@@ -928,7 +928,9 @@ async fn a_due_run_maps_the_project_s_memories_through_the_engine() {
     let db = Arc::new(db);
     let engine = Arc::new(Engine::new("this", vec![Box::new(MapMemories)]));
     let profile = Arc::new(prompt_profile(None).unwrap());
-    let root = repo.root().display().to_string();
+    // Canonical, as git names the main checkout (macOS keeps temp folders
+    // under /private/var behind a /var link).
+    let root = repo.root().canonicalize().unwrap().display().to_string();
     engine.see_project(&db, PROJECT, &root, profile, &Settings::default(), 1);
     db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
         .unwrap();
