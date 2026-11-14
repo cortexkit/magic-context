@@ -401,7 +401,8 @@ impl DateRange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
     /// The session has nothing indexed: no row in `message_fts_rowid_map`
-    /// and an index watermark of 0. Its reads find nothing, so none runs.
+    /// and an index watermark of 0. Its reads would find nothing, so no
+    /// full-text read runs.
     Nothing,
     /// Every full-text row of the session has its rowid in the rowid map,
     /// so matches are screened by the session's mapped rowids before any

@@ -60,7 +60,7 @@ async fn keep_alive_endpoint() -> (String, Arc<AtomicUsize>) {
 #[tokio::test]
 async fn requests_to_one_endpoint_reuse_a_connection_across_providers() {
     let (endpoint, connections) = keep_alive_endpoint().await;
-    // Settings build a new provider for each session and pass.
+    // Settings build a new provider for each session and each transform pass.
     for _ in 0..3 {
         let provider = Provider::from_tiers(
             &json!({"embedding": {
