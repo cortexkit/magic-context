@@ -50,11 +50,18 @@ const COPIED: &[&str] = &[
     "retrospective_processed_windows",
 ];
 
-/// Left under a contested key: one session's state, mappings and caches
-/// (a session ran in one folder, and no row says which project's folder
-/// that was), per-project caches each project builds for itself, workspace
-/// membership (a project is in one workspace, under a unique display
-/// name). The copy leaves every table outside [`COPIED`]; this list names
+/// Moved from a contested key to its first target by id and never copied: a
+/// session's project mapping. A session belongs to one project, so its row
+/// goes where the key's original rows go (the rule its commits follow), and
+/// a read of a project's sessions (the dreamer's reflect task, which reads
+/// the stored events of the project's sessions) still finds it.
+const FIRST_ONLY: &[&str] = &["session_projects"];
+
+/// Left under a contested key: one session's state and caches (a session
+/// ran in one folder, and no row says which project's folder that was),
+/// per-project caches each project builds for itself, workspace membership
+/// (a project is in one workspace, under a unique display name). The copy
+/// leaves every table outside [`COPIED`] and [`FIRST_ONLY`]; this list names
 /// the ones sorted on purpose, and a test fails when a table is in no list.
 #[cfg(test)]
 pub(super) const LEFT: &[&str] = &[
@@ -77,16 +84,16 @@ pub(super) const LEFT: &[&str] = &[
     "primer_candidates",
     "project_state",
     "rescore_jobs",
-    "session_projects",
     "shadow_embedding_registrations",
     "synapse_batch_ledger",
     "workspace_members",
 ];
 
-/// The tables a contested key's rows are copied from.
+/// The tables a contested key's rows are copied from, and the ones moved to
+/// its first target only.
 #[cfg(test)]
-pub(super) fn contested_tables() -> &'static [&'static str] {
-    COPIED
+pub(super) fn contested_tables() -> Vec<&'static str> {
+    COPIED.iter().chain(FIRST_ONLY).copied().collect()
 }
 
 /// Which of a table's rows count as knowledge: a session's own notes don't.
@@ -280,9 +287,11 @@ pub(crate) fn move_step(
 /// rows, in one transaction. The originals move to the first target by id,
 /// keeping their ids (sync records and the rows left behind name them);
 /// every other target gets its own copies with new ids. A source is copied
-/// and moved in the same batch, so it is never copied twice. Rows of one
-/// session stay under the key. A project registered later gets nothing: the
-/// pool is copied once, to the projects that claim the key when it is.
+/// and moved in the same batch, so it is never copied twice. A session's
+/// project mapping moves to the first target and is not copied; the rest of
+/// a session's rows stay under the key. A project registered later gets
+/// nothing: the pool is copied once, to the projects that claim the key when
+/// it is.
 pub(crate) fn copy_step(
     conn: &mut Connection,
     progress: &mut Progress,
@@ -321,7 +330,9 @@ pub(crate) fn copy_step(
     let tables = progress.tables(&tx)?;
     let knowledge: Vec<&Table> = tables
         .iter()
-        .filter(|table| COPIED.contains(&table.name.as_str()))
+        .filter(|table| {
+            COPIED.contains(&table.name.as_str()) || FIRST_ONLY.contains(&table.name.as_str())
+        })
         .collect();
     for table in &knowledge {
         if left == 0 {
@@ -336,7 +347,12 @@ pub(crate) fn copy_step(
         } else {
             None
         };
-        for to in &extras {
+        let copied_to: &[&String] = if FIRST_ONLY.contains(&table.name.as_str()) {
+            &[]
+        } else {
+            &extras
+        };
+        for to in copied_to {
             // Memories come first, so a copied watermark can name the
             // copies every memory batch before it made.
             let ids = if table.name == "memory_embedding_watermarks" {

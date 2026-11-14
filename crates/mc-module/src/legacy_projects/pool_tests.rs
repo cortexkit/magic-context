@@ -195,6 +195,11 @@ fn a_key_one_project_claims_moves_whole_and_a_rerun_moves_nothing() {
         );
         // Every row moved, the memories with their ids.
         assert!(store::keys_with_rows(conn).unwrap().is_empty());
+        // The session's project mapping names the project now.
+        assert_eq!(
+            count(conn, "SELECT count(*) FROM session_projects WHERE session_id = 'ses-1' AND project_path = ?1", "pj-a"),
+            1
+        );
         // The commit's vector and search entry went with it.
         assert_eq!(commit_in(conn, "pj-a"), [1, 1, 1]);
         assert_eq!(commit_in(conn, KEY), [0, 0, 0]);
@@ -325,7 +330,9 @@ fn a_key_two_projects_claim_gives_each_its_own_copy_with_history() {
                 "{table} of {memory}"
             );
         }
-        // Smart notes are knowledge; the session's note and mapping stay.
+        // Smart notes are knowledge and the session's note stays. The
+        // session's project mapping moves to the first project by id, as its
+        // originals do, so the project's session reads still find it.
         for project in ["pj-a", "pj-b"] {
             assert_eq!(
                 count(conn, "SELECT count(*) FROM notes WHERE project_path = ?1 AND type = 'smart'", project),
@@ -337,8 +344,10 @@ fn a_key_two_projects_claim_gives_each_its_own_copy_with_history() {
             count(conn, "SELECT count(*) FROM notes WHERE project_path = ?1 AND type = 'session'", KEY),
             1
         );
-        assert_eq!(count(conn, "SELECT count(*) FROM session_projects WHERE project_path = ?1", KEY), 1);
-        assert_eq!(count(conn, "SELECT count(*) FROM session_projects WHERE project_path <> ?1", KEY), 0);
+        assert_eq!(count(conn, "SELECT count(*) FROM session_projects WHERE project_path = ?1", "pj-a"), 1);
+        assert_eq!(count(conn, "SELECT count(*) FROM session_projects WHERE project_path <> ?1", "pj-a"), 0);
+        assert_eq!(done["pj-a"]["session_projects"], 1);
+        assert!(!done["pj-b"].contains_key("session_projects"), "a mapping is never copied");
         // Each project gets the commit, with its vector and its search entry.
         assert_eq!(commit_in(conn, "pj-a"), [1, 1, 1]);
         assert_eq!(commit_in(conn, "pj-b"), [1, 1, 1]);
@@ -431,7 +440,8 @@ fn keys_in_different_workspaces_hold_a_move() {
 }
 
 /// A table added later with a project column must be sorted on purpose:
-/// copied to every project of a contested key, or left under it.
+/// copied to every project of a contested key, moved to its first project
+/// only, or left under it.
 #[test]
 fn every_project_keyed_table_is_sorted_for_a_contested_key() {
     let conn = ContextDb::fresh_in_memory();
@@ -441,9 +451,9 @@ fn every_project_keyed_table_is_sorted_for_a_contested_key() {
         .map(|table| table.name)
         .collect();
     let sorted: BTreeSet<String> = pool::contested_tables()
-        .iter()
-        .chain(pool::LEFT)
-        .map(|name| (*name).to_owned())
+        .into_iter()
+        .chain(pool::LEFT.iter().copied())
+        .map(str::to_owned)
         .collect();
     assert_eq!(found, sorted);
 }

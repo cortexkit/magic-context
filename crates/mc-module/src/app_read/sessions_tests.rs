@@ -321,6 +321,7 @@ async fn the_modules_writers_tell_the_watch_what_they_changed() {
             workspace_id: None,
             profile: None,
         }],
+        project: None,
     };
     db.publish_summaries("opencode2", "s", &[compartment], None, &recall, T)
         .unwrap();

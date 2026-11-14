@@ -2799,6 +2799,7 @@ impl Session {
                 events: validated.events.clone(),
                 primer,
                 observations,
+                project: self.project.as_ref().map(|project| project.id.clone()),
             };
             if let Err(error) = db.publish_summaries(
                 &self.key.harness,

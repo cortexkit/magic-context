@@ -1049,6 +1049,7 @@ mod tests {
                 project_id: Some("pj-1".into()),
                 workspace_id: None,
             }],
+            project: Some("pj-1".into()),
         };
         db.publish_summaries(
             "opencode",
@@ -1108,6 +1109,62 @@ mod tests {
                     None
                 )
             );
+            // The session is recorded as its project's, with the publish's time.
+            let mapping: (String, String, i64) = conn
+                .query_row(
+                    "SELECT harness, project_path, updated_at FROM session_projects WHERE session_id = 's1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(mapping, ("opencode".into(), "pj-1".into(), 7));
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A publish names the session's project in `session_projects`, the newest
+    /// one winning; a session whose route named no project gets no row, so
+    /// its events stay out of every project's reads.
+    #[test]
+    fn a_publish_records_the_sessions_project_only_when_it_has_one() {
+        let dir = std::env::temp_dir().join(format!("ck-mc-session-project-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+        let summary = |sequence: u64| ValidatedCompartment {
+            sequence,
+            start_message: sequence * 10,
+            end_message: sequence * 10 + 5,
+            start_message_id: format!("m{sequence}a"),
+            end_message_id: format!("m{sequence}b"),
+            title: "Work".into(),
+            content: "Did work.".into(),
+            p1: Some("Did work.".into()),
+            p2: None,
+            p3: None,
+            p4: None,
+            importance: Some(50),
+            episode_type: None,
+        };
+        let recall = |project: Option<&str>| Recall {
+            project: project.map(str::to_owned),
+            ..Recall::default()
+        };
+        db.publish_summaries("opencode", "loose", &[summary(0)], None, &recall(None), 3)
+            .unwrap();
+        db.publish_summaries("opencode", "s1", &[summary(0)], None, &recall(Some("pj-a")), 4)
+            .unwrap();
+        db.publish_summaries("opencode", "s1", &[summary(1)], None, &recall(Some("pj-b")), 5)
+            .unwrap();
+        db.with_connection(|conn| {
+            let rows: Vec<(String, String, i64)> = conn
+                .prepare("SELECT session_id, project_path, updated_at FROM session_projects ORDER BY session_id")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(rows, vec![("s1".into(), "pj-b".into(), 5)]);
         });
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1153,12 +1210,17 @@ mod tests {
 /// (`compartment_events`), with a project its first primer candidate
 /// (`primer_candidates`, read by the dashboard and `ctx_search`, never shown
 /// in the prompt), and what it noticed about the person
-/// (`memory_observations`, read only by the global review).
+/// (`memory_observations`, read only by the global review). With a project,
+/// the session is also recorded as that project's (`session_projects`), so a
+/// read of a project's stored events (the dreamer's reflect task) finds them.
 #[derive(Default)]
 pub struct Recall {
     pub events: Vec<crate::summary::validate::ParsedEvent>,
     pub primer: Option<PrimerSource>,
     pub observations: Vec<ObservationSource>,
+    /// The session's project id; `None` when its route named no project,
+    /// and then no project mapping is written.
+    pub project: Option<String>,
 }
 
 /// One observation about the person and where it came from.
@@ -1209,6 +1271,16 @@ fn store_recall(
     recall: &Recall,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
+    if let Some(project) = recall.project.as_deref().filter(|project| !project.is_empty()) {
+        // A session belongs to one project: the newest publish names it.
+        tx.execute(
+            "INSERT INTO session_projects (session_id, harness, project_path, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id, harness) DO UPDATE SET
+                 project_path = excluded.project_path, updated_at = excluded.updated_at",
+            params![session, harness, project, now_ms],
+        )?;
+    }
     for event in &recall.events {
         // `at_compartment` is 1-based into the run's summaries.
         let id = event
