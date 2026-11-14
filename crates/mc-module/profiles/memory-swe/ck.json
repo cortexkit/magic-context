@@ -80,8 +80,8 @@
     },
     {
       "path": "prompts/dreamer/lift-workspace/system.md",
-      "sha256": "23abd90aa9e3fae7a501747a82b902665431896a1bfe67bd9b8bd62be84fa0db",
-      "bytes": 2483
+      "sha256": "9134cf2277f6dae75d8e2760922d0a19a292aea92f86ec7fcc79032fb5aab115",
+      "bytes": 2505
     },
     {
       "path": "prompts/dreamer/lift-workspace/user.md",

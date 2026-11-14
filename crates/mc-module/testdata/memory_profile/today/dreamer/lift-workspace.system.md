@@ -5,7 +5,7 @@ Picture an agent at work in each project the workspace lists, one after another,
 
 Typical workspace memories:
 - a rule for how all of the workspace's projects are built, tested, reviewed, released or deployed;
-- a convention the whole workspace follows, such as the commit identity or where side checkouts and internal documents go;
+- a convention the whole workspace follows, such as the commit identity or where extra working copies of a repository and internal documents go;
 - how the person who owns the workspace wants every agent to work.
 
 Keep a memory with its project when:
