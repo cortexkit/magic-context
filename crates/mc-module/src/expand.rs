@@ -275,7 +275,8 @@ fn verbose_label(entry: &Entry) -> String {
 
 /// Run a call. `last_summarized` is the number of the last message the
 /// session's summaries cover: messages after it are still in view, so a
-/// range never shows them again.
+/// range never shows them again. A tag call naming a number in
+/// `numbers_unknown` is answered without asking the runner again.
 pub async fn run<C: RunnerClient>(
     client: &C,
     session: &SessionRef,
@@ -283,9 +284,10 @@ pub async fn run<C: RunnerClient>(
     input: &Value,
     last_summarized: Option<u64>,
     counter: crate::count::Counter,
+    numbers_unknown: NumbersUnknown<'_>,
 ) -> Result<String, String> {
     match mode(input)? {
-        Mode::Tag(tag) => by_tag(client, session, limits, tag).await,
+        Mode::Tag(tag) => by_tag(client, session, limits, tag, numbers_unknown).await,
         Mode::Message(number) => by_message(client, session, limits, number).await,
         Mode::Range {
             start,
@@ -309,13 +311,33 @@ pub async fn run<C: RunnerClient>(
     }
 }
 
+/// What a session knows about tag numbers the runner can't place
+/// (`numbers_unknown`): the numbers it refused so far, which a new refusal
+/// adds to, and whether the session's summaries reach that history, which
+/// the error then points to.
+pub struct NumbersUnknown<'a> {
+    pub refused: &'a mut std::collections::BTreeSet<u64>,
+    pub summarized: bool,
+}
+
 async fn by_tag<C: RunnerClient>(
     client: &C,
     session: &SessionRef,
     limits: reads::Limits,
     tag: u64,
+    numbers: NumbersUnknown<'_>,
 ) -> Result<String, String> {
-    let entries = reads::by_tags(client, session, vec![tag], limits).await?;
+    if numbers.refused.contains(&tag) {
+        return Err(reads::numbers_unknown_error(&[tag], numbers.summarized));
+    }
+    let entries = match reads::by_tags_placed(client, session, vec![tag], limits).await {
+        Ok(entries) => entries,
+        Err(reads::TagsRead::NumbersUnknown(refused)) => {
+            numbers.refused.extend(refused);
+            return Err(reads::numbers_unknown_error(&[tag], numbers.summarized));
+        }
+        Err(reads::TagsRead::Failed(error)) => return Err(error),
+    };
     let part = entries
         .iter()
         .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))

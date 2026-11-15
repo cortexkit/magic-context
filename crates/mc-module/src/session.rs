@@ -303,6 +303,33 @@ pub struct Session {
     /// A pass held its view back because the view could not meet the move
     /// floor, and no view has met it since: the hold is logged only once.
     move_floor_held: bool,
+    /// The entry a `cut_before_numbers` refusal named as the last one the
+    /// runner serves without part numbers ([`numbers_unknown`]). Not saved:
+    /// after a restart the read that fills the index finds those entries
+    /// marked again.
+    numbers_refused: Option<MoveFloor>,
+    /// A pass held its view back because it could not cut through the
+    /// history without part numbers: the hold is logged only once.
+    numbers_floor_held: bool,
+    /// The numbers floor whose entries, and later history outside the
+    /// protected tail, render nothing a summary would keep: the cut may pass
+    /// them without a summary ([`numbers_unknown`]). Not saved: after a
+    /// restart the same finding is made again.
+    numbers_covered: Option<MoveFloor>,
+    /// A session without a summarizer whose view the runner refused
+    /// `cut_before_numbers`: it can never cut, so it builds no view until
+    /// the next Setup.
+    numbers_views_held: bool,
+    /// The running tool call last logged as keeping the cut before the
+    /// numbers floor, so the line is written once per call.
+    numbers_running_logged: Option<String>,
+    /// Tag numbers the runner refused as `numbers_unknown`. The refusal is
+    /// permanent for the session, so ck-mc never asks for them again.
+    numbers_unknown_tags: BTreeSet<u64>,
+    /// A view offered again after a restart waits because the runner
+    /// couldn't place its cut yet (`transient`): the next notice offers it
+    /// again.
+    reoffer_pending: bool,
     /// The entry id of the runner's signed floor, as ck-mc last took it
     /// (see the `signed_floor` module). The runner strips signed reasoning at or before it.
     signed_floor: Option<String>,
@@ -805,6 +832,13 @@ impl Session {
             mural_image: None,
             move_floor: None,
             move_floor_held: false,
+            numbers_refused: None,
+            numbers_floor_held: false,
+            numbers_covered: None,
+            numbers_views_held: false,
+            numbers_running_logged: None,
+            numbers_unknown_tags: BTreeSet::new(),
+            reoffer_pending: false,
             signed_floor: None,
             disproved_floor: None,
             statement_seq: None,
@@ -960,6 +994,7 @@ impl Session {
             summary_unshown: self.summary_unshown,
             move_floor: self.move_floor.clone(),
             signed_floor: self.signed_floor.clone(),
+            numbers_unknown_tags: self.numbers_unknown_tags.clone(),
         }
     }
 
@@ -1022,6 +1057,7 @@ impl Session {
         self.summary_unshown = durable.summary_unshown;
         self.move_floor = durable.move_floor;
         self.signed_floor = durable.signed_floor;
+        self.numbers_unknown_tags = durable.numbers_unknown_tags;
         // A view handed over before the restart is the one ck-mc expects
         // the runner to show; Setup settles it.
         self.latest = self.unconfirmed.last().map(|pending| pending.view.clone());
@@ -1181,6 +1217,9 @@ impl Session {
         // Setup is the runner's statement afresh: a floor a refusal showed
         // it contradicting is taken again if this Setup names it.
         self.disproved_floor = None;
+        // Setup is where a session without a summarizer tries views again
+        // after one was refused for history without part numbers.
+        self.numbers_views_held = false;
         // Setup carries no reading, so none is stale. A runner that named
         // views it had already replaced is trusted again: Setup starts its
         // reports afresh.
@@ -1352,6 +1391,11 @@ impl Session {
             })
             .collect();
         self.settle_stated(stated, &refused);
+        // A view offered again after a restart that waited because the
+        // runner couldn't place its cut is offered again now.
+        if self.reoffer_pending {
+            self.offer_unconfirmed_again(client).await;
+        }
         self.take_render_failures(&notice.events);
         let judged = self.judged_view(stated);
         match standing {
@@ -1522,7 +1566,7 @@ impl Session {
         if self.render_failed.repair_pending {
             self.fold_due = true;
         }
-        let short_of_move_floor = self.short_of_move_floor();
+        let short_of_move_floor = self.short_of_move_floor() || self.short_of_numbers_floor();
         if let Some(kept) = self
             .pending_keep
             .take_if(|_| !self.latest_unknown && !short_of_move_floor)
@@ -1604,7 +1648,12 @@ impl Session {
             self.fold_due = true;
             self.head_stale = true;
         }
-        self.head_stale || (execute && (force || !self.summary_on_its_way()) && !hold)
+        // Summaries that reached the history without part numbers lift the
+        // views held back below it: the runner no longer serves the older
+        // view, which cut before that history.
+        self.head_stale
+            || self.numbers_view_due()
+            || (execute && (force || !self.summary_on_its_way()) && !hold)
     }
 
     /// Judge the reading the conditions just taken carry, once the notice's
@@ -1808,6 +1857,11 @@ impl Session {
     /// run at this usage.
     fn summary_due(&mut self, settings: &Settings) -> Option<run::Request> {
         let _timing = crate::notice_cost_timing::span("trigger.summary_due");
+        // No view may cut before history the runner serves without part
+        // numbers, so a summary through it comes before any other.
+        if let Some(due) = self.numbers_summary_due(settings) {
+            return due;
+        }
         if self.wrapup_target.is_some() {
             return self.wrapup_summary_due(settings);
         }
@@ -3220,6 +3274,7 @@ impl Session {
                     .summaries
                     .last()
                     .and_then(|summary| u64::try_from(summary.end_message).ok());
+                let summarized = self.summaries_cover_numbers();
                 crate::expand::run(
                     client,
                     &self.key,
@@ -3227,6 +3282,10 @@ impl Session {
                     input,
                     last_summarized,
                     self.counter(),
+                    crate::expand::NumbersUnknown {
+                        refused: &mut self.numbers_unknown_tags,
+                        summarized,
+                    },
                 )
                 .await
             }
@@ -3538,10 +3597,33 @@ impl Session {
             .copied()
             .filter(|tag| self.index.find_tag(*tag).is_none())
             .collect();
+        // Numbers the runner already refused as unknown are never asked
+        // for again (compaction contract W1.3, `numbers_unknown`).
+        let refused: Vec<_> = missing
+            .iter()
+            .copied()
+            .filter(|tag| self.numbers_unknown_tags.contains(tag))
+            .collect();
+        if !refused.is_empty() {
+            return Ok(crate::reads::numbers_unknown_error(
+                &refused,
+                self.summaries_cover_numbers(),
+            ));
+        }
         let archived = if missing.is_empty() {
             Vec::new()
         } else {
-            crate::reads::by_tags(client, &self.key, missing, self.limits).await?
+            match crate::reads::by_tags_placed(client, &self.key, missing, self.limits).await {
+                Ok(entries) => entries,
+                Err(crate::reads::TagsRead::NumbersUnknown(refused)) => {
+                    self.numbers_unknown_tags.extend(refused.iter().copied());
+                    return Ok(crate::reads::numbers_unknown_error(
+                        &refused,
+                        self.summaries_cover_numbers(),
+                    ));
+                }
+                Err(crate::reads::TagsRead::Failed(error)) => return Err(error),
+            }
         };
         let find = |tag: u64| {
             self.index.find_tag(tag).or_else(|| {
@@ -3655,9 +3737,21 @@ impl Session {
                 })
             })
         } else {
-            self.summaries
+            let summarized = self
+                .summaries
                 .last()
-                .map(|last| last.end_message_id.clone())
+                .map(|last| last.end_message_id.clone());
+            // Entries through the numbers floor that render nothing a
+            // summary would keep are cut past without one.
+            match self.numbers_covered.as_ref().filter(|covered| {
+                self.index.ordinal_of(&covered.mid) == Some(covered.ordinal)
+                    && self
+                        .summarized_through()
+                        .is_none_or(|reach| reach < covered.ordinal)
+            }) {
+                Some(covered) => Some(covered.mid.clone()),
+                None => summarized,
+            }
         };
         let cut = through.and_then(|through| {
             let entries = self.index.entries();
@@ -4266,6 +4360,19 @@ impl Session {
             self.hold_below_move_floor("a cut where the summaries end");
             return (None, 0);
         }
+        // The same for history the runner serves without part numbers: the
+        // summary through it is due, and views wait for it. A session
+        // without a summarizer whose view was refused for it waits for the
+        // next Setup.
+        if self.short_of_numbers_floor() || self.numbers_views_held {
+            if let Some(kept) = keep {
+                self.pending_keep = Some(kept.clone());
+            }
+            if !self.numbers_views_held {
+                self.hold_below_numbers_floor("a cut where the summaries end");
+            }
+            return (None, 0);
+        }
         self.next_keep = keep.cloned();
         self.retire_banned_queued();
         self.app_cause = if over_limit.is_some() {
@@ -4603,6 +4710,15 @@ impl Session {
                     return None;
                 }
                 self.release_move_floor_hold();
+                // Nor may any view cut before history the runner serves
+                // without part numbers (see `numbers_unknown`).
+                if let Some(why) = self.numbers_floor_breach(&view) {
+                    self.discard_held_view();
+                    self.log_running_call_below_numbers_floor();
+                    self.hold_below_numbers_floor(&why);
+                    return None;
+                }
+                self.release_numbers_floor_hold();
                 self.version = version;
                 self.next_covered = covered;
                 Some(view)
@@ -4764,9 +4880,13 @@ impl Session {
                 // counted against them; the apps still show the view as
                 // refused.
                 let floor_at_fault = self.judge_floor_refusal(&view.edits, view.version, &refusal);
+                // A cut before history without part numbers: the cut was at
+                // fault, not the drops, and the next views wait for a
+                // summary through that history instead of repeating it.
+                let numbers = self.take_numbers_refusal(view.version, &refusal);
                 self.roll_back(
                     view.version,
-                    !stale && !floor_at_fault,
+                    !stale && !floor_at_fault && !numbers,
                     refusal_part(&refusal),
                 );
                 if floor_at_fault {
@@ -4805,6 +4925,7 @@ impl Session {
     /// A runner that already holds it refuses it as not newer, which
     /// confirms nothing but loses nothing; any other refusal rolls it back.
     async fn offer_unconfirmed_again<C: RunnerClient>(&mut self, client: &C) {
+        self.reoffer_pending = false;
         // A runner that set up again may have restarted and lost a view it
         // had accepted. Its answer to this offer says again whether it holds
         // the view, and its readings are judged afresh from here.
@@ -4839,9 +4960,30 @@ impl Session {
         // Saved by a build from before the move floor was known, a view may
         // cut before it. Such a view is not offered again: ck-mc puts back
         // what accepting it changed, as when its fate is unknown, and takes
-        // whatever view the runner reports applying.
-        if let Some(why) = self.move_floor_breach_placed(client, &view).await {
-            self.hold_below_move_floor(&why);
+        // whatever view the runner reports applying. A runner that can't
+        // place the view's cut yet decides nothing: the view is offered
+        // again on the next notice.
+        match self.move_floor_breach_placed(client, &view).await {
+            Ok(Some(why)) => {
+                self.hold_below_move_floor(&why);
+                self.roll_back(oldest, false, None);
+                return;
+            }
+            Ok(None) => {}
+            Err(move_floor::PlaceLater) => {
+                tracing::info!(
+                    "ck-mc: session {}: view {} is offered again on the next notice: the runner can't place its cut yet",
+                    self.key.session,
+                    view.version
+                );
+                self.reoffer_pending = true;
+                return;
+            }
+        }
+        // Nor is a view that cuts before history the runner now serves
+        // without part numbers, when the index already shows that history.
+        if let Some(why) = self.numbers_floor_breach(&view) {
+            self.hold_below_numbers_floor(&why);
             self.roll_back(oldest, false, None);
             return;
         }
@@ -4874,7 +5016,8 @@ impl Session {
                 // still empty here, so nothing is placed and the usual
                 // penalty applies.
                 let floor_at_fault = self.judge_floor_refusal(&view.edits, view.version, &refusal);
-                self.roll_back(oldest, !floor_at_fault, None);
+                let numbers = self.take_numbers_refusal(view.version, &refusal);
+                self.roll_back(oldest, !floor_at_fault && !numbers, None);
                 if floor_at_fault {
                     self.app_view_status(oldest, "refused");
                 }
@@ -5088,6 +5231,15 @@ impl Session {
     /// Roll back the oldest unconfirmed view the runner refused at a step
     /// boundary, with every view built on it.
     fn settle_refused(&mut self, refused: &[(u64, ViewRefusal)]) {
+        // A step-boundary refusal of any view, the one in force included,
+        // can name history the runner serves without part numbers; the
+        // floor it names holds whichever view it was.
+        let mut numbers = BTreeSet::new();
+        for (version, refusal) in refused {
+            if self.take_numbers_refusal(*version, refusal) {
+                numbers.insert(*version);
+            }
+        }
         if let Some((version, refusal)) = refused
             .iter()
             .filter(|(version, _)| {
@@ -5113,7 +5265,7 @@ impl Session {
             if kept == Some(true) {
                 self.disprove_floor(*version, refusal);
             }
-            let floor_at_fault = kept.is_some();
+            let floor_at_fault = kept.is_some() || numbers.contains(version);
             // FinalTurnRemoved depends on the newest entry; UnknownMessage
             // can follow a revert. Neither blames a drop when an accepted
             // view first loses that race. Only its immediate retry pays the
@@ -6009,6 +6161,7 @@ mod signed_floor;
 #[path = "statement_order.rs"]
 mod statement_order;
 
+mod numbers_unknown;
 pub(crate) mod render_failed;
 mod user_commands;
 pub(crate) mod wrapup;

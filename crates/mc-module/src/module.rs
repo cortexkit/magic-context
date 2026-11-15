@@ -1118,8 +1118,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             }) {
                                 start_turn_two(&inner, own.clone(), job, &held_key);
                             }
+                            // A run that made progress is followed at once by
+                            // the next one a numbers floor or a wrap-up still
+                            // needs, not by the session's next notice.
                             if progressed {
-                                if let Some(request) = session.pending_wrapup_summary(settings) {
+                                if let Some(request) = session
+                                    .pending_numbers_summary(settings)
+                                    .or_else(|| session.pending_wrapup_summary(settings))
+                                {
                                     start_summary(&inner, own.clone(), request, &held_key);
                                 }
                             }

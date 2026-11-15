@@ -180,9 +180,85 @@ pub async fn by_tags<C: RunnerClient>(
     tags: Vec<u64>,
     limits: Limits,
 ) -> Result<Vec<Entry>, String> {
-    named(client, session, tags, limits, |tags| Select::Tags { tags })
+    by_tags_placed(client, session, tags, limits)
         .await
-        .map_err(|error| format!("session.read: {error:?}"))
+        .map_err(|error| match error {
+            TagsRead::NumbersUnknown(tags) => numbers_unknown_error(&tags, false),
+            TagsRead::Failed(error) => error,
+        })
+}
+
+/// Why a read by tag numbers returned no entries.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TagsRead {
+    /// The runner can't place these numbers (compaction contract W1.3,
+    /// `numbers_unknown`): they belong to history it serves without part
+    /// numbers. Permanent for the session, so the caller must never ask for
+    /// them again.
+    NumbersUnknown(Vec<u64>),
+    /// Any other failure, as text for the tool's answer.
+    Failed(String),
+}
+
+/// [`by_tags`], telling numbers the runner refused as unknown apart from
+/// other failures. The runner refuses the whole read when any requested
+/// number is unknown and names the ones it covers; a refusal that names
+/// none is taken to cover every number its own request asked for, since
+/// nothing narrows it.
+pub async fn by_tags_placed<C: RunnerClient>(
+    client: &C,
+    session: &SessionRef,
+    tags: Vec<u64>,
+    limits: Limits,
+) -> Result<Vec<Entry>, TagsRead> {
+    // One request per chunk, as `named` would split them, so a refusal that
+    // names no numbers marks only what its own request asked for.
+    let size = limits.select_max.unwrap_or(256).clamp(1, 256) as usize;
+    let mut entries = Vec::new();
+    for chunk in tags.chunks(size) {
+        let asked = chunk.to_vec();
+        let read = named(client, session, asked.clone(), limits, |tags| {
+            Select::Tags { tags }
+        })
+        .await
+        .map_err(|error| {
+            if error.code.as_deref()
+                != Some(cortexkit_role_compaction::wire::codes::NUMBERS_UNKNOWN)
+            {
+                return TagsRead::Failed(format!("session.read: {error:?}"));
+            }
+            let named: Option<Vec<u64>> = error
+                .detail
+                .as_ref()
+                .and_then(|detail| detail.get("tags"))
+                .and_then(|tags| serde_json::from_value(tags.clone()).ok())
+                .filter(|tags: &Vec<u64>| !tags.is_empty());
+            TagsRead::NumbersUnknown(named.unwrap_or(asked))
+        })?;
+        entries.extend(read);
+    }
+    Ok(entries)
+}
+
+/// The tool error for tag numbers the runner can't place. The model saw
+/// those numbers on older history that the runner can no longer number, so
+/// it is told why, and how to read that history by message instead. It is
+/// told the summaries cover that history only when `summarized` says they
+/// reach it.
+pub fn numbers_unknown_error(tags: &[u64], summarized: bool) -> String {
+    let named = tags
+        .iter()
+        .map(|tag| format!("§{tag}§"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let read = if summarized {
+        "The session's summaries cover it; read it with ctx_expand message=<ordinal> or a start/end range, or find it with ctx_search."
+    } else {
+        "Read it by message instead: ctx_expand message=<ordinal>, or a start/end range."
+    };
+    format!(
+        "Error: {named} can't be addressed by tag number: that part of the history no longer has tag numbers the runner can establish. {read}"
+    )
 }
 
 #[cfg(test)]
