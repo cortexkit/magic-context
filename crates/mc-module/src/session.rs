@@ -1415,9 +1415,10 @@ impl Session {
             })
             .collect();
         self.settle_stated(stated, &refused);
-        // A view offered again after a restart that waited because the
-        // runner couldn't place its cut, or one whose apply answer was lost,
-        // is offered again now.
+        // A view is offered again now if its offer after a restart waited
+        // because the runner couldn't place the view's cut (the point before
+        // which the view leaves the session's messages out), or if the
+        // answer to applying it was lost.
         if self.reoffer_pending {
             self.offer_unconfirmed_again(client).await;
         }
