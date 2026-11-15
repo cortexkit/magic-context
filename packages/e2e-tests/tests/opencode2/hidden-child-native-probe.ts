@@ -42,7 +42,7 @@ export default {
             join(directory, "native-probe-capability.json"),
             JSON.stringify({ remove: typeof context.session.remove, metadataForward, metadataSemantics }),
         );
-        if (typeof context.session.remove === "function") {
+        if (typeof context.session.remove === "function" && !existsSync(join(directory, "native-remove-done.json"))) {
             void (async () => {
                 while (!existsSync(join(directory, "native-remove-start"))) await Bun.sleep(20);
                 const child = await context.session.create({ title: "running remove probe", location: { directory }, model: { providerID: "openai", id: "mock-model" } });

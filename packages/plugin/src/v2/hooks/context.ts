@@ -196,7 +196,8 @@ import {
 } from "../fold/summary";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
-import { nativeSessionRemove } from "../hidden-child-native";
+import { isLiveHiddenChild, nativeSessionRemove } from "../hidden-child-native";
+import { createHiddenChildSweeper, HIDDEN_CHILD_SWEEP_INTERVAL_MS } from "../hidden-child-sweep";
 import {
     createLateHiddenExecutor,
     createV2HiddenCompletionExecutor,
@@ -1075,10 +1076,24 @@ export async function registerContext(context: V2Context) {
     let db: ReturnType<typeof openDatabase> | undefined = await probeV2StorageAtBoot(storage);
     const storageOpenedAtBoot = db !== undefined;
     let legacyCleanupStarted = false;
+    const hiddenChildSweep = createHiddenChildSweeper(nativeRemove, log, {
+        isLive: isLiveHiddenChild,
+    });
+    let hiddenChildSweepTimer: ReturnType<typeof setInterval> | undefined;
+    const sweepChildren = (database: NonNullable<typeof db>) => {
+        hiddenChildSweep.start(database);
+    };
     const cleanupLegacyOnce = async (database: NonNullable<typeof db>) => {
         if (legacyCleanupStarted) return;
         legacyCleanupStarted = true;
         await cleanupLegacyHiddenChildren(database, nativeRemove, log);
+        sweepChildren(database);
+        hiddenChildSweepTimer = inRootAsyncContext(() =>
+            setInterval(() => {
+                void sweepChildren(database);
+            }, HIDDEN_CHILD_SWEEP_INTERVAL_MS),
+        );
+        hiddenChildSweepTimer.unref?.();
     };
     if (db && isDatabasePersisted(db)) await cleanupLegacyOnce(db);
     let storageRecoveryAnnounced = false;
@@ -3735,6 +3750,8 @@ export async function registerContext(context: V2Context) {
     );
     return {
         async dispose() {
+            if (hiddenChildSweepTimer) clearInterval(hiddenChildSweepTimer);
+            await hiddenChildSweep.dispose();
             messageTimesCache.clear();
             hostFoldIdle?.dispose();
             usageController.abort();

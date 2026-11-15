@@ -530,12 +530,12 @@ export async function createV2HiddenCompletionExecutor(
         host,
         (input) => removeSession.call(host, input),
         {
+            db: options.db,
             hook: options.hook,
             generation,
             keepSubagents: options.keepSubagents === true,
             log: note,
             removalTimeoutMs: options.removalTimeoutMs,
-            directory: options.directory,
         },
     );
 
@@ -824,6 +824,7 @@ export async function createV2HiddenCompletionExecutor(
             run.attempt = { child: attempt, baseline };
             options.hook.registerAttempt(marker, attempt);
             const deadline = Date.now() + run.identity.timeoutMs;
+            lifecycle.extendDeadline(run.child, deadline);
             const budget = run.budget;
             if (budget?.snapshot().finalizeFired) {
                 throw new DreamTokenBudgetExceeded(run.child.id, budget.snapshot().spent);

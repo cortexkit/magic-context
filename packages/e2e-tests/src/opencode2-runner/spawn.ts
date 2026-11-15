@@ -101,12 +101,11 @@ export interface OpenCode2Isolation {
 	referencedDirectories?: string[];
 }
 
-export function isolation(): OpenCode2Isolation {
+export function isolation(root = createE2ETempDir("mc-opencode2-")): OpenCode2Isolation {
 	// The retrospective gate counts only the selected host's root sessions.
 	// Match the OpenCode 2 host for in-process database probes, but do not select
 	// a host when importing utilities that OpenCode 1 tests also use.
 	setHarness("opencode2");
-	const root = createE2ETempDir("mc-opencode2-");
 	const env: NodeJS.ProcessEnv = {
 		PATH: process.env.PATH,
 		OPENCODE_DB: "opencode2.db",
@@ -694,13 +693,13 @@ export function inspectOpenFiles(
 	env: NodeJS.ProcessEnv,
 ): string[] {
 	const sample = () => {
-		const ps = spawnSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8" });
+		const ps = spawnSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8", windowsHide: true });
 		if (ps.status !== 0) throw new Error("Cannot inspect v2 process group");
 		const pids = ps.stdout.trim().split("\n")
 			.map((line) => line.trim().split(/\s+/))
 			.filter(([, group]) => Number(group) === pid).map(([id]) => id);
 		if (!pids.length) throw new Error("v2 process group disappeared before fd inspection");
-		return spawnSync("lsof", ["-p", pids.join(","), "-Fin"], { encoding: "utf8" });
+		return spawnSync("lsof", ["-p", pids.join(","), "-Fin"], { encoding: "utf8", windowsHide: true });
 	};
 	// A short-lived group member can exit between ps and lsof. Resample the whole
 	// live group, but still require a successful inventory and the database inode.

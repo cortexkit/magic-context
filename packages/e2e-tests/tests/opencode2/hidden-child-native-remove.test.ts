@@ -1,22 +1,22 @@
 import { expect, test } from "bun:test";
 import {
     existsSync,
-    mkdtempSync,
     readdirSync,
     readFileSync,
     realpathSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { type RpcPortFileRecord, rpcPortDir } from "../../../plugin/src/shared/rpc-utils";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import { createTestTempDir } from "../../../plugin/src/shared/test-temp-dir";
 import {
     CLI,
     inspectOpenFiles,
     isolation,
+    serviceRegistrationPath,
     spawnOpencode2,
     waitForPluginActive,
 } from "../../src/opencode2-runner/spawn";
@@ -24,9 +24,10 @@ import {
 /**
  * Hidden runs (historian, dreamer) on a real OpenCode 2 host, through the shipped plugin.
  *
- * OpenCode 2.0.22 creates each hidden child under the user's session and removes it when the
- * run ends, leaving no root session behind. The probe reports the native capability and the
- * parent and metadata observed while each child is running.
+ * Each hidden child is a root session of the run's directory, never a child of the user's session:
+ * OpenCode 2.3 reports every idle of a parented session to its parent and wakes it (issue 913).
+ * The child is removed when the run ends, leaving no root session behind. The probe reports the
+ * native capability and the parent and metadata observed while each child is running.
  */
 
 const REVIEW_PROMPT_MARKER = "Review User Memory Candidates";
@@ -64,8 +65,9 @@ function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T, writ
     }
 }
 
-test("hidden runs on OpenCode 2.0.22 are parented and removed with no root children", async () => {
-    const bundleDir = mkdtempSync(join(tmpdir(), "mc-hidden-child-native-probe-"));
+test("hidden runs on OpenCode 2 are unparented and removed with no leftover root sessions", async () => {
+    const fixture = isolation(createTestTempDir("hidden-child-native-remove-").dir);
+    const bundleDir = join(fixture.root, "native-probe");
     const build = await Bun.build({
         entrypoints: [join(import.meta.dir, "hidden-child-native-probe.ts")],
         outdir: bundleDir,
@@ -75,7 +77,6 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
     });
     if (!build.success) throw new Error(build.logs.join("\n"));
 
-    const fixture = isolation();
     const logPath = join(fixture.root, "magic-context.log");
     fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
     const host = await spawnOpencode2({
@@ -83,11 +84,14 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
         probePlugin: bundleDir,
         modelContextLimit: 200_000,
         modelOutputLimit: 1_024,
+        serviceMode: true,
+        waitForTransport: true,
         magicContextConfig: {
             historian: { two_pass: false },
             dreamer: { tasks: { "review-user-memories": { schedule: "0 3 * * *" } } },
         },
     });
+    let activeHost = host;
     const pluginLog = () => (existsSync(logPath) ? readFileSync(logPath, "utf8") : "");
     try {
         const client = OpenCode.make({
@@ -174,7 +178,8 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
                 );
         };
 
-        // Give the historian something to compress.
+        // Give the historian something to compress, then record the user session's messages so
+        // hidden historian/dreamer completions can be proven not to inject `<subagent>` turns.
         host.mock.setDefault({ text: "ordinary turn", usage: { input_tokens: 100, output_tokens: 10 } });
         for (let index = 0; index < 6; index++) {
             await client.session.prompt({
@@ -183,6 +188,7 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
             });
             await client.session.wait({ sessionID: user.id }, { signal: AbortSignal.timeout(30_000) });
         }
+        const userMessagesBefore = (await client.message.list({ sessionID: user.id })).data;
         const rootsBefore = await roots();
         console.log(JSON.stringify({ rootsBefore }));
         expect(rootsBefore.filter((session) => session.hidden)).toEqual([]);
@@ -269,9 +275,7 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
 
         expect(native).toBe(true);
         {
-            // Each hidden child was created under the user's session...
-            for (const child of hiddenChildren) expect(child.parentID).toBe(user.id);
-            // ...and is gone once its run has ended.
+            // Each hidden child is gone once its run has ended...
             for (const child of hiddenChildren) {
                 await eventually(
                     async () => ((await exists(child.sessionID)) ? undefined : true),
@@ -282,12 +286,20 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
             console.log(JSON.stringify({ rootsAfter, childrenOfUser: await childrenOfUser() }));
             expect(rootsAfter).toEqual(rootsBefore);
             expect(await childrenOfUser()).toEqual([]);
-            // Nothing about these children is recorded for later cleanup.
+            const userMessagesAfter = (await client.message.list({ sessionID: user.id })).data;
+            console.log(JSON.stringify({ cliVersion, userMessagesBefore: userMessagesBefore.length, userMessagesAfter: userMessagesAfter.length, historianChildren: historianChildren.length, dreamerChildren: dreamerChildren.length }));
+            // ...its completion did not reach the user's session...
+            expect(userMessagesAfter.map((row) => row.id)).toEqual(
+                userMessagesBefore.map((row) => row.id),
+            );
+            // ...because it was never created under that session.
+            for (const child of hiddenChildren) expect(child.parentID ?? null).toBeNull();
+            // Successful removal drains the durable cleanup records.
             expect(
                 withContextDb(host.env, (db) =>
                     db
                         .prepare(
-                            "SELECT value FROM schema_migrations_meta WHERE key LIKE 'opencode2_hidden_children:%'",
+                            "SELECT value FROM schema_migrations_meta WHERE key LIKE 'hidden_child:%'",
                         )
                         .all(),
                 ),
@@ -296,11 +308,59 @@ test("hidden runs on OpenCode 2.0.22 are parented and removed with no root child
         }
         expect(pluginLog()).not.toContain("could not be removed");
         expect(pluginLog()).not.toContain("could not read back hidden child");
+
+        if (cliVersion === "2.3.0") {
+            // Kill an in-flight historian, preserving isolated context.db, opencode2.db and the mock.
+            host.mock.reset();
+            host.mock.setDefault({ text: "interrupted historian", delayMs: 60_000, usage: { input_tokens: 100, output_tokens: 10 } });
+            const known = new Set(hiddenChildren.map((child) => child.sessionID));
+            await client.session.command({ sessionID: user.id, name: "ctx-recomp", text: "" });
+            const interrupted = await eventually(() => probed("historian").find((child) => !known.has(child.sessionID)), "an interrupted historian child");
+            await eventually(() => host.mock.requests().length > 0 ? true : undefined, "the in-flight historian request");
+            expect(withContextDb(host.env, (db) => db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(`hidden_child:${interrupted.sessionID}`))).toBeTruthy();
+            await host.stopHost();
+            rmSync(serviceRegistrationPath(fixture.env), { force: true });
+            host.mock.reset();
+            host.mock.setDefault({ text: "must not reach the provider", usage: { input_tokens: 10, output_tokens: 2 } });
+            const restart = () => spawnOpencode2({ existingIsolation: fixture, existingMock: { mock: host.mock, baseURL: host.mockBaseURL }, probePlugin: bundleDir, serviceMode: true, waitForTransport: true });
+            activeHost = await restart();
+            const resumedClient = OpenCode.make({ baseUrl: activeHost.url, headers: { authorization: `Basic ${btoa(`opencode:${activeHost.password}`)}` } });
+            await waitForPluginActive(resumedClient, host.cwd);
+            await eventually(() => pluginLog().includes("Refusing a Magic Context hidden-agent turn this instance did not register") ? true : undefined, "the restarted host's unregistered hidden-run refusal");
+            expect((await resumedClient.session.get({ sessionID: interrupted.sessionID })).metadata?.magic_context).toBe("hidden-run");
+            expect(host.mock.requests()).toEqual([]);
+            await activeHost.stopHost();
+            // Age only the durable record, leaving the production bounds unchanged. The sweep keeps a
+            // record until both its one-hour age and its run deadline plus ten minutes have passed;
+            // the interrupted run's deadline is still its configured timeout from now, so move both.
+            withContextDb(host.env, (db) => {
+                const key = `hidden_child:${interrupted.sessionID}`;
+                const row = db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(key) as { value: string };
+                const record = JSON.parse(row.value) as { created_at: number; deadline_at?: number };
+                expect(record.deadline_at).toBeNumber();
+                db.prepare("UPDATE schema_migrations_meta SET value = ? WHERE key = ?").run(JSON.stringify({ ...record, created_at: Date.now() - 3_600_001, deadline_at: Date.now() - 600_001 }), key);
+            }, true);
+            rmSync(serviceRegistrationPath(fixture.env), { force: true });
+            activeHost = await restart();
+            const sweptClient = OpenCode.make({ baseUrl: activeHost.url, headers: { authorization: `Basic ${btoa(`opencode:${activeHost.password}`)}` } });
+            await waitForPluginActive(sweptClient, host.cwd);
+            // The startup sweep runs in the background after the plugin reports active.
+            await eventually(async () => {
+                try {
+                    await sweptClient.session.get({ sessionID: interrupted.sessionID });
+                    return undefined;
+                } catch {
+                    return true;
+                }
+            }, "the startup sweep to remove the interrupted child");
+            await eventually(() => withContextDb(host.env, (db) => db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(`hidden_child:${interrupted.sessionID}`)) ? undefined : true, "the startup sweep to drop the interrupted child's record");
+            console.log(JSON.stringify({ cliVersion, interruptedChild: interrupted.sessionID, resumedTurnRefused: true, startupSweepRemoved: true, openDatabases: inspectOpenFiles(activeHost.pid!, activeHost.root, activeHost.env).filter((path) => /\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path)) }));
+        }
     } catch (error) {
-        console.error(host.stderr(), pluginLog().slice(-20_000));
+        console.error(activeHost.stderr(), pluginLog().slice(-20_000));
         throw error;
     } finally {
-        await host.stop();
+        await activeHost.stop();
         rmSync(bundleDir, { recursive: true, force: true });
     }
     // Two hidden runs plus a real host's boot and its teardown checks (open-file inspection and the

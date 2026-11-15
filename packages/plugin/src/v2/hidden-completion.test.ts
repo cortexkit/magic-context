@@ -31,6 +31,11 @@ import {
 import { Database } from "../shared/sqlite";
 import { createTestTempDir } from "../shared/test-temp-dir";
 import {
+    HIDDEN_CHILD_DEADLINE_GRACE_MS,
+    HIDDEN_CHILD_MAX_AGE_MS,
+    sweepHiddenChildren,
+} from "./hidden-child-sweep";
+import {
     createV2HiddenCompletionExecutor,
     type HiddenChildHost,
     toolLoopMessages,
@@ -64,6 +69,67 @@ const dreamerRun: HiddenRunIdentity = {
     agent: HIDDEN_DREAMER_AGENT,
     kind: "dreamer-task",
 };
+
+for (const identity of [run, dreamerRun]) {
+    test(`${identity.kind} retries extend the durable deadline before each attempt`, async () => {
+        const f = await setup();
+        const started = Date.now();
+        const now = spyOn(Date, "now").mockReturnValue(started);
+        const timeoutMs = 2 * HIDDEN_CHILD_MAX_AGE_MS;
+        const handle = await f.executor.open({ ...identity, timeoutMs });
+        try {
+            const record = () =>
+                JSON.parse(
+                    (
+                        f.db
+                            .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                            .get(`hidden_child:${handle.id}`) as { value: string }
+                    ).value,
+                );
+            expect(record().deadline_at).toBe(started + timeoutMs);
+            await f.executor.attempt(handle, request());
+            now.mockReturnValue(started + timeoutMs);
+            await f.executor.attempt(handle, request());
+            expect(record().deadline_at).toBe(started + 2 * timeoutMs);
+            const removed: string[] = [];
+            // No live-process guard: another process only has the durable deadline.
+            await sweepHiddenChildren(
+                f.db,
+                async ({ sessionID }) => {
+                    removed.push(sessionID);
+                },
+                () => {},
+                {
+                    now: started + timeoutMs + HIDDEN_CHILD_DEADLINE_GRACE_MS + 1,
+                },
+            );
+            expect(removed).toEqual([]);
+        } finally {
+            now.mockRestore();
+            await close(f.executor, handle, true);
+            f.db.close();
+        }
+    });
+}
+
+test("a failed deadline extension is logged without refusing the attempt", async () => {
+    const logs: string[] = [];
+    const f = await setup("deadline-write-failure", { logs });
+    const handle = await f.executor.open(run);
+    try {
+        f.db.exec(
+            "CREATE TRIGGER reject_deadline BEFORE UPDATE ON schema_migrations_meta BEGIN SELECT RAISE(FAIL, 'store unavailable'); END",
+        );
+        await f.executor.attempt(handle, request());
+        expect((await f.executor.collect(handle, 50)).text).toBe("editor completion");
+        expect(
+            logs.some((line) => line.includes("deadline update deferred: store unavailable")),
+        ).toBe(true);
+    } finally {
+        await close(f.executor, handle, true);
+        f.db.close();
+    }
+});
 
 test("host unknown terminal error retains the hook's typed local refusal", async () => {
     const f = await setup();
@@ -862,7 +928,7 @@ describe("OpenCode 2 hidden child completion", () => {
                     title: "Magic Context historian",
                     agent: "historian",
                     model: { providerID: "mock", id: "cheap" },
-                    parentID: "user-session",
+                    location: { directory: "/project" },
                     metadata: { magic_context: "hidden-run", role: "historian" },
                     // The historian has no tools: the session rules deny everything,
                     // and the host evaluates them after the user's own rules.
@@ -1002,7 +1068,7 @@ describe("OpenCode 2 hidden child completion", () => {
                     await close(state.executor, handle, false);
                     const role = identity.kind === "dreamer-task" ? "dreamer" : "historian";
                     expect(logs.filter((line) => line.includes("hidden child child-1 "))).toEqual([
-                        `[magic-context] hidden child child-1 created role=${role} parent=none keep_subagents=${keepSubagents}`,
+                        `[magic-context] hidden child child-1 created role=${role} keep_subagents=${keepSubagents}`,
                         ...(keepSubagents && role === "historian"
                             ? ["[magic-context] hidden child child-1 kept (keep_subagents)"]
                             : [
