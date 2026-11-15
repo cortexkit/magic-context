@@ -884,6 +884,7 @@ const TEMPLATE_DATA = [
 "[magic-context] host stall profiler: \x01ms main-thread stall, \x01 samples, top owner \x01 (\x01%) → \x01\x024p",
 "[magic-context] host stall profiler: \x01ms main-thread stall, \x01 samples, top owner none → \x01\x022p",
 "historian publish stage: stage=post-publish-drops status=started elapsed=0.0ms range=\x01-\x01",
+"ck-mc: dreamer.projects is not a list of project ids; the dreamer runs for no project",
 "latest-turn thinking recovery: refused locally (the recovery state could not be read)",
 "rust compaction-marker drain: candidate preparation deferred; pending target retained",
 "served check: record dropped reason=session_cleared; the next request is not compared",
