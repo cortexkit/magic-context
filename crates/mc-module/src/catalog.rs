@@ -750,11 +750,26 @@ pub(crate) struct PinRefusal {
     pub detail: Value,
 }
 
+/// Schemas a tool had before this build changed it, which this build still
+/// honours: each is the current schema minus optional properties, so every
+/// call in the earlier shape is a valid call now and means what it meant then.
+/// A session keeps the tool schema it was started with until its host
+/// restarts it, so without these a schema change would refuse every call
+/// such a session makes.
+///
+/// - `ctx_memory` before 0.50, without the optional `level`: a write without
+///   a level goes to the project, as every write did then.
+const HONOURED_EARLIER: &[(&str, &str)] = &[(
+    "ctx_memory",
+    "de59b47f087c33bb84d20fe9eec0f5cdd5692089aa43e4bf19b72dcb53292cbc",
+)];
+
 /// Check a call's parsed schema pin against what ck-mc serves now. A pinned
 /// schema is honoured when it is one this build renders for the tool, on
 /// either surface and with or without the smart-note fields: every variant
 /// takes the same arguments, so a session that froze any of them can still
-/// call the tool. The semantics must be the tool's current version.
+/// call the tool. It is also honoured when it is one of the earlier schemas
+/// in [`HONOURED_EARLIER`]. The semantics must be the tool's current version.
 pub(crate) fn check_pin(
     pin: &cortexkit_role_tool_provider::call::SchemaPin,
 ) -> Result<(), PinRefusal> {
@@ -779,7 +794,10 @@ pub(crate) fn check_pin(
                 .filter_map(|schema| catalog::schema_digest(schema).ok()),
         );
     }
-    if !current.contains(&pin.schema_digest) {
+    let earlier = HONOURED_EARLIER
+        .iter()
+        .any(|(name, digest)| *name == tool.name && *digest == pin.schema_digest);
+    if !earlier && !current.contains(&pin.schema_digest) {
         return Err(PinRefusal {
             code: cortexkit_role_tool_provider::errors::TOOL_SCHEMA_CHANGED,
             detail: json!({
@@ -831,6 +849,46 @@ mod pin_tests {
             );
             assert!(check_pin(&pin).is_ok());
         }
+    }
+
+    /// Each earlier schema must be the current one minus optional
+    /// properties, or a call in its shape could mean something else now.
+    #[test]
+    fn an_earlier_schema_is_the_current_one_without_its_new_optional_properties() {
+        let tool = definition().tool("ctx_memory").unwrap();
+        for surface in [Surface::Full, Surface::Light] {
+            let mut schema = input_schema(tool, surface).unwrap();
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            assert!(!required.contains(&json!("level")), "level stays optional");
+            schema["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("level");
+            let digest = catalog::schema_digest(&schema).unwrap();
+            assert!(
+                HONOURED_EARLIER.contains(&("ctx_memory", digest.as_str())),
+                "{surface:?}: {digest}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_pinned_to_ctx_memory_before_0_50_can_still_call_it() {
+        let tool = definition().tool("ctx_memory").unwrap();
+        let pin = SchemaPin::new(
+            "ctx_memory",
+            "de59b47f087c33bb84d20fe9eec0f5cdd5692089aa43e4bf19b72dcb53292cbc".to_owned(),
+            tool.semantics,
+        );
+        assert!(check_pin(&pin).is_ok());
+        // An earlier schema of one tool is no pin for another.
+        let note = definition().tool("ctx_note").unwrap();
+        let elsewhere = SchemaPin::new(
+            "ctx_note",
+            "de59b47f087c33bb84d20fe9eec0f5cdd5692089aa43e4bf19b72dcb53292cbc".to_owned(),
+            note.semantics,
+        );
+        assert!(check_pin(&elsewhere).is_err());
     }
 
     #[test]
