@@ -259,7 +259,7 @@ pub async fn run<C: RunnerClient + Router>(
             Err(Failure::NotSent(_)) => Outcome::Cancelled,
             // An unavailable account or a person-owned wait says nothing
             // against the route, even if the run had already started.
-            Err(Failure::AccountWait(_)) => Outcome::Cancelled,
+            Err(Failure::AccountWait(_) | Failure::NeverRan(_)) => Outcome::Cancelled,
             Err(Failure::Failed(_)) => Outcome::Failed,
         };
         client
@@ -274,6 +274,7 @@ pub async fn run<C: RunnerClient + Router>(
             // Another model would draw on the same accounts, and the
             // runner named when to ask again: the run ends waiting.
             Err(Failure::AccountWait(wait)) => return Err(SummaryError::AccountWait(wait)),
+            Err(Failure::NeverRan(wait)) => return Err(SummaryError::NeverRan(wait)),
             Err(Failure::NotSent(error) | Failure::Failed(error)) => failure = Some(error),
         }
     }
@@ -286,6 +287,9 @@ pub enum SummaryError {
     /// An account is unavailable or the run needs a person. Neither wait
     /// spends a summary attempt or counts against the route.
     AccountWait(AccountWait),
+    /// The runner proved the words never ran. Retry after a transient wait,
+    /// without spending a summary attempt or blaming the model.
+    NeverRan(AccountWait),
     /// Any other failure, as text.
     Failed(String),
 }
@@ -293,6 +297,7 @@ pub enum SummaryError {
 impl std::fmt::Display for SummaryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NeverRan(wait) => write!(f, "{}: the {} never ran", wait.code, wait.send.name()),
             Self::AccountWait(wait) => write!(
                 f,
                 "{}: the {} waits for an account until {} ms since the epoch",
@@ -325,12 +330,15 @@ enum Failure {
     Failed(String),
     /// The runner holds summarizer sends back until an account has room.
     AccountWait(AccountWait),
+    /// The runner retired the send or could not hand its words to the host.
+    NeverRan(AccountWait),
 }
 
 impl From<SummaryError> for Failure {
     fn from(error: SummaryError) -> Self {
         match error {
             SummaryError::AccountWait(wait) => Self::AccountWait(wait),
+            SummaryError::NeverRan(wait) => Self::NeverRan(wait),
             SummaryError::Failed(error) => Self::Failed(error),
         }
     }
@@ -612,6 +620,19 @@ async fn attempt<C: RunnerClient>(
                 tokio::time::sleep(backoff(retry)).await;
                 retry += 1;
             }
+            Err(CallError::Summary(SummaryError::NeverRan(wait)))
+                if retry < MAX_RETRIES && wait.code == "handover_failed" =>
+            {
+                let remaining = call_on
+                    .deadline
+                    .saturating_duration_since(tokio::time::Instant::now());
+                let delay = backoff(retry);
+                if delay >= remaining {
+                    return Err(SummaryError::NeverRan(wait));
+                }
+                tokio::time::sleep(delay).await;
+                retry += 1;
+            }
             // The child names the run to the runner's owner, who can match it
             // against the runner's own records.
             Err(CallError::Summary(SummaryError::Failed(error))) => {
@@ -622,7 +643,9 @@ async fn attempt<C: RunnerClient>(
             }
             // An account wait is never retried here: the runner named when
             // to send again, and that is minutes or hours away.
-            Err(CallError::Summary(wait @ SummaryError::AccountWait(_))) => return Err(wait),
+            Err(CallError::Summary(
+                wait @ (SummaryError::AccountWait(_) | SummaryError::NeverRan(_)),
+            )) => return Err(wait),
         }
     }
 }
@@ -758,17 +781,52 @@ async fn send_and_wait_inner<C: RunnerClient>(
     // The routing decision is a typed send field: the runner fixes it
     // for the run and forwards it when it gets an account from routing.
     request.route_decision_id = Some(how.decision_id.to_owned());
-    let reply = client
-        .send_child(child, request)
-        .await
-        .map_err(|error| send_refused(&error, how.send))?;
+    let mut resent = false;
+    let reply = loop {
+        let reply =
+            tokio::time::timeout_at(how.deadline, client.send_child(child, request.clone()))
+                .await
+                .map_err(|_| "the run did not finish in time".to_owned())?
+                .map_err(|error| send_refused(&error, how.send))?;
+        if reply.state == send_states::NOT_DELIVERED {
+            // Every reason, including a future one, proves final non-delivery.
+            // Only that proof permits a new id; an unknown outcome must not
+            // duplicate a prompt that may already have run.
+            let delay = backoff(0);
+            if resent || tokio::time::Instant::now() + delay >= how.deadline {
+                return Err(never_ran(send_states::NOT_DELIVERED, how.send).into());
+            }
+            tokio::time::sleep(delay).await;
+            request.send_id = format!("{send_id}:not-delivered:1");
+            // The retired send already admitted the child. A new send in
+            // that conversation cannot repeat creation-only fields.
+            request.session_class = None;
+            request.cache = None;
+            request.runner_params.remove("tools");
+            resent = true;
+        } else if reply.state == send_states::PENDING && reply.run_id.is_none() {
+            // Interrupting another turn does not retire this queued send.
+            // Replay its identical id until the runner names its own run.
+            if tokio::time::Instant::now() >= how.deadline {
+                return Err("the run did not finish in time".to_owned().into());
+            }
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + POLL_INTERVAL).min(how.deadline),
+            )
+            .await;
+        } else {
+            break reply;
+        }
+    };
     // A runner may answer a run-starting send as soon as it is stored,
     // before the prompt reaches its host: `pending` with the run's id. That
-    // run is followed like an active one.
-    let Some(run_id) = reply
-        .run_id
-        .filter(|_| matches!(reply.state.as_str(), states::ACTIVE | send_states::PENDING))
-    else {
+    // run is followed like an active one, even if it finished between polls.
+    let Some(run_id) = reply.run_id.filter(|_| {
+        matches!(
+            reply.state.as_str(),
+            states::ACTIVE | send_states::PENDING | send_states::FINISHED
+        )
+    }) else {
         return Err(format!("the runner did not start a run: {}", reply.state).into());
     };
     let result = wait_for(client, child, &run_id, how.deadline, how.send).await?;
@@ -776,6 +834,23 @@ async fn send_and_wait_inner<C: RunnerClient>(
         *usage = Some(add_usage(usage.take(), &step_usage(reported)));
     }
     if result.state != states::COMPLETED {
+        if result.state == states::ERROR
+            && result.error.as_ref().is_some_and(|error| {
+                error.class == cortexkit_role_llm_runner::errors::run_error_classes::HANDOVER_FAILED
+            })
+        {
+            let cause = result
+                .error
+                .as_ref()
+                .and_then(|error| error.cause.as_deref())
+                .unwrap_or("unknown");
+            tracing::info!(
+                "ck-mc: session {}: {} never ran: handover_failed (cause {cause})",
+                child.session.session,
+                how.send.name(),
+            );
+            return Err(never_ran("handover_failed", how.send).into());
+        }
         // A runner that queued the send refuses it at the run's own
         // admission, and says so in the error the run ends with.
         if let Some(wait) = AccountWait::of_ended_run(&result, how.send, now_ms()) {
@@ -807,6 +882,19 @@ async fn send_and_wait_inner<C: RunnerClient>(
     })
 }
 
+/// Reuse the session's wait scheduler, but not its failure accounting or
+/// the one-minute minimum delay for account waits. An unavailable host gets bounded
+/// probes at the existing transient backoff, not a retry on every notice.
+fn never_ran(code: &str, send: SendKind) -> SummaryError {
+    let at_ms = now_ms();
+    SummaryError::NeverRan(AccountWait {
+        code: code.to_owned(),
+        at_ms,
+        until_ms: at_ms.saturating_add(backoff(MAX_RETRIES - 1).as_millis() as i64),
+        send,
+    })
+}
+
 #[cfg(test)]
 #[path = "session_class_tests.rs"]
 pub(crate) mod session_class_tests;
@@ -814,6 +902,10 @@ pub(crate) mod session_class_tests;
 #[cfg(test)]
 #[path = "pending_send_tests.rs"]
 mod pending_send_tests;
+
+#[cfg(test)]
+#[path = "never_ran_tests.rs"]
+pub(crate) mod never_ran_tests;
 
 #[cfg(test)]
 #[path = "harness_tests.rs"]

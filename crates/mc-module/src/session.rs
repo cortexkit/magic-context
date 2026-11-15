@@ -2286,7 +2286,7 @@ impl Session {
         if !waiting.skip_logged {
             waiting.skip_logged = true;
             tracing::info!(
-                "ck-mc: session {session}: summary skipped at {usage:.0}%: summaries wait for the account until {} ms since the epoch ({} after the {}); no summary run starts before then",
+                "ck-mc: session {session}: summary skipped at {usage:.0}%: summaries wait until {} ms since the epoch ({} after the {}); no summary run starts before then",
                 waiting.refusal.until_ms,
                 waiting.refusal.code,
                 waiting.refusal.send.name()
@@ -2348,7 +2348,7 @@ impl Session {
         });
         let seconds = (wait.until_ms - crate::summary::account_wait::now_ms()).max(0) / 1000;
         tracing::info!(
-            "ck-mc: session {}: summaries wait for the account until {} ms since the epoch (in {seconds} s): the runner refused the {} with {}",
+            "ck-mc: session {}: summaries wait until {} ms since the epoch (in {seconds} s): the runner held back the {} with {}",
             self.key.session,
             wait.until_ms,
             wait.send.name(),
@@ -2686,11 +2686,11 @@ impl Session {
                 self.record_no_progress(settings);
                 return None;
             }
-            // The runner held the send back until an account has room. That
-            // is no failure: nothing reached a model, so the reservation goes
-            // back, and no failure, backoff or error is recorded. The session
-            // waits for the time the runner named instead.
-            Err(run::SummaryError::AccountWait(wait)) => {
+            // A wait or a proven never-run send says nothing against the
+            // summarizer. Release its reservation, restore the saved
+            // protected-tail floor state, and use the retry deadline
+            // without recording a summary failure.
+            Err(run::SummaryError::AccountWait(wait) | run::SummaryError::NeverRan(wait)) => {
                 if let Some(reservation) = reservation {
                     self.drain.release(reservation);
                 }

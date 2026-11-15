@@ -1,0 +1,583 @@
+{
+  "requests": [
+    {
+      "name": "absent delivery queues",
+      "delivery": "queue",
+      "request": {
+        "prompt": "next task",
+        "send_id": "owner-delivery-17"
+      }
+    },
+    {
+      "name": "queue named",
+      "delivery": "queue",
+      "request": {
+        "prompt": "next task",
+        "send_id": "owner-delivery-18",
+        "delivery": "queue"
+      }
+    },
+    {
+      "name": "steer with the sender's mark",
+      "delivery": "steer",
+      "request": {
+        "prompt": "<system-reminder>late result for call 3</system-reminder>",
+        "send_id": "late:aft:k-9:e-1",
+        "delivery": "steer",
+        "mark": {
+          "synthetic": true
+        }
+      }
+    },
+    {
+      "name": "interrupt",
+      "delivery": "interrupt",
+      "request": {
+        "prompt": "stop, use the other branch",
+        "send_id": "owner-delivery-19",
+        "delivery": "interrupt"
+      }
+    },
+    {
+      "name": "first send carrying a plan and runner parameters",
+      "delivery": "queue",
+      "request": {
+        "prompt": "start",
+        "send_id": "launch-1",
+        "plan": {
+          "items": [
+            {
+              "provider": "aft",
+              "preset": "default",
+              "params": {}
+            }
+          ],
+          "composition": {
+            "providers": [
+              {
+                "module": "aft",
+                "tools": [
+                  "read"
+                ]
+              }
+            ]
+          }
+        },
+        "model": {
+          "id": "provider/model-x"
+        }
+      }
+    }
+  ],
+  "refused_requests": [
+    {
+      "name": "unknown delivery mode",
+      "field": "delivery",
+      "request": {
+        "prompt": "x",
+        "send_id": "s-1",
+        "delivery": "urgent"
+      }
+    },
+    {
+      "name": "no send_id",
+      "field": "send_id",
+      "request": {
+        "prompt": "x"
+      }
+    }
+  ],
+  "replies": [
+    {
+      "name": "steer joined the running turn",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "run_id": "run-7"
+      }
+    },
+    {
+      "name": "queued behind the running turn",
+      "admitted": false,
+      "reply": {
+        "state": "pending",
+        "submission_id": "sub-3"
+      }
+    },
+    {
+      "name": "idle-session send is durable before host hand-over",
+      "admitted": false,
+      "reply": {
+        "state": "pending",
+        "run_id": "run-8",
+        "submission_id": "sub-4"
+      }
+    },
+    {
+      "name": "own run ended before hand-over with durable proof the prompt was never handed to a host",
+      "admitted": false,
+      "reply": {
+        "state": "not_delivered",
+        "run_id": "run-8",
+        "submission_id": "sub-4",
+        "reason": "handover_failed"
+      }
+    },
+    {
+      "name": "routing refused the account before any provider attempt",
+      "admitted": false,
+      "reply": {
+        "state": "not_delivered",
+        "reason": "routing_refused"
+      }
+    },
+    {
+      "name": "future not-delivered reason survives",
+      "admitted": false,
+      "reply": {
+        "state": "not_delivered",
+        "reason": "future_refusal"
+      }
+    },
+    {
+      "name": "retry after the carrying run ended",
+      "admitted": false,
+      "reply": {
+        "state": "finished",
+        "run_id": "run-7",
+        "reason": "completed"
+      }
+    },
+    {
+      "name": "the send that admitted the session",
+      "admitted": true,
+      "reply": {
+        "state": "active",
+        "run_id": "run-1",
+        "baseline": {
+          "items": [
+            {
+              "provider": "aft",
+              "item": "tools",
+              "item_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+              "preflight_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+            }
+          ],
+          "composition_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+          "tool_names": [
+            "read"
+          ],
+          "accepted_generation": 0,
+          "applied_generation": 0,
+          "session_capabilities": {
+            "mid_session_appends": false
+          }
+        }
+      }
+    },
+    {
+      "name": "steer delivered as step without ref",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "run_id": "run-7",
+        "delivered": {
+          "as": "step"
+        }
+      }
+    },
+    {
+      "name": "steer delivered as step with ref",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "run_id": "run-7",
+        "delivered": {
+          "as": "step",
+          "ref": "row-42"
+        }
+      }
+    },
+    {
+      "name": "steer delivered as step without run_id",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "delivered": {
+          "as": "step",
+          "ref": "row-43"
+        }
+      }
+    },
+    {
+      "name": "steer delivered as turn without ref",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "run_id": "run-7",
+        "delivered": {
+          "as": "turn"
+        }
+      }
+    },
+    {
+      "name": "steer delivered as turn with ref",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "run_id": "run-7",
+        "delivered": {
+          "as": "turn",
+          "ref": "run-7"
+        }
+      }
+    },
+    {
+      "name": "steer pending without ref",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "run_id": "run-7",
+        "delivered": {
+          "as": "pending"
+        }
+      }
+    },
+    {
+      "name": "steer pending with ref",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "run_id": "run-7",
+        "delivered": {
+          "as": "pending",
+          "ref": "hold-1"
+        }
+      }
+    },
+    {
+      "name": "steer unknown without ref",
+      "admitted": false,
+      "reply": {
+        "state": "finished",
+        "run_id": "run-7",
+        "reason": "error",
+        "delivered": {
+          "as": "unknown"
+        }
+      }
+    },
+    {
+      "name": "steer unknown with ref",
+      "admitted": false,
+      "reply": {
+        "state": "finished",
+        "run_id": "run-7",
+        "reason": "error",
+        "delivered": {
+          "as": "unknown",
+          "ref": "cut-run-7"
+        }
+      }
+    },
+    {
+      "name": "steer unknown as value decoding open",
+      "admitted": false,
+      "reply": {
+        "state": "active",
+        "run_id": "run-7",
+        "delivered": {
+          "as": "future_delivery",
+          "ref": "opaque-future-id"
+        }
+      }
+    }
+  ],
+  "refusals": [
+    {
+      "name": "send_id reused with another mode",
+      "retryable": false,
+      "field": "delivery",
+      "refusal": {
+        "code": "send_id_reuse",
+        "message": "send_id owner-delivery-17 was sent with delivery queue",
+        "detail": {
+          "field": "delivery"
+        }
+      }
+    },
+    {
+      "name": "send_id reused with another prompt",
+      "retryable": false,
+      "field": "prompt",
+      "refusal": {
+        "code": "send_id_reuse",
+        "message": "send_id owner-delivery-17 was sent with another prompt",
+        "detail": {
+          "field": "prompt"
+        }
+      }
+    },
+    {
+      "name": "delivery mode the runner does not declare",
+      "retryable": false,
+      "refusal": {
+        "code": "delivery_unsupported",
+        "message": "this runner does not accept delivery interrupt",
+        "detail": {
+          "delivery": "interrupt"
+        }
+      }
+    },
+    {
+      "name": "last run paused",
+      "retryable": false,
+      "refusal": {
+        "code": "run_paused",
+        "message": "run run-6 is paused",
+        "detail": {
+          "run_id": "run-6",
+          "reason": "auth_required"
+        }
+      }
+    },
+    {
+      "name": "not the session's owner",
+      "retryable": false,
+      "refusal": {
+        "code": "scope_owner_mismatch",
+        "message": "only the session's owner may send"
+      }
+    },
+    {
+      "name": "PreUser unavailable under refuse",
+      "retryable": false,
+      "refusal": {
+        "code": "pre_user_unavailable",
+        "message": "compaction-provider PreUser hook unavailable",
+        "detail": {
+          "provider": "compaction-provider"
+        }
+      }
+    },
+    {
+      "name": "required plan item missed the deadline",
+      "retryable": true,
+      "refusal": {
+        "code": "fetch_unavailable",
+        "message": "aft did not answer within 10s",
+        "detail": {
+          "provider": "aft"
+        }
+      }
+    },
+    {
+      "name": "fetched names disagree with the composition",
+      "retryable": false,
+      "refusal": {
+        "code": "plan_stale",
+        "message": "aft tool names differ",
+        "detail": {
+          "differences": [
+            {
+              "provider": "aft",
+              "expected": [
+                "read"
+              ],
+              "fetched": [
+                "read",
+                "edit"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "two tools share a name",
+      "retryable": false,
+      "refusal": {
+        "code": "tool_name_collision",
+        "message": "two tools named search",
+        "detail": {
+          "name": "search",
+          "providers": ["aft", "plexus"]
+        }
+      }
+    },
+    {
+      "name": "a later send carries a different plan",
+      "retryable": false,
+      "refusal": {
+        "code": "plan_drift",
+        "message": "the session's plan is frozen",
+        "detail": {
+          "frozen": "edf948ae9b6f4d56e9196060fb1be01922066e176ecce6b2df9f79edbbf14879",
+          "sent": "f6e3694c3b2c0ea5368d38d653aa85c10fe017e5c74abe1fa00cbedb5a3e5206"
+        }
+      }
+    },
+    {
+      "name": "scoped send without daemon scope support",
+      "retryable": false,
+      "refusal": {
+        "code": "scope_unsupported",
+        "message": "the daemon does not offer scopes/v1"
+      }
+    },
+    {
+      "name": "store briefly unavailable",
+      "retryable": true,
+      "refusal": {
+        "code": "transient",
+        "message": "try again"
+      }
+    }
+  ],
+  "delivery_checks": [
+    {
+      "name": "steer on a runner that declares steer",
+      "declares": [
+        "steer"
+      ],
+      "request": {
+        "prompt": "x",
+        "send_id": "s-1",
+        "delivery": "steer"
+      }
+    },
+    {
+      "name": "absent delivery on a runner that only steers is a queue, refused",
+      "declares": [
+        "steer"
+      ],
+      "request": {
+        "prompt": "x",
+        "send_id": "s-2"
+      },
+      "refusal": {
+        "code": "delivery_unsupported",
+        "message": "this runner does not accept delivery queue",
+        "detail": {
+          "delivery": "queue"
+        }
+      }
+    },
+    {
+      "name": "queue on a runner that only steers",
+      "declares": [
+        "steer"
+      ],
+      "request": {
+        "prompt": "x",
+        "send_id": "s-3",
+        "delivery": "queue"
+      },
+      "refusal": {
+        "code": "delivery_unsupported",
+        "message": "this runner does not accept delivery queue",
+        "detail": {
+          "delivery": "queue"
+        }
+      }
+    },
+    {
+      "name": "interrupt on a runner that steers and queues but cannot interrupt",
+      "declares": [
+        "steer",
+        "queue"
+      ],
+      "request": {
+        "prompt": "x",
+        "send_id": "s-4",
+        "delivery": "interrupt"
+      },
+      "refusal": {
+        "code": "delivery_unsupported",
+        "message": "this runner does not accept delivery interrupt",
+        "detail": {
+          "delivery": "interrupt"
+        }
+      }
+    },
+    {
+      "name": "interrupt on a runner that declares it",
+      "declares": [
+        "steer",
+        "queue",
+        "interrupt"
+      ],
+      "request": {
+        "prompt": "x",
+        "send_id": "s-5",
+        "delivery": "interrupt"
+      }
+    }
+  ],
+  "compaction_item_checks": [
+    {
+      "name": "a plan with a compaction item on a runner that declares compaction",
+      "declares": [
+        "queue",
+        "compaction"
+      ],
+      "request": {
+        "prompt": "start",
+        "send_id": "launch-2",
+        "plan": {
+          "items": [],
+          "compaction_item": {
+            "provider": "compaction-provider"
+          }
+        }
+      }
+    },
+    {
+      "name": "a plan with a compaction item on a runner without compaction is refused at admission",
+      "declares": [
+        "steer",
+        "queue"
+      ],
+      "request": {
+        "prompt": "start",
+        "send_id": "launch-3",
+        "plan": {
+          "items": [],
+          "compaction_item": {
+            "provider": "compaction-provider"
+          }
+        }
+      },
+      "refusal": {
+        "code": "invalid_params",
+        "message": "this runner does not declare compaction",
+        "detail": {
+          "field": "plan.compaction_item"
+        }
+      }
+    },
+    {
+      "name": "a plan without a compaction item on a runner without compaction",
+      "declares": [
+        "queue"
+      ],
+      "request": {
+        "prompt": "start",
+        "send_id": "launch-4",
+        "plan": {
+          "items": []
+        }
+      }
+    },
+    {
+      "name": "a later send without a plan",
+      "declares": [
+        "queue"
+      ],
+      "request": {
+        "prompt": "next",
+        "send_id": "owner-delivery-20"
+      }
+    }
+  ]
+}

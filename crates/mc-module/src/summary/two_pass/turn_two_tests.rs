@@ -252,6 +252,89 @@ async fn account_wait_turn_two_revokes_its_stage_without_spending_attempts() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn never_ran_turn_two_and_recovery_return_facts_without_spending_attempts() {
+    use crate::summary::run::never_ran_tests::{active, handover, not_delivered, Client};
+    let mut clients: Vec<_> = not_delivered()
+        .into_iter()
+        .map(|reply| Client::new(vec![reply], vec![]))
+        .collect();
+    clients.push(Client::new(
+        vec![active()],
+        vec![handover("host_unreachable"); 2],
+    ));
+    for client in clients {
+        let (_dir, db) = store_with_candidates();
+        let outcome = run(&client, &db, &job("pi")).await;
+        assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
+        assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "UPDATE memory_stage_attempts SET state = 'sending';
+             UPDATE memory_pending_facts SET state = 'in_flight',
+                 reserved_stage_key = (SELECT stage_key FROM memory_stage_attempts);",
+            )
+        })
+        .unwrap();
+        let outcome = run(&client, &db, &job("pi")).await;
+        assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
+        assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
+        let request: String = db.with_connection(|conn| {
+            conn.query_row(
+                "SELECT request_json FROM memory_stage_attempts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        });
+        assert!(!request.contains("recoveryVisits"), "{request}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn never_ran_fact_check_forgets_its_unrun_ledger_entry() {
+    use crate::summary::run::never_ran_tests::{active, handover, not_delivered, Client};
+    let mut clients: Vec<_> = not_delivered()
+        .into_iter()
+        .map(|reply| Client::new(vec![reply], vec![]))
+        .collect();
+    clients.push(Client::new(
+        vec![active()],
+        vec![handover("nothing_written")],
+    ));
+    for client in clients {
+        let (_dir, db) = store_with_candidates();
+        let resolver = Resolver {
+            client: &client,
+            db: &db,
+            carrier: Carrier::of(&job("pi")),
+            memory_enabled: true,
+            auto_promote: true,
+            authority: None,
+        };
+        let check = Check {
+            kind: gates::CheckKind::Disproof,
+            operands: vec![gates::Operand {
+                id: "memory:1@1:1".into(),
+                text: "Ask before pushing.".into(),
+            }],
+            pairs: Vec::new(),
+            input: "Releases need two reviewers.".into(),
+        };
+        assert!(matches!(
+            resolver.check("decision", &check).await.unwrap(),
+            Err(Stopped::AccountWait(_))
+        ));
+        let checks: i64 = db.with_connection(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM memory_check_attempts", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        });
+        assert_eq!(checks, 0);
+    }
+}
+
 /// A send left open by an interrupted second turn is sent again on the next
 /// one. When that meets the account wait, the open stage is revoked without
 /// counting a recovery visit, and nothing else is sent to the same accounts.

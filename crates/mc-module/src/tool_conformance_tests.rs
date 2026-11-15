@@ -1,18 +1,20 @@
 //! The published kit runs against real bound Handler dispatch, in-process.
-//! With kit 0.15.7, every preset runs these 20 cases:
+//! With kit 0.15.8, every preset runs these 21 cases:
 //! user_commands_catalog; role_describe_{shape,cacheable};
 //! catalog_{schemas_flat,schemas_portable,reply_valid,modes_valid,
 //! emits_events_boolean,schema_digest_stable,digest_only,
 //! unknown_preset_refused,listed_presets_served};
-//! system_text_{digests_match_text,preflight_digest_stable};
+//! system_text_{digests_match_text,preflight_digest_stable,facts_legacy_omitted};
 //! terminal_frame_on_{success,refusal}; call_key_{malformed_refused,
 //! well_formed_accepted}; schema_pin_{current_accepted,malformed_refused}.
 //!
-//! The 43 skipped cases are: every reply_custody_* (12); user_commands_{
+//! The 45 skipped cases are: every reply_custody_* (12); user_commands_{
 //! reply,repeat,codemode_refused,flow_refused,accepted_late};
 //! call_mode_matches_catalog; catalog_{capability_filter_matches_describe,
 //! filter_preserves_plan_item,model_malformed_refused,filter_model_refused,
 //! disabled_tool_absent}; system_text_preset_optional_served;
+//! system_text_facts_{accepted,malformed_refused}, because this provider
+//! does not declare system-text-facts/v1; its text uses module-owned facts;
 //! call_disabled_tool_refused_by_name; tool_result_{v1_valid,
 //! legacy_route_unchanged,held_reply_route_gating}; terminal_frame_on_cancel;
 //! every withdraw_* (9), late_results_* (3), and crash_* (2).
@@ -243,6 +245,9 @@ async fn check(preset: &'static str, compacting: bool) {
         "catalog_listed_presets_served",
         "system_text_digests_match_text",
         "system_text_preflight_digest_stable",
+        // Callers omit facts for a provider without system-text-facts/v1;
+        // the kit omits them and verifies the real handler's legacy catalog.
+        "system_text_facts_legacy_omitted",
         "terminal_frame_on_success",
         "terminal_frame_on_refusal",
         "call_key_malformed_refused",
