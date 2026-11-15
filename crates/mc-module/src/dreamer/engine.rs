@@ -77,10 +77,12 @@ impl Default for Settings {
 
 /// The most tokens one task run may spend, counting every step's whole
 /// prompt (cache reads included) and its output. A task that reads code runs
-/// a tool loop whose prompt grows with each step, so it adds up quickly: the
-/// 0.49 dreamer's map and verify runs reached 12M to 18M at their largest.
-/// Tasks that read no code stayed under 2M, so the cap only stops a runaway
-/// run. `dreamer.maxTokens` in the person's settings replaces it.
+/// a tool loop whose prompt grows with each step, so it adds up quickly: in
+/// the month before 0.50, the plugin's dreamer (Magic Context 0.49, which ran
+/// the same tasks inside the host) recorded map and verify runs of 12M to 18M
+/// at their largest. Tasks that read no code stayed under 2M, so the cap only
+/// stops a runaway run. `dreamer.maxTokens` in the person's settings replaces
+/// it.
 pub const DEFAULT_BUDGET_TOKENS: u64 = 20_000_000;
 
 /// Each kind's default schedule, the same as the 0.49 dreamer's, so a person
