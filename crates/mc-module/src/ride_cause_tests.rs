@@ -124,10 +124,22 @@ fn head_with_unmeasured_growth() -> (Session, Settings) {
     (session, settings)
 }
 
-fn dropped_tools(view: Option<&View>) -> usize {
+fn reclaimed_tools(view: Option<&View>) -> usize {
     view.into_iter()
         .flat_map(|view| &view.edits)
-        .filter(|edit| matches!(&edit.op, EditOp::Drop { mid, .. } if mid.starts_with("tool-")))
+        .filter(|edit| match &edit.op {
+            EditOp::Drop { mid, .. } => mid.starts_with("tool-"),
+            EditOp::Replace {
+                mid, field, value, ..
+            } => {
+                mid.starts_with("tool-")
+                    && field == "output"
+                    && value
+                        .as_str()
+                        .is_some_and(|output| output.starts_with("[dropped §"))
+            }
+            _ => false,
+        })
         .count()
 }
 
@@ -143,7 +155,7 @@ fn ride_over_limit_without_a_count_uses_the_usable_window() {
     assert_eq!(request.request_tokens, None);
     let view = session.ride(&settings, &request);
     assert!(
-        dropped_tools(view.as_ref()) > 0,
+        reclaimed_tools(view.as_ref()) > 0,
         "a provider refusal without a count kept every tool output"
     );
     assert!(logs.text().contains(
@@ -154,7 +166,26 @@ fn ride_over_limit_without_a_count_uses_the_usable_window() {
     let mut ordinary = request;
     ordinary.causes.clear();
     let view = session.ride(&settings, &ordinary);
-    assert_eq!(dropped_tools(view.as_ref()), 0);
+    assert_eq!(reclaimed_tools(view.as_ref()), 0);
+}
+
+#[test]
+fn ride_over_limit_floor_reclaims_the_final_tool_output() {
+    let (mut session, settings) = head_with_unmeasured_growth();
+    let request = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    );
+    let view = session
+        .ride(&settings, &request)
+        .expect("the count-less floor reclaims tool outputs");
+    assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, part, field, value, .. }
+            if mid == "tool-6" && part == "p" && field == "output"
+                && value == "[dropped §6§]"
+    )));
+    assert_eq!(reclaimed_tools(Some(&view)), 5);
 }
 
 #[test]
@@ -167,13 +198,16 @@ fn ride_over_limit_keeps_a_stated_count_below_the_window() {
         session.conditions.clone(),
     )
     .with_request_tokens(70_000);
-    let view = session.ride(&settings, &request);
-    // The stated 70k is used as given. The emergency lane drops toward 30% of
-    // the 64,350 ceiling (about 19.3k), and with no fixed overhead that takes
-    // four 16k outputs (70k - 64k = 6k). Had the 99k usable-window floor for
-    // count-less rides replaced the stated count, it would take all five
-    // (99k - 80k = 19k), so four proves the stated count was kept.
-    assert_eq!(dropped_tools(view.as_ref()), 4);
+    let view = session
+        .ride(&settings, &request)
+        .expect("the stated count reclaims four outputs");
+    // The 70k count is below the 82k transcript, so fixed overhead is zero:
+    // target = 0.3 * 64,350 = 19,305, reclaim = 50,695, or four 16k outputs.
+    // A 99k floor implies 17k fixed: target = 17k + 0.3 * (64,350 - 17k)
+    // = 31,205, reclaim = 67,795, taking all five. Count the final output's
+    // placeholder too, and prove the stated count leaves that output intact.
+    assert_eq!(reclaimed_tools(Some(&view)), 4);
+    assert!(!touches(&view, "tool-6", "p"));
     assert!(!logs.text().contains("using a request floor"));
 }
 
@@ -188,7 +222,7 @@ fn ride_over_limit_without_a_count_never_floors_below_the_last_reading() {
         session.conditions.clone(),
     );
     let view = session.ride(&settings, &request);
-    assert!(dropped_tools(view.as_ref()) > 0);
+    assert!(reclaimed_tools(view.as_ref()) > 0);
     assert!(logs.text().contains(
         "ck-mc: session s1: over_limit without request_tokens: using a request floor of 120000 tokens"
     ));
