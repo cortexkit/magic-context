@@ -152,10 +152,23 @@ function ledger(db: Database, id: string, entries: string[] | string) {
 		"UPDATE session_meta SET merged_reasoning_stripped_ids = ? WHERE session_id = ?",
 	).run(typeof entries === "string" ? entries : JSON.stringify(entries), id);
 }
-function blockDecisionWrite(db: Database, kind: string) {
-	// Inject an I/O failure only for the requested decision, not all session writes.
+function blockDecisionWrite(
+	db: Database,
+	kind: string,
+	message = "injected decision write failure",
+) {
+	// Inject an I/O failure only for the requested decision, not all session
+	// writes. Once-guards are written to their own fold-guard row in
+	// schema_migrations_meta; every other decision goes to the shared ledger.
+	if (kind === "tag-identity-repair-once") {
+		for (const event of ["INSERT", "UPDATE"])
+			db.exec(
+				`CREATE TRIGGER fail_identity_guard_${event} BEFORE ${event} ON schema_migrations_meta WHEN NEW.key LIKE 'pi_identity_fold_guards:%' BEGIN SELECT RAISE(FAIL, '${message}'); END`,
+			);
+		return;
+	}
 	db.exec(
-		`CREATE TRIGGER fail_identity_decision BEFORE UPDATE OF merged_reasoning_stripped_ids ON session_meta WHEN NEW.merged_reasoning_stripped_ids LIKE '%${kind}%' BEGIN SELECT RAISE(FAIL, 'injected decision write failure'); END`,
+		`CREATE TRIGGER fail_identity_decision BEFORE UPDATE OF merged_reasoning_stripped_ids ON session_meta WHEN NEW.merged_reasoning_stripped_ids LIKE '%${kind}%' BEGIN SELECT RAISE(FAIL, '${message}'); END`,
 	);
 }
 
@@ -252,12 +265,22 @@ test("review 650 r3 partner: full and one-free-slot ledgers serve duplicates wit
 			expect(result.refused).toEqual([]);
 			expect(result.served).toHaveLength(3);
 			expect(new Set(result.served).size).toBe(1);
-			// The first unmerged pass serves 8; its new cached proof may fold on pass two.
-			expect(result.served[0]).toContain("§8§ 1");
 			expect(readPiIdentityRebuilds(db, id)).toEqual([]);
-			expect(decisions.getPendingPi(id)?.materializeReason).not.toBe(
-				"tag_identity_repair",
-			);
+			if (count === PI_CONTENT_DECISION_LIMIT) {
+				// No room for the pending-rebuild record: the fold is undone. The
+				// first unmerged pass serves 8; its new cached proof may fold on
+				// pass two.
+				expect(result.served[0]).toContain("§8§ 1");
+				expect(decisions.getPendingPi(id)?.materializeReason).not.toBe(
+					"tag_identity_repair",
+				);
+			} else {
+				// The once-guard is stored in the fold-guard row, so the one free
+				// slot holds the pending-rebuild record and the declared repair
+				// runs as in an intact ledger.
+				expect(result.served[0]).toContain("§154§ 1");
+				expect(rows(db, id)).toEqual([{ tag_number: 154 }]);
+			}
 		} finally {
 			db.close();
 		}
@@ -531,9 +554,7 @@ for (const kind of [
 		const id = session(`busy-${kind}`);
 		try {
 			seedTool(db, id);
-			db.exec(
-				`CREATE TRIGGER busy_identity_decision BEFORE UPDATE OF merged_reasoning_stripped_ids ON session_meta WHEN NEW.merged_reasoning_stripped_ids LIKE '%${kind}%' BEGIN SELECT RAISE(FAIL, 'database is locked'); END`,
-			);
+			blockDecisionWrite(db, kind, "database is locked");
 			expect(adopt(db, id).rebuilds).toEqual([]);
 			expect(rows(db, id)).toEqual([{ tag_number: 8 }, { tag_number: 154 }]);
 		} finally {

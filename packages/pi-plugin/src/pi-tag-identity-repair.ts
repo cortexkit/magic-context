@@ -4,8 +4,17 @@ import {
 	freezePiContentDecision,
 	getPiContentDecisions,
 } from "@magic-context/core/features/magic-context/pi-content-decisions";
+import {
+	PI_IDENTITY_FOLD_GUARD_LIMIT,
+	readPiIdentityFoldGuards,
+	writePiIdentityFoldGuards,
+} from "@magic-context/core/features/magic-context/pi-identity-fold-guards";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
+import {
+	PiContextDeadlineError,
+	PiContextSupersededError,
+} from "./pi-context-budget";
 
 export const PI_TAG_IDENTITY_REPAIR_ONCE_GUARD = "pi-tag-identity-repair-once";
 export const PI_TAG_IDENTITY_REPAIR_REASON = "tag_identity_repair";
@@ -24,13 +33,29 @@ export interface PiIdentityRebuild {
  *   `legacyKeys`). The caller must not repair it again and must not refuse
  *   the turn either: it leaves the rows unmerged and serves the identity the
  *   way tagging would without any repair.
- * - `unpersisted`: the guard could not be read or written (a full or damaged
- *   decision ledger, a rejected write). Without a durable guard a repair could repeat on every pass, so
- *   the caller treats it like `recurring`.
+ * - `unpersisted`: the guard could not be read or written (a full guard
+ *   store, a damaged decision ledger or guard row, a rejected write). Without
+ *   a durable guard a repair could repeat on every pass, so the caller treats
+ *   it like `recurring`.
  */
 export type PiIdentityRepairClaim = "claimed" | "recurring" | "unpersisted";
 
 const unreadableLedgerLogged = new Set<string>();
+
+/**
+ * Errors that end the whole pass: its deadline passed, a newer pass took the
+ * session over, or the host cancelled the run. Identity repair contains every
+ * other failure by serving duplicates unmerged, but it must let these through:
+ * containing one kept a large repair running long past the pass deadline, and
+ * the pass was then refused with all of its work rolled back.
+ */
+export function isPiPassEndingError(error: unknown): boolean {
+	return (
+		error instanceof PiContextDeadlineError ||
+		error instanceof PiContextSupersededError ||
+		(error instanceof Error && error.name === "AbortError")
+	);
+}
 
 /**
  * The session's Pi content-decision ledger for identity decisions, or null
@@ -49,6 +74,7 @@ export function readPiIdentityDecisions(
 	try {
 		return getPiContentDecisions(db, sessionId);
 	} catch (error) {
+		if (isPiPassEndingError(error)) throw error;
 		if (!unreadableLedgerLogged.has(sessionId)) {
 			if (unreadableLedgerLogged.size > 10_000) unreadableLedgerLogged.clear();
 			unreadableLedgerLogged.add(sessionId);
@@ -62,15 +88,15 @@ export function readPiIdentityDecisions(
 }
 
 /**
- * Write one identity decision. Any failure (a busy store, a damaged field, a
- * rejected write) returns false instead of throwing: the caller then leaves
- * the duplicate unmerged, which serves the turn.
+ * Write one identity decision. Any failure other than one that ends the pass
+ * (a busy store, a damaged field, a rejected write) returns false instead of
+ * throwing: the caller then leaves the duplicate unmerged, which serves the
+ * turn. A pass-ending error is rethrown (see isPiPassEndingError).
  */
 function freezeIdentityDecision(
 	db: Database,
 	sessionId: string,
 	kind:
-		| "tag-identity-repair-once"
 		| "tag-identity-repair-pending"
 		| "tag-identity-rebuild-failed"
 		| "tag-identity-recurring",
@@ -80,6 +106,7 @@ function freezeIdentityDecision(
 	try {
 		return freezePiContentDecision(db, sessionId, kind, value);
 	} catch (error) {
+		if (isPiPassEndingError(error)) throw error;
 		sessionLog(
 			sessionId,
 			`tag identity decision ${kind} could not be written; serving duplicates unmerged: ${error instanceof Error ? error.message : String(error)}`,
@@ -88,26 +115,151 @@ function freezeIdentityDecision(
 	}
 }
 
-/** Caller holds the duplicate-fold writer transaction; persist that this identity has been repaired. */
+const unreadableGuardsLogged = new Set<string>();
+
+/** The session's fold guards, or null (logged once per session) when the stored row cannot be read. */
+function readFoldGuards(db: Database, sessionId: string): Set<string> | null {
+	try {
+		return readPiIdentityFoldGuards(db, sessionId);
+	} catch (error) {
+		if (isPiPassEndingError(error)) throw error;
+		if (!unreadableGuardsLogged.has(sessionId)) {
+			if (unreadableGuardsLogged.size > 10_000) unreadableGuardsLogged.clear();
+			unreadableGuardsLogged.add(sessionId);
+			sessionLog(
+				sessionId,
+				`Pi identity fold guards unreadable: tag identity duplicates are served unmerged and the stored row is left untouched: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		return null;
+	}
+}
+
+/**
+ * The identity decisions one writer transaction works with: the shared Pi
+ * content-decision ledger and the fold guards, each read once by `load`
+ * instead of once per identity. New guards are kept in memory and written
+ * together by `flush` inside the same transaction as the folds they guard, so
+ * no fold commits without its guard and no guard commits without its fold.
+ */
+export class PiIdentityRepairBatch {
+	private ledger: Set<string> | null = null;
+	private guards: Set<string> | null = null;
+	private pending = false;
+	/**
+	 * Set once the guard row could not be written in this pass: every later
+	 * claim then answers `unpersisted`, so only the identities that need a guard
+	 * stay unmerged and the rest of the adoption work can still commit.
+	 */
+	refuseNewGuards = false;
+	constructor(
+		private readonly db: Database,
+		private readonly sessionId: string,
+	) {}
+
+	/** Read both stores. Call it after taking the writer, in every transaction that claims. */
+	load(): void {
+		this.pending = false;
+		this.ledger = readPiIdentityDecisions(this.db, this.sessionId);
+		this.guards = readFoldGuards(this.db, this.sessionId);
+	}
+
+	/** The shared content-decision ledger as loaded, or null when it is unreadable. */
+	decisions(): Set<string> | null {
+		return this.ledger;
+	}
+
+	/** What `claim` would answer for this identity, without claiming anything. */
+	peek(key: string, legacyKeys: readonly string[] = []): PiIdentityRepairClaim {
+		const ledger = this.ledger;
+		const guards = this.guards;
+		if (ledger === null) return "unpersisted";
+		const candidates = [key, ...legacyKeys];
+		if (
+			candidates.some((candidate) =>
+				ledger.has(
+					encodePiContentDecision("tag-identity-repair-once", candidate),
+				),
+			)
+		)
+			return "recurring";
+		if (guards === null) return "unpersisted";
+		if (candidates.some((candidate) => guards.has(candidate)))
+			return "recurring";
+		if (this.refuseNewGuards || guards.size >= PI_IDENTITY_FOLD_GUARD_LIMIT)
+			return "unpersisted";
+		return "claimed";
+	}
+
+	/**
+	 * Ask for the one repair of the identity `key` (or of the keys older builds
+	 * used for it, `legacyKeys`). A guard found in either store, including a
+	 * `tag-identity-repair-once` entry an older build wrote to the shared ledger,
+	 * means the repair is spent.
+	 */
+	claim(
+		key: string,
+		legacyKeys: readonly string[] = [],
+	): PiIdentityRepairClaim {
+		const claim = this.peek(key, legacyKeys);
+		if (claim !== "claimed") return claim;
+		this.guards?.add(key);
+		this.pending = true;
+		return "claimed";
+	}
+
+	/**
+	 * Write the guards claimed since `load`. Throws when they cannot be
+	 * written; the caller must then roll back the folds made in this
+	 * transaction.
+	 */
+	flush(): void {
+		if (!this.pending || !this.guards) return;
+		writePiIdentityFoldGuards(this.db, this.sessionId, this.guards);
+		this.pending = false;
+	}
+
+	/** recordPiIdentityRecurrence against the loaded ledger. */
+	recordRecurrence(key: string): boolean {
+		return recordPiIdentityRecurrence(
+			this.db,
+			this.sessionId,
+			key,
+			this.ledger,
+		);
+	}
+}
+
+/**
+ * Claim and persist one identity's repair on its own; see
+ * PiIdentityRepairBatch.claim. The read and the write of the guard row share
+ * one writer transaction, so a guard another connection stores meanwhile is
+ * never overwritten.
+ */
 export function claimPiIdentityRepair(
 	db: Database,
 	sessionId: string,
 	key: string,
 	legacyKeys: readonly string[] = [],
 ): PiIdentityRepairClaim {
-	const decisions = readPiIdentityDecisions(db, sessionId);
-	if (decisions === null) return "unpersisted";
-	if (
-		[key, ...legacyKeys].some((candidate) =>
-			decisions.has(
-				encodePiContentDecision("tag-identity-repair-once", candidate),
-			),
-		)
-	)
-		return "recurring";
-	return freezeIdentityDecision(db, sessionId, "tag-identity-repair-once", key)
-		? "claimed"
-		: "unpersisted";
+	try {
+		return db
+			.transaction(() => {
+				const batch = new PiIdentityRepairBatch(db, sessionId);
+				batch.load();
+				const claim = batch.claim(key, legacyKeys);
+				if (claim === "claimed") batch.flush();
+				return claim;
+			})
+			.immediate();
+	} catch (error) {
+		if (isPiPassEndingError(error)) throw error;
+		sessionLog(
+			sessionId,
+			`tag identity fold guard could not be written; serving the duplicate unmerged: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return "unpersisted";
+	}
 }
 
 const unrecordedRecurrenceLogged = new Set<string>();
@@ -117,18 +269,26 @@ const unrecordedRecurrenceLogged = new Set<string>();
  * one repair was spent or could not be recorded. Returns whether the caller
  * should log the event: true when this call wrote the record, or when the
  * record cannot be written and this process has not logged that identity for
- * the session yet (so a full ledger logs once, not on every turn). Never
- * throws.
+ * the session yet (so a full ledger logs once, not on every turn). Throws only
+ * a pass-ending error. `decisions`, when given, is the caller's loaded ledger:
+ * it answers the already-recorded check and receives the new record.
  */
 export function recordPiIdentityRecurrence(
 	db: Database,
 	sessionId: string,
 	key: string,
+	decisions?: Set<string> | null,
 ): boolean {
 	const entry = encodePiContentDecision("tag-identity-recurring", key);
-	if (readPiIdentityDecisions(db, sessionId)?.has(entry)) return false;
-	if (freezeIdentityDecision(db, sessionId, "tag-identity-recurring", key))
+	const known =
+		decisions === undefined
+			? readPiIdentityDecisions(db, sessionId)
+			: decisions;
+	if (known?.has(entry)) return false;
+	if (freezeIdentityDecision(db, sessionId, "tag-identity-recurring", key)) {
+		decisions?.add(entry);
 		return true;
+	}
 	const logKey = `${sessionId}\0${key}`;
 	if (unrecordedRecurrenceLogged.has(logKey)) return false;
 	if (unrecordedRecurrenceLogged.size > 10_000)
@@ -149,7 +309,7 @@ export function readPiIdentityRecurrences(
 	);
 }
 
-/** Returns false when the rebuild could not be recorded; the caller then skips the repair. Never throws. */
+/** Returns false when the rebuild could not be recorded; the caller then skips the repair. Throws only a pass-ending error. */
 export function queuePiIdentityRebuild(
 	db: Database,
 	sessionId: string,

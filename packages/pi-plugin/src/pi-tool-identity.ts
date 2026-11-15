@@ -100,15 +100,12 @@ export function piCachedToolSurvivor(
 	callId: string,
 	timestamp: number,
 	rows: readonly { tagNumber: number; status: string }[],
+	view?: PiServedCachedView | null,
 ): number | undefined {
-	const cached = readPiServedCachedArray(sessionId);
+	const cached =
+		view === undefined ? createPiServedCachedView(sessionId) : view;
 	if (!cached) return;
-	const { messages } = cached;
-	const owners = messages.filter(
-		(m) =>
-			m.role === "assistant" &&
-			contentParts(m).some((p) => p.type === "toolCall" && p.id === callId),
-	);
+	const owners = cached.toolCallOwners().get(callId) ?? [];
 	const owner = owners[0];
 	if (
 		!owner ||
@@ -118,15 +115,13 @@ export function piCachedToolSurvivor(
 			.length !== 1
 	)
 		return;
-	const rendered = piRenderedTagNumbers(messages);
+	const rendered = cached.rendered();
 	const present = rows.filter((row) => rendered.has(row.tagNumber));
 	const winner = present[0];
 	if (present.length !== 1 || !winner) return;
 	const { tagNumber: number, status } = winner;
 	if (status !== "active" && status !== "dropped") return;
-	const results = messages.filter(
-		(m) => m.role === "toolResult" && m.toolCallId === callId,
-	);
+	const results = cached.toolResults().get(callId) ?? [];
 	if (
 		!results.some((m) =>
 			contentParts(m).some(
@@ -140,6 +135,76 @@ export function piCachedToolSurvivor(
 	)
 		return;
 	return number;
+}
+
+/**
+ * The last returned array, parsed once, with lookups built on first use.
+ * Fallback adoption asks about thousands of duplicated identities in one pass;
+ * reading, hashing and parsing the whole array again for each of them made a
+ * large session's pass take minutes. One view answers every question of one
+ * adoption pass.
+ */
+export interface PiServedCachedView {
+	messages: Record<string, unknown>[];
+	/** piRenderedTagNumbers of the whole array. */
+	rendered(): Set<number>;
+	/** Assistant messages by the id of each tool call they carry, in array order. */
+	toolCallOwners(): Map<string, Record<string, unknown>[]>;
+	/** Tool-result messages by tool call id, in array order. */
+	toolResults(): Map<string, Record<string, unknown>[]>;
+	/** Lookups other identity modules derive from `messages`, built once per view. */
+	memo<T>(key: string, build: () => T): T;
+}
+
+/** A view of the last returned array, or null when there is no trustworthy one. */
+export function createPiServedCachedView(
+	sessionId: string,
+): PiServedCachedView | null {
+	const cached = readPiServedCachedArray(sessionId);
+	if (!cached) return null;
+	const { messages } = cached;
+	const memos = new Map<string, unknown>();
+	const memo = <T>(key: string, build: () => T): T => {
+		if (!memos.has(key)) memos.set(key, build());
+		return memos.get(key) as T;
+	};
+	return {
+		messages,
+		rendered: () => memo("rendered", () => piRenderedTagNumbers(messages)),
+		toolCallOwners: () =>
+			memo("toolCallOwners", () => {
+				const owners = new Map<string, Record<string, unknown>[]>();
+				for (const message of messages) {
+					if (message.role !== "assistant") continue;
+					const ids = new Set<unknown>();
+					for (const part of contentParts(message))
+						if (part.type === "toolCall") ids.add(part.id);
+					for (const id of ids) {
+						if (typeof id !== "string") continue;
+						const list = owners.get(id);
+						if (list) list.push(message);
+						else owners.set(id, [message]);
+					}
+				}
+				return owners;
+			}),
+		toolResults: () =>
+			memo("toolResults", () => {
+				const results = new Map<string, Record<string, unknown>[]>();
+				for (const message of messages) {
+					if (
+						message.role !== "toolResult" ||
+						typeof message.toolCallId !== "string"
+					)
+						continue;
+					const list = results.get(message.toolCallId);
+					if (list) list.push(message);
+					else results.set(message.toolCallId, [message]);
+				}
+				return results;
+			}),
+		memo,
+	};
 }
 
 export function readPiServedCachedArray(

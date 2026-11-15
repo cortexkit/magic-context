@@ -3,6 +3,7 @@ import { getHarness } from "../../shared/harness";
 import { type Database, prepareCachedStatement, type Statement } from "../../shared/sqlite";
 import { deleteChunkEmbedBackoffForSession } from "./compartment-chunk-embedding";
 import { deleteUnmappedMessageFtsRows } from "./message-fts-rowid-map";
+import { piIdentityFoldGuardKey } from "./pi-identity-fold-guards";
 import { deleteSessionActivity } from "./session-activity";
 import {
     tagIdentityRevisionKey,
@@ -201,6 +202,13 @@ export function deleteSessionScopedRows(
     // Activity is session-owned but stored as keys in the existing KV table,
     // so it cannot appear in the schema-derived SESSION_SCOPED_TABLES list.
     deleteSessionActivity(db, deletableSessionIds);
+    // Pi's identity fold guards live in their own schema_migrations_meta row,
+    // apart from the session's session_meta row; remove them once that row is gone.
+    const deleteFoldGuards = cleanupStatement(
+        db,
+        "DELETE FROM schema_migrations_meta WHERE key = ? AND NOT EXISTS (SELECT 1 FROM session_meta WHERE session_id = ?)",
+    );
+    for (const id of deletableSessionIds) deleteFoldGuards.run(piIdentityFoldGuardKey(id), id);
     if (!options.preserveTagRevisionTombstones) {
         const retireOwner = cleanupStatement(
             db,

@@ -274,9 +274,11 @@ function fillDecisionLedger(db: Database, sessionId: string, count: number) {
 }
 
 for (const free of [0, 1] as const) {
-	test(`issue 650 r3: a decision ledger with ${free} free slot(s) serves the duplicate unmerged instead of refusing`, () => {
-		// With no slot the once guard cannot be written; with one slot the guard
-		// is written but the pending rebuild cannot be, and the fold is undone.
+	test(`issue 650 r3: a decision ledger with ${free} free slot(s) never refuses the duplicate`, () => {
+		// The once guard lives in the identity fold-guard row, so a full shared
+		// ledger cannot block it. With no slot the pending rebuild cannot be
+		// recorded and the fold is undone: the duplicate is served unmerged.
+		// With one slot the pending rebuild fits and the one repair goes ahead.
 		const db = createTestDb();
 		const sessionId = session(`ledger-${free}`);
 		try {
@@ -287,12 +289,19 @@ for (const free of [0, 1] as const) {
 			capturePiServedArray(sessionId, [], { servedTagNumbers: [20, 440] });
 			clearPiServedArraySession(sessionId);
 			const outcome = adoptReal(db, sessionId, fingerprint);
-			expect(outcome.rebuilds).toEqual([]);
-			expect(readPiIdentityRebuilds(db, sessionId)).toEqual([]);
-			expect(messageNumbers(db, sessionId)).toEqual([
-				{ tag_number: 20, message_id: "real:p0" },
-				{ tag_number: 440, message_id: "pi-msg-0-7-user:p0" },
-			]);
+			if (free === 0) {
+				expect(outcome.rebuilds).toEqual([]);
+				expect(readPiIdentityRebuilds(db, sessionId)).toEqual([]);
+				expect(messageNumbers(db, sessionId)).toEqual([
+					{ tag_number: 20, message_id: "real:p0" },
+					{ tag_number: 440, message_id: "pi-msg-0-7-user:p0" },
+				]);
+			} else {
+				expect(outcome.rebuilds.map((repair) => repair.kept)).toEqual([440]);
+				expect(messageNumbers(db, sessionId)).toEqual([
+					{ tag_number: 440, message_id: "real:p0" },
+				]);
+			}
 		} finally {
 			db.close();
 		}

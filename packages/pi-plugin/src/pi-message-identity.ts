@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { stableStringify } from "@magic-context/core/shared/stable-json";
 import {
-	piRenderedTagNumbers,
-	readPiServedCachedArray,
+	createPiServedCachedView,
+	type PiServedCachedView,
 } from "./pi-tool-identity";
 
 export function piMessageEntryFingerprint(message: unknown): string | null {
@@ -80,12 +80,14 @@ export function piCachedMessageSurvivor(
 	fingerprint: string,
 	ordinal: number,
 	rows: readonly { tagNumber: number; status: string }[],
+	view?: PiServedCachedView | null,
 ): number | undefined {
-	const cached = readPiServedCachedArray(sessionId);
+	const cached =
+		view === undefined ? createPiServedCachedView(sessionId) : view;
 	if (!cached) return;
 	const header = fingerprintHeader(fingerprint);
 	if (header === undefined) return;
-	const rendered = piRenderedTagNumbers(cached.messages);
+	const rendered = cached.rendered();
 	const present = rows.filter((row) => rendered.has(row.tagNumber));
 	const winner = present[0];
 	if (present.length !== 1 || !winner) return;
@@ -98,9 +100,19 @@ export function piCachedMessageSurvivor(
 		winner.status === "dropped"
 			? text === `[dropped §${winner.tagNumber}§]`
 			: text?.startsWith(`§${winner.tagNumber}§ `) === true;
-	const carriers = cached.messages.filter(
-		(message) =>
-			messageHeader(message) === header && shows(textParts(message)[ordinal]),
-	);
+	const carriers = (
+		cached
+			.memo("messagesByHeader", () => {
+				const byHeader = new Map<string, Record<string, unknown>[]>();
+				for (const message of cached.messages) {
+					const key = messageHeader(message);
+					const list = byHeader.get(key);
+					if (list) list.push(message);
+					else byHeader.set(key, [message]);
+				}
+				return byHeader;
+			})
+			.get(header) ?? []
+	).filter((message) => shows(textParts(message)[ordinal]));
 	return carriers.length === 1 ? winner.tagNumber : undefined;
 }

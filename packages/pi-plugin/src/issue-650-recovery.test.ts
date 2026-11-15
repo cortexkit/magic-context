@@ -4,6 +4,7 @@ import {
 	freezePiContentDecision,
 	getPiContentDecisions,
 } from "@magic-context/core/features/magic-context/pi-content-decisions";
+import { readPiIdentityFoldGuards } from "@magic-context/core/features/magic-context/pi-identity-fold-guards";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import { getPendingOps } from "@magic-context/core/features/magic-context/storage-ops";
 import { saveSourceContent } from "@magic-context/core/features/magic-context/storage-source";
@@ -174,16 +175,20 @@ for (const kind of ["tool", "message"] as const) {
 				expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([
 					newest,
 				]);
+				// The spent repair's once-guard lives in the identity fold-guard row,
+				// not in the shared content-decision ledger the strip decisions use.
 				const guardEntries = [...getPiContentDecisions(db, sessionId)].filter(
 					(entry) =>
 						decodePiContentDecision(entry)?.[0] === "tag-identity-repair-once",
 				);
-				expect(guardEntries).toHaveLength(1);
+				expect(guardEntries).toHaveLength(0);
+				expect(readPiIdentityFoldGuards(db, sessionId).size).toBe(1);
 				// Ordinary cleanup may prune deleted message choices, but must not
 				// erase the spent repair guard and enable another identity rebuild.
 				expect(
 					freezePiContentDecision(db, sessionId, "reminder-strip", "not-a-tag"),
 				).toBe(true);
+				expect(readPiIdentityFoldGuards(db, sessionId).size).toBe(1);
 				signalPiPendingMaterialization(sessionId);
 				const execute = await pass();
 				expect(JSON.stringify(execute.messages)).not.toBe(bytes);
