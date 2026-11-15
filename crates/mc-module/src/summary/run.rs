@@ -13,6 +13,7 @@ use cortexkit_role_compaction::setup::ModelRef;
 use cortexkit_role_llm_runner::awaits::AwaitParty;
 use cortexkit_role_llm_runner::finish::Finish;
 use cortexkit_role_llm_runner::run::{states, RunResult, RunResultRequest, RunStatusRequest};
+use cortexkit_role_llm_runner::send::states as send_states;
 use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::{json, Map, Value};
 
@@ -761,7 +762,13 @@ async fn send_and_wait_inner<C: RunnerClient>(
         .send_child(child, request)
         .await
         .map_err(|error| send_refused(&error, how.send))?;
-    let Some(run_id) = reply.run_id.filter(|_| reply.state == states::ACTIVE) else {
+    // A runner may answer a run-starting send as soon as it is stored,
+    // before the prompt reaches its host: `pending` with the run's id. That
+    // run is followed like an active one.
+    let Some(run_id) = reply
+        .run_id
+        .filter(|_| matches!(reply.state.as_str(), states::ACTIVE | send_states::PENDING))
+    else {
         return Err(format!("the runner did not start a run: {}", reply.state).into());
     };
     let result = wait_for(client, child, &run_id, how.deadline, how.send).await?;
@@ -803,6 +810,10 @@ async fn send_and_wait_inner<C: RunnerClient>(
 #[cfg(test)]
 #[path = "session_class_tests.rs"]
 pub(crate) mod session_class_tests;
+
+#[cfg(test)]
+#[path = "pending_send_tests.rs"]
+mod pending_send_tests;
 
 #[cfg(test)]
 #[path = "harness_tests.rs"]
@@ -969,6 +980,15 @@ async fn read_range<C: RunnerClient>(
     .await
 }
 
+/// Whether a run in `state` has not ended: active, paused, or `pending`,
+/// stored and not yet handed to the host.
+fn still_running(state: &str) -> bool {
+    matches!(
+        state,
+        states::ACTIVE | states::PAUSED | send_states::PENDING
+    )
+}
+
 /// Wait for a run's result until `deadline`, the run's overall limit. The
 /// wait for each answer is bounded by it too. A `paused` run has not ended
 /// (llm-runner §6): a runner may pause it, for example until an account has
@@ -998,7 +1018,7 @@ async fn wait_for<C: RunnerClient>(
             .awaits
             .as_ref()
             .is_some_and(|wait| wait.party == AwaitParty::Runner);
-        if !matches!(result.state.as_str(), states::PAUSED | states::ACTIVE) && !runner_wait {
+        if !still_running(&result.state) && !runner_wait {
             return Ok(result);
         }
         last = Some(result);
@@ -1018,10 +1038,7 @@ async fn timed_out<C: RunnerClient>(
     last: Option<RunResult>,
     send: SendKind,
 ) -> Result<RunResult, SummaryError> {
-    if let Some(result) = last
-        .as_ref()
-        .filter(|result| !matches!(result.state.as_str(), states::PAUSED | states::ACTIVE))
-    {
+    if let Some(result) = last.as_ref().filter(|result| !still_running(&result.state)) {
         return Ok(result.clone());
     }
     let status = client
