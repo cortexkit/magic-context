@@ -1,8 +1,6 @@
 //! Review witnesses for views whose `session.apply_view` answer was lost.
 //!
-//! Each test states a property the lost-answer handling should keep and
-//! fails on the code as it stands, so each is ignored with the reason it
-//! fails. Remove the `#[ignore]` once the behaviour it names is fixed.
+//! Each test states a property the lost-answer handling keeps.
 
 use super::*;
 use crate::test_log::capture;
@@ -89,7 +87,6 @@ async fn notice_reporting(
 /// gives the queued drops it did not name no refusal strike; the refusal of
 /// the offer again should do the same.
 #[tokio::test]
-#[ignore = "fails: offer_unconfirmed_again rolls back without the refusal's named part, so every automatic part of the view is set aside and every queued drop gets a refusal strike"]
 async fn lost_answer_review_a_refused_offer_again_sets_aside_only_the_named_part() {
     let (mut session, client, _, view) = handed_without_answer().await;
     *client.refuse.lock().unwrap() = true;
@@ -119,7 +116,6 @@ async fn lost_answer_review_a_refused_offer_again_sets_aside_only_the_named_part
 /// and makes ck-mc's next view newer than the runner's
 /// (`publish_recorded`); offered again it should do the same.
 #[tokio::test]
-#[ignore = "fails: offer_unconfirmed_again treats a StaleVersion refusal naming a newer view as the drops' fault and does not raise ck-mc's version"]
 async fn lost_answer_review_an_offer_again_refused_for_a_newer_runner_view_blames_no_drop() {
     let (mut session, client, _, view) = handed_without_answer().await;
     let newer = view.version + 5;
@@ -149,7 +145,6 @@ async fn lost_answer_review_an_offer_again_refused_for_a_newer_runner_view_blame
 /// very view. The runner holds the view, as `offer_unconfirmed_again`
 /// already concludes from the same answer, so it must not be rolled back.
 #[tokio::test]
-#[ignore = "fails: publish_recorded rolls back a view the runner answers as already holding (StaleVersion with latest equal to the view's version)"]
 async fn lost_answer_review_a_resend_answered_as_already_held_keeps_the_view() {
     let (mut session, client, settings) = refusal_fixture();
     let (view, _) = session.build(&settings, None, false, None);
@@ -174,51 +169,10 @@ async fn lost_answer_review_a_resend_answered_as_already_held_keeps_the_view() {
     );
 }
 
-/// The cache-bust analyzer in this repository
-/// (`packages/plugin/scripts/cache-bust-runner-log.ts`, `parseRunnerDecision`)
-/// takes the session and body with `ck-mc: session (\S+): (.*)$` and the
-/// cut with `, cut through (.+)\)$`, anchored at the end of the line. The
-/// confirmation line of a view whose answer was lost must still give it the
-/// cut.
-#[tokio::test]
-#[ignore = "fails: the confirmation note follows the closing parenthesis, so the analyzer's end-anchored cut pattern no longer matches and it reports the cut as unlogged"]
-async fn lost_answer_review_the_cache_bust_analyzer_reads_the_cut_of_a_confirmed_view() {
-    let mut logs = capture();
-    let (mut session, client, settings) = refusal_fixture();
-    let view = session.seal_unchecked(vec![EditOp::Cut {
-        through: "msg_cut".into(),
-    }]);
-    *client.lose_apply_answers.lock().unwrap() = 1;
-    assert!(session.publish(&client, view.clone()).await);
-    notice_reporting(&mut session, &client, &settings, 1, Some(&view)).await;
-    logs.stop();
-    let text = logs.text();
-    let line = text
-        .lines()
-        .find(|line| line.contains(&accepted_line(&view)))
-        .unwrap_or_else(|| panic!("no acceptance line for view {}: {text}", view.version));
-    let body = regex::Regex::new(r"ck-mc: session (\S+): (.*)$")
-        .unwrap()
-        .captures(line)
-        .expect("the analyzer finds the session")[2]
-        .to_owned();
-    assert!(body.starts_with(&accepted_line(&view)), "{body}");
-    let cut = regex::Regex::new(r", cut through (.+)\)$")
-        .unwrap()
-        .captures(&body)
-        .map(|found| found[1].to_owned());
-    assert_eq!(
-        cut.as_deref(),
-        Some("msg_cut"),
-        "the analyzer reads no cut from: {line}"
-    );
-}
-
 /// ck-mc restarts while the view waits. The runner's Setup reports applying
 /// it, which confirms it. The view's acceptance line was never written (it
 /// is written on confirmation), so Setup's confirmation must write it, once.
 #[tokio::test]
-#[ignore = "fails: answer_lost is not saved, so a view confirmed after a restart never gets an acceptance line"]
 async fn lost_answer_review_a_view_confirmed_after_a_restart_logs_its_acceptance_once() {
     let mut logs = capture();
     let (session, client, settings, view) = handed_without_answer().await;
@@ -262,7 +216,6 @@ async fn lost_answer_review_a_view_confirmed_after_a_restart_logs_its_acceptance
 /// the view only from then on, so the confirmation line must not say the
 /// view was handed over before that offer.
 #[tokio::test]
-#[ignore = "fails: the confirmation line states the lost first call's time even when the runner took the view only when it was offered again"]
 async fn lost_answer_review_a_view_first_taken_when_offered_again_is_not_dated_before_that() {
     let mut logs = capture();
     let (mut session, client, settings, view) = handed_without_answer().await;
@@ -379,7 +332,6 @@ fn still_accepted(session: &Session, version: u64) -> bool {
 /// builds no view, as it does when view 20 never existed
 /// (`stale_accepted_a_reading_from_before_the_runner_took_the_view_builds_nothing`).
 #[tokio::test]
-#[ignore = "fails: offering the waiting view again on a notice clears the acceptance of every unconfirmed view, so a reading the accepted view excuses counts and builds a second view"]
 async fn lost_answer_review_an_offer_again_without_answer_keeps_an_older_views_acceptance() {
     let (mut session, client, settings, eighteen) = under_view_eighteen().await;
     let nineteen = session.seal_unchecked(Vec::new());

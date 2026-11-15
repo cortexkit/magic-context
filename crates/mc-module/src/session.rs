@@ -409,19 +409,23 @@ pub struct Unconfirmed {
     /// came back (the call's deadline passed, the connection dropped after
     /// the request was sent, or the client could not prove it stayed
     /// unsent): the runner may hold the view or may never have received it.
-    /// Its acceptance line was not logged then; it is logged when the runner
-    /// reports applying the view or a later one. Not saved: after a restart
-    /// Setup offers the view again in any case.
-    #[serde(skip)]
+    /// Its acceptance line was not logged then. It is logged once the runner
+    /// says it took the view: when an offer again is answered, or when the
+    /// runner reports applying the view or a later one. Saved, so a view
+    /// confirmed after ck-mc restarts still gets its line; left out of the
+    /// saved text while unset, so other views save as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     answer_lost: bool,
-    /// When ck-mc handed the view over, in milliseconds since the Unix epoch
-    /// (wall clock); set together with `answer_lost`. The acceptance line
-    /// logged on confirmation comes with a later notice, often after the
-    /// step that first rendered the view, so it states this time: the
-    /// cache-bust watcher places the view by it rather than by the line's
-    /// own time. Not saved, like `answer_lost`.
-    #[serde(skip)]
-    handed_over_ms: i64,
+    /// When ck-mc first handed the view over, in milliseconds since the Unix
+    /// epoch (wall clock); set together with `answer_lost`, and kept when an
+    /// offer again loses its answer too. A line logged on confirmation comes
+    /// with a later notice, often after the step that first rendered the
+    /// view, so it states this time. The cache-bust watcher
+    /// (`packages/plugin/scripts/cache-bust-runner-views.ts`), which matches
+    /// accepted views to prompt-cache rewrites, places the view by it rather
+    /// than by the line's own time. Saved like `answer_lost`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handed_over_ms: Option<i64>,
 }
 
 /// The state a view's acceptance replaced.
@@ -1274,6 +1278,7 @@ impl Session {
         // Before anything is offered: a view offered again must meet the
         // floor too.
         self.load_move_floor(client).await;
+        self.judge_acceptance_afresh();
         self.offer_unconfirmed_again(client).await;
         let Some(forget_from) = forget_from else {
             self.index_ready = false;
@@ -1411,7 +1416,8 @@ impl Session {
             .collect();
         self.settle_stated(stated, &refused);
         // A view offered again after a restart that waited because the
-        // runner couldn't place its cut is offered again now.
+        // runner couldn't place its cut, or one whose apply answer was lost,
+        // is offered again now.
         if self.reoffer_pending {
             self.offer_unconfirmed_again(client).await;
         }
@@ -2600,6 +2606,7 @@ impl Session {
         self.release_transcript_hold();
         self.settle_stated(applied, &[]);
         self.load_move_floor(client).await;
+        self.judge_acceptance_afresh();
         self.offer_unconfirmed_again(client).await;
         if let Some(ordinal) = forget_from {
             self.invalidate_transcript_from(ordinal);
@@ -4879,7 +4886,11 @@ impl Session {
         let request = ApplyViewRequest::new(view.clone());
         let handed_over_ms = user_commands::wall_now();
         match client.apply_view(&self.key, request).await {
-            Ok(ApplyViewAnswer::Accepted) => {
+            // Accepted, or refused as not newer than this very view: the
+            // runner holds it either way. The second answer comes when the
+            // client sent the request again after a first attempt that may
+            // have reached the runner, and the runner took that one.
+            Ok(answer) if holds_offered(&answer, view.version) => {
                 self.runner_holds(view.version);
                 self.log_view_accepted(&view, None);
                 self.app_view_status(view.version, "accepted");
@@ -4891,35 +4902,7 @@ impl Session {
                     self.key.session,
                     view.version
                 );
-                // The runner holds a newer view than ck-mc knows (one handed
-                // over before a crash): the next view must be newer still,
-                // and the drops this one carried were not at fault.
-                let stale = match &refusal {
-                    ViewRefusal::StaleVersion { latest, .. } => {
-                        self.version = self.version.max(*latest);
-                        true
-                    }
-                    _ => false,
-                };
-                // A signed part ck-mc kept only because of a signed floor the
-                // runner did not apply: the floor, not the drops the view
-                // carried, was at fault. They stay queued, with no refusal
-                // counted against them; the apps still show the view as
-                // refused.
-                let floor_at_fault = self.judge_floor_refusal(&view.edits, view.version, &refusal);
-                // A cut before history without part numbers: the cut was at
-                // fault, not the drops, and the next views wait for a
-                // summary through that history instead of repeating it.
-                let numbers = self.take_numbers_refusal(view.version, &refusal);
-                self.roll_back(
-                    view.version,
-                    !stale && !floor_at_fault && !numbers,
-                    refusal_part(&refusal),
-                );
-                if floor_at_fault {
-                    self.app_view_status(view.version, "refused");
-                }
-                self.reset_transcript_retry();
+                self.roll_back_refused(&view, view.version, &refusal);
             }
             // An answer the contract may add later leaves the outcome
             // unknown (compaction contract W1.5): the view is not sent again,
@@ -4958,7 +4941,7 @@ impl Session {
                     .find(|pending| pending.view.version == view.version)
                 {
                     pending.answer_lost = true;
-                    pending.handed_over_ms = handed_over_ms;
+                    pending.handed_over_ms = Some(handed_over_ms);
                 }
                 self.reoffer_pending = true;
                 return (true, Some(durable));
@@ -4976,15 +4959,11 @@ impl Session {
     /// applying: it may never have arrived, so it is offered again.
     /// A runner that already holds it refuses it as not newer, which
     /// confirms nothing but loses nothing; any other refusal rolls it back.
+    /// Which unconfirmed views the runner holds is judged afresh only after
+    /// a Setup or a resume ([`Session::judge_acceptance_afresh`]), not when
+    /// an ordinary notice offers a waiting view again.
     async fn offer_unconfirmed_again<C: RunnerClient>(&mut self, client: &C) {
         self.reoffer_pending = false;
-        // A runner that set up again may have restarted and lost a view it
-        // had accepted. Its answer to this offer says again whether it holds
-        // the view, and its readings are judged afresh from here.
-        for pending in &mut self.unconfirmed {
-            pending.accepted = false;
-            pending.excused.clear();
-        }
         let Some(view) = self.unconfirmed.last().map(|pending| pending.view.clone()) else {
             return;
         };
@@ -5046,14 +5025,18 @@ impl Session {
             Ok(ApplyViewAnswer::Accepted) => {
                 self.runner_holds(view.version);
                 self.app_view_status(view.version, "accepted");
+                // The runner took the view with this offer, so a view whose
+                // first answer was lost is accepted from now.
+                self.lost_answer_found(view.version, false);
             }
             // Refused as not newer than the view the runner holds: it holds
-            // this one.
+            // this one, from an earlier handover.
             Ok(ApplyViewAnswer::Refused {
                 refusal: ViewRefusal::StaleVersion { latest, .. },
             }) if latest == view.version => {
                 self.runner_holds(view.version);
                 self.reset_transcript_retry();
+                self.lost_answer_found(view.version, true);
             }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 tracing::warn!(
@@ -5062,18 +5045,7 @@ impl Session {
                     view.version,
                     policy_members(&view)
                 );
-                // As for a view refused when first handed over: a signed
-                // part kept only because of a floor puts the fault on the
-                // floor, not on the drops. After a restart the index is
-                // still empty here, so nothing is placed and the usual
-                // penalty applies.
-                let floor_at_fault = self.judge_floor_refusal(&view.edits, view.version, &refusal);
-                let numbers = self.take_numbers_refusal(view.version, &refusal);
-                self.roll_back(oldest, !floor_at_fault && !numbers, None);
-                if floor_at_fault {
-                    self.app_view_status(oldest, "refused");
-                }
-                self.reset_transcript_retry();
+                self.roll_back_refused(&view, oldest, &refusal);
             }
             Ok(other) => {
                 tracing::info!(
@@ -5085,7 +5057,8 @@ impl Session {
             }
             // As when the view was first handed over: an offer whose answer
             // was lost may have reached the runner, so the view stays as it
-            // is and the next notice offers it again.
+            // is and the next notice offers it again. A view whose first
+            // answer was lost too keeps that first handover's time.
             Err(error) if error.outcome_unknown => {
                 tracing::warn!(
                     "ck-mc: session {}: no answer to view {} offered again, which the runner may hold: {error}; it waits for the runner's next report",
@@ -5099,6 +5072,106 @@ impl Session {
                 self.roll_back(oldest, false, None);
             }
         }
+    }
+
+    /// A runner that set up again, or a session that resumes after being
+    /// held, may have lost a view the runner had accepted. The answer to the
+    /// offer that follows says again whether the runner holds the view, and
+    /// its readings are judged afresh from here. Not done when an ordinary
+    /// notice offers a waiting view again: the runner's earlier acceptances
+    /// still stand then.
+    fn judge_acceptance_afresh(&mut self) {
+        for pending in &mut self.unconfirmed {
+            pending.accepted = false;
+            pending.excused.clear();
+        }
+    }
+
+    /// Undo `view` after the runner refused it, together with every
+    /// unconfirmed view from `from` on: on first handover `from` is the
+    /// view itself, and on an offer again it is the oldest view waiting.
+    /// Both answers are judged the same way here, so a refusal blames the
+    /// same drops whichever offer drew it.
+    fn roll_back_refused(&mut self, view: &View, from: u64, refusal: &ViewRefusal) {
+        // The runner holds a newer view than ck-mc knows (one handed over
+        // before a crash): the next view must be newer still, and the drops
+        // this one carried were not at fault.
+        let stale = match refusal {
+            ViewRefusal::StaleVersion { latest, .. } => {
+                self.version = self.version.max(*latest);
+                true
+            }
+            _ => false,
+        };
+        // A signed part ck-mc kept only because of a signed floor the runner
+        // did not apply: the floor, not the drops the view carried, was at
+        // fault. They stay queued, with no refusal counted against them; the
+        // apps still show the view as refused. Right after a restart the
+        // index is still empty, so nothing is placed and the usual penalty
+        // applies.
+        let floor_at_fault = self.judge_floor_refusal(&view.edits, view.version, refusal);
+        // A cut before history without part numbers: the cut was at fault,
+        // not the drops, and the next views wait for a summary through that
+        // history instead of repeating it.
+        let numbers = self.take_numbers_refusal(view.version, refusal);
+        // A refusal that names the part at fault blames only that part.
+        self.roll_back(
+            from,
+            !stale && !floor_at_fault && !numbers,
+            refusal_part(refusal),
+        );
+        if floor_at_fault {
+            self.app_view_status(from, "refused");
+        }
+        self.reset_transcript_retry();
+    }
+
+    /// The runner answered an offer again of view `version`. If the first
+    /// answer to that view was lost, ck-mc now knows the runner holds it, so
+    /// its acceptance is logged here, dated by the handover the runner took,
+    /// and not again on confirmation. `held_before` says the runner already
+    /// held the view from an earlier handover (it refused this offer as not
+    /// newer): the line then carries the first handover's time. Otherwise the
+    /// runner took the view with this offer, and the usual line, written now,
+    /// dates it.
+    fn lost_answer_found(&mut self, version: u64, held_before: bool) {
+        let Some(pending) = self
+            .unconfirmed
+            .iter()
+            .find(|pending| pending.view.version == version && pending.answer_lost)
+        else {
+            return;
+        };
+        if held_before {
+            self.log_held_after_lost_answer(pending);
+        } else {
+            self.log_view_accepted(&pending.view, None);
+        }
+        if let Some(pending) = self
+            .unconfirmed
+            .iter_mut()
+            .find(|pending| pending.view.version == version)
+        {
+            pending.answer_lost = false;
+            pending.handed_over_ms = None;
+        }
+    }
+
+    /// The acceptance line of a view whose apply answer was lost, logged when
+    /// the runner shows it holds the view from an earlier handover: the usual
+    /// line, then a note ending with when ck-mc first handed the view over.
+    /// The line comes later than that handover, often after the step that
+    /// first rendered the view, so the cache-bust watcher takes the stated
+    /// time as the view's.
+    fn log_held_after_lost_answer(&self, pending: &Unconfirmed) {
+        let note = match pending.handed_over_ms {
+            Some(at) => format!(
+                "confirmed by the runner after its apply answer was lost; handed over at {}",
+                crate::upkeep::iso_8601(at)
+            ),
+            None => "confirmed by the runner after its apply answer was lost".to_owned(),
+        };
+        self.log_view_accepted(&pending.view, Some(&note));
     }
 
     /// Save the session's state now, where a store is set.
@@ -5200,7 +5273,7 @@ impl Session {
             accepted: false,
             excused: Vec::new(),
             answer_lost: false,
-            handed_over_ms: 0,
+            handed_over_ms: None,
         });
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {
@@ -5280,21 +5353,17 @@ impl Session {
                 for version in versions {
                     self.app_view_status(version, "applied");
                 }
-                // A view whose answer was lost never logged its acceptance.
-                // The runner's report is the first word that it took the
-                // view, so the line the cache-bust analyzer looks for is
-                // written now, once, as the view leaves the list. It comes
-                // with this notice, often after the step that first rendered
-                // the view, so it ends with when the view was handed over.
+                // A view whose answer was lost, and whose offer again has not
+                // been answered either, never logged its acceptance. The
+                // runner's report is the first word that it took the view, so
+                // the line the cache-bust analyzer looks for is written now,
+                // once, as the view leaves the list, dated by when the view
+                // was handed over.
                 for pending in self.unconfirmed[..=at]
                     .iter()
                     .filter(|pending| pending.answer_lost)
                 {
-                    let note = format!(
-                        "confirmed by the runner after its apply answer was lost; handed over at {}",
-                        crate::upkeep::iso_8601(pending.handed_over_ms)
-                    );
-                    self.log_view_accepted(&pending.view, Some(&note));
+                    self.log_held_after_lost_answer(pending);
                 }
                 self.unconfirmed.drain(..=at);
                 self.reset_transcript_retry();
@@ -6127,6 +6196,18 @@ mod summary_weight_tests {
         assert!(session.summary_due(&Settings::default()).is_none());
         session.conditions.context_window = 90_000;
         assert!(session.summary_due(&Settings::default()).is_some());
+    }
+}
+
+/// Whether `answer` says the runner holds the view `version` it was offered:
+/// it accepted the view, or refused it as not newer than that same version.
+fn holds_offered(answer: &ApplyViewAnswer, version: u64) -> bool {
+    match answer {
+        ApplyViewAnswer::Accepted => true,
+        ApplyViewAnswer::Refused {
+            refusal: ViewRefusal::StaleVersion { latest, .. },
+        } => *latest == version,
+        _ => false,
     }
 }
 

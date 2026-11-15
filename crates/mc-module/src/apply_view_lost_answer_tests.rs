@@ -275,6 +275,62 @@ fn lost_answer_the_handover_time_is_written_as_rfc_3339_utc_milliseconds() {
     );
 }
 
+/// The runner held the view from the first handover, whose answer was lost:
+/// it refuses the offer again as not newer than this very view. That answer
+/// shows it took the view at the first handover, so the acceptance line is
+/// written then, dated by the first handover, and the later confirmation
+/// does not write it again.
+#[tokio::test]
+async fn lost_answer_an_offer_again_refused_as_held_logs_the_first_handover_once() {
+    let mut logs = capture();
+    let from = wall_ms();
+    let (mut session, client, settings, view, _) = handed_without_answer().await;
+    let to = wall_ms();
+    *client.refuse.lock().unwrap() = true;
+    *client.refusal.lock().unwrap() = Some(ViewRefusal::StaleVersion {
+        version: view.version,
+        latest: view.version,
+    });
+    notice_reporting(&mut session, &client, &settings, 1, None).await;
+    assert_eq!(offers_of(&client, view.version), 2, "offered again");
+    assert_eq!(session.unconfirmed.len(), 1, "a held view was rolled back");
+    assert!(session.unconfirmed[0].accepted);
+    assert_eq!(
+        logs.count(&accepted_line(&view)),
+        1,
+        "the runner's answer to the offer again did not log the acceptance: {}",
+        logs.text()
+    );
+    notice_reporting(&mut session, &client, &settings, 2, Some(&view)).await;
+    logs.stop();
+    assert!(session.unconfirmed.is_empty());
+    assert_confirmed_once(&logs.text(), &view, from, to);
+}
+
+/// A view whose answer was lost is saved with that fact and the handover
+/// time; a view the runner answered saves without either field, as views
+/// were saved before.
+#[tokio::test]
+async fn lost_answer_only_a_lost_answer_adds_to_the_saved_view() {
+    let (session, _, _, _, _) = handed_without_answer().await;
+    let saved = serde_json::to_value(session.durable()).unwrap();
+    let pending = &saved["unconfirmed"][0];
+    assert_eq!(pending["answer_lost"], true, "{pending}");
+    assert!(pending["handed_over_ms"].as_i64().is_some(), "{pending}");
+
+    let (mut session, client, settings) = refusal_fixture();
+    let (view, _) = session.build(&settings, None, false, None);
+    assert!(session.publish(&client, view.expect("a view")).await);
+    let saved = serde_json::to_value(session.durable()).unwrap();
+    let pending = saved["unconfirmed"][0].as_object().expect("a saved view");
+    for field in ["answer_lost", "handed_over_ms"] {
+        assert!(
+            !pending.contains_key(field),
+            "an answered view saved `{field}`"
+        );
+    }
+}
+
 /// A call that failed outright (the connection dropped before the request
 /// went out) still rolls the view back: its queued drops are queued again
 /// and the apps show it undelivered.
