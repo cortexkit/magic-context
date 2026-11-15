@@ -493,3 +493,60 @@ fn only_a_category_the_project_had_of_its_own_marks_a_moved_memory_for_review() 
         assert_eq!(review(own), None);
     });
 }
+
+/// Tables whose key is the project column itself, or includes it, keep one
+/// row per project. A second project that already has its own such row
+/// keeps it and takes the larger progress values; the copy must not try to
+/// insert a second row under the same key.
+#[test]
+fn a_copy_merges_into_rows_keyed_by_the_project_the_second_project_already_has() {
+    let (_dir, db) = store();
+    db.with_connection(|conn| {
+        for (project, active) in [(KEY, 200), ("pj-b", 100)] {
+            for scope in ["memory", "commit"] {
+                conn.execute(
+                    "INSERT INTO embedding_identity_active (project_path, scope, model_id, last_active_at)
+                     VALUES (?1, ?2, 'model-1', ?3)",
+                    params![project, scope, active],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO embedding_registrations (project_path, model_id, updated_at)
+                 VALUES (?1, 'model-1', ?2)",
+                params![project, active],
+            )
+            .unwrap();
+        }
+
+        let outcome = copy_all(conn, &["pj-a", "pj-b"], 100);
+        let Outcome::Done(_) = outcome else {
+            panic!("the pool was copied: {outcome:?}");
+        };
+
+        // The first project takes the originals; the second keeps its own
+        // rows, one per key, with the newer activity time.
+        let identity = |project: &str| {
+            count(conn, "SELECT count(*) FROM embedding_identity_active WHERE project_path = ?1", project)
+        };
+        assert_eq!(identity(KEY), 0);
+        assert_eq!(identity("pj-a"), 2);
+        assert_eq!(identity("pj-b"), 2);
+        assert_eq!(
+            count(conn, "SELECT min(last_active_at) FROM embedding_identity_active WHERE project_path = ?1", "pj-b"),
+            200
+        );
+        let registrations = |project: &str| {
+            count(conn, "SELECT count(*) FROM embedding_registrations WHERE project_path = ?1", project)
+        };
+        assert_eq!(registrations(KEY), 0);
+        assert_eq!(registrations("pj-a"), 1);
+        assert_eq!(registrations("pj-b"), 1);
+        for table in ["embedding_identity_active", "embedding_registrations"] {
+            assert!(
+                count(conn, &format!("SELECT count(*) FROM identity_merge_log WHERE action = 'copy_merged' AND to_identity = ?1 AND table_name = '{table}'"), "pj-b") > 0,
+                "{table}"
+            );
+        }
+    });
+}

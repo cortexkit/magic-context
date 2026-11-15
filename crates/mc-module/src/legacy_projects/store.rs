@@ -361,10 +361,15 @@ pub(super) fn log(
 
 /// The row of `to` that `row` would collide with once it names `to`: one
 /// with the same values in a unique index that includes the project column.
+/// `source` is the stored row being moved or copied, which is never its own
+/// collision. It is compared by key, not `row`: a planned copy already names
+/// `to`, so where the project column is part of the key, the copy's key and
+/// the target row's key are the same.
 fn collision(
     conn: &Connection,
     table: &Table,
     row: &Row,
+    source: &Row,
     to: &str,
 ) -> rusqlite::Result<Option<Row>> {
     for columns in &table.unique {
@@ -385,7 +390,7 @@ fn collision(
             .collect();
         let found = rows(conn, table, &format!("{filter} LIMIT 1"), &values)?;
         if let Some(found) = found.into_iter().next() {
-            if row_key(table, &found) != row_key(table, row) {
+            if row_key(table, &found) != row_key(table, source) {
                 return Ok(Some(found));
             }
         }
@@ -454,7 +459,7 @@ pub(super) fn move_row(
     let column = quoted(&table.column);
     let key = row_key(table, row);
     let (selected, values) = predicate(table, row);
-    if let Some(target) = collision(conn, table, row, to)? {
+    if let Some(target) = collision(conn, table, row, row, to)? {
         keep_maximums(conn, table, row, &target)?;
         run(
             conn,
@@ -541,7 +546,7 @@ pub(super) fn copy_row<'a>(
     for (name, value) in &overrides {
         planned.set(name, value.clone());
     }
-    if let Some(target) = collision(conn, table, &planned, to)? {
+    if let Some(target) = collision(conn, table, &planned, row, to)? {
         keep_maximums(conn, table, &planned, &target)?;
         log(
             conn,

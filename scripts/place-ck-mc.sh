@@ -193,10 +193,19 @@ if [[ -e "$mode3_path" ]]; then
 fi
 echo "context.db: live=$context_live staged=$context_supported; mode3.db: live=$store_live staged=$store_supported"
 ((10#$context_supported >= 10#$context_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; mode3.db live=$store_live staged=$store_supported"
-# ck-mc opens context.db only at exactly the version it was built for; the
-# standalone plugin migrates it. Placing it over an older database would leave
-# it refusing to start.
-((10#$context_live == 10#$context_supported)) || die "context.db is at $context_live but this ck-mc opens only $context_supported: start a host with the matching plugin release to migrate it first"
+# Up to version 105 the standalone plugin migrated context.db, and ck-mc
+# opened it only at exactly the version it was built for: placing such a
+# build over an older database would leave it refusing to start. From 106 on
+# ck-mc migrates the store itself when it starts, from the released 0.49
+# plugin's version (95) up, so a newer build may be placed over an older store.
+last_plugin_version=105
+released_plugin_version=95
+if ((10#$context_supported <= last_plugin_version)); then
+    ((10#$context_live == 10#$context_supported)) || die "context.db is at $context_live but this ck-mc opens only $context_supported: start a host with the matching plugin release to migrate it first"
+else
+    ((10#$context_live >= released_plugin_version)) || die "context.db is at $context_live; ck-mc migrates only from $released_plugin_version, the released 0.49 plugin's version: open it once with Magic Context 0.49 first"
+    ((10#$context_live == 10#$context_supported)) || echo "context.db: ck-mc migrates it from $context_live to $context_supported when it starts"
+fi
 ((10#$store_supported >= 10#$store_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; mode3.db live=$store_live staged=$store_supported"
 
 bin_dir=$HOME/.local/share/cortexkit/bin
