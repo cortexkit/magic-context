@@ -2011,6 +2011,7 @@ const TEMPLATE_DATA = [
 "[magic-context] host stall profiler: enable options: \x01",
 "[magic-context] shadow embedding measurement failed: \x01",
 "channel2 ceiling nudge delivery failed (will retry): \x01",
+"ck-mc: dreamer: reading \x01's earlier runs for \x01 failed: \x01",
 "ck-mc: session \x01: deleting reverted summaries failed: \x01",
 "compartment agent: failed to dump historian response \x01",
 "compartment chunk embedding failed for compartment \x01: \x01",

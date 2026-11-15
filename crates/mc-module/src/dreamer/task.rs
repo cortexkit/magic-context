@@ -88,6 +88,14 @@ pub(crate) trait Task: Send + Sync {
     fn once(&self) -> bool {
         false
     }
+    /// Kinds of task that must have run on the project once before this
+    /// one-time task starts for it ([`Self::once`]). A run counts when it
+    /// ended without failing: it applied changes, found nothing to do,
+    /// stopped at its budget, or was skipped because this machine can't run
+    /// it.
+    fn after(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// Whether the task works on the memories a workspace shares rather
     /// than a project's. The engine then schedules it once for each
     /// workspace of two or more projects, under [`Owner::Workspace`], and

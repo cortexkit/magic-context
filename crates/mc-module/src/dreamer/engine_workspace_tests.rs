@@ -69,8 +69,21 @@ fn engine(
     engine
 }
 
+/// Learn project `name` in `workspace`, as cleaned by verify and curate
+/// once already, so a lift may start for it.
 fn see(engine: &Engine, db: &ContextDb, workspace: &str, name: &str) {
     let project = format!("pj-{name}");
+    db.with_connection(|conn| {
+        for kind in ["verify", "curate"] {
+            conn.execute(
+                "INSERT INTO dream_task_runs (task, kind, level, owner_id, profile, started_at, ended_at, outcome)
+                 VALUES (?1, ?2, 'project', ?3, 'earlier', 1, 2, 'nothing_to_do')",
+                rusqlite::params![format!("swe:{kind}"), kind, project],
+            )?;
+        }
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
     engine.see_project(
         db,
         &project,
@@ -119,20 +132,23 @@ fn row(level: &str, owner: &str, task: &str) -> (String, String, String, String)
 /// Each run's task, kind, level, owner and outcome.
 fn runs(db: &ContextDb) -> Vec<(String, String, String, String, Option<String>)> {
     db.with_connection(|conn| {
-        conn.prepare("SELECT task, kind, level, owner_id, outcome FROM dream_task_runs ORDER BY id")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
+        conn.prepare(
+            "SELECT task, kind, level, owner_id, outcome FROM dream_task_runs
+              WHERE profile <> 'earlier' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
     })
 }
 

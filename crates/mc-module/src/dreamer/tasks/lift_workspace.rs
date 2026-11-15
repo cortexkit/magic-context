@@ -320,6 +320,13 @@ impl Task for LiftWorkspace {
         true
     }
 
+    // The move judges only whom a memory applies to, not whether it is still
+    // true. Moved before verify and curate have cleaned the project, an
+    // out-of-date memory reaches every project's prompt in the workspace.
+    fn after(&self) -> &'static [&'static str] {
+        &["verify", "curate"]
+    }
+
     fn batches(&self, context: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String> {
         let workspace = context
             .workspace

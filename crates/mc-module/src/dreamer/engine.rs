@@ -603,6 +603,23 @@ impl Engine {
                 if once_retry_at(&record, &workspace).is_none_or(|at| at > now) {
                     continue;
                 }
+                let kind = declaration["kind"].as_str().unwrap_or_default();
+                let after = self.task(kind).map_or(&[][..], |task| task.after());
+                let ready = db.with_connection(|conn| {
+                    after.iter().try_fold(true, |ready, kind| {
+                        Ok::<_, rusqlite::Error>(ready && store::has_run(conn, &owner, kind)?)
+                    })
+                });
+                match ready {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        tracing::warn!(
+                            "ck-mc: dreamer: reading {project}'s earlier runs for {task} failed: {error}"
+                        );
+                        continue;
+                    }
+                }
                 // The lift writes the project's memories and the
                 // workspace's, so no other run of either may be in progress.
                 let owners = [OwnerKey::workspace(&workspace), owner.clone()];

@@ -16,10 +16,30 @@ use crate::workspace_members::tests::answer;
 const MOVE_ONE: &str = "<place>\n<memory id=\"1\" level=\"workspace\" reason=\"Holds for every project.\"/>\n<memory id=\"2\" level=\"project\"/>\n</place>";
 
 fn store() -> (tempfile::TempDir, Arc<ContextDb>) {
+    let (dir, db) = store_before_cleanup();
+    ran(&db, "verify", "nothing_to_do");
+    ran(&db, "curate", "applied");
+    (dir, db)
+}
+
+/// A store whose project verify and curate have never run on.
+fn store_before_cleanup() -> (tempfile::TempDir, Arc<ContextDb>) {
     let dir = tempfile::tempdir().unwrap();
     let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
     insert(&db, &[row(1), row(2)]);
     (dir, Arc::new(db))
+}
+
+/// Record an ended run of `kind` on the test project.
+fn ran(db: &ContextDb, kind: &str, outcome: &str) {
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO dream_task_runs (task, kind, level, owner_id, profile, started_at, ended_at, outcome)
+             VALUES (?1, ?2, 'project', ?3, 'earlier', 1, 2, ?4)",
+            rusqlite::params![format!("swe:{kind}"), kind, PROJECT, outcome],
+        )
+    })
+    .unwrap();
 }
 
 /// The bundled profile, with the lift switched on as `enabled` says.
@@ -77,7 +97,9 @@ async fn settled(engine: &Engine) {
 /// Each run's task, kind and outcome.
 fn runs(db: &ContextDb) -> Vec<(String, String, Option<String>)> {
     db.with_connection(|conn| {
-        conn.prepare("SELECT task, kind, outcome FROM dream_task_runs ORDER BY id")
+        conn.prepare(
+            "SELECT task, kind, outcome FROM dream_task_runs WHERE profile <> 'earlier' ORDER BY id",
+        )
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
@@ -363,6 +385,31 @@ async fn a_project_the_settings_leave_out_gets_no_lift() {
     engine.see_workspace(PROJECT, Some("ws-lift-listed"));
     engine.retain_projects(&listed);
     engine.tick(&db, &client, &listed, now_ms());
+    settled(&engine).await;
+    assert_eq!(client.sends.lock().unwrap().len(), 1);
+    assert_eq!(level(&db, 1), "workspace");
+}
+
+/// The move waits until verify and curate have each run on the project
+/// once, so it never shares a memory the project's own cleanup would have
+/// archived. A failed run doesn't count.
+#[tokio::test]
+async fn the_lift_waits_until_verify_and_curate_have_run_on_the_project() {
+    let (_dir, db) = store_before_cleanup();
+    let engine = engine(&db, profile(true), "ws-lift-after");
+    let client = client(
+        Some(listing("ws-lift-after", &["subc", "magic-context"])),
+        &[Ends::Reply(MOVE_ONE)],
+    );
+    ran(&db, "verify", "applied");
+    ran(&db, "curate", "failed");
+    engine.tick(&db, &client, &Settings::default(), now_ms());
+    settled(&engine).await;
+    assert!(client.sends.lock().unwrap().is_empty());
+    assert_eq!(record(&db), store::OnceRecord::default());
+
+    ran(&db, "curate", "nothing_to_do");
+    engine.tick(&db, &client, &Settings::default(), now_ms());
     settled(&engine).await;
     assert_eq!(client.sends.lock().unwrap().len(), 1);
     assert_eq!(level(&db, 1), "workspace");

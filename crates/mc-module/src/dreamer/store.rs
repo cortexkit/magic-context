@@ -475,6 +475,18 @@ pub struct OnceRecord {
     pub failures: i64,
 }
 
+/// Whether a run of `kind` for `owner` has ended without failing: applied,
+/// found nothing to do, stopped at its budget, or skipped.
+pub fn has_run(conn: &Connection, owner: &OwnerKey, kind: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM dream_task_runs
+                         WHERE level = ?1 AND owner_id = ?2 AND kind = ?3
+                           AND outcome IN ('applied', 'nothing_to_do', 'budget_stopped', 'skipped'))",
+        rusqlite::params![owner.level, owner.owner_id, kind],
+        |row| row.get(0),
+    )
+}
+
 /// The record of once-per-workspace `task` for `owner`; the default when
 /// it never ran.
 pub fn once_record(
