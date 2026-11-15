@@ -358,7 +358,9 @@ impl Session {
         });
         self.app_cause = "explicit_flush".into();
         // Publication saves the scheduled answer and its possibly-delivered
-        // view in one document, before the runner can receive the view.
+        // view in one document, before the runner can receive the view. A
+        // call whose answer was lost counts as delivered: the runner may
+        // hold the view, and the next notice offers it again if it doesn't.
         let (delivered, durable) = self.publish_recorded(client, view).await;
         if delivered {
             return Ok(reply);

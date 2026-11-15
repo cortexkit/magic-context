@@ -114,6 +114,9 @@ mod render_failed_contract_tests;
 #[path = "numbers_unknown_contract_tests.rs"]
 mod numbers_unknown_contract_tests;
 
+#[path = "apply_view_lost_answer_tests.rs"]
+mod apply_view_lost_answer_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,
@@ -128,6 +131,10 @@ struct Client {
     /// `session.apply_view` fails as a call does when the connection to the
     /// runner drops.
     fail_apply: Mutex<bool>,
+    /// How many of the next `session.apply_view` calls lose their answer:
+    /// the view is offered, and the call fails as one whose deadline passed
+    /// after the request was sent, so the runner may or may not hold it.
+    lose_apply_answers: Mutex<usize>,
     before_apply: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// `session.applied_view` fails as a call does when the connection to
     /// the runner drops.
@@ -197,6 +204,15 @@ impl RunnerClient for Client {
         }
         if *self.fail_apply.lock().unwrap() {
             return Err(crate::client::ClientError::new("connection lost"));
+        }
+        {
+            let mut lose = self.lose_apply_answers.lock().unwrap();
+            if *lose > 0 {
+                *lose -= 1;
+                return Err(crate::client::ClientError::unanswered(
+                    "session.apply_view: request on channel 16 timed out at its deadline",
+                ));
+            }
         }
         Ok(if *self.refuse.lock().unwrap() {
             ApplyViewAnswer::Refused {

@@ -853,6 +853,39 @@ async fn user_commands_failed_save_never_pushes_and_saved_push_failure_stays_rol
     }
 }
 
+/// A flush whose `session.apply_view` got no answer may already be in the
+/// runner's hands. It is answered as scheduled, and its view stays as handed
+/// over, saved as unconfirmed, for the next notice to confirm or offer
+/// again; the snapshot from before the run is not put back as it is after a
+/// failed call.
+#[tokio::test]
+async fn user_commands_a_flush_whose_answer_was_lost_stays_scheduled() {
+    let (mut session, client, settings) = ready();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+    session.set_store(Some(store.clone()));
+    *client.lose_apply_answers.lock().unwrap() = 1;
+    let p = preview(&mut session, &client, &settings, "flush").await;
+    let request =
+        wire::ModuleRunRequest::new(preview_request(&session, "flush"), p.version, "lost-answer");
+    let result = session.command_run(&client, &settings, &request).await;
+    assert_eq!(result.unwrap().outcome, "scheduled");
+    let offered = client
+        .offered
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the flush handed a view over");
+    assert_eq!(session.latest.as_ref(), Some(&offered));
+    assert_eq!(session.unconfirmed.len(), 1);
+    assert_eq!(session.unconfirmed[0].view, offered);
+    assert!(!session.queued.contains(&("old".into(), "p".into())));
+    let saved = store.load(&session.key).unwrap();
+    assert_eq!(saved.unconfirmed.len(), 1);
+    assert_eq!(saved.unconfirmed[0].view, offered);
+}
+
 #[tokio::test]
 async fn user_commands_worker_serializes_concurrent_replays() {
     let (mut session, client, route, mut setup, settings) = fixture();

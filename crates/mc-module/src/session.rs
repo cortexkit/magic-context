@@ -326,9 +326,11 @@ pub struct Session {
     /// Tag numbers the runner refused as `numbers_unknown`. The refusal is
     /// permanent for the session, so ck-mc never asks for them again.
     numbers_unknown_tags: BTreeSet<u64>,
-    /// A view offered again after a restart waits because the runner
-    /// couldn't place its cut yet (`transient`): the next notice offers it
-    /// again.
+    /// The newest unconfirmed view waits to be offered again on the next
+    /// notice: one offered again after a restart waits because the runner
+    /// couldn't place its cut yet (`transient`), and one whose
+    /// `session.apply_view` got no answer ([`Unconfirmed::answer_lost`])
+    /// waits for the runner's next report.
     reoffer_pending: bool,
     /// The entry id of the runner's signed floor, as ck-mc last took it
     /// (see the `signed_floor` module). The runner strips signed reasoning at or before it.
@@ -403,6 +405,14 @@ pub struct Unconfirmed {
     /// without it ([`Session::judge_reading`]). Not saved, like `accepted`.
     #[serde(skip)]
     excused: Vec<(u64, u64)>,
+    /// ck-mc handed the view over with `session.apply_view`, but no answer
+    /// came back (the call's deadline passed, or the connection dropped after
+    /// the request was sent): the runner may hold the view or may never have
+    /// received it. Its acceptance line was not logged then; it is logged
+    /// when the runner reports applying the view or a later one. Not saved:
+    /// after a restart Setup offers the view again in any case.
+    #[serde(skip)]
+    answer_lost: bool,
 }
 
 /// The state a view's acceptance replaced.
@@ -3159,7 +3169,7 @@ impl Session {
         // never reaches the runner rolls the view back
         // ([`Session::ride_undelivered`]).
         self.runner_holds(view.version);
-        self.log_view_accepted(&view);
+        self.log_view_accepted(&view, None);
         Some(view)
     }
 
@@ -4808,8 +4818,9 @@ impl Session {
 
     /// The cache-bust analyzer parses this line to tell which request first
     /// carried a rebuilt view and how far its cut reached, so keep its shape:
-    /// `cut through <message id>` or `no cut`.
-    fn log_view_accepted(&self, view: &View) {
+    /// `cut through <message id>` or `no cut`. A `note`, when given, follows
+    /// the closing parenthesis after `; `, so the line still starts the same.
+    fn log_view_accepted(&self, view: &View, note: Option<&str>) {
         let cut = view
             .edits
             .iter()
@@ -4818,8 +4829,9 @@ impl Session {
                 _ => None,
             })
             .unwrap_or_else(|| "no cut".to_string());
+        let note = note.map(|note| format!("; {note}")).unwrap_or_default();
         tracing::info!(
-            "ck-mc: session {}: view {} accepted ({} edits, {cut})",
+            "ck-mc: session {}: view {} accepted ({} edits, {cut}){note}",
             self.key.session,
             view.version,
             view.edits.len()
@@ -4829,7 +4841,13 @@ impl Session {
     /// Hand `view` to the runner. It is accepted first, as unconfirmed, and
     /// the session's state saved, so that whatever happens to the call, a
     /// restarted ck-mc knows the view may be in the runner's hands. A view
-    /// the runner refuses, or a call that fails, puts the state back.
+    /// the runner refuses, or a call that fails, puts the state back. A call
+    /// that got no answer leaves the view as handed over, since the runner
+    /// may hold it ([`Unconfirmed::answer_lost`]).
+    ///
+    /// Returns whether the view may be in the runner's hands: true when the
+    /// runner accepted it or the call got no answer, and, after an answer
+    /// ck-mc doesn't know, when the runner reports applying it.
     async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) -> bool {
         self.publish_recorded(client, view).await.0
     }
@@ -4853,7 +4871,7 @@ impl Session {
         match client.apply_view(&self.key, request).await {
             Ok(ApplyViewAnswer::Accepted) => {
                 self.runner_holds(view.version);
-                self.log_view_accepted(&view);
+                self.log_view_accepted(&view, None);
                 self.app_view_status(view.version, "accepted");
                 return (true, Some(durable));
             }
@@ -4911,6 +4929,28 @@ impl Session {
                         .is_some_and(|held| held.checksum == view.checksum);
                 return (delivered, Some(durable));
             }
+            // The request was sent but its answer was lost, so the runner may
+            // hold the view. Rolling it back would queue its drops again and
+            // show it undelivered while the runner serves it. It stays as
+            // handed over, the state a ck-mc restart right after the call
+            // finds: the runner's next report confirms it, or the next notice
+            // offers it again, and a refusal then rolls it back.
+            Err(error) if error.outcome_unknown => {
+                tracing::warn!(
+                    "ck-mc: session {}: no answer to view {}, which the runner may hold: {error}; it waits for the runner's next report",
+                    self.key.session,
+                    view.version
+                );
+                if let Some(pending) = self
+                    .unconfirmed
+                    .iter_mut()
+                    .find(|pending| pending.view.version == view.version)
+                {
+                    pending.answer_lost = true;
+                }
+                self.reoffer_pending = true;
+                return (true, Some(durable));
+            }
             Err(error) => {
                 self.runner_call_failed("session.apply_view", &error);
                 self.roll_back(view.version, false, None);
@@ -4919,8 +4959,9 @@ impl Session {
         (false, Some(durable))
     }
 
-    /// A view handed over before ck-mc restarted that the runner does not
-    /// report applying: it may never have arrived, so it is offered again.
+    /// A view handed over before ck-mc restarted, or one whose
+    /// `session.apply_view` got no answer, that the runner does not report
+    /// applying: it may never have arrived, so it is offered again.
     /// A runner that already holds it refuses it as not newer, which
     /// confirms nothing but loses nothing; any other refusal rolls it back.
     async fn offer_unconfirmed_again<C: RunnerClient>(&mut self, client: &C) {
@@ -5030,6 +5071,17 @@ impl Session {
                 );
                 self.roll_back(oldest, false, None);
             }
+            // As when the view was first handed over: an offer whose answer
+            // was lost may have reached the runner, so the view stays as it
+            // is and the next notice offers it again.
+            Err(error) if error.outcome_unknown => {
+                tracing::warn!(
+                    "ck-mc: session {}: no answer to view {} offered again, which the runner may hold: {error}; it waits for the runner's next report",
+                    self.key.session,
+                    view.version
+                );
+                self.reoffer_pending = true;
+            }
             Err(error) => {
                 self.runner_call_failed(&format!("offering view {} again", view.version), &error);
                 self.roll_back(oldest, false, None);
@@ -5135,6 +5187,7 @@ impl Session {
             built_through: self.index.cursor().map(|cursor| cursor.ordinal),
             accepted: false,
             excused: Vec::new(),
+            answer_lost: false,
         });
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {
@@ -5213,6 +5266,19 @@ impl Session {
                     .collect();
                 for version in versions {
                     self.app_view_status(version, "applied");
+                }
+                // A view whose answer was lost never logged its acceptance.
+                // The runner's report is the first word that it took the
+                // view, so the line the cache-bust analyzer looks for is
+                // written now, once, as the view leaves the list.
+                for pending in self.unconfirmed[..=at]
+                    .iter()
+                    .filter(|pending| pending.answer_lost)
+                {
+                    self.log_view_accepted(
+                        &pending.view,
+                        Some("confirmed by the runner after its apply answer was lost"),
+                    );
                 }
                 self.unconfirmed.drain(..=at);
                 self.reset_transcript_retry();

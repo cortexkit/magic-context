@@ -1821,6 +1821,11 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
         message: format!("{method}: {error:?}"),
         code,
         detail,
+        // `OutcomeUnknown` is the client's word for a request it wrote and
+        // saw no answer to. Every other error still counts as a failed call,
+        // including the rare `NotSent` that cannot prove the request stayed
+        // unsent (`never_forwarded() == Some(false)`).
+        outcome_unknown: matches!(error, subc_client_rs::CallError::OutcomeUnknown(_)),
     }
 }
 
@@ -1831,6 +1836,10 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "transport_slow_answer_tests.rs"]
 mod slow_answer_tests;
+
+#[cfg(test)]
+#[path = "transport_outcome_tests.rs"]
+mod outcome_tests;
 
 #[cfg(test)]
 #[path = "tool_conformance_tests.rs"]
