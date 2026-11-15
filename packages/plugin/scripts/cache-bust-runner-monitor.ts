@@ -23,6 +23,7 @@ import {
     emptyRunnerWaveState,
     observeRunnerWave,
     runnerWaveMembersText,
+    runnerWaveProvenAccounts,
     runnerWaveStateSchema,
     runnerWaveTotals,
     ZERO_READ_WAVE_LIFETIME_MS,
@@ -502,7 +503,7 @@ export async function scanRunnerFeed(args: {
         }));
         const waveResult = observeRunnerWave(state.wave, { session: row.session, harness: row.harness }, previous, step, classified);
         if (waveResult.member) {
-            attributeRunnerWave(classified, state.wave.open!.startedAt);
+            attributeRunnerWave(classified, state.wave.open!.startedAt, waveResult.member);
         }
         if (waveResult.superseded) args.log?.(JSON.stringify({
             kind: "runner_zero_read_wave_closed", startedAt: waveResult.superseded.startedAt,
@@ -514,7 +515,7 @@ export async function scanRunnerFeed(args: {
             for (const member of waveResult.opened.members) {
                 const priorHead = state.heads[JSON.stringify([member.harness, member.session])];
                 const prior = priorHead?.summary.find((item) => item.at === member.at);
-                if (prior) attributeRunnerWave(prior, waveResult.opened.startedAt);
+                if (prior) attributeRunnerWave(prior, waveResult.opened.startedAt, member);
                 args.log?.(JSON.stringify({ kind: "runner_zero_read_wave_member", startedAt: waveResult.opened.startedAt, ...member }));
             }
         } else if (waveResult.member) args.log?.(JSON.stringify({ kind: "runner_zero_read_wave_member", startedAt: state.wave.open!.startedAt, ...waveResult.member }));
@@ -576,11 +577,15 @@ export async function scanRunnerFeed(args: {
         if (waveResult.opened) {
             const wave = waveResult.opened;
             const seconds = Math.round((wave.members[1]!.at - wave.startedAt) / 1000);
+            const accounts = runnerWaveProvenAccounts(wave.members);
+            const proof = accounts
+                ? `The account change is proven by the runner's account facts: every member's account changed (${accounts}).`
+                : "The feed carries no account, so this is not proven. A tool or system change for many sessions looks the same from here.";
             wave.lastSummaryAt = now;
             await emit({
                 ...alert, id: `runner-zero-read-wave:${wave.startedAt}`, class: "zero_read_wave",
                 rewrittenTokens: runnerWaveTotals(wave).written,
-                detail: `A zero_read_wave began at ${new Date(wave.startedAt).toISOString()}. Two sessions lost their whole cache within ${seconds} seconds of each other. Members so far: ${runnerWaveMembersText(wave.members)}. This is what an account that stopped being given looks like: a limit, a hold or a lost sign-in. The feed carries no account, so this is not proven. A tool or system change for many sessions looks the same from here. Ask the runner's owner which account stopped being given at about ${new Date(wave.startedAt).toISOString()}.`,
+                detail: `A zero_read_wave began at ${new Date(wave.startedAt).toISOString()}. Two sessions lost their whole cache within ${seconds} seconds of each other. Members so far: ${runnerWaveMembersText(wave.members)}. This is what an account that stopped being given looks like: a limit, a hold or a lost sign-in. ${proof} Ask the runner's owner which account stopped being given at about ${new Date(wave.startedAt).toISOString()}.`,
             });
         }
         if (classified.class === "unexplained" && classified.rewrittenTokens >= 20_000)

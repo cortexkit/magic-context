@@ -82,10 +82,10 @@ export async function analyzeRunnerFeed(
             advanceRunnerWave(wave, step.at);
             waveClasses.set(JSON.stringify([row.session, step.at]), classification);
             const result = observeRunnerWave(wave, row, prior, step, classification);
-            if (result.member) attributeRunnerWave(classification, wave.open!.startedAt);
+            if (result.member) attributeRunnerWave(classification, wave.open!.startedAt, result.member);
             if (result.opened) for (const member of result.opened.members) {
                 const initial = waveClasses.get(JSON.stringify([member.session, member.at]));
-                if (initial) attributeRunnerWave(initial, result.opened.startedAt);
+                if (initial) attributeRunnerWave(initial, result.opened.startedAt, member);
             }
         }
         if (classification?.class === "view") {

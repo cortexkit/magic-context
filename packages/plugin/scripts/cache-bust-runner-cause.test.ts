@@ -212,12 +212,18 @@ test("a view change credits the applied view, even one logged after the request"
     expect(pending.alerts[0]!.detail).toContain("view 2 wrote 100000 tokens; ");
 });
 
-test("account changes Astrocyte proves still group into one zero-read wave", async () => {
+const accountWaveRows = () => {
     const pair = ["baseline-0", "cause-account_or_model_changed"].map((step) => metered(sampleRow(step)));
-    const rows = [
+    return [
         ...pair.map((row) => inSession(row, "alpha", 0)),
         ...pair.map((row) => inSession(row, "beta", 2 * MINUTE)),
     ];
+};
+const PROVEN_WORDING = "The account change is proven by the runner's account facts";
+const UNPROVEN_WORDING = "The feed carries no account, so this is not proven. A tool or system change for many sessions looks the same from here.";
+
+test("account changes Astrocyte proves still group into one zero-read wave", async () => {
+    const rows = accountWaveRows();
     const s = await scan(rows, [], ["alpha", "beta"]);
     expect(s.args.state.wave.open?.members.map((member) => member.session)).toEqual(["alpha", "beta"]);
     // A proven account change has no wake of its own; the wave wakes once.
@@ -231,6 +237,39 @@ test("account changes Astrocyte proves still group into one zero-read wave", asy
         expect(analyzed.get(`${session}/cause-account_or_model_changed`)).toMatchObject({
             class: "zero_read_wave", evidence: member.evidence,
         });
+    }
+});
+
+test("a wave whose every member's account change is proven says so in its wake", async () => {
+    const s = await scan(accountWaveRows(), [], ["alpha", "beta"]);
+    expect(s.args.state.wave.open?.members.map((member) => member.account))
+        .toEqual([{ from: "aaaaaaaa", to: "bbbbbbbb" }, { from: "aaaaaaaa", to: "bbbbbbbb" }]);
+    const wake = s.alerts.find((alert) => alert.class === "zero_read_wave")!;
+    expect(wake.detail).toContain(`${PROVEN_WORDING}: every member's account changed (aaaaaaaa→bbbbbbbb).`);
+    expect(wake.detail).not.toContain("not proven");
+    expect(wake.detail).not.toContain("A tool or system change");
+    expect(wake.detail).toContain("Ask the runner's owner which account stopped being given");
+});
+
+test("a wave with any member lacking proof of an account change keeps the unproven wake", async () => {
+    const [alpha0, alpha1, beta0, beta1] = accountWaveRows();
+    // Astrocyte's same-account rewrite: facts present, account unchanged.
+    const sameAccount = ["baseline-5", "cause-unexplained"]
+        .map((step) => inSession(metered(sampleRow(step)), "beta", 2 * MINUTE - 50_000));
+    const cases = {
+        "a member without facts": [alpha0!, alpha1!, withoutFacts(beta0!), withoutFacts(beta1!)],
+        "a member whose account did not change": [alpha0!, alpha1!, ...sameAccount],
+    };
+    for (const [mixed, rows] of Object.entries(cases)) {
+        const s = await scan(rows, [], ["alpha", "beta"]);
+        expect(s.args.state.wave.open?.members.map((member) => member.session), mixed).toEqual(["alpha", "beta"]);
+        expect(s.args.state.wave.open!.members.map((member) => member.account !== undefined)).toEqual([true, false]);
+        const wake = s.alerts.find((alert) => alert.class === "zero_read_wave")!;
+        expect(wake.detail, mixed).toContain(UNPROVEN_WORDING);
+        expect(wake.detail, mixed).not.toContain(PROVEN_WORDING);
+        // Each member's own evidence still says whether its change is proven.
+        const observations = [...s.observations.values()].filter((item) => item.class === "zero_read_wave");
+        expect(observations.map((item) => item.evidence.includes("not proven"))).toEqual([false, true]);
     }
 });
 

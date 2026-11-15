@@ -12,6 +12,10 @@ const memberSchema = z.object({
     at: time,
     written: time,
     previousStepAt: time,
+    // Present only when Astrocyte named an account change and the runner's
+    // account facts differ between the two steps: the first 8 characters of
+    // each hashed account ref.
+    account: z.object({ from: z.string(), to: z.string() }).optional(),
 });
 export const runnerWaveStateSchema = z.object({
     candidates: z.array(memberSchema).default([]),
@@ -53,8 +57,13 @@ export function observeRunnerWave(
     const accountChange = classification.class === "scope_changed" && classification.cause === "account_or_model_changed";
     if ((classification.class !== "unexplained" && !accountChange) || current.read !== 0 || current.write < 20_000 ||
         (previous.prompt ?? previous.read + previous.write) < 20_000 || previous.model !== current.model) return {};
+    const before = previous.facts?.account_ref;
+    const after = current.facts?.account_ref;
     const member: RunnerWaveMember = {
         ...identity, at: current.at, written: current.write, previousStepAt: previous.at,
+        ...(accountChange && before !== undefined && after !== undefined && before !== after
+            ? { account: { from: before.slice(0, 8), to: after.slice(0, 8) } }
+            : {}),
     };
     if (state.open) {
         // A member's second rewrite stays its own urgent event.
@@ -82,16 +91,32 @@ export function observeRunnerWave(
     return { member, opened, ...(superseded ? { superseded } : {}) };
 }
 
-export function attributeRunnerWave(classification: RunnerClassification, startedAt: number): void {
+/** `member` is the wave member this step became; its account says whether the move is proven. */
+export function attributeRunnerWave(
+    classification: RunnerClassification,
+    startedAt: number,
+    member?: Pick<RunnerWaveMember, "account">,
+): void {
     // Keep Astrocyte's evidence, which starts at "cause=". It can prove the
     // account moved, which the feed's counts alone cannot. Extracting it keeps
     // a repeated attribution of the same step from nesting it twice.
     const from = classification.cause === undefined ? -1 : classification.evidence.indexOf("cause=");
     const astrocyte = from < 0 ? "" : `; ${classification.evidence.slice(from)}`;
-    const proven = classification.cause === "account_or_model_changed";
+    const proven = member?.account !== undefined;
     classification.class = "zero_read_wave";
     classification.zeroReadWaveStartedAt = startedAt;
     classification.evidence = `zero_read_wave began at ${new Date(startedAt).toISOString()}${proven ? "" : "; account or route change is not proven by the feed"}${astrocyte}`;
+}
+
+/**
+ * The accounts every member moved between, as "from→to" pairs, when each
+ * member's account change is proven by the runner's account facts. Undefined
+ * when any member lacks that proof: a wave can also come from a tool or system
+ * change, which looks the same in the feed's counts.
+ */
+export function runnerWaveProvenAccounts(members: readonly RunnerWaveMember[]): string | undefined {
+    if (!members.length || members.some((member) => member.account === undefined)) return undefined;
+    return [...new Set(members.map((member) => `${member.account!.from}→${member.account!.to}`))].join(", ");
 }
 
 export function runnerWaveMembersText(members: readonly RunnerWaveMember[]): string {
