@@ -83,7 +83,9 @@ async fn app_read_seed_cost() {
     }
     session.app_decisions = (0..256).map(|version| json!({"view_version":version,"status":"accepted","at_ms":version,"cause":"execute","changes":{"model":null,"system_prompt":null,"tool_set":null},"dropped_tokens":100,"materialized":false})).collect();
     session.app_decisions_revision += 1;
-    session.app_decisions_dirty = true;
+    session.app_decisions_unsaved = (0..256)
+        .map(|version| (version, crate::store::DecisionWrite::Offered))
+        .collect();
     session.publish_app(&app, true);
     let started = Instant::now();
     let snapshot = session.app_materialize();

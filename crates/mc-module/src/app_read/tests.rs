@@ -873,7 +873,9 @@ async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("PRAGMA user_version=4; CREATE TABLE app_read_snapshots(runner TEXT,harness TEXT,session TEXT,snapshot TEXT,PRIMARY KEY(runner,harness,session)); CREATE TABLE app_read_decisions(runner TEXT,harness TEXT,session TEXT,decisions TEXT,PRIMARY KEY(runner,harness,session));").unwrap();
     let mut snapshot = fixture();
-    snapshot.decisions = vec![json!({"view_version":1,"status":"accepted","at_ms":10})];
+    // Recent, so the store does not expire it when it opens.
+    snapshot.decisions =
+        vec![json!({"view_version":1,"status":"accepted","at_ms":now_ms() - 1_000})];
     let before = AppRead::new(None, None);
     before.publish(snapshot.clone());
     for session in ["s", "another"] {
@@ -907,7 +909,7 @@ async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        6
+        7
     );
     assert_eq!(
         conn.query_row(

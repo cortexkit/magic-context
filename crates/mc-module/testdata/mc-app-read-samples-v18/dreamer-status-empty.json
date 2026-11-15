@@ -1,0 +1,21 @@
+{
+  "name": "dreamer-status-empty",
+  "request": {
+    "method": "dreamer.status",
+    "params": {
+      "project": "pj-empty"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "config_source": "user",
+      "enabled": true,
+      "health": "ok",
+      "op": "dreamer.status",
+      "project": "pj-empty",
+      "schema": 1,
+      "tasks": []
+    }
+  }
+}

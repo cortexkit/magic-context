@@ -66,8 +66,18 @@ impl Session {
 
     pub(super) fn install_command_snapshot(&mut self, snapshot: Self) {
         let validation = std::mem::take(&mut self.view_validation);
+        // The view decision records are a log of the views ck-mc built, and
+        // the store keeps them row by row. A view offered during the attempt
+        // may already have its row, so its record stays, with any status
+        // change not yet written, and the row is kept up to date.
+        let decisions = std::mem::take(&mut self.app_decisions);
+        let unsaved = std::mem::take(&mut self.app_decisions_unsaved);
+        let revision = self.app_decisions_revision;
         *self = snapshot;
         self.view_validation = validation;
+        self.app_decisions = decisions;
+        self.app_decisions_unsaved = unsaved;
+        self.app_decisions_revision = revision;
     }
     /// A request id is unique within one session; the same id on another
     /// session is a different run. Reusing an id here with a different request

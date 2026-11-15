@@ -198,17 +198,15 @@ async fn app_read_summary_reduce_publication_and_all_six_methods() {
         .unwrap();
     let state: Value = serde_json::from_str(&state).unwrap();
     assert!(state["app"].get("decisions").is_none());
-    let decisions: String = conn
-        .query_row(
-            "SELECT decisions FROM app_read_decisions WHERE session=?1",
-            [&key.session],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let decisions: Value = serde_json::from_str(&decisions).unwrap();
-    assert!(decisions
-        .as_array()
+    let decisions: Vec<String> = conn
+        .prepare("SELECT record FROM view_decisions WHERE session=?1")
         .unwrap()
+        .query_map([&key.session], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(decisions
         .iter()
+        .map(|record| serde_json::from_str::<Value>(record).unwrap())
         .any(|d| d["status"] == "accepted" || d["status"] == "applied"));
 }

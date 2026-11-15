@@ -171,8 +171,13 @@ pub struct Store {
     snapshot_writes: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     index_writes: std::sync::atomic::AtomicU64,
+    /// View decision rows written: new rows, and rows whose status changed.
     #[cfg(test)]
-    decision_writes: std::sync::atomic::AtomicU64,
+    decision_inserts: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    decision_updates: std::sync::atomic::AtomicU64,
+    /// When expired view decisions were last deleted.
+    decisions_pruned: Mutex<std::time::Instant>,
     connection: Mutex<Connection>,
     // Keep the offline-command interlock until after SQLite closes. The lock
     // lives on a sidecar so it never interferes with SQLite's database locks.
@@ -207,8 +212,60 @@ pub(crate) fn session_tables(connection: &Connection) -> rusqlite::Result<Vec<St
 
 /// The newest mode3.db schema this build can read and write. Version 6 adds
 /// `owner_command_answers`, the stored answers of commands a person runs on
-/// memories, notes and the dreamer rather than on one session.
-pub const SCHEMA_VERSION: u32 = 6;
+/// memories, notes and the dreamer rather than on one session. Version 7
+/// keeps each view decision in its own `view_decisions` row, replacing the
+/// one list per session in `app_read_decisions`.
+pub const SCHEMA_VERSION: u32 = 7;
+
+/// How long the record of a view ck-mc built is kept: the apps explain a
+/// prompt rewrite from it for this long after the view was offered.
+pub(crate) const VIEW_DECISION_RETENTION_DAYS: u64 = 30;
+pub(crate) const VIEW_DECISION_RETENTION_MS: u64 =
+    VIEW_DECISION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+/// How many of a session's newest view decisions are held in memory, for
+/// status updates and the app projection. Older ones stay in the table.
+pub(crate) const VIEW_DECISIONS_IN_MEMORY: usize = 256;
+
+/// Expired view decisions are deleted when the store opens, and after that
+/// at most this often, with a decision write that happens anyway.
+const VIEW_DECISION_PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// One row per view ck-mc built: the decision record as JSON, keyed by the
+/// session and the view version the runner reports with each step. `at_ms`
+/// is the record's own `at_ms`, kept as a column so expired rows can be
+/// found without reading the records.
+const VIEW_DECISIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS view_decisions (
+    runner TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    session TEXT NOT NULL,
+    view_version INTEGER NOT NULL,
+    at_ms INTEGER NOT NULL,
+    record TEXT NOT NULL,
+    PRIMARY KEY (runner, harness, session, view_version)
+);
+CREATE INDEX IF NOT EXISTS view_decisions_at ON view_decisions(at_ms);";
+
+/// Versions 5 and 6 kept a session's view decisions as one JSON list. Opening
+/// an older store creates it, so the version-4 step can fill it, and the
+/// version-7 step then moves its records into `view_decisions` and drops it.
+const LEGACY_DECISIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS app_read_decisions (
+    runner TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    session TEXT NOT NULL,
+    decisions TEXT NOT NULL,
+    PRIMARY KEY(runner,harness,session)
+);";
+
+/// What changed in a view decision record since it was last written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecisionWrite {
+    /// ck-mc offered the view: the record is new and gets its own row.
+    Offered,
+    /// The view's status changed after its row was written: that one row is
+    /// updated.
+    StatusChanged,
+}
 
 /// How long a person's command answer is kept, so a retried run with the same
 /// request id replays it instead of acting twice: at least the 24 hours the
@@ -287,6 +344,150 @@ pub(crate) fn lock_store(path: &Path, exclusive: bool) -> Result<std::fs::File, 
     Ok(file)
 }
 
+/// A session's newest view decisions, oldest first: the
+/// [`VIEW_DECISIONS_IN_MEMORY`] a session holds in memory. A record that no
+/// longer parses is left out.
+pub(crate) fn newest_view_decisions(
+    connection: &Connection,
+    key: &SessionRef,
+) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT record FROM view_decisions WHERE runner = ?1 AND harness = ?2 AND session = ?3
+          ORDER BY view_version DESC LIMIT ?4",
+    )?;
+    let rows = statement.query_map(
+        params![
+            key.runner,
+            key.harness,
+            key.session,
+            VIEW_DECISIONS_IN_MEMORY as u64
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let mut records = Vec::new();
+    for text in rows {
+        if let Ok(record) = serde_json::from_str(&text?) {
+            records.push(record);
+        }
+    }
+    records.reverse();
+    Ok(records)
+}
+
+/// The stored record of one view of the session, if the store keeps it.
+pub(crate) fn view_decision(
+    connection: &Connection,
+    key: &SessionRef,
+    version: u64,
+) -> rusqlite::Result<Option<serde_json::Value>> {
+    let text: Option<String> = connection
+        .prepare_cached(
+            "SELECT record FROM view_decisions
+              WHERE runner = ?1 AND harness = ?2 AND session = ?3 AND view_version = ?4",
+        )?
+        .query_row(
+            params![key.runner, key.harness, key.session, version],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
+}
+
+/// When the oldest view decision of the session kept from `since_ms` on was
+/// made.
+pub(crate) fn oldest_view_decision_at(
+    connection: &Connection,
+    key: &SessionRef,
+    since_ms: u64,
+) -> rusqlite::Result<Option<u64>> {
+    connection.query_row(
+        "SELECT MIN(at_ms) FROM view_decisions
+          WHERE runner = ?1 AND harness = ?2 AND session = ?3 AND at_ms >= ?4",
+        params![key.runner, key.harness, key.session, since_ms],
+        |row| row.get(0),
+    )
+}
+
+/// Delete every view decision older than [`VIEW_DECISION_RETENTION_MS`].
+fn prune_view_decisions(connection: &Connection, now_ms: u64) -> rusqlite::Result<usize> {
+    connection.execute(
+        "DELETE FROM view_decisions WHERE at_ms < ?1",
+        params![now_ms.saturating_sub(VIEW_DECISION_RETENTION_MS)],
+    )
+}
+
+/// Version 7: give each record of the per-session decision lists its own
+/// `view_decisions` row, with every field it had, then drop the lists. A
+/// list that is not JSON, and a record with no view version to key it by,
+/// is skipped with a warning: no read could find it by version anyway. When
+/// a list names a version twice, its later record, the newer one, is kept.
+fn migrate_view_decisions(connection: &Connection) -> Result<(), String> {
+    let lists: Vec<(SessionRef, String)> = connection
+        .prepare("SELECT runner, harness, session, decisions FROM app_read_decisions")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        SessionRef::new(
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ),
+                        row.get(3)?,
+                    ))
+                })?
+                .collect()
+        })
+        .map_err(|error| error.to_string())?;
+    let mut insert = connection
+        .prepare(
+            "INSERT INTO view_decisions (runner, harness, session, view_version, at_ms, record)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (runner, harness, session, view_version)
+             DO UPDATE SET at_ms = excluded.at_ms, record = excluded.record",
+        )
+        .map_err(|error| error.to_string())?;
+    for (key, text) in lists {
+        let records: Vec<serde_json::Value> = match serde_json::from_str(&text) {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(
+                    "ck-mc: session {}: skipping its saved view decisions, which do not parse: {error}",
+                    key.session
+                );
+                continue;
+            }
+        };
+        let mut unkeyed = 0;
+        for record in records {
+            let Some(version) = record["view_version"].as_u64() else {
+                unkeyed += 1;
+                continue;
+            };
+            insert
+                .execute(params![
+                    key.runner,
+                    key.harness,
+                    key.session,
+                    version,
+                    record["at_ms"].as_u64().unwrap_or(0),
+                    record.to_string()
+                ])
+                .map_err(|error| error.to_string())?;
+        }
+        if unkeyed > 0 {
+            tracing::warn!(
+                "ck-mc: session {}: skipping {unkeyed} saved view decisions with no view version",
+                key.session
+            );
+        }
+    }
+    drop(insert);
+    connection
+        .execute_batch("DROP TABLE app_read_decisions;")
+        .map_err(|error| error.to_string())
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
         let lease = lock_store(path, false)?;
@@ -335,13 +536,6 @@ impl Store {
                       PRIMARY KEY (runner, harness, session, message_id)
                   );
                   CREATE INDEX IF NOT EXISTS app_read_message_ordinals ON app_read_message_index(runner, harness, session, ordinal);
-                  CREATE TABLE IF NOT EXISTS app_read_decisions (
-                      runner TEXT NOT NULL,
-                      harness TEXT NOT NULL,
-                      session TEXT NOT NULL,
-                      decisions TEXT NOT NULL,
-                      PRIMARY KEY(runner,harness,session)
-                  );
                   CREATE TABLE IF NOT EXISTS memory_contexts (
                      runner TEXT NOT NULL,
                      harness TEXT NOT NULL,
@@ -364,10 +558,23 @@ impl Store {
         connection
             .execute_batch(crate::app_read::persistence::SCHEMA)
             .map_err(|error| error.to_string())?;
+        if version < 7 {
+            connection
+                .execute_batch(LEGACY_DECISIONS_SCHEMA)
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .execute_batch(VIEW_DECISIONS_SCHEMA)
+            .map_err(|error| error.to_string())?;
         if version < 5 {
             connection.execute_batch("CREATE TABLE IF NOT EXISTS app_read_snapshots (runner TEXT NOT NULL,harness TEXT NOT NULL,session TEXT NOT NULL,snapshot TEXT NOT NULL,PRIMARY KEY(runner,harness,session));").map_err(|error|error.to_string())?;
             crate::app_read::persistence::migrate(&connection)?;
         }
+        if version < 7 {
+            migrate_view_decisions(&connection)?;
+        }
+        prune_view_decisions(&connection, crate::app_read::now_ms())
+            .map_err(|error| format!("store {}: {error}", path.display()))?;
         connection
             .execute_batch(OWNER_ANSWERS_SCHEMA)
             .map_err(|error| error.to_string())?;
@@ -387,7 +594,10 @@ impl Store {
             #[cfg(test)]
             index_writes: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
-            decision_writes: std::sync::atomic::AtomicU64::new(0),
+            decision_inserts: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            decision_updates: std::sync::atomic::AtomicU64::new(0),
+            decisions_pruned: Mutex::new(std::time::Instant::now()),
             connection: Mutex::new(connection),
             _lease: lease,
             path: path.to_owned(),
@@ -681,7 +891,12 @@ impl Store {
             &snapshot.key,
             &crate::app_read::persistence::Checkpoint::full(snapshot),
         )?;
-        self.save_app_decisions(&snapshot.key, &snapshot.decisions)
+        let writes: Vec<_> = snapshot
+            .decisions
+            .iter()
+            .map(|record| (DecisionWrite::Offered, record))
+            .collect();
+        self.save_app_decisions(&snapshot.key, &writes)
     }
 
     pub(crate) fn save_app_checkpoint(
@@ -751,33 +966,89 @@ impl Store {
         result.map_err(|error| format!("app message index: {error}"))
     }
 
+    /// The session's newest view decisions, oldest first, as many as a
+    /// session holds in memory.
     pub(crate) fn app_decisions(&self, key: &SessionRef) -> Vec<serde_json::Value> {
-        let text:Option<String>=self.lock().query_row("SELECT decisions FROM app_read_decisions WHERE runner=?1 AND harness=?2 AND session=?3",params![key.runner,key.harness,key.session],|row|row.get(0)).optional().unwrap_or_default();
-        let mut rows: Vec<serde_json::Value> = text
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        if rows.len() > 256 {
-            rows.drain(..rows.len() - 256);
-        }
-        rows
+        newest_view_decisions(&self.lock(), key).unwrap_or_default()
     }
 
+    /// Write the view decision records that changed: a new row for each view
+    /// offered, an update of the one row of each view whose status changed.
+    /// A record with no view version has no row and is left out. Expired
+    /// rows are deleted in the same transaction when the last such deletion
+    /// is an hour old.
     pub(crate) fn save_app_decisions(
         &self,
         key: &SessionRef,
-        decisions: &[serde_json::Value],
+        writes: &[(DecisionWrite, &serde_json::Value)],
     ) -> Result<(), String> {
-        let decisions = &decisions[decisions.len().saturating_sub(256)..];
-        let text = serde_json::to_string(decisions).expect("decision JSON");
-        let connection = self.lock();
+        let mut pruned = self
+            .decisions_pruned
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prune = pruned.elapsed() >= VIEW_DECISION_PRUNE_EVERY;
+        let mut connection = self.lock();
         #[cfg(test)]
         let started = std::time::Instant::now();
-        let result=connection.execute("INSERT INTO app_read_decisions VALUES(?1,?2,?3,?4) ON CONFLICT(runner,harness,session) DO UPDATE SET decisions=excluded.decisions",params![key.runner,key.harness,key.session,text]);
+        let result = (|| -> rusqlite::Result<(u64, u64)> {
+            let tx = connection.transaction()?;
+            let (mut inserted, mut updated) = (0, 0);
+            {
+                let mut insert = tx.prepare_cached(
+                    "INSERT INTO view_decisions (runner, harness, session, view_version, at_ms, record)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT (runner, harness, session, view_version)
+                     DO UPDATE SET at_ms = excluded.at_ms, record = excluded.record",
+                )?;
+                let mut update = tx.prepare_cached(
+                    "UPDATE view_decisions SET record = ?5
+                      WHERE runner = ?1 AND harness = ?2 AND session = ?3 AND view_version = ?4",
+                )?;
+                for (write, record) in writes {
+                    let Some(version) = record["view_version"].as_u64() else {
+                        continue;
+                    };
+                    let text = record.to_string();
+                    match write {
+                        DecisionWrite::Offered => {
+                            inserted += insert.execute(params![
+                                key.runner,
+                                key.harness,
+                                key.session,
+                                version,
+                                record["at_ms"].as_u64().unwrap_or(0),
+                                text
+                            ])? as u64;
+                        }
+                        DecisionWrite::StatusChanged => {
+                            updated += update.execute(params![
+                                key.runner,
+                                key.harness,
+                                key.session,
+                                version,
+                                text
+                            ])? as u64;
+                        }
+                    }
+                }
+            }
+            if prune {
+                prune_view_decisions(&tx, crate::app_read::now_ms())?;
+            }
+            tx.commit()?;
+            Ok((inserted, updated))
+        })();
         #[cfg(test)]
         {
+            use std::sync::atomic::Ordering::Relaxed;
             self.record_write(started);
-            self.decision_writes
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Ok((inserted, updated)) = result {
+                self.decision_inserts.fetch_add(inserted, Relaxed);
+                self.decision_updates.fetch_add(updated, Relaxed);
+            }
+        }
+        if prune && result.is_ok() {
+            *pruned = std::time::Instant::now();
         }
         result
             .map(|_| ())
@@ -985,7 +1256,18 @@ impl Store {
         (
             self.index_writes.swap(0, Relaxed),
             self.snapshot_writes.swap(0, Relaxed),
-            self.decision_writes.swap(0, Relaxed),
+            self.decision_inserts.swap(0, Relaxed) + self.decision_updates.swap(0, Relaxed),
+        )
+    }
+
+    /// The view decision rows written since the last call: rows inserted
+    /// for offered views, and rows updated for a changed status.
+    #[cfg(test)]
+    pub(crate) fn take_decision_writes(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.decision_inserts.swap(0, Relaxed),
+            self.decision_updates.swap(0, Relaxed),
         )
     }
 
@@ -1059,7 +1341,7 @@ mod tests {
     /// Rehearses the version-four app snapshot split on a copy of a real
     /// store: every saved snapshot must load back from the new rows exactly as
     /// it was stored whole. Decisions are left out of the comparison: app reads
-    /// take them from their own table (`app_read_decisions`), which may be newer
+    /// take them from their own rows (`view_decisions`), which may be newer
     /// than the copy inside the old snapshot.
     #[test]
     #[ignore = "explicit offline backup only; never opens a live store"]
@@ -1123,7 +1405,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let answers: u32 = connection
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE name = 'owner_command_answers'",
@@ -1135,8 +1417,16 @@ mod tests {
             answers, 1,
             "version 6 keeps the person's owner-command answers"
         );
-        let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_headers','app_read_messages','app_read_summaries','app_read_message_index','app_read_decisions')", [], |row| row.get(0)).unwrap();
+        let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_headers','app_read_messages','app_read_summaries','app_read_message_index','view_decisions')", [], |row| row.get(0)).unwrap();
         assert_eq!(tables, 5);
+        let lists: u32 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'app_read_decisions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lists, 0, "version 7 keeps no per-session decision lists");
     }
 
     #[test]
@@ -1174,7 +1464,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, SCHEMA_VERSION);
     }
     #[test]
     fn repeated_successful_save_does_not_write_again() {
@@ -1306,7 +1596,7 @@ mod tests {
                 .lock()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            6
+            SCHEMA_VERSION
         );
         for key in &keys {
             assert_eq!(migrated.load(key), Some(state.clone()));
@@ -1392,3 +1682,7 @@ mod tests {
         assert_eq!(store.load(&two), Some(newer));
     }
 }
+
+#[cfg(test)]
+#[path = "store_view_decisions_tests.rs"]
+mod view_decisions_tests;

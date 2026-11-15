@@ -230,10 +230,7 @@ fn load_rows(conn: &Connection, key: &SessionRef) -> rusqlite::Result<Option<Sna
                     .map_err(|e| e.to_string())?,
             );
         }
-        let decisions = conn.query_row(
-                "SELECT decisions FROM app_read_decisions WHERE runner=?1 AND harness=?2 AND session=?3",
-                params![key.runner, key.harness, key.session], |row| row.get::<_, String>(0)
-            ).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        let decisions = crate::store::newest_view_decisions(conn, key).unwrap_or_default();
         Ok(Snapshot {
             key: key.clone(),
             base: h.base,

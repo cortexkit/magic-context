@@ -58,7 +58,9 @@ pub struct Session {
     app_projection: app_projection::Projection,
     app_decisions: Vec<Value>,
     app_decisions_revision: u64,
-    app_decisions_dirty: bool,
+    /// Decision records changed since they were last written to the store,
+    /// by view version.
+    app_decisions_unsaved: std::collections::BTreeMap<u64, crate::store::DecisionWrite>,
     app_cause: String,
     key: SessionRef,
     features: Features,
@@ -719,7 +721,7 @@ impl Session {
             app_projection: Default::default(),
             app_decisions: Vec::new(),
             app_decisions_revision: 0,
-            app_decisions_dirty: false,
+            app_decisions_unsaved: Default::default(),
             app_cause: "publication".into(),
             db,
             project: route.project.clone(),
@@ -5033,19 +5035,15 @@ impl Session {
     }
 
     /// Save the session's state now, where a store is set.
-    fn save(&self) -> Result<(), String> {
+    fn save(&mut self) -> Result<(), String> {
         self.save_state(&self.durable())
     }
 
-    fn save_state(&self, durable: &crate::store::Durable) -> Result<(), String> {
+    fn save_state(&mut self, durable: &crate::store::Durable) -> Result<(), String> {
         if let Some(store) = &self.store {
             store.save(&self.key, durable)?;
-            if self.app_decisions_dirty {
-                if let Err(error) = store.save_app_decisions(&self.key, &self.app_decisions) {
-                    tracing::warn!("ck-mc: {error}");
-                }
-            }
         }
+        self.app_save_decisions();
         Ok(())
     }
 
@@ -5316,7 +5314,9 @@ impl Session {
             if record["status"] != status {
                 record["status"] = serde_json::json!(status);
                 self.app_decisions_revision += 1;
-                self.app_decisions_dirty = true;
+                self.app_decisions_unsaved
+                    .entry(version)
+                    .or_insert(crate::store::DecisionWrite::StatusChanged);
             }
         }
         let Some(at) = self

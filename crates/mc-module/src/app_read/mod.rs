@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 mod cache;
+mod cache_why;
 pub(crate) mod docs;
 mod dreamer;
 pub(crate) mod head;
@@ -879,7 +880,7 @@ impl Replica {
                 "max_bytes",
             ],
             "context.compartment" => &["session", "compartment_id"],
-            "context.cache_why" => &["session", "producers"],
+            "context.cache_why" => &["session", "views", "producers"],
             "context.search" => &["query", "scope", "sources", "cursor"],
             "memories.stats" => &["level", "owner"],
             "memories.page" => &[
@@ -1022,27 +1023,50 @@ impl Replica {
                 json!({"state":"ready", "version":version(row), "compartment":row})
             }
             "context.cache_why" => {
-                let producers = p
-                    .get("producers")
-                    .and_then(Value::as_array)
-                    .filter(|v| !v.is_empty() && v.len() <= 100)
-                    .ok_or_else(|| invalid("producers"))?;
-                for producer in producers {
-                    let producer = object(producer, &["producer_ref", "at_ms"])?;
-                    if string(producer, "producer_ref")?.len() > 512 {
-                        return Err(invalid("producer_ref"));
-                    }
-                    if producer
-                        .get("at_ms")
-                        .is_some_and(|v| !v.is_null() && v.as_i64().is_none())
+                let views = p.get("views").filter(|views| !views.is_null());
+                if let Some(views) = views {
+                    // Exactly one form: a request naming both is refused.
+                    if p.get("producers")
+                        .is_some_and(|producers| !producers.is_null())
                     {
-                        return Err(invalid("at_ms"));
+                        return Err(invalid("producers"));
                     }
+                    cache_why::views(
+                        self.store.as_ref(),
+                        &key,
+                        &snapshot.decisions,
+                        views,
+                        now_ms(),
+                    )?
+                } else {
+                    // The `producers` form, answered exactly as before views
+                    // were joined to decisions. The phone still sends it: it
+                    // reads steps from the usage service (Astrocyte), and can
+                    // ask by view only once that service returns each step's
+                    // `view_version`. Remove this form once the apps have
+                    // moved to the `views` form.
+                    let producers = p
+                        .get("producers")
+                        .and_then(Value::as_array)
+                        .filter(|v| !v.is_empty() && v.len() <= 100)
+                        .ok_or_else(|| invalid("producers"))?;
+                    for producer in producers {
+                        let producer = object(producer, &["producer_ref", "at_ms"])?;
+                        if string(producer, "producer_ref")?.len() > 512 {
+                            return Err(invalid("producer_ref"));
+                        }
+                        if producer
+                            .get("at_ms")
+                            .is_some_and(|v| !v.is_null() && v.as_i64().is_none())
+                        {
+                            return Err(invalid("at_ms"));
+                        }
+                    }
+                    // Compaction entries expose mid and generated_under, but not
+                    // llm-runner's run_id/step_id/attempt_id. None can be derived
+                    // from an ordinal or notice sequence, including after reverts.
+                    json!({"join":"unavailable", "join_reason":"runner_step_identity_not_recorded", "producer_ref_kind":null, "session_kind":"mode3", "managed":{"value":snapshot.breakdown.without_summaries()["managed"]["value"], "by":"ck_mc"}, "missing":[], "decisions":[], "next_cursor":null, "retention":{"max_rows":256, "oldest_retained_at_ms":snapshot.decisions.first().map(|v| &v["at_ms"])}})
                 }
-                // Compaction entries expose mid and generated_under, but not
-                // llm-runner's run_id/step_id/attempt_id. None can be derived
-                // from an ordinal or notice sequence, including after reverts.
-                json!({"join":"unavailable", "join_reason":"runner_step_identity_not_recorded", "producer_ref_kind":null, "session_kind":"mode3", "managed":{"value":snapshot.breakdown.without_summaries()["managed"]["value"], "by":"ck_mc"}, "missing":[], "decisions":[], "next_cursor":null, "retention":{"max_rows":256, "oldest_retained_at_ms":snapshot.decisions.first().map(|v| &v["at_ms"])}})
             }
             _ => unreachable!(),
         };
@@ -1185,3 +1209,8 @@ mod samples_v15_tests;
 mod samples_v16_tests;
 #[cfg(test)]
 mod samples_v17_tests;
+#[cfg(test)]
+mod samples_v18_tests;
+
+#[cfg(test)]
+mod cache_why_tests;

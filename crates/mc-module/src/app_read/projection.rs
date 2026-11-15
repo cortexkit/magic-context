@@ -40,11 +40,12 @@ impl Session {
             .map(|(_, part)| crate::tokens::part(part))
             .sum();
         self.app_decisions.push(json!({"view_version":view.version, "view_checksum":view.checksum, "status":"offered", "producer_ref":null, "at_ms":crate::app_read::now_ms(), "decision":"publish", "cause":self.app_cause, "changes":{"model":changes, "system_prompt":null, "tool_set":null}, "dropped_count":self.next_covered.len(), "dropped_tokens":freed, "emergency":self.next_latch, "identity_delta":identity_delta, "input_tokens":self.conditions.last_prompt_tokens, "materialized":materialized}));
-        if self.app_decisions.len() > 256 {
+        if self.app_decisions.len() > crate::store::VIEW_DECISIONS_IN_MEMORY {
             self.app_decisions.remove(0);
         }
         self.app_decisions_revision += 1;
-        self.app_decisions_dirty = true;
+        self.app_decisions_unsaved
+            .insert(view.version, crate::store::DecisionWrite::Offered);
         self.app.last_model = Some(model);
     }
 
@@ -57,8 +58,37 @@ impl Session {
             if record["status"] != status {
                 record["status"] = json!(status);
                 self.app_decisions_revision += 1;
-                self.app_decisions_dirty = true;
+                // A record not written yet is still written whole.
+                self.app_decisions_unsaved
+                    .entry(version)
+                    .or_insert(crate::store::DecisionWrite::StatusChanged);
             }
+        }
+    }
+
+    /// Write the decision records changed since the last write, one row
+    /// each: a new row for a view offered, an update for a status change.
+    /// If the store refuses, they stay unsaved for the next write. A record
+    /// pushed out of memory before it was written is not written.
+    pub(crate) fn app_save_decisions(&mut self) {
+        let Some(store) = &self.store else { return };
+        if self.app_decisions_unsaved.is_empty() {
+            return;
+        }
+        let writes: Vec<_> = self
+            .app_decisions_unsaved
+            .iter()
+            .filter_map(|(version, write)| {
+                self.app_decisions
+                    .iter()
+                    .rev()
+                    .find(|record| record["view_version"] == *version)
+                    .map(|record| (*write, record))
+            })
+            .collect();
+        match store.save_app_decisions(&self.key, &writes) {
+            Ok(()) => self.app_decisions_unsaved.clear(),
+            Err(error) => tracing::warn!("ck-mc: {error}"),
         }
     }
 
@@ -535,6 +565,43 @@ mod tests {
             session.app_decisions[1]["at_ms"] = json!(40);
             session.app_snapshot()
         }
+
+        /// Decision records for the app-read samples, made through the
+        /// paths a session takes: one for each cause a build names and each
+        /// status a view reaches, and one with a cause the apps don't know
+        /// yet. Their times are pinned, a minute apart up to `newest_at_ms`,
+        /// so the samples don't change.
+        pub(crate) fn app_sample_decisions(newest_at_ms: u64) -> Vec<Value> {
+            let mut session = session();
+            let offer = |session: &mut Session, cause: &str| {
+                session.app_cause = cause.into();
+                let view = session.seal_unchecked(vec![]);
+                session.accept(view.clone());
+                view
+            };
+            let apply = |session: &mut Session, view: View| {
+                session
+                    .settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+            };
+            let view = offer(&mut session, "over_limit");
+            apply(&mut session, view);
+            let view = offer(&mut session, "explicit_flush");
+            apply(&mut session, view);
+            let view = offer(&mut session, "cache_lost");
+            session.app_view_status(view.version, "accepted");
+            let view = offer(&mut session, "history_changed");
+            session.roll_back(view.version, true, None);
+            let view = offer(&mut session, "history_refresh");
+            session.roll_back(view.version, false, None);
+            offer(&mut session, "execute");
+            let view = offer(&mut session, "some_future_cause");
+            session.app_view_status(view.version, "accepted");
+            let count = session.app_decisions.len() as u64;
+            for (at, record) in session.app_decisions.iter_mut().enumerate() {
+                record["at_ms"] = json!(newest_at_ms - (count - 1 - at as u64) * 60_000);
+            }
+            session.app_decisions.clone()
+        }
     }
 
     /// The breakdown scales to the usable window, the model's window less
@@ -852,6 +919,84 @@ mod tests {
         assert_eq!(reply["messages"][0]["state"], "raw");
         assert_eq!(reply["messages"][1]["state"], "outside");
         assert_eq!(reply["messages"][2]["state"], "outside");
+    }
+
+    /// Offering a view writes its one new decision row, and confirming it
+    /// updates that row; neither rewrites the session's other records, and a
+    /// pass with no decision change writes none. A write the store refuses
+    /// is made by the next pass.
+    #[tokio::test]
+    async fn offering_a_view_inserts_its_decision_row_and_confirming_it_updates_only_that_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode3.db");
+        let store = Arc::new(crate::store::Store::open(&path).unwrap());
+        let app = crate::app_read::AppRead::new(Some(path.clone()), None);
+        let mut session = session();
+        session.index_ready = true;
+        session.set_store(Some(store.clone()));
+        // Earlier views, so a rewrite of the session's records would touch
+        // more than one row.
+        for _ in 0..3 {
+            let view = session.seal_unchecked(vec![]);
+            session.accept(view.clone());
+            session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
+        }
+        session.publish_app(&app, true);
+        assert_eq!(store.take_decision_writes(), (3, 0));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE decision_events(op TEXT, version INTEGER);
+             CREATE TRIGGER observe_insert AFTER INSERT ON view_decisions BEGIN INSERT INTO decision_events VALUES('insert', new.view_version); END;
+             CREATE TRIGGER observe_update AFTER UPDATE ON view_decisions BEGIN INSERT INTO decision_events VALUES('update', new.view_version); END;
+             CREATE TRIGGER observe_delete AFTER DELETE ON view_decisions BEGIN INSERT INTO decision_events VALUES('delete', old.view_version); END;",
+        )
+        .unwrap();
+        let events = || -> Vec<(String, u64)> {
+            conn.prepare("SELECT op, version FROM decision_events ORDER BY rowid")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+
+        let view = session.seal_unchecked(vec![]);
+        session.accept(view.clone());
+        session.publish_app(&app, false);
+        assert_eq!(events(), [("insert".into(), view.version)]);
+        assert_eq!(store.take_decision_writes(), (1, 0));
+
+        session.settle_unconfirmed(
+            Some(&AppliedView::new(view.version, view.checksum.clone())),
+            &[],
+        );
+        session.publish_app(&app, false);
+        assert_eq!(
+            events(),
+            [
+                ("insert".into(), view.version),
+                ("update".into(), view.version)
+            ]
+        );
+        assert_eq!(store.take_decision_writes(), (0, 1));
+        session.publish_app(&app, false);
+        assert_eq!(events().len(), 2, "no decision changed, so none is written");
+        assert_eq!(store.take_decision_writes(), (0, 0));
+        let stored = store.app_decisions(&session.key);
+        assert_eq!(stored.len(), 4);
+        assert_eq!(stored[3]["view_version"], view.version);
+        assert_eq!(stored[3]["status"], "applied");
+
+        // A busy store refuses the write; the next pass makes it.
+        let next = session.seal_unchecked(vec![]);
+        session.accept(next.clone());
+        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        session.publish_app(&app, false);
+        conn.execute_batch("ROLLBACK;").unwrap();
+        assert_eq!(events().len(), 2);
+        session.publish_app(&app, false);
+        assert_eq!(events()[2], ("insert".into(), next.version));
+        assert_eq!(events().len(), 3);
     }
 
     #[test]

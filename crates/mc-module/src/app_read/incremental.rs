@@ -877,14 +877,7 @@ impl Session {
                     .snapshot_saved
                     .is_none_or(|saved| saved.elapsed() >= std::time::Duration::from_secs(60)));
         self.app_persist_index();
-        if let Some(store) = &self.store {
-            if self.app_decisions_dirty {
-                match store.save_app_decisions(&self.key, &self.app_decisions) {
-                    Ok(()) => self.app_decisions_dirty = false,
-                    Err(error) => tracing::warn!("ck-mc: {error}"),
-                }
-            }
-        }
+        self.app_save_decisions();
         if checkpoint {
             self.app_save_snapshot();
         }

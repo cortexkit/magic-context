@@ -4,11 +4,8 @@ use std::time::{Duration, Instant};
 fn saved(store: &crate::store::Store, name: &str) -> Snapshot {
     let mut snapshot = super::tests::fixture();
     snapshot.key.session = name.into();
-    snapshot.decisions = vec![json!({"at_ms":123,"reason":"saved decision"})];
+    snapshot.decisions = vec![json!({"view_version":1,"at_ms":123,"reason":"saved decision"})];
     super::tests::save_fixture(store, &snapshot, None);
-    store
-        .save_app_decisions(&snapshot.key, &snapshot.decisions)
-        .unwrap();
     snapshot
 }
 

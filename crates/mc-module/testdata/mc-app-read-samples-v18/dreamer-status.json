@@ -1,0 +1,62 @@
+{
+  "name": "dreamer-status",
+  "request": {
+    "method": "dreamer.status",
+    "params": {
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "config_source": "user",
+      "enabled": true,
+      "health": "ok",
+      "lock": {
+        "run_id": 3,
+        "since": 1700007200000,
+        "task": "swe:classify-memories"
+      },
+      "op": "dreamer.status",
+      "project": "pj-sample",
+      "schema": 1,
+      "tasks": [
+        {
+          "enabled": true,
+          "failures_in_a_row": 0,
+          "kind": "classify-memories",
+          "last": {
+            "at": 1700003690000,
+            "status": "applied"
+          },
+          "next_due_at": 4102444800000,
+          "overdue": false,
+          "schedule": {
+            "at": "06:00",
+            "every": "day",
+            "time_zone": "Europe/Istanbul"
+          },
+          "task": "swe:classify-memories"
+        },
+        {
+          "enabled": true,
+          "failures_in_a_row": 1,
+          "kind": "compress-cues",
+          "last": {
+            "at": 1700000060000,
+            "error": "provider returned 500",
+            "failure_class": "model",
+            "status": "failed"
+          },
+          "next_due_at": 1700010000000,
+          "overdue": true,
+          "schedule": {
+            "cron": "15 */2 * * *",
+            "time_zone": "Europe/Istanbul"
+          },
+          "task": "swe:compress-cues"
+        }
+      ]
+    }
+  }
+}

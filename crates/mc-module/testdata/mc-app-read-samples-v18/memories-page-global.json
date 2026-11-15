@@ -1,0 +1,65 @@
+{
+  "name": "memories-page-global",
+  "request": {
+    "method": "memories.page",
+    "params": {
+      "level": "global"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "level": "global",
+      "memories": [
+        {
+          "category": "base:preferences",
+          "content": "Works in Istanbul.",
+          "created_at": 1700000021000,
+          "first_seen_at": 1700000021000,
+          "id": 21,
+          "importance": 50,
+          "last_seen_at": 1700000021000,
+          "level": "global",
+          "owner": "self",
+          "retrieval_count": 0,
+          "revision": 1,
+          "seen_count": 1,
+          "sensitive": true,
+          "shareable": false,
+          "source": {
+            "session": "s",
+            "type": "user-review"
+          },
+          "status": "active",
+          "updated_at": 1700000021000
+        },
+        {
+          "category": "base:preferences",
+          "content": "Prefers short answers.",
+          "created_at": 1700000020000,
+          "first_seen_at": 1700000020000,
+          "id": 20,
+          "importance": 50,
+          "last_seen_at": 1700000020000,
+          "level": "global",
+          "owner": "self",
+          "retrieval_count": 0,
+          "revision": 1,
+          "seen_count": 1,
+          "sensitive": false,
+          "shareable": false,
+          "source": {
+            "project": "pj-sample",
+            "session": "s",
+            "type": "user-review"
+          },
+          "status": "active",
+          "updated_at": 1700000020000
+        }
+      ],
+      "op": "memories.page",
+      "owner": "self",
+      "schema": 1
+    }
+  }
+}

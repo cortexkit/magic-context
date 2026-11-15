@@ -3,7 +3,6 @@ use crate::store::{Durable, Store};
 use cortexkit_role_compaction::read::SessionRef;
 
 const TABLES: [&str; 9] = [
-    "app_read_decisions",
     "app_read_headers",
     "app_read_message_index",
     "app_read_messages",
@@ -12,6 +11,7 @@ const TABLES: [&str; 9] = [
     "memory_contexts",
     "sessions",
     "state_text_refs",
+    "view_decisions",
 ];
 
 fn rekey_runner(path: &Path, request: &Request) -> Result<Summary, String> {
@@ -194,8 +194,10 @@ fn rekey_preserves_every_table_and_restores_session_state() {
         "category_ids":{"facts":"legacy-facts"},"project_id":"project","workspace_id":"workspace","domain":"test", "members_digest":"members",
         "stamp":{"note":"thalamus-pi"},"snapshot_digest":"snapshot"
     })).unwrap();
-    let decisions =
-        vec![json!({"decision_id":"d1","reason":"thalamus-pi remains historical text"})];
+    // Recent, so reopening the store after the rekey does not expire it.
+    let decisions = vec![
+        json!({"view_version":3,"at_ms":crate::app_read::now_ms(),"decision_id":"d1","reason":"thalamus-pi remains historical text"}),
+    ];
     let mut before_sessions = Vec::new();
     for id in &request.sessions {
         let key = key(&request.from, id);
