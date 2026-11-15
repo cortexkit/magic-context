@@ -408,9 +408,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-tokens"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "693c3ba104e0895712e1705f22ef5255ba5ad83bde86d611395f864dede2e4b7"
+checksum = "e6b8dee3d437bdb473a8eb0b656c0f49fd4850e3597d15d7ae26fec7ba3da276"
 dependencies = [
  "ruzstd",
  "serde",
