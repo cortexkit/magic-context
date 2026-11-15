@@ -3050,15 +3050,14 @@ impl Session {
         )
     }
 
-    /// The runner's soft budget is diagnostic only. Count the compact index's
-    /// JSON bytes only at a crossing, never on an unchanged notice.
+    /// The runner's soft budget is diagnostic only. Log existing counts at a
+    /// crossing without walking or serializing the potentially large index.
     fn log_window_budget(&mut self) {
         let flagged = self.conditions.window_over_budget == Some(true);
         if flagged && !self.window_over_budget {
-            let bytes = serde_json::to_vec(self.index.entries()).map_or(0, |bytes| bytes.len());
             tracing::info!(
-                "ck-mc: session {}: window_over_budget: {} entries, {} known compact JSON bytes; stated budget entries {:?}, bytes {:?} (None means no bound stated)",
-                self.key.session, self.index.entries().len(), bytes,
+                "ck-mc: session {}: window_over_budget: {} entries; stated budget entries {:?}, bytes {:?} (None means no bound stated)",
+                self.key.session, self.index.entries().len(),
                 self.limits.window_entries, self.limits.window_bytes
             );
             if self.limits.window_entries.is_none() && self.limits.window_bytes.is_none() {

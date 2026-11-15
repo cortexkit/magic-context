@@ -53,11 +53,6 @@ use cortexkit_role_routing::select::{SelectAnswer, SelectRequest};
 /// How long ck-mc waits on one call to a runner.
 const RUNNER_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-// Enabling this makes runners cap and continue named reads and send the soft
-// window-budget flag and ride cause. Deploy ck-mc's readers before declaring
-// compaction-limits/v1 in its manifest.
-const DECLARE_COMPACTION_LIMITS: bool = false;
-
 /// The module's manifest with moves off ([`manifest_for`]).
 pub fn manifest(module_id: &str) -> ModuleManifest {
     manifest_for(module_id, false)
@@ -158,6 +153,10 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         // a tool-set change) only to providers declaring this.
         cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_NOTES_TOKENS_PROVIDES.to_owned(),
+        // Named readers honor the runner's caps and retry unanswered names.
+        // The soft window-budget flag and ride cause are diagnostic only:
+        // neither grants rebuild permission nor starts a summary.
+        cortexkit_role_compaction::COMPACTION_LIMITS_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_RENDER_FAILED_PROVIDES.to_owned(),
         // The runner serves history whose part numbers it can't establish
         // (entries marked `numbers_unknown`, parts without `tag`) only to
@@ -186,9 +185,6 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     ];
     if agent_data {
         claims.push(cortexkit_role_agent_data::PROVIDES.to_owned());
-    }
-    if DECLARE_COMPACTION_LIMITS {
-        claims.push(cortexkit_role_compaction::COMPACTION_LIMITS_PROVIDES.to_owned());
     }
     let routing = serde_json::to_value(crate::routing::consumer_declarations())
         .expect("routing declarations are JSON");
@@ -2280,13 +2276,13 @@ mod manifest_tests {
             "compaction-host-parts/v1",
             "compaction-signed-floor/v1",
             "compaction-notes-tokens/v1",
+            "compaction-limits/v1",
             "compaction-statement-seq/v1",
             "tool-provider/v1",
             "step-transform-provider/v2",
         ] {
             assert!(provides.contains(&claim), "{claim} missing: {provides:?}");
         }
-        assert!(!provides.contains(&"compaction-limits/v1"));
         assert!(
             !provides
                 .iter()

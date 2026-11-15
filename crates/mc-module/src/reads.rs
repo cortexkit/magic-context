@@ -82,14 +82,17 @@ pub async fn named_detail<C: RunnerClient, N: Clone>(
     select: impl Fn(Vec<N>) -> Select,
 ) -> Result<Vec<Entry>, ClientError> {
     let mut entries = Vec::new();
-    // These are ck-mc's own request sizes, not defaults imposed by the contract.
-    let select_max = limits.select_max.unwrap_or(256).min(256) as usize;
+    // The runner states its own ceiling; 256 only bounds requests when it
+    // states none, not when it explicitly permits a larger selection.
+    let select_max = usize::try_from(limits.select_max.unwrap_or(256)).unwrap_or(usize::MAX);
     if select_max == 0 && !names.is_empty() {
         return Err(ClientError::new("runner permits no named reads"));
     }
     for chunk in names.chunks(select_max.max(1)) {
         let mut selection = select(chunk.to_vec());
-        loop {
+        // Give every unanswered name one retry, but never let a runner keep
+        // a session's read alive by repeatedly leaving names unanswered.
+        for retry in [false, true] {
             let page = client
                 .read(session, ReadRequest::new(selection.clone(), detail))
                 .await?;
@@ -97,6 +100,12 @@ pub async fn named_detail<C: RunnerClient, N: Clone>(
             if unanswered.is_empty() {
                 entries.extend(page.entries);
                 break;
+            }
+            if retry {
+                tracing::warn!("ck-mc: session {}: runner fault: named read left names unanswered after their retry", session.session);
+                return Err(ClientError::new(
+                    "runner fault: named read left names unanswered after their retry",
+                ));
             }
             let next = match &selection {
                 Select::Mids { .. } => Select::Mids {
@@ -119,17 +128,6 @@ pub async fn named_detail<C: RunnerClient, N: Clone>(
                 },
                 _ => return Err(ClientError::new("named read requires mids or tags")),
             };
-            let asked = match &selection {
-                Select::Mids { mids } => mids.len(),
-                Select::Tags { tags } => tags.len(),
-                _ => 0,
-            };
-            if page.entries.is_empty() && unanswered.len() >= asked {
-                tracing::warn!("ck-mc: session {}: runner fault: named read answered nothing and left all names unanswered", session.session);
-                return Err(ClientError::new(
-                    "runner fault: named read made no progress",
-                ));
-            }
             entries.extend(page.entries);
             selection = next;
         }
@@ -213,7 +211,9 @@ pub async fn by_tags_placed<C: RunnerClient>(
 ) -> Result<Vec<Entry>, TagsRead> {
     // One request per chunk, as `named` would split them, so a refusal that
     // names no numbers marks only what its own request asked for.
-    let size = limits.select_max.unwrap_or(256).clamp(1, 256) as usize;
+    let size = usize::try_from(limits.select_max.unwrap_or(256))
+        .unwrap_or(usize::MAX)
+        .max(1);
     let mut entries = Vec::new();
     for chunk in tags.chunks(size) {
         let asked = chunk.to_vec();
