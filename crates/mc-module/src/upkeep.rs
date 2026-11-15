@@ -809,9 +809,10 @@ fn is_object_name(sha: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// `Date.toISOString()` for a time in milliseconds, which `git log --since`
-/// reads.
-fn iso_8601(ms: i64) -> String {
+/// `Date.toISOString()` for a time in milliseconds (RFC 3339, UTC, to the
+/// millisecond, ending in `Z`): what `git log --since` reads, and how a
+/// view's confirmation line states when the view was handed over.
+pub(crate) fn iso_8601(ms: i64) -> String {
     let (days, rest) = (ms.div_euclid(DAY_MS), ms.rem_euclid(DAY_MS));
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let z = days + 719_468;

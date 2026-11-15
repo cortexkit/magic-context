@@ -8,8 +8,49 @@ use super::*;
 use crate::test_log::capture;
 
 /// What the acceptance line of a view confirmed only by the runner's report
-/// says after the usual line.
-const CONFIRMED: &str = "; confirmed by the runner after its apply answer was lost";
+/// says after the usual line, up to the time the view was handed over.
+const CONFIRMED: &str =
+    "; confirmed by the runner after its apply answer was lost; handed over at ";
+
+/// Milliseconds since the Unix epoch, by the wall clock.
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// The one line in `logs` that says `view` was accepted, and that line
+/// ends with the confirmation note and an RFC 3339 UTC time to the
+/// millisecond, between `from` and `to` (wall clock, ms). Two lines, a line
+/// without the note, or one with anything after the time fail.
+fn assert_confirmed_once(logs: &str, view: &View, from: i64, to: i64) {
+    let line = accepted_line(view);
+    let found: Vec<&str> = logs.lines().filter(|text| text.contains(&line)).collect();
+    let [found] = found[..] else {
+        panic!(
+            "view {} accepted {} times: {logs}",
+            view.version,
+            found.len()
+        );
+    };
+    let shape = regex::Regex::new(&format!(
+        r"ck-mc: session s1: {}{}(\d{{4}}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{{3}}Z)$",
+        regex::escape(&line),
+        regex::escape(CONFIRMED)
+    ))
+    .unwrap();
+    let handed = shape
+        .captures(found)
+        .unwrap_or_else(|| panic!("not in the confirmed shape: {found}"))[1]
+        .to_owned();
+    // Times in this one shape sort as text in time order.
+    let (from, to) = (crate::upkeep::iso_8601(from), crate::upkeep::iso_8601(to));
+    assert!(
+        from <= handed && handed <= to,
+        "handed over at {handed}, outside the handover call ({from} to {to})"
+    );
+}
 
 /// The acceptance line for `view` in the shape the cache-bust analyzer
 /// parses (`view N accepted (E edits, cut through X)` or `..., no cut)`),
@@ -81,11 +122,14 @@ async fn notice_reporting(
 
 /// The runner took the view though its answer was lost: nothing is rolled
 /// back, and the runner's next report confirms the view and logs its
-/// acceptance once, in the analyzer's shape with a note after it.
+/// acceptance once, in the analyzer's shape followed by the confirmation
+/// note and the time the view was handed over.
 #[tokio::test]
 async fn lost_answer_a_view_the_runner_holds_is_kept_and_confirmed_once() {
     let mut logs = capture();
+    let from = wall_ms();
     let (mut session, client, settings, view, delivered) = handed_without_answer().await;
+    let to = wall_ms();
     assert!(
         delivered,
         "a view whose answer was lost was reported as not in the runner's hands"
@@ -128,19 +172,7 @@ async fn lost_answer_a_view_the_runner_holds_is_kept_and_confirmed_once() {
     );
     notice_reporting(&mut session, &client, &settings, 2, Some(&view)).await;
     logs.stop();
-    let line = accepted_line(&view);
-    assert_eq!(
-        logs.count(&format!("{line}{CONFIRMED}")),
-        1,
-        "{}",
-        logs.text()
-    );
-    assert_eq!(
-        logs.count(&line),
-        1,
-        "the view's acceptance was logged more than once: {}",
-        logs.text()
-    );
+    assert_confirmed_once(&logs.text(), &view, from, to);
 }
 
 /// The runner never received the view: its next notice reports the view it
@@ -197,7 +229,9 @@ async fn lost_answer_an_offer_again_without_answer_waits_for_the_next_notice() {
 #[tokio::test]
 async fn lost_answer_the_next_view_is_newer_and_carries_the_waiting_one() {
     let mut logs = capture();
+    let from = wall_ms();
     let (mut session, client, settings, view, _) = handed_without_answer().await;
+    let to = wall_ms();
     let next = session
         .seal(
             vec![EditOp::Drop {
@@ -227,13 +261,18 @@ async fn lost_answer_the_next_view_is_newer_and_carries_the_waiting_one() {
     assert!(session.unconfirmed.is_empty());
     assert_eq!(status(&session, view.version), "applied");
     assert_eq!(status(&session, next.version), "applied");
-    assert_eq!(
-        logs.count(&format!("{}{CONFIRMED}", accepted_line(&view))),
-        1,
-        "{}",
-        logs.text()
-    );
+    assert_confirmed_once(&logs.text(), &view, from, to);
     assert_eq!(logs.count(&accepted_line(&next)), 1, "{}", logs.text());
+}
+
+/// The time on a confirmation line is in the shape the cache-bust watcher
+/// reads: RFC 3339, UTC, to the millisecond, ending in `Z`.
+#[test]
+fn lost_answer_the_handover_time_is_written_as_rfc_3339_utc_milliseconds() {
+    assert_eq!(
+        crate::upkeep::iso_8601(1_794_742_521_860),
+        "2026-11-15T11:35:21.860Z"
+    );
 }
 
 /// A call that failed outright (the connection dropped before the request

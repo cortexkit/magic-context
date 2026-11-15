@@ -406,13 +406,22 @@ pub struct Unconfirmed {
     #[serde(skip)]
     excused: Vec<(u64, u64)>,
     /// ck-mc handed the view over with `session.apply_view`, but no answer
-    /// came back (the call's deadline passed, or the connection dropped after
-    /// the request was sent): the runner may hold the view or may never have
-    /// received it. Its acceptance line was not logged then; it is logged
-    /// when the runner reports applying the view or a later one. Not saved:
-    /// after a restart Setup offers the view again in any case.
+    /// came back (the call's deadline passed, the connection dropped after
+    /// the request was sent, or the client could not prove it stayed
+    /// unsent): the runner may hold the view or may never have received it.
+    /// Its acceptance line was not logged then; it is logged when the runner
+    /// reports applying the view or a later one. Not saved: after a restart
+    /// Setup offers the view again in any case.
     #[serde(skip)]
     answer_lost: bool,
+    /// When ck-mc handed the view over, in milliseconds since the Unix epoch
+    /// (wall clock); set together with `answer_lost`. The acceptance line
+    /// logged on confirmation comes with a later notice, often after the
+    /// step that first rendered the view, so it states this time: the
+    /// cache-bust watcher places the view by it rather than by the line's
+    /// own time. Not saved, like `answer_lost`.
+    #[serde(skip)]
+    handed_over_ms: i64,
 }
 
 /// The state a view's acceptance replaced.
@@ -4868,6 +4877,7 @@ impl Session {
             return (false, None);
         }
         let request = ApplyViewRequest::new(view.clone());
+        let handed_over_ms = user_commands::wall_now();
         match client.apply_view(&self.key, request).await {
             Ok(ApplyViewAnswer::Accepted) => {
                 self.runner_holds(view.version);
@@ -4929,12 +4939,13 @@ impl Session {
                         .is_some_and(|held| held.checksum == view.checksum);
                 return (delivered, Some(durable));
             }
-            // The request was sent but its answer was lost, so the runner may
-            // hold the view. Rolling it back would queue its drops again and
-            // show it undelivered while the runner serves it. It stays as
-            // handed over, the state a ck-mc restart right after the call
-            // finds: the runner's next report confirms it, or the next notice
-            // offers it again, and a refusal then rolls it back.
+            // The request may have reached the runner, but no answer came
+            // back, so the runner may hold the view. Rolling it back would
+            // queue its drops again and show it undelivered while the runner
+            // serves it. It stays as handed over, the state a ck-mc restart
+            // right after the call finds: the runner's next report confirms
+            // it, or the next notice offers it again, and a refusal then
+            // rolls it back.
             Err(error) if error.outcome_unknown => {
                 tracing::warn!(
                     "ck-mc: session {}: no answer to view {}, which the runner may hold: {error}; it waits for the runner's next report",
@@ -4947,6 +4958,7 @@ impl Session {
                     .find(|pending| pending.view.version == view.version)
                 {
                     pending.answer_lost = true;
+                    pending.handed_over_ms = handed_over_ms;
                 }
                 self.reoffer_pending = true;
                 return (true, Some(durable));
@@ -5188,6 +5200,7 @@ impl Session {
             accepted: false,
             excused: Vec::new(),
             answer_lost: false,
+            handed_over_ms: 0,
         });
         self.forget_queued(&covered);
         if std::mem::take(&mut self.next_latch) {
@@ -5270,15 +5283,18 @@ impl Session {
                 // A view whose answer was lost never logged its acceptance.
                 // The runner's report is the first word that it took the
                 // view, so the line the cache-bust analyzer looks for is
-                // written now, once, as the view leaves the list.
+                // written now, once, as the view leaves the list. It comes
+                // with this notice, often after the step that first rendered
+                // the view, so it ends with when the view was handed over.
                 for pending in self.unconfirmed[..=at]
                     .iter()
                     .filter(|pending| pending.answer_lost)
                 {
-                    self.log_view_accepted(
-                        &pending.view,
-                        Some("confirmed by the runner after its apply answer was lost"),
+                    let note = format!(
+                        "confirmed by the runner after its apply answer was lost; handed over at {}",
+                        crate::upkeep::iso_8601(pending.handed_over_ms)
                     );
+                    self.log_view_accepted(&pending.view, Some(&note));
                 }
                 self.unconfirmed.drain(..=at);
                 self.reset_transcript_retry();

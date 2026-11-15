@@ -1821,12 +1821,28 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
         message: format!("{method}: {error:?}"),
         code,
         detail,
-        // `OutcomeUnknown` is the client's word for a request it wrote and
-        // saw no answer to. Every other error still counts as a failed call,
-        // including the rare `NotSent` that cannot prove the request stayed
-        // unsent (`never_forwarded() == Some(false)`).
-        outcome_unknown: matches!(error, subc_client_rs::CallError::OutcomeUnknown(_)),
+        // A request may have reached the runner when the client wrote it and
+        // saw no answer (`OutcomeUnknown`), and also when a `NotSent` can't
+        // prove it stayed unsent (`never_forwarded() == Some(false)`: the
+        // reply channel closed after the writer took the request, or a resend
+        // followed a refusal an older daemon did not mark as unsent). Both
+        // count as "may have arrived" because guessing wrong costs far less
+        // that way: a view the runner never received is offered again on the
+        // next notice, which the runner settles, while rolling back a view
+        // the runner holds queues its drops again, shows it undelivered in
+        // the apps and loses its acceptance line.
+        outcome_unknown: may_have_arrived(
+            matches!(error, subc_client_rs::CallError::OutcomeUnknown(_)),
+            error.never_forwarded(),
+        ),
     }
+}
+
+/// Whether a failed call may have reached the runner, from what the client
+/// reports about it: no answer to a written request (`outcome_unknown`), or
+/// [`subc_client_rs::CallError::never_forwarded`] (see [`call_error`]).
+fn may_have_arrived(outcome_unknown: bool, never_forwarded: Option<bool>) -> bool {
+    outcome_unknown || never_forwarded == Some(false)
 }
 
 #[cfg(test)]

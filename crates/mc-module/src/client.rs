@@ -32,10 +32,11 @@ pub struct ClientError {
     pub code: Option<String>,
     /// The refusal's `detail`, when the runner's error body carried one.
     pub detail: Option<serde_json::Value>,
-    /// The request left ck-mc, but no answer came back: its deadline passed,
-    /// or the connection or route ended after it was sent. The runner may
-    /// have received it and acted on it, so a caller must not treat it as a
-    /// call that never happened.
+    /// The request may have left ck-mc, but no answer came back: its
+    /// deadline passed, the connection or route ended after it was sent, or
+    /// the client could not prove it stayed unsent. The runner may have
+    /// received it and acted on it, so a caller must not treat it as a call
+    /// that never happened.
     pub outcome_unknown: bool,
 }
 
