@@ -13,6 +13,8 @@ export interface HiddenChildCleanupRecord {
     directory: string;
     created_at: number;
     deadline_at?: number;
+    /** Set by the sweep to the wall-clock time of the latest removal attempt that failed. */
+    failed_at?: number;
 }
 
 /** Root sessions have no parent to clean them up after a crash; keep a durable removal retry. */
@@ -33,6 +35,12 @@ export function extendHiddenChildDeadline(db: Database, id: string, deadlineAt: 
          SET value = json_set(value, '$.deadline_at', MAX(COALESCE(json_extract(value, '$.deadline_at'), 0), ?))
          WHERE key = ?`,
     ).run(deadlineAt, `${PREFIX}${id}`);
+}
+
+function markHiddenChildRemovalFailed(db: Database, id: string, failedAt: number): void {
+    db.prepare(
+        "UPDATE schema_migrations_meta SET value = json_set(value, '$.failed_at', ?) WHERE key = ?",
+    ).run(failedAt, `${PREFIX}${id}`);
 }
 
 interface SweepOptions {
@@ -84,8 +92,20 @@ export async function sweepHiddenChildren(
     const clock = options.clock ?? (() => performance.now());
     const passDeadline = clock() + (options.budgetMs ?? SWEEP_BUDGET_MS);
     let remaining = options.limit ?? SWEEP_REMOVAL_LIMIT;
+    // A failed removal keeps its record and still uses up part of the pass's removal limit and
+    // time budget. Records never tried come first (oldest first) and failed ones follow (oldest
+    // failure first), so records that keep failing are retried without starving the rest.
+    // json_valid keeps one malformed value from failing the whole query; the loop reports it.
     const rows = db
-        .prepare("SELECT key, value FROM schema_migrations_meta WHERE key GLOB ?")
+        .prepare(
+            `SELECT key, value FROM (
+                SELECT key, value,
+                    CASE WHEN json_valid(value) THEN json_extract(value, '$.failed_at') END AS failed_at,
+                    CASE WHEN json_valid(value) THEN json_extract(value, '$.created_at') END AS created_at
+                FROM schema_migrations_meta WHERE key GLOB ?
+            )
+            ORDER BY failed_at IS NOT NULL, COALESCE(failed_at, created_at), created_at, key`,
+        )
         .all(`${PREFIX}*`) as Array<{ key: string; value: string }>;
     for (const row of rows) {
         if (remaining <= 0 || clock() >= passDeadline || options.shouldStop?.()) break;
@@ -125,7 +145,17 @@ export async function sweepHiddenChildren(
                     }),
                 ]);
             } catch (error) {
-                if (!isSessionNotFound(error)) throw error;
+                if (!isSessionNotFound(error)) {
+                    try {
+                        markHiddenChildRemovalFailed(db, child.id, now);
+                    } catch (markError) {
+                        // The mark only orders later passes; report the removal failure below.
+                        note(
+                            `[magic-context] hidden-child sweep could not mark ${row.key} failed: ${String(markError)}`,
+                        );
+                    }
+                    throw error;
+                }
             }
             forgetHiddenChild(db, child.id);
             note(`[magic-context] stale hidden child ${child.id} removed`);

@@ -212,6 +212,40 @@ test("the sweep clears not-found records but keeps failed removals for its next 
     }
 });
 
+test("records whose removal keeps failing cannot starve a removable record behind them", async () => {
+    const state = fixture();
+    try {
+        // More failing records than one pass may try, all created before the removable record and
+        // ahead of it in key order, so creation or storage order alone tries every one of them first.
+        const failing = Array.from(
+            { length: 60 },
+            (_, index) => `failing-${String(index).padStart(2, "0")}`,
+        );
+        for (const [index, id] of failing.entries())
+            state.add(id, HIDDEN_CHILD_MAX_AGE_MS + 1000 - index);
+        state.add("removable", HIDDEN_CHILD_MAX_AGE_MS + 1);
+        let attempts: string[] = [];
+        const remove = async ({ sessionID }: { sessionID: string }) => {
+            attempts.push(sessionID);
+            if (sessionID !== "removable") throw new Error("host unavailable");
+        };
+        await sweepHiddenChildren(state.db, remove, () => {}, { now: state.now });
+        expect(attempts).toEqual(failing.slice(0, 50));
+        attempts = [];
+        await sweepHiddenChildren(state.db, remove, () => {}, { now: state.now + 1 });
+        // Records not yet tried go first; failed ones follow, oldest failure first.
+        expect(attempts.slice(0, 11)).toEqual([...failing.slice(50), "removable"]);
+        expect(attempts.slice(11)).toEqual(failing.slice(0, 39));
+        expect(state.ids()).toEqual(failing.map((id) => `hidden_child:${id}`));
+        attempts = [];
+        await sweepHiddenChildren(state.db, remove, () => {}, { now: state.now + 2 });
+        // The records whose last failure is oldest are retried before those that just failed.
+        expect(attempts.slice(0, 11)).toEqual(failing.slice(39, 50));
+    } finally {
+        state.db.close();
+    }
+});
+
 test("the sweep bounds stuck removals and retains their records", async () => {
     const state = fixture();
     try {

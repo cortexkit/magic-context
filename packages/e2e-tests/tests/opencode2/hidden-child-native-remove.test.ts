@@ -330,18 +330,30 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
             expect((await resumedClient.session.get({ sessionID: interrupted.sessionID })).metadata?.magic_context).toBe("hidden-run");
             expect(host.mock.requests()).toEqual([]);
             await activeHost.stopHost();
-            // Advance only the durable record's age; production still uses the one-hour grace.
+            // Age only the durable record, leaving the production bounds unchanged. The sweep keeps a
+            // record until both its one-hour age and its run deadline plus ten minutes have passed;
+            // the interrupted run's deadline is still its configured timeout from now, so move both.
             withContextDb(host.env, (db) => {
                 const key = `hidden_child:${interrupted.sessionID}`;
                 const row = db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(key) as { value: string };
-                db.prepare("UPDATE schema_migrations_meta SET value = ? WHERE key = ?").run(JSON.stringify({ ...JSON.parse(row.value), created_at: Date.now() - 3_600_001 }), key);
+                const record = JSON.parse(row.value) as { created_at: number; deadline_at?: number };
+                expect(record.deadline_at).toBeNumber();
+                db.prepare("UPDATE schema_migrations_meta SET value = ? WHERE key = ?").run(JSON.stringify({ ...record, created_at: Date.now() - 3_600_001, deadline_at: Date.now() - 600_001 }), key);
             }, true);
             rmSync(serviceRegistrationPath(fixture.env), { force: true });
             activeHost = await restart();
             const sweptClient = OpenCode.make({ baseUrl: activeHost.url, headers: { authorization: `Basic ${btoa(`opencode:${activeHost.password}`)}` } });
             await waitForPluginActive(sweptClient, host.cwd);
-            await expect(sweptClient.session.get({ sessionID: interrupted.sessionID })).rejects.toThrow();
-            expect(withContextDb(host.env, (db) => db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(`hidden_child:${interrupted.sessionID}`))).toBeFalsy();
+            // The startup sweep runs in the background after the plugin reports active.
+            await eventually(async () => {
+                try {
+                    await sweptClient.session.get({ sessionID: interrupted.sessionID });
+                    return undefined;
+                } catch {
+                    return true;
+                }
+            }, "the startup sweep to remove the interrupted child");
+            await eventually(() => withContextDb(host.env, (db) => db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(`hidden_child:${interrupted.sessionID}`)) ? undefined : true, "the startup sweep to drop the interrupted child's record");
             console.log(JSON.stringify({ cliVersion, interruptedChild: interrupted.sessionID, resumedTurnRefused: true, startupSweepRemoved: true, openDatabases: inspectOpenFiles(activeHost.pid!, activeHost.root, activeHost.env).filter((path) => /\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path)) }));
         }
     } catch (error) {
