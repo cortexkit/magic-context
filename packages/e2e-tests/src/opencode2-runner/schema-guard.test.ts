@@ -44,5 +44,11 @@ test("fixture readiness refuses a failed schema guard even when Magic Context is
 test("an unpinned 2.2 host requires an exact external schema version", () => {
 	expect(schemaGeneration("opencode v2.2.2", "2.2.2")).toBe("2.2");
 	expect(() => schemaGeneration("opencode v2.2.2", "2.2.1")).toThrow("No e2e LLM schema bundle");
-	expect(() => schemaGeneration("opencode v2.3.0", "2.3.0")).toThrow("No e2e LLM schema bundle");
+});
+
+test("an unpinned 2.3 host requires its exact external schema rather than the pinned oracle", () => {
+	expect(schemaGeneration("opencode v2.3.0", "2.3.0")).toBe("2.3");
+	expect(() => schemaGeneration("opencode v2.3.0")).toThrow("No e2e LLM schema bundle");
+	expect(() => schemaGeneration("opencode v2.3.0", "2.2.2")).toThrow("No e2e LLM schema bundle");
+	expect(() => schemaGeneration("opencode v2.4.0", "2.4.0")).toThrow("No e2e LLM schema bundle");
 });

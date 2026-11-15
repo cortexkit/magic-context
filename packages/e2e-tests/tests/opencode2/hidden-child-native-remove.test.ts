@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import {
     existsSync,
-    mkdtempSync,
+    mkdirSync,
     readdirSync,
     readFileSync,
     realpathSync,
@@ -13,10 +13,12 @@ import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { type RpcPortFileRecord, rpcPortDir } from "../../../plugin/src/shared/rpc-utils";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     CLI,
     inspectOpenFiles,
     isolation,
+    serviceRegistrationPath,
     spawnOpencode2,
     waitForPluginActive,
 } from "../../src/opencode2-runner/spawn";
@@ -66,7 +68,10 @@ function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T, writ
 }
 
 test("hidden runs on OpenCode 2 are unparented and removed with no leftover root sessions", async () => {
-    const bundleDir = mkdtempSync(join(tmpdir(), "mc-hidden-child-native-probe-"));
+    const namespace = join(tmpdir(), "magic-context");
+    mkdirSync(namespace, { recursive: true });
+    const fixture = isolation(createTestTempDirFromPath(join(namespace, "issue-913-")));
+    const bundleDir = join(fixture.root, "native-probe");
     const build = await Bun.build({
         entrypoints: [join(import.meta.dir, "hidden-child-native-probe.ts")],
         outdir: bundleDir,
@@ -76,7 +81,6 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
     });
     if (!build.success) throw new Error(build.logs.join("\n"));
 
-    const fixture = isolation();
     const logPath = join(fixture.root, "magic-context.log");
     fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
     const host = await spawnOpencode2({
@@ -84,11 +88,14 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
         probePlugin: bundleDir,
         modelContextLimit: 200_000,
         modelOutputLimit: 1_024,
+        serviceMode: true,
+        waitForTransport: true,
         magicContextConfig: {
             historian: { two_pass: false },
             dreamer: { tasks: { "review-user-memories": { schedule: "0 3 * * *" } } },
         },
     });
+    let activeHost = host;
     const pluginLog = () => (existsSync(logPath) ? readFileSync(logPath, "utf8") : "");
     try {
         const client = OpenCode.make({
@@ -284,18 +291,19 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
             expect(rootsAfter).toEqual(rootsBefore);
             expect(await childrenOfUser()).toEqual([]);
             const userMessagesAfter = (await client.message.list({ sessionID: user.id })).data;
+            console.log(JSON.stringify({ cliVersion, userMessagesBefore: userMessagesBefore.length, userMessagesAfter: userMessagesAfter.length, historianChildren: historianChildren.length, dreamerChildren: dreamerChildren.length }));
             // ...its completion did not reach the user's session...
             expect(userMessagesAfter.map((row) => row.id)).toEqual(
                 userMessagesBefore.map((row) => row.id),
             );
             // ...because it was never created under that session.
             for (const child of hiddenChildren) expect(child.parentID ?? null).toBeNull();
-            // Nothing about these children is recorded for later cleanup.
+            // Successful removal drains the durable cleanup records.
             expect(
                 withContextDb(host.env, (db) =>
                     db
                         .prepare(
-                            "SELECT value FROM schema_migrations_meta WHERE key LIKE 'opencode2_hidden_children:%'",
+                            "SELECT value FROM schema_migrations_meta WHERE key LIKE 'hidden_child:%'",
                         )
                         .all(),
                 ),
@@ -304,11 +312,47 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
         }
         expect(pluginLog()).not.toContain("could not be removed");
         expect(pluginLog()).not.toContain("could not read back hidden child");
+
+        if (cliVersion === "2.3.0") {
+            // Kill an in-flight historian, preserving isolated context.db, opencode2.db and the mock.
+            host.mock.reset();
+            host.mock.setDefault({ text: "interrupted historian", delayMs: 60_000, usage: { input_tokens: 100, output_tokens: 10 } });
+            const known = new Set(hiddenChildren.map((child) => child.sessionID));
+            await client.session.command({ sessionID: user.id, name: "ctx-recomp", text: "" });
+            const interrupted = await eventually(() => probed("historian").find((child) => !known.has(child.sessionID)), "an interrupted historian child");
+            await eventually(() => host.mock.requests().length > 0 ? true : undefined, "the in-flight historian request");
+            expect(withContextDb(host.env, (db) => db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(`hidden_child:${interrupted.sessionID}`))).toBeTruthy();
+            await host.stopHost();
+            rmSync(serviceRegistrationPath(fixture.env), { force: true });
+            host.mock.reset();
+            host.mock.setDefault({ text: "must not reach the provider", usage: { input_tokens: 10, output_tokens: 2 } });
+            const restart = () => spawnOpencode2({ existingIsolation: fixture, existingMock: { mock: host.mock, baseURL: host.mockBaseURL }, probePlugin: bundleDir, serviceMode: true, waitForTransport: true });
+            activeHost = await restart();
+            const resumedClient = OpenCode.make({ baseUrl: activeHost.url, headers: { authorization: `Basic ${btoa(`opencode:${activeHost.password}`)}` } });
+            await waitForPluginActive(resumedClient, host.cwd);
+            await eventually(() => pluginLog().includes("Refusing a Magic Context hidden-agent turn this instance did not register") ? true : undefined, "the restarted host's unregistered hidden-run refusal");
+            expect((await resumedClient.session.get({ sessionID: interrupted.sessionID })).metadata?.magic_context).toBe("hidden-run");
+            expect(host.mock.requests()).toEqual([]);
+            await activeHost.stopHost();
+            // Advance only the durable record's age; production still uses the one-hour grace.
+            withContextDb(host.env, (db) => {
+                const key = `hidden_child:${interrupted.sessionID}`;
+                const row = db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(key) as { value: string };
+                db.prepare("UPDATE schema_migrations_meta SET value = ? WHERE key = ?").run(JSON.stringify({ ...JSON.parse(row.value), created_at: Date.now() - 3_600_001 }), key);
+            }, true);
+            rmSync(serviceRegistrationPath(fixture.env), { force: true });
+            activeHost = await restart();
+            const sweptClient = OpenCode.make({ baseUrl: activeHost.url, headers: { authorization: `Basic ${btoa(`opencode:${activeHost.password}`)}` } });
+            await waitForPluginActive(sweptClient, host.cwd);
+            await expect(sweptClient.session.get({ sessionID: interrupted.sessionID })).rejects.toThrow();
+            expect(withContextDb(host.env, (db) => db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(`hidden_child:${interrupted.sessionID}`))).toBeFalsy();
+            console.log(JSON.stringify({ cliVersion, interruptedChild: interrupted.sessionID, resumedTurnRefused: true, startupSweepRemoved: true, openDatabases: inspectOpenFiles(activeHost.pid!, activeHost.root, activeHost.env).filter((path) => /\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path)) }));
+        }
     } catch (error) {
-        console.error(host.stderr(), pluginLog().slice(-20_000));
+        console.error(activeHost.stderr(), pluginLog().slice(-20_000));
         throw error;
     } finally {
-        await host.stop();
+        await activeHost.stop();
         rmSync(bundleDir, { recursive: true, force: true });
     }
     // Two hidden runs plus a real host's boot and its teardown checks (open-file inspection and the

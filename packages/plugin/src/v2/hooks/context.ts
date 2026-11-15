@@ -197,6 +197,7 @@ import {
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
+import { HIDDEN_CHILD_SWEEP_INTERVAL_MS, sweepHiddenChildren } from "../hidden-child-sweep";
 import {
     createLateHiddenExecutor,
     createV2HiddenCompletionExecutor,
@@ -1075,10 +1076,28 @@ export async function registerContext(context: V2Context) {
     let db: ReturnType<typeof openDatabase> | undefined = await probeV2StorageAtBoot(storage);
     const storageOpenedAtBoot = db !== undefined;
     let legacyCleanupStarted = false;
+    let hiddenChildSweep: Promise<void> | undefined;
+    let hiddenChildSweepTimer: ReturnType<typeof setInterval> | undefined;
+    const sweepChildren = (database: NonNullable<typeof db>) => {
+        if (hiddenChildSweep) return hiddenChildSweep;
+        hiddenChildSweep = sweepHiddenChildren(database, nativeRemove, log)
+            .catch((error) => log("[magic-context] hidden-child sweep failed", error))
+            .finally(() => {
+                hiddenChildSweep = undefined;
+            });
+        return hiddenChildSweep;
+    };
     const cleanupLegacyOnce = async (database: NonNullable<typeof db>) => {
         if (legacyCleanupStarted) return;
         legacyCleanupStarted = true;
         await cleanupLegacyHiddenChildren(database, nativeRemove, log);
+        await sweepChildren(database);
+        hiddenChildSweepTimer = inRootAsyncContext(() =>
+            setInterval(() => {
+                void sweepChildren(database);
+            }, HIDDEN_CHILD_SWEEP_INTERVAL_MS),
+        );
+        hiddenChildSweepTimer.unref?.();
     };
     if (db && isDatabasePersisted(db)) await cleanupLegacyOnce(db);
     let storageRecoveryAnnounced = false;
@@ -3735,6 +3754,8 @@ export async function registerContext(context: V2Context) {
     );
     return {
         async dispose() {
+            if (hiddenChildSweepTimer) clearInterval(hiddenChildSweepTimer);
+            await hiddenChildSweep;
             messageTimesCache.clear();
             hostFoldIdle?.dispose();
             usageController.abort();

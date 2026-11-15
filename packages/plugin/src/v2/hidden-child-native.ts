@@ -1,4 +1,5 @@
 import type { HiddenRunIdentity } from "../hooks/magic-context/compartment-runner-types";
+import type { Database } from "../shared/sqlite";
 import {
     childCreateInput,
     errorText,
@@ -10,12 +11,14 @@ import {
     type PersistedHiddenChild,
     roleTitle,
 } from "./hidden-child-record";
+import { forgetHiddenChild, recordHiddenChild } from "./hidden-child-sweep";
 import type { HiddenChildHook } from "./hooks/hidden-child";
 
 /**
  * The hidden-child lifecycle for OpenCode 2 hosts whose plugin session API has `session.remove`.
  * Every run gets a fresh root child in the run's directory, and the child is removed when the run
- * ends, whether it succeeded or failed. Nothing is recorded in context.db.
+ * ends, whether it succeeded or failed. A context.db record survives failed removal or a crash
+ * so an age-gated sweep can retry without touching another instance's live run.
  *
  * The child is never given the user's session as its parent: OpenCode 2.3 reports every idle of a
  * parented session to its parent and wakes the parent, so each historian or dreamer run would
@@ -50,6 +53,7 @@ export function createNativeHiddenChildren(
     host: HiddenChildHost,
     removeSession: RemoveSession,
     options: {
+        db: Database;
         hook: HiddenChildHook;
         generation: string;
         keepSubagents: boolean;
@@ -80,9 +84,19 @@ export function createNativeHiddenChildren(
                 } finally {
                     if (timer) clearTimeout(timer);
                 }
+                forgetHiddenChild(options.db, child.id);
                 options.log(`[magic-context] hidden child ${child.id} removed`);
             } catch (error) {
-                if (isSessionNotFound(error)) return;
+                if (isSessionNotFound(error)) {
+                    try {
+                        forgetHiddenChild(options.db, child.id);
+                    } catch (storeError) {
+                        options.log(
+                            `[magic-context] hidden child ${child.id} record cleanup deferred: ${errorText(storeError)}`,
+                        );
+                    }
+                    return;
+                }
                 options.log(
                     `[magic-context] hidden child ${child.id} could not be removed: ${errorText(error)}`,
                 );
@@ -102,6 +116,39 @@ export function createNativeHiddenChildren(
         const input = childCreateInput(identity, role, model);
         const created = await host.create(input);
         if (!created.id) throw new Error("OpenCode 2 did not return a child session id");
+        const createdAt = Date.now();
+        if (!options.keepSubagents) {
+            try {
+                recordHiddenChild(options.db, {
+                    id: created.id,
+                    directory: identity.directory,
+                    created_at: createdAt,
+                });
+            } catch (storeError) {
+                let removed = false;
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                try {
+                    await Promise.race([
+                        removeSession({ sessionID: created.id }),
+                        new Promise<never>((_, reject) => {
+                            timer = setTimeout(
+                                () => reject(new Error("session.remove timed out")),
+                                options.removalTimeoutMs ?? 5000,
+                            );
+                        }),
+                    ]);
+                    removed = true;
+                } catch (error) {
+                    removed = isSessionNotFound(error);
+                } finally {
+                    if (timer) clearTimeout(timer);
+                }
+                options.log(
+                    `[magic-context] hidden child ${created.id} record failed; removed=${removed}: ${errorText(storeError)}`,
+                );
+                throw storeError;
+            }
+        }
         options.hook.registerChild(created.id, input.agent);
         options.log(
             `[magic-context] hidden child ${created.id} created role=${role} keep_subagents=${options.keepSubagents}`,
@@ -112,7 +159,7 @@ export function createNativeHiddenChildren(
             generation: options.generation,
             title: roleTitle(role),
             model,
-            created_at: Date.now(),
+            created_at: createdAt,
             directory: identity.directory,
         };
     };

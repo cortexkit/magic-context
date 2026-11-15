@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import type { HiddenRunIdentity } from "../hooks/magic-context/compartment-runner-types";
 import { Database } from "../shared/sqlite";
 import { cleanupLegacyHiddenChildren } from "./hidden-child-cleanup";
-import { isSessionNotFound, nativeSessionRemove } from "./hidden-child-native";
+import {
+    createNativeHiddenChildren,
+    isSessionNotFound,
+    nativeSessionRemove,
+} from "./hidden-child-native";
 import { createV2HiddenCompletionExecutor, type HiddenChildHost } from "./hidden-completion";
 import { HIDDEN_DREAMER_AGENT, HiddenChildHook } from "./hooks/hidden-child";
 import type { SessionContext } from "./hooks/types";
@@ -283,7 +287,7 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
             expect(state.removed).toEqual(["child-1", "child-2", "child-3"]);
             expect(state.legacyRemovals).toEqual([]);
             expect(state.logs).toEqual([]);
-            // Nothing about these children is recorded in context.db.
+            // Successful removal drains the durable retry records.
             expect(state.metaRows()).toBe(0);
         } finally {
             state.db.close();
@@ -354,6 +358,118 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
         try {
             await state.runOnce(historian);
             expect(state.removed).toEqual([]);
+        } finally {
+            state.db.close();
+        }
+    });
+});
+
+describe("durable native hidden-child cleanup", () => {
+    function fixture(
+        options: { keepSubagents?: boolean; removeError?: unknown; storeFails?: boolean } = {},
+    ) {
+        const db = new Database(":memory:");
+        db.exec("CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+        if (options.storeFails)
+            db.exec(
+                "CREATE TRIGGER reject_record BEFORE INSERT ON schema_migrations_meta BEGIN SELECT RAISE(FAIL, 'store unavailable'); END",
+            );
+        const removals: string[] = [];
+        const logs: string[] = [];
+        const hook = new HiddenChildHook();
+        const lifecycle = createNativeHiddenChildren(
+            { create: async () => ({ id: "durable-child" }) } as HiddenChildHost,
+            async ({ sessionID }) => {
+                removals.push(sessionID);
+                if (options.removeError) throw options.removeError;
+            },
+            {
+                db,
+                hook,
+                generation: "test",
+                keepSubagents: options.keepSubagents === true,
+                log: (line) => logs.push(line),
+            },
+        );
+        const open = () =>
+            lifecycle.open(historian, "historian", { providerID: "mock", modelID: "cheap" });
+        const records = () =>
+            db.prepare("SELECT key, value FROM schema_migrations_meta").all() as Array<{
+                key: string;
+                value: string;
+            }>;
+        return { db, lifecycle, open, records, removals, logs, hook };
+    }
+
+    test("records a child before handing it to the run", async () => {
+        const state = fixture();
+        try {
+            const child = await state.open();
+            expect(state.records()).toEqual([
+                {
+                    key: "hidden_child:durable-child",
+                    value: JSON.stringify({
+                        id: child.id,
+                        directory: "/project",
+                        created_at: child.created_at,
+                    }),
+                },
+            ]);
+            expect(state.removals).toEqual([]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    for (const missing of [false, true]) {
+        test(`clears the durable record after ${missing ? "not-found" : "successful removal"}`, async () => {
+            const state = fixture({ removeError: missing ? { status: 404 } : undefined });
+            try {
+                const child = await state.open();
+                expect(state.records()).toHaveLength(1);
+                await state.lifecycle.finish(child, false);
+                expect(state.removals).toEqual([child.id]);
+                expect(state.records()).toEqual([]);
+            } finally {
+                state.db.close();
+            }
+        });
+    }
+
+    test("failed removal keeps the durable record for a later sweep", async () => {
+        const state = fixture({ removeError: new Error("host unavailable") });
+        try {
+            const child = await state.open();
+            await state.lifecycle.finish(child, false);
+            expect(state.records()).toHaveLength(1);
+            expect(state.logs.at(-1)).toContain("could not be removed");
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keep_subagents records nothing even while the child is running", async () => {
+        const state = fixture({ keepSubagents: true });
+        try {
+            const child = await state.open();
+            expect(state.records()).toEqual([]);
+            await state.lifecycle.finish(child, false);
+            expect(state.removals).toEqual([]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("a store failure refuses only the hidden run and removes its unrecorded child", async () => {
+        const state = fixture({ storeFails: true });
+        try {
+            await expect(state.open()).rejects.toThrow("store unavailable");
+            expect(state.removals).toEqual(["durable-child"]);
+            expect(state.records()).toEqual([]);
+            expect(state.hook.agentFor("durable-child")).toBeUndefined();
+            expect(state.logs).toEqual([
+                "[magic-context] hidden child durable-child record failed; removed=true: store unavailable",
+            ]);
         } finally {
             state.db.close();
         }

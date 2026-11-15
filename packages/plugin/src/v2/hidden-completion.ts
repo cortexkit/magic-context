@@ -530,6 +530,7 @@ export async function createV2HiddenCompletionExecutor(
         host,
         (input) => removeSession.call(host, input),
         {
+            db: options.db,
             hook: options.hook,
             generation,
             keepSubagents: options.keepSubagents === true,
