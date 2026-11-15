@@ -11,7 +11,11 @@ import {
     type PersistedHiddenChild,
     roleTitle,
 } from "./hidden-child-record";
-import { forgetHiddenChild, recordHiddenChild } from "./hidden-child-sweep";
+import {
+    extendHiddenChildDeadline,
+    forgetHiddenChild,
+    recordHiddenChild,
+} from "./hidden-child-sweep";
 import type { HiddenChildHook } from "./hooks/hidden-child";
 
 /**
@@ -26,6 +30,12 @@ import type { HiddenChildHook } from "./hooks/hidden-child";
  */
 
 type RemoveSession = NonNullable<HiddenChildHost["removeSession"]>;
+
+// Plugin instances share a process. A sweep from one instance must not remove another's run.
+const liveChildren = new Set<string>();
+export function isLiveHiddenChild(id: string): boolean {
+    return liveChildren.has(id);
+}
 
 /**
  * The feature gate for this lifecycle: the host's own `session.remove`, bound to its session API,
@@ -103,6 +113,8 @@ export function createNativeHiddenChildren(
             }
         })().finally(() => {
             removing.delete(child.id);
+            // Failed removals remain durable retries, not live runs that the sweep must skip.
+            liveChildren.delete(child.id);
         });
         removing.set(child.id, done);
         return done;
@@ -117,12 +129,14 @@ export function createNativeHiddenChildren(
         const created = await host.create(input);
         if (!created.id) throw new Error("OpenCode 2 did not return a child session id");
         const createdAt = Date.now();
+        liveChildren.add(created.id);
         if (!options.keepSubagents) {
             try {
                 recordHiddenChild(options.db, {
                     id: created.id,
                     directory: identity.directory,
                     created_at: createdAt,
+                    deadline_at: createdAt + identity.timeoutMs,
                 });
             } catch (storeError) {
                 let removed = false;
@@ -142,6 +156,7 @@ export function createNativeHiddenChildren(
                     removed = isSessionNotFound(error);
                 } finally {
                     if (timer) clearTimeout(timer);
+                    liveChildren.delete(created.id);
                 }
                 options.log(
                     `[magic-context] hidden child ${created.id} record failed; removed=${removed}: ${errorText(storeError)}`,
@@ -172,6 +187,7 @@ export function createNativeHiddenChildren(
         create,
         retire(child) {
             if (kept(child)) {
+                liveChildren.delete(child.id);
                 options.log(`[magic-context] hidden child ${child.id} kept (keep_subagents)`);
             } else {
                 void remove(child);
@@ -183,9 +199,20 @@ export function createNativeHiddenChildren(
                 return;
             }
             if (kept(child)) {
+                liveChildren.delete(child.id);
                 options.log(`[magic-context] hidden child ${child.id} kept (keep_subagents)`);
             } else {
                 await remove(child);
+            }
+        },
+        extendDeadline(child, deadlineAt) {
+            if (options.keepSubagents) return;
+            try {
+                extendHiddenChildDeadline(options.db, child.id, deadlineAt);
+            } catch (error) {
+                options.log(
+                    `[magic-context] hidden child ${child.id} deadline update deferred: ${errorText(error)}`,
+                );
             }
         },
         updateModel: (child, model) => ({ ...child, model }),

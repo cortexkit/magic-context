@@ -1,19 +1,17 @@
 import { expect, test } from "bun:test";
 import {
     existsSync,
-    mkdirSync,
     readdirSync,
     readFileSync,
     realpathSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { type RpcPortFileRecord, rpcPortDir } from "../../../plugin/src/shared/rpc-utils";
 import { Database } from "../../../plugin/src/shared/sqlite";
-import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
+import { createTestTempDir } from "../../../plugin/src/shared/test-temp-dir";
 import {
     CLI,
     inspectOpenFiles,
@@ -68,9 +66,7 @@ function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T, writ
 }
 
 test("hidden runs on OpenCode 2 are unparented and removed with no leftover root sessions", async () => {
-    const namespace = join(tmpdir(), "magic-context");
-    mkdirSync(namespace, { recursive: true });
-    const fixture = isolation(createTestTempDirFromPath(join(namespace, "issue-913-")));
+    const fixture = isolation(createTestTempDir("hidden-child-native-remove-").dir);
     const bundleDir = join(fixture.root, "native-probe");
     const build = await Bun.build({
         entrypoints: [join(import.meta.dir, "hidden-child-native-probe.ts")],

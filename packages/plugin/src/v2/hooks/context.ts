@@ -196,8 +196,8 @@ import {
 } from "../fold/summary";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
-import { nativeSessionRemove } from "../hidden-child-native";
-import { HIDDEN_CHILD_SWEEP_INTERVAL_MS, sweepHiddenChildren } from "../hidden-child-sweep";
+import { isLiveHiddenChild, nativeSessionRemove } from "../hidden-child-native";
+import { createHiddenChildSweeper, HIDDEN_CHILD_SWEEP_INTERVAL_MS } from "../hidden-child-sweep";
 import {
     createLateHiddenExecutor,
     createV2HiddenCompletionExecutor,
@@ -1076,22 +1076,18 @@ export async function registerContext(context: V2Context) {
     let db: ReturnType<typeof openDatabase> | undefined = await probeV2StorageAtBoot(storage);
     const storageOpenedAtBoot = db !== undefined;
     let legacyCleanupStarted = false;
-    let hiddenChildSweep: Promise<void> | undefined;
+    const hiddenChildSweep = createHiddenChildSweeper(nativeRemove, log, {
+        isLive: isLiveHiddenChild,
+    });
     let hiddenChildSweepTimer: ReturnType<typeof setInterval> | undefined;
     const sweepChildren = (database: NonNullable<typeof db>) => {
-        if (hiddenChildSweep) return hiddenChildSweep;
-        hiddenChildSweep = sweepHiddenChildren(database, nativeRemove, log)
-            .catch((error) => log("[magic-context] hidden-child sweep failed", error))
-            .finally(() => {
-                hiddenChildSweep = undefined;
-            });
-        return hiddenChildSweep;
+        hiddenChildSweep.start(database);
     };
     const cleanupLegacyOnce = async (database: NonNullable<typeof db>) => {
         if (legacyCleanupStarted) return;
         legacyCleanupStarted = true;
         await cleanupLegacyHiddenChildren(database, nativeRemove, log);
-        await sweepChildren(database);
+        sweepChildren(database);
         hiddenChildSweepTimer = inRootAsyncContext(() =>
             setInterval(() => {
                 void sweepChildren(database);
@@ -3755,7 +3751,7 @@ export async function registerContext(context: V2Context) {
     return {
         async dispose() {
             if (hiddenChildSweepTimer) clearInterval(hiddenChildSweepTimer);
-            await hiddenChildSweep;
+            await hiddenChildSweep.dispose();
             messageTimesCache.clear();
             hostFoldIdle?.dispose();
             usageController.abort();

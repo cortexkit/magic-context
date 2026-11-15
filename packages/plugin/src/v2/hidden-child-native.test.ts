@@ -4,9 +4,11 @@ import { Database } from "../shared/sqlite";
 import { cleanupLegacyHiddenChildren } from "./hidden-child-cleanup";
 import {
     createNativeHiddenChildren,
+    isLiveHiddenChild,
     isSessionNotFound,
     nativeSessionRemove,
 } from "./hidden-child-native";
+import { HIDDEN_CHILD_MAX_AGE_MS, sweepHiddenChildren } from "./hidden-child-sweep";
 import { createV2HiddenCompletionExecutor, type HiddenChildHost } from "./hidden-completion";
 import { HIDDEN_DREAMER_AGENT, HiddenChildHook } from "./hooks/hidden-child";
 import type { SessionContext } from "./hooks/types";
@@ -412,10 +414,62 @@ describe("durable native hidden-child cleanup", () => {
                         id: child.id,
                         directory: "/project",
                         created_at: child.created_at,
+                        deadline_at: child.created_at + historian.timeoutMs,
                     }),
                 },
             ]);
             expect(state.removals).toEqual([]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("the sweep skips a live in-process child even after its recorded deadline", async () => {
+        const state = fixture();
+        const child = await state.open();
+        try {
+            const removed: string[] = [];
+            expect(isLiveHiddenChild(child.id)).toBe(true);
+            await sweepHiddenChildren(
+                state.db,
+                async ({ sessionID }) => {
+                    removed.push(sessionID);
+                },
+                () => {},
+                {
+                    now: child.created_at + 2 * HIDDEN_CHILD_MAX_AGE_MS,
+                    isLive: isLiveHiddenChild,
+                },
+            );
+            expect(removed).toEqual([]);
+            expect(state.records()).toHaveLength(1);
+        } finally {
+            await state.lifecycle.finish(child, false);
+            expect(isLiveHiddenChild(child.id)).toBe(false);
+            state.db.close();
+        }
+    });
+
+    test("a failed removal releases live ownership so the same process can sweep it later", async () => {
+        const state = fixture({ removeError: new Error("host unavailable") });
+        try {
+            const child = await state.open();
+            await state.lifecycle.finish(child, false);
+            expect(isLiveHiddenChild(child.id)).toBe(false);
+            const removed: string[] = [];
+            await sweepHiddenChildren(
+                state.db,
+                async ({ sessionID }) => {
+                    removed.push(sessionID);
+                },
+                () => {},
+                {
+                    now: child.created_at + 2 * HIDDEN_CHILD_MAX_AGE_MS,
+                    isLive: isLiveHiddenChild,
+                },
+            );
+            expect(removed).toEqual([child.id]);
+            expect(state.records()).toEqual([]);
         } finally {
             state.db.close();
         }

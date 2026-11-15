@@ -108,6 +108,8 @@ export interface HiddenChildLifecycle {
      * Resolves once any cleanup this lifecycle does for a finished run is over; never rejects.
      */
     finish(child: PersistedHiddenChild, retired: boolean): Promise<void>;
+    /** A retry can outlive the original timeout; never shorten its durable sweep protection. */
+    extendDeadline(child: PersistedHiddenChild, deadlineAt: number): void;
     updateModel(child: PersistedHiddenChild, model: HiddenChildModel): PersistedHiddenChild;
     markEverSettled(child: PersistedHiddenChild): PersistedHiddenChild;
 }

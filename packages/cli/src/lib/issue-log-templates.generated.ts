@@ -1788,6 +1788,7 @@ const TEMPLATE_DATA = [
 "transform: injected m[0]/m[1] (rematerialized=\x01, reason=\x01)",
 "[dreamer] OpenCode 2 parent session lookup failed for \x01: \x01\x020p",
 "[dreamer] smart note #\x01: read-only confirmation failed — \x01",
+"[magic-context] hidden child \x01 deadline update deferred: \x01",
 "[magic-context] host stall profiler: disconnect failed: \x01",
 "[magic-context] Migrated Magic Context \x01 config from \x01 to \x01\x021p,2p",
 "[magic-context] registered embedding config for project \x01",
