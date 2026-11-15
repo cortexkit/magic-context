@@ -1160,6 +1160,11 @@ export interface MagicContextConfig {
         /** Text parts shorter than this (characters) are left untouched. */
         min_chars: number;
     };
+    /** Rule-based drops of tool results the agent no longer needs; every rule is opt-in. */
+    auto_drop: {
+        reread: boolean;
+        retried_errors: boolean;
+    };
     embedding: EmbeddingConfig;
     rerank?: RerankConfig;
     /** User-only connection settings for the Synapse daemon. */
@@ -1594,6 +1599,25 @@ export const MagicContextConfigSchema = z
             .default({ enabled: false, min_chars: 500 })
             .describe(
                 "Age-tier caveman compression for long user/assistant text parts. Active for primary sessions when enabled; never for subagents. Oldest 20% of eligible tags (outside protected tail) go to ultra, next 20% to full, next 20% to lite, newest 40% untouched. Graduated from experimental.caveman_text_compression; opt-in, default off (lossy).",
+            ),
+        auto_drop: z
+            .object({
+                reread: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "Drop a read result once a later read of the same file covers it (the whole file, or the same offset and limit).",
+                    ),
+                retried_errors: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "Drop a failed tool call's error once a later call of the same tool succeeds. Calls the user rejected are kept.",
+                    ),
+            })
+            .default({ reread: false, retried_errors: false })
+            .describe(
+                "Rule-based drops of tool results the agent no longer needs, applied with the routine cleanup lanes so they never originate a cache bust. Protected tags, protected_tools and results carrying a user answer are kept. Dropped results stay recoverable with ctx_expand. Every rule is off by default.",
             ),
         memory: z
             .object({

@@ -1945,6 +1945,7 @@ interface RunPostTransformPhaseArgs {
         /** From the user-level `language` setting; English word rules when absent. */
         wordRules?: CavemanWordRules;
     };
+    autoDrop?: import("./auto-drop").AutoDropConfig;
     /** Deprecated input retained for older callers; supersession runs only on cache-rebuilding passes. */
     smartDrops?: boolean;
     protectedTools?: Readonly<Record<string, number>>;
@@ -3724,6 +3725,7 @@ export async function runPostTransformPhase(
                             : undefined,
                     routine: routineCleanupApplied,
                     caveman: cavemanConfig,
+                    autoDrop: args.autoDrop,
                 },
                 heuristicTags,
             );
@@ -3742,6 +3744,7 @@ export async function runPostTransformPhase(
                         protectedToolTags,
                         routine: true,
                         caveman: cavemanConfig,
+                        autoDrop: args.autoDrop,
                     },
                     getActiveTagsBySession(args.db, args.sessionId),
                 );

@@ -14,6 +14,7 @@ import {
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
 import { applyPersistedToolDrop, hasSmallToolInput } from "./apply-operations";
+import { type AutoDropConfig, selectAutoDropTags } from "./auto-drop";
 import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanup";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import {
@@ -110,6 +111,8 @@ export function applyHeuristicCleanup(
          * for forwarding this only for primary sessions where caveman is enabled.
          */
         caveman?: CavemanCleanupConfig;
+        /** Rule-based drops (re-read, retried error, age); runs with the routine lanes. */
+        autoDrop?: AutoDropConfig;
     },
     preloadedTags?: TagEntry[],
 ): {
@@ -327,17 +330,36 @@ export function applyHeuristicCleanup(
     //     dedup as expected.
     const allMessages = Array.from(messageTagNumbers.keys());
     const toolFingerprints = buildToolFingerprints(allMessages);
-    if (config.routine !== false && toolFingerprints.size > 0) {
-        const tagsByCompositeKey = new Map<string, TagEntry>();
-        for (const tag of tags) {
-            if (tag.type === "tool" && tag.status === "active" && tag.messageId) {
-                const key = tag.toolOwnerMessageId
-                    ? `${tag.toolOwnerMessageId}\x00${tag.messageId}`
-                    : tag.messageId; // legacy fallback for unbackfilled NULL-owner rows
-                tagsByCompositeKey.set(key, tag);
-            }
+    const tagsByCompositeKey = new Map<string, TagEntry>();
+    for (const tag of tags) {
+        if (tag.type === "tool" && tag.status === "active" && tag.messageId) {
+            const key = tag.toolOwnerMessageId
+                ? `${tag.toolOwnerMessageId}\x00${tag.messageId}`
+                : tag.messageId; // legacy fallback for unbackfilled NULL-owner rows
+            tagsByCompositeKey.set(key, tag);
         }
-
+    }
+    // Routine lanes drop fully; protected results and calls that cannot be removed
+    // keep their real arguments.
+    const routineDropped = new Set<number>();
+    const dropRoutineTool = (tag: TagEntry): boolean => {
+        if (routineDropped.has(tag.tagNumber)) return false;
+        if (config.protectedTagNumbers.has(tag.tagNumber)) return false;
+        if (protectedTools.has(tag.tagNumber)) return false;
+        const target = targets.get(tag.tagNumber);
+        if (target?.canDrop?.() === false) return false;
+        const { result } = applyPersistedToolDrop(db, sessionId, tag.tagNumber, target, {
+            inWindow: false,
+        });
+        if (result !== "removed" && result !== "truncated") return false;
+        routineDropped.add(tag.tagNumber);
+        droppedTokenReductions.push({
+            tagNumber: tag.tagNumber,
+            mode: result === "removed" ? "full" : "truncated",
+        });
+        return true;
+    };
+    if (config.routine !== false && toolFingerprints.size > 0) {
         // Group tags by fingerprint. Protected tags join their group so a protected
         // newest copy still anchors it; they are never dropped themselves (below).
         // Leaving them out kept one unprotected copy alive beside the protected one.
@@ -354,26 +376,15 @@ export function applyHeuristicCleanup(
             group.sort((a, b) => a.tagNumber - b.tagNumber);
             // Keep the newest (last), drop the rest
             for (let i = 0; i < group.length - 1; i++) {
-                const tag = group[i];
-                if (config.protectedTagNumbers.has(tag.tagNumber)) continue;
-                const target = targets.get(tag.tagNumber);
-                if (protectedTools.has(tag.tagNumber)) continue;
-                if (target?.canDrop?.() === false) continue;
-                // Deduplication remains a full drop; only the emergency newest-window
-                // arm preserves skeleton bytes. A call that cannot be removed keeps
-                // its real arguments.
-                const { result } = applyPersistedToolDrop(db, sessionId, tag.tagNumber, target, {
-                    inWindow: false,
-                });
-                if (result === "incomplete") continue;
-                if (result === "removed" || result === "truncated") {
-                    deduplicatedTools++;
-                    droppedTokenReductions.push({
-                        tagNumber: tag.tagNumber,
-                        mode: result === "removed" ? "full" : "truncated",
-                    });
-                }
+                if (dropRoutineTool(group[i])) deduplicatedTools++;
             }
+        }
+    }
+
+    if (config.routine !== false && config.autoDrop) {
+        const selected = selectAutoDropTags(allMessages, tagsByCompositeKey, config.autoDrop);
+        for (const tag of tagsByCompositeKey.values()) {
+            if (selected.has(tag.tagNumber) && dropRoutineTool(tag)) droppedTools++;
         }
     }
 

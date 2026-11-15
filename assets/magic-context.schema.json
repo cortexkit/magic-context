@@ -2662,6 +2662,26 @@
         }
       }
     },
+    "auto_drop": {
+      "default": {
+        "reread": false,
+        "retried_errors": false
+      },
+      "description": "Rule-based drops of tool results the agent no longer needs, applied with the routine cleanup lanes so they never originate a cache bust. Protected tags, protected_tools and results carrying a user answer are kept. Dropped results stay recoverable with ctx_expand. Every rule is off by default.",
+      "type": "object",
+      "properties": {
+        "reread": {
+          "default": false,
+          "description": "Drop a read result once a later read of the same file covers it (the whole file, or the same offset and limit).",
+          "type": "boolean"
+        },
+        "retried_errors": {
+          "default": false,
+          "description": "Drop a failed tool call's error once a later call of the same tool succeeds. Calls the user rejected are kept.",
+          "type": "boolean"
+        }
+      }
+    },
     "memory": {
       "default": {
         "enabled": true,

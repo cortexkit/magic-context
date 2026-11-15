@@ -92,6 +92,7 @@ export const RENDERED_PREFIXES: readonly string[] = [
 export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   rerank: "hosted reranking configuration; raw JSONC until a dedicated user-tier form is available",
   clear_reasoning_age: "deprecated and ignored; doctor removes it",
+  auto_drop: "opt-in cleanup rules; raw JSONC until the form gains a cleanup section",
   ...Object.fromEntries(
     ["historian", "dreamer"].flatMap((agent) =>
       [

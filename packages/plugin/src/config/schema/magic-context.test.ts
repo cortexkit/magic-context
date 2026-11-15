@@ -152,6 +152,10 @@ describe("MagicContextConfigSchema", () => {
                     enabled: false,
                     min_chars: 500,
                 },
+                auto_drop: {
+                    reread: false,
+                    retried_errors: false,
+                },
                 embedding: {
                     provider: "openai-compatible",
                     endpoint: "http://localhost:1234/v1",
