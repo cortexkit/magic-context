@@ -39,7 +39,8 @@ class PlacementTests(unittest.TestCase):
         self.staged = once(root, f'''#!/bin/sh
 case "$1" in
  --version) echo 'ck-mc 0.1.0 ({NEW})' ;;
- --print-fences) echo 'context.db=91 mode3.db=50' ;;
+ --print-fences) echo "${{FAKE_STAGED_FENCES:-context.db=91 mode3.db=50}}" ;;
+ --print-tool-pins) printf '%s\n' "${{FAKE_STAGED_PINS:-ctx_memory 1 aaa current}}" ;;
  *) exit 2 ;;
 esac
 ''')
@@ -47,6 +48,7 @@ esac
 case "$1" in
  --version) echo 'ck-mc 0.1.0 ({OLD})' ;;
  --print-fences) echo 'context.db=90 store.db=49' ;;
+ --print-tool-pins) printf '%s\n' "${{FAKE_DEPLOYED_PINS:-ctx_memory 1 aaa current}}" ;;
  *) exit 2 ;;
 esac
 ''')
@@ -160,6 +162,59 @@ printf '0000000100000000 T _main\\n'
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("context.db is at 90 but this ck-mc opens only 91", run.stderr)
+
+    def test_a_build_that_migrates_the_store_itself_may_be_placed_over_an_older_one(self):
+        # From 106 on ck-mc migrates context.db when it starts, from the
+        # released 0.49 plugin's version (95) up.
+        self.env["FAKE_STAGED_FENCES"] = "context.db=110 mode3.db=50"
+        self.versions(105, 49)
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("ck-mc migrates it from 105 to 110 when it starts", run.stdout)
+        self.versions(94, 49)
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("ck-mc migrates only from 95", run.stderr)
+
+    def test_a_tool_pin_the_staged_build_drops_refuses_unless_schemas_may_change(self):
+        # A running session keeps its tool schemas until its host restarts it.
+        self.env["FAKE_DEPLOYED_PINS"] = "ctx_memory 1 aaa current\nctx_note 2 bbb current"
+        self.env["FAKE_STAGED_PINS"] = "ctx_memory 1 ccc current\nctx_note 2 bbb current"
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("ctx_memory 1 aaa", run.stderr)
+        self.assertNotIn("ctx_note 2 bbb", run.stderr)
+        run = self.run_script("--tool-schemas-changed")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        # A semantics change drops the pin too.
+        self.env["FAKE_STAGED_PINS"] = "ctx_memory 2 aaa current\nctx_note 2 bbb current"
+        self.assertNotEqual(self.run_script().returncode, 0)
+
+    def test_an_earlier_pin_the_staged_build_still_honours_passes(self):
+        self.env["FAKE_DEPLOYED_PINS"] = "ctx_memory 1 aaa current"
+        self.env["FAKE_STAGED_PINS"] = "ctx_memory 1 ccc current\nctx_memory 1 aaa earlier"
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("every pin the deployed build serves is honoured", run.stdout)
+
+    def test_a_deployed_build_without_pin_reports_needs_a_reviewed_comparison(self):
+        # Asked an unknown flag, an older ck-mc would start serving, so it is
+        # not asked at all.
+        old = once(Path(self.tmp.name), f'''#!/bin/sh
+case "$1" in
+ --version) echo 'ck-mc 0.1.0 ({OLD})' ;;
+ --print-fences) echo 'context.db=90 store.db=49' ;;
+ *) echo started >> "$FAKE_STARTED"; exit 2 ;;
+esac
+''')
+        (self.bin / "ck-mc").write_bytes(old.read_bytes())
+        self.env["FAKE_STARTED"] = str(Path(self.tmp.name) / "started")
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("--tool-pins-reviewed", run.stderr)
+        self.assertFalse(Path(self.env["FAKE_STARTED"]).exists())
+        run = self.run_script("--tool-pins-reviewed")
+        self.assertEqual(run.returncode, 0, run.stderr)
 
     def test_epoch_change_advises_or_refuses(self):
         allowed = self.run_script()

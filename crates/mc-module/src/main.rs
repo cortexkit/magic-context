@@ -40,6 +40,15 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         );
         return Ok(());
     }
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--print-tool-pins")
+    {
+        for line in mc_module::catalog::pin_report() {
+            println!("{line}");
+        }
+        return Ok(());
+    }
     #[cfg(unix)]
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
     if std::env::args().nth(1).as_deref() == Some("rekey-runner") {

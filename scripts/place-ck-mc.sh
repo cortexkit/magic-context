@@ -5,7 +5,7 @@ set -euo pipefail
 finished=0
 umask 077
 
-usage() { echo "usage: $0 [--dry-run] [--no-restart] [--require-epochs-unchanged] [--source-ref REF] STAGED_BINARY" >&2; exit 2; }
+usage() { echo "usage: $0 [--dry-run] [--no-restart] [--require-epochs-unchanged] [--tool-pins-reviewed] [--tool-schemas-changed] [--source-ref REF] STAGED_BINARY" >&2; exit 2; }
 die() { echo "place-ck-mc: $*" >&2; exit 1; }
 dry_run=0
 # --no-restart places and checks the file and stops there. It is for a window in
@@ -14,6 +14,13 @@ dry_run=0
 # script prints the provenance and health commands to run once it has happened.
 no_restart=0
 require_epochs=0
+# A running session keeps the ctx_* tool schemas it started with until its host
+# restarts it, and ck-mc refuses a call pinned to a schema it no longer honours.
+# --tool-schemas-changed places a build that drops a pin anyway: only inside an
+# agreed host-restart window. --tool-pins-reviewed places over a deployed build
+# too old to report its pins, after comparing them by hand.
+tool_pins_reviewed=0
+tool_schemas_changed=0
 source_ref=
 staged=
 shared_staging=${CK_STAGING:-$HOME/.local/share/cortexkit/staging}
@@ -22,6 +29,8 @@ while (($#)); do
         --dry-run) dry_run=1 ;;
         --no-restart) no_restart=1 ;;
         --require-epochs-unchanged) require_epochs=1 ;;
+        --tool-pins-reviewed) tool_pins_reviewed=1 ;;
+        --tool-schemas-changed) tool_schemas_changed=1 ;;
         --source-ref) (($# >= 2)) || usage; source_ref=$2; shift ;;
         --*) usage ;;
         *) [[ -z "$staged" ]] || usage; staged=$1 ;;
@@ -217,6 +226,36 @@ if [[ "$deployed_fences" =~ ^context\.db=[0-9]+[[:space:]]store\.db=[0-9]+$ ]]; 
     echo "deployed build uses the old store.db; old store.db isn't checked for this placement (left untouched)"
 elif [[ ! "$deployed_fences" =~ ^context\.db=[0-9]+[[:space:]]mode3\.db=[0-9]+$ ]]; then
     die "invalid deployed --print-fences output: $deployed_fences"
+fi
+# Every pin the deployed build serves must still be honoured by the staged one
+# (same tool, semantics and schema digest), or running sessions' calls to that
+# tool are refused. An older build without --print-tool-pins would start
+# serving on the unknown flag, so it is only asked when it names the flag.
+staged_pins=$("$staged" --print-tool-pins) || die "staged binary does not report its tool pins"
+[[ -n "$staged_pins" ]] || die "staged binary reports no tool pins"
+if LC_ALL=C grep -a -q -- '--print-tool-pins' "$deployed"; then
+    deployed_pins=$("$deployed" --print-tool-pins) || die "deployed binary does not report its tool pins"
+    dropped=$(python3 - "$deployed_pins" "$staged_pins" <<'PY'
+import sys
+deployed, staged = sys.argv[1], sys.argv[2]
+honoured = {tuple(line.split()[:3]) for line in staged.splitlines() if line.strip()}
+for line in deployed.splitlines():
+    fields = line.split()
+    if len(fields) == 4 and fields[3] == "current" and tuple(fields[:3]) not in honoured:
+        print(" ".join(fields[:3]))
+PY
+) || die "cannot compare tool pins"
+    if [[ -n "$dropped" ]]; then
+        echo "tool pins the deployed build serves and the staged build no longer honours:" >&2
+        echo "$dropped" >&2
+        ((tool_schemas_changed)) || die "running sessions' calls to these tools would be refused until their hosts restart: honour the old pins (HONOURED_EARLIER in crates/mc-module/src/catalog.rs) or place with --tool-schemas-changed in a host-restart window"
+        echo "placing with changed tool schemas (--tool-schemas-changed)"
+    else
+        echo "tool pins: every pin the deployed build serves is honoured"
+    fi
+else
+    ((tool_pins_reviewed)) || die "deployed build can't report its tool pins: compare the ctx_* tool schemas of both builds by hand, then pass --tool-pins-reviewed"
+    echo "tool pins: deployed build predates --print-tool-pins; compared by hand (--tool-pins-reviewed)"
 fi
 # Require both build revisions locally; guessing an unavailable epoch could hide a change.
 epochs() {

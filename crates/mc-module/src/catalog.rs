@@ -764,6 +764,54 @@ const HONOURED_EARLIER: &[(&str, &str)] = &[(
     "de59b47f087c33bb84d20fe9eec0f5cdd5692089aa43e4bf19b72dcb53292cbc",
 )];
 
+/// The schema digests this build renders for `tool`: on either surface, and
+/// for `ctx_note` with or without the smart-note fields.
+fn current_digests(tool: &ToolDefinition) -> Vec<String> {
+    let mut current = Vec::new();
+    for surface in [Surface::Full, Surface::Light] {
+        let Ok(schema) = input_schema(tool, surface) else {
+            continue;
+        };
+        let mut variants = vec![schema.clone()];
+        if tool.name == "ctx_note" {
+            let mut without = schema;
+            disable_smart_note_schema(&mut without);
+            variants.push(without);
+        }
+        for digest in variants
+            .iter()
+            .filter_map(|schema| catalog::schema_digest(schema).ok())
+        {
+            if !current.contains(&digest) {
+                current.push(digest);
+            }
+        }
+    }
+    current
+}
+
+/// Every pin this build honours, one line each: `<tool> <semantics>
+/// <digest> current` for a schema it renders, `... earlier` for one in
+/// [`HONOURED_EARLIER`]. The placement script compares the deployed build's
+/// `current` lines with the staged build's lines: a running session keeps
+/// the schemas it started with, so a pin the staged build no longer honours
+/// would refuse that session's calls until its host restarts it.
+pub fn pin_report() -> Vec<String> {
+    let mut lines = Vec::new();
+    for tool in &definition().tools {
+        for digest in current_digests(tool) {
+            lines.push(format!("{} {} {digest} current", tool.name, tool.semantics));
+        }
+        for (_, digest) in HONOURED_EARLIER
+            .iter()
+            .filter(|(name, _)| *name == tool.name)
+        {
+            lines.push(format!("{} {} {digest} earlier", tool.name, tool.semantics));
+        }
+    }
+    lines
+}
+
 /// Check a call's parsed schema pin against what ck-mc serves now. A pinned
 /// schema is honoured when it is one this build renders for the tool, on
 /// either surface and with or without the smart-note fields: every variant
@@ -777,23 +825,7 @@ pub(crate) fn check_pin(
         // An unknown tool is refused by name elsewhere.
         return Ok(());
     };
-    let mut current = Vec::new();
-    for surface in [Surface::Full, Surface::Light] {
-        let Ok(schema) = input_schema(tool, surface) else {
-            continue;
-        };
-        let mut variants = vec![schema.clone()];
-        if tool.name == "ctx_note" {
-            let mut without = schema;
-            disable_smart_note_schema(&mut without);
-            variants.push(without);
-        }
-        current.extend(
-            variants
-                .iter()
-                .filter_map(|schema| catalog::schema_digest(schema).ok()),
-        );
-    }
+    let current = current_digests(tool);
     let earlier = HONOURED_EARLIER
         .iter()
         .any(|(name, digest)| *name == tool.name && *digest == pin.schema_digest);
@@ -870,6 +902,32 @@ mod pin_tests {
                 "{surface:?}: {digest}"
             );
         }
+    }
+
+    /// The placement script compares these lines between builds, so every
+    /// pin `check_pin` honours must be in them, and nothing else.
+    #[test]
+    fn the_pin_report_lists_exactly_the_pins_this_build_honours() {
+        let report = pin_report();
+        assert!(!report.is_empty());
+        for line in &report {
+            let fields: Vec<&str> = line.split(' ').collect();
+            assert_eq!(fields.len(), 4, "{line}");
+            assert!(matches!(fields[3], "current" | "earlier"), "{line}");
+            let pin = SchemaPin::new(fields[0], fields[2].to_owned(), fields[1].parse().unwrap());
+            assert!(check_pin(&pin).is_ok(), "{line}");
+        }
+        for tool in &definition().tools {
+            for digest in current_digests(tool) {
+                assert!(report.contains(&format!(
+                    "{} {} {digest} current",
+                    tool.name, tool.semantics
+                )));
+            }
+        }
+        assert!(report
+            .iter()
+            .any(|line| line.starts_with("ctx_memory ") && line.ends_with(" earlier")));
     }
 
     #[test]
