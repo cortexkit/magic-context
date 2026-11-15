@@ -27,6 +27,8 @@ pub(crate) enum Ends {
     /// Ends with routing's full capacity (`concurrency_full`) until this
     /// reset, the way an llm-runner 0.8.51 runner ends a queued run.
     Full(u64),
+    /// The runner could not hand the prompt to its host, so no model ran.
+    NeverRan,
 }
 
 /// A reader catalog as the tests give it: each tool with its capabilities,
@@ -47,6 +49,7 @@ pub(crate) struct Client {
     pub(crate) selects: Mutex<Vec<SelectRequest>>,
     pub(crate) reports: Mutex<Vec<String>>,
     pub(crate) sends: Mutex<Vec<(Child, SendRequest)>>,
+    pub(crate) send_replies: Mutex<VecDeque<SendReply>>,
     /// The runners that take fetch plans.
     pub(crate) plans: Vec<&'static str>,
     /// The modules the daemon lists as tool providers, in the order it
@@ -81,6 +84,7 @@ impl Client {
             selects: Mutex::default(),
             reports: Mutex::default(),
             sends: Mutex::default(),
+            send_replies: Mutex::default(),
             plans: Vec::new(),
             providers: vec!["aft"],
             catalog: Err("no reader in this test"),
@@ -192,6 +196,9 @@ impl RunnerClient for Client {
         request: SendRequest,
     ) -> Result<SendReply, ClientError> {
         self.sends.lock().unwrap().push((child.clone(), request));
+        if let Some(reply) = self.send_replies.lock().unwrap().pop_front() {
+            return Ok(reply);
+        }
         let mut reply = SendReply::new(states::ACTIVE);
         reply.run_id = Some("run".into());
         Ok(reply)
@@ -214,6 +221,7 @@ impl RunnerClient for Client {
                 result
             }
             Ends::Capped => completed("{\"partial\":", Some(Finish::Length)),
+            Ends::NeverRan => crate::summary::run::never_ran_tests::handover("nothing_written"),
             Ends::Error(message) => {
                 let mut result = RunResult::new("run", states::ERROR);
                 result.error = Some(RunError::new("provider", message, "provider_error"));

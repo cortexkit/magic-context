@@ -350,3 +350,74 @@ async fn move_floor_a_session_moved_earlier_takes_its_floor_from_the_fence() {
     assert!(moved.offered().is_empty());
     assert!(moved.session.durable().move_floor.is_some());
 }
+
+/// A moved session holding, after a restart, an unconfirmed view whose cut
+/// is `through`, with its transcript in the runner but not yet in the index.
+async fn reoffering(through: &str) -> (Session, Client, Settings, View) {
+    let (mut session, client, route, mut setup, settings) = fixture();
+    *client.entries.lock().unwrap() = transcript(12);
+    setup.newest = client.entries.lock().unwrap().last().map(cursor);
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &setup, features)
+        .await;
+    session.set_move_floor(Some(FLOOR));
+    let view = View::seal(
+        1,
+        vec![cortexkit_role_compaction::view::Edit::new(
+            1,
+            EditOp::Cut {
+                through: through.into(),
+            },
+        )],
+    );
+    session.accept(view.clone());
+    // As after a restart: the index fills only after the view is offered.
+    session.index = Index::starting_at(1);
+    client.reads.lock().unwrap().clear();
+    (session, client, settings, view)
+}
+
+/// A view offered again whose cut is the floor entry itself meets the floor
+/// by id: no runner read places it first.
+#[tokio::test]
+async fn move_floor_a_reoffered_view_cutting_at_the_floor_reads_nothing() {
+    let (mut session, client, _, view) = reoffering(FLOOR.1).await;
+    session.offer_unconfirmed_again(&client).await;
+    assert!(
+        client.reads.lock().unwrap().is_empty(),
+        "the floor entry was read to place it"
+    );
+    assert_eq!(client.offered.lock().unwrap().clone(), vec![view]);
+}
+
+/// A runner that can't place a reoffered view's cut yet (`transient`)
+/// leaves the view's fate open: it is neither rolled back nor counted as a
+/// breach, and the next notice offers it again.
+#[tokio::test]
+async fn move_floor_a_transient_refusal_offers_the_view_again_later() {
+    let (mut session, client, settings, view) = reoffering("m10").await;
+    client
+        .pages
+        .lock()
+        .unwrap()
+        .push_back(Err(crate::client::ClientError::refused(
+            "transient",
+            "index_filling",
+        )));
+    session.offer_unconfirmed_again(&client).await;
+    assert!(client.offered.lock().unwrap().is_empty());
+    assert_eq!(session.unconfirmed.len(), 1, "the view was rolled back");
+    assert_eq!(session.latest.as_ref(), Some(&view));
+    assert!(
+        !session.move_floor_held,
+        "a transient read counted as a breach"
+    );
+
+    let entry = text(13, "m13");
+    client.entries.lock().unwrap().push(entry.clone());
+    let mut request = notice(&session, 1, Some(cursor(&entry)));
+    request.entries = vec![entry];
+    session.notice(&client, &settings, request).await;
+    assert_eq!(client.offered.lock().unwrap().first(), Some(&view));
+}

@@ -25,6 +25,7 @@ fn full(reset: Option<i64>) -> RouteError {
 fn waited(error: SummaryError) -> AccountWait {
     match error {
         SummaryError::AccountWait(wait) => wait,
+        SummaryError::NeverRan(wait) => panic!("full capacity counted as never run: {wait:?}"),
         SummaryError::Failed(error) => panic!("full capacity counted as a failure: {error}"),
     }
 }

@@ -228,6 +228,39 @@ fn every_stored_number_moves_to_the_runners_numbering() {
     );
 }
 
+/// A message with two search rows, as an old indexer left on THALAMUS's head:
+/// the row of the message before it filed under its id. The move keeps the
+/// newest row, deletes the other, and records as its search count the rows
+/// that stay, so the check at the end of the move finds them all.
+#[test]
+fn a_message_indexed_twice_keeps_its_newest_search_row() {
+    let store = Store::new("twice");
+    seed(&store);
+    store
+        .conn()
+        .execute_batch(&format!(
+            "INSERT OR REPLACE INTO message_fts_rowid_map_backfill_state (id, completed) VALUES (1, 1);
+             INSERT INTO message_history_fts (rowid, session_id, message_ordinal, message_id, role, content)
+                 VALUES (9, '{SESSION}', 5, 'a7', 'assistant', 'stray');
+             INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
+                 VALUES ('{SESSION}', 5, 9, 50);"
+        ))
+        .unwrap();
+    run(&store, &numbering()).unwrap();
+    assert_eq!(
+        store.query::<String>(
+            "SELECT rowid || ':' || message_ordinal FROM message_history_fts ORDER BY rowid"
+        ),
+        ["10:3", "12:5"]
+    );
+    let progress = crate::move_batches::record(&store.conn(), &record_key(HARNESS, SESSION))
+        .unwrap()
+        .unwrap();
+    let mapped = crate::move_batches::message_rows(&store.conn(), SESSION).unwrap();
+    assert_eq!(progress["search_rows"], mapped.len() as u64);
+    assert_eq!(mapped.len(), 2);
+}
+
 /// Two cited blocks of one publication whose numbers shift down, stored so
 /// the first row rewritten moves onto the range the second still holds. Seen on WERNI's move,
 /// where the rewrite failed on the fact-block table's unique key.

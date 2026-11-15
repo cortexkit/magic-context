@@ -28,7 +28,7 @@ cortexkit-store = "=0.2.4"
 cortexkit-store-types = "=0.2.2"
 cortexkit-lease = "=0.1.2"
 cortexkit-log = { version = "=0.3.5", features = ["store-paths"] }
-cortexkit-tokens = "0.1"
+cortexkit-tokens = "0.2"
 
 # Published subc wire/SDK crates use crates.io.
 #
@@ -48,12 +48,12 @@ subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "90295ece
 
 
 # The compaction contract (compaction-provider/v2, compaction-runner/v1).
-cortexkit-role-compaction = "=0.4.3"
+cortexkit-role-compaction = "=0.4.5"
 # Applies views and checks them against the provider rules; runners use the
 # same library, so both sides render a view the same way.
-cortexkit-compaction-view = "=0.4.0"
+cortexkit-compaction-view = "=0.4.1"
 # session.send and run.result, which the compaction contract reuses.
-cortexkit-role-llm-runner = "=0.8.51"
+cortexkit-role-llm-runner = "=0.8.54"
 
 # Internal crates.
 mc-tokenizer = { path = "crates/mc-tokenizer" }

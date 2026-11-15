@@ -12,6 +12,16 @@ fn stated() -> Stated {
 }
 
 #[test]
+fn compaction_limits_capability_is_declared() {
+    for agent_data in [false, true] {
+        let manifest = crate::transport::manifest_for(crate::MODULE_ID, agent_data);
+        let claims = &manifest.capabilities.unwrap().provides;
+        assert!(cortexkit_role_compaction::provides_limits(claims));
+        assert!(claims.iter().any(|claim| claim == "compaction-limits/v1"));
+    }
+}
+
+#[test]
 fn limits_absent_partial_full_and_larger_than_our_request_sizes() {
     let absent = Limits::from_setup(None);
     assert_eq!(absent, Limits::default());
@@ -189,7 +199,8 @@ async fn full_after_three_pages_obey_limits_and_next_after() {
 #[tokio::test]
 async fn named_600_mids_retry_exact_unanswered_in_order() {
     let (_, client, route, _, _) = fixture();
-    let entries: Vec<_> = (1..=600).map(|n| text(n, &format!("m{n}"))).collect();
+    // Request order differs from transcript order and must survive continuation.
+    let entries: Vec<_> = (1..=600).rev().map(|n| text(n, &format!("m{n}"))).collect();
     let mut first = ReadPage::new(entries[..250].to_vec(), Head::new());
     first.unanswered = Some(
         entries[250..256]
@@ -333,7 +344,7 @@ async fn runner_fault_empty_continuing_page_fails_compact_and_full_reads_once() 
 }
 
 #[tokio::test]
-async fn runner_fault_named_all_unanswered_fails_once_for_mids_and_tags() {
+async fn runner_fault_named_all_unanswered_after_retry_fails_for_mids_and_tags() {
     let capture = crate::test_log::capture();
     for mids in [true, false] {
         let (_, client, route, _, _) = fixture();
@@ -343,7 +354,11 @@ async fn runner_fault_named_all_unanswered_fails_once_for_mids_and_tags() {
         } else {
             vec![ReadName::Tag(1)]
         });
-        client.pages.lock().unwrap().push_back(Ok(page));
+        client
+            .pages
+            .lock()
+            .unwrap()
+            .extend([Ok(page.clone()), Ok(page)]);
         if mids {
             assert!(crate::reads::named(
                 &client,
@@ -361,7 +376,7 @@ async fn runner_fault_named_all_unanswered_fails_once_for_mids_and_tags() {
                     .is_err()
             );
         }
-        assert_eq!(client.reads.lock().unwrap().len(), 1);
+        assert_eq!(client.reads.lock().unwrap().len(), 2);
     }
     assert_eq!(
         capture
@@ -369,14 +384,14 @@ async fn runner_fault_named_all_unanswered_fails_once_for_mids_and_tags() {
             .lines()
             .filter(|line| line.contains("WARN")
                 && line.contains("s1")
-                && line.contains("left all names unanswered"))
+                && line.contains("left names unanswered after their retry"))
             .count(),
         2
     );
 }
 
 #[tokio::test]
-async fn window_flag_logs_once_per_crossing_and_changes_no_policy() {
+async fn window_flag_logs_once_per_crossing_without_index_bytes_and_changes_no_policy() {
     let capture = crate::test_log::capture();
     let (mut session, client, _, _, settings) = fixture();
     session.features.summarizer = true;
@@ -424,10 +439,9 @@ async fn window_flag_logs_once_per_crossing_and_changes_no_policy() {
         .filter(|line| line.contains("INFO") && line.contains("window_over_budget:"))
         .collect();
     assert_eq!(crossings.len(), 2);
-    assert!(crossings.iter().all(|line| line.contains("s1")
-        && line.contains("1 entries")
-        && line.contains("Some(4)")
-        && line.contains("Some(1024)")));
+    assert!(crossings.iter().all(|line| line.ends_with(
+        "ck-mc: session s1: window_over_budget: 1 entries; stated budget entries Some(4), bytes Some(1024) (None means no bound stated)"
+    )), "{log}");
     let mut ride = RideRequest::new(
         vec![RideCause::WindowOverBudget],
         1000,
@@ -482,30 +496,139 @@ async fn flag_without_a_stated_window_budget_logs_fault_and_still_does_nothing()
 }
 
 #[tokio::test]
-async fn named_larger_stated_select_max_keeps_our_256_name_request_size() {
-    let (_, client, route, _, _) = fixture();
-    for _ in 0..3 {
-        client
-            .pages
-            .lock()
-            .unwrap()
-            .push_back(Ok(ReadPage::new(vec![], Head::new())));
-    }
-    let limits = Limits {
-        select_max: Some(1000),
-        ..Limits::default()
-    };
-    crate::reads::by_tags(&client, &route.session, (1..=600).collect(), limits)
-        .await
-        .unwrap();
-    let reads = client.reads.lock().unwrap();
-    assert_eq!(reads.len(), 3);
-    for (request, range) in reads.iter().zip([1..257, 257..513, 513..601]) {
-        assert_eq!(
-            request.select,
-            Select::Tags {
-                tags: range.collect()
+async fn named_mids_and_tags_use_stated_select_max_or_256_if_absent() {
+    for mids in [true, false] {
+        for (ceiling, count, sizes) in [
+            (Some(2), 5, vec![2, 2, 1]),
+            (Some(1000), 600, vec![600]),
+            (None, 600, vec![256, 256, 88]),
+        ] {
+            let (_, client, route, _, _) = fixture();
+            for _ in &sizes {
+                client
+                    .pages
+                    .lock()
+                    .unwrap()
+                    .push_back(Ok(ReadPage::new(vec![], Head::new())));
             }
+            let limits = Limits {
+                select_max: ceiling,
+                ..Limits::default()
+            };
+            if mids {
+                crate::reads::named(
+                    &client,
+                    &route.session,
+                    (1..=count).map(|n| format!("m{n}")).collect(),
+                    limits,
+                    |mids| Select::Mids { mids },
+                )
+                .await
+                .unwrap();
+            } else {
+                crate::reads::by_tags(&client, &route.session, (1..=count).collect(), limits)
+                    .await
+                    .unwrap();
+            }
+            let reads = client.reads.lock().unwrap();
+            assert_eq!(reads.len(), sizes.len());
+            let mut offset = 1;
+            for (request, size) in reads.iter().zip(sizes) {
+                let expected = if mids {
+                    Select::Mids {
+                        mids: (offset..offset + size).map(|n| format!("m{n}")).collect(),
+                    }
+                } else {
+                    Select::Tags {
+                        tags: (offset..offset + size).collect(),
+                    }
+                };
+                assert_eq!(request.select, expected);
+                offset += size;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn named_all_unanswered_retries_once_for_mids_and_tags() {
+    for mids in [true, false] {
+        let (_, client, route, _, _) = fixture();
+        let mut page = ReadPage::new(vec![], Head::new());
+        page.unanswered = Some(if mids {
+            vec![ReadName::Mid("m1".into())]
+        } else {
+            vec![ReadName::Tag(1)]
+        });
+        let entry = text(1, "m1");
+        client.pages.lock().unwrap().extend([
+            Ok(page),
+            Ok(ReadPage::new(vec![entry.clone()], Head::new())),
+        ]);
+        let entries = if mids {
+            crate::reads::named(
+                &client,
+                &route.session,
+                vec!["m1".into()],
+                Limits::default(),
+                |mids| Select::Mids { mids },
+            )
+            .await
+            .unwrap()
+        } else {
+            crate::reads::by_tags(&client, &route.session, vec![1], Limits::default())
+                .await
+                .unwrap()
+        };
+        assert_eq!(entries, vec![entry]);
+        let reads = client.reads.lock().unwrap();
+        assert_eq!(reads.len(), 2);
+        assert_eq!(reads[0], reads[1]);
+    }
+}
+
+#[tokio::test]
+async fn named_repeated_unanswered_refuses_even_when_reply_makes_progress() {
+    for mids in [true, false] {
+        let (_, client, route, _, _) = fixture();
+        let mut first = ReadPage::new(vec![text(1, "m1")], Head::new());
+        first.unanswered = Some(if mids {
+            vec![ReadName::Mid("m3".into()), ReadName::Mid("m2".into())]
+        } else {
+            vec![ReadName::Tag(3), ReadName::Tag(2)]
+        });
+        let mut retry = ReadPage::new(vec![text(3, "m3")], Head::new());
+        retry.unanswered = Some(if mids {
+            vec![ReadName::Mid("m2".into())]
+        } else {
+            vec![ReadName::Tag(2)]
+        });
+        client.pages.lock().unwrap().extend([
+            Ok(first),
+            Ok(retry),
+            Ok(ReadPage::new(vec![text(2, "m2")], Head::new())),
+        ]);
+        let error = if mids {
+            crate::reads::named(
+                &client,
+                &route.session,
+                vec!["m1".into(), "m3".into(), "m2".into()],
+                Limits::default(),
+                |mids| Select::Mids { mids },
+            )
+            .await
+            .unwrap_err()
+            .message
+        } else {
+            crate::reads::by_tags(&client, &route.session, vec![1, 3, 2], Limits::default())
+                .await
+                .unwrap_err()
+        };
+        assert!(error.contains("unanswered after their retry"), "{error}");
+        assert_eq!(
+            client.reads.lock().unwrap().len(),
+            2,
+            "never ask a name a third time"
         );
     }
 }
@@ -518,9 +641,13 @@ async fn named_runner_fault_in_a_view_build_warns_only_once() {
     super::named_read_tests::hold_compact_images(&mut session, &entries);
     let mut page = ReadPage::new(vec![], Head::new());
     page.unanswered = Some(vec![ReadName::Mid(entries[0].mid.clone())]);
-    client.pages.lock().unwrap().push_back(Ok(page));
+    client
+        .pages
+        .lock()
+        .unwrap()
+        .extend([Ok(page.clone()), Ok(page)]);
     session.build_now(&client, &settings).await;
-    assert_eq!(client.reads.lock().unwrap().len(), 1);
+    assert_eq!(client.reads.lock().unwrap().len(), 2);
     assert!(session.image_outputs.is_empty());
     assert_eq!(
         capture

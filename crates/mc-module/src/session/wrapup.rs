@@ -57,7 +57,7 @@ impl Session {
 
     pub(crate) fn wrapup_preview(&self, settings: &Settings, keep: u64) -> Preview {
         if !self.command_managed() {
-            return crate::user_commands::unavailable();
+            return self.command_unavailable();
         }
         let from = self.summarized_through().map_or(1, |n| n + 1);
         let until = self.wrapup_boundary(settings, keep);

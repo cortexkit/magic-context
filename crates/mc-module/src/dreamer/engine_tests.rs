@@ -404,6 +404,61 @@ async fn an_account_wait_ends_the_run_as_a_wait_due_when_it_ends() {
     assert_eq!(due, Some(slot.min(reset)));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_never_run_send_waits_until_its_deadline_without_counting_a_failure() {
+    for (ends, replies, code, send_count) in [
+        (vec![Ends::NeverRan], vec![], "handover_failed", 1),
+        (
+            vec![],
+            vec![cortexkit_role_llm_runner::send::SendReply::new("not_delivered"); 2],
+            "not_delivered",
+            2,
+        ),
+    ] {
+        let (_dir, db) = store();
+        let engine = engine(1);
+        let client = Arc::new(Client::new(&["p/a"], &ends));
+        *client.send_replies.lock().unwrap() = replies.into();
+        engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+        make_due(&db);
+        db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET failures = 2", []))
+            .unwrap();
+        let before = now_ms();
+        engine.tick(&db, &client, &Settings::default(), before);
+        settled(&engine).await;
+        let after = now_ms();
+        let (outcome, failure_class, batches): (String, Option<String>, String) = db
+            .with_connection(|conn| {
+                conn.query_row(
+                    "SELECT outcome, failure_class, batches_json FROM dream_task_runs",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(outcome, "waiting");
+        assert_eq!(failure_class, None);
+        let batches: serde_json::Value = serde_json::from_str(&batches).unwrap();
+        assert_eq!(batches[0]["code"], code);
+        let deadline = batches[0]["wait_until"].as_i64().unwrap();
+        assert!(deadline >= before + 6_000 && deadline <= after + 8_000);
+        let (_, status, _, due) = schedule(&db);
+        assert_eq!(status.as_deref(), Some("waiting"));
+        let slot = cron::next_due(default_schedule("classify-memories"), after).unwrap();
+        assert_eq!(due, Some(slot.min(deadline)));
+        let failures_in_a_row: i64 = db
+            .with_connection(|conn| {
+                conn.query_row("SELECT failures FROM dream_schedules", [], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(failures_in_a_row, 2);
+        assert_eq!(locks(&db), 0);
+        assert_eq!(client.sends.lock().unwrap().len(), send_count);
+        assert_eq!(*client.reports.lock().unwrap(), ["decision-a cancelled"]);
+        assert!(client.ends.lock().unwrap().is_empty());
+    }
+}
+
 #[tokio::test]
 async fn a_failed_model_counts_a_failure_and_releases_the_lock() {
     let (_dir, db) = store();

@@ -32,6 +32,12 @@ pub struct ClientError {
     pub code: Option<String>,
     /// The refusal's `detail`, when the runner's error body carried one.
     pub detail: Option<serde_json::Value>,
+    /// The request may have left ck-mc, but no answer came back: its
+    /// deadline passed, the connection or route ended after it was sent, or
+    /// the client could not prove it stayed unsent. The runner may have
+    /// received it and acted on it, so a caller must not treat it as a call
+    /// that never happened.
+    pub outcome_unknown: bool,
 }
 
 impl ClientError {
@@ -40,6 +46,7 @@ impl ClientError {
             message: message.into(),
             code: None,
             detail: None,
+            outcome_unknown: false,
         }
     }
 
@@ -48,6 +55,15 @@ impl ClientError {
             message: message.into(),
             code: Some(code.into()),
             detail: None,
+            outcome_unknown: false,
+        }
+    }
+
+    /// A request that was sent but got no answer (see `outcome_unknown`).
+    pub fn unanswered(message: impl Into<String>) -> Self {
+        Self {
+            outcome_unknown: true,
+            ..Self::new(message)
         }
     }
 

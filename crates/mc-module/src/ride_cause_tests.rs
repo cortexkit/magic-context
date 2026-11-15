@@ -96,6 +96,138 @@ fn worker() -> (Session, Client, Settings) {
     (session, client, settings)
 }
 
+/// The transcript has grown to 82k tokens, but the last served request was
+/// only 10k. Five tool outputs can shrink it after a provider refusal.
+fn head_with_unmeasured_growth() -> (Session, Settings) {
+    use cortexkit_role_compaction::tokens::PartTokens;
+
+    let (mut session, _, _, _, settings) = fixture();
+    session.preset = crate::catalog::Preset::Head;
+    session.features = crate::preset::features(session.preset.as_str()).unwrap();
+    session.conditions.last_prompt_tokens = Some(10_000);
+    let mut task = text(1, "task");
+    task.parts[0].tokens = Some(PartTokens::count(2_000));
+    let mut entries = vec![task];
+    for ordinal in 2..=6 {
+        let mut part = output_part("p", ordinal);
+        part.tokens = Some(PartTokens::tool(0, 16_000));
+        entries.push(Entry::new(
+            ordinal,
+            format!("tool-{ordinal}"),
+            Role::Assistant,
+            ordinal,
+            vec![part],
+        ));
+    }
+    session.index.extend_counted(entries, Some("family"));
+    session.index_ready = true;
+    (session, settings)
+}
+
+fn reclaimed_tools(view: Option<&View>) -> usize {
+    view.into_iter()
+        .flat_map(|view| &view.edits)
+        .filter(|edit| match &edit.op {
+            EditOp::Drop { mid, .. } => mid.starts_with("tool-"),
+            EditOp::Replace {
+                mid, field, value, ..
+            } => {
+                mid.starts_with("tool-")
+                    && field == "output"
+                    && value
+                        .as_str()
+                        .is_some_and(|output| output.starts_with("[dropped §"))
+            }
+            _ => false,
+        })
+        .count()
+}
+
+#[test]
+fn ride_over_limit_without_a_count_uses_the_usable_window() {
+    let logs = crate::test_log::capture();
+    let (mut session, settings) = head_with_unmeasured_growth();
+    let request = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    );
+    assert_eq!(request.request_tokens, None);
+    let view = session.ride(&settings, &request);
+    assert!(
+        reclaimed_tools(view.as_ref()) > 0,
+        "a provider refusal without a count kept every tool output"
+    );
+    assert!(logs.text().contains(
+        "ck-mc: session s1: over_limit without request_tokens: using a request floor of 99000 tokens"
+    ));
+
+    let (mut session, _) = head_with_unmeasured_growth();
+    let mut ordinary = request;
+    ordinary.causes.clear();
+    let view = session.ride(&settings, &ordinary);
+    assert_eq!(reclaimed_tools(view.as_ref()), 0);
+}
+
+#[test]
+fn ride_over_limit_floor_reclaims_the_final_tool_output() {
+    let (mut session, settings) = head_with_unmeasured_growth();
+    let request = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    );
+    let view = session
+        .ride(&settings, &request)
+        .expect("the count-less floor reclaims tool outputs");
+    assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, part, field, value, .. }
+            if mid == "tool-6" && part == "p" && field == "output"
+                && value == "[dropped §6§]"
+    )));
+    assert_eq!(reclaimed_tools(Some(&view)), 5);
+}
+
+#[test]
+fn ride_over_limit_keeps_a_stated_count_below_the_window() {
+    let logs = crate::test_log::capture();
+    let (mut session, settings) = head_with_unmeasured_growth();
+    let request = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    )
+    .with_request_tokens(70_000);
+    let view = session
+        .ride(&settings, &request)
+        .expect("the stated count reclaims four outputs");
+    // The 70k count is below the 82k transcript, so fixed overhead is zero:
+    // target = 0.3 * 64,350 = 19,305, reclaim = 50,695, or four 16k outputs.
+    // A 99k floor implies 17k fixed: target = 17k + 0.3 * (64,350 - 17k)
+    // = 31,205, reclaim = 67,795, taking all five. Count the final output's
+    // placeholder too, and prove the stated count leaves that output intact.
+    assert_eq!(reclaimed_tools(Some(&view)), 4);
+    assert!(!touches(&view, "tool-6", "p"));
+    assert!(!logs.text().contains("using a request floor"));
+}
+
+#[test]
+fn ride_over_limit_without_a_count_never_floors_below_the_last_reading() {
+    let logs = crate::test_log::capture();
+    let (mut session, settings) = head_with_unmeasured_growth();
+    session.conditions.last_prompt_tokens = Some(120_000);
+    let request = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    );
+    let view = session.ride(&settings, &request);
+    assert!(reclaimed_tools(view.as_ref()) > 0);
+    assert!(logs.text().contains(
+        "ck-mc: session s1: over_limit without request_tokens: using a request floor of 120000 tokens"
+    ));
+}
+
 /// A head whose served view shows one summary in `m[0]`, with a newer summary
 /// published since and not yet shown: a fold would move it into `m[0]`.
 /// Returns the session and the `m[0]` the runner was served.

@@ -249,3 +249,68 @@ async fn wrapup_worker_drains_successive_runs_until_target_is_covered() {
         .to_string()
         .contains("Wrapup target"));
 }
+
+/// History the runner serves without part numbers holds every view until a
+/// summary passes its last entry. When that history is longer than one
+/// summarizer chunk, the runs must follow one another until they reach that
+/// entry, as a wrap-up's do, rather than wait for the session's next notice
+/// while its views stay held.
+#[tokio::test]
+async fn numbers_review_summaries_drain_successive_runs_until_the_numbers_floor() {
+    let (session, _, route, mut setup, settings) = fixture();
+    setup.preset = "head".into();
+    let trace = Arc::new(Trace {
+        complete: true,
+        ..Default::default()
+    });
+    let floor = 150;
+    *trace.runner.entries.lock().unwrap() = (1..=160)
+        .map(|ordinal| {
+            let mut entry = Entry::new(
+                ordinal,
+                format!("m{ordinal}"),
+                if ordinal % 2 == 1 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                ordinal,
+                vec![Part::new(
+                    "p",
+                    PartBody::Text {
+                        text: "word ".repeat(400).into(),
+                    },
+                )],
+            );
+            // The parts carry no tag, so marking the entry leaves its
+            // digest unchanged.
+            entry.numbers_unknown = ordinal <= floor;
+            entry
+        })
+        .collect();
+    let newest = trace.runner.entries.lock().unwrap().last().map(cursor);
+    setup.newest = newest.clone();
+    let module = crate::module::Module::new(SummaryClient(trace.clone()), settings, None, None);
+    module.setup(route.clone(), setup).unwrap();
+    module.idle(&route.session).await.unwrap();
+    module
+        .notice(&route.session, notice(&session, 1, newest))
+        .unwrap();
+    module.idle(&route.session).await.unwrap();
+    let pattern = regex::Regex::new(r":(\d+)-(\d+):").unwrap();
+    let ranges: Vec<(u64, u64)> = trace
+        .children
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(child, _)| {
+            let captures = pattern.captures(&child.session)?;
+            Some((captures[1].parse().ok()?, captures[2].parse().ok()?))
+        })
+        .collect();
+    assert!(!ranges.is_empty(), "no summary started");
+    assert!(
+        ranges.iter().any(|(_, through)| *through >= floor),
+        "the summaries stopped short of the numbers floor at {floor} until another notice: runs {ranges:?}"
+    );
+}

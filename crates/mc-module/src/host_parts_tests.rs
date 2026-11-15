@@ -80,6 +80,10 @@ async fn host_parts_recovery_preserves_bytes_and_labels_full_tag_preview_and_ran
             &input,
             Some(1),
             crate::count::Counter::for_model(None),
+            crate::expand::NumbersUnknown {
+                refused: &mut Default::default(),
+                summarized: false,
+            },
         )
         .await
         .unwrap();

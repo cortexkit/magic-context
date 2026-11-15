@@ -53,11 +53,6 @@ use cortexkit_role_routing::select::{SelectAnswer, SelectRequest};
 /// How long ck-mc waits on one call to a runner.
 const RUNNER_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-// Enabling this makes runners cap and continue named reads and send the soft
-// window-budget flag and ride cause. Deploy ck-mc's readers before declaring
-// compaction-limits/v1 in its manifest.
-const DECLARE_COMPACTION_LIMITS: bool = false;
-
 /// The module's manifest with moves off ([`manifest_for`]).
 pub fn manifest(module_id: &str) -> ModuleManifest {
     manifest_for(module_id, false)
@@ -161,7 +156,18 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         // a tool-set change) only to providers declaring this.
         cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_NOTES_TOKENS_PROVIDES.to_owned(),
+        // Named readers honor the runner's caps and retry unanswered names.
+        // The soft window-budget flag and ride cause are diagnostic only:
+        // neither grants rebuild permission nor starts a summary.
+        cortexkit_role_compaction::COMPACTION_LIMITS_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_RENDER_FAILED_PROVIDES.to_owned(),
+        // The runner serves history whose part numbers it can't establish
+        // (entries marked `numbers_unknown`, parts without `tag`) only to
+        // providers declaring this. ck-mc keeps such entries as the same
+        // messages, answers tag numbers the runner refuses with a tool
+        // error, and cuts every view through that history once a summary
+        // covers it (see `session::numbers_unknown`).
+        cortexkit_role_compaction::COMPACTION_NUMBERS_UNKNOWN_PROVIDES.to_owned(),
         // The runner marks Setup, notices and rides with `statement_epoch`
         // and `statement_seq` only for providers declaring this (allowed from
         // contract 0.3.8 on), so ck-mc can drop a statement from a replaced
@@ -186,9 +192,6 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     ];
     if agent_data {
         claims.push(cortexkit_role_agent_data::PROVIDES.to_owned());
-    }
-    if DECLARE_COMPACTION_LIMITS {
-        claims.push(cortexkit_role_compaction::COMPACTION_LIMITS_PROVIDES.to_owned());
     }
     let routing = serde_json::to_value(crate::routing::consumer_declarations())
         .expect("routing declarations are JSON");
@@ -2032,7 +2035,28 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
         message: format!("{method}: {error:?}"),
         code,
         detail,
+        // A request may have reached the runner when the client wrote it and
+        // saw no answer (`OutcomeUnknown`), and also when a `NotSent` can't
+        // prove it stayed unsent (`never_forwarded() == Some(false)`: the
+        // reply channel closed after the writer took the request, or a resend
+        // followed a refusal an older daemon did not mark as unsent). Both
+        // count as "may have arrived" because guessing wrong costs far less
+        // that way: a view the runner never received is offered again on the
+        // next notice, which the runner settles, while rolling back a view
+        // the runner holds queues its drops again, shows it undelivered in
+        // the apps and loses its acceptance line.
+        outcome_unknown: may_have_arrived(
+            matches!(error, subc_client_rs::CallError::OutcomeUnknown(_)),
+            error.never_forwarded(),
+        ),
     }
+}
+
+/// Whether a failed call may have reached the runner, from what the client
+/// reports about it: no answer to a written request (`outcome_unknown`), or
+/// [`subc_client_rs::CallError::never_forwarded`] (see [`call_error`]).
+fn may_have_arrived(outcome_unknown: bool, never_forwarded: Option<bool>) -> bool {
+    outcome_unknown || never_forwarded == Some(false)
 }
 
 #[cfg(test)]
@@ -2042,6 +2066,10 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "transport_slow_answer_tests.rs"]
 mod slow_answer_tests;
+
+#[cfg(test)]
+#[path = "transport_outcome_tests.rs"]
+mod outcome_tests;
 
 #[cfg(test)]
 #[path = "tool_conformance_tests.rs"]
@@ -2540,13 +2568,13 @@ mod manifest_tests {
             "compaction-host-parts/v1",
             "compaction-signed-floor/v1",
             "compaction-notes-tokens/v1",
+            "compaction-limits/v1",
             "compaction-statement-seq/v1",
             "tool-provider/v1",
             "step-transform-provider/v2",
         ] {
             assert!(provides.contains(&claim), "{claim} missing: {provides:?}");
         }
-        assert!(!provides.contains(&"compaction-limits/v1"));
         assert!(
             !provides
                 .iter()

@@ -69,7 +69,14 @@ mod tests {
 
     #[test]
     fn unknown_and_approximate_models_keep_the_estimator() {
-        for model in ["test/model", "anthropic/claude-haiku-5-5"] {
+        // Older Gemini and names without a revision map to Gemini's
+        // vocabulary only as an approximation, so they stay estimated.
+        for model in [
+            "test/model",
+            "anthropic/claude-haiku-5-5",
+            "google/gemini-2.5-pro",
+            "google/gemini-flash-latest",
+        ] {
             let counter = Counter::for_model(Some(model));
             assert_eq!(counter.family(), None);
             let text = "Read src/session.rs, preserve the cached prefix, then cargo test.";

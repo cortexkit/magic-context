@@ -118,17 +118,39 @@ impl Session {
         )
     }
     pub(super) fn command_managed(&self) -> bool {
-        self.compacting()
+        self.command_unmanaged().is_none()
+    }
+
+    /// Why commands can't act on the session now, as the reason a preview
+    /// gives: not managed, or views held until a summary passes history the
+    /// runner serves without part numbers (no view could land a flush, and
+    /// a preview built on a snapshot would blame the queue for it).
+    pub(super) fn command_unmanaged(&self) -> Option<&'static str> {
+        if !(self.compacting()
             && !self.suspended
             && self.index_ready
             && !self.latest_unknown
             && self.transcript_behind.is_none()
-            && !self.short_of_move_floor()
+            && !self.short_of_move_floor())
+        {
+            return Some("not_managed");
+        }
+        self.short_of_numbers_floor()
+            .then_some("waiting_for_numbers_summary")
+    }
+
+    /// The preview of a session commands can't act on now.
+    pub(super) fn command_unavailable(&self) -> Preview {
+        let mut preview = crate::user_commands::unavailable();
+        if let Some(reason) = self.command_unmanaged() {
+            preview.reason = Some(reason.into());
+        }
+        preview
     }
 
     pub(crate) fn command_preview(&mut self, settings: &Settings, id: &str) -> Preview {
         if !self.command_managed() {
-            return crate::user_commands::unavailable();
+            return self.command_unavailable();
         }
         if id == "status" {
             self.command_status(settings)
@@ -302,9 +324,9 @@ impl Session {
         if let Some(answer) = self.command_replay(request, &digest) {
             return Ok(answer);
         }
-        if !self.command_managed() {
+        if let Some(reason) = self.command_unmanaged() {
             return Ok(RunReply::new(if request.preview_version == "unmanaged" {
-                "not_managed"
+                reason
             } else {
                 "preview_stale"
             }));
@@ -346,7 +368,9 @@ impl Session {
         });
         self.app_cause = "explicit_flush".into();
         // Publication saves the scheduled answer and its possibly-delivered
-        // view in one document, before the runner can receive the view.
+        // view in one document, before the runner can receive the view. A
+        // call whose answer was lost counts as delivered: the runner may
+        // hold the view, and the next notice offers it again if it doesn't.
         let (delivered, durable) = self.publish_recorded(client, view).await;
         if delivered {
             return Ok(reply);

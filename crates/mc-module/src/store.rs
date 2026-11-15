@@ -155,6 +155,13 @@ pub struct Durable {
     /// change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_floor: Option<String>,
+    /// Tag numbers the runner refused as `numbers_unknown`: history it
+    /// serves without part numbers. The refusal holds for the session's
+    /// life, so they are never asked for again, after a restart too. Left
+    /// out of the saved text while empty, so other sessions' rows don't
+    /// change.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub numbers_unknown_tags: std::collections::BTreeSet<u64>,
 }
 
 pub struct Store {

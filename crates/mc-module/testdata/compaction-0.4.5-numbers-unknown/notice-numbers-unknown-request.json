@@ -1,0 +1,42 @@
+{
+  "method": "compaction.notice",
+  "params": {
+    "conditions": {
+      "context_window": 32768,
+      "last_prompt_tokens": 1024,
+      "model": {
+        "model": "example-model",
+        "provider": "example-provider",
+        "variant": "standard"
+      },
+      "output_reserve": 4096,
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "none"
+      }
+    },
+    "entries": [
+      {
+        "digest": "d0b80047bd0898ffb05e6e523c71786dc5746327b321b46c173b5195e4aa00c8",
+        "mid": "message-a",
+        "notice": {
+          "sender": "example-notifier",
+          "template": "example"
+        },
+        "numbers_unknown": true,
+        "ordinal": 1,
+        "parts": [
+          {
+            "digest": "635c5b437d5d204fd794bbf6d6569f53f3df37c2802d3df80e8df1a2c8a0e7d3",
+            "id": "part-a",
+            "kind": "text",
+            "text": "An invented message."
+          }
+        ],
+        "role": "user",
+        "written_at": 1700000000000
+      }
+    ],
+    "seq": 2
+  }
+}

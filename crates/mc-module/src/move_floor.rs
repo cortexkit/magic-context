@@ -28,8 +28,22 @@ pub struct MoveFloor {
     pub mid: String,
 }
 
+/// Where the runner said an entry sits.
+enum Placed {
+    At(u64),
+    /// Not on the active path, or the read failed.
+    Nowhere,
+    /// The runner can't answer yet (`transient`), but will.
+    Later,
+}
+
+/// The runner can't place a reoffered view's cut yet, so the view is
+/// offered again later rather than judged now.
+#[derive(Debug)]
+pub(super) struct PlaceLater;
+
 /// The message id a view cuts through, if it has a cut.
-fn cut_of(view: &View) -> Option<&str> {
+pub(super) fn cut_of(view: &View) -> Option<&str> {
     view.edits.iter().find_map(|edit| match &edit.op {
         EditOp::Cut { through } => Some(through.as_str()),
         _ => None,
@@ -37,8 +51,9 @@ fn cut_of(view: &View) -> Option<&str> {
 }
 
 /// Why a view whose cut is `cut` (its id, and its ordinal where known) may
-/// not go to a session moved with `floor`; `None` when it may.
-fn breach(floor: &MoveFloor, cut: Option<(&str, Option<u64>)>) -> Option<String> {
+/// not go to a session whose views must cut through `floor` or later;
+/// `None` when it may.
+pub(super) fn breach(floor: &MoveFloor, cut: Option<(&str, Option<u64>)>) -> Option<String> {
     let Some((through, ordinal)) = cut else {
         return Some("no cut".into());
     };
@@ -85,18 +100,29 @@ impl Session {
     }
 
     /// The same check for a view built before a restart, whose cut the
-    /// index may not hold yet: the runner places it.
+    /// index may not hold yet: the runner places it. A cut through the
+    /// floor entry itself, or through an entry the index holds, needs no
+    /// read. `Err` when the runner answered that it can't place the entry
+    /// yet (`transient`): the view's fate is not decided, and it is offered
+    /// again later.
     pub(super) async fn move_floor_breach_placed<C: RunnerClient>(
         &self,
         client: &C,
         view: &View,
-    ) -> Option<String> {
-        let floor = self.move_floor.as_ref()?;
+    ) -> Result<Option<String>, PlaceLater> {
+        let Some(floor) = self.move_floor.as_ref() else {
+            return Ok(None);
+        };
         let cut = match cut_of(view) {
-            Some(through) => Some((through, self.place(client, through).await)),
+            Some(through) if through == floor.mid => return Ok(None),
+            Some(through) => match self.place(client, through).await {
+                Placed::At(ordinal) => Some((through, Some(ordinal))),
+                Placed::Nowhere => Some((through, None)),
+                Placed::Later => return Err(PlaceLater),
+            },
             None => None,
         };
-        breach(floor, cut)
+        Ok(breach(floor, cut))
     }
 
     /// A pass's view stays in ck-mc because of `why`. Logged once per stay
@@ -152,10 +178,10 @@ impl Session {
     }
 
     /// The ordinal of entry `mid`: from the index when it holds it,
-    /// otherwise from the runner. `None` when neither can place it.
-    async fn place<C: RunnerClient>(&self, client: &C, mid: &str) -> Option<u64> {
+    /// otherwise from the runner.
+    async fn place<C: RunnerClient>(&self, client: &C, mid: &str) -> Placed {
         if let Some(ordinal) = self.index.ordinal_of(mid) {
-            return Some(ordinal);
+            return Placed::At(ordinal);
         }
         let read = crate::reads::named_detail(
             client,
@@ -171,7 +197,19 @@ impl Session {
             Ok(entries) => entries
                 .iter()
                 .find(|entry| entry.mid == mid)
-                .map(|entry| entry.ordinal),
+                .map_or(Placed::Nowhere, |entry| Placed::At(entry.ordinal)),
+            // The runner can't answer this read yet but will, so it proves
+            // nothing about where the entry is.
+            Err(error)
+                if error.code.as_deref()
+                    == Some(cortexkit_role_compaction::wire::codes::TRANSIENT) =>
+            {
+                tracing::info!(
+                    "ck-mc: session {}: the runner can't place entry {mid} against the move floor yet: {error:?}",
+                    self.key.session
+                );
+                Placed::Later
+            }
             Err(error) => {
                 if !error.message.starts_with("runner fault:") {
                     tracing::warn!(
@@ -179,7 +217,7 @@ impl Session {
                         self.key.session
                     );
                 }
-                None
+                Placed::Nowhere
             }
         }
     }
@@ -225,14 +263,14 @@ impl Session {
             return;
         };
         match self.place(client, mid).await {
-            Some(ordinal) => {
+            Placed::At(ordinal) => {
                 tracing::info!(
                     "ck-mc: session {}: move floor entry {ordinal} ({mid}), from its move fence",
                     self.key.session
                 );
                 self.set_move_floor(Some((ordinal, mid)));
             }
-            None => tracing::warn!(
+            Placed::Nowhere | Placed::Later => tracing::warn!(
                 "ck-mc: session {}: its move fence names cut entry {mid}, which the runner cannot place; no move floor is known until a later Setup places it",
                 self.key.session
             ),

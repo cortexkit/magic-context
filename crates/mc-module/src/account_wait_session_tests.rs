@@ -110,6 +110,52 @@ async fn account_wait_ends_a_run_waiting_with_no_failure_charged() {
     assert_eq!(waiting.refusal.send, SendKind::TurnOne);
 }
 
+#[tokio::test(start_paused = true)]
+async fn never_ran_summary_returns_quota_and_preserves_failure_counters() {
+    use crate::summary::run::never_ran_tests::{
+        active, handover, not_delivered, Client as SendClient,
+    };
+    let mut senders: Vec<_> = not_delivered()
+        .into_iter()
+        .map(|reply| SendClient::new(vec![reply], vec![]))
+        .collect();
+    senders.push(SendClient::new(
+        vec![active()],
+        vec![handover("host_exited"); 3],
+    ));
+    for sender in senders {
+        let (mut session, client, settings) = ready();
+        assert!(session.decide_notice(&settings).summary.is_some());
+        assert!(session.drain.spent > 0);
+        // Existing failures belong to earlier model attempts, not this
+        // unrun prompt: neither increment nor reset them.
+        session.app.failures = 2;
+        session.app.last_error = Some("earlier failure".into());
+        session.drain.failure_at = 123;
+        let result = run::run(
+            &sender,
+            None,
+            &crate::summary::run::account_wait_send_tests::job(),
+        )
+        .await;
+        assert!(matches!(result, Err(run::SummaryError::NeverRan(_))));
+        session
+            .summary_finished(&client, &settings, result, now_ms())
+            .await;
+        assert_eq!(session.app.failures, 2);
+        assert_eq!(session.app.last_error.as_deref(), Some("earlier failure"));
+        assert_eq!(session.drain.failure_at, 123);
+        assert_eq!(session.drain.spent, 0);
+        assert_eq!(session.no_progress, None);
+        assert!(!session.summarizing);
+        let waiting = session.account_wait.as_ref().unwrap();
+        assert!((6_000..=8_000).contains(&(waiting.refusal.until_ms - waiting.refusal.at_ms)));
+        assert!(session.decide_notice(&settings).summary.is_none());
+        session.account_wait.as_mut().unwrap().refusal.until_ms = now_ms() - 1;
+        assert!(session.decide_notice(&settings).summary.is_some());
+    }
+}
+
 #[tokio::test]
 async fn routing_account_wait_releases_quota_preserves_views_and_stops_repeat_notices() {
     let (mut session, client, settings) = ready();

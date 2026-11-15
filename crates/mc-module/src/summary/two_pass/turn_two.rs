@@ -1582,7 +1582,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                     // against sending the check twice, so it goes; the stage
                     // that asked for the check is revoked by the caller, and
                     // a later second turn decides its facts afresh.
-                    Err(SummaryError::AccountWait(wait)) => {
+                    Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
                         self.db
                             .with_connection(|conn| {
                                 conn.execute(
@@ -1905,7 +1905,7 @@ async fn recover_one<C: RunnerClient>(
             Ok(reply) => db
                 .with_connection(|conn| record_reply(conn, stage, &carrier, &reply))
                 .map_err(|error| error.to_string())?,
-            Err(SummaryError::AccountWait(wait)) => {
+            Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
                 revoke_for_account(db, stage)?;
                 return Ok(Some(wait));
             }
@@ -2107,7 +2107,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
     {
         Ok(reply) => reply,
         Err(SummaryError::Failed(error)) if error == TIMED_OUT => return Ok(Outcome::InFlight),
-        Err(SummaryError::AccountWait(wait)) => {
+        Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
             revoke_for_account(db, &reserved.stage)?;
             return Ok(Outcome::AccountWait(wait));
         }

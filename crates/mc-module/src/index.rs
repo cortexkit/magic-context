@@ -38,6 +38,25 @@ fn only_tool_results_changed(held: &Entry, new: &Entry) -> bool {
         })
 }
 
+/// Whether `new` is `held` as the runner serves it once it can no longer
+/// establish the entry's part numbers (compaction contract T9, T10 and W7):
+/// marked `numbers_unknown`, with the same role, notice and parts (same ids
+/// and part digests) but its numbered parts without tags. Dropping the tags
+/// changes the entry digest, yet it is the same stored message, never an
+/// edit or a revert.
+fn lost_its_numbers(held: &Entry, new: &Entry) -> bool {
+    new.numbers_unknown
+        && held.mid == new.mid
+        && held.role == new.role
+        && held.notice == new.notice
+        && held.parts.len() == new.parts.len()
+        && held
+            .parts
+            .iter()
+            .zip(&new.parts)
+            .all(|(old, new)| old.id == new.id && old.digest == new.digest)
+}
+
 #[derive(Clone, Debug)]
 pub struct Index {
     /// The ordinal of `entries[0]`, or of the next entry when empty.
@@ -54,6 +73,9 @@ pub struct Index {
     app_pruned: Option<u64>,
     positions: std::collections::HashMap<String, u64>,
     summary_changed: Option<u64>,
+    /// The ordinal of the newest held entry marked `numbers_unknown`. Kept
+    /// as entries arrive so a pass need not scan the whole window for it.
+    numbers_unknown_through: Option<u64>,
 }
 
 /// An empty index that holds the whole transcript, from its first entry.
@@ -138,6 +160,31 @@ impl Index {
             app_pruned: None,
             positions: Default::default(),
             summary_changed: Some(base),
+            numbers_unknown_through: None,
+        }
+    }
+
+    /// The newest held entry the runner serves without part numbers
+    /// (`numbers_unknown`). Every view must cut through it or a later entry
+    /// (compaction contract T11).
+    pub fn numbers_unknown_through(&self) -> Option<&Entry> {
+        self.at(self.numbers_unknown_through?)
+    }
+
+    /// Find the newest marked entry again after entries were removed or
+    /// replaced; the incremental record can't tell what came before it.
+    fn recount_numbers_unknown(&mut self) {
+        self.numbers_unknown_through = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.numbers_unknown)
+            .map(|entry| entry.ordinal);
+    }
+
+    fn note_numbers_unknown(&mut self, entry: &Entry) {
+        if entry.numbers_unknown {
+            self.numbers_unknown_through = self.numbers_unknown_through.max(Some(entry.ordinal));
         }
     }
 
@@ -223,6 +270,7 @@ impl Index {
                 );
                 self.app_changed.insert(entry.ordinal);
                 self.positions.insert(entry.mid.clone(), entry.ordinal);
+                self.note_numbers_unknown(&entry);
                 Arc::make_mut(&mut self.entries).push(entry);
                 continue;
             }
@@ -230,6 +278,26 @@ impl Index {
                 return Extend::Gap;
             }
             let held = &mut Arc::make_mut(&mut self.entries)[(entry.ordinal - self.base) as usize];
+            if held.digest != entry.digest && lost_its_numbers(held, &entry) {
+                // The runner fixed this stretch as unknown-number after the
+                // index took it (compaction contract W7): the held copy takes
+                // the served form, tags gone and the new digest, and keeps
+                // everything else, so nothing after it is read or indexed
+                // again. The metadata below is then refreshed as for any
+                // repeat.
+                held.digest = entry.digest.clone();
+                held.numbers_unknown = true;
+                for (held, new) in held.parts.iter_mut().zip(&entry.parts) {
+                    held.tag = new.tag;
+                }
+                self.summary_changed = Some(
+                    self.summary_changed
+                        .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
+                );
+                self.app_changed.insert(entry.ordinal);
+                self.numbers_unknown_through =
+                    self.numbers_unknown_through.max(Some(entry.ordinal));
+            }
             if held.digest == entry.digest && held.mid == entry.mid {
                 // The host's finish stamp can arrive after the message was
                 // first read. It isn't part of the transcript, so it only
@@ -278,7 +346,11 @@ impl Index {
                         .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
                 );
                 self.app_changed.insert(entry.ordinal);
+                let was_marked = held.numbers_unknown;
                 *held = entry;
+                if was_marked || held.numbers_unknown {
+                    self.recount_numbers_unknown();
+                }
                 continue;
             }
             return Extend::Diverged;
@@ -299,6 +371,12 @@ impl Index {
         }
         self.app_truncated = Some(self.app_truncated.map_or(ordinal, |old| old.min(ordinal)));
         Arc::make_mut(&mut self.entries).truncate(ordinal.saturating_sub(self.base) as usize);
+        if self
+            .numbers_unknown_through
+            .is_some_and(|marked| marked >= ordinal)
+        {
+            self.recount_numbers_unknown();
+        }
     }
 
     /// Forget every entry before `ordinal`, which becomes the base. Returns
@@ -313,6 +391,12 @@ impl Index {
         let gone: Vec<_> = Arc::make_mut(&mut self.entries).drain(..count).collect();
         for entry in &gone {
             self.positions.remove(&entry.mid);
+        }
+        if self
+            .numbers_unknown_through
+            .is_some_and(|marked| marked < self.base)
+        {
+            self.recount_numbers_unknown();
         }
         gone
     }
@@ -642,5 +726,92 @@ mod tests {
         assert_eq!(Index::starting_at(4).read_after(), Some(3));
         assert_eq!(Index::starting_at(2).read_after(), Some(1));
         assert_eq!(Index::default().read_after(), None);
+    }
+
+    /// The contract's own pair: one stored entry served numbered, then
+    /// marked `numbers_unknown` with its tag gone and a new digest.
+    fn transition() -> (Entry, Entry) {
+        let raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../testdata/compaction-0.4.5-numbers-unknown/numbers-unknown-transition.json"
+        ))
+        .unwrap();
+        (
+            serde_json::from_value(raw["numbered"].clone()).unwrap(),
+            serde_json::from_value(raw["marked"].clone()).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_marked_entry_is_the_entry_already_held_not_an_edit() {
+        let (numbered, served) = transition();
+        let mut index = Index::default();
+        // The held copy carries a token count the runner reported. A read
+        // without a token family can't carry that count again, so the marked
+        // form must keep the held one.
+        let mut counted = numbered.clone();
+        counted.parts[0].tokens = Some(cortexkit_role_compaction::tokens::PartTokens::count(77));
+        index.extend_counted(
+            [counted, entry(2, "b", "later"), entry(3, "c", "newest")],
+            Some("family-a"),
+        );
+        assert!(index.numbers_unknown_through().is_none());
+        index.app_changes();
+        // An older entry, so only the identity rule can keep it as it was.
+        assert_eq!(
+            index.extend_counted([served.clone()], None),
+            Extend::Continued
+        );
+        let held = &index.entries()[0];
+        assert!(held.numbers_unknown);
+        assert_eq!(held.parts[0].tag, None);
+        assert_eq!(held.digest, served.digest);
+        assert_eq!(crate::tokens::part(&held.parts[0]), 77);
+        assert_eq!(index.find_tag(1).map(|(entry, _)| entry.mid.clone()), None);
+        assert_eq!(index.numbers_unknown_through().unwrap().mid, "message-a");
+        assert_eq!(index.entries()[1].parts[0].tag, Some(2));
+        assert_eq!(index.app_changes().1, vec![1]);
+        // Served again the same way, it is a plain repeat.
+        assert_eq!(index.extend([served.clone()]), Extend::Continued);
+
+        // A marked entry whose part changed is still an edit.
+        let mut index = Index::default();
+        index.extend([numbered, entry(2, "b", "later")]);
+        let mut edited = served;
+        edited.parts[0].digest = entry(9, "z", "other").parts[0].digest.clone();
+        assert_eq!(index.extend([edited]), Extend::Diverged);
+    }
+
+    #[test]
+    fn the_newest_marked_entry_follows_reverts_prunes_and_updates() {
+        let marked = |ordinal: u64, mid: &str| {
+            let mut entry = entry(ordinal, mid, "x");
+            entry.numbers_unknown = true;
+            entry.parts[0].tag = None;
+            entry.digest = cortexkit_role_compaction::read::entry_digest(
+                entry.role.clone(),
+                entry.notice.as_ref(),
+                &entry.parts,
+            );
+            entry
+        };
+        let through = |index: &Index| index.numbers_unknown_through().map(|e| e.ordinal);
+        let mut index = Index::default();
+        index.extend([
+            marked(1, "a"),
+            marked(2, "b"),
+            entry(3, "c", "x"),
+            marked(4, "d"),
+        ]);
+        assert_eq!(through(&index), Some(4));
+        // The newest entry may change; written again unmarked, it no longer
+        // counts.
+        index.extend([entry(4, "d", "x")]);
+        assert_eq!(through(&index), Some(2));
+        index.truncate(2);
+        assert_eq!(through(&index), Some(1));
+        index.extend([entry(2, "e", "x"), marked(3, "f")]);
+        assert_eq!(through(&index), Some(3));
+        index.prune_before(4);
+        assert_eq!(through(&index), None);
     }
 }

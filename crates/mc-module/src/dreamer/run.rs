@@ -253,7 +253,7 @@ pub async fn run<C: RunnerClient + Router>(
                         ))
                     }
                 },
-                Err(SummaryError::AccountWait(wait)) => {
+                Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
                     report(Outcome::Cancelled, usage.as_ref()).await;
                     return Err(TaskError::AccountWait(wait));
                 }
