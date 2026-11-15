@@ -910,6 +910,7 @@ const TEMPLATE_DATA = [
 "ck-mc: finishing the install of agent-data cut \x01, which the last run of ck-mc started",
 "Pi held identity rebuild: prior prefix unavailable (\x01); applying the declared rebuild",
 "thinking binding recovery: stripped bound reasoning from \x01 assistant(s) [\x01]; flag=kept",
+"ck-mc: session \x01: over_limit without request_tokens: using a request floor of \x01 tokens",
 "compartment trigger: proactive fire at \x01% (floor=\x01% projected post-drop=none target=\x01%)",
 "context limit resolved: \x01 for \x01 (catalog \x01, overflow-detected \x01, proven accepted input \x01)\x021m",
 "pending ops WILL NOT APPLY — reason=\x01 pendingOps=not loaded (deferred pass) context=\x01%",

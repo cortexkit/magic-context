@@ -3128,16 +3128,26 @@ impl Session {
             ride.applied_view.as_ref().map(|view| view.version),
         );
         self.settle_stated(stated, &[]);
-        // An over-limit ride still lands on a stale reading: it acts on the
-        // runner's own estimate of the request it is about to send.
+        // A provider refusal still permits reclaim when the last reading is
+        // stale: the refused request did not fit under the current view.
         let judged = self.judged_view(stated);
         match standing {
             Standing::Current => self.judge_reading(previous, judged.as_ref()),
             Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
         }
-        let over_limit = ride
-            .has(RideCause::OverLimit)
-            .then_some(ride.request_tokens.unwrap_or(0));
+        let over_limit = ride.has(RideCause::OverLimit).then(|| {
+            ride.request_tokens.unwrap_or_else(|| {
+                // The provider refused the request, so it exceeded the usable
+                // window even without a stated count. Keep any larger reading.
+                let floor = pass::usable_window(&self.conditions)
+                    .max(self.conditions.last_prompt_tokens.unwrap_or(0));
+                tracing::info!(
+                    "ck-mc: session {}: over_limit without request_tokens: using a request floor of {floor} tokens",
+                    self.key.session
+                );
+                floor
+            })
+        });
         // Only a cause that changes the request's bytes before the
         // conversation folds the head for free. A forgotten cache (expiry, a
         // chain reset, a tier or account switch, an unknown cause) adds
@@ -4329,7 +4339,8 @@ impl Session {
     /// on every pass.
     ///
     /// `over_limit` is set when the runner asked for a view because its next
-    /// request would not fit, and carries its estimate of that request. The
+    /// request was refused for length, and carries the provider's stated count
+    /// or a lower bound from the usable window and last reading. The
     /// emergency drop then runs whatever the usage, and the protections that
     /// can yield do. `prefix_changes` is set on a ride whose request's bytes
     /// before the conversation change anyway, so the cache is lost whether or
