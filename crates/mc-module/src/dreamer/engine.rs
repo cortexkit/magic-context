@@ -57,6 +57,12 @@ pub struct Settings {
     pub schedules: HashMap<String, String>,
     /// The most input and output tokens one run may spend.
     pub budget_tokens: u64,
+    /// The projects the dreamer runs for, by id; `None` for every project
+    /// with a session in this process. The dreamer then acts as if only
+    /// these projects had sessions: their own tasks, their one-time tasks,
+    /// the person's own tasks carried by one of them, and the shared tasks
+    /// of their workspaces.
+    pub projects: Option<BTreeSet<String>>,
 }
 
 impl Default for Settings {
@@ -64,6 +70,7 @@ impl Default for Settings {
         Self {
             schedules: HashMap::new(),
             budget_tokens: DEFAULT_BUDGET_TOKENS,
+            projects: None,
         }
     }
 }
@@ -89,6 +96,13 @@ pub fn default_schedule(kind: &str) -> &'static str {
 }
 
 impl Settings {
+    /// Whether the dreamer runs for `project`.
+    pub fn runs_for(&self, project: &str) -> bool {
+        self.projects
+            .as_ref()
+            .is_none_or(|projects| projects.contains(project))
+    }
+
     fn schedule(&self, kind: &str) -> String {
         self.schedules
             .get(kind)
@@ -293,6 +307,28 @@ impl Engine {
             None => {
                 workspaces.remove(project);
             }
+        }
+    }
+
+    /// Forget every project seen in this process that `settings` no longer
+    /// runs for, with its workspace and any of the person's own tasks it
+    /// carried, so nothing starts for it until the settings list it again.
+    /// Its schedules stay in the store and are picked up when it is.
+    pub fn retain_projects(&self, settings: &Settings) {
+        self.projects
+            .lock()
+            .expect("dreamer projects")
+            .retain(|project, _| settings.runs_for(project));
+        self.workspaces
+            .lock()
+            .expect("dreamer workspaces")
+            .retain(|project, _| settings.runs_for(project));
+        let mut carrier = self.global.lock().expect("dreamer global owner");
+        if carrier
+            .as_ref()
+            .is_some_and(|(project, _)| !settings.runs_for(project))
+        {
+            *carrier = None;
         }
     }
 

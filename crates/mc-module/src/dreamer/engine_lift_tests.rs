@@ -332,3 +332,38 @@ fn retries_wait_longer_after_each_failure_up_to_a_day() {
         Some(1_000 + ONCE_RETRY_MAX)
     );
 }
+
+/// `dreamer.projects` limits the dreamer to the listed projects: a project
+/// seen before the list left it out is forgotten, and its one-time task
+/// never starts.
+#[tokio::test]
+async fn a_project_the_settings_leave_out_gets_no_lift() {
+    let (_dir, db) = store();
+    let engine = engine(&db, profile(true), "ws-lift-listed");
+    let client = client(
+        Some(listing("ws-lift-listed", &["subc", "magic-context"])),
+        &[Ends::Reply(MOVE_ONE)],
+    );
+    let elsewhere = Settings {
+        projects: Some(["pj-another".to_owned()].into()),
+        ..Settings::default()
+    };
+    engine.retain_projects(&elsewhere);
+    engine.tick(&db, &client, &elsewhere, now_ms());
+    settled(&engine).await;
+    assert!(client.sends.lock().unwrap().is_empty());
+    assert!(runs(&db).is_empty());
+
+    // Listed, it runs.
+    let listed = Settings {
+        projects: Some([PROJECT.to_owned()].into()),
+        ..Settings::default()
+    };
+    engine.see_project(&db, PROJECT, "/nowhere", profile(true), &listed, now_ms());
+    engine.see_workspace(PROJECT, Some("ws-lift-listed"));
+    engine.retain_projects(&listed);
+    engine.tick(&db, &client, &listed, now_ms());
+    settled(&engine).await;
+    assert_eq!(client.sends.lock().unwrap().len(), 1);
+    assert_eq!(level(&db, 1), "workspace");
+}

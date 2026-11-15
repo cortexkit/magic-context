@@ -856,7 +856,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             loop {
                 if let Some(settings) = module.inner.config.dreamer() {
                     let now = now_ms();
+                    engine.retain_projects(&settings);
                     for (project, root, session) in module.projects_with_a_session() {
+                        if !settings.runs_for(&project) {
+                            continue;
+                        }
                         let context = module
                             .inner
                             .store

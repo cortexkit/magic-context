@@ -17,7 +17,7 @@
 //! Each file is re-read when its modification time changes, so an edit
 //! applies from the session's next pass without a restart.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -92,7 +92,8 @@ impl Config {
 
 /// The dreamer's settings from the user's file, the same keys the 0.49
 /// dreamer read: `dreamer.disable`, `dreamer.maxTokens` and each task's
-/// `dreamer.tasks.<kind>.schedule`. Only the user's file is read: a
+/// `dreamer.tasks.<kind>.schedule`, plus `dreamer.projects`, the project ids
+/// it runs for (every project when absent). Only the user's file is read: a
 /// project's file can't make the person's machine spend more.
 fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Settings> {
     let dreamer = user.and_then(|user| user.get("dreamer"));
@@ -110,6 +111,20 @@ fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Sett
         .filter(|budget| *budget > 0)
     {
         settings.budget_tokens = budget;
+    }
+    // A list that can't be read limits the dreamer to no project: a setting
+    // that narrows where the dreamer runs must never widen it by mistake.
+    if let Some(projects) = dreamer.and_then(|dreamer| dreamer.get("projects")) {
+        let listed: Option<BTreeSet<String>> = projects.as_array().and_then(|projects| {
+            projects
+                .iter()
+                .map(|project| project.as_str().map(|id| id.trim().to_owned()))
+                .collect()
+        });
+        if listed.is_none() {
+            tracing::warn!("ck-mc: dreamer.projects is not a list of project ids; the dreamer runs for no project");
+        }
+        settings.projects = Some(listed.unwrap_or_default());
     }
     for (kind, task) in dreamer
         .and_then(|dreamer| dreamer.get("tasks"))

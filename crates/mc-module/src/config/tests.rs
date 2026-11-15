@@ -742,3 +742,28 @@ fn keep_subagents_is_off_by_default_and_only_the_user_turns_it_on() {
         json!({"keep_subagents": false})
     ));
 }
+
+#[test]
+fn dreamer_projects_limit_the_dreamer_and_an_unreadable_list_means_none() {
+    let settings =
+        |dreamer: serde_json::Value| dreamer_settings(Some(&json!({ "dreamer": dreamer })));
+    assert_eq!(settings(json!({})).unwrap().projects, None);
+    assert_eq!(
+        settings(json!({"projects": ["pj-a", " pj-b "]}))
+            .unwrap()
+            .projects,
+        Some(["pj-a".to_owned(), "pj-b".to_owned()].into())
+    );
+    // A list that can't be read narrows to no project, never to all.
+    assert_eq!(
+        settings(json!({"projects": "pj-a"})).unwrap().projects,
+        Some(Default::default())
+    );
+    assert_eq!(
+        settings(json!({"projects": ["pj-a", 3]})).unwrap().projects,
+        Some(Default::default())
+    );
+    let off = settings(json!({"projects": []})).unwrap();
+    assert!(!off.runs_for("pj-a"));
+    assert!(settings(json!({})).unwrap().runs_for("pj-a"));
+}
