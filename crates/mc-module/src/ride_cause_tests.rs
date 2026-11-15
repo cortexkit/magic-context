@@ -168,8 +168,11 @@ fn ride_over_limit_keeps_a_stated_count_below_the_window() {
     )
     .with_request_tokens(70_000);
     let view = session.ride(&settings, &request);
-    // With no fixed overhead, reaching 30% of the 64,350 ceiling takes four
-    // 16k outputs. Flooring the stated count to 99k would take all five.
+    // The stated 70k is used as given. The emergency lane drops toward 30% of
+    // the 64,350 ceiling (about 19.3k), and with no fixed overhead that takes
+    // four 16k outputs (70k - 64k = 6k). Had the 99k usable-window floor for
+    // count-less rides replaced the stated count, it would take all five
+    // (99k - 80k = 19k), so four proves the stated count was kept.
     assert_eq!(dropped_tools(view.as_ref()), 4);
     assert!(!logs.text().contains("using a request floor"));
 }
