@@ -90,6 +90,25 @@ test("delayed view evidence quotes the stale reading and counts multiple interve
     expect(s.alerts).toEqual([]);
 });
 
+test("a view whose apply answer was lost counts from its handover, though confirmed after the rewrite", async () => {
+    // ck-mc logs such a view's acceptance only when a later notice confirms it,
+    // so the line itself is newer than the rewrite it explains.
+    const confirmed = log(rewriteAt + 400,
+        "view 38 accepted (31 edits, cut through 01dff6e5); confirmed by the runner after its apply answer was lost; " +
+        `handed over at ${new Date(acceptedAt).toISOString()}`);
+    const decision = parseRunnerDecision(confirmed, session)!;
+    expect(decision).toMatchObject({ kind: "view", version: 38, at: acceptedAt });
+    expect(decision.detail).toBe("view=38 edits=31 cut=01dff6e5");
+    const s = scan(rows(), heads([confirmed]));
+    await s.run();
+    expect(Object.values(s.args.state.heads)[0]!.summary.at(-1)).toMatchObject({ class: "view", viewVersion: 38, viewAcceptedAt: acceptedAt });
+    expect(s.alerts).toEqual([]);
+    // Without the handover time, the same line cannot explain the rewrite.
+    const late = scan(rows(), heads([confirmed.replace(/; handed over at \S+$/, "")]));
+    await late.run();
+    expect(late.alerts.map((alert) => alert.class)).toEqual(["unexplained"]);
+});
+
 test("an idle head applies a view 40 minutes after acceptance without a wake", async () => {
     const delayedAt = acceptedAt + 40 * MINUTE;
     const feed = [row(acceptedAt - 1, 686_474, 0), row(delayedAt, 62_208, 381_260)];

@@ -300,6 +300,7 @@ describe("analyze-cache-bust Thalamus runners", () => {
         expect(parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: runner refused view 3: invalid`, "ses_runner")).toMatchObject({ kind: "view_refused", version: 3 });
         for (const [suffix, cut] of [["", "unlogged"], [", no cut", "none"], [", cut through msg_99", "msg_99"]]) {
             expect(parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: view 3 accepted (2 edits${suffix})`, "ses_runner")!.detail).toBe(`view=3 edits=2 cut=${cut}`);
+            expect(parseRunnerDecision(`${at} INFO ck-mc: session ses_runner: view 3 accepted (2 edits${suffix}); a note`, "ses_runner")!.detail).toBe(`view=3 edits=2 cut=${cut}`);
         }
     });
 

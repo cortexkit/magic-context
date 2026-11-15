@@ -27,9 +27,15 @@ export function parseRunnerDecision(line: string, session: string): RunnerDecisi
     // Cut-through/no-cut shape: 8c75aafa8d, the same file at :3051.
     const view = /^view (\d+) accepted\b/.exec(body);
     const edits = /^view \d+ accepted \((\d+) edits/.exec(body)?.[1];
-    const cut = /, cut through (.+)\)$/.exec(body)?.[1];
+    // A note may follow the closing parenthesis, so the cut is not end-anchored.
+    const cut = /^view \d+ accepted \(\d+ edits, cut through ([^)]+)\)/.exec(body)?.[1];
+    // When ck-mc's apply call lost its answer, the view's acceptance is logged
+    // only once a later notice confirms it, after the request that first carried
+    // it. That line names when the view was handed over, and the view counts from
+    // then, so a rewrite on that request is credited to it.
+    const handedOver = Date.parse(/; handed over at (\S+)$/.exec(body)?.[1] ?? "");
     if (view) return {
-        at, kind: "view", version: Number(view[1]), line,
+        at: Number.isFinite(handedOver) ? handedOver : at, kind: "view", version: Number(view[1]), line,
         detail: `view=${view[1]} edits=${edits ?? "unlogged"} cut=${cut ?? (body.includes(", no cut") ? "none" : "unlogged")}`,
     };
     const reoffer = /^(?:runner refused view|unknown answer to view) (\d+) offered again:/.exec(body) ??
