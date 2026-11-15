@@ -2,15 +2,17 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import {
-    classifyRunnerStep,
     extendRunnerRebuildChain,
     formatRunnerStepTiming,
     type RunnerClassification,
     type RunnerMeterStep,
     type RunnerViewRewrite,
 } from "./cache-bust-runner-classification";
+import { classifyRunnerFeedStep } from "./cache-bust-runner-cause";
 import {
     runnerFeedRow,
+    runnerStepFacts,
+    runnerStepFactsSchema,
     type RunnerFeedRow,
     type RunnerMeterSource,
 } from "./cache-bust-runner-feed";
@@ -174,6 +176,7 @@ const meterStepSchema = z.object({
     read: nonnegative,
     write: nonnegative,
     prompt: nonnegative.optional(),
+    facts: runnerStepFactsSchema.optional(),
 });
 const observationSchema = z.object({
     healthy: z.boolean(),
@@ -198,6 +201,7 @@ const observationSchema = z.object({
     viewVersion: nonnegative.optional(),
     viewAcceptedAt: nonnegative.optional(),
     zeroReadWaveStartedAt: nonnegative.optional(),
+    cause: z.string().optional(),
     step: z.string(),
     at: nonnegative,
     read: nonnegative,
@@ -472,12 +476,14 @@ export async function scanRunnerFeed(args: {
             summary.skipped++;
             continue;
         }
-        const step = {
+        const stepFacts = runnerStepFacts(row);
+        const step: RunnerMeterStep = {
             at: row.occurred_at_ms,
             model: row.model,
             read: row.cache_read,
             write: row.cache_write,
             prompt: row.prompt,
+            ...(stepFacts ? { facts: stepFacts } : {}),
         };
         const previous = head.last;
         if (previous && step.at <= previous.at) continue;
@@ -487,7 +493,13 @@ export async function scanRunnerFeed(args: {
         observeRunnerViewStep(viewAttribution, facts.decisions, step.at);
         if (!previous) continue;
         advanceWave(step.at);
-        const classified: RunnerClassification = classifyRunnerStep(previous, step, facts.decisions, { viewAttribution });
+        const decided = classifyRunnerFeedStep(previous, step, facts.decisions, { viewAttribution }, row.cause);
+        const classified: RunnerClassification = decided.classification;
+        // Compare Astrocyte's cause with the log-timing guess it replaced.
+        if (decided.disagreement) args.log?.(JSON.stringify({
+            kind: "runner_cause_disagreement", session: row.session, step: row.step_ref,
+            harness: row.harness, at: step.at, ...decided.disagreement,
+        }));
         const waveResult = observeRunnerWave(state.wave, { session: row.session, harness: row.harness }, previous, step, classified);
         if (waveResult.member) {
             attributeRunnerWave(classified, state.wave.open!.startedAt);

@@ -1,12 +1,12 @@
 import {
-    classifyRunnerStep,
     extendRunnerRebuildChain,
     formatRunnerStepTiming,
     type RunnerClassification,
     type RunnerMeterStep,
     type RunnerViewRewrite,
 } from "./cache-bust-runner-classification";
-import type { RunnerFeedRow, RunnerMeterSource } from "./cache-bust-runner-feed";
+import { classifyRunnerFeedStep } from "./cache-bust-runner-cause";
+import { runnerStepFacts, type RunnerFeedRow, type RunnerMeterSource } from "./cache-bust-runner-feed";
 import type { RunnerHeads } from "./cache-bust-runner-monitor";
 import { emptyRunnerViewAttribution, type RunnerViewAttributionState } from "./cache-bust-runner-views";
 import { advanceRunnerWave, attributeRunnerWave, emptyRunnerWaveState, observeRunnerWave } from "./cache-bust-runner-wave";
@@ -60,20 +60,23 @@ export async function analyzeRunnerFeed(
             if (selected && row.session === session) rows.push({ row, note });
             continue;
         }
-        const step = {
+        const stepFacts = runnerStepFacts(row);
+        const step: RunnerMeterStep = {
             at: row.occurred_at_ms,
             model: row.model!,
             read: row.cache_read!,
             write: row.cache_write!,
             prompt: row.prompt,
+            ...(stepFacts ? { facts: stepFacts } : {}),
         };
         const key = JSON.stringify([row.harness, row.session]);
         const prior = previous.get(key);
         previous.set(key, step);
         const viewAttribution = views.get(key) ?? emptyRunnerViewAttribution();
         views.set(key, viewAttribution);
+        // The watcher's rule, so both give a step the same class.
         const classification: RunnerClassification | undefined = prior
-            ? classifyRunnerStep(prior, step, heads.get(row.session)?.decisions ?? [], { viewAttribution })
+            ? classifyRunnerFeedStep(prior, step, heads.get(row.session)?.decisions ?? [], { viewAttribution }, row.cause).classification
             : undefined;
         if (selected && prior && classification) {
             advanceRunnerWave(wave, step.at);
@@ -116,6 +119,6 @@ export function printRunnerFeedAnalysis(
         );
     }
     print(
-        `${rows.length} step row(s), ${rows.filter((row) => row.classification && !row.classification.healthy).length} short read(s); source=astrocyte, at most 24h of history; no request bytes, account, completion or keep-warm facts.`,
+        `${rows.length} step row(s), ${rows.filter((row) => row.classification && !row.classification.healthy).length} short read(s); source=astrocyte, at most 24h of history; no request bytes; account, completion, keep-warm, view, tool and system facts only where the runner sends them.`,
     );
 }

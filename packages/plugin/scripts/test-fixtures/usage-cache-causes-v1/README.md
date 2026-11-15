@@ -1,0 +1,3 @@
+The `usage.steps.read` reply from Astrocyte's tagged sample set `usage-cache-causes-v1`, copied byte for byte from the astrocyte repository's `crates/astrocyte-module/test-vectors/usage-cache-causes-v1/reply-feed-read.json` (commit 33440b2abe70). SHA-256 `f142bb1c6eddb4a66ff1d1f8304f3e31fbbe38a4e1ae9ddd67064ab7ef864ef4`, the same as that set's SHA256SUMS.
+
+Astrocyte produced it from synthetic steps with llm-runner 0.8.55 and usage-steps 0.2.8. One session alternates a baseline step with a rewrite for each `cause`, and every row carries the runner's cache facts. All identities, timestamps, digests and counts are invented. The rows carry no `cache_write`, so tests that run them through the watcher add counts and keep every other member as it is.

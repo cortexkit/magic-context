@@ -1,4 +1,5 @@
 import { cachedPrefixFloor } from "./cache-bust-attribution";
+import type { RunnerStepFacts } from "./cache-bust-runner-feed";
 import type { RunnerDecision } from "./cache-bust-runner-log";
 import {
     creditRunnerViewRewrite,
@@ -24,6 +25,8 @@ export interface RunnerMeterStep {
     read: number;
     write: number;
     prompt?: number;
+    /** Cache facts the runner reported for this step, when it reported any. */
+    facts?: RunnerStepFacts;
 }
 
 export interface RunnerClassification {
@@ -38,6 +41,8 @@ export interface RunnerClassification {
     viewVersion?: number;
     viewAcceptedAt?: number;
     zeroReadWaveStartedAt?: number;
+    /** Astrocyte's cause, set only when that cause decided `class`. */
+    cause?: string;
 }
 
 export type RunnerStepClassification = Omit<RunnerClassification, "class"> & {

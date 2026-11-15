@@ -37,7 +37,12 @@ export function advanceRunnerWave(state: RunnerWaveState, at: number): RunnerZer
     return closed;
 }
 
-/** Recorded causes keep their own classification; only unexplained rewrites join. */
+/**
+ * Recorded causes keep their own classification; only unexplained rewrites join,
+ * and those Astrocyte proved were an account change. A zero-read wave is what an
+ * account that stopped being given looks like, so a proven move between accounts
+ * still groups with the other sessions it moved.
+ */
 export function observeRunnerWave(
     state: RunnerWaveState,
     identity: { session: string; harness: string },
@@ -45,7 +50,8 @@ export function observeRunnerWave(
     current: RunnerMeterStep,
     classification: RunnerClassification,
 ): { member?: RunnerWaveMember; opened?: RunnerZeroReadWave; superseded?: RunnerZeroReadWave } {
-    if (classification.class !== "unexplained" || current.read !== 0 || current.write < 20_000 ||
+    const accountChange = classification.class === "scope_changed" && classification.cause === "account_or_model_changed";
+    if ((classification.class !== "unexplained" && !accountChange) || current.read !== 0 || current.write < 20_000 ||
         (previous.prompt ?? previous.read + previous.write) < 20_000 || previous.model !== current.model) return {};
     const member: RunnerWaveMember = {
         ...identity, at: current.at, written: current.write, previousStepAt: previous.at,
@@ -77,9 +83,15 @@ export function observeRunnerWave(
 }
 
 export function attributeRunnerWave(classification: RunnerClassification, startedAt: number): void {
+    // Keep Astrocyte's evidence, which starts at "cause=". It can prove the
+    // account moved, which the feed's counts alone cannot. Extracting it keeps
+    // a repeated attribution of the same step from nesting it twice.
+    const from = classification.cause === undefined ? -1 : classification.evidence.indexOf("cause=");
+    const astrocyte = from < 0 ? "" : `; ${classification.evidence.slice(from)}`;
+    const proven = classification.cause === "account_or_model_changed";
     classification.class = "zero_read_wave";
     classification.zeroReadWaveStartedAt = startedAt;
-    classification.evidence = `zero_read_wave began at ${new Date(startedAt).toISOString()}; account or route change is not proven by the feed`;
+    classification.evidence = `zero_read_wave began at ${new Date(startedAt).toISOString()}${proven ? "" : "; account or route change is not proven by the feed"}${astrocyte}`;
 }
 
 export function runnerWaveMembersText(members: readonly RunnerWaveMember[]): string {

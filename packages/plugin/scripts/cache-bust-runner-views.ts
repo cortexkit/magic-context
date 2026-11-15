@@ -104,3 +104,33 @@ export function creditRunnerViewRewrite(
         evidence: `view ${view.version} accepted at ${new Date(view.at).toISOString()}; ${steps} metered step(s) between accept and rewrite; ${view.line}${reading ? `; ${reading.line ?? reading.detail}` : ""}`,
     };
 }
+
+/**
+ * Credit the view a runner reported applying on a request, with every older
+ * view: once a request carries that view, none of them can explain a later
+ * rewrite. A newer accepted view stays pending, because the request did not
+ * carry it. ck-mc can log an acceptance only after the request that first
+ * carried it, so the acceptance may not be retained yet. It is then recorded
+ * here, already credited, and a later sync leaves it as it is.
+ */
+export function creditRunnerViewVersion(
+    state: RunnerViewAttributionState,
+    decisions: readonly RunnerDecision[],
+    version: number,
+    at: number,
+): RunnerAcceptedView | undefined {
+    let view = state.views.find((candidate) => candidate.version === version);
+    if (!view) {
+        const accepts = decisions.filter((event) =>
+            event.kind === "view" && event.version === version && event.at >= at - RUNNER_VIEW_RETENTION_MS,
+        );
+        const event = accepts.filter((candidate) => candidate.at <= at).at(-1) ?? accepts[0];
+        if (event) {
+            view = { at: event.at, version, line: event.line ?? event.detail, credited: false };
+            state.views.push(view);
+        }
+    }
+    for (const candidate of state.views)
+        if (candidate.version <= version) candidate.credited = true;
+    return view;
+}
