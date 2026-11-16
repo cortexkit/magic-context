@@ -1159,11 +1159,7 @@ function cleanupHistorianDump(sessionId: string, dumpPath?: string): void {
  * is logged and returns undefined; the historian pass carries on without a
  * dump.
  */
-function dumpHistorianResponse(
-    sessionId: string,
-    label: string,
-    text: string,
-): string | undefined {
+function dumpHistorianResponse(sessionId: string, label: string, text: string): string | undefined {
     try {
         const dumpDir = getMagicContextHistorianSessionDir(sessionId);
         mkdirSync(dumpDir, { recursive: true });

@@ -186,7 +186,13 @@ describe("Pi historian dump collection", () => {
         );
 
         const dumps = collectPiHistorianDumps(
-            [{ sessionId: "pi-session-a", directory: project, lastActiveAt: "2026-11-16T20:00:00.000Z" }],
+            [
+                {
+                    sessionId: "pi-session-a",
+                    directory: project,
+                    lastActiveAt: "2026-11-16T20:00:00.000Z",
+                },
+            ],
             historianRoot,
         );
 

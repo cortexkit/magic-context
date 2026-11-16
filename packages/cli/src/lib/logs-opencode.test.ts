@@ -400,7 +400,12 @@ describe("bundleIssueReport secret redaction", () => {
                 logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
                 recentSessions: { available: true, rows: [] },
                 historianDumps: {
-                    sessionDumps: { dir: join(root, "dumps"), count: 0, sessionCount: 0, sessions: [] },
+                    sessionDumps: {
+                        dir: join(root, "dumps"),
+                        count: 0,
+                        sessionCount: 0,
+                        sessions: [],
+                    },
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
                 },
@@ -515,7 +520,12 @@ describe("bundleIssueReport secret redaction", () => {
                     ],
                 },
                 historianDumps: {
-                    sessionDumps: { dir: join(root, "dumps"), count: 0, sessionCount: 0, sessions: [] },
+                    sessionDumps: {
+                        dir: join(root, "dumps"),
+                        count: 0,
+                        sessionCount: 0,
+                        sessions: [],
+                    },
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
                 },
