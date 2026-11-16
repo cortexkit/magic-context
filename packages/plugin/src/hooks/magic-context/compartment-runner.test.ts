@@ -3050,10 +3050,10 @@ describe("runCompartmentAgent", () => {
     });
 
     it("keeps the generic notice without the raw error for failures 1-2 and shows only the repeated-failure warning at the 3rd", async () => {
-        // The 3rd failure in a row used to escalate the same generic notice.
-        // Since issue 930 it shows the repeated-failure warning instead (one
-        // toast, never both), which names the last error (redacted) and the
-        // config file; the first two failures keep the generic notice.
+        // The 3rd failure in a row shows the repeated-failure warning instead
+        // of escalating the generic notice (one toast, never both). The warning
+        // names the last error (redacted) and the config file; the first two
+        // failures keep the generic notice.
         const sessionId = "ses-persistent-failure";
         useTempDataHome("compartment-runner-persistent-failure-");
         createOpenCodeDb(sessionId, [
