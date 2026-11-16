@@ -43,6 +43,7 @@ import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provid
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type { Database } from "@magic-context/core/shared/sqlite";
+import { piProviderInput } from "./pi-provider-input";
 import type { PiMeasuredPrefixFit } from "./pi-raw-fallback";
 import { isPiSystemEntry } from "./system-entry-pi";
 
@@ -546,17 +547,6 @@ function omitsRootBookkeeping(
 		if (apis.size === 1) api = [...apis][0];
 	}
 	return typeof api === "string" && bookkeepingOmittingApis.has(api);
-}
-
-function piProviderInput(message: unknown): unknown {
-	if (!message || typeof message !== "object" || Array.isArray(message))
-		return message;
-	// Called only for the explicit constructors above. Exclude their two omitted
-	// root bookkeeping fields, never identically named nested tool arguments.
-	const descriptors = Object.getOwnPropertyDescriptors(message);
-	delete descriptors.completedAt;
-	delete descriptors.contextSnapshot;
-	return Object.create(Object.getPrototypeOf(message), descriptors);
 }
 
 /** Rebuild retry input from session entries only when every message matches its pre-render snapshot. */
