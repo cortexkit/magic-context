@@ -339,6 +339,12 @@ import {
 	recordPiTransformTiming,
 } from "./context-perf-hooks";
 import {
+	clearPiCtxReduceCallableSession,
+	piCtxReduceCallable,
+	readServedPiCtxReduceCallable,
+	recordServedPiCtxReduceCallable,
+} from "./ctx-reduce-callable-pi";
+import {
 	clearPiChannel1State,
 	getPiChannel1Baseline,
 	setPiChannel1Baseline,
@@ -5069,6 +5075,12 @@ export function registerPiContextHandler(
 				),
 			);
 			assertCurrentPass();
+			// A subagent has no history head: no m[0]/m[1], so no summaries, project
+			// docs, user profile or memories (ARCHITECTURE.md, Session modes). Time
+			// markers are not part of the head and still follow options.injection.
+			const historyHead = sessionMetaForUsage.isSubagent
+				? undefined
+				: options.injection;
 			updateSessionProjectTracking(
 				sessionId,
 				projectIdentity,
@@ -5159,7 +5171,7 @@ export function registerPiContextHandler(
 				}
 			}
 			const tMeta = performance.now();
-			let piM0M1PassSnapshot = options.injection
+			let piM0M1PassSnapshot = historyHead
 				? createPiM0M1PassSnapshot({
 						db: options.db,
 						sessionId,
@@ -5171,7 +5183,7 @@ export function registerPiContextHandler(
 			if (
 				strictEntryIds &&
 				branchEntries &&
-				options.injection &&
+				historyHead &&
 				!options.compactionOff &&
 				stripMcOwnedPiCompactionSummary(
 					event.messages as PiAgentMessage[],
@@ -5185,7 +5197,7 @@ export function registerPiContextHandler(
 					tEntryBranch,
 				);
 			}
-			if (strictEntryIds && options.injection && !options.compactionOff) {
+			if (strictEntryIds && historyHead && !options.compactionOff) {
 				const removed = trimPiMessagesToCachedBoundary(
 					options.db,
 					sessionId,
@@ -5352,7 +5364,7 @@ export function registerPiContextHandler(
 					clearPiInjectionTokenCountCache(sessionId);
 					sessionMetaForUsage.cachedM0Bytes = null;
 					sessionMetaForUsage.cachedM1Bytes = null;
-					piM0M1PassSnapshot = options.injection
+					piM0M1PassSnapshot = historyHead
 						? createPiM0M1PassSnapshot({
 								db: options.db,
 								sessionId,
@@ -5879,7 +5891,7 @@ export function registerPiContextHandler(
 					// Publication happened after the pass snapshot. Read both the new
 					// summary and its boundary so the queued drops are safe on this pass.
 					sessionMeta = getOrCreateSessionMeta(options.db, sessionId);
-					piM0M1PassSnapshot = options.injection
+					piM0M1PassSnapshot = historyHead
 						? createPiM0M1PassSnapshot({
 								db: options.db,
 								sessionId,
@@ -6015,7 +6027,7 @@ export function registerPiContextHandler(
 						(usageInputTokens <= 0 &&
 							(isFirstContextPassForSession ||
 								lkgPassSnapshot?.replayFailure !== null)),
-					coldInjection: !!options.injection && !sessionMeta.cachedM0Bytes,
+					coldInjection: !!historyHead && !sessionMeta.cachedM0Bytes,
 					cacheBusting: isCacheBusting,
 					sessionId,
 					appendedMessages:
@@ -6050,7 +6062,20 @@ export function registerPiContextHandler(
 					usagePercentage < effectiveExecuteThresholdPercentage,
 				);
 			}
+			// Read on every pass: another extension can take ctx_reduce out of the
+			// session's active tools or put it back, and an Oh My Pi task child
+			// spawned from plan mode never has it. Tags, the reminder baseline and
+			// (in before_agent_start) the guidance all follow this one answer.
+			const ctxReduceCallable = piCtxReduceCallable(
+				pi,
+				options.compactionOff === true,
+			);
+			const servedCtxReduceCallable = options.compactionOff
+				? ctxReduceCallable
+				: readServedPiCtxReduceCallable(options.db, sessionId);
 			const pipelineArgs: RunPipelineArgs = {
+				ctxReduceCallable,
+				servedCtxReduceCallable,
 				providerOverflowRecovery:
 					emergencyRecoveryArmed &&
 					historianStateForPass.emergencyRecoveryOrigin === "provider_overflow",
@@ -6080,10 +6105,10 @@ export function registerPiContextHandler(
 					windowGeometry?.usableSoft ?? usageContextLimit ?? 0,
 				heuristics: options.heuristics,
 				emergencyCeilingTokens,
-				injection: options.injection
+				injection: historyHead
 					? {
-							...options.injection,
-							memoryEnabled: options.injection.memoryEnabled,
+							...historyHead,
+							memoryEnabled: historyHead.memoryEnabled,
 							// History decay uses the history budget, not the smaller memory
 							// injection budget. Derive it from live usage and historian
 							// configuration so history is retained consistently across hosts.
@@ -6120,6 +6145,9 @@ export function registerPiContextHandler(
 				forceMaterializationPercentage,
 				signedThinkingHold:
 					requestToolsChange === null &&
+					// A change of the tool list invalidates signed thinking like any
+					// other tools change, so it is never held.
+					ctxReduceCallable === servedCtxReduceCallable &&
 					resolvePiSignedThinkingHold({
 						sessionId,
 						db: options.db,
@@ -6234,7 +6262,8 @@ export function registerPiContextHandler(
 			if (!options.compactionOff)
 				assertPiTagSnapshotReady(options.db, sessionId);
 			let historianEvaluatedThisPass = false;
-			const historian = options.historian;
+			// A subagent has no summarizer (ARCHITECTURE.md, Session modes).
+			const historian = sessionMeta.isSubagent ? undefined : options.historian;
 			const scheduleHistorian = (
 				result: Pick<
 					RunPipelineResult,
@@ -6440,7 +6469,8 @@ export function registerPiContextHandler(
 			);
 			const tNoteNudges = performance.now();
 			try {
-				if (!options.compactionOff) {
+				// Note nudges are primary-only (ARCHITECTURE.md, Session modes).
+				if (!options.compactionOff && !sessionMeta.isSubagent) {
 					outputMessages = applyNoteNudges({
 						sessionId,
 						db: options.db,
@@ -6474,6 +6504,7 @@ export function registerPiContextHandler(
 			if (
 				options.autoSearch?.enabled &&
 				!options.compactionOff &&
+				!sessionMeta.isSubagent &&
 				result.prefixMutationAllowed &&
 				budget.remainingWork() > PI_CONTEXT_BUDGET.searchMs
 			) {
@@ -6727,7 +6758,9 @@ export function registerPiContextHandler(
 				const tChannelAccounting = performance.now();
 				try {
 					const sessionMetaForCh1 = sessionMeta;
-					if (!options.compactionOff && !sessionMetaForCh1.isSubagent) {
+					// Both reminders read this baseline, so a session that cannot call
+					// ctx_reduce has none and is never reminded to.
+					if (ctxReduceCallable) {
 						const { tags, protectedTagNumbers, pendingDropTagNumbers } =
 							result.channelBaselineSnapshot;
 						const stableId = (message: unknown): string | undefined =>
@@ -7285,7 +7318,7 @@ export function registerPiContextHandler(
 										isCacheBusting:
 											historyRefreshSessions.has(sessionId) ||
 											deferredHistoryRefreshSessions.has(sessionId),
-										injectionPassSnapshot: options.injection
+										injectionPassSnapshot: historyHead
 											? createPiM0M1PassSnapshot({
 													db: options.db,
 													sessionId,
@@ -7665,6 +7698,17 @@ export function registerPiContextHandler(
 				"served system hash record",
 				recordServedSystemHash,
 			);
+			// The request this pass returns carries the tags this answer decided,
+			// so later passes compare their own answer with it. A side turn serves
+			// a temporary conversation, not the session's request.
+			if (!budget.sideTurn && !options.compactionOff)
+				afterCapture(sessionId, "ctx_reduce served record", () =>
+					recordServedPiCtxReduceCallable(
+						options.db,
+						sessionId,
+						ctxReduceCallable,
+					),
+				);
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};
@@ -9089,6 +9133,17 @@ interface RunPipelineArgs {
 	 * pass strips every signed block and the caller passes no hold.
 	 */
 	requestToolsChange?: RequestToolsChange | null;
+	/**
+	 * The session can call ctx_reduce on this request: compaction is on and the
+	 * request's tool list carries the tool. Decides the tag prefixes and the
+	 * reminder baseline; queued drops and automatic reductions run either way.
+	 */
+	ctxReduceCallable: boolean;
+	/**
+	 * The same answer for the request this session last served. When the two
+	 * differ, ctx_reduce entered or left the request's tool list.
+	 */
+	servedCtxReduceCallable: boolean;
 	resolvedProviderID?: string;
 	resolvedModelID?: string;
 	providerApi?: string;
@@ -10409,11 +10464,24 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const alreadyRanHeuristicsThisTurn =
 		currentTurnId !== null &&
 		lastHeuristicsTurnIdBySession.get(args.sessionId) === currentTurnId;
-	// Pi's primary process always registers ctx_reduce. Hidden/no-session child
-	// processes do not use this context handler; if a future path marks a session
-	// as subagent here, suppress visible tags and nudges so the prompt never points
-	// at a missing session-scoped tool.
-	const ctxReduceCallable = !args.sessionMeta.isSubagent;
+	// Tag prefixes go out only while the session can call ctx_reduce. Tags are
+	// still assigned and stored when they are not shown, so queued drops and
+	// automatic reductions keep working, and the prefixes that come back with
+	// the tool carry the same numbers.
+	const ctxReduceCallable = args.ctxReduceCallable;
+	// ctx_reduce entered or left the request's tool list since the last served
+	// request. Tools come first in the request, so the provider has already lost
+	// the cache from the tool definitions on, and this pass adds or removes the
+	// tag prefixes anyway: it is a rebuild already paid for, and queued work
+	// rides it. On a primary session whose system prompt changed with the tool
+	// list, the system-prompt fold also runs.
+	const requestToolListChanged =
+		args.ctxReduceCallable !== args.servedCtxReduceCallable;
+	if (requestToolListChanged)
+		sessionLog(
+			args.sessionId,
+			`request tool list changed: ctx_reduce ${args.ctxReduceCallable ? "added" : "removed"}; tag prefixes ${args.ctxReduceCallable ? "return" : "stop"} on this rebuild`,
+		);
 	// Deferred publication signals may be consumed only on a pass that already
 	// has a genuine bust opportunity. Pi's historian is detached and signals via
 	// the deferred sets post-publish, so there is no inline await to special-case.
@@ -10458,6 +10526,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		hardFold:
 			foldBustsServedPrefixThisPass ||
 			systemPrefixChangedThisPass ||
+			requestToolListChanged ||
 			firstRenderBust ||
 			isCacheBustingPass,
 		force:
@@ -10522,6 +10591,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		isCacheBustingPass &&
 		(rideSignals.publishedHistory ||
 			systemPrefixChangedThisPass ||
+			requestToolListChanged ||
 			rideSignals.explicitFlush ||
 			args.forceMaterialization === true ||
 			hasPendingMaterializeSignal ||
@@ -11600,6 +11670,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			const independentMutationBeforeHeuristics =
 				pendingOpsDidMutate ||
 				systemPrefixChangedThisPass ||
+				requestToolListChanged ||
 				foldBustsServedPrefixThisPass ||
 				identityRebuild ||
 				firstRenderBust;
@@ -13475,6 +13546,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	dropServedRecord(sessionId, "session_cleared");
 	cancelPiTagSnapshotSession(sessionId);
 	lastServedSystemHashBySession.delete(sessionId);
+	clearPiCtxReduceCallableSession(sessionId);
 	clearPiHistoryBoundaryRepairSession(sessionId);
 	clearPiUpperReclaimSession(sessionId);
 	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });

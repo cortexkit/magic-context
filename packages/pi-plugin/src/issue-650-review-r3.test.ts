@@ -679,8 +679,17 @@ for (const proof of [
 						properties: { code: { type: "string" } },
 					},
 				},
+				// Magic Context registers ctx_reduce, so the session can call it.
+				{
+					name: "ctx_reduce",
+					description: "Mark tags for dropping",
+					parameters: {
+						type: "object",
+						properties: { drop: { type: "string" } },
+					},
+				},
 			],
-			getActiveTools: () => ["codemode"],
+			getActiveTools: () => ["codemode", "ctx_reduce"],
 		});
 		registerPiContextHandler(fake.pi as never, {
 			db,

@@ -45,7 +45,9 @@ test("held-head witness: over-window replay requires a stripped, permitted rebui
 		.map((line) => JSON.parse(line.slice(prefix.length)));
 	expect(evidence).toHaveLength(1);
 	expect(evidence[0]).toMatchObject({
-		tokens: 101876,
+		// Includes the ctx_reduce definition the driver's tool list carries, so
+		// the session can call the tool and keeps its tag prefixes.
+		tokens: 101921,
 		limit: 100000,
 		activeSignedBlocks: 0,
 		declaredRebuild: true,

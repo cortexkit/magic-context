@@ -173,6 +173,7 @@ import {
 	signalPiSystemPromptRefreshForProject,
 	trackSessionForProject,
 } from "./context-handler";
+import { piCtxReduceCallable } from "./ctx-reduce-callable-pi";
 import {
 	markPiChannel1Reduced,
 	maybeChannel1ReminderForToolResult,
@@ -207,6 +208,7 @@ import {
 	type PiModelRegistryLike,
 	waitForPiModelRegistryRefresh,
 } from "./model-chain-health";
+import { recordPiSpawnedSession } from "./pi-agent-identity";
 import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
 import {
 	resolvePiUsableContextLimit,
@@ -2070,6 +2072,10 @@ async function startPiMagicContextRuntime(
 			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId, "pass"),
 		});
 		const sessionId = resolveSessionId(ctx);
+		// After clone inheritance, which may write the session's metadata row
+		// first: a spawned Oh My Pi session is recorded as a subagent before its
+		// first request.
+		if (sessionId) recordPiSpawnedSession(db, sessionId, ctx);
 		if (
 			!piMarkerRehydrationLogged &&
 			pendingPiMarkerSessions.length > 0 &&
@@ -2495,6 +2501,7 @@ async function startPiMagicContextRuntime(
 				}
 			}
 			if (sessionId) {
+				recordPiSpawnedSession(db, sessionId, ctx);
 				trackSessionForProject(currentProject.projectIdentity, sessionId);
 
 				// Re-arm a pending Pi compaction-marker drain on session ACTIVATION,
@@ -2599,7 +2606,10 @@ async function startPiMagicContextRuntime(
 				memoryEnabled: effectiveConfig.memory.enabled,
 				includeGuidance: true,
 				protectedTags: effectiveConfig.protected_tags,
-				ctxReduceCallable: !compactionOff,
+				// Read from the session's tool list every turn: another extension
+				// can remove ctx_reduce or put it back, and a spawned Oh My Pi
+				// session can start without it.
+				ctxReduceCallable: piCtxReduceCallable(pi, compactionOff),
 				dreamerEnabled: effectiveProjectDeps.dreamerEnabled,
 				smartNotesEnabled: config.smart_notes.enabled,
 				temporalAwarenessEnabled: effectiveConfig.temporal_awareness ?? false,
@@ -2776,7 +2786,7 @@ async function startPiMagicContextRuntime(
 				: undefined;
 			if (lastAssistant?.stopReason === "stop") {
 				const sessionId = ctx.sessionManager?.getSessionId?.();
-				if (sessionId && db && !compactionOff)
+				if (sessionId && db && piCtxReduceCallable(pi, compactionOff))
 					maybeDeliverChannel2Pi(pi, db, sessionId);
 			}
 		} catch (err) {
@@ -2902,8 +2912,9 @@ async function startPiMagicContextRuntime(
 			// appending the nudge ahead of the next model call. Under oh-my-pi (OMP),
 			// an explicitly interruptible wait that is cancelled gets a paired
 			// synthetic result. No-ops unless pending and revalidated; agent_end stays
-			// as the fallback delivery site.
-			if (compactionOff) return;
+			// as the fallback delivery site. Neither reminder goes to a session
+			// that cannot call ctx_reduce.
+			if (!piCtxReduceCallable(pi, compactionOff)) return;
 			const block = maybeChannel1ReminderForToolResult({
 				db,
 				sessionId,

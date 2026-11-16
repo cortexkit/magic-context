@@ -80,8 +80,15 @@ for (const api of ["google-generative-ai", "anthropic-messages"]) {
 		const fake = createFakePi();
 		Object.assign(fake.pi, {
 			appendEntry: () => undefined,
-			getAllTools: () => [],
-			getActiveTools: () => [],
+			// Only Magic Context's ctx_reduce: the session can call it.
+			getAllTools: () => [
+				{
+					name: "ctx_reduce",
+					description: "",
+					parameters: { type: "object" },
+				},
+			],
+			getActiveTools: () => ["ctx_reduce"],
 		});
 		let raw = [userMessage("persist this own prompt", 1)];
 		const ctx = Object.assign(fakeContext(sessionId, root, ["entry"], raw), {

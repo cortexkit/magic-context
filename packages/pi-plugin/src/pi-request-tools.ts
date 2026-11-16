@@ -219,6 +219,41 @@ function calledToolNames(messages: readonly unknown[]): Set<string> {
 }
 
 /**
+ * Whether Pi's next request sends the tool `name`: the session has it active
+ * (`getActiveTools`) and it is registered (`getAllTools`), the two lists
+ * readPiRequestToolsFingerprint below builds the request's tools from. Oh My
+ * Pi's active list also names the tools it mounts behind its device transport;
+ * the session can still call those. Undefined when either list cannot be read.
+ */
+export function readPiRequestSendsTool(
+	pi: { getAllTools?: () => unknown; getActiveTools?: () => unknown },
+	name: string,
+): boolean | undefined {
+	try {
+		if (
+			typeof pi.getAllTools !== "function" ||
+			typeof pi.getActiveTools !== "function"
+		)
+			return undefined;
+		const active = pi.getActiveTools();
+		if (!Array.isArray(active)) return undefined;
+		if (!active.includes(name)) return false;
+		const all = pi.getAllTools();
+		if (!Array.isArray(all)) return undefined;
+		// Pi sends only registered tools.
+		return all.some(
+			(tool) =>
+				typeof tool === "object" &&
+				tool !== null &&
+				(tool as { name?: unknown }).name === name,
+		);
+	} catch {
+		// A throwing host API proves nothing about the request's tools.
+		return undefined;
+	}
+}
+
+/**
  * The fingerprint of the tools Pi's next request sends: the registered tools
  * (`getAllTools`) the session has active (`getActiveTools`), as Pi builds the
  * request from them, written the way the route's provider writer sends them.

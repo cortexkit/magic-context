@@ -48,7 +48,13 @@ async function fixture(
 	const notices: string[] = [];
 	const refusals = { aborts: 0 };
 	const fake = createFakePi();
-	Object.assign(fake.pi, { getAllTools: () => [], getActiveTools: () => [] });
+	// Only Magic Context's ctx_reduce: the session can call it.
+	Object.assign(fake.pi, {
+		getAllTools: () => [
+			{ name: "ctx_reduce", description: "", parameters: { type: "object" } },
+		],
+		getActiveTools: () => ["ctx_reduce"],
+	});
 	let failure: Error | undefined;
 	registerPiContextHandler(fake.pi as never, {
 		db,
