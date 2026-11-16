@@ -1,7 +1,7 @@
 {
   "items": [
     {
-      "digest": "c541e6583c3c4ba3953b1cb1fa0e5d36a460e58c6550ca1c87aa844d7edc5874",
+      "digest": "ae1932af1f10365f6ef23e8a5cd88ea6b0207a57a7bc6179020a22e60abfdc45",
       "dropped": {
         "dangling_reference": 1,
         "uncommitted_publication": 1
@@ -10,7 +10,7 @@
       "sessionRef": "7da671be6c82090ea8f585b2fe29086f"
     },
     {
-      "digest": "7a6d52b70fd0872f12dd3eeae603fd6a5d0aba38fe5612090aa0c6718bf96e52",
+      "digest": "a481972d45a2579d00cad75ab9a73a46efa0b69694a46d13a36166d4d158d787",
       "endOffset": 514,
       "sessionRef": "36705c404b4079e6c30365f40c92ab78"
     }
