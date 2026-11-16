@@ -1160,8 +1160,19 @@ fn add_usage(total: Option<StepUsage>, more: &StepUsage) -> StepUsage {
 const RUNNER_TRANSIENT: &str = "the runner refused it as transient: ";
 
 /// A failed `session.send`: an account wait when the runner refused it as
-/// one, otherwise the run's error text.
+/// one, a short wait when the runner was restarting and the send never left,
+/// otherwise the run's error text.
 fn send_refused(error: &crate::client::ClientError, send: SendKind) -> SummaryError {
+    // The daemon refused the route because the runner module is reloading or
+    // not up yet, and proved nothing was sent. That says nothing about the
+    // model or the words, so probe again after the transient backoff instead
+    // of failing the run: a dreamer run would otherwise end `failed` and drop
+    // its remaining batches.
+    if !error.outcome_unknown {
+        if let Some(code @ ("module_reloading" | "target_unavailable")) = error.code.as_deref() {
+            return never_ran(code, send);
+        }
+    }
     let wait = error.code.as_deref().and_then(|code| {
         AccountWait::of_refusal(
             code,
@@ -1407,6 +1418,37 @@ mod tests {
         let mut refused = crate::client::ClientError::new("only the session's owner may do this");
         refused.code = Some("scope_owner_mismatch".into());
         assert!(!super::retryable(&super::send_error(&refused)));
+    }
+
+    /// A send the daemon refused because the runner was reloading, with
+    /// proof it never left, ends in a short wait rather than a failure. One
+    /// that may have reached the runner, or another route refusal, is not.
+    #[test]
+    fn a_send_refused_while_the_runner_reloads_waits() {
+        use super::{send_refused, SummaryError};
+        use crate::summary::account_wait::SendKind;
+        for code in ["module_reloading", "target_unavailable"] {
+            let mut error = crate::client::ClientError::new("route.open failed");
+            error.code = Some(code.into());
+            match send_refused(&error, SendKind::Dream) {
+                SummaryError::NeverRan(wait) => {
+                    assert_eq!(wait.code, code);
+                    assert!(wait.until_ms > wait.at_ms);
+                }
+                other => panic!("{code}: {other:?}"),
+            }
+            error.outcome_unknown = true;
+            assert!(matches!(
+                send_refused(&error, SendKind::Dream),
+                SummaryError::Failed(_)
+            ));
+        }
+        let mut other = crate::client::ClientError::new("route.open failed");
+        other.code = Some("target_not_found".into());
+        assert!(matches!(
+            send_refused(&other, SendKind::Dream),
+            SummaryError::Failed(_)
+        ));
     }
 
     #[test]
