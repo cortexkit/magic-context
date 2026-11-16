@@ -274,6 +274,43 @@ impl Fixture {
     }
 }
 
+/// A batch standing for one a replay planned earlier, so the replay harness
+/// can check the verdicts of its reply without writing anything: `read`
+/// holds its memories as the batch sent them, `checkout` the code at the
+/// commit the batch read, and `main` the repository's main checkout, whose
+/// live branches a memory without a line of its own is checked against.
+pub(crate) fn replay_batch(
+    declaration: &Value,
+    broad: bool,
+    project: &str,
+    read: Vec<Read>,
+    checkout: Arc<Checkout>,
+    main: &std::path::Path,
+) -> VerifyBatch {
+    let gate = read
+        .iter()
+        .any(|read| !read.lined)
+        .then(|| Gate::new(main, HISTORY_TIMEOUT));
+    VerifyBatch {
+        declared: Arc::new(Declared::of(declaration, Verify { broad }.kind())),
+        index: 0,
+        project: project.to_owned(),
+        system: String::new(),
+        message: String::new(),
+        read,
+        diff: false,
+        search: None,
+        folder: checkout.root().to_string_lossy().into_owned(),
+        checkout,
+        branch: None,
+        gate,
+        history_timeout: HISTORY_TIMEOUT,
+        absence: Mutex::default(),
+        confirmations: Mutex::default(),
+        files: Mutex::default(),
+    }
+}
+
 fn ids(batch: &VerifyBatch) -> Vec<i64> {
     batch.read().iter().map(|read| read.id).collect()
 }
