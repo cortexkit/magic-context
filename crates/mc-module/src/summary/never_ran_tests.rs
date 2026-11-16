@@ -458,3 +458,115 @@ async fn never_ran_queued_send_can_finish_between_receipt_polls() {
     assert_eq!(*client.reads.lock().unwrap(), ["run-7"]);
     assert_eq!(client.sends.lock().unwrap().len(), 2);
 }
+
+/// THALAMUS's Agent Runner samples for a prompt it proved it never handed to
+/// a host (`send-not-delivered-v1`), kept byte for byte with their sums.
+mod thalamus_not_delivered {
+    use super::*;
+    use cortexkit_role_llm_runner::run::RunStatus;
+
+    const SAMPLES: [(&str, &[u8]); 7] = [
+        (
+            "01-send-reply-pending.json",
+            include_bytes!("../../testdata/send-not-delivered-v1/01-send-reply-pending.json"),
+        ),
+        (
+            "02-send-status-not-delivered-handover-failed.json",
+            include_bytes!(
+                "../../testdata/send-not-delivered-v1/02-send-status-not-delivered-handover-failed.json"
+            ),
+        ),
+        (
+            "03-send-resend-same-id-not-delivered.json",
+            include_bytes!(
+                "../../testdata/send-not-delivered-v1/03-send-resend-same-id-not-delivered.json"
+            ),
+        ),
+        (
+            "04-run-status-handover-failed.json",
+            include_bytes!("../../testdata/send-not-delivered-v1/04-run-status-handover-failed.json"),
+        ),
+        (
+            "05-run-result-handover-failed.json",
+            include_bytes!("../../testdata/send-not-delivered-v1/05-run-result-handover-failed.json"),
+        ),
+        (
+            "06-run-ended-event-handover-failed.json",
+            include_bytes!(
+                "../../testdata/send-not-delivered-v1/06-run-ended-event-handover-failed.json"
+            ),
+        ),
+        (
+            "07-send-status-not-delivered-withdrawn.json",
+            include_bytes!(
+                "../../testdata/send-not-delivered-v1/07-send-status-not-delivered-withdrawn.json"
+            ),
+        ),
+    ];
+
+    fn sample<T: serde::de::DeserializeOwned>(index: usize) -> T {
+        serde_json::from_slice(SAMPLES[index].1).unwrap()
+    }
+
+    #[test]
+    fn the_samples_match_their_sums() {
+        use sha2::{Digest, Sha256};
+        let sums = include_str!("../../testdata/send-not-delivered-v1/SHA256SUMS");
+        for (name, bytes) in SAMPLES {
+            let line = format!("{:x}  {name}", Sha256::digest(bytes));
+            assert!(sums.lines().any(|sum| sum == line), "{name}");
+        }
+    }
+
+    /// An inline `pending` without a run id is replayed under the same id;
+    /// a `not_delivered` hand-over failure is sent once more under a new id;
+    /// a second one ends the summary as a send that never ran.
+    #[tokio::test(start_paused = true)]
+    async fn pending_then_not_delivered_twice_never_ran() {
+        let client = Client::new(vec![sample(0), sample(1), sample(2)], vec![]);
+        let error = direct(&client, SendKind::TurnOne).await.err().unwrap();
+        let SummaryError::NeverRan(wait) = error else {
+            panic!("not a never-run wait: {error:?}")
+        };
+        assert_eq!(wait.code, send_states::NOT_DELIVERED);
+        let sends = client.sends.lock().unwrap();
+        let ids: Vec<&str> = sends
+            .iter()
+            .map(|(_, request)| request.send_id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(
+            ids[0], ids[1],
+            "the pending send is replayed under its own id"
+        );
+        assert_ne!(
+            ids[1], ids[2],
+            "a not_delivered send is resent under a new id"
+        );
+        assert!(client.reads.lock().unwrap().is_empty());
+    }
+
+    /// The `withdrawn` reason proves non-delivery like any other.
+    #[tokio::test(start_paused = true)]
+    async fn withdrawn_is_resent_once() {
+        let client = Client::new(vec![sample(6), active()], vec![]);
+        direct(&client, SendKind::TurnTwo).await.unwrap();
+        assert_eq!(client.sends.lock().unwrap().len(), 2);
+    }
+
+    /// A run that ends `handover_failed` never ran; its status reads the same.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_ended_handover_failed_never_ran() {
+        let status: RunStatus = sample(3);
+        let class = status.error.as_ref().map(|error| error.class.as_str());
+        assert_eq!(class, Some("handover_failed"));
+        let result: RunResult = sample(4);
+        let started = SendReply::new(states::ACTIVE).with_run_id(result.run_id.clone());
+        let client = Client::new(vec![started], vec![result]);
+        let error = direct(&client, SendKind::FactCheck).await.err().unwrap();
+        let SummaryError::NeverRan(wait) = error else {
+            panic!("not a never-run wait: {error:?}")
+        };
+        assert_eq!(wait.code, "handover_failed");
+    }
+}
