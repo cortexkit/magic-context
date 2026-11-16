@@ -1,0 +1,18 @@
+{
+  "causes": [
+    "over_limit"
+  ],
+  "conditions": {
+    "context_window": 200000,
+    "model": {
+      "model": "claude-opus-5",
+      "provider": "anthropic"
+    },
+    "output_reserve": 32000,
+    "rules": {
+      "history_edit_cost": "suffix",
+      "signed_parts": "none"
+    }
+  },
+  "deadline_ms": 30000
+}

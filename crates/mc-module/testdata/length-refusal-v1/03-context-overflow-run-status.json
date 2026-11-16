@@ -1,0 +1,16 @@
+{
+  "error": {
+    "class": "permanent",
+    "message": "prompt is too long: 213456 tokens > 200000 maximum",
+    "provider_code": "context_overflow",
+    "provider_detail_code": "provider.invalid-request",
+    "status": 400
+  },
+  "state": "error",
+  "undelivered_steers": [],
+  "usage": {
+    "by_model": [],
+    "steps": 0,
+    "unreported_steps": 0
+  }
+}

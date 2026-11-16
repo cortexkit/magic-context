@@ -1908,3 +1908,50 @@ async fn lifecycle_setup_counts_what_it_read() {
     assert_eq!((read.applied_view, read.applied_view_failed), (1, 1));
     assert_eq!(read.read_back(), "failed");
 }
+
+/// THALAMUS's `length-refusal-v1` samples from Agent Runner: once a provider
+/// refuses a request for its length, the runner ends the run `error` with
+/// `provider_code: context_overflow` and rides `over_limit` at once, with the
+/// provider's own count (01) or none when the provider states none (02). Both
+/// rides decode through ck-mc's own types and get a smaller view back, and
+/// the run status decodes as an ordinary run error.
+#[test]
+fn thalamus_length_refusal_v1_rides_get_a_view() {
+    use cortexkit_role_compaction::ride::{RideCause, RideRequest};
+    use sha2::{Digest, Sha256};
+    let files: [(&str, &[u8]); 3] = [
+        (
+            "01-ride-after-refusal-with-count.json",
+            include_bytes!("../testdata/length-refusal-v1/01-ride-after-refusal-with-count.json"),
+        ),
+        (
+            "02-ride-after-refusal-without-count.json",
+            include_bytes!(
+                "../testdata/length-refusal-v1/02-ride-after-refusal-without-count.json"
+            ),
+        ),
+        (
+            "03-context-overflow-run-status.json",
+            include_bytes!("../testdata/length-refusal-v1/03-context-overflow-run-status.json"),
+        ),
+    ];
+    let sums = include_str!("../testdata/length-refusal-v1/SHA256SUMS");
+    for (name, bytes) in files {
+        let line = format!("{:x}  {name}", Sha256::digest(bytes));
+        assert!(sums.lines().any(|sum| sum == line), "{name}");
+    }
+    for (name, bytes) in &files[..2] {
+        let ride: RideRequest = serde_json::from_slice(bytes).unwrap();
+        assert!(ride.has(RideCause::OverLimit), "{name}");
+        let (mut session, _, _, _, settings) = fixture();
+        two_old_outputs(&mut session);
+        session.index_ready = true;
+        let view = session.ride(&settings, &ride);
+        assert!(view.is_some(), "{name}: a length refusal gets a view back");
+    }
+    let status: cortexkit_role_llm_runner::run::RunStatus =
+        serde_json::from_slice(files[2].1).unwrap();
+    let status = serde_json::to_value(&status).unwrap();
+    assert_eq!(status["state"], "error");
+    assert_eq!(status["error"]["provider_code"], "context_overflow");
+}
