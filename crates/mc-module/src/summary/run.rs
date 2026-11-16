@@ -1078,10 +1078,11 @@ fn run_params(how: &Model<'_>, temperature: bool) -> Map<String, Value> {
 /// A run's usage as one step's. `prompt_tokens` is the whole prompt the run
 /// sent, as `StepUsage` defines it: the runner's `input_tokens` counts only
 /// input that was neither read from nor written to the prompt cache, so the
-/// cache reads and writes are added back. A dreamer run's token budget adds
-/// these up across batches, and a tool-using batch sends most of its prompt
-/// from the cache, so counting the uncached part alone let a run spend
-/// several times its budget.
+/// cache reads and writes are added back. The dreamer (Magic Context's
+/// scheduled memory upkeep) adds these up across a run's batches to hold
+/// the run to its token budget, and a tool-using batch sends most of its
+/// prompt from the cache, so counting the uncached part alone let a run
+/// spend several times its budget.
 fn step_usage(run: &cortexkit_role_llm_runner::usage::RunUsage) -> StepUsage {
     let mut usage = StepUsage::new();
     usage.prompt_tokens = [
