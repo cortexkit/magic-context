@@ -654,11 +654,11 @@ impl RunnerClient for SubcRunnerClient {
         // The same provider, preset, params and scope the runner fetches the
         // plan's tool item with, for the child's session. A tool provider
         // binds a route by host family, not by the runner's or ck-mc's module
-        // id, and a session a runner hosts binds as `runner` (AFT refuses an
-        // unknown family with `config_divergence`). Unscoped, AFT has no
-        // project folder for the route and refuses the catalog
-        // (`project_required`). A request without a preset carries none, as
-        // the role requires.
+        // id, and a session a runner hosts binds as `runner` (AFT, the
+        // fleet's code-tools provider, refuses an unknown family with
+        // `config_divergence`). Unscoped, AFT has no project folder for the
+        // route and refuses the catalog (`project_required`). A request
+        // without a preset carries none, as the role requires.
         let provider = SessionRef::new(
             provider.to_owned(),
             RUNNER_HOST_FAMILY.to_owned(),
