@@ -19,12 +19,12 @@ fn params() -> Value {
 }
 
 #[test]
-fn context_read_describe_lists_only_the_two_read_ops_without_a_store() {
+fn context_read_describe_lists_the_three_read_ops_without_a_store() {
     let answer = reader().read(&request("role.describe", json!({}))).unwrap();
     assert_eq!(answer["majors"][0]["version"], "mc-context-read/v1");
     assert_eq!(
         answer["majors"][0]["ops"],
-        json!(["context.memories", "context.summaries"])
+        json!(["context.memories", "context.summaries", "context.recent"])
     );
 }
 
@@ -51,7 +51,7 @@ fn context_read_budget_requires_an_integer_in_range() {
     ] {
         for method in OPS {
             let mut p = params();
-            if method == "context.summaries" {
+            if method != "context.memories" {
                 p.as_object_mut().unwrap().remove("purpose");
             }
             p["budget_tokens"] = budget.clone();
@@ -127,7 +127,9 @@ fn context_read_unknown_session_precedes_any_other_store_or_content_read() {
     let conn = Connection::open(fixture.reader.context.as_ref().unwrap()).unwrap();
     conn.execute_batch("DROP TABLE memories; DROP TABLE compartments;")
         .unwrap();
-    for method in OPS {
+    // Only these two read context.db; context.recent asks the session's
+    // worker, which a reader alone does not have.
+    for method in ["context.memories", "context.summaries"] {
         let mut p = params();
         p["session"]["session"] = json!("unknown");
         if method == "context.summaries" {
@@ -185,7 +187,7 @@ fn context_read_memories_reuse_head_selection_including_the_sessions_workspace()
     assert_eq!(answer["exact"], false);
     let (snapshot, _) = fixture
         .reader
-        .snapshot("opencode", "plugin", Some("bias"))
+        .snapshot("opencode", "plugin", Some("bias"), None)
         .unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -231,7 +233,10 @@ fn context_read_plugin_summaries_use_existing_no_pressure_decay_newest_first() {
         items[0]["tokens"],
         mc_tokenizer::estimate_tokens(items[0]["text"].as_str().unwrap())
     );
-    let (snapshot, _) = fixture.reader.snapshot("opencode", "plugin", None).unwrap();
+    let (snapshot, _) = fixture
+        .reader
+        .snapshot("opencode", "plugin", None, None)
+        .unwrap();
     let rendered =
         render::render_stored_compartments(&snapshot.summaries, 0.0, mc_tokenizer::estimate_tokens);
     assert!(items
@@ -271,6 +276,86 @@ fn context_read_summaries_stop_at_the_first_item_that_does_not_fit() {
 }
 
 #[test]
+fn context_read_newest_summaries_are_the_newest_with_content_at_tier_one() {
+    let fixture = Fixture::new();
+    let conn = Connection::open(fixture.reader.context.as_ref().unwrap()).unwrap();
+    // A row with no content only advances coverage, and the head skips it.
+    conn.execute("INSERT INTO compartments(session_id,harness,sequence,start_message,end_message,title,content,importance,created_at) VALUES('plugin','opencode',12,121,130,'','',50,0)", []).unwrap();
+    let stored = ContextDb::read_compartments(&conn, "opencode", "plugin").unwrap();
+    assert_eq!(stored.len(), 13);
+    let mut p = params();
+    p["newest"] = json!(3);
+    let answer = fixture.read("context.summaries", p.clone());
+    let items = answer["summaries"].as_array().unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["id"].clone())
+            .collect::<Vec<_>>(),
+        [json!("11"), json!("10"), json!("9")]
+    );
+    for item in items {
+        let summary = stored
+            .iter()
+            .find(|s| item["id"].as_str().and_then(|id| id.parse().ok()) == Some(s.sequence))
+            .unwrap();
+        let text =
+            render::render_compartment_at_tier(&render::DecayRenderCompartment::from(summary), 1);
+        assert!(text.contains("verbose fact"));
+        assert_eq!(item["text"], text);
+        assert_eq!(item["start"], summary.start_message);
+        assert_eq!(item["end"], summary.end_message);
+        assert_eq!(item["title"], summary.title);
+        assert_eq!(item["tokens"], mc_tokenizer::estimate_tokens(&text));
+    }
+    // The folded reply shows the newest summary at tier 1 too.
+    let folded = fixture.read("context.summaries", params());
+    assert_eq!(folded["summaries"][0], items[0]);
+    assert_eq!(answer["token_family"], folded["token_family"]);
+    // More than the session has: every summary with content.
+    p["newest"] = json!(16);
+    assert_eq!(
+        fixture.read("context.summaries", p.clone())["summaries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        12
+    );
+    // The budget stops before the first summary that does not fit.
+    p["newest"] = json!(3);
+    p["budget_tokens"] =
+        json!(items[0]["tokens"].as_u64().unwrap() + items[1]["tokens"].as_u64().unwrap());
+    assert_eq!(
+        fixture.read("context.summaries", p)["summaries"],
+        json!([items[0], items[1]])
+    );
+}
+
+#[test]
+fn context_read_newest_is_an_integer_from_1_to_16_on_summaries_only() {
+    for newest in [
+        json!(0),
+        json!(17),
+        json!(-1),
+        json!(1.5),
+        json!("3"),
+        json!(true),
+        Value::Null,
+    ] {
+        let mut p = params();
+        p.as_object_mut().unwrap().remove("purpose");
+        p["newest"] = newest;
+        let error = reader().read(&request("context.summaries", p)).unwrap_err();
+        assert_eq!(error.code, "invalid_params");
+        assert_eq!(error.detail.unwrap()["field"], "newest");
+    }
+    let mut p = params();
+    p["newest"] = json!(3);
+    let error = reader().read(&request("context.memories", p)).unwrap_err();
+    assert_eq!(error.detail.unwrap()["field"], "unknown_field");
+}
+
+#[test]
 fn context_read_uses_the_recorded_plugin_model_and_never_writes() {
     let fixture = Fixture::new();
     let path = fixture.reader.context.as_ref().unwrap();
@@ -301,7 +386,10 @@ fn context_read_plugin_project_identity_is_not_a_configuration_directory() {
     let fixture = Fixture::new();
     let conn = Connection::open(fixture.reader.context.as_ref().unwrap()).unwrap();
     conn.execute("UPDATE session_projects SET project_path='git:identity-not-a-directory' WHERE session_id='plugin'", []).unwrap();
-    let (snapshot, _) = fixture.reader.snapshot("opencode", "plugin", None).unwrap();
+    let (snapshot, _) = fixture
+        .reader
+        .snapshot("opencode", "plugin", None, None)
+        .unwrap();
     assert_eq!(snapshot.project.unwrap().id, "git:identity-not-a-directory");
     // Only this value is passed to configuration resolution, which opens project files.
     assert_eq!(snapshot.config_root, None);
@@ -466,7 +554,7 @@ fn context_read_werni_sized_read_holds_stay_under_250_ms() {
         for _ in 0..10 {
             let (snapshot, hold) = fixture
                 .reader
-                .snapshot("opencode", "plugin", purpose)
+                .snapshot("opencode", "plugin", purpose, None)
                 .unwrap();
             assert_eq!(
                 if purpose.is_some() {

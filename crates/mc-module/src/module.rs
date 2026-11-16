@@ -188,6 +188,14 @@ enum Job {
         project: Option<String>,
         workspace: Option<String>,
     },
+    /// `context.recent`: the session's newest messages as the summarizer's
+    /// lines, within `budget` tokens ([`Session::recent`]). A read: it
+    /// changes no session state and is neither saved nor published. A worker
+    /// with no session restores it first, as a tool call's does.
+    Recent {
+        budget: u64,
+        reply: oneshot::Sender<Result<Value, cortexkit_role_compaction::wire::Refusal>>,
+    },
 }
 
 impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
@@ -273,7 +281,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             config: config.clone(),
             dreamer: dreamer.clone(),
         });
-        Self {
+        let module = Self {
             inner: Arc::new(Inner {
                 app_read,
                 context_read,
@@ -297,7 +305,24 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 session_folders: Mutex::new(HashMap::new()),
                 entorhinal_watch: Arc::default(),
             }),
-        }
+        };
+        // `context.recent` reads a session's transcript index, which only
+        // its worker holds. Weak, so the read service, which the module
+        // owns, never keeps the module alive.
+        let own = Arc::downgrade(&module.inner);
+        module
+            .inner
+            .context_read
+            .serve_recent(Box::new(move |recent| {
+                let inner = own.upgrade();
+                Box::pin(async move {
+                    match inner {
+                        Some(inner) => Module { inner }.recent(recent).await,
+                        None => Err(crate::context_read::transcript_pending()),
+                    }
+                })
+            }));
+        module
     }
 
     /// App requests read an independent projection, never a session job.
@@ -481,6 +506,60 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// Context reads use a separate read-only worker so they cannot delay session work.
     pub fn context_read(&self) -> &crate::context_read::ContextRead {
         &self.inner.context_read
+    }
+
+    /// `context.recent`, once the context read service admitted it, asked of
+    /// the session's worker: only the worker holds the session's transcript
+    /// index. The request names no runner, so a live worker of the harness
+    /// and session answers, the first by runner name when several do. With
+    /// none, a session mode3.db keeps saved state of gets its worker
+    /// started, as a command run does, and the read restores the session.
+    async fn recent(
+        &self,
+        recent: crate::context_read::Recent,
+    ) -> Result<Value, cortexkit_role_compaction::wire::Refusal> {
+        let live = self
+            .inner
+            .workers
+            .lock()
+            .expect("worker map")
+            .iter()
+            .filter(|(key, _)| key.harness == recent.harness && key.session == recent.session)
+            .min_by(|(a, _), (b, _)| a.runner.cmp(&b.runner))
+            .map(|(_, worker)| worker.clone());
+        let worker = match live {
+            Some(worker) => worker,
+            None => {
+                let key = recent
+                    .saved?
+                    .into_iter()
+                    .map(|runner| SessionRef::new(runner, &recent.harness, &recent.session))
+                    .find(|key| {
+                        self.inner
+                            .store
+                            .as_ref()
+                            .is_some_and(|store| store.load(key).is_some())
+                    })
+                    .ok_or_else(crate::context_read::unknown_session)?;
+                let mut workers = self.inner.workers.lock().expect("worker map");
+                workers
+                    .entry(key.clone())
+                    .or_insert_with(|| self.spawn_worker(key))
+                    .clone()
+            }
+        };
+        let (reply, answer) = oneshot::channel();
+        // A worker that stops before answering was released by a move; the
+        // caller's next read finds the session gone or held.
+        worker
+            .send(Job::Recent {
+                budget: recent.budget,
+                reply,
+            })
+            .map_err(|_| crate::context_read::transcript_pending())?;
+        answer
+            .await
+            .map_err(|_| crate::context_read::transcript_pending())?
     }
 
     /// Wait for eventual message search indexing, outside the session worker.
@@ -1261,7 +1340,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         | Job::Busy(_)
                         | Job::Resume
                         | Job::Park { .. }
-                        | Job::Discard { .. },
+                        | Job::Discard { .. }
+                        | Job::Recent { .. },
                         _,
                     ) => Settings::default(),
                     (Job::Setup(route, request, _), _) => route_settings(
@@ -1291,6 +1371,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         | Job::Discard { .. }
                         | Job::PreUser { .. }
                         | Job::AppCheckpoint { .. }
+                        | Job::Recent { .. }
                 );
                 let refresh_search = matches!(&job, Job::Setup(..) | Job::Notice(..));
                 let app_checkpoint = matches!(&job, Job::Setup(..))
@@ -1574,6 +1655,39 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         };
                         let _ = reply.send(answer);
                     }
+                    Job::Recent { budget, reply } => {
+                        if session.is_none() {
+                            if let Some(durable) =
+                                inner.store.as_ref().and_then(|store| store.load(&held_key))
+                            {
+                                // Restored as for a tool call that arrives
+                                // before the runner's first notice: one read
+                                // of the transcript from the cut on. A read
+                                // that fails leaves the index unready, and
+                                // the answer asks the caller to retry.
+                                inner.app_read.activate(&held_key).await;
+                                let route = Route {
+                                    session: held_key.clone(),
+                                    project: None,
+                                    workdir: None,
+                                    agent_id: None,
+                                };
+                                let mut restored = Session::tools_only(&route, inner.db.clone());
+                                restored.set_store(inner.store.clone());
+                                restored.load_summaries();
+                                restored.restore(durable);
+                                restored.restore_for_tools(inner.client.as_ref()).await;
+                                session = Some(restored);
+                            }
+                        }
+                        let answer = match &session {
+                            Some(session) => session.recent(budget),
+                            None => Err(crate::context_read::unknown_session()),
+                        };
+                        let _ = reply.send(answer);
+                        // A read: nothing to publish or save.
+                        continue;
+                    }
                     Job::Idle(reply) => {
                         if retry_save {
                             if let (Some(store), Some(session)) =
@@ -1802,6 +1916,10 @@ fn hold(
         }
         Job::PreUser { reply, .. } => {
             let _ = reply.send(Addition::default());
+            None
+        }
+        Job::Recent { reply, .. } => {
+            let _ = reply.send(Err(gated.refusal()));
             None
         }
         Job::Idle(_)

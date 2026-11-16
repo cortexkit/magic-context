@@ -84,15 +84,20 @@ struct Block {
 
 impl Block {
     fn header(&self) -> String {
+        self.header_with(&self.commit_hashes)
+    }
+
+    /// The line's `[N-M] A:` prefix, listing `commit_hashes` as its commits.
+    fn header_with(&self, commit_hashes: &[String]) -> String {
         let range = if self.start == self.end {
             format!("[{}]", self.start)
         } else {
             format!("[{}-{}]", self.start, self.end)
         };
-        let commits = if self.commit_hashes.is_empty() {
+        let commits = if commit_hashes.is_empty() {
             String::new()
         } else {
-            format!(" commits: {}", self.commit_hashes.join(", "))
+            format!(" commits: {}", commit_hashes.join(", "))
         };
         format!("{range} {}:{commits} ", self.role)
     }
@@ -130,6 +135,194 @@ pub fn build_with(
     counter: crate::count::Counter,
 ) -> Option<Chunk> {
     build_counted(entries, token_budget, mode, |_, text| counter.count(text))
+}
+
+/// The newest lines of a transcript, as [`build`] prints them, for a reader
+/// that wants to know what the session has been doing lately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Newest {
+    /// The lines, oldest first, joined as the chunk joins them, without the
+    /// chunk's `Messages A-B:` heading.
+    pub text: String,
+    /// The first and last message the lines cover.
+    pub from: u64,
+    pub through: u64,
+    /// `text` counted with the caller's counter.
+    pub tokens: u64,
+    /// The newest line alone was over the budget, so `text` holds only that
+    /// line's header, `… ` and the end of its text.
+    pub cut: bool,
+}
+
+/// What [`newest`] keeps of each line it printed.
+struct LineFacts {
+    tokens: u64,
+    /// The line's length in bytes.
+    len: usize,
+    /// The prefix the line starts with: `[N-M] A: commits: … ` for a
+    /// person's or the model's line, `[N] ` for a relay.
+    header: String,
+    /// The same prefix without its commit list.
+    short_header: String,
+}
+
+/// The newest lines of `entries` (oldest first, as the index holds them),
+/// as [`build`] prints them: counted back from the newest message, a line
+/// at a time, until the next older line would take the text past
+/// `token_budget` by `counter`'s count. Older lines are whole or left out.
+/// The newest line is always there; when it alone is over the budget, only
+/// its header and the last part of its text that fits are kept, with `… `
+/// between them, and its commit list is dropped when the full header leaves
+/// no room. Returns `None` when the entries hold no line.
+///
+/// Only the newest messages are printed: the lines are built forward over a
+/// window at the end of the entries, which grows until it holds every line
+/// the budget takes.
+pub fn newest(
+    entries: &[Entry],
+    token_budget: u64,
+    counter: crate::count::Counter,
+) -> Option<Newest> {
+    let separator = counter.count("\n");
+    let mut window = 64usize;
+    loop {
+        let from = entries.len().saturating_sub(window);
+        let whole = from == 0;
+        let mut facts: Vec<LineFacts> = Vec::new();
+        let chunk = build_counted(&entries[from..], u64::MAX, Lines::Merged, |block, text| {
+            let tokens = counter.count(text);
+            let (header, short_header) = if block.role == 'R' {
+                let header = format!("[{}] ", block.end);
+                (header.clone(), header)
+            } else {
+                (block.header(), block.header_with(&[]))
+            };
+            facts.push(LineFacts {
+                tokens,
+                len: text.len(),
+                header,
+                short_header,
+            });
+            tokens
+        });
+        // A window that starts inside the transcript may start inside a line
+        // too, so its oldest line may lack its first messages: it is never
+        // taken, and the window grows when the lines after it all fit.
+        let first = usize::from(!whole);
+        let Some(chunk) = chunk.filter(|chunk| chunk.printed_blocks.len() > first) else {
+            if whole {
+                return None;
+            }
+            window = window.saturating_mul(4);
+            continue;
+        };
+        let blocks = &chunk.printed_blocks;
+        let last = blocks.len() - 1;
+        let start_of = |line: usize| blocks[line].text_end - facts[line].len;
+        let count_from = |line: usize| counter.count(&chunk.input[start_of(line)..]);
+        // Pick the oldest line from the lines' own counts and the separators
+        // between them, then settle it with the count of the joined text,
+        // which can differ by a few tokens.
+        let mut oldest = last;
+        let mut estimate = facts[last].tokens;
+        while oldest > first {
+            let older = estimate + separator + facts[oldest - 1].tokens;
+            if older > token_budget {
+                break;
+            }
+            estimate = older;
+            oldest -= 1;
+        }
+        let mut tokens = count_from(oldest);
+        if tokens > token_budget {
+            while tokens > token_budget && oldest < last {
+                oldest += 1;
+                tokens = count_from(oldest);
+            }
+        } else {
+            while oldest > first {
+                let older = count_from(oldest - 1);
+                if older > token_budget {
+                    break;
+                }
+                oldest -= 1;
+                tokens = older;
+            }
+            if oldest == first && !whole {
+                window = window.saturating_mul(4);
+                continue;
+            }
+        }
+        let line = &chunk.input[start_of(oldest)..];
+        if tokens <= token_budget {
+            return Some(Newest {
+                text: line.to_owned(),
+                from: blocks[oldest].start,
+                through: blocks[last].end,
+                tokens,
+                cut: false,
+            });
+        }
+        let (text, tokens) = cut_line(line, &facts[last], token_budget, counter);
+        return Some(Newest {
+            text,
+            from: blocks[last].start,
+            through: blocks[last].end,
+            tokens,
+            cut: true,
+        });
+    }
+}
+
+/// `line` cut to its header, `… ` and the longest end of its text that
+/// fits `token_budget`, with the text's count. The header keeps its commit
+/// list only when the full header and `… ` fit by themselves.
+fn cut_line(
+    line: &str,
+    facts: &LineFacts,
+    token_budget: u64,
+    counter: crate::count::Counter,
+) -> (String, u64) {
+    debug_assert!(line.starts_with(&facts.header));
+    let body = &line[facts.header.len()..];
+    let mut prefix = format!("{}… ", facts.header);
+    if counter.count(&prefix) > token_budget {
+        prefix = format!("{}… ", facts.short_header);
+    }
+    // Where each character starts, plus the end: a cut keeps `body[at..]`.
+    let bounds: Vec<usize> = body
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(body.len()))
+        .collect();
+    let fits = |index: usize| {
+        counter.count(&format!("{prefix}{}", &body[bounds[index]..])) <= token_budget
+    };
+    // Search the last few characters a token first, and a longer stretch
+    // only when all of those fit.
+    let end = bounds.len() - 1;
+    let mut span = (token_budget as usize).saturating_mul(4).max(1);
+    let keep = loop {
+        let low = end.saturating_sub(span);
+        // The longest end that fits starts in `low..=high`; an empty end
+        // counts as fitting, so the header is never dropped.
+        let (mut lo, mut high) = (low, end);
+        while lo < high {
+            let mid = lo + (high - lo) / 2;
+            if fits(mid) {
+                high = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if high > low || low == 0 {
+            break high;
+        }
+        span = span.saturating_mul(4);
+    };
+    let text = format!("{prefix}{}", &body[bounds[keep]..]);
+    let tokens = counter.count(&text);
+    (text, tokens)
 }
 
 /// The trigger revisits held history on notices. For models with an exact

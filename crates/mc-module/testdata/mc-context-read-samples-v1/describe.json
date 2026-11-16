@@ -1,0 +1,24 @@
+{
+  "caller": "reserved:colliculus",
+  "name": "describe",
+  "request": {
+    "method": "role.describe",
+    "params": {}
+  },
+  "response": {
+    "result": {
+      "implementation_version": "{implementation_version}",
+      "majors": [
+        {
+          "ops": [
+            "context.memories",
+            "context.summaries",
+            "context.recent"
+          ],
+          "stability": "alpha",
+          "version": "mc-context-read/v1"
+        }
+      ]
+    }
+  }
+}
