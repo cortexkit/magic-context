@@ -494,3 +494,23 @@ async fn quiet_a_head_session_waits_its_whole_quiet_time_after_its_run_ended() {
         "a head was freed before its quiet time"
     );
 }
+
+/// A `pre_user` answered from a freed session's carry is followed by the
+/// runner's next request: the worker reads the session again right after
+/// answering, so that request's ride doesn't wait for the reads.
+#[tokio::test(start_paused = true)]
+async fn quiet_a_pre_user_answered_while_freed_reads_the_session_again_at_once() {
+    let f = Fixture::new("worker", false).await;
+    f.wait_quiet_time().await;
+    assert!(f.quiet(), "the session went quiet");
+    let reads = *f.client().reads.lock().unwrap();
+    f.module
+        .pre_user(f.key(), "Carry on with the parser fix", 30 * 60_000)
+        .await;
+    f.module.idle_foreground(f.key()).await.unwrap();
+    assert!(
+        *f.client().reads.lock().unwrap() > reads,
+        "the session was not read again after the hook"
+    );
+    assert!(!f.quiet(), "the hook's worker runs the session");
+}

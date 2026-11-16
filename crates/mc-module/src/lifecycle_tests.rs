@@ -2132,3 +2132,39 @@ async fn lifecycle_a_session_freed_while_quiet_answers_its_next_notices_as_one_n
         assert_same_session(&mut kept, &mut resumed, step);
     }
 }
+
+/// What a failed read, a runner's refusal or another provider's view leaves
+/// in memory is read again on resuming, or left to the next Setup, as after
+/// a restart: none of them keeps a session from being freed.
+#[tokio::test]
+async fn lifecycle_a_quiet_session_is_freed_whatever_a_failed_read_or_refusal_left() {
+    /// What a test leaves in memory before the session is freed.
+    type Leave = fn(&mut Session);
+    let cases: [(&str, Leave); 3] = [
+        ("index and runner's view unknown", |session| {
+            session.index_ready = false;
+            session.latest_unknown = true;
+        }),
+        ("refused by the runner", |session| session.suspended = true),
+        ("another provider's view applied", |session| {
+            session.latest = None;
+        }),
+    ];
+    for (number, (case, leave)) in cases.into_iter().enumerate() {
+        let (mut session, client, _app, _) = settled(&format!("quiet-left-{number}")).await;
+        leave(&mut session);
+        let suspended = session.suspended;
+        let Ok(carry) = Box::new(session).quiet_carry() else {
+            panic!("{case}: a session with nothing in flight is kept");
+        };
+        let reads = client.reads.lock().unwrap().len();
+        let resumed = Session::resume_quiet(carry, &client).await;
+        assert_eq!(resumed.suspended, suspended, "{case}");
+        // A session the runner refused reads nothing until its next Setup.
+        assert_eq!(
+            client.reads.lock().unwrap().len() > reads,
+            !suspended,
+            "{case}: transcript reads on resuming"
+        );
+    }
+}
