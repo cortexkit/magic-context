@@ -208,6 +208,10 @@ test("OC2 arms thinking recovery for the rejected turn from its event stream and
 				? (JSON.parse(value.slice("latest_thinking_original_turn:".length)) as Record<string, unknown>)
 				: value;
 		};
+		// The host's event stream reaches the plugin on its own task, so the arm
+		// can land just after the session reads idle: wait for it, briefly.
+		const armedBy = Date.now() + 10_000;
+		while (typeof state() === "string" && Date.now() < armedBy) await Bun.sleep(50);
 		console.log(JSON.stringify({ armed: state(), userID }));
 		expect(state()).toMatchObject({ stage: "armed", rejections: 1 });
 
