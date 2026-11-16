@@ -71,8 +71,10 @@ pub struct RunEnds {
     unnamed_logged: AtomicBool,
 }
 
-/// One registered wait: its id, and what wakes it.
-type Waiting = (u64, Arc<Notify>);
+/// One registered wait: its id, what wakes it to read its run, and what only
+/// a run-end event wakes ([`Watch::ended`]). A reader that stops wakes the
+/// first so each wait reads at once, and no run ended then.
+type Waiting = (u64, Arc<Notify>, Arc<Notify>);
 
 /// Where the reader is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,15 +148,17 @@ impl RunEnds {
         let session_ref = crate::agent_data::source::session_ref(child);
         let id = self.next_wait.fetch_add(1, Ordering::Relaxed);
         let notify = Arc::new(Notify::new());
+        let ended = Arc::new(Notify::new());
         lock(&self.waits)
             .entry(session_ref.clone())
             .or_default()
-            .push((id, notify.clone()));
+            .push((id, notify.clone(), ended.clone()));
         Watch {
             ends: self,
             session_ref,
             id,
             notify,
+            ended,
         }
     }
 
@@ -169,8 +173,9 @@ impl RunEnds {
         }
         match lock(&self.waits).get(session_ref) {
             Some(waits) => {
-                for (_, notify) in waits {
+                for (_, notify, ended) in waits {
                     notify.notify_one();
+                    ended.notify_one();
                 }
                 Woke::Waits(waits.len())
             }
@@ -207,7 +212,7 @@ impl RunEnds {
             // wake each one, so it reads now and sleeps the short interval
             // after.
             for waits in lock(&self.waits).values() {
-                for (_, notify) in waits {
+                for (_, notify, _) in waits {
                     notify.notify_one();
                 }
             }
@@ -221,6 +226,7 @@ pub(crate) struct Watch<'a> {
     session_ref: String,
     id: u64,
     notify: Arc<Notify>,
+    ended: Arc<Notify>,
 }
 
 impl Watch<'_> {
@@ -236,9 +242,9 @@ impl Watch<'_> {
     /// Wait, without a timeout, for the next run-end event naming this
     /// watch's session, or for one that came since the last wait: for a
     /// waiter that has nothing to read, only something to do once the run
-    /// ended.
+    /// ended. A reader that stops wakes no such wait.
     pub(crate) async fn ended(&self) {
-        self.notify.notified().await;
+        self.ended.notified().await;
     }
 }
 
@@ -246,7 +252,7 @@ impl Drop for Watch<'_> {
     fn drop(&mut self) {
         let mut waits = lock(&self.ends.waits);
         if let Some(list) = waits.get_mut(&self.session_ref) {
-            list.retain(|(id, _)| *id != self.id);
+            list.retain(|(id, _, _)| *id != self.id);
             if list.is_empty() {
                 waits.remove(&self.session_ref);
             }

@@ -168,19 +168,28 @@ async fn quiet_review_a_freed_session_keeps_the_bound_on_an_immediate_retry() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// How long restoring a large freed head takes: 3,000 summaries in
-/// `context.db` and 300,000 entries after the cut, each a text of about 300
-/// characters. The runner here answers every read at once and in one page;
-/// a real runner serves pages of at most 1 MiB, each a round trip, so the
-/// test also reports how many such pages the transcript fills. Run it with
-/// `--release --ignored --nocapture`.
-#[tokio::test]
-#[ignore = "a measurement, run on request with --release --ignored --nocapture"]
-async fn quiet_review_resume_time_for_a_large_head() {
+/// A head with 3,000 summaries in `context.db` and 300,000 entries after
+/// the cut, each a text of about 300 characters, whose runner applies the
+/// view a notice built: a large session with nothing in flight.
+struct LargeHead {
+    session: Session,
+    client: Client,
+    /// The apps' reads of the session, which [`quiet_review_large_head_parts`]
+    /// publishes to.
+    #[cfg_attr(not(feature = "heap-profile"), allow(dead_code))]
+    app: crate::app_read::AppRead,
+    dir: std::path::PathBuf,
+    /// The transcript after the cut as compact JSON, in bytes.
+    after_cut_bytes: usize,
+    /// How long the Setup that read the whole transcript took.
+    setup_ms: u128,
+}
+
+async fn large_head(label: &str) -> LargeHead {
     const SUMMARIES: u64 = 3_000;
     const AFTER_CUT: u64 = 300_000;
     let (mut session, client, route, mut setup, settings) = fixture();
-    let dir = scratch("quiet-review-large-head");
+    let dir = scratch(label);
     let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     let content = "Reworked the parser's error recovery so that a missing brace no longer \
         swallows the rest of the file; added tests for nested blocks, trailing commas and \
@@ -277,6 +286,32 @@ async fn quiet_review_resume_time_for_a_large_head() {
     session.summarizing = false;
     session.run_start = None;
     session.reservation = None;
+    LargeHead {
+        session,
+        client,
+        app,
+        dir,
+        after_cut_bytes,
+        setup_ms,
+    }
+}
+
+/// How long restoring a large freed head takes ([`large_head`]). The runner
+/// here answers every read at once and in one page; a real runner serves
+/// pages of at most 1 MiB, each a round trip, so the test also reports how
+/// many such pages the transcript fills. Run it with
+/// `--release --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "a measurement, run on request with --release --ignored --nocapture"]
+async fn quiet_review_resume_time_for_a_large_head() {
+    let LargeHead {
+        session,
+        client,
+        dir,
+        after_cut_bytes,
+        setup_ms,
+        ..
+    } = large_head("quiet-review-large-head").await;
     let cut = session.cut;
     let indexed = session.index.entries().len();
 
@@ -338,4 +373,181 @@ async fn quiet_review_resume_time_for_a_large_head() {
         session.latest.as_ref().map_or(0, |view| view.edits.len())
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// dhat as the allocator, so a measurement can read the bytes held live.
+/// Only a build with `heap-profile` has it; without a running profiler it
+/// passes every allocation straight to the system allocator.
+#[cfg(feature = "heap-profile")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+/// What a large idle head ([`large_head`]) holds, part by part, and what
+/// freeing it keeps; then how long its restore takes, step by step, and with
+/// the transcript index and the view checks kept instead of read and primed
+/// again. Bytes are the requested sizes dhat counts live, measured as what
+/// dropping each part frees, in an order that charges a shared allocation
+/// to the part dropped last. Run it alone, in a release build:
+/// `--release --features agent-data,heap-profile -- --ignored --nocapture
+/// quiet_review_large_head_parts`.
+#[cfg(feature = "heap-profile")]
+#[tokio::test]
+#[ignore = "a measurement, run on request with --release --features heap-profile --ignored --nocapture"]
+async fn quiet_review_large_head_parts() {
+    fn ms(started: std::time::Instant) -> f64 {
+        started.elapsed().as_secs_f64() * 1000.0
+    }
+    fn mib(bytes: i64) -> String {
+        format!("{:.1} MiB", bytes as f64 / (1 << 20) as f64)
+    }
+
+    // Times first, without the profiler, which slows every allocation.
+    let LargeHead {
+        mut session,
+        client,
+        app,
+        dir,
+        ..
+    } = large_head("quiet-review-parts-time").await;
+    let step = std::time::Instant::now();
+    session.publish_app(&app, false);
+    let publish_kept = ms(step);
+    let index = session.index.clone();
+    let checks = session.view_validation.clone();
+    let Ok(carry) = Box::new(session).quiet_carry() else {
+        panic!("the session is quiet");
+    };
+    let carried = carry.1.clone();
+    let step = std::time::Instant::now();
+    let mut session = Session::restore_quiet(carry);
+    let restore_stores = ms(step);
+    let step = std::time::Instant::now();
+    session.index_ready = session.read_until(&client, None, true).await;
+    let restore_read = ms(step);
+    let step = std::time::Instant::now();
+    session.adopt_runner_view(&client).await;
+    let restore_view = ms(step);
+    assert_eq!(session.latest.as_ref().map(View::applied), carried);
+    let step = std::time::Instant::now();
+    session.publish_app(&app, false);
+    let publish_rebuilt = ms(step);
+    let step = std::time::Instant::now();
+    if let Some(view) = &session.latest {
+        session.view_validation.prime(session.index.entries(), view);
+    }
+    let prime = ms(step);
+    // The same restore with the index and the view checks kept.
+    let Ok(mut carry) = Box::new(session).quiet_carry() else {
+        panic!("the resumed session is quiet");
+    };
+    carry.0.index = index;
+    carry.0.index_ready = true;
+    carry.0.view_validation = checks;
+    let step = std::time::Instant::now();
+    let mut session = Session::restore_quiet(carry);
+    session.index_ready = true;
+    session.adopt_runner_view(&client).await;
+    let restore_keeping_index = ms(step);
+    assert!(session.latest.is_some());
+    drop(session);
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!(
+        "large head restore, ms: summaries and decisions {restore_stores:.1}; transcript read and \
+         index {restore_read:.1}; runner's view read back {restore_view:.1}; whole restore \
+         {:.1}; view checks primed (no longer in the restore) {prime:.1}; first app publish after \
+         the restore (builds the projection) {publish_rebuilt:.1}, an idle session's publish \
+         {publish_kept:.1}; restore keeping the index and the view checks (no read, no prime) \
+         {restore_keeping_index:.1}",
+        restore_stores + restore_read + restore_view
+    );
+
+    // Bytes, with the profiler.
+    let _profiler = dhat::Profiler::builder().testing().build();
+    let live = || dhat::HeapStats::get().curr_bytes as i64;
+    let LargeHead { mut session, .. } = large_head("quiet-review-parts-bytes").await;
+    let view = session.latest.clone().expect("the head's view");
+    // The view checks' parts, by what copies of what each one holds cost:
+    // the inserted messages, every edit with its size, and the first four
+    // edits with their hash states.
+    let before = live();
+    let inserts: Vec<EditOp> = view
+        .edits
+        .iter()
+        .filter(|edit| matches!(edit.op, EditOp::Insert { .. }))
+        .map(|edit| edit.op.clone())
+        .collect();
+    let inserts_bytes = live() - before;
+    drop(inserts);
+    let before = live();
+    let sizes: Vec<(cortexkit_role_compaction::view::Edit, usize)> =
+        view.edits.iter().map(|edit| (edit.clone(), 0)).collect();
+    let sizes_bytes = live() - before;
+    drop(sizes);
+    let before = live();
+    let prefix: Vec<(cortexkit_role_compaction::view::Edit, sha2::Sha256)> = view
+        .edits
+        .iter()
+        .take(4)
+        .map(|edit| (edit.clone(), <sha2::Sha256 as sha2::Digest>::new()))
+        .collect();
+    let prefix_bytes = live() - before;
+    drop(prefix);
+    drop(view);
+    let mut freed = |part: &str, drop_part: &mut dyn FnMut(&mut Session)| {
+        let before = live();
+        drop_part(&mut session);
+        let bytes = before - live();
+        (part.to_owned(), bytes)
+    };
+    let parts = vec![
+        freed("view checks (inserts, hash_prefix, wire_sizes)", &mut |s| {
+            s.view_validation = Default::default();
+        }),
+        freed("transcript index", &mut |s| s.index = Index::default()),
+        freed("summaries (rows; head-summary cache)", &mut |s| {
+            s.summaries.replace(Vec::new());
+            s.head_summaries = None;
+        }),
+        freed("newest view", &mut |s| s.latest = None),
+        freed("app projection and decisions", &mut |s| {
+            s.app_projection = Default::default();
+            s.app_decisions = Vec::new();
+        }),
+        freed("baseline and mural", &mut |s| {
+            s.baseline = None;
+            s.mural_image = None;
+        }),
+    ];
+    let before = live();
+    drop(session);
+    let rest = before - live();
+
+    // What the carry of the same head holds.
+    let LargeHead { session, .. } = large_head("quiet-review-parts-carry").await;
+    let before = live();
+    let Ok(carry) = Box::new(session).quiet_carry() else {
+        panic!("the session is quiet");
+    };
+    let shed = before - live();
+    let before = live();
+    drop(carry);
+    let carry_bytes = before - live();
+
+    let mut table = String::from("large head, live bytes by part:\n");
+    let total: i64 = parts.iter().map(|(_, bytes)| bytes).sum::<i64>() + rest;
+    for (part, bytes) in &parts {
+        table.push_str(&format!("  {part}: {}\n", mib(*bytes)));
+    }
+    table.push_str(&format!(
+        "  everything else: {}\n  idle session in all: {}\n  of the view checks, by copies: \
+         inserts {}, wire_sizes {}, hash_prefix {}\n  freeing drops {}; the carry holds {}\n",
+        mib(rest),
+        mib(total),
+        mib(inserts_bytes),
+        mib(sizes_bytes),
+        mib(prefix_bytes),
+        mib(shed),
+        mib(carry_bytes)
+    ));
+    eprint!("{table}");
 }

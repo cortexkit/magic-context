@@ -202,6 +202,10 @@ pub struct Session {
     seq: u64,
     /// The session's summaries, oldest first.
     summaries: Summaries,
+    /// Resuming a session freed while quiet could not read its summaries
+    /// from `context.db` again, so it holds only the newest. Nothing runs on
+    /// it until a read succeeds ([`Session::summaries_ready`]).
+    summaries_unread: bool,
     /// What newer summaries add to the history head, kept from the last view
     /// build until the summaries or the baseline's summary items change.
     head_summaries: Option<HeadSummaries>,
@@ -791,9 +795,10 @@ fn same(applied: &AppliedView, view: &View) -> bool {
 }
 
 /// A session freed while quiet ([`Session::quiet_carry`]): the session
-/// itself, without what [`Session::resume_quiet`] reads again. Its worker
+/// itself, without what [`Session::resume_quiet`] reads again, and the view
+/// it held, by version and checksum, which the runner applied. Its worker
 /// may stop meanwhile; this is all the module keeps of the session.
-pub(crate) struct QuietCarry(Box<Session>);
+pub(crate) struct QuietCarry(Box<Session>, Option<AppliedView>);
 
 impl QuietCarry {
     /// The session's settings inputs, as [`Session::config_inputs`].
@@ -916,6 +921,7 @@ impl Session {
             pending_keep: None,
             seq: 0,
             summaries: Summaries::default(),
+            summaries_unread: false,
             head_summaries: None,
             baseline: None,
             next_baseline: None,
@@ -1246,11 +1252,13 @@ impl Session {
     ///
     /// In flight means a view the runner has not confirmed or one waiting to
     /// be offered again, a summary run, a transcript held behind the
-    /// summaries, a suspended session, an index or runner's view a failed
-    /// read left unknown, a runner that last reported applying a view other
-    /// than ck-mc's newest, or app decisions or a checkpoint not saved. What
-    /// only the worker sees (its queue, its saved state, the search index)
-    /// is the worker's to check.
+    /// summaries, ck-mc's newest view not being the one the runner last
+    /// reported applying, or app decisions or a checkpoint not saved. An
+    /// index or runner's view a failed read left unknown, and a session the
+    /// runner refused, are not in flight: resuming reads them again as the
+    /// next notice would, or leaves them to the next Setup. What only the
+    /// worker sees (its queue, its saved state, the search index) is the
+    /// worker's to check.
     pub(crate) fn quiet_carry(mut self: Box<Self>) -> Result<QuietCarry, Box<Self>> {
         self.app_checkpoint_if_due(true);
         let quiet = self.compacting()
@@ -1260,10 +1268,12 @@ impl Session {
             && self.run_start.is_none()
             && self.reservation.is_none()
             && self.transcript_behind.is_none()
-            && !self.suspended
-            && self.index_ready
-            && !self.latest_unknown
-            && self.latest.as_ref().map_or(0, |view| view.version) == self.newest_applied
+            // Without a view of ck-mc's (one another provider owns, or none)
+            // there is no view to compare.
+            && self
+                .latest
+                .as_ref()
+                .is_none_or(|view| view.version == self.newest_applied)
             && self.app_decisions_unsaved.is_empty()
             && self.app_snapshot_deadline().is_none();
         if !quiet {
@@ -1280,7 +1290,8 @@ impl Session {
         let _ = self.index.extend(newest);
         self.index_ready = false;
         // Read back from the runner on resuming, as after a restart.
-        if self.latest.take().is_some() {
+        let view = self.latest.take().map(|view| view.applied());
+        if view.is_some() {
             self.latest_unknown = true;
         }
         self.view_validation = Default::default();
@@ -1289,43 +1300,105 @@ impl Session {
         self.app_projection = Default::default();
         self.app_projection.head_read = head_read;
         self.app_decisions = Vec::new();
-        Ok(QuietCarry(self))
+        Ok(QuietCarry(self, view))
     }
 
-    /// The session `carry` was made from, with what it dropped read again
-    /// the way Setup reads it after a restart: the summaries from
-    /// `context.db`, the apps' decisions from `mode3.db`, the transcript from
+    /// The session `carry` was made from, with what the stores hold of it
+    /// read again: its summaries from `context.db` and the apps' decisions
+    /// from `mode3.db`. Its transcript and the runner's view are left for
+    /// the caller to read: Setup, or [`Session::resume_quiet`]. Summaries
+    /// that can't be read leave the session marked unread
+    /// ([`Session::summaries_ready`]).
+    pub(crate) fn restore_quiet(carry: QuietCarry) -> Self {
+        let mut session = *carry.0;
+        session.set_store(session.store.clone());
+        session.summaries_unread = true;
+        session.summaries_ready();
+        session.index = Index::starting_at(session.cut.unwrap_or(1));
+        session
+    }
+
+    /// The session `carry` was made from, read again the way Setup reads it
+    /// after a restart: [`Session::restore_quiet`], then the transcript from
     /// the cut, then the view the runner applies. A read that fails leaves
     /// the session as the same failed read leaves it after a restart, for
-    /// its next notice to read again.
+    /// its next job to read again. Unread summaries, and a session the
+    /// runner refused, read nothing more, as their next notice wouldn't.
     pub(crate) async fn resume_quiet<C: RunnerClient>(carry: QuietCarry, client: &C) -> Self {
-        let mut session = *carry.0;
-        session.reload_quiet_summaries();
-        session.set_store(session.store.clone());
-        session.distrust_state_ahead_of_summaries();
-        session.index = Index::starting_at(session.cut.unwrap_or(1));
+        let carried = carry.1.clone();
+        let mut session = Self::restore_quiet(carry);
+        if session.summaries_unread || session.suspended {
+            return session;
+        }
         session.index_ready = session.read_until(client, None, true).await;
         if session.index_ready && session.latest_unknown {
+            // The bound on an immediate retry stays while the runner applies
+            // the view it was set under.
+            let retry = session.transcript_retry;
             session.adopt_runner_view(client).await;
-        }
-        if let Some(view) = &session.latest {
-            session.view_validation.prime(session.index.entries(), view);
+            if carried
+                .as_ref()
+                .zip(session.latest.as_ref())
+                .is_some_and(|(carried, view)| same(carried, view))
+            {
+                session.transcript_retry = retry;
+            }
         }
         session
+    }
+
+    /// Whether the session holds all its summaries: false while those of a
+    /// session resumed after a quiet free could not be read from `context.db`
+    /// again, which leaves only the newest. Each call while they are unread
+    /// tries the read again; once it succeeds the session is checked against
+    /// them as after a restart. Nothing may run on the partial set.
+    pub(crate) fn summaries_ready(&mut self) -> bool {
+        if self.summaries_unread && self.reload_quiet_summaries() {
+            self.summaries_unread = false;
+            let cut = self.cut;
+            self.distrust_state_ahead_of_summaries();
+            if self.cut != cut {
+                self.index = Index::starting_at(self.cut.unwrap_or(1));
+                self.index_ready = false;
+            }
+        }
+        !self.summaries_unread
     }
 
     /// Drop the summaries of a session freed while quiet, all but the
     /// newest ([`QuietCarry::answers_pre_user`]). With
     /// [`Session::reload_quiet_summaries`], the only places freeing a session
-    /// touches its summaries.
+    /// touches its summaries. Without `context.db` (only tests run so) the
+    /// summaries live only in memory, and are kept.
     fn drop_quiet_summaries(&mut self) {
+        if self.db.is_none() {
+            return;
+        }
         let newest = self.summaries.last().cloned();
         self.summaries.replace(newest.into_iter().collect());
     }
 
-    /// Read the summaries of a session resumed after a quiet free again.
-    fn reload_quiet_summaries(&mut self) {
-        self.load_summaries();
+    /// Read the summaries of a session resumed after a quiet free again, as
+    /// [`Session::load_summaries`] does; false, with the summaries left as
+    /// they were, when `context.db` can't be read.
+    fn reload_quiet_summaries(&mut self) -> bool {
+        let Some(db) = &self.db else {
+            return true;
+        };
+        match db.compartments(&self.key.harness, &self.key.session) {
+            Ok(summaries) => {
+                self.summaries.replace(summaries);
+                self.app_projection.summaries_dirty = true;
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "ck-mc: session {}: reading its summaries again after a quiet free failed: {error}; nothing runs on it until a read succeeds",
+                    self.key.session
+                );
+                false
+            }
+        }
     }
 
     /// `mode3.db` and `context.db` are backed up separately, and a restore
@@ -1450,6 +1523,11 @@ impl Session {
             statement_epoch,
             statement_stamp
         );
+        // Summaries a resume could not read again are read first; until
+        // then the Setup takes nothing (the worker holds it meanwhile).
+        if !self.summaries_ready() {
+            return;
+        }
         self.features = features;
         self.preset = crate::catalog::Preset::parse(&request.preset).expect("validated preset");
         self.tools_only = false;
@@ -1669,6 +1747,11 @@ impl Session {
         notice: NoticeRequest,
     ) -> Option<run::Request> {
         let _timing = crate::notice_cost_timing::span("session.notice");
+        // Summaries a resume could not read again are read first; until
+        // then the notice takes nothing (the worker holds it meanwhile).
+        if !self.summaries_ready() {
+            return None;
+        }
         // Whether the notice belongs to the session as ck-mc holds it comes
         // first, before anything in it is taken, the notice number included.
         let Some(standing) = self.standing(&notice.conditions) else {
@@ -3596,6 +3679,10 @@ impl Session {
     /// lands only what the pass would land on a notice, as does a soft window
     /// budget signal (see [`pass::RideCauseKind`]).
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
+        // No view is built on summaries a resume could not read again.
+        if !self.summaries_ready() {
+            return None;
+        }
         // Whether the ride belongs to the session as ck-mc holds it comes
         // first, before anything in it is taken.
         let Some(standing) = self.standing(&ride.conditions) else {

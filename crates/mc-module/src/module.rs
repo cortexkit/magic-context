@@ -1328,6 +1328,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             // run before the queue's next one once it no longer holds them.
             let mut held: VecDeque<Job> = VecDeque::new();
             let mut ready: VecDeque<Job> = VecDeque::new();
+            // Setups and notices that wait for summaries a resume could not
+            // read again, in the order they arrived.
+            let mut unread: VecDeque<Job> = VecDeque::new();
             // A session without a summarizer is freed sooner once the runner
             // says its run ended.
             let watch_run_end = || inner.client.run_ends().map(|ends| ends.watch(&held_key));
@@ -1368,6 +1371,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             }
                             Err(NoJob::Quiet) => {
                                 let freed = held.is_empty()
+                                    && unread.is_empty()
                                     && !retry_save
                                     && free_quiet(
                                         &inner,
@@ -1416,6 +1420,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                     Ok(()) => job,
                 };
+                // The session's own activity after its run ended: it is in use
+                // again, and waits its whole quiet time.
+                if matches!(
+                    &job,
+                    Job::Setup(..)
+                        | Job::Notice(_)
+                        | Job::Ride(..)
+                        | Job::Tool { .. }
+                        | Job::PreUser { .. }
+                        | Job::Command { .. }
+                ) {
+                    run_ended = false;
+                }
                 // A quiet session is read again before a job that works on
                 // it, as Setup reads a session after a restart. The jobs that
                 // only ask about work in flight, and a workspace answer, need
@@ -1435,15 +1452,36 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     _ => true,
                 };
                 if let Some(quiet) = carry.take_if(|_| needs_session) {
-                    // Hydrate the apps' projection first, as for a new worker.
-                    inner.app_read.activate(&held_key).await;
-                    let started = std::time::Instant::now();
-                    session = Some(Session::resume_quiet(quiet, inner.client.as_ref()).await);
-                    tracing::info!(
-                        "ck-mc: session {}: resumed after a quiet free in {} ms",
-                        held_key.session,
-                        started.elapsed().as_millis()
-                    );
+                    // A Setup reads the transcript and the runner's view
+                    // itself, once.
+                    let reads = !matches!(&job, Job::Setup(..));
+                    session = Some(resume(&inner, &held_key, quiet, reads).await);
+                }
+                // Nothing runs on summaries a resume could not read again:
+                // each such job tries the read first. Setups and notices wait
+                // for it, in order; then they run before this job.
+                let on_summaries = matches!(
+                    &job,
+                    Job::Setup(..)
+                        | Job::Notice(_)
+                        | Job::Ride(..)
+                        | Job::Tool { .. }
+                        | Job::Command { .. }
+                        | Job::SummaryFinished(..)
+                        | Job::AccountWait(_)
+                );
+                if on_summaries {
+                    if session.as_mut().is_some_and(|session| !session.summaries_ready()) {
+                        hold_unread(job, &mut unread);
+                        continue;
+                    }
+                    if !unread.is_empty() {
+                        let rest = std::mem::take(&mut ready);
+                        ready.extend(unread.drain(..));
+                        ready.push_back(job);
+                        ready.extend(rest);
+                        continue;
+                    }
                 }
                 let settings: Settings = match (&job, &session) {
                     (
@@ -1785,6 +1823,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             (None, None) => Addition::default(),
                         };
                         let _ = reply.send(answer);
+                        // A person's message is followed by the runner's next
+                        // request: read the freed session again now, while
+                        // the model works, not when that request's ride waits.
+                        if let Some(quiet) = carry.take() {
+                            session = Some(resume(&inner, &held_key, quiet, true).await);
+                        }
                     }
                     Job::Idle(reply) => {
                         if retry_save {
@@ -2051,8 +2095,9 @@ struct Freed<'a> {
 
 /// Free the session of a worker whose queue stayed empty for its quiet
 /// time, and give the worker's place in the map to what is kept of it
-/// ([`Quiet`]), so the next job starts a worker again with that. True when
-/// the worker may stop now.
+/// ([`Quiet`]), so the next job starts a worker again with that. A session
+/// that only called tools keeps nothing, and leaves the map as it was before
+/// its first call. True when the worker may stop now.
 ///
 /// False while the session can't be freed: a move or a summarizer run holds
 /// it, its state, its apps' rows or its search index are not saved yet, or
@@ -2089,6 +2134,24 @@ fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
     if !searched {
         return false;
     }
+    if session.as_ref().is_some_and(|live| !live.compacting()) {
+        // A session that only called tools keeps nothing: its next call
+        // starts a fresh one, as its first call did.
+        let live = session.as_mut().expect("a session that only called tools");
+        live.app_checkpoint_if_due(true);
+        if live.app_snapshot_deadline().is_some()
+            || give_up_place(inner, key, own, receiver, search_guard, ready, None).is_err()
+        {
+            return false;
+        }
+        *session = None;
+        tracing::info!(
+            "ck-mc: session {}: freed after {} s without a job; its next job reads it again",
+            key.session,
+            freed.quiet_for.as_secs()
+        );
+        return true;
+    }
     if let Some(live) = session.take() {
         // The next worker reads the session's state from the store.
         let kept = if freed.saved.as_ref() == Some(&live.durable()) {
@@ -2107,38 +2170,120 @@ fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
     let Some(kept) = carry.take() else {
         return false;
     };
-    let mut workers = inner.workers.lock().expect("worker map");
-    if let Ok(job) = receiver.try_recv() {
-        ready.push_back(job);
-        *carry = Some(kept);
-        return false;
-    }
-    let ours = |worker: &mpsc::UnboundedSender<Job>| {
-        own.upgrade().is_some_and(|own| own.same_channel(worker))
-    };
-    let Some(slot) = workers
-        .get_mut(key)
-        .filter(|slot| matches!(slot, Slot::Running(worker) if ours(worker)))
-    else {
-        // A move dropped the session, and its Discard is on the way.
-        *carry = Some(kept);
-        return false;
-    };
-    // Under the lock, so the next worker's search work and projection come
-    // after this worker's guard and release.
-    *search_guard = None;
-    *slot = Slot::Quiet(Box::new(Quiet {
+    let quiet = Box::new(Quiet {
         carry: kept,
         saved: freed.saved.clone(),
         subagent: freed.subagent,
-    }));
-    inner.app_read.release(key);
+    });
+    if let Err(quiet) = give_up_place(inner, key, own, receiver, search_guard, ready, Some(quiet)) {
+        *carry = quiet.map(|quiet| quiet.carry);
+        return false;
+    }
     tracing::info!(
         "ck-mc: session {}: freed after {} s without a job; its next job reads it again",
         key.session,
         freed.quiet_for.as_secs()
     );
     true
+}
+
+/// Give a worker's place in the map up to what is kept of its session
+/// (`quiet`), or leave the session no place at all (`None`): under the map's
+/// lock, only while the worker's queue is empty and the place is still the
+/// worker's. Otherwise `quiet` comes back, and a job that arrived meanwhile
+/// is in `ready`.
+fn give_up_place<'a, C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &'a Inner<C>,
+    key: &SessionRef,
+    own: &mpsc::WeakUnboundedSender<Job>,
+    receiver: &mut mpsc::UnboundedReceiver<Job>,
+    search_guard: &mut Option<crate::search::background::SessionGuard<'a>>,
+    ready: &mut VecDeque<Job>,
+    quiet: Option<Box<Quiet>>,
+) -> Result<(), Option<Box<Quiet>>> {
+    let mut workers = inner.workers.lock().expect("worker map");
+    if let Ok(job) = receiver.try_recv() {
+        ready.push_back(job);
+        return Err(quiet);
+    }
+    let ours = |worker: &mpsc::UnboundedSender<Job>| {
+        own.upgrade().is_some_and(|own| own.same_channel(worker))
+    };
+    if !workers
+        .get(key)
+        .is_some_and(|slot| matches!(slot, Slot::Running(worker) if ours(worker)))
+    {
+        // A move dropped the session, and its Discard is on the way.
+        return Err(quiet);
+    }
+    // Under the lock, so the next worker's search work and projection come
+    // after this worker's guard and release.
+    *search_guard = None;
+    match quiet {
+        Some(quiet) => {
+            workers.insert(key.clone(), Slot::Quiet(quiet));
+        }
+        None => {
+            workers.remove(key);
+        }
+    }
+    inner.app_read.release(key);
+    Ok(())
+}
+
+/// Read a quiet session's carry again for the job that needs it, the
+/// transcript and the runner's view included unless the job (a Setup)
+/// reads them itself.
+async fn resume<C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &Inner<C>,
+    key: &SessionRef,
+    carry: crate::session::QuietCarry,
+    reads: bool,
+) -> Session {
+    // Hydrate the apps' projection first, as for a new worker.
+    inner.app_read.activate(key).await;
+    let started = std::time::Instant::now();
+    let session = if reads {
+        Session::resume_quiet(carry, inner.client.as_ref()).await
+    } else {
+        Session::restore_quiet(carry)
+    };
+    tracing::info!(
+        "ck-mc: session {}: resumed after a quiet free in {} ms",
+        key.session,
+        started.elapsed().as_millis()
+    );
+    session
+}
+
+/// What a worker does with a job that needs a session whose summaries a
+/// resume could not read again ([`Session::summaries_ready`]). A Setup or
+/// notice waits in `unread`, in order, for the read to succeed, as do a
+/// summarizer run's result and an account wait. A ride gets no view, and a
+/// tool call or a person's command is refused for now.
+fn hold_unread(job: Job, unread: &mut VecDeque<Job>) {
+    match job {
+        Job::Setup(..) | Job::Notice(_) | Job::SummaryFinished(..) | Job::AccountWait(_) => {
+            unread.push_back(job);
+        }
+        Job::Ride(_, reply) => {
+            let _ = reply.send(None);
+        }
+        Job::Tool { reply, .. } => {
+            let _ = reply.send(Err(ModuleError::Tool(
+                "Magic Context can't read this session's history right now; try again shortly."
+                    .into(),
+            )));
+        }
+        Job::Command { reply, .. } => {
+            let _ = reply.send(Err(subc_protocol::ErrorBody::new(
+                "store_unavailable",
+                "The session's history can't be read right now; try again shortly.",
+            )));
+        }
+        // Jobs that need no summaries run as usual and never come here.
+        job => unread.push_back(job),
+    }
 }
 
 /// Read again, off the Setup's path, which workspace the session's project

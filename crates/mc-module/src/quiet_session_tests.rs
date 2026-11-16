@@ -453,8 +453,12 @@ async fn quiet_a_notice_sent_as_the_quiet_time_ends_runs_once_on_the_worker() {
 async fn quiet_a_minute_after_the_run_ended(f: &Fixture) -> bool {
     f.notice(1, None, None).await;
     f.module.search_idle(f.key()).await.unwrap();
-    // A job that touches no thread, so the clock stays where it is.
+    // A job that starts the worker again if the paused clock freed the
+    // session while the search index was waited for. A session the hook
+    // finds freed is read again right after it: wait for that, so the minute
+    // counts from the worker's last job.
     f.module.pre_user(f.key(), "next", 0).await;
+    f.module.idle_foreground(f.key()).await.unwrap();
     assert!(!f.quiet());
     f.client()
         .ends
