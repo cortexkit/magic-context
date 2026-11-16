@@ -416,23 +416,20 @@ export function createEventHook(args: {
                         clearHistorianFailureState(args.db, assistantInfo.sessionID);
                         clearPersistedReasoningWatermark(args.db, assistantInfo.sessionID);
                         // Clear the prior model's detected-overflow limit and the
-                        // emergency-recovery flag. The transform has its OWN model-change
-                        // branch that clears these, but it never fires on a mid-session
-                        // switch: this handler updates liveModelBySession first, so by the
-                        // time the transform runs, its knownModel already equals the new
-                        // model. transform.ts explicitly delegates mid-session switches to
-                        // "the first message.updated to trigger hook-handler clearing" —
-                        // so the detected-limit + recovery clears must live HERE too, else
-                        // the old model's limit leaks into the new model's pressure math
-                        // (e.g. a 120K detected limit kept after switching to a 1M model).
+                        // emergency-recovery flag. This branch runs only when a reply
+                        // comes from a model other than the one liveModelBySession
+                        // holds. A user's switch does not reach it: chat.message and
+                        // every transform pass set liveModelBySession to the selected
+                        // model before its first reply arrives. Switches are covered
+                        // by the transform, which on every pass clears a detected
+                        // limit recorded for a model other than the outgoing one.
                         clearDetectedContextLimit(args.db, assistantInfo.sessionID);
                         clearEmergencyRecovery(args.db, assistantInfo.sessionID);
                         // The emergency idempotence latch is keyed to the prior model's
                         // ceiling (contextLimit × executeThreshold). A switch to a
                         // smaller model lowers the ceiling, so the latch must reset to
-                        // re-evaluate the full tail. For the same delegation reason as
-                        // above, the transform-side reset is dead on a live switch —
-                        // clear it HERE.
+                        // re-evaluate the full tail. On a user's switch the transform's
+                        // model-change reset clears it.
                         clearEmergencyDropSample(args.db, assistantInfo.sessionID);
                         updateSessionMeta(args.db, assistantInfo.sessionID, {
                             clearedReasoningThroughTag: 0,

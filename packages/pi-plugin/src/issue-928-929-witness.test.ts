@@ -1,13 +1,11 @@
 /**
  * Witness tests for issues 928 and 929 on Pi.
  *
- * A passing test pins the behaviour the code has today. A skipped test asserts
- * the behaviour the issue expects (and the code's own comment intends); it
- * fails on the current code, and its comment names the mechanism.
- * Set MC_ISSUE_928_EXPECTED=1 to run the skipped tests.
+ * A test whose comment says it failed before the fix covers a changed rule;
+ * the others pin behaviour that was already correct.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import {
 	clearEmergencyRecovery,
 	getOrCreateSessionMeta,
@@ -15,6 +13,7 @@ import {
 	recordOverflowDetected,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import * as loggerModule from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	clearContextHandlerSession,
@@ -38,9 +37,6 @@ const OTHER = "gpt-6-luna";
 const NARROW_KEY = `${PROVIDER}/${NARROW}`;
 const LIMIT_ERROR =
 	"This model's maximum context length is 198000 tokens. However, your messages resulted in 205000 tokens.";
-
-/** Runs a test for expected behaviour only on request; see the file comment. */
-const itExpected = process.env.MC_ISSUE_928_EXPECTED === "1" ? it : it.skip;
 
 /** Persist an accepted NARROW reply the way Pi's message_end handler does. */
 async function acceptedReply(
@@ -107,14 +103,41 @@ describe("issue 928 on Pi: Pi's message_end handler", () => {
 		}
 	});
 
-	it("step 2 (confirmed on Pi, current behaviour): an accepted request above the detected limit is set aside as not one request's usage, and the limit stays", async () => {
+	// Failed before the fix: the reading was bounded by the wall the detected
+	// limit itself capped, so it was set aside as possible turn-aggregate usage
+	// before the clear could run.
+	for (const source of ["observed", "catalog"] as const) {
+		it(`step 2: an accepted request above a model-keyed detected limit clears it and is recorded as usage (${source} window)`, async () => {
+			const db = createTestDb();
+			const sessionId = `ses-928-pi-step2-${source}`;
+			try {
+				recordOverflowDetected(db, sessionId, 198_000, NARROW_KEY);
+				clearEmergencyRecovery(db, sessionId);
+
+				await acceptedReply(db, sessionId, 253_659, {
+					size: 400_000,
+					source,
+				});
+
+				expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
+				const meta = getOrCreateSessionMeta(db, sessionId);
+				expect(meta.lastInputTokens).toBe(253_659);
+				expect(meta.observedSafeInputTokens).toBe(253_659);
+				expect(meta.lastUsageContextLimit).toBe(400_000);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+	}
+
+	it("a reading above Pi's wall without the limit is still set aside as possible turn-aggregate usage, and the limit stays", async () => {
 		const db = createTestDb();
-		const sessionId = "ses-928-pi-step2-current";
+		const sessionId = "ses-928-pi-aggregate";
 		try {
 			recordOverflowDetected(db, sessionId, 198_000, NARROW_KEY);
 			clearEmergencyRecovery(db, sessionId);
 
-			await acceptedReply(db, sessionId, 253_659, {
+			await acceptedReply(db, sessionId, 520_000, {
 				size: 400_000,
 				source: "observed",
 			});
@@ -123,41 +146,12 @@ describe("issue 928 on Pi: Pi's message_end handler", () => {
 				getOverflowState(db, sessionId, NARROW_KEY).detectedContextLimit,
 			).toBe(198_000);
 			const meta = getOrCreateSessionMeta(db, sessionId);
-			expect(meta.observedSafeInputTokens).toBe(0);
 			expect(meta.lastInputTokens).toBe(0);
-			expect(meta.lastContextPercentage).toBe(0);
+			expect(meta.observedSafeInputTokens).toBe(0);
 		} finally {
 			closeQuietly(db);
 		}
 	});
-
-	// Fails today: index.ts bounds provider usage by piPressureEvidenceLimit of
-	// the geometry that already applies the detected limit as its cap, which
-	// makes 198,000 a trusted wall. The 253,659-token reading is rejected as
-	// possible turn-aggregate billing before the clear below it can run, so
-	// that clear only fires for a detected limit with no model key.
-	for (const source of ["observed", "catalog"] as const) {
-		itExpected(
-			`expected by issue 928 and by Pi's own comment: an accepted request above a model-keyed detected limit clears it (${source} window)`,
-			async () => {
-				const db = createTestDb();
-				const sessionId = `ses-928-pi-step2-expected-${source}`;
-				try {
-					recordOverflowDetected(db, sessionId, 198_000, NARROW_KEY);
-					clearEmergencyRecovery(db, sessionId);
-
-					await acceptedReply(db, sessionId, 253_659, {
-						size: 400_000,
-						source,
-					});
-
-					expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
-				} finally {
-					closeQuietly(db);
-				}
-			},
-		);
-	}
 
 	it("secondary variant (confirmed, by design): an accepted request below the detected limit leaves it in place", async () => {
 		const db = createTestDb();
@@ -196,10 +190,11 @@ function registerHandler(db: ReturnType<typeof createTestDb>) {
 	) => Promise<{ messages: never[] }>;
 }
 
-function passOn(sessionId: string, modelID: string) {
+function passOn(sessionId: string, modelID: string, contextWindow = 100_000) {
 	return {
 		...fakeContext(sessionId),
 		model: { provider: PROVIDER, id: modelID },
+		getContextUsage: () => ({ tokens: 0, percent: 0, contextWindow }),
 	} as never;
 }
 
@@ -215,9 +210,7 @@ describe("issue 928 on Pi: the context handler's model-change reset", () => {
 				passOn(sessionId, NARROW),
 			);
 			refuseNarrowRequest(db, sessionId);
-			// Recovery ends on the next pass that fits and keeps the limit. Left
-			// armed, the switch pass below reads it from a snapshot taken before
-			// the model-change reset and, in this harness, refuses the turn.
+			// Recovery ends on the next pass that fits and keeps the limit.
 			clearEmergencyRecovery(db, sessionId);
 			expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(
 				198_000,
@@ -233,6 +226,51 @@ describe("issue 928 on Pi: the context handler's model-change reset", () => {
 				getOverflowState(db, sessionId).detectedContextLimitModelKey,
 			).toBeNull();
 		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	// Failed before the fix: the pass read the limit and the recovery flag from
+	// a copy of the session row taken before the model-change reset, and neither
+	// is checked against the model. It capped the window at 198,000, bumped to
+	// 95% for the previous model's recovery, and in this harness refused the turn.
+	it("the switch pass itself neither caps its window with the previous model's limit nor runs that model's overflow recovery", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-928-pi-switch-pass";
+		const log = spyOn(loggerModule, "sessionLog");
+		try {
+			const handler = registerHandler(db);
+			recordPiLiveModel(sessionId, NARROW_KEY);
+			await handler(
+				{ messages: [userMessage("first", 1)] as never[] },
+				passOn(sessionId, NARROW, 400_000),
+			);
+			refuseNarrowRequest(db, sessionId);
+			expect(getOverflowState(db, sessionId).needsEmergencyRecovery).toBe(true);
+			log.mockClear();
+
+			await handler(
+				{ messages: [userMessage("on the other model", 2)] as never[] },
+				passOn(sessionId, OTHER, 400_000),
+			);
+
+			const lines = log.mock.calls.map(([, text]) => String(text));
+			expect(
+				lines.some((line) => line.includes("bumping percentage to 95%")),
+			).toBe(false);
+			const pressure = lines.filter((line) =>
+				line.startsWith("transform: usage="),
+			);
+			expect(pressure.length).toBeGreaterThan(0);
+			expect(pressure.every((line) => line.includes("limit=400000"))).toBe(
+				true,
+			);
+			const overflow = getOverflowState(db, sessionId);
+			expect(overflow.detectedContextLimit).toBe(0);
+			expect(overflow.needsEmergencyRecovery).toBe(false);
+		} finally {
+			log.mockRestore();
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
 		}

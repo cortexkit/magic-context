@@ -1543,16 +1543,41 @@ export function createTransform(deps: TransformDeps) {
                     currentOutgoingModel.modelID,
                 );
                 const lastUsageModelKey = persistedUsageBeforeResets?.lastObservedModelKey ?? null;
-                if (
+                const modelChangedSinceUsage =
                     lastUsageModelKey != null &&
                     outgoingModelKey != null &&
                     piModelRefToCanonical(lastUsageModelKey) !==
-                        piModelRefToCanonical(outgoingModelKey)
-                ) {
-                    const outgoingOverflow = getOverflowState(db, sessionId, outgoingModelKey);
+                        piModelRefToCanonical(outgoingModelKey);
+                // A detected limit belongs to the model whose provider reported
+                // it. The usage-based trigger above can miss leaving that model:
+                // the last usage is only updated by an accepted reply, so a model
+                // whose only request was refused never becomes the last usage
+                // model, and a reset leaves no usage to compare with at all.
+                // Checking the stored limit's own model key against the outgoing
+                // model on every pass clears it whenever the session is not on
+                // that model, as Pi does on every model switch. A limit with no
+                // model key is left alone: nothing says which model it belongs to.
+                const storedOverflow = getOverflowState(db, sessionId);
+                const detectedLimitForOtherModel =
+                    outgoingModelKey != null &&
+                    storedOverflow.detectedContextLimit > 0 &&
+                    storedOverflow.detectedContextLimitModelKey !== null &&
+                    storedOverflow.detectedContextLimitModelKey !==
+                        piModelRefToCanonical(outgoingModelKey);
+                if (detectedLimitForOtherModel && !modelChangedSinceUsage) {
+                    sessionLog(
+                        sessionId,
+                        `transform: clearing detected limit ${storedOverflow.detectedContextLimit} and overflow recovery recorded for ${storedOverflow.detectedContextLimitModelKey}; outgoing model is ${outgoingModelKey}`,
+                    );
+                    clearDetectedContextLimit(db, sessionId);
+                    clearEmergencyRecovery(db, sessionId);
+                    forgetHistoryBoundaryRecovery(sessionId);
+                }
+                if (modelChangedSinceUsage) {
                     const preserveOutgoingOverflow =
-                        outgoingOverflow.detectedContextLimit > 0 &&
-                        outgoingOverflow.detectedContextLimitModelKey !== null;
+                        storedOverflow.detectedContextLimit > 0 &&
+                        storedOverflow.detectedContextLimitModelKey !== null &&
+                        !detectedLimitForOtherModel;
                     dropSlot(sessionId, "model-change");
                     sessionLog(
                         sessionId,
@@ -1576,7 +1601,7 @@ export function createTransform(deps: TransformDeps) {
                     if (preserveOutgoingOverflow) {
                         sessionLog(
                             sessionId,
-                            `transform: preserving detected limit ${outgoingOverflow.detectedContextLimit} and overflow recovery for outgoing model ${outgoingModelKey}`,
+                            `transform: preserving detected limit ${storedOverflow.detectedContextLimit} and overflow recovery for outgoing model ${outgoingModelKey}`,
                         );
                     } else {
                         clearDetectedContextLimit(db, sessionId);

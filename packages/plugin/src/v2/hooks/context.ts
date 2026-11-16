@@ -1655,6 +1655,7 @@ export async function registerContext(context: V2Context) {
                         draftModel: draft.model,
                         reading,
                         contextUsageMap: usage,
+                        limitFor,
                     });
                 }
             } finally {

@@ -1,15 +1,24 @@
 import {
     type ContextDatabase,
+    clearDetectedContextLimit,
     getOrCreateSessionMeta,
+    getOverflowState,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { clearInjectionCache } from "../../hooks/magic-context/inject-compartments";
+import { dropSlot } from "../../hooks/magic-context/lkg-slot";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
+import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import {
     isSuccessfulProviderCompletion,
     providerResponseFailed,
 } from "../../shared/provider-response-completion";
-import { type UsageReading, usageReadingMatchesDraft } from "./usage-reading";
+import {
+    type UsageReading,
+    type UsageReadingInput,
+    usageReadingMatchesDraft,
+} from "./usage-reading";
 
 export interface PersistV2UsageReadingArgs {
     db: ContextDatabase;
@@ -17,6 +26,12 @@ export interface PersistV2UsageReadingArgs {
     draftModel: { providerID: string; id: string };
     reading: UsageReading;
     contextUsageMap: TransformDeps["contextUsageMap"];
+    /**
+     * The window resolver the reading was measured with. When this reading
+     * clears a detected limit, the reading's window is resolved again with it,
+     * so the recorded percentage is not computed against the cleared limit.
+     */
+    limitFor?: UsageReadingInput["limitFor"];
 }
 
 /**
@@ -81,18 +96,30 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
         if (responseTime) updateSessionMeta(db, sessionID, { lastResponseTime: responseTime });
         return;
     }
-    const percentage = (reading.inputTokens / reading.limit) * 100;
+    let limit = reading.limit;
+    const readingModel = reading.modelKey ?? draftModelKey;
+    if (served && clearDisprovedDetectedLimit(db, sessionID, readingModel, reading.inputTokens)) {
+        const slash = readingModel.indexOf("/");
+        const relimit =
+            slash > 0
+                ? args.limitFor?.(readingModel.slice(0, slash), readingModel.slice(slash + 1))
+                : undefined;
+        if (typeof relimit === "number" && Number.isFinite(relimit) && relimit > 0) {
+            limit = relimit;
+        }
+    }
+    const percentage = (reading.inputTokens / limit) * 100;
     const updates: Parameters<typeof updateSessionMeta>[2] = {
         lastContextPercentage: percentage,
         lastInputTokens: reading.inputTokens,
-        lastUsageContextLimit: reading.limit,
+        lastUsageContextLimit: limit,
         lastObservedModelKey: reading.modelKey ?? draftModelKey,
     };
     if (responseTime) updates.lastResponseTime = responseTime;
     updateSessionMeta(db, sessionID, updates);
     sessionLog(
         sessionID,
-        `v2 usage: inputTokens=${reading.inputTokens} contextLimit=${reading.limit} percentage=${percentage} responseModel=${reading.modelKey ?? "legacy"} draftContextLimit=${reading.admissionLimit} pressure=${readingMatchesDraft ? "current" : "stale-model-ignored"}`,
+        `v2 usage: inputTokens=${reading.inputTokens} contextLimit=${limit} percentage=${percentage} responseModel=${reading.modelKey ?? "legacy"} draftContextLimit=${reading.admissionLimit} pressure=${readingMatchesDraft ? "current" : "stale-model-ignored"}`,
     );
     if (readingMatchesDraft) {
         args.contextUsageMap.set(sessionID, {
@@ -105,4 +132,39 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
     } else {
         args.contextUsageMap.delete(sessionID);
     }
+}
+
+/**
+ * A limit learned from an earlier overflow error is stale once the provider
+ * accepts a larger request on the same model, whatever the configured window
+ * says, so it is cleared; OpenCode 1 and Pi apply the same rule to their usage
+ * events. A limit with no model key is cleared too, as on OpenCode 1. The
+ * recovery flag is left alone: it ends on the pass whose request fits.
+ *
+ * The process's replay of the last served request and its cached history
+ * injection are dropped with the limit, as OpenCode 1 does when its usage
+ * event clears it, so no later pass replays state cached before the change.
+ */
+function clearDisprovedDetectedLimit(
+    db: ContextDatabase,
+    sessionID: string,
+    readingModel: string,
+    inputTokens: number,
+): boolean {
+    const stored = getOverflowState(db, sessionID);
+    if (
+        stored.detectedContextLimit <= 0 ||
+        inputTokens <= stored.detectedContextLimit ||
+        (stored.detectedContextLimitModelKey !== null &&
+            stored.detectedContextLimitModelKey !== piModelRefToCanonical(readingModel))
+    )
+        return false;
+    clearDetectedContextLimit(db, sessionID);
+    dropSlot(sessionID, "session-cache-invalidated");
+    clearInjectionCache(sessionID);
+    sessionLog(
+        sessionID,
+        `v2 usage: detected limit ${stored.detectedContextLimit} invalidated by a successful ${inputTokens}-token request on ${readingModel}; using catalog/default`,
+    );
+    return true;
 }

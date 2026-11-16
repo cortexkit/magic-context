@@ -797,6 +797,58 @@ export async function persistPiPressureFromMessageEnd(args: {
 			? piModelRefToCanonical(`${activeModel.provider}/${activeModel.id}`)
 			: undefined;
 	const usage = extractAssistantUsage(args.message);
+	const msg =
+		args.message && typeof args.message === "object"
+			? (args.message as { errorMessage?: unknown })
+			: undefined;
+	const messageHadOverflowError =
+		typeof msg?.errorMessage === "string" &&
+		detectOverflow(msg.errorMessage).isOverflow;
+	// A successful reply can carry turn-aggregate billing counters. Success
+	// alone does not prove that such a reading measures one request.
+	const requestAccepted =
+		!messageHadOverflowError &&
+		!providerResponseFailed({
+			finish: (args.message as { stopReason?: unknown } | undefined)
+				?.stopReason,
+			error: msg?.errorMessage,
+		});
+	// A limit learned from an earlier overflow error is stale once the provider
+	// accepts a larger request, whatever the configured window says. The reading
+	// is bounded here by Pi's wall without that limit: bounded by the limit
+	// itself, every reading large enough to disprove it would be set aside as
+	// possible turn-aggregate usage. A reading above the uncapped wall is still
+	// set aside. The limit is cleared before the geometry below is resolved, so
+	// this reading is then measured and recorded without the stale cap.
+	if (requestAccepted) {
+		const rawOverflow = getOverflowState(args.db, args.sessionId);
+		const detectedLimitMatchesModel =
+			rawOverflow.detectedContextLimitModelKey === null ||
+			(modelKey !== undefined &&
+				rawOverflow.detectedContextLimitModelKey === modelKey);
+		if (rawOverflow.detectedContextLimit > 0 && detectedLimitMatchesModel) {
+			const uncappedPressure = computePiPressure(
+				usage,
+				args.piContextWindow,
+				piPressureEvidenceLimit(
+					resolvePiWindowGeometry({
+						rawContextWindow: args.piContextWindow,
+						rawContextWindowSource: args.piContextWindowSource,
+						model: activeModel,
+					}),
+				),
+			);
+			if (
+				uncappedPressure &&
+				uncappedPressure.inputTokens > rawOverflow.detectedContextLimit
+			) {
+				clearDetectedContextLimit(args.db, args.sessionId);
+				info(
+					`message_end: detected limit ${rawOverflow.detectedContextLimit} invalidated by a successful ${uncappedPressure.inputTokens}-token request; using Pi contextWindow`,
+				);
+			}
+		}
+	}
 	const detectedContextLimit = getOverflowState(
 		args.db,
 		args.sessionId,
@@ -828,42 +880,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 			"message_end",
 		);
 	}
-	const msg =
-		args.message && typeof args.message === "object"
-			? (args.message as { errorMessage?: unknown })
-			: undefined;
-	const messageHadOverflowError =
-		typeof msg?.errorMessage === "string" &&
-		detectOverflow(msg.errorMessage).isOverflow;
-	// A successful reply can carry turn-aggregate billing counters. Success
-	// alone does not prove that such a reading measures one request.
-	const requestAccepted =
-		!messageHadOverflowError &&
-		!providerResponseFailed({
-			finish: (args.message as { stopReason?: unknown } | undefined)
-				?.stopReason,
-			error: msg?.errorMessage,
-		});
 	const requestSucceeded = requestAccepted && !rejectedUsage;
-	// A limit learned from an earlier overflow error is stale once the provider
-	// accepts a larger request, whatever the configured window says.
-	if (requestAccepted && unboundedPressure) {
-		const rawOverflow = getOverflowState(args.db, args.sessionId);
-		const detectedLimitMatchesModel =
-			rawOverflow.detectedContextLimitModelKey === null ||
-			(modelKey !== undefined &&
-				rawOverflow.detectedContextLimitModelKey === modelKey);
-		if (
-			rawOverflow.detectedContextLimit > 0 &&
-			detectedLimitMatchesModel &&
-			unboundedPressure.inputTokens > rawOverflow.detectedContextLimit
-		) {
-			clearDetectedContextLimit(args.db, args.sessionId);
-			info(
-				`message_end: detected limit ${rawOverflow.detectedContextLimit} invalidated by a successful ${unboundedPressure.inputTokens}-token request; using Pi contextWindow`,
-			);
-		}
-	}
 
 	// The floor is proof about the model that served it; see pi-proven-floor.ts.
 	// Resolved before the row is read, because an unkeyed floor is cleared here.

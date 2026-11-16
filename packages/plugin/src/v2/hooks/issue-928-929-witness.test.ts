@@ -2,14 +2,12 @@
 
 /**
  * Witness tests for issues 928 and 929 on OpenCode 2's own usage and error
- * paths. The transform's model-change branch and the limit resolver are shared
- * with OpenCode 1 and are witnessed in
+ * paths. The transform's model-change handling and the limit resolver are
+ * shared with OpenCode 1 and are witnessed in
  * hooks/magic-context/issue-928-929-witness.test.ts.
  *
- * A passing test pins the behaviour the code has today. A skipped test asserts
- * the behaviour the issue expects (and OpenCode 1 already has); it fails on the
- * current code, and its comment names the mechanism that makes it fail.
- * Set MC_ISSUE_928_EXPECTED=1 to run the skipped tests.
+ * A test whose comment says it failed before the fix covers a changed rule;
+ * the others pin behaviour that was already correct.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -35,11 +33,9 @@ import { resolveUsageReading } from "./usage-reading";
 
 const MODEL = { providerID: "gateway", id: "deepseek-v4.1-flash" };
 const MODEL_KEY = `${MODEL.providerID}/${MODEL.id}`;
+const OTHER_MODEL = { providerID: "gateway", id: "gpt-6-luna" };
 const LIMIT_ERROR =
     "This model's maximum context length is 198000 tokens. However, your messages resulted in 205000 tokens.";
-
-/** Runs a test for expected behaviour only on request; see the file comment. */
-const itExpected = process.env.MC_ISSUE_928_EXPECTED === "1" ? it : it.skip;
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -60,7 +56,7 @@ function useTempDataHome(prefix: string): void {
     process.env.XDG_DATA_HOME = dir;
 }
 
-/** A 400,000-token catalog window with no output limit, so usable equals context. */
+/** 400,000-token catalog windows with no output limit, so usable equals context. */
 async function seedCatalog(): Promise<void> {
     await refreshModelLimitsFromApi({
         config: {
@@ -69,7 +65,10 @@ async function seedCatalog(): Promise<void> {
                     providers: [
                         {
                             id: MODEL.providerID,
-                            models: { [MODEL.id]: { limit: { context: 400_000 } } },
+                            models: {
+                                [MODEL.id]: { limit: { context: 400_000 } },
+                                [OTHER_MODEL.id]: { limit: { context: 400_000 } },
+                            },
                         },
                     ],
                 },
@@ -78,25 +77,36 @@ async function seedCatalog(): Promise<void> {
     });
 }
 
-/** Persist an accepted reply the way the OpenCode 2 context hook does. */
-function persistAcceptedReply(
+/** Completion times increase so no reading is skipped as older than the last one. */
+let completedAt = 1_000;
+
+/** Persist a reply the way the OpenCode 2 context hook does. */
+function persistReply(
     db: ReturnType<typeof openDatabase>,
     sessionID: string,
     input: number,
-    completed: number,
-): void {
+    options: { model?: typeof MODEL; failed?: boolean } = {},
+): TransformDeps["contextUsageMap"] {
+    const model = options.model ?? MODEL;
     const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
+    const limitFor = (providerID: string, modelID: string) =>
+        resolveContextLimit(providerID, modelID, { db, sessionID });
     const reading = resolveUsageReading({
-        rowModel: { providerID: MODEL.providerID, id: MODEL.id },
-        draftModel: MODEL,
+        rowModel: model,
+        draftModel: model,
         tokens: { input, cache: { read: 0, write: 0 } },
-        completed,
-        finish: "stop",
-        limitFor: (providerID, modelID) =>
-            resolveContextLimit(providerID, modelID, { db, sessionID }),
+        completed: ++completedAt,
+        finish: options.failed ? "error" : "stop",
+        ...(options.failed ? { error: { message: "upstream failed" } } : {}),
+        limitFor,
     });
     if (!reading) throw new Error("expected a usage reading");
-    persistV2UsageReading({ db, sessionID, draftModel: MODEL, reading, contextUsageMap });
+    persistV2UsageReading({ db, sessionID, draftModel: model, reading, contextUsageMap, limitFor });
+    return contextUsageMap;
+}
+
+function narrowLimit(db: ReturnType<typeof openDatabase>, sessionID: string): void {
+    recordOverflowDetected(db, sessionID, 198_000, MODEL_KEY, "provider_overflow", "combined");
 }
 
 describe("issue 928 on OpenCode 2", () => {
@@ -123,45 +133,47 @@ describe("issue 928 on OpenCode 2", () => {
         expect(getOrCreateSessionMeta(db, sessionID).observedSafeInputTokens).toBe(0);
     });
 
-    it("step 2 (confirmed on OpenCode 2, current behaviour): an accepted request above the detected limit keeps the limit and is scored above 100% of it", async () => {
-        useTempDataHome("issue-928-v2-step2-current-");
+    // Failed before the fix: persistV2UsageReading recorded the reading against
+    // the stale limit (128%) and had no counterpart of OpenCode 1's rule.
+    it("step 2: an accepted request above the model-keyed detected limit clears the limit and is scored against the catalog window", async () => {
+        useTempDataHome("issue-928-v2-step2-");
         await seedCatalog();
         const db = openDatabase();
-        const sessionID = "ses-928-v2-step2-current";
-        recordOverflowDetected(db, sessionID, 198_000, MODEL_KEY, "provider_overflow", "combined");
+        const sessionID = "ses-928-v2-step2";
+        narrowLimit(db, sessionID);
 
-        persistAcceptedReply(db, sessionID, 253_659, 1_000);
+        const usage = persistReply(db, sessionID, 253_659);
 
-        expect(getOverflowState(db, sessionID, MODEL_KEY).detectedContextLimit).toBe(198_000);
+        const overflow = getOverflowState(db, sessionID);
+        expect(overflow.detectedContextLimit).toBe(0);
+        expect(overflow.detectedContextLimitModelKey).toBeNull();
+        // Limit only, as on OpenCode 1 and Pi: recovery ends on the pass whose
+        // request fits.
+        expect(overflow.needsEmergencyRecovery).toBe(true);
         const meta = getOrCreateSessionMeta(db, sessionID);
-        expect(meta.lastUsageContextLimit).toBe(198_000);
-        expect(meta.lastContextPercentage).toBeCloseTo((253_659 / 198_000) * 100, 6);
+        expect(meta.lastUsageContextLimit).toBe(400_000);
+        expect(meta.lastContextPercentage).toBeCloseTo((253_659 / 400_000) * 100, 6);
+        expect(usage.get(sessionID)?.usage.percentage).toBeCloseTo((253_659 / 400_000) * 100, 6);
     });
 
-    // Fails today: persistV2UsageReading (usage-persist.ts) records the reading
-    // but has no counterpart of OpenCode 1's rule in event-handler.ts that
-    // clears a detected limit an accepted larger request disproves.
-    itExpected(
-        "expected by issue 928 and OpenCode 1 parity: an accepted request above the detected limit clears it",
-        async () => {
-            useTempDataHome("issue-928-v2-step2-expected-");
-            await seedCatalog();
-            const db = openDatabase();
-            const sessionID = "ses-928-v2-step2-expected";
-            recordOverflowDetected(
-                db,
-                sessionID,
-                198_000,
-                MODEL_KEY,
-                "provider_overflow",
-                "combined",
-            );
+    it("keeps the limit for an accepted request at or below it, a failed reply, or a reading from another model", async () => {
+        useTempDataHome("issue-928-v2-keep-");
+        await seedCatalog();
+        const db = openDatabase();
+        const sessionID = "ses-928-v2-keep";
+        narrowLimit(db, sessionID);
 
-            persistAcceptedReply(db, sessionID, 253_659, 1_000);
+        persistReply(db, sessionID, 198_000);
+        expect(getOverflowState(db, sessionID).detectedContextLimit).toBe(198_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastUsageContextLimit).toBe(198_000);
 
-            expect(getOverflowState(db, sessionID).detectedContextLimit).toBe(0);
-        },
-    );
+        persistReply(db, sessionID, 253_659, { failed: true });
+        expect(getOverflowState(db, sessionID).detectedContextLimit).toBe(198_000);
+
+        persistReply(db, sessionID, 253_659, { model: OTHER_MODEL });
+        expect(getOverflowState(db, sessionID).detectedContextLimit).toBe(198_000);
+        expect(getOverflowState(db, sessionID).detectedContextLimitModelKey).toBe(MODEL_KEY);
+    });
 });
 
 describe("issue 929 on OpenCode 2", () => {
@@ -171,7 +183,7 @@ describe("issue 929 on OpenCode 2", () => {
         const db = openDatabase();
         const sessionID = "ses-929-v2";
 
-        persistAcceptedReply(db, sessionID, 245_165, 1_000);
+        persistReply(db, sessionID, 245_165);
 
         const meta = getOrCreateSessionMeta(db, sessionID);
         expect(meta.lastObservedModelKey).toBe(MODEL_KEY);

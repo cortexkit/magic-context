@@ -4,11 +4,9 @@
  * Witness tests for issues 928 and 929 on OpenCode 1, plus the transform and
  * limit resolver that OpenCode 2 shares.
  *
- * Each test names a claim from the issue and what the code does with it.
- * A passing test pins the behaviour the code has today. A skipped test asserts
- * the behaviour the issue (and, where noted, Pi parity) expects; it fails on
- * the current code, and its comment names the mechanism that makes it fail.
- * Set MC_ISSUE_928_EXPECTED=1 to run the skipped tests.
+ * Each test names the behaviour it covers and what the code does with it. A
+ * test whose comment says it failed before the fix covers a changed rule; the
+ * others pin behaviour that was already correct.
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
@@ -59,9 +57,6 @@ const NARROW_KEY = `${PROVIDER}/${NARROW}`;
 const OTHER_KEY = `${PROVIDER}/${OTHER}`;
 const LIMIT_ERROR =
     "This model's maximum context length is 198000 tokens. However, your messages resulted in 205000 tokens.";
-
-/** Runs a test for expected behaviour only on request; see the file comment. */
-const itExpected = process.env.MC_ISSUE_928_EXPECTED === "1" ? it : it.skip;
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -428,9 +423,15 @@ function turnMessages(sessionId: string, turn: number, previous: string, next: s
 /**
  * The narrow model refused at 198,000 tokens. `lastObservedModel` is the model
  * of the last accepted reply: NARROW when the narrow route later answered a
- * smaller request, OTHER when the refused request was the narrow model's only one.
+ * smaller request, OTHER when the refused request was the narrow model's only
+ * one. Recovery stays armed only when `recoveryArmed` is set; otherwise it has
+ * ended, as it does on the next pass that fits, which keeps the limit.
  */
-async function narrowLimitAfterRefusal(sessionId: string, lastObservedModel: string) {
+async function narrowLimitAfterRefusal(
+    sessionId: string,
+    lastObservedModel: string,
+    recoveryArmed = false,
+) {
     createOpenCodeDb(sessionId);
     await seedCatalog(400_000);
     const db = openDatabase();
@@ -441,14 +442,13 @@ async function narrowLimitAfterRefusal(sessionId: string, lastObservedModel: str
         lastUsageContextLimit: 400_000,
     });
     recordOverflowDetected(db, sessionId, 198_000, NARROW_KEY, "provider_overflow", "combined");
-    // Emergency recovery ends on the next pass that fits; it keeps the limit.
-    clearEmergencyRecovery(db, sessionId);
+    if (!recoveryArmed) clearEmergencyRecovery(db, sessionId);
     return db;
 }
 
 for (const generation of ["v1", "v2"] as const) {
     const host = generation === "v1" ? "OpenCode 1" : "OpenCode 2";
-    describe(`issue 928, transform model-change branch on ${host}`, () => {
+    describe(`issue 928, transform model-change handling on ${host}`, () => {
         it("step 4 (refuted when the narrow model answered after its refusal): switching away clears its limit", async () => {
             useTempDataHome(`issue-928-switch-answered-${generation}-`);
             const sessionId = `ses-928-answered-${generation}`;
@@ -461,54 +461,80 @@ for (const generation of ["v1", "v2"] as const) {
             expect(getOverflowState(db, sessionId).detectedContextLimitModelKey).toBeNull();
         });
 
-        it("second way into the same state: while the stored usage reads zero (after a first-pass or refused-turn reset), a model switch is not seen at all", async () => {
+        // Failed before the fix: the model-change trigger compares the outgoing
+        // model with the model of the last ACCEPTED reply. The narrow model's
+        // only request was refused, so that key never became NARROW and leaving
+        // NARROW was not seen as a change.
+        it("leaving the model that owns a detected limit clears the limit and its recovery flag, even when its only request was refused", async () => {
+            useTempDataHome(`issue-928-switch-refused-${generation}-`);
+            const sessionId = `ses-928-refused-${generation}`;
+            const db = await narrowLimitAfterRefusal(sessionId, OTHER, true);
+            expect(getOverflowState(db, sessionId).needsEmergencyRecovery).toBe(true);
+            const transform = makeTransform(db, generation);
+
+            await transform({}, { messages: turnMessages(sessionId, 1, NARROW, OTHER) });
+
+            const overflow = getOverflowState(db, sessionId);
+            expect(overflow.detectedContextLimit).toBe(0);
+            expect(overflow.detectedContextLimitModelKey).toBeNull();
+            expect(overflow.needsEmergencyRecovery).toBe(false);
+        });
+
+        // Failed before the fix: with both stored usage fields zero, the
+        // model-change trigger has no reading to compare with.
+        it("leaving the model also clears its limit while the stored usage reads zero after a first-pass or refused-turn reset", async () => {
             useTempDataHome(`issue-928-switch-zero-usage-${generation}-`);
             const sessionId = `ses-928-zero-usage-${generation}`;
             const db = await narrowLimitAfterRefusal(sessionId, NARROW);
-            // The reading the model-change check compares with is ignored when
-            // both stored usage fields are zero, which is what the first-pass and
-            // refused-turn resets leave behind until the next accepted reply.
             updateSessionMeta(db, sessionId, { lastContextPercentage: 0, lastInputTokens: 0 });
             const transform = makeTransform(db, generation);
 
             await transform({}, { messages: turnMessages(sessionId, 1, NARROW, OTHER) });
 
-            expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(198_000);
-            expect(getOverflowState(db, sessionId).detectedContextLimitModelKey).toBe(NARROW_KEY);
+            expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
         });
 
-        it("steps 3 and 4 (confirmed when the narrow model's only request was refused): the limit outlives the switch away and a restart, and is preserved on return", async () => {
-            useTempDataHome(`issue-928-switch-refused-${generation}-`);
-            const sessionId = `ses-928-refused-${generation}`;
+        // Failed before the fix: the limit survived the detour to OTHER and a
+        // restart, and the return to NARROW took the preserve branch.
+        it("steps 3 and 4: after a detour to another model and a restart, returning to the narrow model starts without the old limit", async () => {
+            useTempDataHome(`issue-928-switch-return-${generation}-`);
+            const sessionId = `ses-928-return-${generation}`;
             let db = await narrowLimitAfterRefusal(sessionId, OTHER);
             let transform = makeTransform(db, generation);
 
-            // Back on OTHER after NARROW's refused reply: the last accepted
-            // reply was OTHER's, so the transform sees no model change and the
-            // narrow limit stays stored, hidden from OTHER by the model-key guard.
             await transform({}, { messages: turnMessages(sessionId, 1, NARROW, OTHER) });
-            expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(198_000);
-            expect(getOverflowState(db, sessionId).detectedContextLimitModelKey).toBe(NARROW_KEY);
-            expect(getOverflowState(db, sessionId, OTHER_KEY).detectedContextLimit).toBe(0);
-
-            // OTHER answers that turn, which records its usage again.
             updateSessionMeta(db, sessionId, {
                 lastContextPercentage: 31,
                 lastInputTokens: 62_000,
                 lastObservedModelKey: OTHER_KEY,
             });
-
-            // Restart: the row is durable and nothing resets it at startup.
             closeDatabase();
             db = openDatabase();
             transform = makeTransform(db, generation);
-            expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(198_000);
 
-            // Switching to NARROW: the model differs from the last accepted
-            // reply's, and the stored limit belongs to NARROW, so it is preserved.
             const log = spyOn(loggerModule, "sessionLog");
             try {
                 await transform({}, { messages: turnMessages(sessionId, 2, OTHER, NARROW) });
+                const lines = log.mock.calls.map(([, text]) => String(text));
+                expect(lines.some((line) => line.includes("preserving detected limit"))).toBe(
+                    false,
+                );
+            } finally {
+                log.mockRestore();
+            }
+            expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
+            expect(limitFor(db, sessionId)).toBe(400_000);
+        });
+
+        it("keeps a limit recorded for the outgoing model before that model's first accepted reply", async () => {
+            useTempDataHome(`issue-928-switch-preserve-${generation}-`);
+            const sessionId = `ses-928-preserve-${generation}`;
+            const db = await narrowLimitAfterRefusal(sessionId, OTHER);
+            const transform = makeTransform(db, generation);
+
+            const log = spyOn(loggerModule, "sessionLog");
+            try {
+                await transform({}, { messages: turnMessages(sessionId, 1, NARROW, NARROW) });
                 const lines = log.mock.calls.map(([, text]) => String(text));
                 expect(
                     lines.some((line) =>
@@ -524,23 +550,18 @@ for (const generation of ["v1", "v2"] as const) {
             expect(limitFor(db, sessionId)).toBe(198_000);
         });
 
-        // Fails today: the trigger compares the outgoing model with the model of
-        // the last ACCEPTED reply (lastObservedModelKey, transform.ts). The
-        // narrow model's only request was refused, so that key never became
-        // NARROW and leaving NARROW is not seen as a change. Pi compares with
-        // the model of the previous pass and clears on any switch.
-        itExpected(
-            "expected by issue 928 and Pi parity: leaving the model that owns a detected limit clears it, even when its only request was refused",
-            async () => {
-                useTempDataHome(`issue-928-switch-expected-${generation}-`);
-                const sessionId = `ses-928-expected-${generation}`;
-                const db = await narrowLimitAfterRefusal(sessionId, OTHER);
-                const transform = makeTransform(db, generation);
+        it("leaves a detected limit with no model key alone on a pass without a model change", async () => {
+            useTempDataHome(`issue-928-unkeyed-${generation}-`);
+            const sessionId = `ses-928-unkeyed-${generation}`;
+            const db = await narrowLimitAfterRefusal(sessionId, OTHER);
+            clearDetectedContextLimit(db, sessionId);
+            recordDetectedContextLimit(db, sessionId, 150_000, undefined, "combined");
+            const transform = makeTransform(db, generation);
 
-                await transform({}, { messages: turnMessages(sessionId, 1, NARROW, OTHER) });
+            await transform({}, { messages: turnMessages(sessionId, 1, OTHER, OTHER) });
 
-                expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
-            },
-        );
+            expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(150_000);
+            expect(getOverflowState(db, sessionId).detectedContextLimitModelKey).toBeNull();
+        });
     });
 }

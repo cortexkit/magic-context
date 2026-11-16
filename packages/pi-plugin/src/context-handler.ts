@@ -5145,19 +5145,6 @@ export function registerPiContextHandler(
 				}
 			}
 			const tMeta = performance.now();
-			const historianStateForPass = options.compactionOff
-				? EMPTY_PI_HISTORIAN_STATE_SNAPSHOT
-				: (() => {
-						try {
-							return loadPiHistorianStateSnapshot(options.db, sessionId);
-						} catch (error) {
-							sessionLog(
-								sessionId,
-								`historian state snapshot failed; using safe defaults: ${error instanceof Error ? error.message : String(error)}`,
-							);
-							return EMPTY_PI_HISTORIAN_STATE_SNAPSHOT;
-						}
-					})();
 			let piM0M1PassSnapshot = options.injection
 				? createPiM0M1PassSnapshot({
 						db: options.db,
@@ -5441,6 +5428,23 @@ export function registerPiContextHandler(
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;
 			}
+			// Read after the model-change reset above. The detected limit and the
+			// recovery flag in this row carry no check of which model they belong
+			// to, so a copy read before that reset would cap this pass's window
+			// with the previous model's limit and run its overflow recovery.
+			const historianStateForPass = options.compactionOff
+				? EMPTY_PI_HISTORIAN_STATE_SNAPSHOT
+				: (() => {
+						try {
+							return loadPiHistorianStateSnapshot(options.db, sessionId);
+						} catch (error) {
+							sessionLog(
+								sessionId,
+								`historian state snapshot failed; using safe defaults: ${error instanceof Error ? error.message : String(error)}`,
+							);
+							return EMPTY_PI_HISTORIAN_STATE_SNAPSHOT;
+						}
+					})();
 			let usagePercentage = 0;
 			let usageInputTokens = 0;
 			// Persisted usage (from message_end via persistPiPressureFromMessageEnd)
