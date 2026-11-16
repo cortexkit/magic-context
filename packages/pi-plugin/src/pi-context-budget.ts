@@ -27,6 +27,20 @@ export const PI_CONTEXT_BUDGET = {
 
 export class PiContextDeadlineError extends Error {}
 
+/**
+ * The pass reached its deadline while waiting for a historian run. `refusal`
+ * is the text the user is shown if the pass is refused for it (see
+ * describeHistorianJoinRefusal); the message stays the budget diagnostic.
+ */
+export class PiHistorianJoinDeadlineError extends PiContextDeadlineError {
+	constructor(
+		diagnostic: string,
+		readonly refusal: string,
+	) {
+		super(diagnostic);
+	}
+}
+
 export class PiContextSupersededError extends Error {
 	constructor(
 		message: string,

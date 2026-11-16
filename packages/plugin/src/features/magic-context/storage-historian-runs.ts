@@ -81,6 +81,37 @@ export function countHistorianRuns(db: Database, sessionId: string): number {
     }
 }
 
+/**
+ * When the session's most recent failed incremental runs ended, newest first,
+ * at most `limit` of them. Only runs after the latest successful one count: a
+ * success ends a streak of failures. A run's row is written when the run ends,
+ * so these are end times.
+ */
+export function getRecentFailedHistorianRunTimes(
+    db: Database,
+    sessionId: string,
+    limit: number,
+): number[] {
+    if (!Number.isInteger(limit) || limit <= 0) return [];
+    try {
+        return db
+            .prepare<[string, string, number], { created_at: number }>(
+                `SELECT created_at FROM historian_runs
+                 WHERE session_id = ? AND run_kind = 'incremental' AND status = 'failed'
+                   AND id > (
+                       SELECT COALESCE(MAX(id), 0) FROM historian_runs
+                       WHERE session_id = ? AND run_kind = 'incremental' AND status = 'success'
+                   )
+                 ORDER BY id DESC LIMIT ?`,
+            )
+            .all(sessionId, sessionId, limit)
+            .map((row) => row.created_at);
+    } catch {
+        // Older stores may not have the telemetry table yet; callers omit the time.
+        return [];
+    }
+}
+
 export function recordHistorianRun(db: Database, input: HistorianRunInput): number | null {
     try {
         const failureReason =

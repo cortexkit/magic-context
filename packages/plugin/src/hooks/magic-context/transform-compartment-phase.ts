@@ -19,6 +19,7 @@ import type {
 } from "./compartment-runner-types";
 import { BLOCK_UNTIL_DONE_PERCENTAGE } from "./compartment-trigger";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
+import { type HistorianFailureStreak, type HistorianRunProgress, describeHistorianJoinRefusal } from "./historian-failure-report";
 import {
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
@@ -57,7 +58,13 @@ export function historianJoinFailClosedMessage(input: {
     budgetMs: number | null;
     finalWireEstimate?: { tokens: number; trusted: boolean };
     contextLimitTokens: number;
-    lastHistorianError?: string | null;
+    /** The run the pass waited for, read when the refusal is written. */
+    joinedRun?: HistorianRunProgress;
+    /** The session's streak of failed historian runs; none when omitted. */
+    failures?: HistorianFailureStreak;
+    /** The usage that put the pass in the 95% band, as a percentage of the window. */
+    usagePercentage?: number;
+    now?: number;
 }): string | null {
     if (!input.timedOut) return null;
     const estimate = input.finalWireEstimate;
@@ -71,12 +78,18 @@ export function historianJoinFailClosedMessage(input: {
     ) {
         return null;
     }
-    const budgetMs = input.budgetMs ?? HISTORIAN_INLINE_JOIN_BUDGET_MS;
-    const seconds = budgetMs / 1000;
-    const reason =
-        input.lastHistorianError?.replace(/\s+/g, " ").trim() ||
-        "background historian is still running";
-    return `historian did not complete within ${seconds} s: ${reason}`;
+    return describeHistorianJoinRefusal({
+        waitedMs: input.budgetMs ?? HISTORIAN_INLINE_JOIN_BUDGET_MS,
+        usagePercentage: input.usagePercentage,
+        run: input.joinedRun,
+        failures: input.failures ?? {
+            count: 0,
+            lastError: null,
+            lastFailureAt: null,
+            since: null,
+        },
+        now: input.now,
+    });
 }
 
 interface RunCompartmentPhaseArgs {
@@ -245,6 +258,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     rebuiltHistoryThisPass: boolean;
     historianJoinTimedOut: boolean;
     historianJoinBudgetMs: number | null;
+    /** The run whose join timed out, if one did; its fields stay live after the pass. */
+    historianJoinedRun: ActiveCompartmentRun | undefined;
     /** Historian runs a recovery pass started after its first join (see chainRecoveryRuns). */
     chainedRecoveryRuns: number;
     /**
@@ -261,6 +276,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     let rebuiltHistoryThisPass = false;
     let historianJoinTimedOut = false;
     let historianJoinBudgetMs: number | null = null;
+    let historianJoinedRun: ActiveCompartmentRun | undefined;
     let chainedRecoveryRuns = 0;
     const historianRunnable = args.historianRunnable !== false;
 
@@ -286,6 +302,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             rebuiltHistoryThisPass,
             historianJoinTimedOut,
             historianJoinBudgetMs,
+            historianJoinedRun,
             chainedRecoveryRuns,
             recoveryHistoryRemains: false,
         };
@@ -363,6 +380,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         if (activeRun.inlineJoinTimedOutBudgetMs !== undefined && !activeRun.settled) {
             historianJoinTimedOut = true;
             historianJoinBudgetMs = activeRun.inlineJoinTimedOutBudgetMs;
+            historianJoinedRun = activeRun;
             sessionLog(
                 args.sessionId,
                 "transform: compartment inline join budget already exhausted for this run — not waiting again",
@@ -385,6 +403,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         if (result === "timeout") {
             activeRun.inlineJoinTimedOutBudgetMs = join.budgetMs;
             historianJoinTimedOut = true;
+            historianJoinedRun = activeRun;
             sessionLog(
                 args.sessionId,
                 `transform: compartment await timed out after ${timeoutMs}ms — proceeding without waiting`,
@@ -800,6 +819,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         rebuiltHistoryThisPass,
         historianJoinTimedOut,
         historianJoinBudgetMs,
+        historianJoinedRun,
         chainedRecoveryRuns,
         recoveryHistoryRemains,
     };

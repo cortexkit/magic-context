@@ -80,6 +80,7 @@ import {
     validateStoredCompartments,
 } from "./compartment-runner-validation";
 import { producerSourceLocalBudget } from "./derive-budgets";
+import { clearRepeatedHistorianFailureWarning, takeRepeatedHistorianFailureWarning } from "./historian-failure-report";
 import {
     clearHistorianHistoryWait,
     recordHistorianNoProgress,
@@ -313,6 +314,7 @@ export function clearHistorianAlertState(sessionId: string): void {
     clearHistorianHistoryWait(sessionId);
     lastHistorianAlertBySession.delete(sessionId);
     loggedStoredValidationFailures.delete(sessionId);
+    clearRepeatedHistorianFailureWarning(sessionId);
 }
 
 export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Promise<void> {
@@ -398,6 +400,38 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             return;
         }
         await sendStatusNotification(client, sessionId, message, getNotificationParams?.() ?? {});
+    };
+
+    /**
+     * The notice for a failure this run has just counted: the repeated-failure
+     * warning when one is due (it has its own spacing, so the per-failure
+     * cooldown does not hold it back), otherwise `notice`.
+     */
+    const notifyCountedFailure = async (failureCount: number, notice: string): Promise<void> => {
+        let warning: string | null = null;
+        try {
+            warning = takeRepeatedHistorianFailureWarning({
+                db,
+                sessionId,
+                failureCount,
+                chunk:
+                    telemetry.chunkStartOrdinal != null && telemetry.chunkEndOrdinal != null
+                        ? { start: telemetry.chunkStartOrdinal, end: telemetry.chunkEndOrdinal }
+                        : undefined,
+                // This run writes its run record when it ends, after this notice.
+                unrecordedFailures: 1,
+            });
+        } catch (error) {
+            sessionLog(sessionId, "historian repeated-failure warning failed:", error);
+        }
+        if (!warning) {
+            await notifyHistorianIssue(notice);
+            return;
+        }
+        issueNotified = true;
+        lastHistorianAlertBySession.set(sessionId, Date.now());
+        sessionLog(sessionId, `historian repeated-failure warning sent: count=${failureCount}`);
+        await sendStatusNotification(client, sessionId, warning, getNotificationParams?.() ?? {});
     };
 
     const truncateHistorianInputIfNeeded = (text: string, budget: number): string => {
@@ -525,9 +559,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             if (unresolvedInvolved) {
                 // Record the failure time like any other permanent historian
                 // failure, which is also what the backoff above measures from.
-                await notifyHistorianIssue(buildStoredCompartmentsInvalidNotice());
+                await notifyCountedFailure(failCount, buildStoredCompartmentsInvalidNotice());
             } else {
-                await notifyHistorianIssue(
+                await notifyCountedFailure(
+                    failCount,
                     buildHistorianFailureNotice(failCount, existingValidationError),
                 );
             }
@@ -768,9 +803,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 sessionId,
                 `historian failure: source=prompt-fit reason="${promptFit.reason}"`,
             );
-            incrementHistorianFailure(db, sessionId, promptFit.reason);
+            const failCount = incrementHistorianFailure(db, sessionId, promptFit.reason);
             retainDrainReservationForRetryThrottle = true;
-            await notifyHistorianIssue(buildHistorianWindowTooSmallNotice());
+            await notifyCountedFailure(failCount, buildHistorianWindowTooSmallNotice());
             return;
         }
         const chunkTokens = promptFit.chunkTokens;
@@ -829,6 +864,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             deps.forceKeepLastCompartment === true && !chunk.hasMore;
         telemetry.chunkStartOrdinal = chunk.startIndex;
         telemetry.chunkEndOrdinal = chunk.endIndex;
+        deps.onChunkSelected?.({ start: chunk.startIndex, end: chunk.endIndex });
         if (!chunk.text || chunk.messageCount === 0) {
             if (persistFilteredNoise(db, sessionId, chunk, eligibleEndOrdinal)) {
                 telemetry.status = "noop";
@@ -926,7 +962,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             // recovery flag unchanged), making the loop bug invisible in
             // diagnostics.
             const failCount = incrementHistorianFailure(db, sessionId, chunkCoverageError);
-            await notifyHistorianIssue(buildHistorianFailureNotice(failCount, chunkCoverageError));
+            await notifyCountedFailure(
+                failCount,
+                buildHistorianFailureNotice(failCount, chunkCoverageError),
+            );
             rollbackDrainReservation();
             return;
         }
@@ -1022,7 +1061,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             );
             const failCount = incrementHistorianFailure(db, sessionId, validatedPass.error);
             telemetry.failureReason = validatedPass.failureReason ?? validatedPass.error;
-            await notifyHistorianIssue(buildHistorianFailureNotice(failCount, validatedPass.error));
+            await notifyCountedFailure(
+                failCount,
+                buildHistorianFailureNotice(failCount, validatedPass.error),
+            );
             return;
         }
         retainDrainReservationForRetryThrottle = false;
@@ -1095,7 +1137,8 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 `no forward progress beyond raw message ${offset - 1}`,
             );
             try {
-                await notifyHistorianIssue(
+                await notifyCountedFailure(
+                    failCount,
                     buildHistorianFailureNotice(
                         failCount,
                         `historian made no forward progress beyond raw message ${offset - 1}`,
@@ -1233,7 +1276,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             );
             sessionLog(sessionId, "historian output discarded: reason=dangling_boundary");
             const failCount = incrementHistorianFailure(db, sessionId, reason);
-            await notifyHistorianIssue(buildHistorianFailureNotice(failCount, reason));
+            await notifyCountedFailure(failCount, buildHistorianFailureNotice(failCount, reason));
             rollbackDrainReservation();
             return;
         }
@@ -1654,7 +1697,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         );
         if (!issueNotified) {
             const failCount = incrementHistorianFailure(db, sessionId, desc.brief);
-            await notifyHistorianIssue(buildHistorianFailureNotice(failCount, desc.brief));
+            await notifyCountedFailure(
+                failCount,
+                buildHistorianFailureNotice(failCount, desc.brief),
+            );
         }
     } finally {
         if (!completedSuccessfully) {

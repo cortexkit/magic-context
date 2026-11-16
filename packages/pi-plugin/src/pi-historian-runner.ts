@@ -37,6 +37,7 @@
  * see Pi runs in the same `[magic-context][ses_xxx]` format.
  */
 
+import { type HistorianChunkRange, clearRepeatedHistorianFailureWarning, takeRepeatedHistorianFailureWarning } from "@magic-context/core/hooks/magic-context/historian-failure-report";
 import * as crypto from "node:crypto";
 import { withContentLanguageDirective } from "@magic-context/core/agents/language-directive";
 import { embedAndStoreCompartmentChunks } from "@magic-context/core/features/magic-context/compartment-embedding";
@@ -396,6 +397,7 @@ function shouldSuppressHistorianAlert(sessionId: string): boolean {
 export function clearPiHistorianAlertState(sessionId: string): void {
 	clearHistorianHistoryWait(sessionId);
 	lastHistorianAlertBySession.delete(sessionId);
+	clearRepeatedHistorianFailureWarning(sessionId);
 }
 
 export interface PiHistorianDeps {
@@ -487,6 +489,12 @@ export interface PiHistorianDeps {
 	readBranchEntries?: () => unknown[];
 	/** Optional callback for surfacing failure notices (Pi UI / logs). */
 	notifyIssue?: (message: string) => void | Promise<void>;
+	/**
+	 * Called once the run has read its chunk, with the chunk's raw message
+	 * ordinals. A pass that waits for the run names the chunk if the wait
+	 * runs out.
+	 */
+	onChunkSelected?: (chunk: HistorianChunkRange) => void;
 	/** Test seam / embedding bootstrap override. Defaults to Pi directory registration. */
 	ensureProjectRegistered?: (
 		directory: string,
@@ -604,6 +612,50 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			});
 		}
 	};
+	// The chunk this run reads, once read; named by the repeated-failure warning.
+	let selectedChunk: HistorianChunkRange | undefined;
+	/**
+	 * The notice for a failure this run has just counted: the repeated-failure
+	 * warning when one is due (it has its own spacing, so the per-failure
+	 * cooldown does not hold it back), otherwise `notice`.
+	 */
+	const notifyCountedFailure = async (
+		failureCount: number,
+		notice: string,
+	): Promise<void> => {
+		let warning: string | null = null;
+		try {
+			warning = takeRepeatedHistorianFailureWarning({
+				db,
+				sessionId,
+				failureCount,
+				chunk: selectedChunk,
+				// This run writes its run record when it ends, after this notice.
+				unrecordedFailures: 1,
+			});
+		} catch (error) {
+			sessionLog(sessionId, "historian repeated-failure warning failed", {
+				error: describeError(error).brief,
+			});
+		}
+		if (!warning) {
+			await notify(notice);
+			return;
+		}
+		issueNotified = true;
+		lastHistorianAlertBySession.set(sessionId, Date.now());
+		sessionLog(
+			sessionId,
+			`historian repeated-failure warning sent: count=${failureCount}`,
+		);
+		try {
+			await notifyIssue?.(warning);
+		} catch (error) {
+			sessionLog(sessionId, "historian notify failed", {
+				error: describeError(error).brief,
+			});
+		}
+	};
 
 	updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
@@ -648,7 +700,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						sessionId,
 						existingValidationError,
 					);
-					await notify(
+					await notifyCountedFailure(
+						failCount,
 						buildHistorianFailureNotice(failCount, existingValidationError),
 					);
 				}
@@ -841,9 +894,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionId,
 					`historian failure: source=prompt-fit reason="${promptFit.reason}"`,
 				);
-				incrementHistorianFailure(db, sessionId, promptFit.reason);
+				const failCount = incrementHistorianFailure(
+					db,
+					sessionId,
+					promptFit.reason,
+				);
 				retainDrainReservationForRetryThrottle = true;
-				await notify(buildHistorianWindowTooSmallNotice());
+				await notifyCountedFailure(
+					failCount,
+					buildHistorianWindowTooSmallNotice(),
+				);
 				return;
 			}
 			const chunkTokens = promptFit.chunkTokens;
@@ -893,6 +953,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			);
 			const forceKeepLastCompartmentForChunk =
 				forceKeepLastCompartment === true && !chunk.hasMore;
+			selectedChunk = { start: chunk.startIndex, end: chunk.endIndex };
+			deps.onChunkSelected?.(selectedChunk);
 			if (!chunk.text || chunk.messageCount === 0) {
 				if (persistFilteredNoise(db, sessionId, chunk, eligibleEndOrdinal)) {
 					telemetry.status = "noop";
@@ -933,7 +995,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						sessionId,
 						chunkCoverageError,
 					);
-					await notify(
+					await notifyCountedFailure(
+						failCount,
 						buildHistorianFailureNotice(failCount, chunkCoverageError),
 					);
 				}
@@ -1291,7 +1354,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				sessionLog(sessionId, `historian failure: ${errorMsg}`);
 				{
 					const failCount = incrementHistorianFailure(db, sessionId, errorMsg);
-					await notify(buildHistorianFailureNotice(failCount, errorMsg));
+					await notifyCountedFailure(
+						failCount,
+						buildHistorianFailureNotice(failCount, errorMsg),
+					);
 				}
 				return;
 			}
@@ -1407,7 +1473,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				);
 				{
 					const failCount = incrementHistorianFailure(db, sessionId, errorMsg);
-					await notify(buildHistorianFailureNotice(failCount, errorMsg));
+					await notifyCountedFailure(
+						failCount,
+						buildHistorianFailureNotice(failCount, errorMsg),
+					);
 				}
 				recordHistorianNoProgress(boundarySnapshot, inEmergency);
 				rollbackDrainReservation();
@@ -1837,7 +1906,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		);
 		if (!issueNotified) {
 			const failCount = incrementHistorianFailure(db, sessionId, desc.brief);
-			await notify(buildHistorianFailureNotice(failCount, desc.brief));
+			await notifyCountedFailure(
+				failCount,
+				buildHistorianFailureNotice(failCount, desc.brief),
+			);
 		}
 	} finally {
 		if (!completedSuccessfully) {

@@ -43,7 +43,6 @@ import {
     getChannel1NudgeState,
     getChannel2NudgeState,
     getEmergencyInputSample,
-    getHistorianFailureState,
     getLastNudgeUndropped,
     getMergedReasoningStrippedIds,
     getOverflowState,
@@ -128,6 +127,7 @@ import {
 } from "./final-wire-token-estimate";
 import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
+import { readHistorianFailureStreak } from "./historian-failure-report";
 import {
     forgetHistoryBoundaryRecovery,
     historyBoundaryRecoveryStateKey,
@@ -4370,13 +4370,15 @@ export function createTransform(deps: TransformDeps) {
                       budgetMs: compartmentPhase.historianJoinBudgetMs,
                       finalWireEstimate,
                       contextLimitTokens: boundaryContextLimit,
-                      lastHistorianError: getHistorianFailureState(db, sessionId).lastError,
+                      joinedRun: compartmentPhase.historianJoinedRun,
+                      failures: readHistorianFailureStreak(db, sessionId),
+                      usagePercentage: contextUsage.percentage,
                   })
                 : null;
             if (timedOutHistorianFailure) {
                 sessionLog(
                     sessionId,
-                    `transform: ${timedOutHistorianFailure}; finalEstimate=${finalWireEstimate?.tokens ?? "unavailable"} estimateTrusted=${finalWireEstimate?.trusted ?? false} contextLimit=${boundaryContextLimit} emergencyReclaimed=${postTransformResult.emergencyReclaimedTokens}`,
+                    `transform: historian join refusal: ${timedOutHistorianFailure}; finalEstimate=${finalWireEstimate?.tokens ?? "unavailable"} estimateTrusted=${finalWireEstimate?.trusted ?? false} contextLimit=${boundaryContextLimit} emergencyReclaimed=${postTransformResult.emergencyReclaimedTokens}`,
                 );
                 keepRecoveryArmed();
                 throw new EmergencyFailClosedError(timedOutHistorianFailure);

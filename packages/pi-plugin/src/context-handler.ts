@@ -29,6 +29,7 @@
  * native compaction.
  */
 
+import { type HistorianRunProgress, describeHistorianJoinRefusal, readHistorianFailureStreak } from "@magic-context/core/hooks/magic-context/historian-failure-report";
 import * as crypto from "node:crypto";
 import type {
 	ContextEvent,
@@ -393,7 +394,11 @@ import {
 	protectedPiPassTagNumbers,
 } from "./pass-tag-projection-pi";
 import { adaptPiAppendCompaction } from "./pi-append-compaction";
-import { PI_CONTEXT_BUDGET, PiContextDeadlineError } from "./pi-context-budget";
+import {
+	PI_CONTEXT_BUDGET,
+	PiContextDeadlineError,
+	PiHistorianJoinDeadlineError,
+} from "./pi-context-budget";
 import {
 	resolvePiUsableContextLimit,
 	resolvePiWindowGeometry,
@@ -736,11 +741,16 @@ export const __test = {
 	setInFlightHistorianForTests(
 		sessionId: string,
 		promise: Promise<unknown>,
+		progress?: HistorianRunProgress,
 	): () => void {
 		inFlightHistorian.set(sessionId, promise);
+		if (progress) inFlightHistorianProgress.set(sessionId, progress);
 		return () => {
 			if (inFlightHistorian.get(sessionId) === promise) {
 				inFlightHistorian.delete(sessionId);
+			}
+			if (progress && inFlightHistorianProgress.get(sessionId) === progress) {
+				inFlightHistorianProgress.delete(sessionId);
 			}
 		};
 	},
@@ -5848,7 +5858,19 @@ export function registerPiContextHandler(
 					budget.stage = "emergency historian";
 					// Charge the join to the existing optional clock, leaving the outcome
 					// reserve for replay or refusal. A timeout must not serve unreduced input.
-					await budget.wait(historian);
+					const historianProgress = inFlightHistorianProgress.get(sessionId);
+					const historianWaitMs = budget.remainingWork();
+					try {
+						await budget.wait(historian);
+					} catch (error) {
+						throw describeHistorianJoinDeadline(error, {
+							db: options.db,
+							sessionId,
+							waitedMs: historianWaitMs,
+							usagePercentage,
+							run: historianProgress,
+						});
+					}
 					assertCurrentPass();
 					// Publication happened after the pass snapshot. Read both the new
 					// summary and its boundary so the queued drops are safe on this pass.
@@ -7888,6 +7910,15 @@ export function registerPiContextHandler(
 			// Without a resolved session there are no persisted decisions to omit
 			// (Pi's runtime manager is missing), so the host's input passes through.
 			if (!lkgCompactionOff && sessionIdForError) {
+				// A pass that ran out of time waiting for its historian names the
+				// run and the session's summary failures, in the same words as
+				// OpenCode, followed by the deadline diagnostic.
+				const historianJoin = findPiHistorianJoinDeadline(err);
+				if (historianJoin)
+					throw new PiDegradedPassError("emergency-historian-join", {
+						cause: err,
+						message: `${historianJoin.refusal} (${historianJoin.message})`,
+					});
 				throw piFallbackRefusal("context-handler-failed", err);
 			}
 			log(
@@ -7954,6 +7985,11 @@ export function registerPiContextHandler(
  * foreground context deadline before retrying reclaim and the fit check.
  */
 const inFlightHistorian = new Map<string, Promise<unknown>>();
+/**
+ * What each in-flight run has done so far (start, chunk, end), so a pass whose
+ * wait for it runs out can name the run in its refusal.
+ */
+const inFlightHistorianProgress = new Map<string, HistorianRunProgress>();
 const historianAbortControllers = new Map<string, AbortController>();
 
 export function abortInFlightHistorians(sessionId: string): void {
@@ -8170,6 +8206,55 @@ function hasEligiblePiCompartmentHistory(
 	}
 }
 
+/**
+ * A deadline reached while the pass waited for its historian run becomes a
+ * PiHistorianJoinDeadlineError carrying the refusal the user is shown if the
+ * pass is refused for it. Any other error is returned unchanged, and so is the
+ * deadline when the session's failure record cannot be read.
+ */
+function describeHistorianJoinDeadline(
+	error: unknown,
+	facts: {
+		db: ContextDatabase;
+		sessionId: string;
+		waitedMs: number;
+		usagePercentage: number;
+		run: HistorianRunProgress | undefined;
+	},
+): unknown {
+	if (!(error instanceof PiContextDeadlineError)) return error;
+	try {
+		return new PiHistorianJoinDeadlineError(
+			error.message,
+			describeHistorianJoinRefusal({
+				waitedMs: facts.waitedMs,
+				usagePercentage: facts.usagePercentage,
+				run: facts.run,
+				failures: readHistorianFailureStreak(facts.db, facts.sessionId),
+			}),
+		);
+	} catch (readError) {
+		sessionLog(
+			facts.sessionId,
+			`historian join refusal could not read the failure record: ${readError instanceof Error ? readError.message : String(readError)}`,
+		);
+		return error;
+	}
+}
+
+function findPiHistorianJoinDeadline(
+	error: unknown,
+): PiHistorianJoinDeadlineError | undefined {
+	const seen = new Set<unknown>();
+	let current = error;
+	while (current && typeof current === "object" && !seen.has(current)) {
+		if (current instanceof PiHistorianJoinDeadlineError) return current;
+		seen.add(current);
+		current = (current as { cause?: unknown }).cause;
+	}
+	return undefined;
+}
+
 function sendPiIgnoredNotification(
 	ctx: ExtensionContext,
 	message: string,
@@ -8230,6 +8315,7 @@ function spawnPiHistorianRun(args: {
 	const holderId = crypto.randomUUID();
 	const controller = new AbortController();
 	historianAbortControllers.set(sessionId, controller);
+	const progress: HistorianRunProgress = { startedAt: Date.now() };
 	const runPromise = inPiHistorianRootContext(sessionId, () =>
 		(async () => {
 			// Yield before starting detached work. A headless context pass may
@@ -8310,6 +8396,9 @@ function spawnPiHistorianRun(args: {
 					userObservationsRequested: historian.userObservationsRequested,
 					language: historian.language,
 					compartmentLeaseHolderId: holderId,
+					onChunkSelected: (chunk) => {
+						progress.chunk = chunk;
+					},
 					notifyIssue: (text) => {
 						if (!isContextHandlerSessionActive(sessionId)) {
 							sessionLog(
@@ -8375,8 +8464,11 @@ function spawnPiHistorianRun(args: {
 				);
 			})
 			.finally(() => {
+				progress.endedAt = Date.now();
 				try {
 					inFlightHistorian.delete(sessionId);
+					if (inFlightHistorianProgress.get(sessionId) === progress)
+						inFlightHistorianProgress.delete(sessionId);
 					if (historianAbortControllers.get(sessionId) === controller)
 						historianAbortControllers.delete(sessionId);
 					unregister();
@@ -8392,6 +8484,7 @@ function spawnPiHistorianRun(args: {
 			}),
 	);
 	inFlightHistorian.set(sessionId, runPromise);
+	inFlightHistorianProgress.set(sessionId, progress);
 	historian.onStatusChange?.(ctx, sessionId);
 }
 

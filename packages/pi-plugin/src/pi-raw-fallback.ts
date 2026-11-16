@@ -40,9 +40,13 @@ export class PiDegradedPassError extends Error {
 
 	constructor(
 		readonly site: string,
-		options?: { cause?: unknown },
+		/** `message` replaces the generic wording when the cause has its own refusal text. */
+		options?: { cause?: unknown; message?: string },
 	) {
-		super(describeDegradedPassFailure(site, options?.cause), options);
+		super(
+			options?.message ?? describeDegradedPassFailure(site, options?.cause),
+			options,
+		);
 		this.name = "PiDegradedPassError";
 	}
 }

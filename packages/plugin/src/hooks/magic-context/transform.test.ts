@@ -4542,21 +4542,22 @@ describe("createTransform historian failure handling", () => {
         });
 
         try {
-            await expect(
-                transform(
-                    {},
-                    {
-                        messages: [
-                            {
-                                info: { id: "m-user", role: "user", sessionID: sessionId },
-                                parts: [{ type: "text", text: "continue" }],
-                            },
-                        ],
-                    },
-                ),
-            ).rejects.toThrow(
-                "historian did not complete within 0.005 s: background historian is still running",
+            const refusal = transform(
+                {},
+                {
+                    messages: [
+                        {
+                            info: { id: "m-user", role: "user", sessionID: sessionId },
+                            parts: [{ type: "text", text: "continue" }],
+                        },
+                    ],
+                },
             );
+            await expect(refusal).rejects.toThrow(
+                "This turn was not sent: context is at 96% of the window, and Magic Context waited 0.005 s for a history summary that did not finish in time. The summary run is still running after",
+            );
+            // No failure is recorded, so none is quoted.
+            await expect(refusal).rejects.not.toThrow(/failed/);
         } finally {
             finishHistorian();
         }

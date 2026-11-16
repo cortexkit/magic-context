@@ -23,10 +23,16 @@ import type {
     CompartmentRunnerDeps,
     HiddenCompartmentRunnerDeps,
 } from "./compartment-runner-types";
+import type { HistorianRunProgress } from "./historian-failure-report";
 import type { ProtectedTailBoundarySnapshot } from "./protected-tail-boundary";
 import { primeTailRawMessageCache, withRawSessionMessageCache } from "./read-session-chunk";
 
-export interface ActiveCompartmentRun {
+/**
+ * A run that mutates compartment state. Its start and end times, and the
+ * chunk an incremental run summarizes, let a pass that waited for it say
+ * what the run was doing (see describeHistorianJoinRefusal).
+ */
+export interface ActiveCompartmentRun extends HistorianRunProgress {
     promise: Promise<void>;
     published: boolean;
     kind?: "incremental" | "recomp" | "wrapup" | "other";
@@ -79,9 +85,11 @@ export function registerActiveCompartmentRun(
         promise: Promise.resolve(),
         published: false,
         kind,
+        startedAt: Date.now(),
     };
     const wrapped = promise.finally(() => {
         activeRun.settled = true;
+        activeRun.endedAt = Date.now();
         // Only clear if this is still the current entry (another run may have
         // replaced us if the caller overwrote; don't stomp the replacement).
         if (activeRuns.get(sessionId)?.promise === wrapped) {
@@ -187,12 +195,22 @@ function startBackgroundCompartmentAgent(
 
     const renewal = startLeaseRenewal(deps, holderId);
 
+    const activeRun: ActiveCompartmentRun = {
+        promise: Promise.resolve(),
+        published: false,
+        kind: "incremental",
+        startedAt: Date.now(),
+    };
     // Track the real underlying promise — NOT a raced wrapper.
     // This ensures activeRuns.has(sessionId) stays true until the historian run
     // actually completes, preventing duplicate runs even if an external await times out.
     const runnerDeps = withPublishedCallback({
         ...deps,
         compartmentLeaseHolderId: holderId,
+        onChunkSelected: (chunk) => {
+            activeRun.chunk = chunk;
+            deps.onChunkSelected?.(chunk);
+        },
     });
     // An async function executes its synchronous prefix immediately. Yield a whole
     // event-loop turn, not a microtask, so the awaiting transform can finish before
@@ -246,6 +264,7 @@ function startBackgroundCompartmentAgent(
             // The `.catch` above has already run by the time this finalizer executes,
             // so anything thrown here would reject a promise nobody awaits. Contain
             // every step: cleanup must never become an unhandled rejection.
+            activeRun.endedAt = Date.now();
             try {
                 clearInterval(renewal);
                 releaseCompartmentLeaseBestEffort(deps.db, deps.sessionId, holderId, sessionLog);
@@ -256,7 +275,8 @@ function startBackgroundCompartmentAgent(
                 sessionLog(deps.sessionId, "compartment agent: finalizer failed:", err);
             }
         });
-    activeRuns.set(deps.sessionId, { promise, published: false, kind: "incremental" });
+    activeRun.promise = promise;
+    activeRuns.set(deps.sessionId, activeRun);
 }
 
 export interface ExecuteContextRecompOptions {

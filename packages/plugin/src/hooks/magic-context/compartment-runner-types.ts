@@ -210,6 +210,12 @@ export interface CompartmentRunnerDeps<
      * run as published before invoking this callback.
      */
     onCompartmentStatePublished?: (sessionId: string) => void;
+    /**
+     * Called once an incremental run has read its chunk, with the chunk's raw
+     * message ordinals. A pass that waits for the run names the chunk if the
+     * wait runs out.
+     */
+    onChunkSelected?: (chunk: { start: number; end: number }) => void;
     /** Live recomp-phase progress callback (sidebar / status). The runner emits
      *  "recomp"-phase updates (start + each pass); the caller owns the migration
      *  and terminal (done/failed) phases. Best-effort, never throws into the loop. */

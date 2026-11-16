@@ -573,7 +573,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
                     contextLimitTokens: 100_000,
                     finalWireEstimate: { trusted: false, tokens: 90_000 },
                 }),
-            ).toContain("historian did not complete within");
+            ).toContain("This turn was not sent");
             expect(
                 historianJoinFailClosedMessage({
                     timedOut: repeated.historianJoinTimedOut,
@@ -581,7 +581,9 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
                     contextLimitTokens: 100_000,
                     finalWireEstimate: { trusted: true, tokens: 101_000 },
                 }),
-            ).toContain("historian did not complete within");
+            ).toContain("This turn was not sent");
+            // The pass that did not wait again still names the run it joined.
+            expect(repeated.historianJoinedRun).toBe(first);
             finish();
             await first.promise;
             second = registerActiveCompartmentRun(
@@ -603,13 +605,24 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
     });
 
     it("proceeds only when post-timeout emergency reclaim proves the wire fits", () => {
+        const now = new Date(2026, 10, 15, 15, 51, 22).getTime();
+        const failures = {
+            count: 1,
+            lastError: "provider is slow",
+            lastFailureAt: now - 80_000,
+            since: now - 80_000,
+        };
+        const joinedRun = { startedAt: now - 60_000, chunk: { start: 407, end: 443 } };
         expect(
             historianJoinFailClosedMessage({
                 timedOut: true,
                 budgetMs: HISTORIAN_INLINE_JOIN_BUDGET_MS,
                 finalWireEstimate: { tokens: 64_000, trusted: true },
                 contextLimitTokens: 100_000,
-                lastHistorianError: "provider is slow",
+                joinedRun,
+                failures,
+                usagePercentage: 96,
+                now,
             }),
         ).toBeNull();
         expect(
@@ -618,17 +631,25 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
                 budgetMs: HISTORIAN_INLINE_JOIN_BUDGET_MS,
                 finalWireEstimate: { tokens: 104_000, trusted: true },
                 contextLimitTokens: 100_000,
-                lastHistorianError: "provider is slow",
+                joinedRun,
+                failures,
+                usagePercentage: 96,
+                now,
             }),
-        ).toBe("historian did not complete within 60 s: provider is slow");
+        ).toBe(
+            "This turn was not sent: context is at 96% of the window, and Magic Context waited 60 s for a history summary that did not finish in time. The summary of messages 407-443 is still running after 60 s. The previous run failed at 15:50:02: provider is slow. Summary runs failed in a row: 1, since 15:50:02. What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.",
+        );
         expect(
             historianJoinFailClosedMessage({
                 timedOut: true,
                 budgetMs: HISTORIAN_INLINE_JOIN_BUDGET_MS,
                 finalWireEstimate: { tokens: 64_000, trusted: false },
                 contextLimitTokens: 100_000,
+                now,
             }),
-        ).toBe("historian did not complete within 60 s: background historian is still running");
+        ).toBe(
+            "This turn was not sent: context is nearly full, and Magic Context waited 60 s for a history summary that did not finish in time. What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.",
+        );
     });
 
     it("keeps an in-budget historian completion on the inline fold path", async () => {

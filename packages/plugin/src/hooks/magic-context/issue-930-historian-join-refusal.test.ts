@@ -1,17 +1,21 @@
 /// <reference types="bun-types" />
 
 /**
- * Issue 930: the turn refusal that names a historian validation error.
+ * Issue 930: the turn refusal after a timed-out historian join.
  *
  * At 95% a primary session joins its historian for at most 60 seconds
  * (transform-compartment-phase.ts). When the join times out, the pass is
  * refused unless the final request estimate is trusted and under the context
- * limit (historianJoinFailClosedMessage). The refusal's reason text is the
- * session's last recorded historian failure, which belongs to an earlier run,
- * not to the run the pass was waiting for.
+ * limit (historianJoinFailClosedMessage). That decision is unchanged here.
  *
- * These tests record that behaviour on a model with no calibration seed, where
- * the estimate used for the decision is an upper envelope (at least twice the
+ * The refusal used to quote the session's last stored historian error as its
+ * reason, although that error belonged to an earlier run that had already
+ * ended. It now names the run the pass waited for (its chunk, and whether it
+ * is still running or failed), quotes an earlier failure only as the previous
+ * run's, counts the failed runs in a row, gives the usage, and says what to do.
+ *
+ * The refusals are checked on a model with no calibration seed, where the
+ * estimate used for the decision is an upper envelope (at least twice the
  * local count), and on a route whose tool definitions are not measured yet,
  * where the estimate is not trusted at all. In both the request fits the
  * window by the estimator's own unscaled count. The control shows that the
@@ -29,6 +33,7 @@ import {
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { recordHistorianRun } from "../../features/magic-context/storage-historian-runs";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
     __resetToolDefinitionMeasurements,
@@ -43,6 +48,7 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { resolveDecisionCalibration } from "./decision-calibration";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
+import { formatHistorianClockTime } from "./historian-failure-report";
 import { createTransform } from "./transform";
 
 const PROVIDER = "issue-930-provider";
@@ -51,6 +57,13 @@ const CONTEXT_LIMIT = 100_000;
 /** The reported error of the run before the one the pass joins. */
 const EARLIER_RUN_ERROR =
     "Historian returned invalid compartment output: Compartment range 202-280 does not map to raw session lines 407-432";
+/** The reported error of the run the pass joins, had it failed in time. */
+const JOINED_RUN_ERROR =
+    "Historian returned invalid compartment output: Compartment range 202-443 does not map to raw session lines 407-443";
+/** The chunk of the run the pass joins (run #5488 in the report). */
+const JOINED_CHUNK = { start: 407, end: 443 };
+const ACTIONS =
+    "What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -142,9 +155,30 @@ async function setup(args: {
     }
     const db = openDatabase();
     updateSessionMeta(db, args.sessionId, { systemPromptTokens: args.systemPromptTokens });
-    // The earlier run failed validation; the pass joins the next one.
+    // The earlier run failed validation and ended 80 s ago; 20 s later a pass
+    // started the next run, which this pass joins (the report's timeline).
+    const earlierFailureAt = Date.now() - 80_000;
     incrementHistorianFailure(db, args.sessionId, EARLIER_RUN_ERROR);
-    registerActiveCompartmentRun(args.sessionId, args.run);
+    db.prepare("UPDATE session_meta SET historian_last_failure_at = ? WHERE session_id = ?").run(
+        earlierFailureAt,
+        args.sessionId,
+    );
+    const earlierRunId = recordHistorianRun(db, {
+        sessionId: args.sessionId,
+        harness: "opencode",
+        runKind: "incremental",
+        status: "failed",
+        failureReason: EARLIER_RUN_ERROR,
+        chunkStartOrdinal: 407,
+        chunkEndOrdinal: 432,
+    });
+    db.prepare("UPDATE historian_runs SET created_at = ? WHERE id = ?").run(
+        earlierFailureAt,
+        earlierRunId,
+    );
+    const joinedRun = registerActiveCompartmentRun(args.sessionId, args.run, "incremental");
+    joinedRun.startedAt = Date.now() - 60_000;
+    joinedRun.chunk = JOINED_CHUNK;
     const abort = mock(async () => ({ data: true }));
     const transform = createTransform({
         tagger: createTagger(),
@@ -176,7 +210,7 @@ async function setup(args: {
         getModelKey: () => `${PROVIDER}/${MODEL}`,
         getNotificationParams: () => ({ agent: "build", providerId: PROVIDER, modelId: MODEL }),
     });
-    return { db, transform, abort };
+    return { db, transform, abort, earlierFailureAt };
 }
 
 /**
@@ -207,8 +241,27 @@ async function runPass(
     return {
         error,
         lines,
-        refusalLog: lines.find((line) => line.startsWith("transform: historian did not complete")),
+        refusalLog: lines.find((line) => line.startsWith("transform: historian join refusal:")),
     };
+}
+
+/** The refusal's text, checked fact by fact (the run's age is not fixed). */
+function expectRefusalNamesTheJoinedRun(message: string, earlierFailureAt: number): void {
+    expect(
+        message.startsWith(
+            "This turn was not sent: context is at 96% of the window, and Magic Context waited 0.005 s for a history summary that did not finish in time. ",
+        ),
+    ).toBe(true);
+    // The run the pass waited for, by its chunk, is still running.
+    expect(message).toMatch(/ The summary of messages 407-443 is still running after 6\d s\. /);
+    // The stored error is the earlier run's, and is named as such.
+    const earlier = formatHistorianClockTime(earlierFailureAt);
+    expect(message).toContain(` The previous run failed at ${earlier}: ${EARLIER_RUN_ERROR}. `);
+    expect(message).toContain(` Summary runs failed in a row: 1, since ${earlier}. `);
+    expect(message.endsWith(ACTIONS)).toBe(true);
+    // Never as the reason the joined run did not finish.
+    expect(message).not.toContain("historian did not complete");
+    expect(message).not.toContain("407-443 failed");
 }
 
 /** The estimator's own unscaled count of the request this pass would send. */
@@ -225,10 +278,10 @@ function unscaledCount(sessionId: string, systemPromptTokens: number): number {
 }
 
 describe("issue 930: refusal after a timed-out historian join", () => {
-    it("refuses a request under the window on an unseeded model and names the earlier run's validation error", async () => {
+    it("refuses a request under the window on an unseeded model, naming the joined run and the earlier run's validation error as the previous run's", async () => {
         const sessionId = "ses-issue-930-unseeded";
         let finishRun!: () => void;
-        const { transform, abort } = await setup({
+        const { transform, abort, earlierFailureAt } = await setup({
             prefix: "issue-930-unseeded-",
             sessionId,
             systemPromptTokens: 90_000,
@@ -247,12 +300,11 @@ describe("issue 930: refusal after a timed-out historian join", () => {
             expect(lines).toContain(
                 "transform: compartment await timed out after 5ms — proceeding without waiting",
             );
-            expect(error).toMatchObject({
-                name: "EmergencyFailClosedError",
-                message: `historian did not complete within 0.005 s: ${EARLIER_RUN_ERROR}`,
-            });
+            expect(error).toMatchObject({ name: "EmergencyFailClosedError" });
+            expectRefusalNamesTheJoinedRun((error as Error).message, earlierFailureAt);
             // The decision compared the fit envelope, not the request's size.
             const finalEstimate = Number(/finalEstimate=(\d+)/.exec(refusalLog ?? "")?.[1]);
+            expect(refusalLog).toContain((error as Error).message);
             expect(refusalLog).toContain("estimateTrusted=true");
             expect(refusalLog).toContain(`contextLimit=${CONTEXT_LIMIT}`);
             expect(finalEstimate).toBeGreaterThanOrEqual(2 * unscaledCount(sessionId, 90_000));
@@ -265,7 +317,7 @@ describe("issue 930: refusal after a timed-out historian join", () => {
     it("refuses a small request whose estimate is untrusted because the route's tool definitions are not measured", async () => {
         const sessionId = "ses-issue-930-untrusted";
         let finishRun!: () => void;
-        const { transform } = await setup({
+        const { transform, earlierFailureAt } = await setup({
             prefix: "issue-930-untrusted-",
             sessionId,
             systemPromptTokens: 20_000,
@@ -283,11 +335,44 @@ describe("issue 930: refusal after a timed-out historian join", () => {
             expect(lines).toContain(
                 "transform: compartment await timed out after 5ms — proceeding without waiting",
             );
-            expect(error).toMatchObject({
-                name: "EmergencyFailClosedError",
-                message: `historian did not complete within 0.005 s: ${EARLIER_RUN_ERROR}`,
-            });
+            expect(error).toMatchObject({ name: "EmergencyFailClosedError" });
+            expectRefusalNamesTheJoinedRun((error as Error).message, earlierFailureAt);
             expect(refusalLog).toContain("estimateTrusted=false");
+        } finally {
+            finishRun();
+        }
+    });
+
+    it("names the joined run's own failure when the run fails after the wait ran out", async () => {
+        const sessionId = "ses-issue-930-joined-failure";
+        let finishRun!: () => void;
+        const { db, transform } = await setup({
+            prefix: "issue-930-joined-failure-",
+            sessionId,
+            systemPromptTokens: 90_000,
+            measureTools: true,
+            run: new Promise<void>((resolve) => {
+                finishRun = resolve;
+            }),
+            historianTimeoutMs: 5,
+        });
+        try {
+            // The joined run records its own failure after the pass stopped
+            // waiting, before the pass writes its refusal.
+            const { error } = await runPass(transform, sessionId, (line) => {
+                if (!line.startsWith("transform: compartment await timed out")) return;
+                incrementHistorianFailure(db, sessionId, JOINED_RUN_ERROR);
+            });
+
+            expect(error).toMatchObject({ name: "EmergencyFailClosedError" });
+            const message = (error as Error).message;
+            expect(message).toContain(
+                ` The summary of messages 407-443 failed: ${JOINED_RUN_ERROR}. Summary runs failed in a row: 2. `,
+            );
+            // The stored error is now the joined run's; it is not the previous run's.
+            expect(message).not.toContain("The previous run failed");
+            expect(message).not.toContain("still running");
+            expect(message.endsWith(ACTIONS)).toBe(true);
         } finally {
             finishRun();
         }
