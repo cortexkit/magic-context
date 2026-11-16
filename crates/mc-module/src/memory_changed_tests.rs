@@ -20,7 +20,12 @@ use crate::memory_writes::{save, Writer};
 /// through `test_bus` by the returned publisher.
 pub(crate) fn watched(
     test_bus: &Arc<TestBus>,
-) -> (tempfile::TempDir, Arc<ContextDb>, Arc<MemoryWakes>, Publisher) {
+) -> (
+    tempfile::TempDir,
+    Arc<ContextDb>,
+    Arc<MemoryWakes>,
+    Publisher,
+) {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap());
     let wakes = Arc::new(MemoryWakes::default());
@@ -106,7 +111,11 @@ fn a_wake_names_its_owner_and_revision_and_no_memory_text() {
     let notice = global.notice(&account).unwrap();
     assert_eq!(notice.id, "global::9");
     assert_eq!(
-        notice.headers.keys().map(String::as_str).collect::<Vec<_>>(),
+        notice
+            .headers
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
         ["level", "revision"]
     );
     let workspace = Wake {

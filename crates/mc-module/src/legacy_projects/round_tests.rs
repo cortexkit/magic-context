@@ -442,10 +442,7 @@ async fn a_move_into_a_project_wakes_it_once_with_a_higher_revision() {
     let plain = fixture.folder("plain");
     fixture.memory(&golden_key(), "Secret marker zebra.");
     fixture.note(&key::directory_key(&plain), "Ship after CI.");
-    let roots = vec![
-        ("pj-git".to_owned(), repo),
-        ("pj-dir".to_owned(), plain),
-    ];
+    let roots = vec![("pj-git".to_owned(), repo), ("pj-dir".to_owned(), plain)];
     let report = Mover::default().apply(&fixture.db, &roots, 5);
     assert!(report.complete);
     // The project that received memories is woken; the one that received

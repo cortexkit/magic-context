@@ -797,8 +797,7 @@ impl DocsNotices {
         }
         let result = async {
             let session = self.bus.session().await?;
-            let published =
-                publish_pending(db, &session.account, session.publisher.as_ref()).await;
+            let published = publish_pending(db, &session.account, session.publisher.as_ref()).await;
             if published.is_err() {
                 session.discard();
             }

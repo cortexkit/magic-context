@@ -1800,10 +1800,7 @@ fn read_workspace_again<C: RunnerClient + Router + Send + Sync + 'static>(
     let Some(folder) = route.workdir.clone() else {
         return;
     };
-    read_workspaces(
-        inner,
-        vec![(folder, (route.session.clone(), vec![worker]))],
-    );
+    read_workspaces(inner, vec![(folder, (route.session.clone(), vec![worker]))]);
 }
 
 /// A folder's sessions: the one whose route Entorhinal is asked under, and
