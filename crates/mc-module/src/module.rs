@@ -90,7 +90,11 @@ struct Inner<C> {
     /// Which sessions a move holds. Checked before a job is queued or a
     /// worker created, and again when a worker takes a job off its queue.
     journal: Arc<crate::agent_data::Journal>,
-    workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
+    /// Each session's worker, or what its worker kept of the session once
+    /// the session went quiet ([`Slot`]). Jobs are sent under this lock, and
+    /// a worker gives its place up only under it, with its queue empty, so
+    /// no job ever reaches a worker that stopped.
+    workers: Mutex<HashMap<SessionRef, Slot>>,
     /// The sessions set up in this process, each with the statement epoch
     /// its newest Setup named (`None` when it named none). Every notice and
     /// ride is checked against it as it arrives, before it is queued (see
@@ -188,6 +192,35 @@ enum Job {
         project: Option<String>,
         workspace: Option<String>,
     },
+}
+
+/// How long a session's worker waits without a job before it frees the
+/// session ([`Session::quiet_carry`]). Its next job resumes it first, from
+/// what the carry kept and what the stores hold.
+const QUIET_AFTER: Duration = Duration::from_secs(10 * 60);
+/// The same wait, once the runner reported that the run of a session
+/// without a summarizer (a worker or reader) ended: such a session rarely
+/// has another job after its run.
+const QUIET_AFTER_RUN_END: Duration = Duration::from_secs(60);
+
+/// A session's place in the module.
+enum Slot {
+    /// A worker runs the session's jobs.
+    Running(mpsc::UnboundedSender<Job>),
+    /// The session went quiet and its worker stopped; the next job starts a
+    /// worker again with what it kept.
+    Quiet(Box<Quiet>),
+}
+
+/// What a worker keeps of the session it freed.
+struct Quiet {
+    carry: crate::session::QuietCarry,
+    /// The state last saved to `mode3.db`, so the next worker saves only a
+    /// change.
+    saved: Option<crate::store::Durable>,
+    /// The session has no summarizer, so its worker follows the runner's
+    /// run-end events ([`QUIET_AFTER_RUN_END`]).
+    subagent: bool,
 }
 
 impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
@@ -417,9 +450,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
 
     /// Run the jobs the session's worker held while a move held the
     /// session. Jobs stay held while the move still holds it; a session
-    /// with no worker holds nothing.
+    /// with no worker, or a quiet one, holds nothing.
     pub fn resume(&self, session: &SessionRef) {
-        let _ = self.send(session, Job::Resume);
+        let _ = self.send_running(session, Job::Resume);
     }
 
     /// Finish, in the background, every install of a move the journal
@@ -443,13 +476,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         // move took away or replaced. Until the session's next Setup, a read
         // of it is answered as for a session this process never saw.
         self.inner.app_read.forget_session(session, replaced);
-        let worker = self
+        let slot = self
             .inner
             .workers
             .lock()
             .expect("worker map")
             .remove(session);
-        if let Some(worker) = worker {
+        // A quiet session has no worker: what it kept goes with its slot.
+        if let Some(Slot::Running(worker)) = slot {
             let _ = worker.send(Job::Discard {
                 cut: cut.to_owned(),
                 replaced,
@@ -496,9 +530,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     pub async fn flush_app_snapshots(&self) {
         let answers: Vec<_> = {
             let workers = self.inner.workers.lock().expect("worker map");
+            // A quiet session saved everything before its worker stopped.
             workers
                 .values()
-                .filter_map(|worker| {
+                .filter_map(|slot| {
+                    let Slot::Running(worker) = slot else {
+                        return None;
+                    };
                     let (reply, answer) = oneshot::channel();
                     worker
                         .send(Job::AppCheckpoint { flush: Some(reply) })
@@ -560,18 +598,17 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         // and of two Setups racing, the one queued last is the one recorded.
         // The queue is unbounded, so sending never waits.
         let mut set_up = self.inner.set_up.lock().expect("setup sessions");
-        let worker = {
-            let mut workers = self.inner.workers.lock().expect("worker map");
-            workers
-                .entry(route.session.clone())
-                .or_insert_with(|| self.spawn_worker(route.session.clone()))
-                .clone()
-        };
         let key = route.session.clone();
         let epoch = request.statement_epoch.clone();
-        worker
-            .send(Job::Setup(route, request, features))
-            .map_err(|_| ModuleError::Stopped)?;
+        {
+            let mut workers = self.inner.workers.lock().expect("worker map");
+            let slot = workers
+                .entry(key.clone())
+                .or_insert_with(|| self.spawn_worker(key.clone()));
+            self.running(slot, &key)
+                .send(Job::Setup(route, request, features))
+                .map_err(|_| ModuleError::Stopped)?;
+        }
         set_up.insert(key, epoch);
         Ok(SetupAnswer::Ready)
     }
@@ -709,21 +746,21 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     ) -> Result<String, ModuleError> {
         self.admit(&route.session)?;
         let (reply, answer) = oneshot::channel();
-        let worker = {
+        {
+            let key = &route.session;
             let mut workers = self.inner.workers.lock().expect("worker map");
-            workers
-                .entry(route.session.clone())
-                .or_insert_with(|| self.spawn_worker(route.session.clone()))
-                .clone()
-        };
-        worker
-            .send(Job::Tool {
-                route: route.clone(),
-                name: name.to_owned(),
-                input,
-                reply,
-            })
-            .map_err(|_| ModuleError::Stopped)?;
+            let slot = workers
+                .entry(key.clone())
+                .or_insert_with(|| self.spawn_worker(key.clone()));
+            self.running(slot, key)
+                .send(Job::Tool {
+                    route: route.clone(),
+                    name: name.to_owned(),
+                    input,
+                    reply,
+                })
+                .map_err(|_| ModuleError::Stopped)?;
+        }
         answer.await.map_err(|_| ModuleError::Stopped)?
     }
 
@@ -764,15 +801,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// when a test needs search results rather than an applied compaction view.
     pub async fn idle_foreground(&self, session: &SessionRef) -> Result<(), ModuleError> {
         loop {
-            let (reply, answer) = oneshot::channel();
-            self.send(session, Job::Idle(reply))?;
-            answer.await.map_err(|_| ModuleError::Stopped)?;
+            self.barrier(session)?
+                .await
+                .map_err(|_| ModuleError::Stopped)?;
             if *self.inner.summaries_running.lock().expect("summary count") == 0 {
                 // A run that just ended queued its result before the count
                 // dropped; one more round handles it.
-                let (reply, answer) = oneshot::channel();
-                self.send(session, Job::Idle(reply))?;
-                return answer.await.map_err(|_| ModuleError::Stopped);
+                return self
+                    .barrier(session)?
+                    .await
+                    .map_err(|_| ModuleError::Stopped);
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -936,14 +974,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         {
             let workers = self.inner.workers.lock().expect("worker map");
             for (session, folder) in folders {
-                let Some(worker) = workers.get(&session) else {
+                // A quiet session gets the answer too: it starts its worker
+                // again, which takes the answer without reading the session.
+                if !workers.contains_key(&session) {
                     continue;
-                };
+                }
                 by_folder
                     .entry(folder)
                     .or_insert_with(|| (session.clone(), Vec::new()))
                     .1
-                    .push(worker.downgrade());
+                    .push(session);
             }
         }
         read_workspaces(&self.inner, by_folder.into_iter().collect());
@@ -1082,16 +1122,57 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         }
     }
 
+    /// Queue `job` on the session's worker, starting it again when the
+    /// session went quiet.
     fn send(&self, session: &SessionRef, job: Job) -> Result<(), ModuleError> {
-        let worker = self
-            .inner
-            .workers
-            .lock()
-            .expect("worker map")
-            .get(session)
-            .cloned()
+        let mut workers = self.inner.workers.lock().expect("worker map");
+        let slot = workers
+            .get_mut(session)
             .ok_or(ModuleError::UnknownSession)?;
-        worker.send(job).map_err(|_| ModuleError::Stopped)
+        self.running(slot, session)
+            .send(job)
+            .map_err(|_| ModuleError::Stopped)
+    }
+
+    /// Queue `job` only on a worker that runs: a quiet session has nothing in
+    /// flight to ask about, wait for or let go of, and is answered as one
+    /// with no worker.
+    fn send_running(&self, session: &SessionRef, job: Job) -> Result<(), ModuleError> {
+        match self.inner.workers.lock().expect("worker map").get(session) {
+            Some(Slot::Running(worker)) => worker.send(job).map_err(|_| ModuleError::Stopped),
+            Some(Slot::Quiet(_)) | None => Err(ModuleError::UnknownSession),
+        }
+    }
+
+    /// A barrier on the session's worker, answered once it handled every job
+    /// queued before. A quiet session's worker stopped with its queue empty,
+    /// so its barrier is passed at once.
+    fn barrier(&self, session: &SessionRef) -> Result<oneshot::Receiver<()>, ModuleError> {
+        let (reply, answer) = oneshot::channel();
+        match self.inner.workers.lock().expect("worker map").get(session) {
+            Some(Slot::Running(worker)) => worker
+                .send(Job::Idle(reply))
+                .map_err(|_| ModuleError::Stopped)?,
+            Some(Slot::Quiet(_)) => {
+                let _ = reply.send(());
+            }
+            None => return Err(ModuleError::UnknownSession),
+        }
+        Ok(answer)
+    }
+
+    /// The sender of the worker in `slot`, `key`'s, started again from what
+    /// it kept when the session went quiet. Called under the `workers` lock.
+    fn running(&self, slot: &mut Slot, key: &SessionRef) -> mpsc::UnboundedSender<Job> {
+        if let Slot::Running(worker) = slot {
+            return worker.clone();
+        }
+        let (jobs, receiver) = mpsc::unbounded_channel();
+        let Slot::Quiet(quiet) = std::mem::replace(slot, Slot::Running(jobs.clone())) else {
+            unreachable!("a running slot returned above");
+        };
+        self.run_worker(key.clone(), &jobs, receiver, Some(*quiet));
+        jobs
     }
 
     pub(crate) async fn command_request(
@@ -1118,33 +1199,40 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let Some(key) = request.key() else {
             return self.owner_command(request).await;
         };
-        let worker = self
-            .inner
-            .workers
-            .lock()
-            .expect("worker map")
-            .get(&key)
-            .cloned();
-        let worker = worker.or_else(|| {
-            if !matches!(&request, commands::Request::Run(_))
-                || self
-                    .inner
-                    .store
-                    .as_ref()
-                    .and_then(|store| store.load(&key))
-                    .is_none()
-            {
-                return None;
-            }
+        // A Run restores, from its saved state, a session no worker holds;
+        // other commands answer such a session as one ck-mc doesn't hold.
+        let restores = matches!(&request, commands::Request::Run(_))
+            && !self
+                .inner
+                .workers
+                .lock()
+                .expect("worker map")
+                .contains_key(&key)
+            && self
+                .inner
+                .store
+                .as_ref()
+                .and_then(|store| store.load(&key))
+                .is_some();
+        let (reply, answer) = oneshot::channel();
+        let unsent = {
             let mut workers = self.inner.workers.lock().expect("worker map");
-            Some(
+            if restores {
                 workers
                     .entry(key.clone())
-                    .or_insert_with(|| self.spawn_worker(key.clone()))
-                    .clone(),
-            )
-        });
-        let Some(worker) = worker else {
+                    .or_insert_with(|| self.spawn_worker(key.clone()));
+            }
+            match workers.get_mut(&key) {
+                Some(slot) => {
+                    self.running(slot, &key)
+                        .send(Job::Command { request, reply })
+                        .map_err(|_| commands::invalid("subject"))?;
+                    None
+                }
+                None => Some(request),
+            }
+        };
+        if let Some(request) = unsent {
             return commands::execute(
                 None,
                 self.inner.client.as_ref(),
@@ -1152,11 +1240,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 request,
             )
             .await;
-        };
-        let (reply, answer) = oneshot::channel();
-        worker
-            .send(Job::Command { request, reply })
-            .map_err(|_| commands::invalid("subject"))?;
+        }
         answer.await.map_err(|_| commands::invalid("subject"))?
     }
 
@@ -1206,31 +1290,112 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         }
     }
 
-    fn spawn_worker(&self, key: SessionRef) -> mpsc::UnboundedSender<Job> {
-        let (jobs, mut receiver) = mpsc::unbounded_channel::<Job>();
+    /// A new session's place: a worker that has no session yet.
+    fn spawn_worker(&self, key: SessionRef) -> Slot {
+        let (jobs, receiver) = mpsc::unbounded_channel::<Job>();
+        self.run_worker(key, &jobs, receiver, None);
+        Slot::Running(jobs)
+    }
+
+    /// Run `key`'s jobs from `receiver` on a task of their own, picking the
+    /// session up from what its last worker kept (`quiet`) if it went quiet.
+    /// After [`QUIET_AFTER`] without a job the worker frees the session and
+    /// stops ([`free_quiet`]); a job that needs the session resumes what was
+    /// freed before it runs ([`Session::resume_quiet`]).
+    fn run_worker(
+        &self,
+        key: SessionRef,
+        jobs: &mpsc::UnboundedSender<Job>,
+        mut receiver: mpsc::UnboundedReceiver<Job>,
+        quiet: Option<Quiet>,
+    ) {
         let inner = Arc::clone(&self.inner);
         // Weak, so the worker's own handle never keeps it alive.
         let own = jobs.downgrade();
         tokio::spawn(async move {
             let held_key = key.clone();
-            let _search_guard = inner
+            let mut search_guard = inner
                 .search
                 .as_ref()
                 .map(|search| search.session_guard(key));
             let mut session: Option<Session> = None;
-            let mut saved: Option<crate::store::Durable> = None;
+            let (mut carry, mut saved, mut subagent) = match quiet {
+                Some(quiet) => (Some(quiet.carry), quiet.saved, quiet.subagent),
+                None => (None, None, false),
+            };
             let mut retry_save = false;
             // Jobs a move held, in the order they arrived, and the jobs to
             // run before the queue's next one once it no longer holds them.
             let mut held: VecDeque<Job> = VecDeque::new();
             let mut ready: VecDeque<Job> = VecDeque::new();
+            // Setups and notices that wait for summaries a resume could not
+            // read again, in the order they arrived.
+            let mut unread: VecDeque<Job> = VecDeque::new();
+            // A session without a summarizer is freed sooner once the runner
+            // says its run ended.
+            let watch_run_end = || inner.client.run_ends().map(|ends| ends.watch(&held_key));
+            let mut run_end = if subagent { watch_run_end() } else { None };
+            let mut run_ended = false;
             loop {
                 let job = match ready.pop_front() {
                     Some(job) => job,
-                    None => match receiver.recv().await {
-                        Some(job) => job,
-                        None => break,
-                    },
+                    None => {
+                        // The quiet time counts from when the worker ran out
+                        // of jobs, or from the run-end event if that came later.
+                        let quiet_after = if run_ended {
+                            QUIET_AFTER_RUN_END
+                        } else {
+                            QUIET_AFTER
+                        };
+                        let quiet_at = tokio::time::Instant::now() + quiet_after;
+                        let ended = async {
+                            match &run_end {
+                                Some(watch) => watch.ended().await,
+                                None => std::future::pending().await,
+                            }
+                        };
+                        // Biased, so a job that is waiting always runs before
+                        // the session is freed.
+                        let waited = tokio::select! {
+                            biased;
+                            job = receiver.recv() => Ok(job),
+                            () = tokio::time::sleep_until(quiet_at) => Err(NoJob::Quiet),
+                            () = ended => Err(NoJob::RunEnded),
+                        };
+                        match waited {
+                            Ok(Some(job)) => job,
+                            Ok(None) => break,
+                            Err(NoJob::RunEnded) => {
+                                run_ended = true;
+                                continue;
+                            }
+                            Err(NoJob::Quiet) => {
+                                let freed = held.is_empty()
+                                    && unread.is_empty()
+                                    && !retry_save
+                                    && free_quiet(
+                                        &inner,
+                                        &held_key,
+                                        &own,
+                                        &mut receiver,
+                                        &mut session,
+                                        &mut carry,
+                                        &mut search_guard,
+                                        Freed {
+                                            saved: &saved,
+                                            subagent,
+                                            quiet_for: quiet_after,
+                                        },
+                                        &mut ready,
+                                    );
+                                if freed {
+                                    break;
+                                }
+                                // Not now: try again after another quiet time.
+                                continue;
+                            }
+                        }
+                    }
                 };
                 let job = match inner.journal.gate().check(&held_key) {
                     Err(gated) => match hold(job, &gated, &mut held, &held_key) {
@@ -1255,6 +1420,66 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                     Ok(()) => job,
                 };
+                // The session's own activity after its run ended: it is in use
+                // again, and waits its whole quiet time.
+                if matches!(
+                    &job,
+                    Job::Setup(..)
+                        | Job::Notice(_)
+                        | Job::Ride(..)
+                        | Job::Tool { .. }
+                        | Job::PreUser { .. }
+                        | Job::Command { .. }
+                ) {
+                    run_ended = false;
+                }
+                // A quiet session is resumed before a job that works on it.
+                // The jobs that only ask about work in flight, and a
+                // workspace answer, need nothing of it; the carry answers
+                // `pre_user` as the resumed session would.
+                let needs_session = !matches!(
+                    &job,
+                    Job::Idle(_)
+                        | Job::Busy(_)
+                        | Job::Resume
+                        | Job::Park { .. }
+                        | Job::Discard { .. }
+                        | Job::AppCheckpoint { .. }
+                        | Job::Workspace { .. }
+                        | Job::PreUser { .. }
+                );
+                if let Some(quiet) = carry.take_if(|_| needs_session) {
+                    session = Some(resume(&inner, &held_key, quiet).await);
+                }
+                // Nothing runs on summaries a resume could not read again:
+                // each such job tries the read first. Setups and notices wait
+                // for it, in order; then they run before this job.
+                let on_summaries = matches!(
+                    &job,
+                    Job::Setup(..)
+                        | Job::Notice(_)
+                        | Job::Ride(..)
+                        | Job::Tool { .. }
+                        | Job::Command { .. }
+                        | Job::SummaryFinished(..)
+                        | Job::AccountWait(_)
+                );
+                if on_summaries {
+                    if session
+                        .as_mut()
+                        .is_some_and(|session| !session.summaries_ready())
+                    {
+                        hold_unread(job, &mut unread);
+                        continue;
+                    }
+                    if !unread.is_empty() {
+                        let rest = std::mem::take(&mut ready);
+                        ready.extend(unread.drain(..));
+                        ready.push_back(job);
+                        ready.extend(rest);
+                        continue;
+                    }
+                }
                 let settings: Settings = match (&job, &session) {
                     (
                         Job::Idle(_)
@@ -1279,7 +1504,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     // The first tool call of a session that has no Setup: only
                     // the project's settings matter to its tools.
                     (Job::Tool { route, .. }, None) => route_settings(&inner.config, route, "", 0),
-                    (_, None) => Settings::default(),
+                    // A quiet session answering `pre_user` as it was freed.
+                    (_, None) => match &carry {
+                        Some(carry) => {
+                            let (root, model_key, usable) = carry.config_inputs();
+                            inner.config.resolve(root, &model_key, usable)
+                        }
+                        None => Settings::default(),
+                    },
                 };
                 let settings = &settings;
                 let publish_app = !matches!(
@@ -1295,10 +1527,22 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 let refresh_search = matches!(&job, Job::Setup(..) | Job::Notice(..));
                 let app_checkpoint = matches!(&job, Job::Setup(..))
                     || (session.is_none() && matches!(&job, Job::Tool { .. }));
-                if publish_app && session.is_none() {
+                // A quiet session's workspace answer changes nothing the apps
+                // show, so its projection is neither hydrated nor published.
+                if publish_app && session.is_none() && carry.is_none() {
                     // Hydrate before this worker can save a newer checkpoint;
                     // queued reads and deltas then share the same hydrated state.
                     inner.app_read.activate(&held_key).await;
+                }
+                if let Job::Setup(_, _, features) = &job {
+                    // Each Setup names the preset again.
+                    subagent = !features.summarizer;
+                    if !subagent {
+                        run_end = None;
+                        run_ended = false;
+                    } else if run_end.is_none() {
+                        run_end = watch_run_end();
+                    }
                 }
                 match job {
                     Job::Resume => continue,
@@ -1398,7 +1642,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         // afresh below, like any new one.
                         Some(existing) if existing.compacting() => {
                             if !ensure_memory_context(&inner, &route, existing).await {
-                                read_workspace_again(&inner, own.clone(), &route);
+                                read_workspace_again(&inner, &route);
                             }
                             existing
                                 .setup(inner.client.as_ref(), settings, &route, &request, features)
@@ -1417,7 +1661,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 fresh.restore(durable);
                             }
                             if !ensure_memory_context(&inner, &route, &mut fresh).await {
-                                read_workspace_again(&inner, own.clone(), &route);
+                                read_workspace_again(&inner, &route);
                             }
                             fresh
                                 .setup(inner.client.as_ref(), settings, &route, &request, features)
@@ -1476,6 +1720,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     Job::Workspace { project, workspace } => {
                         if let Some(session) = &mut session {
                             session.follow_workspace(project.as_deref(), workspace);
+                        } else if let Some(carry) = &mut carry {
+                            carry.follow_workspace(project.as_deref(), workspace);
                         }
                     }
                     Job::Ride(ride, reply) => {
@@ -1568,11 +1814,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         let _ = reply.send(answer);
                     }
                     Job::PreUser { text, now, reply } => {
-                        let answer = match &session {
-                            Some(session) => session.pre_user(settings, &text, now).await,
-                            None => Addition::default(),
+                        let answer = match (&session, &carry) {
+                            (Some(session), _) => session.pre_user(settings, &text, now).await,
+                            (None, Some(carry)) => carry.pre_user(settings, &text, now).await,
+                            (None, None) => Addition::default(),
                         };
                         let _ = reply.send(answer);
+                        // A person's message is followed by the runner's next
+                        // request: resume the freed session now, while the
+                        // model works, rather than making that request wait
+                        // for the resume.
+                        if let Some(quiet) = carry.take() {
+                            session = Some(resume(&inner, &held_key, quiet).await);
+                        }
                     }
                     Job::Idle(reply) => {
                         if retry_save {
@@ -1639,7 +1893,6 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 }
             }
         });
-        jobs
     }
 }
 
@@ -1658,7 +1911,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host f
     async fn probe(&self, session: &SessionRef, budget: Duration) -> crate::agent_data::Probe {
         use crate::agent_data::Probe;
         let (reply, answer) = oneshot::channel();
-        match self.send(session, Job::Busy(reply)) {
+        match self.send_running(session, Job::Busy(reply)) {
             Err(ModuleError::UnknownSession) => return Probe::NoWorker,
             // A worker that stopped cannot say what it was doing.
             Err(_) => return Probe::NoAnswer,
@@ -1692,7 +1945,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host f
         use crate::agent_data::{Park, Parked};
         let (at, reached) = oneshot::channel();
         let (release, until) = oneshot::channel();
-        match self.send(session, Job::Park { at, until }) {
+        match self.send_running(session, Job::Park { at, until }) {
             Err(ModuleError::UnknownSession) => return Park::NoWorker,
             Err(_) => return Park::NoAnswer,
             Ok(()) => {}
@@ -1707,7 +1960,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host f
     }
 
     fn resume(&self, session: &SessionRef) {
-        let _ = self.send(session, Job::Resume);
+        let _ = self.send_running(session, Job::Resume);
     }
 
     fn forget(&self, session: &SessionRef, cut: &str) {
@@ -1719,6 +1972,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> crate::agent_data::Host f
     }
 
     fn active(&self, session: &SessionRef) -> bool {
+        // A quiet session still runs here: its next job starts its worker
+        // again.
         self.inner
             .workers
             .lock()
@@ -1820,29 +2075,233 @@ fn view_unconfirmed(session: Option<&Session>) -> bool {
         .is_some_and(|session| !session.durable().unconfirmed.is_empty())
 }
 
+/// Why a worker stopped waiting for its next job without one.
+enum NoJob {
+    /// The session's quiet time passed.
+    Quiet,
+    /// The runner said the session's run ended.
+    RunEnded,
+}
+
+/// What a worker that frees its session keeps besides the session, and
+/// how long the session had no job, for the log.
+struct Freed<'a> {
+    saved: &'a Option<crate::store::Durable>,
+    subagent: bool,
+    quiet_for: Duration,
+}
+
+/// Free the session of a worker whose queue stayed empty for its quiet
+/// time, and give the worker's place in the map to what is kept of it
+/// ([`Quiet`]), so the next job starts a worker again with that. A session
+/// that only called tools keeps nothing, and leaves the map as it was before
+/// its first call. True when the worker may stop now.
+///
+/// False while the session can't be freed: a move or a summarizer run holds
+/// it, its state, its apps' rows or its search index are not saved yet, or
+/// there is no store to read its summaries and decisions again from. False
+/// also when a job arrived meanwhile: the job is then in `ready`, and the
+/// session, freed already, is resumed before the job runs.
+#[allow(clippy::too_many_arguments)]
+fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &'a Inner<C>,
+    key: &SessionRef,
+    own: &mpsc::WeakUnboundedSender<Job>,
+    receiver: &mut mpsc::UnboundedReceiver<Job>,
+    session: &mut Option<Session>,
+    carry: &mut Option<crate::session::QuietCarry>,
+    search_guard: &mut Option<crate::search::background::SessionGuard<'a>>,
+    freed: Freed<'_>,
+    ready: &mut VecDeque<Job>,
+) -> bool {
+    use futures_util::FutureExt;
+    if inner.store.is_none()
+        || inner.db.is_none()
+        || inner.journal.gate().check(key).is_err()
+        || inner.runs.running(key)
+    {
+        return false;
+    }
+    // A worker that stops drops its search guard, and the search index then
+    // forgets the session, with any messages it has not indexed yet: free
+    // the session only once the index is idle.
+    let searched = inner
+        .search
+        .as_ref()
+        .is_none_or(|search| matches!(search.idle(key).now_or_never(), Some(Ok(()))));
+    if !searched {
+        return false;
+    }
+    if session.as_ref().is_some_and(|live| !live.compacting()) {
+        // A session that only called tools keeps nothing: its next call
+        // starts a fresh one, as its first call did.
+        let live = session.as_mut().expect("a session that only called tools");
+        live.app_checkpoint_if_due(true);
+        if live.app_snapshot_deadline().is_some()
+            || give_up_place(inner, key, own, receiver, search_guard, ready, None).is_err()
+        {
+            return false;
+        }
+        *session = None;
+        tracing::info!(
+            "ck-mc: session {}: freed after {} s without a job; its next job reads it again",
+            key.session,
+            freed.quiet_for.as_secs()
+        );
+        return true;
+    }
+    if let Some(live) = session.take() {
+        // The next worker reads the session's state from the store.
+        let kept = if freed.saved.as_ref() == Some(&live.durable()) {
+            Box::new(live).quiet_carry()
+        } else {
+            Err(Box::new(live))
+        };
+        match kept {
+            Ok(kept) => *carry = Some(kept),
+            Err(live) => {
+                *session = Some(*live);
+                return false;
+            }
+        }
+    }
+    let Some(kept) = carry.take() else {
+        return false;
+    };
+    let quiet = Box::new(Quiet {
+        carry: kept,
+        saved: freed.saved.clone(),
+        subagent: freed.subagent,
+    });
+    if let Err(quiet) = give_up_place(inner, key, own, receiver, search_guard, ready, Some(quiet)) {
+        *carry = quiet.map(|quiet| quiet.carry);
+        return false;
+    }
+    tracing::info!(
+        "ck-mc: session {}: freed after {} s without a job; its next job reads it again",
+        key.session,
+        freed.quiet_for.as_secs()
+    );
+    true
+}
+
+/// Give a worker's place in the map up to what is kept of its session
+/// (`quiet`), or leave the session no place at all (`None`): under the map's
+/// lock, only while the worker's queue is empty and the place is still the
+/// worker's. Otherwise `quiet` comes back, and a job that arrived meanwhile
+/// is in `ready`.
+fn give_up_place<'a, C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &'a Inner<C>,
+    key: &SessionRef,
+    own: &mpsc::WeakUnboundedSender<Job>,
+    receiver: &mut mpsc::UnboundedReceiver<Job>,
+    search_guard: &mut Option<crate::search::background::SessionGuard<'a>>,
+    ready: &mut VecDeque<Job>,
+    quiet: Option<Box<Quiet>>,
+) -> Result<(), Option<Box<Quiet>>> {
+    let mut workers = inner.workers.lock().expect("worker map");
+    if let Ok(job) = receiver.try_recv() {
+        ready.push_back(job);
+        return Err(quiet);
+    }
+    let ours = |worker: &mpsc::UnboundedSender<Job>| {
+        own.upgrade().is_some_and(|own| own.same_channel(worker))
+    };
+    if !workers
+        .get(key)
+        .is_some_and(|slot| matches!(slot, Slot::Running(worker) if ours(worker)))
+    {
+        // A move dropped the session, and its Discard is on the way.
+        return Err(quiet);
+    }
+    // Under the lock, so the next worker's search work and projection come
+    // after this worker's guard and release.
+    *search_guard = None;
+    match quiet {
+        Some(quiet) => {
+            workers.insert(key.clone(), Slot::Quiet(quiet));
+        }
+        None => {
+            workers.remove(key);
+        }
+    }
+    inner.app_read.release(key);
+    Ok(())
+}
+
+/// Resume a quiet session's carry for the job that needs it
+/// ([`Session::resume_quiet`]).
+async fn resume<C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &Inner<C>,
+    key: &SessionRef,
+    carry: crate::session::QuietCarry,
+) -> Session {
+    // Hydrate the apps' projection first, as for a new worker.
+    inner.app_read.activate(key).await;
+    let started = std::time::Instant::now();
+    let session = Session::resume_quiet(carry);
+    tracing::info!(
+        "ck-mc: session {}: resumed after a quiet free in {} ms",
+        key.session,
+        started.elapsed().as_millis()
+    );
+    session
+}
+
+/// What a worker does with a job that needs a session whose summaries a
+/// resume could not read again ([`Session::summaries_ready`]). A Setup or
+/// notice waits in `unread`, in order, for the read to succeed, as do a
+/// summarizer run's result and an account wait. A ride gets no view, and a
+/// tool call or a person's command is refused for now.
+fn hold_unread(job: Job, unread: &mut VecDeque<Job>) {
+    match job {
+        Job::Setup(..) | Job::Notice(_) | Job::SummaryFinished(..) | Job::AccountWait(_) => {
+            unread.push_back(job);
+        }
+        Job::Ride(_, reply) => {
+            let _ = reply.send(None);
+        }
+        Job::Tool { reply, .. } => {
+            let _ = reply.send(Err(ModuleError::Tool(
+                "Magic Context can't read this session's history right now; try again shortly."
+                    .into(),
+            )));
+        }
+        Job::Command { reply, .. } => {
+            let _ = reply.send(Err(subc_protocol::ErrorBody::new(
+                "store_unavailable",
+                "The session's history can't be read right now; try again shortly.",
+            )));
+        }
+        // Jobs that need no summaries run as usual and never come here.
+        job => unread.push_back(job),
+    }
+}
+
 /// Read again, off the Setup's path, which workspace the session's project
 /// is in now, and hand the answer to the session's worker. A head runs for
 /// months while its project may move to another workspace; one Entorhinal
 /// read per Setup is how it notices.
 fn read_workspace_again<C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &Arc<Inner<C>>,
-    worker: mpsc::WeakUnboundedSender<Job>,
     route: &Route,
 ) {
     let Some(folder) = route.workdir.clone() else {
         return;
     };
-    read_workspaces(inner, vec![(folder, (route.session.clone(), vec![worker]))]);
+    let session = route.session.clone();
+    read_workspaces(inner, vec![(folder, (session.clone(), vec![session]))]);
 }
 
 /// A folder's sessions: the one whose route Entorhinal is asked under, and
-/// the workers of all of them.
-type Folder = (SessionRef, Vec<mpsc::WeakUnboundedSender<Job>>);
+/// all of them.
+type Folder = (SessionRef, Vec<SessionRef>);
 
 /// Read again, in the background, which project and workspace each folder is
 /// in now: one Entorhinal read per folder, in turn, asked under the named
 /// session's route. Each answer goes to the workers of that folder's
-/// sessions; a folder Entorhinal doesn't answer for changes nothing.
+/// sessions, started again for a session that went quiet meanwhile; a
+/// folder Entorhinal doesn't answer for changes nothing.
 fn read_workspaces<C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &Arc<Inner<C>>,
     folders: Vec<(String, Folder)>,
@@ -1850,22 +2309,29 @@ fn read_workspaces<C: RunnerClient + Router + Send + Sync + 'static>(
     if folders.is_empty() {
         return;
     }
-    let inner = Arc::clone(inner);
+    let module = Module {
+        inner: Arc::clone(inner),
+    };
     tokio::spawn(async move {
-        for (folder, (session, workers)) in folders {
-            let Some((project, workspace)) =
-                crate::memory_context::read_workspace(inner.client.as_ref(), &session, &folder)
-                    .await
+        for (folder, (session, sessions)) in folders {
+            let Some((project, workspace)) = crate::memory_context::read_workspace(
+                module.inner.client.as_ref(),
+                &session,
+                &folder,
+            )
+            .await
             else {
                 continue;
             };
-            for worker in workers {
-                if let Some(worker) = worker.upgrade() {
-                    let _ = worker.send(Job::Workspace {
+            for session in sessions {
+                // A session a move dropped since has no worker to tell.
+                let _ = module.send(
+                    &session,
+                    Job::Workspace {
                         project: project.clone(),
                         workspace: workspace.clone(),
-                    });
-                }
+                    },
+                );
             }
         }
     });
@@ -2058,3 +2524,7 @@ mod config_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "quiet_session_tests.rs"]
+mod quiet_session_tests;

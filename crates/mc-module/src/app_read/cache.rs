@@ -51,9 +51,22 @@ impl Replica {
 
     pub(super) fn activate(&mut self, key: &SessionRef) {
         // A live worker may have uncheckpointed deltas. Keep its projection
-        // until the worker is explicitly discarded, not merely until a timer expires.
+        // until the worker is explicitly discarded or releases it, not merely
+        // until a timer expires.
         self.cache.active.insert(key.clone());
         let _ = self.ensure_loaded(key);
+    }
+
+    /// The session's worker saved its projection to the store and stopped
+    /// (a quiet session the module freed). The snapshot then goes like that
+    /// of any session no worker holds: once no read used it for
+    /// [`KEEP_FOR`], or sooner past [`IDLE_LIMIT`] such sessions. The next
+    /// read, or the next worker's first update, loads it from the store
+    /// again. A worker that starts again activates it first, and its
+    /// activation reaches this thread after the release.
+    pub(super) fn release(&mut self, key: &SessionRef) {
+        self.cache.active.remove(key);
+        self.evict_idle(Instant::now());
     }
 
     pub(super) fn ensure_loaded(&mut self, key: &SessionRef) -> Result<(), Refusal> {
@@ -117,5 +130,44 @@ impl Replica {
                 self.forget_head(&key);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    /// A session whose worker freed it keeps its snapshot only while reads
+    /// use it, then answers from its saved checkpoint as before.
+    #[test]
+    fn app_read_a_released_session_is_evicted_and_read_again_from_its_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+        let snapshot = super::super::tests::fixture();
+        super::super::tests::save_fixture(&store, &snapshot, None);
+        let key = snapshot.key.clone();
+        let mut replica = super::super::tests::replica(None);
+        replica.snapshots.clear();
+        replica.store = Some(
+            Connection::open_with_flags(&store.path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap(),
+        );
+        replica.load();
+        replica.activate(&key);
+        let params = json!({"session":key,"message_ids":["m1","m2"]});
+        let mut before = replica.read("context.states", &params).unwrap();
+        let later = Instant::now() + KEEP_FOR + Duration::from_secs(1);
+        replica.evict_idle(later);
+        assert!(replica.snapshots.contains_key(&key), "a live worker's");
+        // Just used, a released snapshot stays for the reads using it.
+        replica.release(&key);
+        assert!(replica.snapshots.contains_key(&key));
+        replica.evict_idle(later);
+        assert!(!replica.snapshots.contains_key(&key), "released, then idle");
+        let mut after = replica.read("context.states", &params).unwrap();
+        assert!(replica.snapshots.contains_key(&key), "read again");
+        for read in [&mut before, &mut after] {
+            read.as_object_mut().unwrap().remove("as_of_ms");
+        }
+        assert_eq!(before, after);
     }
 }

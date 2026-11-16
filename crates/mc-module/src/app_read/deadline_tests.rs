@@ -213,7 +213,7 @@ async fn app_read_removed_session_cancels_pending_deadline() {
     let f = Fixture::new().await;
     f.change(1).await;
     f.module.inner.set_up.lock().unwrap().remove(&f.key);
-    let worker = f
+    let slot = f
         .module
         .inner
         .workers
@@ -221,6 +221,9 @@ async fn app_read_removed_session_cancels_pending_deadline() {
         .unwrap()
         .remove(&f.key)
         .unwrap();
+    let Slot::Running(worker) = slot else {
+        panic!("the session's worker runs");
+    };
     let weak = worker.downgrade();
     drop(worker);
     tokio::task::yield_now().await;

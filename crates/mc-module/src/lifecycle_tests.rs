@@ -129,6 +129,9 @@ mod apply_view_lost_answer_review_tests;
 #[path = "compaction_undo_tests.rs"]
 mod compaction_undo_tests;
 
+#[path = "quiet_resume_review_tests.rs"]
+mod quiet_resume_review_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,
@@ -1960,4 +1963,229 @@ fn thalamus_length_refusal_v1_rides_get_a_view() {
     let status = serde_json::to_value(&status).unwrap();
     assert_eq!(status["state"], "error");
     assert_eq!(status["error"]["provider_code"], "context_overflow");
+}
+
+/// A head session with two summaries, a store and the apps' projection, set
+/// up under a statement epoch, whose runner applies the view a notice built
+/// and handed over: a session with nothing in flight. Built the same way for
+/// every `label`, so two of them are alike.
+async fn settled(label: &str) -> (Session, Client, crate::app_read::AppRead, Settings) {
+    let (mut session, client, route, mut setup, settings) = fixture();
+    let dir = scratch(label);
+    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, created_at, harness)
+             VALUES ('s1', 1, 1, 2, 'a', 'b', 'first', 'first part', 'first part', 1, 'mock'),
+                    ('s1', 2, 3, 4, 'c', 'd', 'second', 'second part', 'second part', 1, 'mock');",
+        )
+        .map_err(|e| e.to_string())
+    })
+    .unwrap();
+    session.db = Some(Arc::new(db));
+    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).unwrap());
+    session.set_store(Some(Arc::clone(&store)));
+    let app = crate::app_read::AppRead::new(Some(store.path.clone()), Some(dir.join("context.db")));
+    session.load_summaries();
+    *client.entries.lock().unwrap() = vec![
+        text(1, "a"),
+        text(2, "b"),
+        text(3, "c"),
+        text(4, "d"),
+        text(5, "e"),
+    ];
+    setup.newest = client.entries.lock().unwrap().last().map(cursor);
+    setup.statement_epoch = Some("epoch".into());
+    setup.statement_seq = Some(1);
+    let features = Features {
+        summarizer: true,
+        ..session.features
+    };
+    session
+        .setup(&client, &settings, &route, &setup, features)
+        .await;
+    session.publish_app(&app, true);
+    // A head that is due builds and hands over a view with the history and
+    // the cut on the next notice.
+    session.head_stale = true;
+    let mut request = notice(&session, 1, setup.newest.clone());
+    request.conditions.statement_seq = Some(2);
+    session.notice(&client, &settings, request).await;
+    session.publish_app(&app, false);
+    let view = session.latest.clone().expect("the notice built a view");
+    let mut answer = AppliedViewAnswer::new();
+    answer.view = Some(view.clone());
+    *client.applied.lock().unwrap() = Some(answer);
+    let mut request = notice(&session, 2, setup.newest.clone());
+    request.conditions.statement_seq = Some(3);
+    request.applied_view = Some(view.applied());
+    session.notice(&client, &settings, request).await;
+    session.publish_app(&app, false);
+    assert!(
+        session.unconfirmed.is_empty(),
+        "the runner confirmed the view"
+    );
+    (session, client, app, settings)
+}
+
+/// Field for field, what a notice depends on and what it leaves: the saved
+/// state, the view, the transcript index, the summaries, the statement order
+/// and the apps' projection and decisions. Wall-clock times (`*_ms`) are left
+/// out: the two sessions are built a few milliseconds apart.
+fn assert_same_session(kept: &mut Session, resumed: &mut Session, step: &str) {
+    fn timeless(value: impl serde::Serialize) -> Value {
+        fn strip(value: &mut Value) {
+            match value {
+                Value::Object(members) => {
+                    members.retain(|name, _| !name.ends_with("_ms"));
+                    members.values_mut().for_each(strip);
+                }
+                Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let mut value = serde_json::to_value(value).unwrap();
+        strip(&mut value);
+        value
+    }
+    assert_eq!(
+        timeless(kept.durable()),
+        timeless(resumed.durable()),
+        "{step}: saved state"
+    );
+    assert_eq!(kept.latest, resumed.latest, "{step}: view");
+    assert_eq!(kept.version, resumed.version, "{step}: version");
+    assert_eq!(kept.cut, resumed.cut, "{step}: cut");
+    assert_eq!(kept.index.base(), resumed.index.base(), "{step}: index");
+    assert_eq!(
+        kept.index.entries(),
+        resumed.index.entries(),
+        "{step}: index"
+    );
+    assert_eq!(kept.index_ready, resumed.index_ready, "{step}: index");
+    assert_eq!(
+        kept.summaries.to_vec(),
+        resumed.summaries.to_vec(),
+        "{step}: summaries"
+    );
+    assert_eq!(kept.seq, resumed.seq, "{step}: notice number");
+    assert_eq!(kept.statement_epoch, resumed.statement_epoch, "{step}");
+    assert_eq!(kept.statement_seq, resumed.statement_seq, "{step}");
+    assert_eq!(kept.statement_late, resumed.statement_late, "{step}");
+    assert_eq!(kept.late_statements, resumed.late_statements, "{step}");
+    assert_eq!(kept.conditions, resumed.conditions, "{step}: conditions");
+    assert_eq!(kept.latest_unknown, resumed.latest_unknown, "{step}");
+    assert_eq!(
+        timeless(&kept.app_decisions),
+        timeless(&resumed.app_decisions),
+        "{step}"
+    );
+    assert_eq!(
+        timeless(kept.app_snapshot()),
+        timeless(resumed.app_snapshot()),
+        "{step}: apps' projection"
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_a_session_freed_while_quiet_answers_its_next_notices_as_one_never_freed() {
+    let (mut kept, kept_client, kept_app, settings) = settled("quiet-kept").await;
+    let (freed, client, app, _) = settled("quiet-freed").await;
+    let Ok(carry) = Box::new(freed).quiet_carry() else {
+        panic!("a session with nothing in flight is quiet");
+    };
+    // What freeing drops: all but the newest summary. The transcript index
+    // and the view stay, so resuming reads nothing from the runner.
+    assert_eq!(carry.0.summaries.len(), 1);
+    assert_eq!(carry.0.index.entries(), kept.index.entries());
+    assert!(carry.0.index_ready && carry.0.latest.is_some());
+    let reads = client.reads.lock().unwrap().len();
+    let mut resumed = Session::resume_quiet(carry);
+    assert_eq!(
+        client.reads.lock().unwrap().len(),
+        reads,
+        "resuming reads nothing from the runner"
+    );
+    assert_same_session(&mut kept, &mut resumed, "resumed");
+
+    // A quiet notice with a new message, then one at the execute threshold,
+    // then one built before a statement already taken.
+    let f = text(6, "f");
+    for client in [&kept_client, &client] {
+        client.entries.lock().unwrap().push(f.clone());
+    }
+    let applied = kept.latest.as_ref().map(View::applied);
+    let steps = [
+        ("new message", 3, Some(4), None),
+        ("execute threshold", 4, Some(5), Some(70_000)),
+        ("late statement", 5, Some(2), Some(10_000)),
+    ];
+    for (step, seq, stamp, tokens) in steps {
+        let mut answers = Vec::new();
+        for (session, client, app) in [
+            (&mut kept, &kept_client, &kept_app),
+            (&mut resumed, &client, &app),
+        ] {
+            let mut request = notice(session, seq, Some(cursor(&f)));
+            request.entries = vec![f.clone()];
+            request.applied_view = applied.clone();
+            request.conditions.statement_seq = stamp;
+            request.conditions.last_prompt_tokens = tokens;
+            let summary = session.notice(client, &settings, request).await;
+            session.publish_app(app, false);
+            answers.push((summary.is_some(), client.offered.lock().unwrap().clone()));
+        }
+        assert_eq!(answers[0], answers[1], "{step}: decisions and views");
+        assert_same_session(&mut kept, &mut resumed, step);
+    }
+}
+
+/// What a failed read, a runner's refusal or another provider's view leaves
+/// in memory doesn't keep a session from being freed. The resumed session
+/// keeps it for its next job, as a session never freed does, and reads
+/// nothing on resuming.
+#[tokio::test]
+async fn lifecycle_a_quiet_session_is_freed_whatever_a_failed_read_or_refusal_left() {
+    /// What a test leaves in memory before the session is freed.
+    type Leave = fn(&mut Session);
+    let cases: [(&str, Leave); 3] = [
+        ("index and runner's view unknown", |session| {
+            session.index_ready = false;
+            session.latest_unknown = true;
+        }),
+        ("refused by the runner", |session| session.suspended = true),
+        ("another provider's view applied", |session| {
+            session.latest = None;
+        }),
+    ];
+    for (number, (case, leave)) in cases.into_iter().enumerate() {
+        let (mut session, client, _app, _) = settled(&format!("quiet-left-{number}")).await;
+        leave(&mut session);
+        let left = (
+            session.index_ready,
+            session.latest_unknown,
+            session.suspended,
+            session.latest.clone(),
+        );
+        let Ok(carry) = Box::new(session).quiet_carry() else {
+            panic!("{case}: a session with nothing in flight is kept");
+        };
+        let reads = client.reads.lock().unwrap().len();
+        let resumed = Session::resume_quiet(carry);
+        assert_eq!(
+            (
+                resumed.index_ready,
+                resumed.latest_unknown,
+                resumed.suspended,
+                resumed.latest.clone(),
+            ),
+            left,
+            "{case}: what the session left for its next job"
+        );
+        assert_eq!(
+            client.reads.lock().unwrap().len(),
+            reads,
+            "{case}: transcript reads on resuming"
+        );
+    }
 }
