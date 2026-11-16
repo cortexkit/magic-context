@@ -603,3 +603,151 @@ mod thalamus_not_delivered {
         assert_eq!(wait.code, "handover_failed");
     }
 }
+
+/// THALAMUS's Agent Runner samples from the change that answers a
+/// run-starting send as soon as it is stored: `pending` with the run's id,
+/// before the prompt reaches the host (`send-answers-early-v1`,
+/// `send-unknown-v2`, `send-not-delivered-v2`), kept byte for byte with their
+/// sums. Such a `pending` is neither delivery nor a run already under way: the
+/// summary follows the named run to its end, and a hand-over that fails still
+/// ends it as a send that never ran.
+mod thalamus_send_answers_early {
+    use super::*;
+    use cortexkit_role_llm_runner::run::RunStatus;
+
+    macro_rules! samples {
+        ($dir:literal: $($name:literal),+ $(,)?) => {
+            [$(($name, include_bytes!(concat!("../../testdata/", $dir, "/", $name)) as &[u8])),+]
+        };
+    }
+
+    const EARLY: [(&str, &[u8]); 3] = samples!("send-answers-early-v1":
+        "01-opencode2-send-reply.json",
+        "02-pi-send-reply.json",
+        "03-claude-code-send-reply.json",
+    );
+    const UNKNOWN: [(&str, &[u8]); 8] = samples!("send-unknown-v2":
+        "01-head-send-reply.json",
+        "02-head-send-status-unknown.json",
+        "03-head-send-resend-same-id.json",
+        "04-steer-send-reply.json",
+        "05-steer-send-status-unknown.json",
+        "06-steer-send-resend-same-id.json",
+        "07-head-send-status-pending.json",
+        "08-head-send-status-delivered.json",
+    );
+    const NOT_DELIVERED: [(&str, &[u8]); 7] = samples!("send-not-delivered-v2":
+        "01-send-reply-pending.json",
+        "02-send-status-not-delivered-handover-failed.json",
+        "03-send-resend-same-id-not-delivered.json",
+        "04-run-status-handover-failed.json",
+        "05-run-result-handover-failed.json",
+        "06-run-ended-event-handover-failed.json",
+        "07-send-status-not-delivered-withdrawn.json",
+    );
+
+    fn reply(sample: (&str, &[u8])) -> SendReply {
+        serde_json::from_slice(sample.1).unwrap_or_else(|error| panic!("{}: {error}", sample.0))
+    }
+
+    #[test]
+    fn the_samples_match_their_sums() {
+        use sha2::{Digest, Sha256};
+        let sets: [(&[(&str, &[u8])], &str); 3] = [
+            (
+                &EARLY,
+                include_str!("../../testdata/send-answers-early-v1/SHA256SUMS"),
+            ),
+            (
+                &UNKNOWN,
+                include_str!("../../testdata/send-unknown-v2/SHA256SUMS"),
+            ),
+            (
+                &NOT_DELIVERED,
+                include_str!("../../testdata/send-not-delivered-v2/SHA256SUMS"),
+            ),
+        ];
+        for (samples, sums) in sets {
+            for (name, bytes) in samples {
+                let line = format!("{:x}  {name}", Sha256::digest(bytes));
+                assert!(sums.lines().any(|sum| sum == line), "{name}");
+            }
+        }
+    }
+
+    /// A first reply of `pending` that names its run, from every host, is
+    /// followed as that run: one send, never replayed or resent, and the
+    /// summary reads the named run's result.
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_reply_with_a_run_id_is_followed_as_that_run() {
+        for sample in [EARLY[0], EARLY[1], EARLY[2], UNKNOWN[0], NOT_DELIVERED[0]] {
+            let early = reply(sample);
+            assert_eq!(early.state, send_states::PENDING, "{}", sample.0);
+            let run_id = early.run_id.clone().unwrap();
+            let client = Client::new(vec![early], vec![]);
+            direct(&client, SendKind::TurnOne)
+                .await
+                .unwrap_or_else(|error| panic!("{}: {error:?}", sample.0));
+            assert_eq!(client.sends.lock().unwrap().len(), 1, "{}", sample.0);
+            assert_eq!(*client.reads.lock().unwrap(), [run_id], "{}", sample.0);
+        }
+    }
+
+    /// The run a `pending` reply named ends `handover_failed` when its prompt
+    /// never reached the host: the summary never ran, and is not a failure.
+    #[tokio::test(start_paused = true)]
+    async fn a_named_run_whose_handover_failed_never_ran() {
+        let status: RunStatus = serde_json::from_slice(NOT_DELIVERED[3].1).unwrap();
+        assert_eq!(status.error.unwrap().class, "handover_failed");
+        let result: RunResult = serde_json::from_slice(NOT_DELIVERED[4].1).unwrap();
+        let client = Client::new(vec![reply(NOT_DELIVERED[0])], vec![result]);
+        let error = direct(&client, SendKind::TurnOne).await.err().unwrap();
+        let SummaryError::NeverRan(wait) = error else {
+            panic!("not a never-run wait: {error:?}")
+        };
+        assert_eq!(wait.code, "handover_failed");
+        assert_eq!(client.sends.lock().unwrap().len(), 1);
+    }
+
+    /// A `not_delivered` answer that names the run it recorded proves the
+    /// prompt never ran: the send goes once more under a new id, and the
+    /// retired run is never followed.
+    #[tokio::test(start_paused = true)]
+    async fn a_not_delivered_answer_naming_its_run_is_resent_once() {
+        for sample in [NOT_DELIVERED[1], NOT_DELIVERED[2], NOT_DELIVERED[6]] {
+            let client = Client::new(vec![reply(sample), active()], vec![]);
+            direct(&client, SendKind::TurnOne)
+                .await
+                .unwrap_or_else(|error| panic!("{}: {error:?}", sample.0));
+            let sends = client.sends.lock().unwrap();
+            assert_eq!(sends.len(), 2, "{}", sample.0);
+            assert_ne!(sends[0].1.send_id, sends[1].1.send_id, "{}", sample.0);
+            assert_eq!(*client.reads.lock().unwrap(), ["run"], "{}", sample.0);
+        }
+    }
+
+    /// An answer whose delivery is unknown, or a replayed id's stored receipt,
+    /// is followed as the run it names. A `pending` without a run id is
+    /// replayed under the same id until the runner names one.
+    #[tokio::test(start_paused = true)]
+    async fn unknown_delivery_follows_the_named_run() {
+        for sample in &UNKNOWN[1..6] {
+            let named = reply(*sample);
+            let run_id = named.run_id.clone().unwrap();
+            let client = Client::new(vec![named], vec![]);
+            direct(&client, SendKind::TurnOne)
+                .await
+                .unwrap_or_else(|error| panic!("{}: {error:?}", sample.0));
+            assert_eq!(*client.reads.lock().unwrap(), [run_id], "{}", sample.0);
+        }
+        let client = Client::new(vec![reply(UNKNOWN[6]), reply(UNKNOWN[7])], vec![]);
+        direct(&client, SendKind::TurnOne).await.unwrap();
+        let sends = client.sends.lock().unwrap();
+        assert_eq!(sends.len(), 2);
+        assert_eq!(sends[0].1.send_id, sends[1].1.send_id);
+        assert_eq!(
+            *client.reads.lock().unwrap(),
+            ["run_b373e590c9cb0c2c2645ebee"]
+        );
+    }
+}
