@@ -11,6 +11,7 @@ pub(crate) mod due;
 pub mod fit;
 pub mod hashes;
 pub mod head;
+pub mod index;
 pub mod prompt;
 pub mod prompts;
 pub mod render;

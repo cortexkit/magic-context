@@ -220,12 +220,8 @@ fn scenario(run: &mut Run) {
     // Summary 4 is counted again in the new model's vocabulary. The two
     // vocabularies must count it differently, or a count kept from before
     // the change would go unseen.
-    let newer = run
-        .session
-        .summaries
-        .iter()
-        .find(|summary| summary.sequence == 4)
-        .unwrap();
+    let rows = run.session.summary_rows().unwrap();
+    let newer = rows.iter().find(|summary| summary.sequence == 4).unwrap();
     let text = crate::summary::render::render_compartment_at_tier(
         &crate::summary::render::DecayRenderCompartment::from(newer),
         1,

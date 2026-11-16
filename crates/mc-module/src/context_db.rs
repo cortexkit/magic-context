@@ -166,6 +166,34 @@ fn shared_body(content: String, p1: Option<String>) -> (Arc<str>, Option<Arc<str
     (content, p1)
 }
 
+/// The columns [`compartment_row`] reads, in its order.
+const COMPARTMENT_COLUMNS: &str = "sequence, start_message, end_message, COALESCE(start_message_id, ''),
+        COALESCE(end_message_id, ''), title, content, p1, p2, p3, p4,
+        importance, episode_type, legacy, created_at";
+
+fn compartment_row(row: &rusqlite::Row) -> rusqlite::Result<StoredCompartment> {
+    let (content, p1) = shared_body(row.get(6)?, row.get(7)?);
+    Ok(StoredCompartment {
+        sequence: row.get(0)?,
+        start_message: row.get(1)?,
+        end_message: row.get(2)?,
+        start_message_id: row.get(3)?,
+        end_message_id: row.get(4)?,
+        start_date: None,
+        end_date: None,
+        title: row.get(5)?,
+        content,
+        p1,
+        p2: row.get(8)?,
+        p3: row.get(9)?,
+        p4: row.get(10)?,
+        importance: row.get(11)?,
+        episode_type: row.get(12)?,
+        legacy: row.get(13)?,
+        created_at: row.get(14)?,
+    })
+}
+
 /// Whose notes a call may see and change: the session's own, by harness
 /// and host session id, plus its project's smart notes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -531,38 +559,41 @@ impl ContextDb {
         session: &str,
     ) -> Result<Vec<StoredCompartment>, String> {
         let mut statement = connection
-            .prepare_cached(
-                "SELECT sequence, start_message, end_message, COALESCE(start_message_id, ''),
-                        COALESCE(end_message_id, ''), title, content, p1, p2, p3, p4,
-                        importance, episode_type, legacy, created_at
+            .prepare_cached(&format!(
+                "SELECT {COMPARTMENT_COLUMNS}
                    FROM compartments
                   WHERE session_id = ?1 AND harness = ?2
-                  ORDER BY sequence",
-            )
+                  ORDER BY sequence"
+            ))
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map(params![session, harness], |row| {
-                let (content, p1) = shared_body(row.get(6)?, row.get(7)?);
-                Ok(StoredCompartment {
-                    sequence: row.get(0)?,
-                    start_message: row.get(1)?,
-                    end_message: row.get(2)?,
-                    start_message_id: row.get(3)?,
-                    end_message_id: row.get(4)?,
-                    start_date: None,
-                    end_date: None,
-                    title: row.get(5)?,
-                    content,
-                    p1,
-                    p2: row.get(8)?,
-                    p3: row.get(9)?,
-                    p4: row.get(10)?,
-                    importance: row.get(11)?,
-                    episode_type: row.get(12)?,
-                    legacy: row.get(13)?,
-                    created_at: row.get(14)?,
-                })
-            })
+            .query_map(params![session, harness], compartment_row)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    /// The session's summaries with these sequence numbers, oldest first;
+    /// a sequence the store doesn't hold is left out.
+    pub fn compartments_with_sequences(
+        &self,
+        harness: &str,
+        session: &str,
+        sequences: &[i64],
+    ) -> Result<Vec<StoredCompartment>, String> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare_cached(&format!(
+                "SELECT {COMPARTMENT_COLUMNS}
+                   FROM compartments
+                  WHERE session_id = ?1 AND harness = ?2
+                    AND sequence IN (SELECT value FROM json_each(?3))
+                  ORDER BY sequence"
+            ))
+            .map_err(|error| error.to_string())?;
+        let sequences = serde_json::to_string(sequences).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![session, harness, sequences], compartment_row)
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<_, _>>()
             .map_err(|error| error.to_string())

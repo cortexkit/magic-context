@@ -543,7 +543,7 @@ mod tests {
             });
             let inputs = crate::summary::head::Inputs {
                 counter: crate::count::Counter::for_model(Some("provider/model")),
-                summaries: &session.summaries,
+                summaries: &session.summary_rows().unwrap(),
                 docs: "<project-docs>Project layout</project-docs>",
                 rows: &[],
                 classes: &std::collections::HashMap::new(),

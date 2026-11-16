@@ -479,9 +479,24 @@ impl Session {
                 );
             }
         }
-        let compartments = if p.summaries_dirty {
-            p.ranges = summary_ranges(&self.summaries);
-            p.compartments = Arc::new(self.summaries.iter().map(compartment).collect());
+        // Every summary's full row: the rows the session doesn't hold are
+        // read from context.db. A failed read keeps the rows shown and tries
+        // again on the next update.
+        let rows = if p.summaries_dirty {
+            self.summary_rows()
+                .map_err(|error| {
+                    tracing::warn!(
+                        "ck-mc: session {}: reading summaries for the app reads failed: {error}",
+                        self.key.session
+                    )
+                })
+                .ok()
+        } else {
+            None
+        };
+        let compartments = if let Some(rows) = rows {
+            p.ranges = summary_ranges(self.summary_index());
+            p.compartments = Arc::new(rows.iter().map(|row| compartment(row)).collect());
             p.queued = p
                 .stamped
                 .iter()
@@ -1220,7 +1235,7 @@ fn compartment(c: &StoredCompartment) -> Value {
     json!({"compartment_id":c.sequence.to_string(), "ordinal":c.sequence, "title":c.title, "first_message_id":c.start_message_id, "last_message_id":c.end_message_id, "first_message_ordinal":c.start_message, "last_message_ordinal":c.end_message, "first_at_ms":null, "last_at_ms":null, "message_count":(c.end_message-c.start_message+1).max(0), "importance":c.importance, "summary_markdown":c.content, "summary_markdown_bytes":c.content.len(), "summary_markdown_truncated":false, "tiers":{"p1":c.p1, "p2":c.p2, "p3":c.p3, "p4":c.p4}, "tiers_bytes":{"p1":c.p1.as_deref().map(str::len), "p2":c.p2.as_ref().map(String::len), "p3":c.p3.as_ref().map(String::len), "p4":c.p4.as_ref().map(String::len)}, "tiers_truncated":{"p1":false,"p2":false,"p3":false,"p4":false}, "created_at_ms":c.created_at, "legacy":c.legacy!=0, "episode_type":c.episode_type, "facts":{"attribution":"historian_run", "by_category":{}, "session_facts_cursor":null}})
 }
 
-fn summary_ranges(summaries: &[StoredCompartment]) -> BTreeMap<u64, u64> {
+fn summary_ranges(summaries: &[crate::session::SummaryIndex]) -> BTreeMap<u64, u64> {
     // Older summaries can share message boundaries. Cache their union so
     // messages already summarized are excluded from pending part removals,
     // regardless of overlapping ranges or row order.

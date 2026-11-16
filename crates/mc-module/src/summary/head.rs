@@ -649,21 +649,24 @@ impl NewerSummaries {
 
 /// The summaries newer than `baseline`'s `m[0]`, rendered for `m[1]`, and
 /// the attribution that goes with them. A baseline that already carries the
-/// returned items gives the same result again.
-pub fn newer_summaries(
+/// returned items gives the same result again. `summaries` may also hold
+/// only the newer ones.
+pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
     baseline: &Baseline,
-    summaries: &[StoredCompartment],
+    summaries: &[S],
     counter: crate::count::Counter,
 ) -> NewerSummaries {
     // Summaries are kept in sequence order, so the newer ones are found by a
     // binary search rather than a look at every summary.
     debug_assert!(summaries
         .windows(2)
-        .all(|pair| pair[0].sequence <= pair[1].sequence));
-    let first = summaries.partition_point(|summary| summary.sequence <= baseline.through_sequence);
+        .all(|pair| pair[0].borrow().sequence <= pair[1].borrow().sequence));
+    let first =
+        summaries.partition_point(|summary| summary.borrow().sequence <= baseline.through_sequence);
     let mut texts = Vec::new();
     let mut newer = Vec::new();
     for summary in &summaries[first..] {
+        let summary = summary.borrow();
         let rendered = DecayRenderCompartment::from(summary);
         if rendered.is_no_content() {
             continue;

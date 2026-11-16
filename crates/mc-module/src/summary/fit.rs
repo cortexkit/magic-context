@@ -15,11 +15,13 @@
 
 use super::prompt::{
     build_compartment_agent_prompt, order_historian_memories, render_historian_memory_block,
-    render_seed_examples_block, render_session_references_block_window, select_seeds,
-    select_session_references, CompartmentPromptInputs, ReferenceCompartment,
+    render_seed_examples_block, render_session_references_block_window,
+    select_session_reference_indices, select_seeds, CompartmentPromptInputs,
+    ReferenceCompartment,
 };
 use crate::calibration::LocalMass;
-use crate::context_db::{StoredCompartment, StoredMemory};
+use crate::context_db::StoredMemory;
+use crate::summary::index::SummaryIndex;
 
 /// Smallest chunk worth a run: below it the fixed parts take the whole window
 /// and a run could not summarize even one ordinary message.
@@ -86,7 +88,9 @@ pub struct Input<'a> {
     /// The highest ordinal the chunk may end at: it sizes the
     /// `Messages X-Y:` header.
     pub last_ordinal: u64,
-    pub summaries: &'a [StoredCompartment],
+    /// The earlier summaries the prompt shows as references, as
+    /// [`chosen_references`] picks them, oldest first.
+    pub references: &'a [ReferenceCompartment],
     pub memories: &'a [StoredMemory],
     pub memory_enabled: bool,
     /// The two-pass historian's first turn: no memory block, and the anchor
@@ -117,6 +121,28 @@ pub struct Fit {
     pub trimmed: bool,
 }
 
+/// The positions, among `summaries`, of the summaries a run's prompt shows
+/// as references. The choice reads only whether each has content and its
+/// importance, so a run reads the bodies of the chosen ones alone.
+pub fn chosen_references(
+    summaries: &[SummaryIndex],
+    prompts: &super::prompts::SummaryPrompts,
+    session_id: &str,
+    chunk_start: u64,
+) -> Vec<usize> {
+    let seeds = select_seeds(
+        &prompts.seeds,
+        session_id,
+        chunk_start as i64,
+        prompts.seeds_per_call,
+    );
+    let candidates: Vec<(bool, i32)> = summaries
+        .iter()
+        .map(|summary| (summary.has_content, summary.importance))
+        .collect();
+    select_session_reference_indices(&candidates, &seeds, session_id, chunk_start as i64)
+}
+
 /// Fit the prompt to every model in `input.windows`. `Err` names why not
 /// even a minimal chunk fits; the reason stays the same until the model,
 /// its window or the prompt change.
@@ -127,17 +153,7 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
         input.chunk_start as i64,
         input.prompts.seeds_per_call,
     );
-    let references: Vec<ReferenceCompartment> = input
-        .summaries
-        .iter()
-        .map(ReferenceCompartment::from)
-        .collect();
-    let references = select_session_references(
-        &references,
-        &seeds,
-        input.session_id,
-        input.chunk_start as i64,
-    );
+    let references = input.references;
     // Anchored facts are compared with memory by the second turn, so the
     // first turn carries no memory block.
     let memories = if input.memory_enabled && !input.anchored_facts {
@@ -288,6 +304,9 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
 mod tests {
     use super::*;
 
+    use crate::context_db::StoredCompartment;
+    use sha2::{Digest, Sha256};
+
     fn summary(sequence: i64) -> StoredCompartment {
         StoredCompartment {
             sequence,
@@ -321,8 +340,18 @@ mod tests {
         PROMPTS.get_or_init(crate::summary::prompts::SummaryPrompts::bundled)
     }
 
+    /// The references a run over these summaries shows, chosen as a run
+    /// chooses them for the chunk [`input`] starts at.
+    fn references(summaries: &[StoredCompartment]) -> Vec<ReferenceCompartment> {
+        let index: Vec<SummaryIndex> = summaries.iter().map(SummaryIndex::from).collect();
+        chosen_references(&index, prompts(), "s1", 101)
+            .into_iter()
+            .map(|position| ReferenceCompartment::from(&summaries[position]))
+            .collect()
+    }
+
     fn input<'a>(
-        summaries: &'a [StoredCompartment],
+        references: &'a [ReferenceCompartment],
         memories: &'a [StoredMemory],
         windows: &'a [Window],
     ) -> Input<'a> {
@@ -330,7 +359,7 @@ mod tests {
             session_id: "s1",
             chunk_start: 101,
             last_ordinal: 200,
-            summaries,
+            references,
             memories,
             memory_enabled: true,
             anchored_facts: false,
@@ -352,9 +381,10 @@ mod tests {
     #[test]
     fn a_large_window_keeps_everything() {
         let summaries: Vec<_> = (0..10).map(summary).collect();
+        let references = references(&summaries);
         let memories: Vec<_> = (1..=20).map(memory).collect();
         let windows = [window(400_000)];
-        let fit = fit(&input(&summaries, &memories, &windows)).unwrap();
+        let fit = fit(&input(&references, &memories, &windows)).unwrap();
         assert!(!fit.trimmed);
         assert_eq!(fit.chunk_tokens, 20_000);
         assert!(fit.project_memory.contains("Rule 20"));
@@ -363,9 +393,10 @@ mod tests {
     #[test]
     fn a_small_window_trims_references_then_memories_then_shrinks_the_chunk() {
         let summaries: Vec<_> = (0..10).map(summary).collect();
+        let references = references(&summaries);
         let memories: Vec<_> = (1..=200).map(memory).collect();
         let windows = [window(40_000)];
-        let fit = fit(&input(&summaries, &memories, &windows)).unwrap();
+        let fit = fit(&input(&references, &memories, &windows)).unwrap();
         assert!(fit.trimmed);
         // References go before memories.
         assert!(fit.session_references.is_empty());
@@ -425,5 +456,87 @@ mod tests {
         let fitted = fit(&input(&[], &[], &windows)).unwrap();
         assert_eq!(fitted.chunk_tokens, 20_000);
         assert!(!fitted.trimmed);
+    }
+
+    /// A summary of every kind a session holds, at many importances: tiered
+    /// with `p1` equal to its body, tiered with a different `p1`, legacy
+    /// (a body and no tiers), and empty.
+    fn varied(sequence: i64) -> StoredCompartment {
+        let mut row = StoredCompartment {
+            sequence,
+            start_message: sequence * 10 + 1,
+            end_message: sequence * 10 + 10,
+            title: format!("Work {sequence} & <review>"),
+            content: format!("Body {sequence}: kept \"the\" prefix.").into(),
+            importance: ((sequence * 37) % 100 + 1) as i32,
+            episode_type: (sequence % 3 == 0).then(|| "bug".to_owned()),
+            ..StoredCompartment::default()
+        };
+        match sequence % 5 {
+            0 => {}
+            1 => {
+                row.title = String::new();
+                row.content = "".into();
+            }
+            2 => row.p1 = Some(format!("Detail {sequence} differs from the body.").into()),
+            _ => {
+                row.p1 = Some(row.content.clone());
+                row.p2 = Some(format!("Short {sequence}."));
+                row.p3 = Some(format!("Shorter {sequence}."));
+                row.p4 = (sequence % 2 == 0).then(|| format!("Cue {sequence}."));
+            }
+        }
+        row
+    }
+
+    /// The prompt a run builds from what it fitted, as `run.rs` builds it.
+    fn run_prompt(fitted: &Fit) -> String {
+        build_compartment_agent_prompt(&CompartmentPromptInputs {
+            seed_examples: &fitted.seed_examples,
+            session_references: &fitted.session_references,
+            project_memory: &fitted.project_memory,
+            input_source: "Messages 101-200:\n\n[101] U: keep the prefix\n",
+            memory_enabled: true,
+            user_observations_requested: false,
+            extraction_free: false,
+            anchored_facts: false,
+            turn_one_instruction: &prompts().turn_one,
+        })
+    }
+
+    /// Choosing references on their index entries and reading only the
+    /// chosen bodies picks the summaries choosing among every body picked,
+    /// and the summarizer gets the same prompt bytes. The hashes were taken
+    /// from the version that handed every summary's body to the run, with
+    /// these summaries, memories and windows: one that keeps every
+    /// reference, one that trims some, and one that trims them all.
+    #[test]
+    fn references_chosen_from_the_index_send_the_same_prompt_as_before() {
+        let summaries: Vec<_> = (0..60).map(varied).collect();
+        let memories: Vec<_> = (1..=5).map(memory).collect();
+        let chosen = references(&summaries);
+        let every_body: Vec<ReferenceCompartment> =
+            summaries.iter().map(ReferenceCompartment::from).collect();
+        let seeds = select_seeds(&prompts().seeds, "s1", 101, prompts().seeds_per_call);
+        assert_eq!(
+            chosen,
+            super::super::prompt::select_session_references(&every_body, &seeds, "s1", 101)
+        );
+        let hashes: Vec<String> = [400_000, 32_000, 24_000]
+            .into_iter()
+            .map(|context_window| {
+                let windows = [window(context_window)];
+                let fitted = fit(&input(&chosen, &memories, &windows)).unwrap();
+                format!("{:x}", Sha256::digest(run_prompt(&fitted).as_bytes()))
+            })
+            .collect();
+        assert_eq!(
+            hashes,
+            [
+                "33cf478b05c956bd3c4d520967c04d3753c7282f5cde3e0e9524d2c856285537",
+                "e85781760a1f87473a0d50ea025bc60aacf296f46e2f823d59da4eda9459ff71",
+                "1ae116163ec6ae1384ca1fa66654bca59d0a3918cdcaec2dfeb61f29aa3e72d5",
+            ]
+        );
     }
 }

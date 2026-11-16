@@ -239,7 +239,7 @@ pub(crate) fn job() -> Request {
         child_harness: None,
         from: 1,
         until: 5,
-        summaries: Vec::new(),
+        summaries: Default::default(),
         project_root: Some("/project".into()),
         project: None,
         language: None,
