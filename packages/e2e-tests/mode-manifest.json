@@ -59,6 +59,14 @@
             "hosts": ["omp", "pi"]
         },
         {
+            "path": "tests/issue-904-reduce-callable.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real Pi and OMP requests carry tag prefixes, ctx_reduce guidance and reduce reminders only while ctx_reduce is in the session's tool list: absent from the start under pressure, removed and restored with one rebuild at each change and the queued drop landing, and OMP task children recorded as subagents (plan-mode children without ctx_reduce). Host PID lsof proves throwaway-store containment.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["omp", "pi"]
+        },
+        {
             "path": "tests/opencode2/native-fold-hidden-edit.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

@@ -272,6 +272,7 @@ export class PiRpcClient {
           "--extension",
           PI_RELOAD_EXTENSION,
           ...discoveryArgs,
+          ...(this.options.hostArgs ?? []),
           "--model",
           host === "omp" ? "mock/mock-model" : "anthropic/claude-haiku-4-5",
           "--api-key",
