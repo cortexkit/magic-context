@@ -62,10 +62,10 @@ impl From<&StoredCompartment> for DecayRenderCompartment {
             start_message: c.start_message,
             end_message: c.end_message,
             title: c.title.clone(),
-            content: c.content.clone(),
+            content: c.content.to_string(),
             start_date: c.start_date.clone(),
             end_date: c.end_date.clone(),
-            p1: c.p1.clone(),
+            p1: c.p1.as_deref().map(str::to_owned),
             p2: c.p2.clone(),
             p3: c.p3.clone(),
             p4: c.p4.clone(),
@@ -749,7 +749,7 @@ mod tests {
             sequence: 1,
             title: "Flat".into(),
             content: "flat".into(),
-            p1: Some(String::new()),
+            p1: Some("".into()),
             legacy: 0,
             ..Default::default()
         };

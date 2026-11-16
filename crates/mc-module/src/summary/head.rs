@@ -972,8 +972,8 @@ mod tests {
             start_message: start,
             end_message: end,
             title: format!("Part {sequence}"),
-            content: format!("Body {sequence}"),
-            p1: Some(format!("Body {sequence}")),
+            content: format!("Body {sequence}").into(),
+            p1: Some(format!("Body {sequence}").into()),
             p2: Some(format!("Short {sequence}")),
             p3: Some(format!("Shorter {sequence}")),
             p4: Some(String::new()),
@@ -1237,8 +1237,8 @@ mod tests {
         let summaries: Vec<_> = (0..12)
             .map(|sequence| {
                 let mut row = summary(sequence, sequence * 20 + 1, sequence * 20 + 20);
-                row.content = detail.repeat(8);
-                row.p1 = Some(detail.repeat(8));
+                row.content = detail.repeat(8).into();
+                row.p1 = Some(detail.repeat(8).into());
                 row.p2 = Some(detail.repeat(4));
                 row.p3 = Some(detail.repeat(2));
                 row.p4 = Some(detail.to_owned());

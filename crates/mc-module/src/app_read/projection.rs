@@ -1339,7 +1339,11 @@ mod tests {
                 end_message: sequence * 10 + 9,
                 title: format!("Work {sequence}"),
                 content: "Fallback".into(),
-                p1: Some("Detailed decisions and source review. ".repeat(100)),
+                p1: Some(
+                    "Detailed decisions and source review. "
+                        .repeat(100)
+                        .into(),
+                ),
                 p2: Some("Shorter decisions. ".repeat(20)),
                 p3: Some("Brief decisions.".into()),
                 p4: Some("Cue".into()),

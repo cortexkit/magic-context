@@ -296,8 +296,8 @@ mod tests {
             start_message_id: format!("m{}", sequence * 10 + 1),
             end_message_id: format!("m{}", sequence * 10 + 10),
             title: format!("Summary {sequence}"),
-            content: "x ".repeat(400),
-            p1: Some("x ".repeat(400)),
+            content: "x ".repeat(400).into(),
+            p1: Some("x ".repeat(400).into()),
             importance: 50,
             ..StoredCompartment::default()
         }
