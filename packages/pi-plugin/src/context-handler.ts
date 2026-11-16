@@ -10480,7 +10480,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (requestToolListChanged)
 		sessionLog(
 			args.sessionId,
-			`request tool list changed: ctx_reduce ${args.ctxReduceCallable ? "added" : "removed"}; tag prefixes ${args.ctxReduceCallable ? "return" : "stop"} on this rebuild`,
+			`request tool list changed: ctx_reduce ${args.ctxReduceCallable ? "added; tag prefixes return" : "removed; tag prefixes stop"} on this rebuild`,
 		);
 	// Deferred publication signals may be consumed only on a pass that already
 	// has a genuine bust opportunity. Pi's historian is detached and signals via
