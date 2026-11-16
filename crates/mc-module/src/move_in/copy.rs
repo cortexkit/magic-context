@@ -48,6 +48,22 @@ struct Rows {
     rows: Vec<Vec<SqlValue>>,
     /// The newest summary's last message, in the source's own numbering.
     last_end: Option<i64>,
+    /// Summaries left out of the copy, each with why.
+    skipped: Vec<String>,
+}
+
+/// The columns that hold a summary's text: a summary whose every one of
+/// them is empty says nothing a session could read.
+const TEXT_COLUMNS: [&str; 6] = ["title", "content", "p1", "p2", "p3", "p4"];
+
+/// Whether a stored value holds no text: null, or a string of only
+/// whitespace.
+fn is_blank(value: &SqlValue) -> bool {
+    match value {
+        SqlValue::Null => true,
+        SqlValue::Text(text) => text.trim().is_empty(),
+        _ => false,
+    }
 }
 
 fn target_exists(target: &SessionRef, what: &str) -> String {
@@ -110,7 +126,7 @@ fn read_summaries(
         .map(|column| crate::move_batches::quoted(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut rows: Vec<Vec<SqlValue>> = conn
+    let rows: Vec<Vec<SqlValue>> = conn
         .prepare(&format!(
             "SELECT {list} FROM compartments WHERE session_id = ?1 AND harness = ?2 ORDER BY sequence"
         ))
@@ -125,22 +141,56 @@ fn read_summaries(
     // As a move does: when every stored number already is the target's,
     // the summaries keep their coordinates.
     let identity = numbering.is_identity();
+    let text_at: Vec<usize> = TEXT_COLUMNS
+        .iter()
+        .filter_map(|name| columns.iter().position(|column| column == name))
+        .collect();
     let mut last_end = None;
-    for values in &mut rows {
+    let mut skipped = Vec::new();
+    let mut kept = Vec::with_capacity(rows.len());
+    for mut values in rows {
         let (start, end) = (
             integer(&values[start_at], "start_message")?,
             integer(&values[end_at], "end_message")?,
         );
+        // The source may keep running after its transcript was exported, and
+        // its later summaries cover messages the copy doesn't have. They are
+        // the newest, so every summary from the first such one is left out.
+        if numbering.beyond_newest(end) {
+            skipped.push(format!(
+                "summaries from {} ({start}..{end}) on left out: they cover messages after the copied transcript's newest",
+                integer(&values[sequence_at], "sequence")?
+            ));
+            break;
+        }
         if !identity {
-            let (first, last, first_id, last_id) = numbering.summary_coordinates(
+            let sequence = integer(&values[sequence_at], "sequence")?;
+            let coordinates = numbering.summary_coordinates(
                 session,
-                integer(&values[sequence_at], "sequence")?,
+                sequence,
                 (start, end),
                 (
                     &text(&values[start_id_at], "start_message_id")?,
                     &text(&values[end_id_at], "end_message_id")?,
                 ),
-            )?;
+            );
+            let (first, last, first_id, last_id) = match coordinates {
+                Ok(coordinates) => coordinates,
+                // A summary that covers only rows the runner left out and
+                // holds no text has nothing to show and nothing to cover, so
+                // leaving it out loses nothing. A move still refuses it, since
+                // a move rewrites the source; a copy only reads it.
+                Err(error)
+                    if error.starts_with("summary_covers_no_runner_entry")
+                        && text_at.iter().all(|&at| is_blank(&values[at])) =>
+                {
+                    skipped.push(format!(
+                        "summary {sequence} ({start}..{end}) left out: it holds no text and covers only rows the runner left out"
+                    ));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             values[start_at] = SqlValue::Integer(first);
             values[end_at] = SqlValue::Integer(last);
             values[start_id_at] = SqlValue::Text(first_id);
@@ -149,11 +199,13 @@ fn read_summaries(
         values[session_at] = SqlValue::Text(target.session.clone());
         values[harness_at] = SqlValue::Text(target.harness.clone());
         last_end = Some(end);
+        kept.push(values);
     }
     Ok(Rows {
         columns,
-        rows,
+        rows: kept,
         last_end,
+        skipped,
     })
 }
 
@@ -254,7 +306,12 @@ pub fn copy_in(
             rows.rows.len(),
             summary_cut,
             source_tags,
-            numbering.alignment_warnings().to_vec(),
+            numbering
+                .alignment_warnings()
+                .iter()
+                .cloned()
+                .chain(rows.skipped.iter().cloned())
+                .collect::<Vec<_>>(),
         ))
     })?;
     // The newest message stays shown, as after a move: the cut goes through

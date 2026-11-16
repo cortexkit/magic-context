@@ -785,6 +785,13 @@ impl Numbering {
         Ok((first, last, first_id.to_owned(), last_id.to_owned()))
     }
 
+    /// Whether a plugin number lies past the newest message of the
+    /// transcript this numbering was built from. Only a plugin numbering
+    /// (OpenCode, Pi) can tell; a runner's own ordinals answer no.
+    pub(crate) fn beyond_newest(&self, ordinal: i64) -> bool {
+        self.source_ordinals.is_none() && ordinal > self.by_plugin.len() as i64
+    }
+
     /// Whether every plugin number already is the runner's.
     pub(crate) fn is_identity(&self) -> bool {
         self.source_ordinals.is_none()
