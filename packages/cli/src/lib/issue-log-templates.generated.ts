@@ -617,6 +617,7 @@ const TEMPLATE_DATA = [
 "historian publish stage: stage=dangling-boundary-check status=started elapsed=0.0ms compartments=\x01",
 "Pi compaction-marker clear: reason=active-branch-retired endMessageId=\x01 ordinal=\x01 firstKeptEntryId=\x01\x020i",
 "v2 refusal: interrupting the turn before the provider request arm=blocking-transform-error cause=\x01",
+"Oh My Pi spawned session (agent kind sub) has compartments from its source session: kept primary",
 "[dreamer] verify safety refusal: memory_id=\x01 verdict=archive reason=directive-shaped-project-rule",
 "[dreamer] map-memories: all \x01 path(s) for memory \x01 were rejected; recording host_rejected_fallback",
 "transform: model switch \x01 -> \x01/\x01 reset — percentage=\x01% tokens=\x01 — clearing stale model-specific state\x020s,1m,2m",
