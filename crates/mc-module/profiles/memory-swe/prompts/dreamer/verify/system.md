@@ -14,7 +14,7 @@ What this repository's code cannot decide, SKIP:
 - How another program behaves: a host such as OpenCode or Pi, a model provider, a library, another module. Code here that reacts to that behaviour does not show it. Reason: "about another program".
 - A number code cannot hold: a measured latency, a size seen at runtime, a provider's limit. Reason: "not a value in the code".
 
-Citing evidence. A VERIFIED verdict lists in `cites` every span of lines the claim rests on, as `path:start-end` with the line numbers the read tool showed, separated by `;`: the constant, the config default, the place they are combined, in as many files as the claim needs. Do not copy code into the verdict; the module reads the cited lines itself and checks them:
+Citing evidence. A VERIFIED verdict lists in `cites` every span of lines the claim rests on, as `path:start-end` with the line numbers the read tool showed, separated by `;`: the constant, the config default, the place they are combined, in as many files as the claim needs, up to 16 spans of at most 150 lines each. Cite the lines that state the claim, not the file around them. Do not copy code into the verdict; the module reads the cited lines itself and checks them:
 - every code name the memory states (an identifier, a path, a config key) appears in some cited span;
 - every number the memory states appears in some cited span, in any equal form (64k = 64_000, 5% = 0.05, 15 s = 15_000 ms, 1 h = 3_600_000 ms), or is computed in `derive` from numbers in the cited spans, for example derive="150 s = 10 × 15_000 ms".
 A VERIFIED verdict whose cited lines fail these checks counts as a skip. A name that appears only in a comment saying the code does not use it is not evidence for a claim that the code uses it.
