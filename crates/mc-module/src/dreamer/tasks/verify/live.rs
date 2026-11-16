@@ -19,7 +19,11 @@
 //!   spans of such a memory the same way before it asks a model.
 //!
 //! The live branches are the default branch and the head of every worktree
-//! that has commits the default branch doesn't contain ([`Refs::live_in`]).
+//! that has commits the default branch doesn't contain ([`Refs::live_in`]),
+//! except worktrees inside the CortexKit data root (`~/.local/share/cortexkit`
+//! or `$XDG_DATA_HOME/cortexkit`): those are agents' task checkouts,
+//! verification copies and deploy copies, not lines anyone runs, so their
+//! commits never hold a memory back. The main checkout always counts.
 //! With one live branch every check passes, so a project on
 //! a single line behaves as it did before lines were recorded. The branches
 //! are read once per batch, when its reply is accepted; a git command that

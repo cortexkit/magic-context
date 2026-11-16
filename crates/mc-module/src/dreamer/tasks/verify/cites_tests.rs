@@ -239,9 +239,9 @@ fn code_texts(content: &str) -> Vec<String> {
         .collect()
 }
 
-/// Names from a real verify replay (16 Nov 2026) that the citation reader
-/// takes as code names, but that a memory states in prose: a confirmation's
-/// cited code need not hold them. The subject-gone check still reads them.
+/// Names the citation reader takes as code names although a memory states
+/// them in prose: a confirmation's cited code need not hold them. The
+/// subject-gone check still reads them.
 #[test]
 fn a_confirmation_needs_only_the_names_that_look_like_code() {
     let content = "OpenCode and TypeScript on macOS, GitHub, CortexKit and TypeBox keep \

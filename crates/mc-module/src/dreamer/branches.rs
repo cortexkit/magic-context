@@ -70,6 +70,8 @@ pub(crate) struct LiveBranch {
 /// One worktree's HEAD.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Worktree {
+    /// Its folder, as git lists it.
+    path: PathBuf,
     /// Its branch; `None` when detached.
     branch: Option<String>,
     commit: String,
@@ -156,10 +158,19 @@ impl Refs {
     }
 
     /// The live branches: the default branch, then each worktree's HEAD,
-    /// once per commit (the first name a commit is reached by is kept).
+    /// once per commit (the first name a commit is reached by is kept). The
+    /// module reads them through [`Refs::live_in`].
+    #[cfg(test)]
     pub(crate) fn live(&self) -> Vec<LiveBranch> {
+        self.live_of(self.worktrees.iter())
+    }
+
+    /// The live branches with only the heads of `worktrees`: the default
+    /// branch, then each of those heads, once per commit (the first name a
+    /// commit is reached by is kept).
+    fn live_of<'a>(&self, worktrees: impl Iterator<Item = &'a Worktree>) -> Vec<LiveBranch> {
         let mut live: Vec<LiveBranch> = Vec::new();
-        let worktrees = self.worktrees.iter().map(|worktree| LiveBranch {
+        let worktrees = worktrees.map(|worktree| LiveBranch {
             name: worktree
                 .branch
                 .clone()
@@ -177,16 +188,37 @@ impl Refs {
         live
     }
 
-    /// [`Refs::live`] without the worktree heads the default branch already
-    /// contains. Such a checkout has no commit of its own: it holds older
-    /// code of the default branch's line, which the default branch
-    /// supersedes, so a memory needs no protection on its account. Busy
-    /// repositories collect many of these (old side checkouts, worktrees left
-    /// on an earlier commit), and each one would otherwise make files differ
-    /// and keep verify from changing any old memory that names them. `Err`
-    /// when git fails or runs out of time on one of the checks.
+    /// The live branches without the worktree heads the default branch already
+    /// contains, and without the worktrees inside the CortexKit data root
+    /// ([`crate::storage_paths::cortexkit_data_root`]). A checkout without a
+    /// commit of its own holds older code of the default branch's line,
+    /// which the default branch supersedes, so a memory needs no protection
+    /// on its account. Busy repositories collect many of these (old side
+    /// checkouts, worktrees left on an earlier commit), and each one would
+    /// otherwise make files differ and keep verify from changing any old
+    /// memory that names them. A worktree inside the data root is an agent's
+    /// task checkout, verification copy or deploy copy, not a line anyone
+    /// runs, whatever commits it has. The main checkout is never left out.
+    /// `Err` when git fails or runs out of time on one of the checks.
     pub(crate) fn live_in(&self, repo: &Path) -> Result<Vec<LiveBranch>, String> {
-        let live = self.live();
+        self.live_outside(repo, &crate::storage_paths::cortexkit_data_root())
+    }
+
+    /// [`Refs::live_in`] with `data_root` as the CortexKit data root. Paths
+    /// are compared resolved, so a symlinked home or macOS's `/private/var`
+    /// still matches; a folder equal to the root or inside it counts, a
+    /// sibling such as `cortexkit-scratch` does not.
+    fn live_outside(&self, repo: &Path, data_root: &Path) -> Result<Vec<LiveBranch>, String> {
+        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        let root = real(data_root);
+        let main = real(repo);
+        let live = self.live_of(self.worktrees.iter().enumerate().filter_map(
+            |(index, worktree)| {
+                let path = real(&worktree.path);
+                let main_checkout = index == 0 || path == main;
+                (main_checkout || !path.starts_with(&root)).then_some(worktree)
+            },
+        ));
         let Some(default) = live
             .first()
             .cloned()
@@ -233,11 +265,14 @@ fn contains(repo: &Path, tip: &str, ancestor: &str) -> Result<bool, String> {
 fn worktrees(listed: &str) -> Vec<Worktree> {
     let mut found = Vec::new();
     for entry in listed.split("\n\n") {
+        let mut path = None;
         let mut commit = None;
         let mut branch = None;
         let mut skip = false;
         for line in entry.lines() {
-            if let Some(head) = line.strip_prefix("HEAD ") {
+            if let Some(folder) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(folder));
+            } else if let Some(head) = line.strip_prefix("HEAD ") {
                 commit = Some(head.trim().to_owned());
             } else if let Some(name) = line.strip_prefix("branch ") {
                 branch = name.trim().strip_prefix("refs/heads/").map(str::to_owned);
@@ -245,9 +280,15 @@ fn worktrees(listed: &str) -> Vec<Worktree> {
                 skip = true;
             }
         }
-        match commit {
-            Some(commit) if !skip && is_commit(&commit) && commit.bytes().any(|b| b != b'0') => {
-                found.push(Worktree { branch, commit });
+        match (path, commit) {
+            (Some(path), Some(commit))
+                if !skip && is_commit(&commit) && commit.bytes().any(|b| b != b'0') =>
+            {
+                found.push(Worktree {
+                    path,
+                    branch,
+                    commit,
+                });
             }
             _ => {}
         }

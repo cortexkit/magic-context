@@ -445,9 +445,9 @@ fn audit_row_73_a_call_the_cited_code_does_not_make() {
     );
 }
 
-/// A memory that names products in prose (from a real verify replay) is
-/// confirmed from code that holds its code names alone; the same product
-/// written in backticks must be in the cited lines.
+/// A memory that names products in prose is confirmed from code that holds
+/// its code names alone; the same product written in backticks must be in
+/// the cited lines.
 #[test]
 fn products_named_in_prose_need_not_be_in_the_cited_lines() {
     let held = files(&[(
