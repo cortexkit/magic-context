@@ -831,8 +831,11 @@ mod tests {
             ]
         );
 
-        // A busy writer must not acknowledge pending rows or summaries. The next
-        // checkpoint retries the complete delta, including intervening updates.
+        // A busy writer must not acknowledge pending rows. The next
+        // checkpoint retries the complete delta, including intervening
+        // updates. A summary change in between adds nothing to it: the
+        // checkpoint holds no summaries, which the app reads take from
+        // `context.db`.
         session
             .index
             .extend([Entry::new(202, "m202", Role::Assistant, 202, vec![])]);
@@ -857,17 +860,14 @@ mod tests {
         for row in reply["messages"].as_array().unwrap() {
             assert_eq!(row["state"], "raw");
         }
-        let summary = reloaded
-            .read(
-                "context.compartment",
-                json!({"session":session.key,"compartment_id":"1"}),
+        let summaries: u64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'app_read_summaries'",
+                [],
+                |row| row.get(0),
             )
-            .await
             .unwrap();
-        assert_eq!(
-            summary["compartment"]["summary_markdown"],
-            "updated summary"
-        );
+        assert_eq!(summaries, 0);
     }
 
     #[tokio::test]
