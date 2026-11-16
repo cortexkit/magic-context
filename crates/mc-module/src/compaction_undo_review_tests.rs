@@ -2,8 +2,10 @@
 //! lost ck-mc's view: Setup's (`Session::offer_at_setup`) and a notice's
 //! (`Session::rebuild_when_runner_lost_view`). An offered view rewrites the
 //! request bytes the provider has cached, so most tests check that no view
-//! is offered while the runner still holds ck-mc's view. A test marked
-//! `ignore` fails on the code as it stands: its reason names the finding.
+//! is offered while the runner still holds ck-mc's view. The others check
+//! that a session whose host may hold a compaction marker gets one when it
+//! needs one, and that forced views stop when the runner keeps refusing or
+//! dropping them.
 //!
 //! The host compaction marker: when the runner applies a view, it writes
 //! the host's own compaction marker at the view's cut, and the host stops
@@ -314,7 +316,6 @@ fn with_summaries(dir: &std::path::Path) -> (Session, Client, Settings) {
 /// steps: the notice that reports the refusal shows no lost view, and at
 /// this usage no rebuild is due.
 #[tokio::test]
-#[ignore = "witness: a first view refused at its step boundary is rebuilt and offered whatever the usage, though the runner never held a view"]
 async fn reoffer_review_a_first_view_refused_at_its_step_boundary_is_not_a_lost_view() {
     let dir = scratch("reoffer-review-first-view-refused");
     let (mut session, client, settings) = with_summaries(&dir);
@@ -378,12 +379,11 @@ async fn reoffer_review_a_drop_refused_twice_is_forgotten() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// The forced view itself has no such bound: the runner refuses it on
-/// every notice for a reason ck-mc can't fix, and ck-mc builds and offers it
-/// again on every notice, whatever the usage. A refused view never renders,
-/// so this costs builds and calls, not the provider's cache.
+/// The forced view has its own bound: the runner refuses it on every notice
+/// for a reason ck-mc can't fix, and after two such refusals with no new
+/// message ck-mc stops building and offering it. A refused view never
+/// renders, so the loop cost builds and calls, not the provider's cache.
 #[tokio::test]
-#[ignore = "witness: a forced view the runner always refuses is rebuilt and offered on every notice; refused_once bounds drops, not the head"]
 async fn reoffer_review_a_view_refused_on_every_offer_is_not_offered_on_every_notice() {
     let dir = scratch("reoffer-review-refused-loop");
     let (mut session, client, settings, _) = lost_and_always_refused(&dir).await;
@@ -402,11 +402,10 @@ async fn reoffer_review_a_view_refused_on_every_offer_is_not_offered_on_every_no
 /// The runner applies each view ck-mc offers after it dropped one, then
 /// drops that one too at its next step, with the transcript unchanged.
 /// Every forced view the runner applies rewrites the request bytes the
-/// provider cached. A drop alone, with no forced rebuild, waits for usage
-/// to reach the execute threshold or for a new summary; with it, ck-mc
-/// offers a new view after every drop, with no second-strike bound.
+/// provider cached, so after two such drops with no new message ck-mc stops
+/// forcing views, and a view waits for usage to reach the execute threshold
+/// or for a new summary.
 #[tokio::test]
-#[ignore = "witness: a runner that drops every view it applies gets a new forced view, and a cache rewrite, after every drop"]
 async fn reoffer_review_a_view_dropped_after_every_apply_is_not_offered_after_every_drop() {
     let dir = scratch("reoffer-review-drop-loop");
     let (mut session, client, settings) = view_2_applied(&dir, transcript()).await;
@@ -461,13 +460,11 @@ async fn setup_after_a_refused_forced_view(restart: bool) {
 }
 
 #[tokio::test]
-#[ignore = "witness: Setup offers no view when ck-mc had already lost its own view (head due) before the Setup"]
 async fn reoffer_review_a_setup_after_a_refused_forced_view_offers_one() {
     setup_after_a_refused_forced_view(false).await;
 }
 
 #[tokio::test]
-#[ignore = "witness: after a restart, Setup offers no view when ck-mc had already lost its own view (head due) before the restart"]
 async fn reoffer_review_a_setup_after_a_restart_and_a_refused_forced_view_offers_one() {
     setup_after_a_refused_forced_view(true).await;
 }
@@ -501,10 +498,9 @@ async fn reoffer_review_a_moved_session_with_its_view_installed_gets_no_offer() 
 
 /// The runner's first Setup after the move applies no view: it lost the
 /// one the move installed. A moved session takes no step until a view
-/// applies, a case Setup's offer is meant to cover, but the move saved no
-/// applied version, so Setup finds no view of ck-mc's to have been lost.
+/// applies, and installing the move's view left a possible host marker, so
+/// Setup offers one.
 #[tokio::test]
-#[ignore = "witness: a moved session whose installed view is gone at Setup gets no view offered"]
 async fn reoffer_review_a_moved_session_without_its_view_gets_one_at_setup() {
     let dir = scratch("reoffer-review-moved-lost");
     let (mut session, client, settings, _) = moved_in(&dir);

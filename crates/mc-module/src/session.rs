@@ -50,6 +50,11 @@ use crate::view_builder;
 /// messages again ([`Session::hold_transcript_behind`]).
 const IMPLICIT_FORGET_LIMIT: usize = 3;
 
+/// How many views offered in a row because the runner lost ck-mc's view may
+/// end refused or dropped, with no new message since each was built, before
+/// ck-mc stops forcing them (see `Session::lost_view_offers`).
+const LOST_VIEW_OFFERS: u32 = 2;
+
 #[derive(Clone)]
 pub struct Session {
     command_answers: Arc<Vec<crate::store::CommandAnswer>>,
@@ -249,11 +254,32 @@ pub struct Session {
     /// it serves it. Allow one rebuild, but guard against the same reason on
     /// the very next built version so a faulty view cannot loop every pass.
     transcript_retry: Option<(TranscriptRefusal, u64)>,
-    /// A revert removed summaries the head shows, or the runner refused or
-    /// dropped ck-mc's view and applies none. The next notice rebuilds the
-    /// head whatever the usage: the model must not keep seeing history that
-    /// was undone, and a runner without a view may take no step at all.
+    /// A revert removed summaries the head shows. The next notice rebuilds
+    /// the head whatever the usage: the model must not keep seeing history
+    /// that was undone.
     head_stale: bool,
+    /// The runner applied a view of ck-mc's that cuts, or a move installed
+    /// the session's first view, so the host may hold a compaction marker:
+    /// written at an applied view's cut, after which the host no longer loads
+    /// the messages before it. Such a session takes no step while the runner
+    /// applies no view, so ck-mc offers one whatever the usage when the
+    /// runner loses its view. Never cleared.
+    marker_possible: bool,
+    /// The runner lost ck-mc's view in a session where `marker_possible`
+    /// holds: it refused or dropped it, and applies none. While ck-mc holds
+    /// no view of its own, a notice builds and offers one whatever the usage,
+    /// within the bound `lost_view_offers` keeps. Cleared when the runner
+    /// reports applying a view of ck-mc's.
+    lost_view_due: bool,
+    /// How many views offered because the runner lost ck-mc's view ended
+    /// refused or dropped in a row, each with no new message since it was
+    /// built. At [`LOST_VIEW_OFFERS`] notices force no more until the
+    /// transcript grows; the next Setup may force one more. Not saved: a
+    /// restart starts counting again.
+    lost_view_offers: u32,
+    /// The newest view offered because the runner lost ck-mc's view, kept
+    /// until the transcript grows past the message it was built through.
+    lost_view_offer: Option<LostViewOffer>,
     /// The `ctx_reduce` reminders' cadence.
     nudges: crate::nudges::State,
     /// The ordinal of the last message the applied view cuts. The index
@@ -496,6 +522,19 @@ struct NoticePass {
     summary: Option<run::Request>,
     rebuild: bool,
     head_stale: bool,
+    /// The rebuild is forced because the runner lost ck-mc's view.
+    lost_view: bool,
+}
+
+/// A view offered because the runner lost ck-mc's view (see
+/// `Session::lost_view_due`).
+#[derive(Clone, Copy, Debug)]
+struct LostViewOffer {
+    version: u64,
+    /// The newest message ordinal the index held when the view was built.
+    through: u64,
+    /// Whether the view's refusal or drop was counted already.
+    ended: bool,
 }
 
 /// Running counts of the reads a session made to its runner, so Setup can
@@ -845,6 +884,10 @@ impl Session {
             last_served_ms: 0,
             fold_due: false,
             head_stale: false,
+            marker_possible: false,
+            lost_view_due: false,
+            lost_view_offers: 0,
+            lost_view_offer: None,
             nudges: crate::nudges::State::default(),
             cut: None,
             pruned_turns: 0,
@@ -1030,6 +1073,7 @@ impl Session {
             preset: (!self.tools_only).then(|| self.preset.as_str().to_owned()),
             pending_keep: self.pending_keep.clone(),
             head_stale: self.head_stale,
+            marker_possible: self.marker_possible,
             reminder_counter: self.reminder_counter,
             render_failed: self.render_failed.clone(),
             version: self.version,
@@ -1080,6 +1124,7 @@ impl Session {
         }
         self.pending_keep = durable.pending_keep;
         self.head_stale = durable.head_stale;
+        self.marker_possible = durable.marker_possible;
         self.reminder_counter = durable.reminder_counter;
         self.render_failed = durable.render_failed;
         self.version = durable.version;
@@ -1296,6 +1341,7 @@ impl Session {
         self.project = route.project.clone();
         self.workdir = folder_of(route);
         self.seq = 0;
+        self.note_transcript_growth(request.newest.as_ref());
         // Before anything is offered, settled or read: a transcript that no
         // longer holds the summaries' history holds the session here, with
         // its state as it was.
@@ -1323,7 +1369,7 @@ impl Session {
         self.load_move_floor(client).await;
         self.judge_acceptance_afresh();
         self.offer_unconfirmed_again(client).await;
-        let behind = self.runner_behind_at_setup(request.applied_view.as_ref(), applied_before);
+        let lost = self.runner_lost_view_at_setup(request.applied_view.as_ref(), applied_before);
         let Some(forget_from) = forget_from else {
             self.index_ready = false;
             return;
@@ -1366,32 +1412,34 @@ impl Session {
                     self.publish(client, view).await;
                 }
             }
-        } else if let Some(current) = behind {
+        } else if let Some(current) = lost {
             self.offer_at_setup(client, settings, request.applied_view.as_ref(), current)
                 .await;
         }
     }
 
     /// Whether Setup finds that the runner lost ck-mc's view, once Setup has
-    /// settled the views and offered a waiting one again: ck-mc has a view,
-    /// and the runner applies none, or one older than ck-mc's newest view
-    /// that it applied or was handed. Only that lost-view case counts. A
-    /// session that never had a view of ck-mc's has no host compaction
-    /// marker: the runner renders it unreduced and it keeps sending notices,
-    /// so its summaries wait for the next permitted rebuild, and Setup
-    /// doesn't rewrite the request bytes the provider has cached for it.
-    /// `applied_before` is the newest view the runner reported applying
-    /// before this Setup, which is all ck-mc knows of its confirmed view
-    /// after a restart. A view the runner took on this Setup's offer again
-    /// counts as held, and so does one whose offer again is still waiting
-    /// for an answer or for the runner to place its cut. Returns ck-mc's
-    /// current view's version when the runner lost it.
-    fn runner_behind_at_setup(
+    /// settled the views and offered a waiting one again. Only a session whose
+    /// host may hold a compaction marker counts (`marker_possible`): one that
+    /// never had a view of ck-mc's applied, or installed by a move, renders
+    /// unreduced and keeps sending notices, so its summaries wait for the
+    /// next permitted rebuild, and Setup doesn't rewrite the request bytes the
+    /// provider has cached for it. Such a runner lost the view when it applies
+    /// none, whatever ck-mc's own record says, or one older than ck-mc's
+    /// newest view that it applied or was handed. `applied_before` is the
+    /// newest view the runner reported applying before this Setup, which is
+    /// all ck-mc knows of its confirmed view after a restart. A view the
+    /// runner took on this Setup's offer again counts as held, and so does one
+    /// whose offer again is still waiting for an answer or for the runner to
+    /// place its cut. Returns ck-mc's current view's version (0 for none) when
+    /// the runner lost it.
+    fn runner_lost_view_at_setup(
         &self,
         applied: Option<&AppliedView>,
         applied_before: u64,
     ) -> Option<u64> {
-        if self.reoffer_pending
+        if !self.marker_possible
+            || self.reoffer_pending
             || self
                 .unconfirmed
                 .last()
@@ -1404,20 +1452,25 @@ impl Session {
             None if self.latest_unknown => applied_before,
             None => 0,
         };
-        (current > 0 && applied.is_none_or(|applied| applied.version < current)).then_some(current)
+        applied
+            .is_none_or(|applied| applied.version < current)
+            .then_some(current)
     }
 
     /// Setup found that the runner lost ck-mc's view (see
-    /// [`Session::runner_behind_at_setup`]), and it has read the transcript
+    /// [`Session::runner_lost_view_at_setup`]), and it has read the transcript
     /// and taken the view the runner applies. A session past its host's
     /// compaction marker (written at an applied view's cut, after which the
     /// host no longer loads the messages before it), or moved in from
     /// another host, takes no step until a view applies, so no notice may
     /// come to offer one: Setup builds and offers it itself, whatever the
-    /// usage. The head is marked stale first, as after an undo, so a refused
-    /// view stays due on later notices. Only a session with a summarizer
-    /// renders a head, and only one with summaries or a cut has history to
-    /// serve; a view another provider applies is left to it.
+    /// usage, and whatever the bound on such offers says (see
+    /// `lost_view_offers`). When the runner applies none, a refused view
+    /// stays due on later notices, within that bound. Only a session with a
+    /// summarizer renders a head, and only one with summaries or a cut has
+    /// history to serve. When the runner applies a view, one another
+    /// provider owns is left to it, and none is built while ck-mc couldn't
+    /// read the runner's view back.
     async fn offer_at_setup<C: RunnerClient>(
         &mut self,
         client: &C,
@@ -1425,31 +1478,42 @@ impl Session {
         applied: Option<&AppliedView>,
         current: u64,
     ) {
-        if !self.features.summarizer
-            || (self.summaries.is_empty() && self.cut.is_none())
-            || self.latest_unknown
-            || (self.latest.is_none() && self.newest_applied != 0)
-        {
+        if !self.features.summarizer || (self.summaries.is_empty() && self.cut.is_none()) {
             return;
+        }
+        match applied {
+            // The Setup states that the runner applies no view, so a view
+            // that couldn't be read back is none.
+            None => {
+                if self.latest_unknown {
+                    self.latest_unknown = false;
+                    self.latest = None;
+                }
+                self.lost_view_due = true;
+            }
+            Some(_)
+                if self.latest_unknown || (self.latest.is_none() && self.newest_applied != 0) =>
+            {
+                return;
+            }
+            Some(_) => {}
         }
         let applying = applied.map_or_else(
             || "no view".to_owned(),
             |view| format!("view {}", view.version),
         );
+        let newest = match current {
+            0 => "none".to_owned(),
+            version => format!("view {version}"),
+        };
         tracing::info!(
-            "ck-mc: session {}: Setup found the runner applying {applying}, behind ck-mc's view {current}; the history head is rebuilt and offered now",
+            "ck-mc: session {}: Setup found the runner applying {applying} where its host may hold a compaction marker (ck-mc's newest view: {newest}); the history head is rebuilt and offered now",
             self.key.session
         );
-        let was_stale = std::mem::replace(&mut self.head_stale, true);
         let (view, _) = self.build_now(client, settings).await;
-        match view {
-            Some(view) => {
-                self.publish(client, view).await;
-            }
-            // The view the runner applies already shows what a rebuild
-            // would, so nothing is due.
-            None if self.latest.is_some() => self.head_stale = was_stale,
-            None => {}
+        if let Some(view) = view {
+            self.record_lost_view_offer(&view);
+            self.publish(client, view).await;
         }
     }
 
@@ -1506,6 +1570,7 @@ impl Session {
     ) -> Option<run::Request> {
         let _timing = crate::notice_cost_timing::span("session.handle_notice");
         self.seq = notice.seq;
+        self.note_transcript_growth(notice.newest.as_ref());
         let previous = reading_of(&self.conditions);
         let previous_notes = self.notes.measured;
         let was_stale = self.reading_stale;
@@ -1752,6 +1817,9 @@ impl Session {
                 self.build_now(client, settings).await
             };
             if let Some(view) = view {
+                if decision.lost_view {
+                    self.record_lost_view_offer(&view);
+                }
                 self.publish(client, view).await;
             }
             if !decision.head_stale {
@@ -1765,22 +1833,26 @@ impl Session {
     /// was handed ck-mc's view `held`: it refused ck-mc's newest view at a
     /// step boundary, or dropped the view it applied, as a runner does when
     /// an undo removes the view's cut message or a step finds the view's
-    /// window stale. A session past its host's compaction marker (written at
-    /// an applied view's cut, after which the host no longer loads the
-    /// messages before it), or moved in from another host, takes no step
-    /// until a view applies, so the
-    /// history head is rebuilt on this notice whatever the usage, as after
-    /// an undo, and stays due until the runner takes a view with it. Only a
-    /// session with a summarizer renders a head, and only one with summaries
-    /// or a cut has history to serve again.
+    /// window stale. When that view was itself offered because the runner
+    /// lost an earlier one, its end counts toward the bound on such offers.
+    /// A session past its host's compaction marker (written at an applied
+    /// view's cut, after which the host no longer loads the messages before
+    /// it), or moved in from another host, takes no step until a view
+    /// applies, so a view is due whatever the usage (`lost_view_due`). Only a
+    /// session whose host may hold such a marker counts (`marker_possible`):
+    /// a first view refused before any view applied is an ordinary refusal.
+    /// Only a session with a summarizer renders a head, and only one with
+    /// summaries or a cut has history to serve again.
     fn rebuild_when_runner_lost_view(&mut self, held: Option<u64>) {
         let Some(version) = held else {
             return;
         };
-        if self.head_stale
-            || self.latest.is_some()
-            || self.latest_unknown
-            || self.newest_applied != 0
+        if self.latest.is_some() || self.latest_unknown || self.newest_applied != 0 {
+            return;
+        }
+        self.lost_view_offer_ended(version);
+        if self.lost_view_due
+            || !self.marker_possible
             || !self.features.summarizer
             || (self.summaries.is_empty() && self.cut.is_none())
         {
@@ -1790,18 +1862,87 @@ impl Session {
             "ck-mc: session {}: the runner applies no view after ck-mc's view {version}; the history head is rebuilt and offered on this notice",
             self.key.session
         );
-        self.head_stale = true;
+        self.lost_view_due = true;
+    }
+
+    /// Whether this notice builds and offers a view because the runner lost
+    /// ck-mc's view (`lost_view_due`): while ck-mc holds no view of its own,
+    /// the runner applies none, and fewer than [`LOST_VIEW_OFFERS`] such
+    /// views ended refused or dropped in a row.
+    fn lost_view_forced(&self) -> bool {
+        self.lost_view_due
+            && self.latest.is_none()
+            && !self.latest_unknown
+            && self.newest_applied == 0
+            && self.lost_view_offers < LOST_VIEW_OFFERS
+    }
+
+    /// `view` is offered because the runner lost ck-mc's view.
+    fn record_lost_view_offer(&mut self, view: &View) {
+        self.lost_view_offer = Some(LostViewOffer {
+            version: view.version,
+            through: self.index.cursor().map_or(0, |cursor| cursor.ordinal),
+            ended: false,
+        });
+    }
+
+    /// The views from `from` on were refused, or the runner dropped `from`.
+    /// When they include the newest view offered because the runner lost
+    /// ck-mc's view, and no new message came since it was built (a new one
+    /// drops the record, see [`Session::note_transcript_growth`]), it counts
+    /// toward [`LOST_VIEW_OFFERS`]. Reaching the bound is logged once.
+    fn lost_view_offer_ended(&mut self, from: u64) {
+        let Some(offer) = self
+            .lost_view_offer
+            .as_mut()
+            .filter(|offer| !offer.ended && offer.version >= from)
+        else {
+            return;
+        };
+        offer.ended = true;
+        self.lost_view_offers += 1;
+        if self.lost_view_offers == LOST_VIEW_OFFERS {
+            tracing::warn!(
+                "ck-mc: session {}: the runner refused or dropped {} views in a row that ck-mc offered because the runner applied none of its views, with no new message since; none is forced until the transcript grows or the next Setup, and a view waits for a summary or for the usage to call for one",
+                self.key.session,
+                self.lost_view_offers
+            );
+        }
+    }
+
+    /// A message newer than the one the newest view offered because the
+    /// runner lost ck-mc's view was built through: that view's end no longer
+    /// counts, and such views may be offered again.
+    fn note_transcript_growth(&mut self, newest: Option<&Cursor>) {
+        if let (Some(offer), Some(newest)) = (self.lost_view_offer, newest) {
+            if newest.ordinal > offer.through {
+                self.lost_view_offer = None;
+                self.lost_view_offers = 0;
+            }
+        }
+    }
+
+    /// The runner reports applying ck-mc's view, which `cuts` or not: no view
+    /// is due for a lost one, and one that cuts may leave a compaction
+    /// marker in the host.
+    fn runner_applies_own_view(&mut self, cuts: bool) {
+        self.lost_view_due = false;
+        self.marker_possible |= cuts;
     }
 
     /// One permission for the history refresh and every mutation lane. Summary
     /// admission runs first, so a run started here also holds the queued work.
+    /// A view due because the runner lost ck-mc's view is offered on a notice
+    /// only, never on a ride.
     fn decide_notice(&mut self, settings: &Settings) -> NoticePass {
         let _timing = crate::notice_cost_timing::span("notice.decision");
         let summary = self.summary_due(settings);
+        let lost_view = self.lost_view_forced();
         NoticePass {
             summary,
-            rebuild: self.rebuild_permitted(settings),
+            rebuild: self.rebuild_permitted(settings) || lost_view,
             head_stale: self.head_stale,
+            lost_view,
         }
     }
 
@@ -4545,6 +4686,9 @@ impl Session {
         self.version = version;
         self.cut = cut.map(|(ordinal, _)| ordinal);
         self.set_move_floor(cut);
+        // The move installs this view, and the host may stop loading the
+        // messages before its cut, as for a view the runner applied.
+        self.marker_possible = true;
         self.index = Index::starting_at(self.cut.unwrap_or(1));
         self.latest = Some(view.clone());
         Ok(view)
@@ -5405,6 +5549,7 @@ impl Session {
             self.app_view_status(from, "refused");
         }
         self.reset_transcript_retry();
+        self.lost_view_offer_ended(from);
     }
 
     /// The runner answered an offer again of view `version`. If the first
@@ -5603,6 +5748,19 @@ impl Session {
         // requests under what it applies now.
         self.newest_applied = applied.map_or(0, |applied| applied.version);
         self.app_confirm_head(self.newest_applied);
+        // The view the runner applies is ck-mc's own when ck-mc holds it,
+        // confirmed already or waiting for this report.
+        let own = applied.and_then(|applied| {
+            self.unconfirmed
+                .iter()
+                .map(|pending| &pending.view)
+                .chain(self.latest.as_ref())
+                .find(|view| same(applied, view))
+                .map(cuts)
+        });
+        if let Some(cuts) = own {
+            self.runner_applies_own_view(cuts);
+        }
         if let Some(applied) = applied {
             self.render_failed.held(applied.version);
             // Views are cumulative: applying a view applies every edit of the
@@ -5706,6 +5864,7 @@ impl Session {
                     Some(kind) => self.transcript_retry == Some((kind, *version)),
                 };
             self.roll_back(*version, guard, refusal_part(refusal));
+            self.lost_view_offer_ended(*version);
             // Retrying skips drop penalties, not the refusal status shown
             // in the apps' view history.
             self.app_view_status(*version, "refused");
@@ -5899,6 +6058,8 @@ impl Session {
                         return;
                     }
                     self.apply_cut(view);
+                    let cut = cuts(view);
+                    self.runner_applies_own_view(cut);
                 }
                 self.latest = answer.view;
                 self.latest_unknown = false;
@@ -6476,6 +6637,13 @@ mod summary_weight_tests {
         session.conditions.context_window = 90_000;
         assert!(session.summary_due(&Settings::default()).is_some());
     }
+}
+
+/// Whether `view` cuts the session's earlier messages.
+fn cuts(view: &View) -> bool {
+    view.edits
+        .iter()
+        .any(|edit| matches!(edit.op, EditOp::Cut { .. }))
 }
 
 /// Whether `answer` says the runner holds the view `version` it was offered:

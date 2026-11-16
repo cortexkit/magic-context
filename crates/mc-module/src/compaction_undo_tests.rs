@@ -510,3 +510,70 @@ async fn compaction_undo_v1_a_refused_setup_offer_stays_due() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// The runner dropped view 2 and refuses every view ck-mc offers. After two
+/// forced views end refused with no new message, ck-mc stops forcing them
+/// and logs that once. A new message lets it force one again.
+#[tokio::test]
+async fn compaction_undo_v1_forced_views_resume_once_the_transcript_grows() {
+    let logs = crate::test_log::capture();
+    let dir = scratch("undo-v1-bound-growth");
+    let (mut session, client, settings) = view_2_applied(&dir, transcript()).await;
+    *client.refuse.lock().unwrap() = true;
+    let before = client.offered.lock().unwrap().len();
+    for seq in 1..=4 {
+        let newest = client.entries.lock().unwrap().last().map(cursor);
+        session
+            .notice(&client, &settings, notice(&session, seq, newest))
+            .await;
+    }
+    assert_eq!(offered_since(&client, before).len(), 2);
+    assert_eq!(logs.count("none is forced until the transcript grows"), 1);
+    client.entries.lock().unwrap().push(Entry::new(
+        25,
+        mid(25),
+        Role::User,
+        1024,
+        vec![text_part("0", tag(25), "message 25")],
+    ));
+    let newest = client.entries.lock().unwrap().last().map(cursor);
+    session
+        .notice(&client, &settings, notice(&session, 5, newest))
+        .await;
+    assert_eq!(
+        offered_since(&client, before).len(),
+        3,
+        "a new message did not let ck-mc force a view again"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// After a ck-mc restart the runner's Setup says it applies no view, and
+/// reading the runner's view back fails. The Setup's statement stands:
+/// ck-mc offers a view in Setup's own pass.
+#[tokio::test]
+async fn compaction_undo_v1_a_setup_without_a_view_offers_one_when_the_read_back_fails() {
+    let dir = scratch("undo-v1-setup-read-back-fails");
+    let (session, client, settings) = view_2_applied(&dir, transcript()).await;
+    let durable = session.durable();
+    let (mut restored, _, route, _, _) = fixture();
+    restored.db = session.db.clone();
+    restored.load_summaries();
+    restored.restore(durable);
+    assert!(restored.latest_unknown);
+    *client.fail_applied_view.lock().unwrap() = true;
+    let runner = client.entries.lock().unwrap().clone();
+    let request = setup_request(runner.last().unwrap(), None);
+    let before = client.offered.lock().unwrap().len();
+    restored
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    let offered = offered_since(&client, before);
+    let [view] = &offered[..] else {
+        panic!("{} views offered during Setup", offered.len());
+    };
+    assert_eq!(cut_through(view), Some(mid(18).as_str()));
+    cortexkit_compaction_view::render::apply(&runner, view)
+        .expect("the runner can apply the view to its transcript");
+    std::fs::remove_dir_all(dir).unwrap();
+}

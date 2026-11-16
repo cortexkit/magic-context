@@ -57,6 +57,12 @@ pub struct Durable {
     pub pending_keep: Option<BTreeSet<(String, String)>>,
     #[serde(default)]
     pub head_stale: bool,
+    /// The runner applied a view of ck-mc's that cuts, or a move installed
+    /// the session's first view, so its host may hold a compaction marker.
+    /// Left out of the saved text while false, so other sessions' rows don't
+    /// change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub marker_possible: bool,
     /// Reserved reminder ids, independent of the runner's notice numbering.
     #[serde(default)]
     pub reminder_counter: u64,
