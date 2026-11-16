@@ -1192,6 +1192,18 @@ fn agent_data_admission(
     Ok(caller)
 }
 
+/// An agent-data reply as it goes on the wire: the body inside
+/// `{"result": …}`, the envelope every module reply uses and Entorhinal's
+/// participant client decodes. The reply is already one JSON object, so it
+/// is wrapped without parsing it again. A refusal is an ERROR frame instead.
+fn agent_data_result(reply: Vec<u8>) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(reply.len() + 11);
+    wire.extend_from_slice(b"{\"result\":");
+    wire.extend_from_slice(&reply);
+    wire.push(b'}');
+    wire
+}
+
 /// A principal as the agent-data contract spells callers:
 /// `reserved:<module id>`, `direct` or `unverified`; empty when the daemon
 /// stamped none.
@@ -2066,7 +2078,7 @@ impl Handler {
         // app or context handler.
         if let Some(answer) = self.agent_data(ctx.route_handle().channel, body).await {
             return match answer {
-                Ok(reply) => HandlerOutcome::Response(reply),
+                Ok(reply) => HandlerOutcome::Response(agent_data_result(reply)),
                 Err(refusal) => match refusal.detail {
                     Some(detail) => HandlerOutcome::ErrorWithDetail {
                         code: refusal.code.as_str().to_owned(),

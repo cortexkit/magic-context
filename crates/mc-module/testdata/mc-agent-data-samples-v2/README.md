@@ -8,8 +8,10 @@ changed; the wire format is the same.
 These are JSON bodies accepted or produced by ck-mc's `agent-data/v1`
 participant, using `cortexkit-role-agent-data` 0.3.0. Each JSON file is one
 message, not a request/response wrapper. Requests contain `method` and
-`params`. Successful reply bodies are bare objects; refusal bodies contain
-`code`, `message`, and, where applicable, `detail`. Keys are sorted and the
+`params`. Successful reply bodies are shown bare; on the wire each one
+travels inside `{"result": <body>}`, the envelope every module reply uses.
+Refusal bodies are the ERROR frame's body and contain `code`, `message`,
+and, where applicable, `detail`. Keys are sorted and the
 only presentation changes are indentation and a final newline.
 
 The `wire-` examples crossed two disposable daemons. Their source head has

@@ -136,6 +136,17 @@ async fn with_moves_on_only_entorhinal_binds_agent_data_and_its_requests_go_to_t
         handler.agent_data(5, &status()).await.unwrap().unwrap(),
         br#"{"step":"none"}"#
     );
+    // On the wire the reply travels inside `{"result": …}`, the envelope
+    // Entorhinal's participant client decodes strictly.
+    let wire = agent_data_result(handler.agent_data(5, &status()).await.unwrap().unwrap());
+    assert_eq!(wire, br#"{"result":{"step":"none"}}"#);
+    let envelope: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&wire).unwrap();
+    assert_eq!(
+        envelope.keys().collect::<Vec<_>>(),
+        ["result"],
+        "only `result` at the top"
+    );
     assert!(handler.agent_data(6, &status()).await.is_none());
     for principal in [
         None,

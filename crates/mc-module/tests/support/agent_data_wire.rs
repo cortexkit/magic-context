@@ -282,7 +282,22 @@ impl StandIn {
                     )
                     .await;
                 Ok(match reply {
-                    Ok(bytes) => json!({"reply": String::from_utf8(bytes).unwrap()}),
+                    // As Entorhinal's participant client does: a reply is
+                    // exactly `{"result": <body>}` and nothing else, so a
+                    // bare body fails here as it fails a real move.
+                    Ok(bytes) => {
+                        let mut envelope: serde_json::Map<String, Value> =
+                            serde_json::from_slice(&bytes)
+                                .expect("an agent-data reply is a JSON object");
+                        let body = envelope
+                            .remove("result")
+                            .expect("an agent-data reply carries `result`");
+                        assert!(
+                            envelope.is_empty(),
+                            "an agent-data reply carries only `result`: {envelope:?}"
+                        );
+                        json!({"reply": body.to_string()})
+                    }
                     Err(subc_client_rs::CallError::Module(body)) => json!({"refused": {
                         "code": body.code,
                         "message": body.message,
