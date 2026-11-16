@@ -28,6 +28,11 @@ struct Client {
     offered: Mutex<Vec<View>>,
     reads: Mutex<usize>,
     ends: crate::run_ends::RunEnds,
+    /// How long each transcript read takes, standing for the pages a long
+    /// transcript costs a real runner to serve.
+    read_delay: Mutex<Duration>,
+    /// Transcript reads fail, as when the runner went away.
+    fail_reads: Mutex<bool>,
 }
 
 fn cursor(entry: &Entry) -> Cursor {
@@ -37,6 +42,13 @@ fn cursor(entry: &Entry) -> Cursor {
 impl RunnerClient for Client {
     async fn read(&self, _: &SessionRef, request: ReadRequest) -> Result<ReadPage, ClientError> {
         *self.reads.lock().unwrap() += 1;
+        if *self.fail_reads.lock().unwrap() {
+            return Err(ClientError::new("connection lost"));
+        }
+        let delay = *self.read_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         let entries = self.entries.lock().unwrap();
         let mut head = Head::new();
         head.newest = entries.last().map(cursor);
@@ -466,6 +478,9 @@ async fn quiet_a_worker_session_is_freed_a_minute_after_its_run_ended() {
     let states = f.app_reads().await.pop().unwrap();
     assert_eq!(states["messages"][4]["message_id"], "e", "{states}");
 }
+
+#[path = "quiet_worker_review_tests.rs"]
+mod quiet_worker_review_tests;
 
 #[tokio::test(start_paused = true)]
 async fn quiet_a_head_session_waits_its_whole_quiet_time_after_its_run_ended() {
