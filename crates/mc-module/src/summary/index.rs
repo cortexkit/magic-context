@@ -141,41 +141,43 @@ impl Summaries {
 
     /// The full rows of the summaries at `positions` in the list, in that
     /// order: held rows as they are in memory, the others read from
-    /// `context.db` in one read. `Err` when the read fails or a summary is
-    /// no longer stored there.
+    /// `context.db` in one read. A summary `context.db` no longer holds is
+    /// left out and named in [`Rows::missing`]. `Err` when the read fails.
     pub(crate) fn rows(
         &self,
         positions: impl IntoIterator<Item = usize>,
         store: Option<(&ContextDb, &str, &str)>,
-    ) -> Result<Vec<Arc<StoredCompartment>>, String> {
+    ) -> Result<Rows, String> {
         let wanted: Vec<&SummaryIndex> = positions
             .into_iter()
             .map(|position| &self.index[position])
             .collect();
-        let missing: Vec<i64> = wanted
+        let unheld: Vec<i64> = wanted
             .iter()
             .map(|entry| entry.sequence)
             .filter(|sequence| !self.held.contains_key(sequence))
             .collect();
         let mut read = BTreeMap::new();
-        if !missing.is_empty() {
+        if !unheld.is_empty() {
             let Some((db, harness, session)) = store else {
                 return Err("no store holds the summaries' text".into());
             };
-            for row in db.compartments_with_sequences(harness, session, &missing)? {
+            for row in db.compartments_with_sequences(harness, session, &unheld)? {
                 read.insert(row.sequence, Arc::new(row));
             }
         }
-        wanted
-            .iter()
-            .map(|entry| {
-                self.held
-                    .get(&entry.sequence)
-                    .or_else(|| read.get(&entry.sequence))
-                    .cloned()
-                    .ok_or_else(|| format!("summary {} is not in context.db", entry.sequence))
-            })
-            .collect()
+        let mut rows = Rows::default();
+        for entry in wanted {
+            match self
+                .held
+                .get(&entry.sequence)
+                .or_else(|| read.get(&entry.sequence))
+            {
+                Some(row) => rows.found.push(row.clone()),
+                None => rows.missing.push(entry.sequence),
+            }
+        }
+        Ok(rows)
     }
 
     /// The full rows of the summaries newer than `sequence`, oldest first.
@@ -183,12 +185,32 @@ impl Summaries {
         &self,
         sequence: i64,
         store: Option<(&ContextDb, &str, &str)>,
-    ) -> Result<Vec<Arc<StoredCompartment>>, String> {
+    ) -> Result<Rows, String> {
         let first = self
             .index
             .partition_point(|entry| entry.sequence <= sequence);
         self.rows(first..self.index.len(), store)
     }
+}
+
+/// What [`Summaries::rows`] read.
+#[derive(Debug, Default)]
+pub struct Rows {
+    /// The rows found, in the order they were asked for.
+    pub found: Vec<Arc<StoredCompartment>>,
+    /// The sequences of the summaries `context.db` no longer holds: another
+    /// writer deleted them after the session let their text go.
+    pub missing: Vec<i64>,
+}
+
+/// Why a session couldn't read every summary row it needed.
+#[derive(Debug)]
+pub enum UnreadSummaries {
+    /// The read failed, as on a busy or broken store; the next pass reads
+    /// again.
+    Failed(String),
+    /// `context.db` no longer holds these summaries.
+    Missing(Vec<i64>),
 }
 
 impl std::ops::Deref for Summaries {
@@ -271,7 +293,10 @@ mod tests {
         assert_eq!(summaries.len(), 5);
         assert_eq!(summaries.held(), 2);
         assert_eq!(summaries.revision(), revision);
-        assert_eq!(sequences(&summaries.rows_after(3, None).unwrap()), [4, 5]);
+        assert_eq!(
+            sequences(&summaries.rows_after(3, None).unwrap().found),
+            [4, 5]
+        );
         assert!(
             summaries.rows(0..5, None).is_err(),
             "text let go needs a store to read it back from"
@@ -295,7 +320,10 @@ mod tests {
             conn.execute_batch("UPDATE compartments SET content = 'Edited', p1 = 'Edited';")
         })
         .unwrap();
-        let read = summaries.rows(0..3, Some((&db, "mock", "s1"))).unwrap();
+        let read = summaries
+            .rows(0..3, Some((&db, "mock", "s1")))
+            .unwrap()
+            .found;
         assert_eq!(&*read[0].content, "Edited");
         assert_eq!(&*read[1].content, "Edited");
         assert_eq!(*read[2], rows[2], "a held row stays as it was");
@@ -304,10 +332,9 @@ mod tests {
             conn.execute_batch("DELETE FROM compartments WHERE sequence = 1;")
         })
         .unwrap();
-        assert_eq!(
-            summaries.rows(0..3, Some((&db, "mock", "s1"))).unwrap_err(),
-            "summary 1 is not in context.db"
-        );
+        let read = summaries.rows(0..3, Some((&db, "mock", "s1"))).unwrap();
+        assert_eq!(sequences(&read.found), [2, 3]);
+        assert_eq!(read.missing, [1], "a deleted summary is named, not read");
     }
 
     #[test]

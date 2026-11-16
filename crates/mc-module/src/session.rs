@@ -184,6 +184,10 @@ pub struct Session {
     /// After a restart, until the view the runner applies is read back:
     /// ck-mc doesn't know which edits the next view must carry.
     latest_unknown: bool,
+    /// Summaries a head render found missing from `context.db`; the next
+    /// build reads the session's summaries from there again
+    /// ([`Session::reload_changed_summaries`]).
+    summaries_missing: Option<Vec<i64>>,
     /// The `ctx_keep` the pass being built carries out. If the runner
     /// refuses that view or never gets it, the keep waits again: the model
     /// was told everything else goes.
@@ -676,7 +680,7 @@ enum AccountAdmit {
     Emergency(Option<String>),
 }
 
-pub(crate) use crate::summary::index::{Summaries, SummaryIndex};
+pub(crate) use crate::summary::index::{Summaries, SummaryIndex, UnreadSummaries};
 
 /// [`head::newer_summaries`] as the last view build computed it, and what it
 /// was computed from.
@@ -704,7 +708,7 @@ impl HeadSummaries {
         store: Option<(&ContextDb, &str, &str)>,
         model: &str,
         counter: crate::count::Counter,
-    ) -> Result<head::NewerSummaries, String> {
+    ) -> Result<head::NewerSummaries, UnreadSummaries> {
         if let Some(kept) = cache.as_ref().filter(|kept| {
             (kept.from.same(&base.summary_items) || kept.newer.items().same(&base.summary_items))
                 && kept.through_sequence == base.through_sequence
@@ -714,8 +718,13 @@ impl HeadSummaries {
             return Ok(kept.newer.clone());
         }
         // Held in memory, unless no baseline the session keeps needed them.
-        let newer_rows = summaries.rows_after(base.through_sequence, store)?;
-        let newer = head::newer_summaries(base, &newer_rows, counter);
+        let newer_rows = summaries
+            .rows_after(base.through_sequence, store)
+            .map_err(UnreadSummaries::Failed)?;
+        if !newer_rows.missing.is_empty() {
+            return Err(UnreadSummaries::Missing(newer_rows.missing));
+        }
+        let newer = head::newer_summaries(base, &newer_rows.found, counter);
         *cache = Some(Self {
             from: base.summary_items.clone(),
             through_sequence: base.through_sequence,
@@ -822,6 +831,7 @@ impl Session {
             next_rearm: false,
             summary_unshown: false,
             latest_unknown: false,
+            summaries_missing: None,
             next_keep: None,
             failed_parts: BTreeSet::new(),
             keep_requested: false,
@@ -1134,7 +1144,6 @@ impl Session {
         // none of the earlier edits and every dropped part would come back.
         self.latest_unknown = self.latest.is_none() && self.version > 0;
         self.distrust_state_ahead_of_summaries();
-        self.release_summary_bodies();
         self.share_baseline_text();
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
@@ -1154,9 +1163,34 @@ impl Session {
     /// may then cut, or show in `m[0]`, summaries `context.db` no longer
     /// has; those messages would be neither summarized nor shown. ck-mc
     /// trusts `context.db`: reading starts where its summaries end, `m[0]` is
-    /// rendered again, views not yet confirmed are dropped, and the next view
-    /// moves the cut back, so the summarizer covers those messages again.
+    /// rendered again ([`Session::adopt_stored_summaries`]), views not yet
+    /// confirmed are dropped, and the next view moves the cut back, so the
+    /// summarizer covers those messages again.
     fn distrust_state_ahead_of_summaries(&mut self) {
+        let (cut, covered) = (self.cut, self.summarized_through());
+        if !self.adopt_stored_summaries() {
+            return;
+        }
+        tracing::info!(
+            "ck-mc: session {}: saved state is ahead of context.db's summaries (cut {:?}, summaries through {covered:?}); rebuilding from context.db",
+            self.key.session, cut
+        );
+        // Views saved before the restart may rest on those summaries too.
+        // Setup reads back the one the runner applies before any is built.
+        self.unconfirmed.clear();
+        self.latest = None;
+    }
+
+    /// Take the summaries `context.db` holds, which `load_summaries` has
+    /// just read, over state that rests on summaries it no longer has. The
+    /// cut moves back to where the summaries end, and the transcript is read
+    /// again from there when the index no longer holds it. A baseline that
+    /// shows summaries past them is dropped, so the head folds. Then the text
+    /// no baseline needs is let go. A restore comes here, and so does a
+    /// build after a head render found summaries missing from `context.db`
+    /// ([`Session::reload_changed_summaries`]). Returns whether the state was
+    /// ahead of the summaries.
+    fn adopt_stored_summaries(&mut self) -> bool {
         let covered = self.summarized_through();
         let cut_ahead = self
             .cut
@@ -1168,22 +1202,39 @@ impl Session {
             .baseline
             .as_ref()
             .is_some_and(|baseline| baseline.through_sequence > last_sequence);
-        if !cut_ahead && !head_ahead {
-            return;
-        }
-        tracing::info!(
-            "ck-mc: session {}: saved state is ahead of context.db's summaries (cut {:?}, summaries through {covered:?}); rebuilding from context.db",
-            self.key.session, self.cut
-        );
         if cut_ahead {
             self.cut = covered;
+            let from = self.cut.unwrap_or(1);
+            if self.index.base() > from {
+                self.index = Index::starting_at(from);
+                self.index_ready = false;
+            }
         }
         if head_ahead {
             self.baseline = None;
         }
-        self.unconfirmed.clear();
-        self.latest = None;
-        self.head_stale = true;
+        self.head_stale |= cut_ahead || head_ahead;
+        self.release_summary_bodies();
+        cut_ahead || head_ahead
+    }
+
+    /// A head render found summaries `context.db` no longer holds: another
+    /// writer deleted them after the session let their text go. ck-mc
+    /// trusts `context.db`, so the session reads its summaries from there
+    /// again and takes them over the state that rested on the missing ones
+    /// ([`Session::adopt_stored_summaries`]); the due fold then renders from
+    /// what remains. Views the runner holds stay: the next one carries
+    /// their edits and moves the cut back if it has to.
+    fn reload_changed_summaries(&mut self) {
+        let Some(missing) = self.summaries_missing.take() else {
+            return;
+        };
+        tracing::warn!(
+            "ck-mc: session {}: summaries {missing:?} are no longer in context.db; the session reads its summaries from there again",
+            self.key.session
+        );
+        self.load_summaries();
+        self.adopt_stored_summaries();
     }
 
     /// Load the summaries `context.db` already holds for the session, such as
@@ -1213,11 +1264,15 @@ impl Session {
 
     /// Every summary's full row, oldest first: held ones copied from memory,
     /// the others read from `context.db`.
-    pub(crate) fn summary_rows(&self) -> Result<Vec<StoredCompartment>, String> {
+    pub(crate) fn summary_rows(&self) -> Result<Vec<StoredCompartment>, UnreadSummaries> {
         let rows = self
             .summaries
-            .rows(0..self.summaries.len(), self.summary_store())?;
-        Ok(rows.into_iter().map(Arc::unwrap_or_clone).collect())
+            .rows(0..self.summaries.len(), self.summary_store())
+            .map_err(UnreadSummaries::Failed)?;
+        if !rows.missing.is_empty() {
+            return Err(UnreadSummaries::Missing(rows.missing));
+        }
+        Ok(rows.found.into_iter().map(Arc::unwrap_or_clone).collect())
     }
 
     /// Where the summaries the session doesn't hold are read from.
@@ -4393,7 +4448,7 @@ impl Session {
                     summaries: &summaries,
                     ..fold_inputs
                 }),
-                Err(error) => return self.head_as_shown(&format!("reading summaries: {error}")),
+                Err(unread) => return self.head_as_shown_for(unread),
             },
         };
         // A baseline in the memory format before levels records what its
@@ -4417,7 +4472,7 @@ impl Session {
             fold_inputs.counter,
         ) {
             Ok(newer) => newer,
-            Err(error) => return self.head_as_shown(&format!("reading summaries: {error}")),
+            Err(unread) => return self.head_as_shown_for(unread),
         };
         let (mut m1, mut next, pressure) = head::delta_with(
             &base,
@@ -4434,7 +4489,7 @@ impl Session {
         {
             let summaries = match self.summary_rows() {
                 Ok(summaries) => summaries,
-                Err(error) => return self.head_as_shown(&format!("reading summaries: {error}")),
+                Err(unread) => return self.head_as_shown_for(unread),
             };
             base = folded(&head::Inputs {
                 summaries: &summaries,
@@ -4451,7 +4506,7 @@ impl Session {
                 fold_inputs.counter,
             ) {
                 Ok(newer) => newer,
-                Err(error) => return self.head_as_shown(&format!("reading summaries: {error}")),
+                Err(unread) => return self.head_as_shown_for(unread),
             };
             // A fresh fold shows every current memory, so none is gone.
             (m1, next, _) = head::delta_with(&base, &fold_inputs, &newer);
@@ -4648,6 +4703,23 @@ impl Session {
             }
         }
         m1_changed
+    }
+
+    /// The head as shown, when the summaries a render needs couldn't all be
+    /// read. Summaries missing from `context.db` are read from there again
+    /// before the next build ([`Session::reload_changed_summaries`]); a
+    /// failed read is simply tried again.
+    fn head_as_shown_for(&mut self, unread: UnreadSummaries) -> Vec<EditOp> {
+        match unread {
+            UnreadSummaries::Failed(error) => {
+                self.head_as_shown(&format!("reading summaries: {error}"))
+            }
+            UnreadSummaries::Missing(missing) => {
+                let why = format!("summaries {missing:?} are not in context.db");
+                self.summaries_missing = Some(missing);
+                self.head_as_shown(&why)
+            }
+        }
     }
 
     fn head_as_shown(&mut self, why: &str) -> Vec<EditOp> {
@@ -4849,6 +4921,10 @@ impl Session {
         }
         self.next_flush = flush;
         let _timing = crate::notice_cost_timing::span("build.total");
+        // Before anything is built on summaries context.db no longer has.
+        // When the cut moves back past what the index holds, the transcript
+        // is read again first and this build waits for it.
+        self.reload_changed_summaries();
         if !self.index_ready {
             return (None, 0);
         }

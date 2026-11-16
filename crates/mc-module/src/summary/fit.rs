@@ -145,7 +145,12 @@ pub fn chosen_references(
 /// The references a run's prompt shows ([`chosen_references`]), oldest
 /// first, with their bodies: held rows from memory, the others read from
 /// the session's rows in `context.db` (`store`: the store, harness and
-/// session). No other summary's body is read.
+/// session) as they are now. No other summary's body is read.
+///
+/// References are context for the summarizer, not part of a cached prompt,
+/// so one `context.db` no longer holds (another writer deleted it, or a
+/// revert did while the run was under way) is left out, and no other
+/// summary takes its place: the run goes on without it.
 pub fn references(
     summaries: &Summaries,
     prompts: &super::prompts::SummaryPrompts,
@@ -154,8 +159,15 @@ pub fn references(
     store: Option<(&ContextDb, &str, &str)>,
 ) -> Result<Vec<ReferenceCompartment>, String> {
     let chosen = chosen_references(summaries, prompts, session_id, chunk_start);
-    Ok(summaries
-        .rows(chosen, store)?
+    let read = summaries.rows(chosen, store)?;
+    if !read.missing.is_empty() {
+        tracing::warn!(
+            "ck-mc: session {session_id}: summaries {:?} chosen as references are no longer in context.db; the run leaves them out",
+            read.missing
+        );
+    }
+    Ok(read
+        .found
         .iter()
         .map(|row| ReferenceCompartment::from(&**row))
         .collect())
@@ -524,7 +536,8 @@ mod tests {
 
     /// A run reads the bodies of the references it shows from `context.db`
     /// and needs no other summary's: here the store holds the chosen ones
-    /// alone, and no summary's body is held in memory.
+    /// alone, and no summary's body is held in memory. One that is deleted
+    /// is left out.
     #[test]
     fn a_run_reads_only_the_bodies_of_the_references_it_shows() {
         let dir = tempfile::tempdir().unwrap();
@@ -563,11 +576,30 @@ mod tests {
         summaries.release_through(rows.len() as i64);
         let read =
             super::references(&summaries, prompts(), "s1", 101, Some((&db, "mock", "s1"))).unwrap();
-        let expected: Vec<ReferenceCompartment> = chosen
+        let mut expected: Vec<ReferenceCompartment> = chosen
             .iter()
             .map(|&position| ReferenceCompartment::from(&rows[position]))
             .collect();
         assert_eq!(read, expected);
+
+        // A chosen reference deleted from context.db is left out, and no
+        // other summary takes its place.
+        let deleted = rows[chosen[1]].sequence;
+        db.with_connection(|conn| {
+            conn.execute("DELETE FROM compartments WHERE sequence = ?1", [deleted])
+        })
+        .unwrap();
+        let (read, log) = crate::test_log::logged(|| {
+            super::references(&summaries, prompts(), "s1", 101, Some((&db, "mock", "s1"))).unwrap()
+        });
+        expected.remove(1);
+        assert_eq!(read, expected);
+        assert!(
+            log.contains(&format!(
+                "summaries [{deleted}] chosen as references are no longer in context.db"
+            )),
+            "{log}"
+        );
     }
 
     /// Choosing references on their index entries and reading only the

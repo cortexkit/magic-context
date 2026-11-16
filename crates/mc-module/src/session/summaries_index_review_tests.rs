@@ -161,14 +161,16 @@ fn a_summary_run_builds_its_references_after_another_writer_deletes_one() {
 
 /// Another writer edits summary 2 after the session let its text go. The
 /// next summary run reads its reference from `context.db` and shows the
-/// summarizer the edited text, on a run that renders no `m[0]`. Before the
-/// index the run showed the row the session had loaded, so the summary
-/// prompt's bytes for the same session history now depend on when another
-/// writer changed `context.db`. The choice of references still reads the
-/// index entries kept from before the edit, so an edit to importance or
-/// content would be shown with a choice made on the old values.
+/// summarizer the edited text. Before the index the run showed the row the
+/// session had loaded. Showing the current text is intended: references are
+/// context for the summarizer, not part of a cached prompt, and a reference
+/// shows what `context.db` holds now, as the next fold's `m[0]` does. Which
+/// summaries are shown is still chosen on the index entries the session
+/// loaded (importance, and whether each has content), so an edit to those
+/// reaches the choice only when the summaries are next loaded; that is fine
+/// too.
 #[test]
-fn a_summary_run_shows_its_references_as_the_session_loaded_them() {
+fn a_summary_run_shows_its_references_as_context_db_holds_them_now() {
     let (dir, mut session, settings) = released("review-edited-reference");
     // What the run showed before the index: the references chosen among
     // every row the session had loaded, as `fit` chose them then.
@@ -197,9 +199,24 @@ fn a_summary_run_shows_its_references_as_the_session_loaded_them() {
             p1 = 'Edited elsewhere.' WHERE sequence = 2;",
     );
     let read = run_references(&mut session, &settings).unwrap();
+    let edited: Vec<ReferenceCompartment> = shown_by_base
+        .into_iter()
+        .map(|reference| {
+            if reference.title == "Work 2" {
+                ReferenceCompartment {
+                    title: "Edited elsewhere".into(),
+                    content: "Edited elsewhere.".into(),
+                    p1: Some("Edited elsewhere.".into()),
+                    ..reference
+                }
+            } else {
+                reference
+            }
+        })
+        .collect();
     assert_eq!(
-        read, shown_by_base,
-        "the run shows another writer's edit of a summary the session let go"
+        read, edited,
+        "the same references, summary 2 as context.db holds it now"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
