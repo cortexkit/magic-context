@@ -157,3 +157,11 @@ pub fn glyph(character: char) -> &'static [u8; 8] {
         .binary_search_by_key(&character, |(key, _)| *key)
         .map_or(&REPLACEMENT, |index| &GLYPHS[index].1)
 }
+
+/// Whether the font has a glyph of its own for `character`, rather than
+/// drawing it as the replacement box.
+pub fn has_glyph(character: char) -> bool {
+    GLYPHS
+        .binary_search_by_key(&character, |(key, _)| *key)
+        .is_ok()
+}

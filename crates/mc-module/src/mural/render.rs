@@ -9,6 +9,8 @@
 //! The PNG's compressed bytes may differ, since the two use different deflate
 //! encoders; the layout text's checksum is what identifies a mural.
 
+use unicode_normalization::char::{decompose_compatible, is_combining_mark};
+
 use super::font::{self, CELL_HEIGHT, CELL_WIDTH, LINE_PITCH};
 
 /// The largest image, in pixels each way.
@@ -64,6 +66,9 @@ pub struct Plan {
     pub rendered_ids: Vec<i64>,
     /// The memories that did not fit.
     pub dropped_ids: Vec<i64>,
+    /// The memories left out because the font can't draw their cue (see
+    /// [`drawable_cue`]). They are in neither list above.
+    pub undrawable_ids: Vec<i64>,
     pub width: usize,
     pub height: usize,
 }
@@ -330,6 +335,7 @@ fn layout(entries: &[Entry], plan: &[Line], room_width: usize, column_count: usi
         text: format!("{}\n", lines.join("\n")),
         rendered_ids,
         dropped_ids,
+        undrawable_ids: Vec::new(),
         width: 0,
         height: 0,
     }
@@ -353,8 +359,86 @@ pub fn tile_area(width: usize, height: usize) -> usize {
     width.div_ceil(VISION_TILE) * height.div_ceil(VISION_TILE)
 }
 
-/// Lay out `entries`, already in mural order.
+/// The combining marks drawn over their base character: U+0334 to U+0338,
+/// the overlaid tilde, strokes and solidi. The compatibility decomposition
+/// of a negated symbol ends in one (`≠` is `=` and U+0338), so dropping it
+/// would draw the symbol's opposite. It is kept instead; the font has no
+/// glyph for it, so such a cue is not drawn at all.
+const OVERLAY_MARKS: std::ops::RangeInclusive<char> = '\u{334}'..='\u{338}';
+
+/// The ASCII that common typographic punctuation the font lacks stands for.
+fn typographic_ascii(character: char) -> Option<&'static str> {
+    Some(match character {
+        // Curly and low single quotation marks.
+        '\u{2018}'..='\u{201b}' => "'",
+        // Curly and low double quotation marks.
+        '\u{201c}'..='\u{201f}' => "\"",
+        // Hyphens and dashes: en, em, figure dash, horizontal bar.
+        '\u{2010}'..='\u{2015}' => "-",
+        '…' => "...",
+        _ => return None,
+    })
+}
+
+/// `cue` as the font can draw it, or `None` when it can't draw all of it.
+///
+/// A character the font has a glyph for stays as it is, so a cue the font
+/// draws whole keeps its exact pixels. Whitespace of every kind, the
+/// non-breaking space among it, stays too: the layout turns each run of it
+/// into one space. Any other character becomes the ASCII it stands for when
+/// it is typographic punctuation (curly quotes, dashes, the ellipsis), else
+/// its compatibility decomposition (NFKD) without combining marks, so `é` is
+/// drawn as `e` and `ﬁ` as `fi`.
+///
+/// The cue is drawable only when the font has a glyph for every character
+/// of the result, and the result still shows something when the cue did:
+/// a cue of Chinese characters, or only of combining marks, is not drawn.
+pub fn drawable_cue(cue: &str) -> Option<String> {
+    let mut drawn = String::with_capacity(cue.len());
+    for character in cue.chars() {
+        if font::has_glyph(character) || is_js_space(character) {
+            drawn.push(character);
+        } else if let Some(ascii) = typographic_ascii(character) {
+            drawn.push_str(ascii);
+        } else {
+            decompose_compatible(character, |part| {
+                if !is_combining_mark(part) || OVERLAY_MARKS.contains(&part) {
+                    drawn.push(part);
+                }
+            });
+        }
+    }
+    let every_glyph = drawn
+        .chars()
+        .all(|character| font::has_glyph(character) || is_js_space(character));
+    let shows_something = |text: &str| words(text).next().is_some();
+    (every_glyph && shows_something(&drawn) == shows_something(cue)).then_some(drawn)
+}
+
+/// Lay out `entries`, already in mural order, with each cue as the font can
+/// draw it ([`drawable_cue`]). An entry whose cue the font can't draw is
+/// left out as if it had no cue, and so is a category banner left with no
+/// cue under it; [`Plan::undrawable_ids`] lists those entries.
 pub fn plan(entries: &[Entry]) -> Plan {
+    let mut drawable = Vec::with_capacity(entries.len());
+    let mut undrawable_ids = Vec::new();
+    for entry in entries {
+        match drawable_cue(&entry.cue) {
+            Some(cue) => drawable.push(Entry {
+                cue,
+                ..entry.clone()
+            }),
+            None => undrawable_ids.push(entry.id),
+        }
+    }
+    let mut plan = lay_out_cues(&drawable);
+    plan.undrawable_ids = undrawable_ids;
+    plan
+}
+
+/// Lay out `entries` with their cues as they are, as the plugin's renderer
+/// does.
+fn lay_out_cues(entries: &[Entry]) -> Plan {
     let room_width = choose_room_width(entries);
     let lines = plan_lines(entries, room_width);
     let candidates: Vec<(usize, Plan)> = (1..=COLUMNS)
@@ -571,7 +655,19 @@ mod tests {
                     cue: entry.cue,
                 })
                 .collect();
-            let plan = plan(&entries);
+            // The plugin's renderer draws a character its font lacks as a
+            // box; this one leaves out any cue with such a character.
+            // `lay_out_cues` lays out every cue as the plugin does. The font
+            // draws every cue of these vectors except one in "wrapping"
+            // (an emoji and kanji), so leaving cues out changes no other
+            // vector.
+            let drawn = plan(&entries);
+            let plan = lay_out_cues(&entries);
+            if vector.name == "wrapping" {
+                assert_eq!(drawn.undrawable_ids, [2], "{}", vector.name);
+            } else {
+                assert_eq!(drawn, plan, "{}: a cue the font draws", vector.name);
+            }
             assert_eq!(plan.text, vector.text, "{}: layout text", vector.name);
             assert_eq!(
                 (plan.width, plan.height),

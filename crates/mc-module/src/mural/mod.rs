@@ -14,7 +14,10 @@
 //!   memory never reshuffles the others in its band.
 //!
 //! A mural is drawn only when enough of the project's memories have current
-//! cues: at least 15, or at least half of them (`muralCoverageGate`).
+//! cues: at least 15, or at least half of them (`muralCoverageGate`). Only a
+//! cue the mural's font can draw counts, and only such cues are drawn
+//! ([`render::drawable_cue`]): a cue in a script the font lacks, such as
+//! Chinese, is left out, and the mural with it when no cue is left.
 //!
 //! The rendered PNG is stored per project in `mural_manifest`, keyed by the
 //! layout text's checksum, which the plugin uses too: when the layout is
@@ -89,16 +92,18 @@ fn current(cue: Option<&Cue>, content: &str) -> bool {
     matches!(cue, Some(Cue { text: Some(_), hash: Some(hash) }) if *hash == content_hash(content))
 }
 
-/// Whether enough of `memories` have current, non-blank cues.
+/// Whether enough of `memories` have current, non-blank cues the font can
+/// draw ([`render::drawable_cue`]). A cue the font can't draw is not on the
+/// mural, so it doesn't count towards one.
 pub fn coverage_ok(memories: &[StoredMemory], cues: &HashMap<i64, Cue>) -> bool {
     let cued = memories
         .iter()
         .filter(|memory| {
             let cue = cues.get(&memory.id);
             current(cue, &memory.content)
-                && cue
-                    .and_then(|cue| cue.text.as_deref())
-                    .is_some_and(|text| !text.trim().is_empty())
+                && cue.and_then(|cue| cue.text.as_deref()).is_some_and(|text| {
+                    !text.trim().is_empty() && render::drawable_cue(text).is_some()
+                })
         })
         .count();
     !memories.is_empty()
@@ -166,8 +171,9 @@ pub fn read_cues(conn: &Connection, ids: &[i64]) -> rusqlite::Result<HashMap<i64
 
 /// The project's mural for `memories` (the project's own rows the head
 /// chose from) and the ones its text left out for room, or `None` when
-/// there is nothing to draw or too few cues. An unchanged layout reuses the stored
-/// image; a new one is drawn and stored.
+/// there is nothing to draw or too few cues: the font drawing none of the
+/// left-out memories' cues is nothing to draw. An unchanged layout reuses
+/// the stored image; a new one is drawn and stored.
 pub fn ensure(
     conn: &Connection,
     project: &str,
@@ -185,6 +191,9 @@ pub fn ensure(
         return Ok(None);
     }
     let plan = render::plan(&entries);
+    if plan.rendered_ids.is_empty() {
+        return Ok(None);
+    }
     let hash = content_hash(&plan.text);
     let stored: Option<(Vec<u8>, String, i64, i64)> = conn
         .query_row(
@@ -232,6 +241,9 @@ pub fn ensure(
         memory_ids: plan.rendered_ids,
     }))
 }
+
+#[cfg(test)]
+mod drawable_tests;
 
 #[cfg(test)]
 mod tests {

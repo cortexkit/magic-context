@@ -2899,6 +2899,11 @@ fn insert_memory(dir: &std::path::Path, id: i64, content: &str) {
 /// Twenty project memories with current mural cues, and a memory budget
 /// that shows only a few of them: the rest are what a mural draws.
 fn mural_project(name: &str) -> std::path::PathBuf {
+    mural_project_cued(name, |id| format!("parser checks→merge {id}"))
+}
+
+/// [`mural_project`] with memory `id`'s cue written by `cue`.
+fn mural_project_cued(name: &str, cue: impl Fn(i64) -> String) -> std::path::PathBuf {
     use sha2::Digest as _;
     let dir = scratch(name);
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
@@ -2913,7 +2918,7 @@ fn mural_project(name: &str) -> std::path::PathBuf {
                                        first_seen_at, created_at, updated_at, last_seen_at,
                                        mural_cue, mural_cue_hash)
                  VALUES (?1, 'project', 'pj-test', 'swe:project-rules', 'PROJECT_RULES', ?2, ?3, 80, 1, 1, 1, 1, ?4, ?5)",
-                rusqlite::params![id, content, format!("hash-{id}"), format!("parser checks→merge {id}"), hash],
+                rusqlite::params![id, content, format!("hash-{id}"), cue(id), hash],
             )
             .unwrap();
     }
@@ -2994,6 +2999,25 @@ async fn m0_has_no_mural_when_the_model_may_not_read_images() {
     let dir = mural_project("mural-no-images");
     let mut runner = start_full(
         mural_config(&dir, None),
+        mural_settings(),
+        Some(dir.clone()),
+    )
+    .await;
+    runner.play(&[user("Hello."), answer()]).await;
+    assert_clean(&runner);
+    let (m0, _) = head_texts(runner.host());
+    assert!(!m0.contains("<memory-mural>"), "{m0}");
+    assert!(head_images(runner.host()).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pool of Chinese cues, none of which the mural's font draws, gets
+/// neither the image nor its block, even on a model that reads images.
+#[tokio::test]
+async fn m0_has_no_mural_when_the_font_draws_none_of_the_cues() {
+    let dir = mural_project_cued("mural-undrawable", |id| format!("合并前运行解析检查 {id}"));
+    let mut runner = start_full(
+        mural_config(&dir, Some(true)),
         mural_settings(),
         Some(dir.clone()),
     )
