@@ -63,7 +63,7 @@ fn unrelated() -> Vec<Entry> {
 /// The state a held session must keep exactly as it was.
 #[derive(Debug, PartialEq)]
 struct Kept {
-    summaries: Vec<StoredCompartment>,
+    summaries: Vec<crate::session::SummaryIndex>,
     cut: Option<u64>,
     base: u64,
     baseline: Option<Arc<crate::summary::head::Baseline>>,

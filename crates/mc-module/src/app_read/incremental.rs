@@ -482,7 +482,7 @@ impl Session {
             // Only the summaries' ordinals are read here. The app reads take
             // the summaries themselves from `context.db`.
             p.ranges = summary_ranges(
-                self.summaries
+                self.summary_index()
                     .iter()
                     .map(|c| (c.start_message, c.end_message)),
             );

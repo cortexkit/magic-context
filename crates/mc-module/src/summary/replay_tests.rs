@@ -664,7 +664,7 @@ fn turn_one_prompt(case: &Case, prompts: &SummaryPrompts, system: &str) -> Strin
                 session_id: &case.session,
                 chunk_start: case.chunk.0,
                 last_ordinal: case.chunk.1,
-                summaries: &[],
+                references: &[],
                 memories: &[],
                 memory_enabled: true,
                 anchored_facts: true,

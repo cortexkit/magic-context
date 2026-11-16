@@ -332,7 +332,7 @@ impl Fixture {
         };
         let baseline = crate::summary::head::fold(&inputs, None);
         let (delta, baseline, _) = crate::summary::head::delta(&baseline, &inputs);
-        let text = baseline.m0.clone();
+        let text = baseline.m0.to_string();
         let view = View::seal(
             7,
             crate::summary::head::head_ops(&text, &delta, None)

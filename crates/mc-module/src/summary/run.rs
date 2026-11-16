@@ -27,14 +27,14 @@ use regex::Regex;
 
 use super::prompt::{
     build_compartment_agent_prompt, with_content_language_directive, CompartmentPromptInputs,
-    ContentLanguageDirectiveOptions,
+    ContentLanguageDirectiveOptions, ReferenceCompartment,
 };
 use super::prompts::SummaryPrompts;
 use super::validate::{
     validate_historian_output, StoredCompartmentRange, ValidateOptions, ValidatedChunk,
 };
 use crate::client::{Child, RunnerClient};
-use crate::context_db::{ContextDb, StoredCompartment};
+use crate::context_db::ContextDb;
 use crate::routing::{self, Router};
 use cortexkit_role_compaction::read::StepUsage;
 use cortexkit_role_routing::report::Outcome;
@@ -72,8 +72,10 @@ pub struct Request {
     pub from: u64,
     /// The first ordinal of the protected tail, which the run leaves alone.
     pub until: u64,
-    /// The session's summaries so far, oldest first.
-    pub summaries: Vec<StoredCompartment>,
+    /// The session's summaries so far, oldest first: every one's index
+    /// entry, and the rows the session holds. The run reads the bodies of
+    /// the references it chooses from `context.db` when they aren't held.
+    pub summaries: crate::summary::index::Summaries,
     /// The session's project folder, where the runner creates the
     /// summarizer's child sessions.
     pub project_root: Option<String>,
@@ -196,6 +198,22 @@ pub async fn run<C: RunnerClient + Router>(
         return Ok(None);
     }
     let prompts = SummaryPrompts::for_context(job.memory_context.as_ref())?;
+    // The references the prompt shows are chosen on the summaries' index
+    // entries, so only the chosen ones' bodies are read.
+    let references = fit::references(
+        &job.summaries,
+        &prompts,
+        &job.session.session,
+        job.from,
+        db.map(|db| {
+            (
+                db,
+                job.session.harness.as_str(),
+                job.session.session.as_str(),
+            )
+        }),
+    )
+    .map_err(|error| format!("reading the summaries shown as references: {error}"))?;
     let system = two_pass_system(&prompts.system, job.language.as_deref());
     let carrier = format!("ck-mc:{}", job.session.runner);
     // A runner may host several harnesses with different model support. Route
@@ -278,6 +296,7 @@ pub async fn run<C: RunnerClient + Router>(
             deadline,
             system: &system,
             prompts: &prompts,
+            references: &references,
             keep_child: job.keep_subagents,
             attribution,
         };
@@ -384,6 +403,8 @@ struct Call<'a> {
     system: &'a str,
     /// The profile texts the system prompt came from.
     prompts: &'a Arc<SummaryPrompts>,
+    /// The earlier summaries the prompt shows as references.
+    references: &'a [ReferenceCompartment],
     /// Keep the children this model is asked in ([`Model::keep_child`]).
     keep_child: bool,
     /// Where the children this model is asked in are attributed.
@@ -454,7 +475,7 @@ async fn summarize_on<C: RunnerClient>(
         session_id: &job.session.session,
         chunk_start: job.from,
         last_ordinal: job.until.saturating_sub(1).max(job.from),
-        summaries: &job.summaries,
+        references: call.references,
         // The first turn shows no memories: the second turn compares the
         // facts with them.
         memories: &[],

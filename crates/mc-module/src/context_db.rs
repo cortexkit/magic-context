@@ -80,7 +80,9 @@ const fn declared_number(source: &str, declaration: &str) -> u32 {
     panic!("declaration not found");
 }
 
-/// One summary of a stretch of messages, as stored.
+/// One summary of a stretch of messages, as stored. In nearly every row
+/// written since tiers existed, `content` and `p1` hold the same text; they
+/// then share one allocation instead of holding two copies of it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoredCompartment {
     pub sequence: i64,
@@ -94,10 +96,10 @@ pub struct StoredCompartment {
     pub end_date: Option<String>,
     pub title: String,
     /// The most detailed tier, or the whole body of a summary from before
-    /// tiers existed.
-    pub content: String,
+    /// tiers existed. It shares `p1`'s text when the two are equal.
+    pub content: Arc<str>,
     /// The four detail tiers, most detailed first; absent for old rows.
-    pub p1: Option<String>,
+    pub p1: Option<Arc<str>>,
     pub p2: Option<String>,
     pub p3: Option<String>,
     pub p4: Option<String>,
@@ -127,6 +129,7 @@ pub struct StoredMemory {
 
 impl From<&ValidatedCompartment> for StoredCompartment {
     fn from(compartment: &ValidatedCompartment) -> Self {
+        let (content, p1) = shared_body(compartment.content.clone(), compartment.p1.clone());
         Self {
             sequence: compartment.sequence as i64,
             start_message: compartment.start_message as i64,
@@ -136,8 +139,8 @@ impl From<&ValidatedCompartment> for StoredCompartment {
             start_date: None,
             end_date: None,
             title: compartment.title.clone(),
-            content: compartment.content.clone(),
-            p1: compartment.p1.clone(),
+            content,
+            p1,
             p2: compartment.p2.clone(),
             p3: compartment.p3.clone(),
             p4: compartment.p4.clone(),
@@ -147,6 +150,49 @@ impl From<&ValidatedCompartment> for StoredCompartment {
             created_at: 0,
         }
     }
+}
+
+/// A summary's `content` and `p1` as [`StoredCompartment`] holds them: one
+/// shared text when they are equal, two otherwise.
+fn shared_body(content: String, p1: Option<String>) -> (Arc<str>, Option<Arc<str>>) {
+    let content: Arc<str> = content.into();
+    let p1 = p1.map(|p1| {
+        if *p1 == *content {
+            content.clone()
+        } else {
+            p1.into()
+        }
+    });
+    (content, p1)
+}
+
+/// The columns [`compartment_row`] reads, in its order.
+const COMPARTMENT_COLUMNS: &str =
+    "sequence, start_message, end_message, COALESCE(start_message_id, ''),
+        COALESCE(end_message_id, ''), title, content, p1, p2, p3, p4,
+        importance, episode_type, legacy, created_at";
+
+fn compartment_row(row: &rusqlite::Row) -> rusqlite::Result<StoredCompartment> {
+    let (content, p1) = shared_body(row.get(6)?, row.get(7)?);
+    Ok(StoredCompartment {
+        sequence: row.get(0)?,
+        start_message: row.get(1)?,
+        end_message: row.get(2)?,
+        start_message_id: row.get(3)?,
+        end_message_id: row.get(4)?,
+        start_date: None,
+        end_date: None,
+        title: row.get(5)?,
+        content,
+        p1,
+        p2: row.get(8)?,
+        p3: row.get(9)?,
+        p4: row.get(10)?,
+        importance: row.get(11)?,
+        episode_type: row.get(12)?,
+        legacy: row.get(13)?,
+        created_at: row.get(14)?,
+    })
 }
 
 /// Whose notes a call may see and change: the session's own, by harness
@@ -514,37 +560,41 @@ impl ContextDb {
         session: &str,
     ) -> Result<Vec<StoredCompartment>, String> {
         let mut statement = connection
-            .prepare_cached(
-                "SELECT sequence, start_message, end_message, COALESCE(start_message_id, ''),
-                        COALESCE(end_message_id, ''), title, content, p1, p2, p3, p4,
-                        importance, episode_type, legacy, created_at
+            .prepare_cached(&format!(
+                "SELECT {COMPARTMENT_COLUMNS}
                    FROM compartments
                   WHERE session_id = ?1 AND harness = ?2
-                  ORDER BY sequence",
-            )
+                  ORDER BY sequence"
+            ))
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map(params![session, harness], |row| {
-                Ok(StoredCompartment {
-                    sequence: row.get(0)?,
-                    start_message: row.get(1)?,
-                    end_message: row.get(2)?,
-                    start_message_id: row.get(3)?,
-                    end_message_id: row.get(4)?,
-                    start_date: None,
-                    end_date: None,
-                    title: row.get(5)?,
-                    content: row.get(6)?,
-                    p1: row.get(7)?,
-                    p2: row.get(8)?,
-                    p3: row.get(9)?,
-                    p4: row.get(10)?,
-                    importance: row.get(11)?,
-                    episode_type: row.get(12)?,
-                    legacy: row.get(13)?,
-                    created_at: row.get(14)?,
-                })
-            })
+            .query_map(params![session, harness], compartment_row)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    /// The session's summaries with these sequence numbers, oldest first;
+    /// a sequence the store doesn't hold is left out.
+    pub fn compartments_with_sequences(
+        &self,
+        harness: &str,
+        session: &str,
+        sequences: &[i64],
+    ) -> Result<Vec<StoredCompartment>, String> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare_cached(&format!(
+                "SELECT {COMPARTMENT_COLUMNS}
+                   FROM compartments
+                  WHERE session_id = ?1 AND harness = ?2
+                    AND sequence IN (SELECT value FROM json_each(?3))
+                  ORDER BY sequence"
+            ))
+            .map_err(|error| error.to_string())?;
+        let sequences = serde_json::to_string(sequences).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![session, harness, sequences], compartment_row)
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<_, _>>()
             .map_err(|error| error.to_string())
@@ -1253,6 +1303,46 @@ mod tests {
             .append_compartments("opencode", "s1", &[compartment], 8)
             .is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row whose `content` equals its most detailed tier holds that text
+    /// once, read from the store or made from a run's reply alike, and a row
+    /// whose two differ keeps both texts as they are.
+    #[test]
+    fn content_equal_to_p1_is_held_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+        let compartment = |sequence: u64, content: &str, p1: &str| ValidatedCompartment {
+            sequence,
+            start_message: sequence,
+            end_message: sequence,
+            start_message_id: format!("m{sequence}"),
+            end_message_id: format!("m{sequence}"),
+            title: "Work".into(),
+            content: content.into(),
+            p1: Some(p1.into()),
+            p2: None,
+            p3: None,
+            p4: None,
+            importance: Some(60),
+            episode_type: None,
+        };
+        let same = compartment(1, "Kept the prefix stable.", "Kept the prefix stable.");
+        let differs = compartment(2, "The flat body.", "The detailed tier.");
+        db.append_compartments("opencode", "s1", &[same.clone(), differs.clone()], 7)
+            .unwrap();
+        let stored = db.compartments("opencode", "s1").unwrap();
+        let made = [
+            StoredCompartment::from(&same),
+            StoredCompartment::from(&differs),
+        ];
+        for rows in [&stored[..], &made[..]] {
+            let p1 = rows[0].p1.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&rows[0].content, p1), "equal texts are one");
+            assert_eq!(&*rows[0].content, "Kept the prefix stable.");
+            assert_eq!(&**rows[1].p1.as_ref().unwrap(), "The detailed tier.");
+            assert_eq!(&*rows[1].content, "The flat body.");
+        }
     }
 }
 

@@ -200,6 +200,7 @@ async fn turn_one_call_sets_creating_send_label() {
     };
     let call_on = Call {
         prompts: &crate::summary::prompts::SummaryPrompts::bundled(),
+        references: &[],
         keep_child: false,
         target: &target,
         child_harness: "pi",

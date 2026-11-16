@@ -462,6 +462,7 @@ async fn attempt_on(
     };
     let call_on = Call {
         prompts: &crate::summary::prompts::SummaryPrompts::bundled(),
+        references: &[],
         keep_child: false,
         target: &target,
         child_harness: "pi",

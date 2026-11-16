@@ -157,7 +157,7 @@ fn rekey_preserves_every_table_and_restores_session_state() {
     let store = Store::open(&path).unwrap();
     let request = request();
     let baseline = Baseline {
-        m0: "Historical text mentions thalamus-pi. ".repeat(1000),
+        m0: "Historical text mentions thalamus-pi. ".repeat(1000).into(),
         through_sequence: 1,
         ..Baseline::default()
     };
@@ -167,7 +167,7 @@ fn rekey_preserves_every_table_and_restores_session_state() {
             7,
             EditOp::Insert {
                 at: InsertAt::Start,
-                message: InsertedMessage::new("history", Role::User, vec![baseline.m0.clone()]),
+                message: InsertedMessage::new("history", Role::User, vec![baseline.m0.to_string()]),
             },
         )],
     );

@@ -676,56 +676,7 @@ enum AccountAdmit {
     Emergency(Option<String>),
 }
 
-/// A session's summaries, oldest first (in sequence order), with a revision
-/// that every change moves on. Values derived from the summaries are kept
-/// against the revision they were derived at, instead of being derived again
-/// on every step or compared summary by summary. Changes go through the
-/// methods below, so none can leave the revision behind.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Summaries {
-    list: Vec<StoredCompartment>,
-    revision: u64,
-}
-
-impl Summaries {
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    pub(crate) fn replace(&mut self, list: Vec<StoredCompartment>) {
-        self.list = list;
-        self.revision += 1;
-    }
-
-    pub(crate) fn truncate(&mut self, len: usize) {
-        self.list.truncate(len);
-        self.revision += 1;
-    }
-
-    pub(crate) fn extend(&mut self, summaries: impl IntoIterator<Item = StoredCompartment>) {
-        self.list.extend(summaries);
-        self.revision += 1;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn push(&mut self, summary: StoredCompartment) {
-        self.extend([summary]);
-    }
-
-    /// Edit the summaries in place.
-    #[cfg(test)]
-    pub(crate) fn edit(&mut self) -> &mut Vec<StoredCompartment> {
-        self.revision += 1;
-        &mut self.list
-    }
-}
-
-impl std::ops::Deref for Summaries {
-    type Target = [StoredCompartment];
-    fn deref(&self) -> &[StoredCompartment] {
-        &self.list
-    }
-}
+pub(crate) use crate::summary::index::{Summaries, SummaryIndex};
 
 /// [`head::newer_summaries`] as the last view build computed it, and what it
 /// was computed from.
@@ -744,23 +695,27 @@ struct HeadSummaries {
 impl HeadSummaries {
     /// [`head::newer_summaries`] for `base`: kept in `cache` from an earlier
     /// call with the same summaries, model and baseline items, or computed
-    /// now and kept there.
+    /// now from the summaries `store` names and kept there. `Err` when their
+    /// rows can't be read.
     fn for_base(
         cache: &mut Option<Self>,
         base: &Baseline,
         summaries: &Summaries,
+        store: Option<(&ContextDb, &str, &str)>,
         model: &str,
         counter: crate::count::Counter,
-    ) -> head::NewerSummaries {
+    ) -> Result<head::NewerSummaries, String> {
         if let Some(kept) = cache.as_ref().filter(|kept| {
             (kept.from.same(&base.summary_items) || kept.newer.items().same(&base.summary_items))
                 && kept.through_sequence == base.through_sequence
                 && kept.summaries_revision == summaries.revision()
                 && kept.model == model
         }) {
-            return kept.newer.clone();
+            return Ok(kept.newer.clone());
         }
-        let newer = head::newer_summaries(base, summaries, counter);
+        // Held in memory, unless no baseline the session keeps needed them.
+        let newer_rows = summaries.rows_after(base.through_sequence, store)?;
+        let newer = head::newer_summaries(base, &newer_rows, counter);
         *cache = Some(Self {
             from: base.summary_items.clone(),
             through_sequence: base.through_sequence,
@@ -768,7 +723,7 @@ impl HeadSummaries {
             model: model.to_owned(),
             newer: newer.clone(),
         });
-        newer
+        Ok(newer)
     }
 }
 
@@ -1179,6 +1134,8 @@ impl Session {
         // none of the earlier edits and every dropped part would come back.
         self.latest_unknown = self.latest.is_none() && self.version > 0;
         self.distrust_state_ahead_of_summaries();
+        self.release_summary_bodies();
+        self.share_baseline_text();
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
         self.index = Index::starting_at(self.cut.unwrap_or(1));
@@ -1230,7 +1187,9 @@ impl Session {
     }
 
     /// Load the summaries `context.db` already holds for the session, such as
-    /// those of a session moved in from a standalone host.
+    /// those of a session moved in from a standalone host. Every row is held
+    /// until the session knows which its history head still needs
+    /// ([`Session::release_summary_bodies`]).
     pub fn load_summaries(&mut self) {
         let Some(db) = &self.db else {
             return;
@@ -1244,6 +1203,75 @@ impl Session {
                 "ck-mc: session {}: loading summaries failed: {error}",
                 self.key.session
             ),
+        }
+    }
+
+    /// Every summary's index entry, oldest first.
+    pub(crate) fn summary_index(&self) -> &[SummaryIndex] {
+        &self.summaries
+    }
+
+    /// Every summary's full row, oldest first: held ones copied from memory,
+    /// the others read from `context.db`.
+    pub(crate) fn summary_rows(&self) -> Result<Vec<StoredCompartment>, String> {
+        let rows = self
+            .summaries
+            .rows(0..self.summaries.len(), self.summary_store())?;
+        Ok(rows.into_iter().map(Arc::unwrap_or_clone).collect())
+    }
+
+    /// Where the summaries the session doesn't hold are read from.
+    fn summary_store(&self) -> Option<(&ContextDb, &str, &str)> {
+        self.db
+            .as_deref()
+            .map(|db| (db, self.key.harness.as_str(), self.key.session.as_str()))
+    }
+
+    /// Stop holding the text of summaries that no baseline the session may
+    /// still render `m[1]` against shows there: neither its own nor the one
+    /// an unconfirmed view would restore. A baseline shows in `m[1]` only
+    /// the summaries newer than it, and a state without one folds, which
+    /// reads every summary from `context.db`. With none at all, or without
+    /// a store to read them back from, every row stays.
+    fn release_summary_bodies(&mut self) {
+        if self.db.is_none() {
+            return;
+        }
+        let through = self
+            .baseline
+            .iter()
+            .chain(
+                self.unconfirmed
+                    .iter()
+                    .filter_map(|pending| pending.before.baseline.as_ref()),
+            )
+            .map(|baseline| baseline.through_sequence)
+            .min();
+        if let Some(through) = through {
+            self.summaries.release_through(through);
+        }
+    }
+
+    /// A store load decodes each saved baseline on its own, so the
+    /// session's baseline and each unconfirmed view's before-state hold
+    /// separate copies of what is usually the same `m[0]`. Keep one.
+    fn share_baseline_text(&mut self) {
+        let mut kept: Vec<Arc<str>> = self
+            .baseline
+            .iter()
+            .map(|baseline| baseline.m0.clone())
+            .collect();
+        for pending in &mut self.unconfirmed {
+            let Some(baseline) = &mut pending.before.baseline else {
+                continue;
+            };
+            match kept.iter().find(|m0| **m0 == baseline.m0) {
+                Some(m0) if !Arc::ptr_eq(m0, &baseline.m0) => {
+                    Arc::make_mut(baseline).m0 = m0.clone();
+                }
+                Some(_) => {}
+                None => kept.push(baseline.m0.clone()),
+            }
         }
     }
 
@@ -2487,7 +2515,7 @@ impl Session {
             until,
             project_root: self.workdir.clone(),
             project: self.writable_memory_level().map(str::to_owned),
-            summaries: self.summaries.to_vec(),
+            summaries: self.summaries.clone(),
             language: settings.language.clone(),
             memory_enabled,
             auto_promote: settings.auto_promote,
@@ -4252,6 +4280,7 @@ impl Session {
 
     fn render_head_for(&mut self, settings: &Settings, flush: bool) -> Vec<EditOp> {
         let _timing = crate::notice_cost_timing::span("head.render");
+        self.release_summary_bodies();
         // A manual flush refreshes only the delta. A missing baseline waits
         // for the normal first render, which is the path allowed to create it.
         if flush && self.baseline.is_none() {
@@ -4298,9 +4327,11 @@ impl Session {
         // next build computes it again.
         let mut head_summaries = self.head_summaries.take();
         let history_budget_tokens = shape.history_budget_tokens;
+        // A fold reads every summary's row (see below); between folds the
+        // head needs only the summaries newer than its baseline.
         let fold_inputs = head::Inputs {
             counter: crate::count::Counter::for_model(Some(&model_key)),
-            summaries: &self.summaries,
+            summaries: &[],
             docs: &docs,
             rows: &rows,
             classes: &classes,
@@ -4357,7 +4388,13 @@ impl Session {
                 fresh_fold = false;
                 baseline.as_ref().clone()
             }
-            _ => folded(&fold_inputs),
+            _ => match self.summary_rows() {
+                Ok(summaries) => folded(&head::Inputs {
+                    summaries: &summaries,
+                    ..fold_inputs
+                }),
+                Err(error) => return self.head_as_shown(&format!("reading summaries: {error}")),
+            },
         };
         // A baseline in the memory format before levels records what its
         // m[0] shows for the project block only. Building an m[1] on it
@@ -4371,13 +4408,17 @@ impl Session {
             Ok(gone) => gone,
             Err(error) => return self.head_as_shown(&format!("reading memory rows: {error}")),
         };
-        let newer = HeadSummaries::for_base(
+        let newer = match HeadSummaries::for_base(
             &mut head_summaries,
             &base,
             &self.summaries,
+            self.summary_store(),
             &model_key,
             fold_inputs.counter,
-        );
+        ) {
+            Ok(newer) => newer,
+            Err(error) => return self.head_as_shown(&format!("reading summaries: {error}")),
+        };
         let (mut m1, mut next, pressure) = head::delta_with(
             &base,
             &head::Inputs {
@@ -4391,15 +4432,27 @@ impl Session {
             && !self.fold_due
             && head::needs_refold(&base, pressure, history_budget_tokens, fold_inputs.counter)
         {
-            base = folded(&fold_inputs);
+            let summaries = match self.summary_rows() {
+                Ok(summaries) => summaries,
+                Err(error) => return self.head_as_shown(&format!("reading summaries: {error}")),
+            };
+            base = folded(&head::Inputs {
+                summaries: &summaries,
+                ..fold_inputs
+            });
             fresh_fold = true;
-            let newer = HeadSummaries::for_base(
+            // A fresh fold shows every summary in `m[0]`, so none is newer.
+            let newer = match HeadSummaries::for_base(
                 &mut head_summaries,
                 &base,
                 &self.summaries,
+                self.summary_store(),
                 &model_key,
                 fold_inputs.counter,
-            );
+            ) {
+                Ok(newer) => newer,
+                Err(error) => return self.head_as_shown(&format!("reading summaries: {error}")),
+            };
             // A fresh fold shows every current memory, so none is gone.
             (m1, next, _) = head::delta_with(&base, &fold_inputs, &newer);
         }

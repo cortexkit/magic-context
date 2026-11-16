@@ -127,8 +127,11 @@ pub struct Baseline {
     /// What the head shows of each memory: `m[0]`'s text, then each change
     /// `m[1]` showed since.
     pub shown: BTreeMap<i64, Shown>,
+    /// Shared by every copy of the baseline (the session's, an unconfirmed
+    /// view's before-state, the app head's), since it is the largest part
+    /// of one and changes only on a fold.
     #[serde(serialize_with = "crate::store_text::text")]
-    pub m0: String,
+    pub m0: Arc<str>,
     #[serde(default)]
     pub committed: Vec<Committed>,
     /// The memory text the model reads in full: `m[0]`'s, then each change
@@ -422,7 +425,7 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
                 )
             })
             .collect(),
-        m0: sections.join("\n\n").trim().to_owned(),
+        m0: sections.join("\n\n").trim().into(),
         committed: Vec::new(),
         seen: shown_rows()
             .map(|row| (row.id, row.content.clone()))
@@ -649,21 +652,24 @@ impl NewerSummaries {
 
 /// The summaries newer than `baseline`'s `m[0]`, rendered for `m[1]`, and
 /// the attribution that goes with them. A baseline that already carries the
-/// returned items gives the same result again.
-pub fn newer_summaries(
+/// returned items gives the same result again. `summaries` may also hold
+/// only the newer ones.
+pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
     baseline: &Baseline,
-    summaries: &[StoredCompartment],
+    summaries: &[S],
     counter: crate::count::Counter,
 ) -> NewerSummaries {
     // Summaries are kept in sequence order, so the newer ones are found by a
     // binary search rather than a look at every summary.
     debug_assert!(summaries
         .windows(2)
-        .all(|pair| pair[0].sequence <= pair[1].sequence));
-    let first = summaries.partition_point(|summary| summary.sequence <= baseline.through_sequence);
+        .all(|pair| pair[0].borrow().sequence <= pair[1].borrow().sequence));
+    let first =
+        summaries.partition_point(|summary| summary.borrow().sequence <= baseline.through_sequence);
     let mut texts = Vec::new();
     let mut newer = Vec::new();
     for summary in &summaries[first..] {
+        let summary = summary.borrow();
         let rendered = DecayRenderCompartment::from(summary);
         if rendered.is_no_content() {
             continue;
@@ -972,8 +978,8 @@ mod tests {
             start_message: start,
             end_message: end,
             title: format!("Part {sequence}"),
-            content: format!("Body {sequence}"),
-            p1: Some(format!("Body {sequence}")),
+            content: format!("Body {sequence}").into(),
+            p1: Some(format!("Body {sequence}").into()),
             p2: Some(format!("Short {sequence}")),
             p3: Some(format!("Shorter {sequence}")),
             p4: Some(String::new()),
@@ -1140,11 +1146,11 @@ mod tests {
     fn a_large_m1_folds_instead_of_refreshing_m1() {
         let words = |n: usize| "word ".repeat(n);
         let small_m0 = Baseline {
-            m0: words(10),
+            m0: words(10).into(),
             ..Baseline::default()
         };
         let big_m0 = Baseline {
-            m0: words(4_000),
+            m0: words(4_000).into(),
             ..Baseline::default()
         };
         // Nothing new: never.
@@ -1237,8 +1243,8 @@ mod tests {
         let summaries: Vec<_> = (0..12)
             .map(|sequence| {
                 let mut row = summary(sequence, sequence * 20 + 1, sequence * 20 + 20);
-                row.content = detail.repeat(8);
-                row.p1 = Some(detail.repeat(8));
+                row.content = detail.repeat(8).into();
+                row.p1 = Some(detail.repeat(8).into());
                 row.p2 = Some(detail.repeat(4));
                 row.p3 = Some(detail.repeat(2));
                 row.p4 = Some(detail.to_owned());

@@ -75,6 +75,9 @@ mod summary_sharing_tests;
 #[path = "head_cache_differential_tests.rs"]
 mod head_cache_differential_tests;
 
+#[path = "session/held_summaries_tests.rs"]
+mod held_summaries_tests;
+
 #[path = "embedding_search_tests.rs"]
 mod embedding_search_tests;
 
@@ -812,7 +815,7 @@ async fn lifecycle_revert_removes_summary_rows_and_raw_search_rows() {
 fn quiet_durable_snapshots_share_the_unchanged_history_baseline() {
     let (mut session, _, _, _, _) = fixture();
     session.baseline = Some(Arc::new(Baseline {
-        m0: "unchanged history ".repeat(12_000),
+        m0: "unchanged history ".repeat(12_000).into(),
         ..Baseline::default()
     }));
     let first = session.durable();
@@ -826,7 +829,7 @@ fn quiet_durable_snapshots_share_the_unchanged_history_baseline() {
     assert_eq!(first, decoded);
     assert_eq!(
         serde_json::to_value(first).unwrap()["baseline"]["m0"],
-        session.baseline.as_ref().unwrap().m0
+        *session.baseline.as_ref().unwrap().m0
     );
 }
 

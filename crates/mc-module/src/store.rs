@@ -1595,11 +1595,11 @@ mod tests {
         let path = dir.path().join("mode3.db");
         let legacy = Store::create_version_three_for_tests(&path).unwrap();
         let old = Baseline {
-            m0: "old immutable history ".repeat(1_000),
+            m0: "old immutable history ".repeat(1_000).into(),
             ..Baseline::default()
         };
         let base = Baseline {
-            m0: "current immutable history ".repeat(1_000),
+            m0: "current immutable history ".repeat(1_000).into(),
             ..Baseline::default()
         };
         let view = |version, text: &str| {
@@ -1668,7 +1668,7 @@ mod tests {
         let key = SessionRef::new("runner", "pi", "retry");
         let state = Durable {
             baseline: Some(Arc::new(Baseline {
-                m0: "immutable history ".repeat(1_000),
+                m0: "immutable history ".repeat(1_000).into(),
                 ..Baseline::default()
             })),
             ..Durable::default()
@@ -1690,14 +1690,14 @@ mod tests {
         let two = SessionRef::new("runner", "pi", "two");
         let original = Durable {
             baseline: Some(Arc::new(Baseline {
-                m0: "old history ".repeat(1_000),
+                m0: "old history ".repeat(1_000).into(),
                 ..Baseline::default()
             })),
             ..Durable::default()
         };
         let newer = Durable {
             baseline: Some(Arc::new(Baseline {
-                m0: "new history ".repeat(1_000),
+                m0: "new history ".repeat(1_000).into(),
                 ..Baseline::default()
             })),
             ..Durable::default()

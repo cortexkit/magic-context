@@ -551,7 +551,7 @@ mod tests {
             });
             let inputs = crate::summary::head::Inputs {
                 counter: crate::count::Counter::for_model(Some("provider/model")),
-                summaries: &session.summaries,
+                summaries: &session.summary_rows().unwrap(),
                 docs: "<project-docs>Project layout</project-docs>",
                 rows: &[],
                 classes: &std::collections::HashMap::new(),
@@ -1347,7 +1347,7 @@ mod tests {
                 end_message: sequence * 10 + 9,
                 title: format!("Work {sequence}"),
                 content: "Fallback".into(),
-                p1: Some("Detailed decisions and source review. ".repeat(100)),
+                p1: Some("Detailed decisions and source review. ".repeat(100).into()),
                 p2: Some("Shorter decisions. ".repeat(20)),
                 p3: Some("Brief decisions.".into()),
                 p4: Some("Cue".into()),
@@ -1393,7 +1393,7 @@ mod tests {
                 &render::DecayRenderCompartment::from(&summaries[id - 1]),
                 item["tier"].as_u64().unwrap() as u8,
             );
-            let head = if id == 4 { &m1 } else { &baseline.m0 };
+            let head: &str = if id == 4 { &m1 } else { &baseline.m0 };
             assert!(
                 head.contains(&text),
                 "attribution must describe the bytes actually rendered"
