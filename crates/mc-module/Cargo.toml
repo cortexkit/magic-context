@@ -33,6 +33,9 @@ serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true }
 subc-client-rs = { workspace = true }
 subc-protocol = { workspace = true }
+# Only the registration live suite's helper binaries use it directly; ck-mc
+# reaches it through subc-client-rs.
+subc-os = { workspace = true }
 regex = "1"
 mc-tokenizer = { workspace = true }
 cortexkit-tokens = { workspace = true }
@@ -46,14 +49,14 @@ miniz_oxide = "0.8"
 serde_jcs = "0.2"
 # Model tool calls and the edit to a person's message come through these
 # published contracts, each on a route of its own.
-cortexkit-role-tool-provider = "=0.15.7"
+cortexkit-role-tool-provider = "=0.15.8"
 cortexkit-role-step-transform-provider = "=0.5.0"
 # Routing picks a summarizer model the session's own runner can run; ck-mc
 # has no model chain of its own and never falls back to the session's model.
 cortexkit-role-routing = "=0.7.23"
 # A session moves between machines through the agent-data/v1 contract.
 cortexkit-role-agent-data = "=0.3.0"
-cortexkit-role-user-commands = "=0.1.2"
+cortexkit-role-user-commands = "=0.1.4"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
 # A session's memory context comes from Entorhinal, in these
 # published request and reply types.
@@ -83,7 +86,7 @@ nix = { version = "0.31.3", features = ["fs"] }
 windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-cortexkit-role-tool-provider-conformance = "=0.15.8"
+cortexkit-role-tool-provider-conformance = "=0.15.9"
 rusqlite = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["test-util"] }
 # The contract's published vectors, for the participant's own tests.
@@ -94,7 +97,34 @@ filetime = "0.2"
 tracing-subscriber = "0.3"
 # An in-memory bus for the notice publisher's tests.
 cortexkit-bus-inmemory = "=0.3.2"
+# The registration live suite (tests/registration_live.rs): an in-process
+# daemon that supervises the real ck-mc binary, the wire it is driven over,
+# and scratch homes fenced away from the operator's own.
+subc-daemon = { workspace = true }
+subc-control = { workspace = true }
+subc-transport = { workspace = true }
+cortexkit-test-support = "=0.1.14"
 
 [[bin]]
 name = "ck-mc"
 path = "src/main.rs"
+
+# Test-only helpers the registration live suite's daemon launches. None of
+# them is shipped: releases take target/release/ck-mc alone.
+[[bin]]
+name = "mc-test-nonce-holder"
+path = "tests/support/nonce_holder.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "mc-test-nonce-launcher"
+path = "tests/support/nonce_launcher.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "mc-test-privacy-trampoline"
+path = "tests/support/privacy_trampoline.rs"
+test = false
+bench = false

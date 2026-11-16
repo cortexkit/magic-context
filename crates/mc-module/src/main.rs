@@ -114,6 +114,19 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         journal,
         agent_data,
     );
+    // Register before any background work starts. Under a daemon that hands
+    // ck-mc a registration channel, every outbound connection is bound with a
+    // claim minted on this registration, so a connection opened before it
+    // exists is refused. The daemon's requests wait unread until `serve` is
+    // awaited below, after the background work is started.
+    let (handle, serve) = subc_client_rs::serve_with_handle(
+        &connection_file,
+        manifest_for(&module_id, agent_data),
+        Handler::new(module.clone()),
+    )
+    .await?;
+    // ck-mc's child scopes are published through its serving connection.
+    child_scopes.install(handle);
     module.spawn_upkeep();
     module.spawn_memory_sync();
     // One connection to the bus, through ck-bus, which revokes a module's
@@ -131,14 +144,6 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     // An install a move started before a crash is finished in every build:
     // its sessions are refused until it is.
     module.spawn_move_recovery();
-    let (handle, serve) = subc_client_rs::serve_with_handle(
-        &connection_file,
-        manifest_for(&module_id, agent_data),
-        Handler::new(module.clone()),
-    )
-    .await?;
-    // ck-mc's child scopes are published through its serving connection.
-    child_scopes.install(handle);
     let result = serve.await;
     module.flush_app_snapshots().await;
     result?;

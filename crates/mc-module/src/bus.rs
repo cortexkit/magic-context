@@ -55,7 +55,7 @@ use cortexkit_bus_trait::{
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use subc_client_rs::{CallOptions, ConsumerIdentity, ConsumerOptions, SubcConsumer};
+use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
 use subc_protocol::{BindIdentity, RouteTarget};
 
 use crate::context_db::ContextDb;
@@ -202,19 +202,19 @@ fn fresh_required(error: &str) -> bool {
 }
 
 /// The route to ck-bus's management surface, which issues and renews
-/// credentials and signs connection nonces.
+/// credentials and signs connection nonces. ck-bus issues a credential only
+/// to the module the daemon attests on the route, and the SDK's connection
+/// carries that attestation: a self claim when ck-mc registered over the
+/// daemon's registration channel, its launch nonce when it dialled the
+/// daemon. The call itself names no caller.
 pub struct CredentialRoute {
     consumer: SubcConsumer,
     identity: BindIdentity,
-    principal: ConsumerIdentity,
 }
 
 impl CredentialRoute {
     /// Connect to the daemon at `path` as this module.
     pub async fn connect(path: &Path) -> Result<Self, String> {
-        let nonce = subc_client_rs::launch_nonce()
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "ck-mc launch nonce absent".to_string())?;
         let consumer = tokio::time::timeout(
             Duration::from_secs(2),
             SubcConsumer::connect(path, ConsumerOptions::default()),
@@ -225,10 +225,6 @@ impl CredentialRoute {
         Ok(Self {
             consumer,
             identity: BindIdentity::new(crate::MODULE_ID, "bus"),
-            principal: ConsumerIdentity {
-                module_id: crate::MODULE_ID.into(),
-                launch_nonce: nonce.value().to_owned(),
-            },
         })
     }
 
@@ -245,7 +241,6 @@ impl CredentialRoute {
                 body,
                 CallOptions {
                     timeout: Duration::from_secs(2),
-                    consumer_identity: Some(self.principal.clone()),
                     ..Default::default()
                 },
             )

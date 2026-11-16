@@ -199,6 +199,10 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         unreachable!("routing declarations serialize as an object")
     };
     ModuleManifest::builder(module_id, env!("CARGO_PKG_VERSION"))
+        // ck-mc serves through the SDK, which registers over the private
+        // channel a daemon hands it at spawn and binds its outbound
+        // connections with claims minted on that registration.
+        .registration_channel(true)
         .provides(provides)
         // Routing reads the consumers a module owns from its catalog entry,
         // so they stay known while the module is stopped.
@@ -2641,6 +2645,17 @@ mod manifest_tests {
                 .any(|claim| claim.ends_with("-provider/v1") && *claim != "tool-provider/v1"),
             "an old contract version is still claimed: {provides:?}"
         );
+    }
+
+    /// ck-mc declares that it can serve over the private registration
+    /// channel a daemon hands it at spawn. The SDK registers over that
+    /// channel and binds every outbound connection with a claim.
+    #[test]
+    fn the_manifest_declares_registration_channel_support() {
+        for agent_data in [false, true] {
+            let manifest = super::manifest_for("magic-context", agent_data);
+            assert_eq!(manifest.registration_channel, Some(true));
+        }
     }
 }
 

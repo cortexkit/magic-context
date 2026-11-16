@@ -39,11 +39,18 @@ cortexkit-tokens = "0.2"
 # A build machine that accepts only git sources found in Cargo.lock refuses
 # the manifest because of this line: remove it in that run's working tree,
 # uncommitted, and never in a commit.
-subc-protocol = "=0.34.1"
-subc-control = "=0.34.0"
-subc-transport = "=0.15.0"
-subc-client-rs = "=0.33.0"
-subc-os = "=0.1.26"
+subc-protocol = "=0.37.0"
+subc-control = "=0.40.1"
+subc-transport = "=0.18.0"
+subc-client-rs = "=0.40.3"
+subc-os = "=0.1.39"
+# The daemon the registration live suite boots in-process
+# (crates/mc-module/tests/registration_live.rs), with its test support on.
+# It is the release the cerebellum module's own registration suite boots, and
+# it builds against the control and protocol pins above (0.47.2 does not
+# build against control 0.40.2). 0.48 needs a newer
+# cortexkit-project-identity than ck-mc pins.
+subc-daemon = { version = "=0.47.1", features = ["test-support"] }
 subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "90295ece040258c77ea1f1f1d727109c5eaab13f" }
 
 
