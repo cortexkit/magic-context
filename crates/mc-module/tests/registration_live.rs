@@ -354,7 +354,6 @@ async fn read_nonce(directory: &Path, id: &str) -> String {
 
 impl Fixture {
     async fn start(registration_channel: bool) -> Self {
-        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         let directory = ScratchDir::new("mc-registration-live");
         let module_env = fenced_module_env(directory.path());
         let data = fenced_subc_env_dir(directory.path(), "XDG_DATA_HOME");
