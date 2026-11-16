@@ -511,9 +511,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// `context.recent`, once the context read service admitted it, asked of
     /// the session's worker: only the worker holds the session's transcript
     /// index. The request names no runner, so a live worker of the harness
-    /// and session answers, the first by runner name when several do. With
-    /// no live worker, a worker is started for the session's saved state in
-    /// mode3.db, as for a command run, and the read restores the session.
+    /// and session answers, the first by runner name when several do. When
+    /// no worker is live but mode3.db holds the session's saved state, a
+    /// worker is started for it, as for a command run, and the read restores
+    /// the session from that state.
     async fn recent(
         &self,
         recent: crate::context_read::Recent,

@@ -530,8 +530,8 @@ impl Reader {
     /// overrides cannot apply; user and model settings still do.
     ///
     /// With `newest`, summaries are not folded: the newest ones read are each
-    /// shown at tier 1, as the history head shows a summary published since
-    /// its baseline (`m[0]`) was built.
+    /// shown at tier 1, the full text the history head gives a summary
+    /// published since its baseline was last rebuilt.
     fn query(
         &self,
         harness: &str,

@@ -83,4 +83,6 @@ Refusals:
   is still reading the session's transcript, after a Setup or a restore, or
   that read failed. Ask again after the wait.
 - `invalid_params` with `{"field": "budget_tokens"}` for a budget outside
-  256..=32768, and the move refusals every context read can answer.
+  256..=32768. Like every context read, it also answers `session_moving`
+  while an agent move holds the session and `session_moved` once the
+  session was moved to another machine.
