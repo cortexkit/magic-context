@@ -350,9 +350,9 @@ test("issue 663: raw auto-learn capture cannot borrow a completed conversation r
 		},
 	});
 	expect(h.stops).toBe(1);
-	expect(h.refusals.at(-1)).toContain(
-		"no context pass ran for OMP auto-learn capture; raw conversation refused",
-	);
+	// The capture is no turn of this session: it is refused without a
+	// turn-refused entry.
+	expect(h.refusals).toEqual([]);
 });
 
 test("issue 663: ordinary context and dispatch preserve managed bytes", async () => {
@@ -407,7 +407,7 @@ test("issue 663: Responses auto-learn capture cannot borrow a completed receipt"
 		},
 	});
 	expect(h.stops).toBe(1);
-	expect(h.refusals.at(-1)).toContain(
-		"no context pass ran for OMP auto-learn capture; raw conversation refused",
-	);
+	// The capture is no turn of this session: it is refused without a
+	// turn-refused entry.
+	expect(h.refusals).toEqual([]);
 });

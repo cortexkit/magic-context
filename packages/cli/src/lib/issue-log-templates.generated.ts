@@ -130,6 +130,7 @@ const TEMPLATE_DATA = [
 "[magic-context] storage warning: continuing migration for \x01; the Pi/OMP process-list probe could not run, which commonly means an OS sandbox denied ps. No live Pi harness was confirmed.\x020p",
 "native-attachment-cache oversized_core_store session=\x01 stored_byte_charge=\x01 total_budget=\x01 over_budget_by=\x01 consequence=single_session_exceeds_native_cache_budget delta_core_preserved=true\x020s",
 "compartment trigger: cheap-skip at \x01% (below proactive floor \x01%) — live-tail upper bound \x01 (persisted=\x01, untagged-memory≤\x01) < triggerBudget \x01; no size trigger possible, skipped full raw read",
+"OMP auto-learn capture refused for session=\x01: it sends the raw conversation, which Magic Context does not manage; auto-learn capture stays off while Magic Context manages this session",
 "ERROR: compaction marker read-back failed harness=pi compactionId=<missing> expectedFirstKept=\x01; further writes disabled for this session manager until restart; leaving marker pending",
 "[shadow] backfill scope \x01 for \x01 retired without progress — the chunk writer produced no canonical windows; \x01+ items remain and automatic registration will not retry unchanged candidates",
 "transform: unknown provider usage; using wire estimate for priced pass inputTokens=\x01 percentage=\x01 trusted=\x01 wireTokens=\x01 pressureTokens=\x01 grewPastSavedReading=\x01 sizedPlan=clears_reasoning",

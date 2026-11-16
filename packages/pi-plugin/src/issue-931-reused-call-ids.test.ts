@@ -100,8 +100,20 @@ const user = {
 	timestamp: 1,
 };
 
-/** A tool-call reply as OMP stores it: composite ids, the provider's own items in providerPayload. */
-function reply(timestamp: number, response: string, calls: string[]): any {
+/**
+ * A tool-call reply as OMP stores it: composite ids, the provider's own items
+ * in providerPayload. `stored` lists the order of the stored call items by
+ * index into `calls`; OMP takes content order from each item's
+ * output_item.added event and stored order from its output_item.done event
+ * (processResponsesStream, openai-responses.ts onOutputItemDone), so a
+ * provider that finishes parallel calls out of order stores them reordered.
+ */
+function reply(
+	timestamp: number,
+	response: string,
+	calls: string[],
+	stored = calls.map((_, index) => index),
+): any {
 	return {
 		role: "assistant",
 		api: model.api,
@@ -131,11 +143,11 @@ function reply(timestamp: number, response: string, calls: string[]): any {
 					summary: [],
 					encrypted_content: `enc-${response}`,
 				},
-				...calls.map((id, index) => ({
+				...stored.map((index) => ({
 					id: `fc_${response}_${index + 1}`,
 					status: "completed",
 					type: "function_call",
-					call_id: id,
+					call_id: calls[index],
 					name: "read",
 					arguments: JSON.stringify({ path: `f${index + 1}.txt` }),
 				})),
@@ -184,6 +196,13 @@ const histories = {
 		reply(4, "r2", ["call_b", "call_c"]),
 		result(5, "r2", 1, "call_b"),
 		result(6, "r2", 2, "call_c"),
+	],
+	// Parallel calls whose stored items are in the reverse of content order.
+	"parallel calls stored out of order": [
+		user,
+		reply(2, "r1", ["call_a", "call_b"], [1, 0]),
+		result(3, "r1", 1, "call_a"),
+		result(4, "r1", 2, "call_b"),
 	],
 } as const;
 type Case = keyof typeof histories;
@@ -260,6 +279,17 @@ const expectedWire: Record<
 			["call_a", "call_b", "call_c"],
 		],
 	},
+	// OMP replays the stored order; rebuilt from the message, content order.
+	"parallel calls stored out of order": {
+		warm: [
+			["call_b", "call_a"],
+			["call_a", "call_b"],
+		],
+		cold: [
+			["call_a", "call_b"],
+			["call_a", "call_b"],
+		],
+	},
 };
 
 for (const host of hosts)
@@ -301,6 +331,7 @@ for (const host of hosts)
 			for (const name of [
 				"duplicates within one reply",
 				"duplicates across replies",
+				"parallel calls stored out of order",
 			] as const) {
 				const prepared = prepare(name);
 				const input = encode(host, prepared.messages, true);
@@ -401,6 +432,18 @@ const expectedDelta: Record<Case, unknown[]> = {
 			output: "contents r2 2",
 		},
 	],
+	"parallel calls stored out of order": [
+		{
+			type: "function_call_output",
+			call_id: "call_a",
+			output: "contents r1 1",
+		},
+		{
+			type: "function_call_output",
+			call_id: "call_b",
+			output: "contents r1 2",
+		},
+	],
 };
 
 /** The previous request, its response and the continuation OMP sends after it. */
@@ -459,6 +502,7 @@ for (const host of hosts)
 			"duplicates within one reply",
 			"duplicates across replies",
 			"unique ids",
+			"parallel calls stored out of order",
 		] as const)
 			test(`${name}: any other continuation is still refused`, () => {
 				const { delta, expand } = chained(host, name);

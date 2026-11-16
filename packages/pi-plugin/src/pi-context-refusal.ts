@@ -30,6 +30,7 @@ import {
 	isOmpAdvisorRequest,
 	isOmpSideContext,
 	isOmpUnmanagedCaptureRequest,
+	piWithoutOmpJuice,
 } from "./omp-request-kind";
 import {
 	PI_CONTEXT_BUDGET,
@@ -76,6 +77,9 @@ import { PiDegradedPassError } from "./pi-raw-fallback";
 const ENTRY_TYPE = "magic-context-turn-refused";
 const RETRY_MESSAGE =
 	"Magic Context could not safely prepare this turn; send your message again.";
+/** Why OMP's auto-learn capture request is refused; it writes no entry. */
+export const PI_OMP_CAPTURE_REFUSAL =
+	"Magic Context does not send OMP's auto-learn capture: it carries the raw, unmanaged conversation.";
 const MAX_UNSENDABLE_NONCES_PER_SESSION = 32;
 
 export { PiContextSupersededError } from "./pi-context-budget";
@@ -530,6 +534,9 @@ export function registerPiGuardedContext(
 	receiptMaps.add(imageTrimNotices);
 	const foreignNotices = new Map<string | object, boolean>();
 	receiptMaps.add(foreignNotices);
+	// Sessions whose auto-learn capture refusal has been logged.
+	const captureNotices = new Map<string | object, boolean>();
+	receiptMaps.add(captureNotices);
 	const foreignIndexes = new Map<string | object, PiForeignSessionIndex>();
 	receiptMaps.add(foreignIndexes);
 	// What the latest admitted managed request carried and the response the
@@ -677,7 +684,27 @@ export function registerPiGuardedContext(
 		// and bounded candidate text against old fingerprints. There is no hashing
 		// to detect changes; matching requests never read/hash session history.
 		pi.on("before_provider_request", (event, ctx) => {
-			const cancelledOperation = operations.get(operationKey(ctx));
+			const payload = (event as { payload?: unknown }).payload;
+			const key = operationKey(ctx);
+			// OMP's auto-learn capture agent resends the session's raw history,
+			// never prepared by a context pass, through this session's hook after
+			// the run ends. It belongs to no operation of this session, so refuse it
+			// before reading or changing any operation, and quietly: it is not a
+			// turn of this session, so it gets no refusal entry or notice here.
+			// Sessions whose dispatch check is off (compaction off, or the side-turn
+			// latch below) send it unmanaged, as they send every request.
+			if (isOmpUnmanagedCaptureRequest(payload)) {
+				if (options.compactionOff?.(ctx) || sideSessions.get(key)?.sides)
+					return;
+				if (!captureNotices.has(key)) {
+					captureNotices.set(key, true);
+					log(
+						`[magic-context][pi] OMP auto-learn capture refused for session=${String(key)}: it sends the raw conversation, which Magic Context does not manage; auto-learn capture stays off while Magic Context manages this session`,
+					);
+				}
+				return piRefusedPayload(PI_OMP_CAPTURE_REFUSAL);
+			}
+			const cancelledOperation = operations.get(key);
 			const signal = (ctx as { signal?: AbortSignal }).signal;
 			if (signal ? signal.aborted : cancelledOperation?.pass?.isCancelled()) {
 				cancelledOperation?.pass?.cancel();
@@ -688,11 +715,9 @@ export function registerPiGuardedContext(
 			}
 			if (options.compactionOff?.(ctx)) {
 				// An unmanaged request now owns the provider's latest response.
-				chains.delete(operationKey(ctx));
+				chains.delete(key);
 				return;
 			}
-			const payload = (event as { payload?: unknown }).payload;
-			const key = operationKey(ctx);
 			// OMP erases the ephemeral request's attribution before this hook. Its
 			// abort API is session-wide, so after seeing OMP's attributed reminder
 			// and prompt in a context event we cannot safely abort any payload here.
@@ -748,9 +773,7 @@ export function registerPiGuardedContext(
 			}
 			const active = operation;
 			const isCurrent = () => operations.get(key) === active;
-			const capture = isOmpUnmanagedCaptureRequest(payload);
-			const budget =
-				(capture ? undefined : active.pass) ?? new PiContextBudget();
+			const budget = active.pass ?? new PiContextBudget();
 			// Later callbacks for an already-refused context pass must still block serialization.
 			// Emit one notice, rather than wrapping the previous "provider dispatch"
 			// stage into itself on each attempt and repeatedly asking for a resend.
@@ -759,10 +782,6 @@ export function registerPiGuardedContext(
 			}
 			let refusalOrigin: "agent_end" | undefined;
 			try {
-				if (capture)
-					throw new Error(
-						"no context pass ran for OMP auto-learn capture; raw conversation refused",
-					);
 				if (!active.pass)
 					throw new Error("no context pass ran for this operation");
 				// Judge this operation's latest pass from operation state only, not
@@ -797,13 +816,15 @@ export function registerPiGuardedContext(
 				// the previous admitted request's input, that request's response, then
 				// this frame's items. The checks below then run on that expansion
 				// exactly as they run on a full request; only the retry byte identity
-				// stays on the frame actually sent.
-				const chained = piChainedRequest(payload);
-				let checked: unknown = payload;
+				// stays on the frame actually sent. OMP's trailing Juice item is no
+				// part of the conversation and is left out of every check but that one.
+				const managed = piWithoutOmpJuice(payload, ctx.model);
+				const chained = piChainedRequest(managed);
+				let checked: unknown = managed;
 				let chainInput: readonly unknown[] | undefined;
 				if (chained) {
 					const expanded = piExpandChainedRequest(
-						payload as Record<string, unknown>,
+						managed as Record<string, unknown>,
 						chained,
 						chains.get(key)?.anchor,
 						active.preparedHistory,

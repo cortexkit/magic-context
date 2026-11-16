@@ -1,5 +1,8 @@
 import { expect } from "bun:test";
-import { registerPiGuardedContext as register } from "../pi-context-refusal";
+import {
+	PI_OMP_CAPTURE_REFUSAL,
+	registerPiGuardedContext as register,
+} from "../pi-context-refusal";
 
 export * from "../pi-context-refusal";
 
@@ -35,12 +38,15 @@ export const registerPiGuardedContext: typeof register = (
 	options,
 ) => {
 	let reason: string | undefined;
+	let entries = 0;
 	register(
 		{
 			...pi,
 			appendEntry(type, data) {
-				if (type === "magic-context-turn-refused")
+				if (type === "magic-context-turn-refused") {
 					reason = (data as { message: string }).message;
+					entries++;
+				}
 				return pi.appendEntry(type, data);
 			},
 			on: ((name: string, fn: (event: unknown, ctx: object) => unknown) => {
@@ -48,11 +54,23 @@ export const registerPiGuardedContext: typeof register = (
 					name as never,
 					(name === "before_provider_request"
 						? (event: unknown, ctx: object) => {
+								const written = entries;
 								const result = fn(event, ctx);
 								if (result === undefined) return result;
+								// OMP's auto-learn capture is refused without an entry.
+								let quiet = false;
+								try {
+									JSON.stringify(result);
+								} catch (error) {
+									quiet =
+										entries === written &&
+										(error as Error).message === PI_OMP_CAPTURE_REFUSAL;
+								}
 								assertPiRefusedDispatch(
 									result,
-									reason ?? "Magic Context request cancelled",
+									quiet
+										? PI_OMP_CAPTURE_REFUSAL
+										: (reason ?? "Magic Context request cancelled"),
 								);
 								blocked.set(counterKey(ctx), piBlockedDispatches(ctx) + 1);
 								(
