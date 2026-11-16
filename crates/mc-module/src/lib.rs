@@ -63,6 +63,8 @@ pub mod decay;
 pub(crate) mod docs_proposals;
 pub(crate) mod dreamer;
 pub mod embedding;
+/// Following Entorhinal's change markers over the bus.
+pub(crate) mod entorhinal_changes;
 pub mod expand;
 /// The memories a history head may show, and the one selection that picks them.
 pub mod head_memories;
@@ -73,6 +75,8 @@ pub mod lanes;
 /// Moving the 0.49 plugin's project rows to Entorhinal's project ids.
 pub(crate) mod legacy_projects;
 pub mod memory;
+/// The bus wake sent after memories a history head can show changed.
+pub(crate) mod memory_changed;
 pub(crate) mod memory_context;
 /// The 0.49 head's memory selection, which tests compare against.
 #[cfg(test)]

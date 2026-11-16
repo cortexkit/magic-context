@@ -202,6 +202,81 @@ async fn a_due_task_sends_each_batch_and_applies_each_accepted_reply() {
     assert_eq!(locks(&db), 0);
 }
 
+/// A memory task whose one batch journals a decision about a memory of
+/// [`PROJECT`], as every memory task's apply does.
+struct Journaling;
+
+struct JournalingBatch;
+
+impl Task for Journaling {
+    fn kind(&self) -> &'static str {
+        "classify-memories"
+    }
+    fn batches(&self, _: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String> {
+        Ok(vec![Box::new(JournalingBatch)])
+    }
+}
+
+impl run::TaskInput for JournalingBatch {
+    fn system(&self) -> &str {
+        "system"
+    }
+    fn prompt(&self, _: Window, _: u64) -> Option<String> {
+        Some("batch".into())
+    }
+    fn accepts(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl Batch for JournalingBatch {
+    fn apply(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        _: &TaskReply,
+        run: i64,
+    ) -> Result<Applied, String> {
+        tx.execute(
+            "INSERT INTO memory_journal(project_path, decision_key, operation, receipt_json, applied_at)
+             VALUES (?1, ?2, 'classify', '{}', 1)",
+            params![PROJECT, format!("dream:{run}")],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(Applied {
+            proposed: 1,
+            applied: 1,
+            dropped: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_applied_memory_task_wakes_its_project() {
+    let test_bus = crate::bus::tests::TestBus::new();
+    let (_dir, db, wakes, mut publisher) = crate::memory_changed::tests::watched(&test_bus);
+    let floor = db
+        .with_connection(|conn| crate::memory_changed::revision(conn))
+        .unwrap();
+    let engine = Arc::new(Engine::new("this", vec![Box::new(Journaling)]));
+    let client = Arc::new(Client::new(&["p/a"], &[Ends::Reply("ok")]));
+    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    make_due(&db);
+    engine.tick(&db, &client, &Settings::default(), now_ms());
+    settled(&engine).await;
+    assert_eq!(runs(&db)[0].1.as_deref(), Some("applied"));
+    let sent = publisher.round(&db, wakes.take()).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0].owner,
+        crate::memory_changed::Owner::of("project", PROJECT).unwrap()
+    );
+    assert!(sent[0].revision > floor);
+    assert_eq!(
+        test_bus.notices()[0].0,
+        format!("project:{PROJECT}:{}", sent[0].revision)
+    );
+}
+
 #[tokio::test]
 async fn an_unseen_project_or_one_already_running_starts_nothing() {
     let (_dir, db) = store();

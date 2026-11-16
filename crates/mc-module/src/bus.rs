@@ -1,6 +1,8 @@
-//! Publishing the module's bus events: today one, `docs_proposal` v1, a
-//! notice that a project has a new docs-upkeep proposal
-//! ([`crate::docs_proposals`]).
+//! The module's connection to the bus ([`Bus`]), and its `docs_proposal` v1
+//! notices, which say that a project has a new docs-upkeep proposal
+//! ([`crate::docs_proposals`]). The same connection carries the
+//! `memory_changed` wakes ([`crate::memory_changed`]) and the watch on
+//! Entorhinal's change markers ([`crate::entorhinal_changes`]).
 //!
 //! The daemon serves no call that publishes a module's event, so the module
 //! publishes to the bus itself, as Plexus does: it opens a route to ck-bus
@@ -32,7 +34,9 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use cortexkit_bus_naming::AccountNames;
 use cortexkit_bus_nats::{ConnectConfig, NatsConnection};
-use cortexkit_bus_trait::{BusError, ContentDigest, Headers, PublishReceipt, Stream};
+use cortexkit_bus_trait::{
+    BusError, ContentDigest, Headers, PublishReceipt, Register, RegisterWatch, Stream,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerIdentity, ConsumerOptions, SubcConsumer};
@@ -529,24 +533,90 @@ pub(crate) async fn publish_pending(
     Ok(published)
 }
 
+/// What opens a watch on one key of another module's KV bucket.
+#[async_trait]
+#[allow(clippy::double_must_use)]
+pub(crate) trait Registers: Send + Sync {
+    /// Watch `key` of the bucket named `bucket`. The watch first delivers
+    /// the key's current value, then each change.
+    async fn watch(&self, bucket: &str, key: &str) -> Result<Box<dyn RegisterWatch>, String>;
+}
+
+/// The KV buckets of a NATS connection.
+struct NatsRegisters(NatsConnection);
+
+#[async_trait]
+impl Registers for NatsRegisters {
+    async fn watch(&self, bucket: &str, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
+        // Only fixed codes leave: a bus error can name subjects and buckets.
+        let refused = |error: BusError| -> String {
+            match error {
+                BusError::Denied { .. } | BusError::Absent { .. } => "nats_watch_refused",
+                _ => "nats_watch_failed",
+            }
+            .into()
+        };
+        let register = self.0.register(bucket).await.map_err(refused)?;
+        let watch = register.watch(key).await.map_err(refused)?;
+        Ok(Box::new(watch))
+    }
+}
+
+/// A session with no KV buckets, for tests that only publish.
+#[cfg(test)]
+struct NoRegisters;
+
+#[cfg(test)]
+#[async_trait]
+impl Registers for NoRegisters {
+    async fn watch(&self, _: &str, _: &str) -> Result<Box<dyn RegisterWatch>, String> {
+        Err("register_absent".into())
+    }
+}
+
 /// A connection to the bus with the credential it was opened with.
 pub(crate) struct BusSession {
     credential: Option<Credential>,
-    account: AccountNames,
-    publisher: Box<dyn EventPublisher>,
+    pub(crate) account: AccountNames,
+    pub(crate) publisher: Box<dyn EventPublisher>,
+    registers: Box<dyn Registers>,
     route: Option<Arc<dyn CredentialProvider>>,
 }
 
 impl BusSession {
-    /// A session over `publisher` in `account`, with no credential to renew.
+    /// A session over `publisher` in `account`, with no credential to renew
+    /// and no KV buckets.
     #[cfg(test)]
     pub(crate) fn fixed(account: AccountNames, publisher: Box<dyn EventPublisher>) -> Self {
         Self {
             credential: None,
             account,
             publisher,
+            registers: Box::new(NoRegisters),
             route: None,
         }
+    }
+
+    /// The same session, with `registers` as its KV buckets.
+    #[cfg(test)]
+    pub(crate) fn with_registers(mut self, registers: Box<dyn Registers>) -> Self {
+        self.registers = registers;
+        self
+    }
+
+    /// Watch `key` of the bucket `name` that the module `owner` writes, by
+    /// the bucket's name in this session's account.
+    pub(crate) async fn watch(
+        &self,
+        owner: &str,
+        name: &str,
+        key: &str,
+    ) -> Result<Box<dyn RegisterWatch>, String> {
+        let bucket = self
+            .account
+            .module_bucket_name(owner, name)
+            .map_err(|error| format!("bucket_name: {error}"))?;
+        self.registers.watch(&bucket, key).await
     }
 }
 
@@ -573,6 +643,7 @@ async fn build_session(
     Ok(BusSession {
         credential: Some(credential),
         account,
+        registers: Box::new(NatsRegisters(connection.clone())),
         publisher: Box::new(NatsEventPublisher {
             connection,
             stream_name,
@@ -612,18 +683,38 @@ impl SessionFactory for ProductionSessions {
     }
 }
 
-/// The module's publisher of `docs_proposal` notices, kept across the
-/// dreamer's rounds.
-pub struct DocsNotices {
+/// The module's one connection to the bus, shared by everything that
+/// publishes or watches: the docs-proposal notices ([`DocsNotices`]), the
+/// memory wakes ([`crate::memory_changed`]) and the watch on Entorhinal's
+/// changes ([`crate::entorhinal_changes`]). It is opened when first needed
+/// and renewed before its credential expires.
+pub struct Bus {
     factory: Arc<dyn SessionFactory>,
     session: tokio::sync::Mutex<Option<BusSession>>,
-    /// Whether the current outage was logged, so it is logged once.
-    logged: AtomicBool,
 }
 
-impl DocsNotices {
-    /// Notices published through ck-bus, reached over the daemon whose
-    /// connection file is `path`.
+/// The bus's open session, held until dropped.
+pub(crate) struct SessionGuard<'a>(tokio::sync::MutexGuard<'a, Option<BusSession>>);
+
+impl std::ops::Deref for SessionGuard<'_> {
+    type Target = BusSession;
+
+    fn deref(&self) -> &BusSession {
+        self.0.as_ref().expect("a guard holds an open session")
+    }
+}
+
+impl SessionGuard<'_> {
+    /// Drop the session after a failure on it, so the next user opens a
+    /// fresh one.
+    pub(crate) fn discard(mut self) {
+        *self.0 = None;
+    }
+}
+
+impl Bus {
+    /// The bus through ck-bus, reached over the daemon whose connection file
+    /// is `path`.
     pub fn through_ckbus(path: PathBuf) -> Self {
         Self::with_factory(Arc::new(ProductionSessions { path }))
     }
@@ -632,8 +723,65 @@ impl DocsNotices {
         Self {
             factory,
             session: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// The open session: opened first when there is none, and renewed when
+    /// its credential is about to expire. A failure leaves no session, so
+    /// the next caller starts a fresh one.
+    pub(crate) async fn session(&self) -> Result<SessionGuard<'_>, String> {
+        let mut session = self.session.lock().await;
+        let ready = async {
+            if session.is_none() {
+                *session = Some(self.factory.open().await?);
+            }
+            let active = session.as_mut().expect("opened session");
+            if active
+                .credential
+                .as_ref()
+                .is_some_and(|credential| credential.exp - now_ms() / 1000 < RENEW_WITHIN_S)
+            {
+                self.factory.renew(active).await?;
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        match ready {
+            Ok(()) => Ok(SessionGuard(session)),
+            Err(error) => {
+                *session = None;
+                Err(error)
+            }
+        }
+    }
+
+    /// Drop the current session, so the next caller opens a fresh one: a
+    /// watch on it ended, so its connection may be gone.
+    pub(crate) async fn discard(&self) {
+        *self.session.lock().await = None;
+    }
+}
+
+/// The module's publisher of `docs_proposal` notices, kept across the
+/// dreamer's rounds.
+pub struct DocsNotices {
+    bus: Arc<Bus>,
+    /// Whether the current outage was logged, so it is logged once.
+    logged: AtomicBool,
+}
+
+impl DocsNotices {
+    /// Notices published through `bus`.
+    pub fn over(bus: Arc<Bus>) -> Self {
+        Self {
+            bus,
             logged: AtomicBool::new(false),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_factory(factory: Arc<dyn SessionFactory>) -> Self {
+        Self::over(Arc::new(Bus::with_factory(factory)))
     }
 
     /// One round: publish every pending proposal's unsent notice, opening or
@@ -647,20 +795,14 @@ impl DocsNotices {
         if !has_work {
             return;
         }
-        let mut session = self.session.lock().await;
         let result = async {
-            if session.is_none() {
-                *session = Some(self.factory.open().await?);
+            let session = self.bus.session().await?;
+            let published =
+                publish_pending(db, &session.account, session.publisher.as_ref()).await;
+            if published.is_err() {
+                session.discard();
             }
-            let active = session.as_mut().expect("opened session");
-            if active
-                .credential
-                .as_ref()
-                .is_some_and(|credential| credential.exp - now_ms() / 1000 < RENEW_WITHIN_S)
-            {
-                self.factory.renew(active).await?;
-            }
-            publish_pending(db, &active.account, active.publisher.as_ref()).await
+            published
         }
         .await;
         match result {
@@ -671,7 +813,6 @@ impl DocsNotices {
                 self.logged.store(false, Ordering::Relaxed);
             }
             Err(error) => {
-                *session = None;
                 if !self.logged.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         "ck-mc: bus: docs proposal notices wait unsent until the bus is reachable: {error}"

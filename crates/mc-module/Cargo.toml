@@ -66,7 +66,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # NATS credential from ck-bus, a JetStream publish, the fleet's subject names.
 cortexkit-bus-nats = "=0.4.0"
 cortexkit-bus-trait = "=0.3.1"
-cortexkit-bus-naming = "=0.3.4"
+cortexkit-bus-naming = "=0.4.0"
 async-nats = { version = "0.50", default-features = false }
 async-trait = "0.1"
 # Credential tokens are wiped from memory when dropped.

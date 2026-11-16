@@ -215,8 +215,11 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
             must_never_reach: Vec::new(),
         }))
         // The events ck-mc publishes on the bus, with the headers a notice
-        // carries ([`crate::bus`]).
-        .events(Some(vec![crate::docs_proposals::event_declaration()]))
+        // carries ([`crate::bus`], [`crate::memory_changed`]).
+        .events(Some(vec![
+            crate::docs_proposals::event_declaration(),
+            crate::memory_changed::event_declaration(),
+        ]))
         // The build's commit, from MC_BUILD_SHA at compile time. The daemon
         // shows it in module status, and placement checks it to prove the
         // running module is the placed build. A missing or malformed stamp
@@ -2861,7 +2864,7 @@ mod flow_tests {
     }
 
     #[test]
-    fn the_manifest_declares_flow_scopes_the_flow_operations_and_the_event() {
+    fn the_manifest_declares_flow_scopes_the_flow_operations_and_the_events() {
         let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
         let claims = manifest["capabilities"]["provides"].as_array().unwrap();
         assert!(claims.contains(&json!("flow-scopes/v1")));
@@ -2887,6 +2890,11 @@ mod flow_tests {
                 "version": 1,
                 "headers": ["event_key", "project_id"],
                 "summary": "Magic Context proposed edits to a project's ARCHITECTURE.md and STRUCTURE.md",
+            }, {
+                "name": "memory_changed",
+                "version": 1,
+                "headers": ["level", "owner_id", "revision"],
+                "summary": "Magic Context memories of a project, a workspace or the person changed",
             }])
         );
         subc_protocol::manifest::validate_hello_event_declarations(&json!({"manifest": manifest}))

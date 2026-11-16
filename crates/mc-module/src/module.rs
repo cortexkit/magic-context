@@ -117,6 +117,11 @@ struct Inner<C> {
     /// The publisher of the docs-upkeep proposals' bus notices, once the
     /// process set one ([`Module::publish_docs_notices_with`]).
     docs_notices: std::sync::OnceLock<Arc<crate::bus::DocsNotices>>,
+    /// Each set-up session's folder, which its workspace is read for again
+    /// when Entorhinal's registry changes ([`Module::spawn_entorhinal_follow`]).
+    session_folders: Mutex<HashMap<SessionRef, String>>,
+    /// Whether the watch on Entorhinal's change markers is up.
+    entorhinal_watch: Arc<crate::entorhinal_changes::WatchState>,
 }
 
 enum Job {
@@ -285,6 +290,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 dreamer,
                 legacy_wake: Arc::default(),
                 docs_notices: std::sync::OnceLock::new(),
+                session_folders: Mutex::new(HashMap::new()),
+                entorhinal_watch: Arc::default(),
             }),
         }
     }
@@ -450,6 +457,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .expect("setup sessions")
             .remove(session);
         self.inner
+            .session_folders
+            .lock()
+            .expect("session folders")
+            .remove(session);
+        self.inner
             .session_projects
             .lock()
             .expect("session projects")
@@ -530,6 +542,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .session_seen(&route.session, project, &request.preset);
             self.touch(&route.session);
             self.inner.legacy_wake.saw(&project.id);
+        }
+        if let Some(folder) = &route.workdir {
+            self.inner
+                .session_folders
+                .lock()
+                .expect("session folders")
+                .insert(route.session.clone(), folder.clone());
         }
         // The epoch is recorded and the Setup queued under one lock, the one
         // a notice or ride is checked and queued under. So no statement
@@ -837,6 +856,71 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// effect; a module without one publishes none.
     pub fn publish_docs_notices_with(&self, notices: crate::bus::DocsNotices) {
         let _ = self.inner.docs_notices.set(Arc::new(notices));
+    }
+
+    /// Wake other modules on `bus` after each committed change to memories a
+    /// session's head can show ([`crate::memory_changed`]). Without
+    /// `context.db` nothing changes.
+    pub fn spawn_memory_wakes(&self, bus: Arc<crate::bus::Bus>) {
+        let Some(db) = self.inner.db.clone() else {
+            return;
+        };
+        let wakes = Arc::new(crate::memory_changed::MemoryWakes::default());
+        let publisher = crate::memory_changed::publisher_for(&db, bus, &wakes);
+        tokio::spawn(crate::memory_changed::run(publisher, db, wakes));
+    }
+
+    /// Follow Entorhinal's change markers on `bus`
+    /// ([`crate::entorhinal_changes`]): each change reads every live
+    /// session's workspace again and wakes a legacy project round.
+    pub fn spawn_entorhinal_follow(&self, bus: Arc<crate::bus::Bus>) {
+        let module = self.clone();
+        let state = Arc::clone(&self.inner.entorhinal_watch);
+        tokio::spawn(async move {
+            crate::entorhinal_changes::run(bus, state, move || module.registry_changed()).await;
+        });
+    }
+
+    /// Whether the watch on Entorhinal's change markers is up.
+    #[cfg(test)]
+    pub(crate) fn entorhinal_watch_up(&self) -> bool {
+        self.inner.entorhinal_watch.is_up()
+    }
+
+    /// The module's `context.db`, for tests that watch its writers.
+    #[cfg(test)]
+    pub(crate) fn context_store(&self) -> Option<&Arc<ContextDb>> {
+        self.inner.db.as_ref()
+    }
+
+    /// Entorhinal's registry changed: a session's project may be in another
+    /// workspace now, and a 0.49 folder may belong to a project now. Each
+    /// set-up session's folder is read again, once per folder, and a legacy
+    /// project round is woken.
+    pub(crate) fn registry_changed(&self) {
+        self.inner.legacy_wake.registry_changed();
+        let folders = self
+            .inner
+            .session_folders
+            .lock()
+            .expect("session folders")
+            .clone();
+        let mut by_folder: std::collections::BTreeMap<String, Folder> =
+            std::collections::BTreeMap::new();
+        {
+            let workers = self.inner.workers.lock().expect("worker map");
+            for (session, folder) in folders {
+                let Some(worker) = workers.get(&session) else {
+                    continue;
+                };
+                by_folder
+                    .entry(folder)
+                    .or_insert_with(|| (session.clone(), Vec::new()))
+                    .1
+                    .push(worker.downgrade());
+            }
+        }
+        read_workspaces(&self.inner, by_folder.into_iter().collect());
     }
 
     /// Run the dreamer once a minute, the first time after upkeep's quiet
@@ -1716,16 +1800,44 @@ fn read_workspace_again<C: RunnerClient + Router + Send + Sync + 'static>(
     let Some(folder) = route.workdir.clone() else {
         return;
     };
+    read_workspaces(
+        inner,
+        vec![(folder, (route.session.clone(), vec![worker]))],
+    );
+}
+
+/// A folder's sessions: the one whose route Entorhinal is asked under, and
+/// the workers of all of them.
+type Folder = (SessionRef, Vec<mpsc::WeakUnboundedSender<Job>>);
+
+/// Read again, in the background, which project and workspace each folder is
+/// in now: one Entorhinal read per folder, in turn, asked under the named
+/// session's route. Each answer goes to the workers of that folder's
+/// sessions; a folder Entorhinal doesn't answer for changes nothing.
+fn read_workspaces<C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &Arc<Inner<C>>,
+    folders: Vec<(String, Folder)>,
+) {
+    if folders.is_empty() {
+        return;
+    }
     let inner = Arc::clone(inner);
-    let session = route.session.clone();
     tokio::spawn(async move {
-        let Some((project, workspace)) =
-            crate::memory_context::read_workspace(inner.client.as_ref(), &session, &folder).await
-        else {
-            return;
-        };
-        if let Some(worker) = worker.upgrade() {
-            let _ = worker.send(Job::Workspace { project, workspace });
+        for (folder, (session, workers)) in folders {
+            let Some((project, workspace)) =
+                crate::memory_context::read_workspace(inner.client.as_ref(), &session, &folder)
+                    .await
+            else {
+                continue;
+            };
+            for worker in workers {
+                if let Some(worker) = worker.upgrade() {
+                    let _ = worker.send(Job::Workspace {
+                        project: project.clone(),
+                        workspace: workspace.clone(),
+                    });
+                }
+            }
         }
     });
 }

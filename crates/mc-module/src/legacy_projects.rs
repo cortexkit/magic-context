@@ -26,7 +26,9 @@
 //!
 //! Rounds are few ([`run`]): one after start, retried with a growing pause
 //! until Entorhinal answers; one when a Setup names a project id this process
-//! hasn't seen ([`Wake`]); and one an hour. A round acts only when
+//! hasn't seen ([`Wake`]); one when Entorhinal's registry changes, while the
+//! bus carries its change markers ([`crate::entorhinal_changes`]); and one an
+//! hour. A round acts only when
 //! Entorhinal's `generation` or `incarnation` is new, or the last round
 //! failed in the store. Once the store has no row under a 0.49 key, no more
 //! rounds run in this process. Without an answer nothing moves. Running
@@ -221,6 +223,13 @@ impl Mover {
                 .and_then(|project| groups.get(project.as_str()))
                 .unwrap_or(&none);
             let settled = settle(db, key, projects, group, now);
+            // A project that received memories shows them to its sessions'
+            // heads, and its app pages and other modules hear of them.
+            for (project, rows) in &settled.done {
+                if rows.get("memories").is_some_and(|count| *count > 0) {
+                    db.changed(crate::app_read::Change::project_memories(project));
+                }
+            }
             if !settled.done.is_empty() {
                 let to = settled.done.keys().cloned().collect::<Vec<_>>().join(", ");
                 let rows = described(&settled.done);
@@ -409,12 +418,27 @@ impl Wake {
             self.notify.notify_one();
         }
     }
+
+    /// Entorhinal's registry changed ([`crate::entorhinal_changes`]): a
+    /// project may now claim a 0.49 folder.
+    pub(crate) fn registry_changed(&self) {
+        self.notify.notify_one();
+    }
+
+    /// Whether a round was woken within `within`.
+    #[cfg(test)]
+    pub(crate) async fn woken(&self, within: Duration) -> bool {
+        tokio::time::timeout(within, self.notify.notified())
+            .await
+            .is_ok()
+    }
 }
 
 /// Rounds while the store has rows under a 0.49 key: the first at once,
 /// retried with a growing pause until Entorhinal answers, then one an hour
-/// and one whenever `wake` sees a new project id. A round that failed in the
-/// store is retried like an unanswered one.
+/// and one whenever `wake` sees a new project id or hears that Entorhinal's
+/// registry changed. A round that failed in the store is retried like an
+/// unanswered one.
 pub(crate) async fn run<C: RunnerClient>(client: &C, db: Arc<ContextDb>, wake: Arc<Wake>) {
     let mut mover = Mover::default();
     let mut retry = RETRY_FIRST;

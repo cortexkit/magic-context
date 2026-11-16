@@ -269,3 +269,145 @@ fn only_trusted_ckbus_refusal_codes_leave_the_module() {
         json!({"a": 1})
     );
 }
+
+/// One notice the test bus's stream took: subject, message id, digest,
+/// headers, and whether the stream had it already.
+pub(crate) type Sent = (String, String, ContentDigest, Headers, bool);
+
+/// A bus for other modules' tests. Notices go to an in-memory stream and are
+/// recorded as the bus took them; KV buckets are a second in-memory bus.
+/// `down` refuses every session, as a bus that is down or a missing ck-bus
+/// does.
+pub(crate) struct TestBus {
+    pub stream: cortexkit_bus_inmemory::InMemoryBus,
+    pub kv: cortexkit_bus_inmemory::InMemoryBus,
+    pub sent: Mutex<Vec<Sent>>,
+    pub down: AtomicBool,
+    pub opened: AtomicUsize,
+    /// The bucket names watches were opened on.
+    pub watched: Mutex<Vec<String>>,
+    /// Bumped to end every watch open now.
+    cut: tokio::sync::watch::Sender<u64>,
+}
+
+impl TestBus {
+    pub(crate) fn new() -> Arc<Self> {
+        use cortexkit_bus_inmemory::{InMemoryBus, InMemoryConfig};
+        Arc::new(Self {
+            stream: InMemoryBus::new(InMemoryConfig::default()),
+            kv: InMemoryBus::new(InMemoryConfig::default()),
+            sent: Mutex::new(Vec::new()),
+            down: AtomicBool::new(false),
+            opened: AtomicUsize::new(0),
+            watched: Mutex::new(Vec::new()),
+            cut: tokio::sync::watch::channel(0).0,
+        })
+    }
+
+    /// End every watch open now, as a lost connection does.
+    pub(crate) fn cut_watches(&self) {
+        self.cut.send_modify(|cuts| *cuts += 1);
+    }
+
+    /// The module's bus over this one.
+    pub(crate) fn bus(self: &Arc<Self>) -> Arc<Bus> {
+        Arc::new(Bus::with_factory(Arc::new(TestSessions(self.clone()))))
+    }
+
+    /// The notices the stream took, in order: message id and headers.
+    pub(crate) fn notices(&self) -> Vec<(String, Headers)> {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, id, _, headers, _)| (id.clone(), headers.clone()))
+            .collect()
+    }
+}
+
+struct TestSessions(Arc<TestBus>);
+
+struct TestPublisher(Arc<TestBus>);
+
+#[async_trait]
+impl EventPublisher for TestPublisher {
+    async fn publish(
+        &self,
+        subject: &str,
+        id: &str,
+        digest: ContentDigest,
+        headers: Headers,
+    ) -> Result<PublishReceipt, String> {
+        if self.0.down.load(Ordering::Relaxed) {
+            return Err("nats_publish_failed".into());
+        }
+        let receipt = Stream::publish(&self.0.stream, subject, id, digest, headers.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        self.0.sent.lock().unwrap().push((
+            subject.into(),
+            id.into(),
+            digest,
+            headers,
+            receipt.duplicate(),
+        ));
+        Ok(receipt)
+    }
+}
+
+struct TestRegisters(Arc<TestBus>);
+
+#[async_trait]
+impl Registers for TestRegisters {
+    async fn watch(&self, bucket: &str, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
+        if self.0.down.load(Ordering::Relaxed) {
+            return Err("nats_watch_failed".into());
+        }
+        self.0.watched.lock().unwrap().push(bucket.into());
+        let watch = Register::watch(&self.0.kv, key)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Box::new(TestWatch {
+            watch,
+            cut: self.0.cut.subscribe(),
+        }))
+    }
+}
+
+/// An in-memory watch that ends when the test bus cuts its watches.
+struct TestWatch {
+    watch: cortexkit_bus_inmemory::InMemoryRegisterWatch,
+    cut: tokio::sync::watch::Receiver<u64>,
+}
+
+#[async_trait]
+impl RegisterWatch for TestWatch {
+    async fn next(&mut self) -> cortexkit_bus_trait::BusResult<cortexkit_bus_trait::WatchEvent> {
+        tokio::select! {
+            event = self.watch.next() => event,
+            _ = self.cut.changed() => Err(BusError::unavailable("register watch cut")),
+        }
+    }
+
+    fn has_snapshot(&self) -> bool {
+        self.watch.has_snapshot()
+    }
+}
+
+#[async_trait]
+impl SessionFactory for TestSessions {
+    async fn open(&self) -> Result<BusSession, String> {
+        if self.0.down.load(Ordering::Relaxed) {
+            return Err("ckbus_refused".into());
+        }
+        self.0.opened.fetch_add(1, Ordering::Relaxed);
+        Ok(
+            BusSession::fixed(account(), Box::new(TestPublisher(self.0.clone())))
+                .with_registers(Box::new(TestRegisters(self.0.clone()))),
+        )
+    }
+
+    async fn renew(&self, _session: &mut BusSession) -> Result<(), String> {
+        Ok(())
+    }
+}

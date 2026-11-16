@@ -114,12 +114,15 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     );
     module.spawn_upkeep();
     module.spawn_memory_sync();
-    // The dreamer's rounds announce new docs proposals on the bus.
-    module.publish_docs_notices_with(mc_module::bus::DocsNotices::through_ckbus(
-        connection_file.clone(),
-    ));
+    // One connection to the bus, through ck-bus: the dreamer's rounds
+    // announce new docs proposals on it, memory changes wake other modules,
+    // and Entorhinal's change markers are followed.
+    let bus = Arc::new(mc_module::bus::Bus::through_ckbus(connection_file.clone()));
+    module.publish_docs_notices_with(mc_module::bus::DocsNotices::over(Arc::clone(&bus)));
+    module.spawn_memory_wakes(Arc::clone(&bus));
     module.spawn_dreamer();
     module.spawn_legacy_projects();
+    module.spawn_entorhinal_follow(bus);
     // An install a move started before a crash is finished in every build:
     // its sessions are refused until it is.
     module.spawn_move_recovery();

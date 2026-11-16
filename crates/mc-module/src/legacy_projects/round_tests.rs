@@ -428,3 +428,63 @@ async fn rounds_stop_once_no_legacy_rows_are_left() {
     .expect("a clean store ends the rounds at once");
     assert_eq!(client.calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn a_move_into_a_project_wakes_it_once_with_a_higher_revision() {
+    let test_bus = crate::bus::tests::TestBus::new();
+    let (_store, db, wakes, mut publisher) = crate::memory_changed::tests::watched(&test_bus);
+    let fixture = Fixture {
+        dir: tempfile::tempdir().unwrap(),
+        db,
+    };
+    let floor = fixture.with(|conn| crate::memory_changed::revision(conn).unwrap());
+    let repo = fixture.checkout("repo");
+    let plain = fixture.folder("plain");
+    fixture.memory(&golden_key(), "Secret marker zebra.");
+    fixture.note(&key::directory_key(&plain), "Ship after CI.");
+    let roots = vec![
+        ("pj-git".to_owned(), repo),
+        ("pj-dir".to_owned(), plain),
+    ];
+    let report = Mover::default().apply(&fixture.db, &roots, 5);
+    assert!(report.complete);
+    // The project that received memories is woken; the one that received
+    // only a note is not.
+    let sent = publisher.round(&fixture.db, wakes.take()).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0].owner,
+        crate::memory_changed::Owner::of("project", "pj-git").unwrap()
+    );
+    assert!(sent[0].revision > floor);
+    assert!(!crate::memory_changed::tests::carried(&test_bus).contains("zebra"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_registry_change_wakes_a_round_and_the_hour_stays_the_backstop() {
+    let fixture = Fixture::new();
+    // A key no folder gives keeps rounds going.
+    fixture.memory("git:ffffffff", "Nobody's.");
+    let client = Arc::new(entorhinal(answer(1, &[])));
+    let wake = Arc::new(Wake::default());
+    let task = tokio::spawn({
+        let (client, db, wake) = (
+            Arc::clone(&client),
+            Arc::clone(&fixture.db),
+            Arc::clone(&wake),
+        );
+        async move { run(client.as_ref(), db, wake).await }
+    });
+    let calls = || client.calls.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(calls(), 1);
+    // Entorhinal's registry changed: a round runs at once.
+    wake.registry_changed();
+    asked(&client, 2).await;
+    // Without another change, the next round still waits for the hour.
+    tokio::time::sleep(Duration::from_secs(59 * 60)).await;
+    assert_eq!(calls(), 2);
+    tokio::time::sleep(Duration::from_secs(2 * 60)).await;
+    asked(&client, 3).await;
+    task.abort();
+}

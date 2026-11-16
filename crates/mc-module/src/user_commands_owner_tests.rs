@@ -1667,3 +1667,60 @@ async fn docs_proposal_dismiss_offers_only_a_pending_proposal_of_its_project() {
     assert_eq!(refused.code, wire::UNKNOWN_SUBJECT);
     assert_eq!(docs_status(&conn, other), "pending");
 }
+
+#[tokio::test]
+async fn an_owner_edit_and_delete_each_wake_the_project_with_a_higher_revision() {
+    let owner = Owner::new();
+    let conn = owner.conn();
+    let id = memory(
+        &conn,
+        "project",
+        PROJECT,
+        ARCHITECTURE,
+        "Secret marker zebra.",
+    );
+    let test_bus = crate::bus::tests::TestBus::new();
+    let db = Arc::clone(owner.module.context_store().unwrap());
+    let wakes = Arc::new(crate::memory_changed::MemoryWakes::default());
+    let mut publisher = crate::memory_changed::publisher_for(&db, test_bus.bus(), &wakes);
+    let project_owner = crate::memory_changed::Owner::of("project", PROJECT).unwrap();
+
+    let (_, answer) = owner
+        .apply(
+            "project_memory_edit",
+            project(),
+            json!({"id": id, "content": "Secret marker zebra, revised.", "category": "keep"}),
+            "edit-1",
+        )
+        .await;
+    assert_eq!(answer["outcome"], "applied");
+    let edited = publisher.round(&db, wakes.take()).await;
+    assert_eq!(edited.len(), 1, "{edited:?}");
+    assert_eq!(edited[0].owner, project_owner);
+
+    let (_, answer) = owner
+        .apply(
+            "project_memory_delete",
+            project(),
+            json!({"ids": id.to_string()}),
+            "delete-1",
+        )
+        .await;
+    assert_eq!(answer["facts"][0]["value"], 1.0);
+    let deleted = publisher.round(&db, wakes.take()).await;
+    assert_eq!(deleted.len(), 1, "{deleted:?}");
+    assert_eq!(deleted[0].owner, project_owner);
+    assert!(deleted[0].revision > edited[0].revision);
+    assert_eq!(
+        test_bus
+            .notices()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        [
+            format!("project:{PROJECT}:{}", edited[0].revision),
+            format!("project:{PROJECT}:{}", deleted[0].revision),
+        ]
+    );
+    assert!(!crate::memory_changed::tests::carried(&test_bus).contains("zebra"));
+}

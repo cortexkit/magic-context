@@ -13,7 +13,7 @@
 //! same file.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
@@ -207,6 +207,10 @@ pub struct ContextDb {
     /// once by the module that serves those reads; a store without one (a
     /// test, a tool) tells no one.
     notifier: std::sync::OnceLock<crate::app_read::Notifier>,
+    /// Where writers' memory changes become bus wakes. Set once by the
+    /// module that publishes them ([`crate::memory_changed`]); a store
+    /// without one wakes no one.
+    memory_wakes: std::sync::OnceLock<Arc<crate::memory_changed::MemoryWakes>>,
     /// Read-only connections for searches, opened when first needed.
     readers: readers::Readers,
     #[cfg(feature = "context-db-timing")]
@@ -376,6 +380,7 @@ impl ContextDb {
             path: path.to_owned(),
             connection: Mutex::new(connection),
             notifier: std::sync::OnceLock::new(),
+            memory_wakes: std::sync::OnceLock::new(),
             readers: readers::Readers::default(),
             #[cfg(feature = "context-db-timing")]
             timing,
@@ -453,9 +458,21 @@ impl ContextDb {
         let _ = self.notifier.set(notifier);
     }
 
+    /// Signal `wakes` with every memory change a writer reports from now on.
+    /// Only the first call takes effect.
+    pub(crate) fn wake_on_memory_changes(&self, wakes: Arc<crate::memory_changed::MemoryWakes>) {
+        let _ = self.memory_wakes.set(wakes);
+    }
+
     /// Report a committed change to rows the app reads show. Call it after
-    /// the transaction commits, so a reload reads the change.
+    /// the transaction commits, so a reload reads the change. A change to an
+    /// owner's memories also wakes other modules over the bus.
     pub(crate) fn changed(&self, change: crate::app_read::Change) {
+        if let (crate::app_read::Change::Memories { level, owner }, Some(wakes)) =
+            (&change, self.memory_wakes.get())
+        {
+            wakes.signal(level, owner);
+        }
         if let Some(notifier) = self.notifier.get() {
             notifier.changed(change);
         }

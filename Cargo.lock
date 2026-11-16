@@ -261,7 +261,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c563d7235caba742d198c5a6ba9b1fe27869d6494f13a5757ec28e00522eb4f"
 dependencies = [
  "async-trait",
- "cortexkit-bus-naming",
+ "cortexkit-bus-naming 0.3.4",
  "cortexkit-bus-trait",
  "tokio",
 ]
@@ -273,6 +273,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "059309f7503eba557d5c1bcf1dfcf59f8fa978516ed0827cf79ecb62ff7fc07a"
 
 [[package]]
+name = "cortexkit-bus-naming"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be84df2874202cd171f19acd2a38f6e13db498b31813a0f0e7a6e91235ddcc54"
+
+[[package]]
 name = "cortexkit-bus-nats"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -281,7 +287,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "bytes",
- "cortexkit-bus-naming",
+ "cortexkit-bus-naming 0.3.4",
  "cortexkit-bus-trait",
  "futures-util",
  "tokio",
@@ -1221,7 +1227,7 @@ dependencies = [
  "chrono",
  "cortexkit-agent-identity",
  "cortexkit-bus-inmemory",
- "cortexkit-bus-naming",
+ "cortexkit-bus-naming 0.4.0",
  "cortexkit-bus-nats",
  "cortexkit-bus-trait",
  "cortexkit-compaction-view",
