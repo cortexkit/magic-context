@@ -15,8 +15,13 @@ notice-cost-timing = ["nix/resource", "nix/time"]
 # them, whatever MAGIC_CONTEXT_AGENT_DATA says; moves the journal already
 # records are enforced either way (see `agent_data::switch`).
 agent-data = []
+# Opt-in heap attribution for the `heap_profile` test (allocation sites with
+# backtraces). Only that test target requires it; no build of ck-mc turns it on.
+heap-profile = ["dep:dhat"]
 
 [dependencies]
+# The heap profiler behind `heap-profile`.
+dhat = { version = "0.3.3", optional = true }
 # Local midnight for memories that end on a calendar date.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 # The machine's IANA time zone name, which dreamer schedules run in.
@@ -111,6 +116,14 @@ cortexkit-test-support = "=0.1.14"
 [[bin]]
 name = "ck-mc"
 path = "src/main.rs"
+
+# Measures what the module holds in memory after Setup, on a copy of real
+# stores. It replaces the global allocator, so it builds only on request:
+# `cargo test -p mc-module --release --features heap-profile --test heap_profile -- --ignored --nocapture`.
+[[test]]
+name = "heap_profile"
+path = "tests/heap_profile.rs"
+required-features = ["heap-profile"]
 
 # Test-only helpers the registration live suite's daemon launches. None of
 # them is shipped: releases take target/release/ck-mc alone.
