@@ -8,6 +8,7 @@ impl Replica {
         let key = session(scope.get("session").unwrap_or(&Value::Null))?;
         self.identity(&key)?;
         self.ensure_loaded(&key)?;
+        self.retry_summaries(&key);
         let snapshot = self.locate(&key)?;
         if let Some(sources) = p.get("sources") {
             if sources != &json!(["message"]) {
@@ -48,7 +49,14 @@ impl Replica {
                 "The message index contains another harness's rows.",
             ));
         }
-        let identity = version(&json!([key, query, snapshot.newest, snapshot.compartments]));
+        let identity = summaries::search_identity(
+            conn,
+            &key,
+            query,
+            snapshot.newest,
+            &snapshot.compartments,
+        )
+        .map_err(|_| unavailable())?;
         let offset = match p.get("cursor").filter(|v| !v.is_null()) {
             None => 0,
             Some(value) => {
@@ -71,8 +79,8 @@ impl Replica {
         let more = hits.len() > 50;
         let hits: Vec<Value> = hits.into_iter().take(50).map(|hit| {
             let at_ms: Option<i64> = conn.query_row("SELECT message_time_ms FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal=?2", params![key.session, hit.number], |row| row.get(0)).ok().flatten();
-            let compartment = snapshot.compartments.iter().find(|c| c["first_message_ordinal"].as_i64().unwrap_or(i64::MAX) <= hit.number && c["last_message_ordinal"].as_i64().unwrap_or(-1) >= hit.number);
-            json!({"session":key, "message_id":hit.message_id, "role":hit.role, "at_ms":at_ms, "snippet":hit.content, "match_ranges":match_ranges(&hit.content, query), "source":"message", "ordinal":hit.number, "score":hit.score, "compartment_id":compartment.map(|c| &c["compartment_id"]), "agent_id":null, "agent_resolution":"client", "project":null, "project_source":null, "ref":null})
+            let compartment = snapshot.compartments.iter().find(|c| c.first_message_ordinal <= hit.number && c.last_message_ordinal >= hit.number);
+            json!({"session":key, "message_id":hit.message_id, "role":hit.role, "at_ms":at_ms, "snippet":hit.content, "match_ranges":match_ranges(&hit.content, query), "source":"message", "ordinal":hit.number, "score":hit.score, "compartment_id":compartment.map(|c| c.id()), "agent_id":null, "agent_resolution":"client", "project":null, "project_source":null, "ref":null})
         }).collect();
         let mut fields = json!({"next_cursor":if more {Some(format!("{identity}:{}", offset+50))} else {None}, "hits":hits, "complete":true, "agent_resolution":"client", "diagnostics":{"omitted_sessions":0, "project_resolution":{"status":"ok"}}, "source_status":{"message":"ok"}});
         envelope("context.search", &mut fields);

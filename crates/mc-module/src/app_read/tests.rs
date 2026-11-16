@@ -12,7 +12,7 @@ pub(super) fn fixture() -> Snapshot {
     let mut messages = BTreeMap::new();
     for (i, state) in [(1, "raw"), (2, "raw"), (3, "dropped")] {
         let mid = format!("m{i}");
-        messages.insert(mid.clone(), Message { ordinal:i, at_ms:i*10, row:json!({"message_id":mid,"state":state,"compartment_id":null,"outside_reason":null,"split":null,"stamped_parts":[],"dropped_parts":[],"parts":{"tagged":1,"stamped":0,"dropped":0}}) });
+        messages.insert(mid.clone(), Arc::new(Message { ordinal:i, at_ms:i*10, row:json!({"message_id":mid,"state":state,"compartment_id":null,"outside_reason":null,"split":null,"stamped_parts":[],"dropped_parts":[],"parts":{"tagged":1,"stamped":0,"dropped":0}}).into() }));
     }
     Snapshot {
         key: key(),
@@ -23,18 +23,56 @@ pub(super) fn fixture() -> Snapshot {
         breakdown: Breakdown::from_value(
             json!({"managed":{"value":true},"as_of":{"step_ref":"m3","at_ms":30},"total":{"tokens":80,"source":"provider"},"context_window":{"tokens":100000,"source":"usage"},"parts":[{"part":"history_raw","tokens":10,"estimate":true,"count":2}],"unattributed":70,"estimation_source":"legacy_estimate"}),
         ),
-        compartments: vec![
-            json!({"compartment_id":"1","ordinal":1,"title":"Earlier work","first_message_id":"m1","last_message_id":"m1","first_message_ordinal":1,"last_message_ordinal":1,"first_at_ms":10,"last_at_ms":10,"message_count":1,"importance":70,"summary_markdown":"A summary","tiers":{"p1":"detail","p2":"short","p3":"tiny","p4":"cue"}}),
-        ],
+        compartments: vec![summaries::Summary {
+            sequence: 1,
+            first_message_id: "m1".into(),
+            last_message_id: "m1".into(),
+            first_message_ordinal: 1,
+            last_message_ordinal: 1,
+            at_ms: [Some(10), Some(10)],
+        }],
         messages,
         decisions: vec![],
     }
 }
+
+/// Store the fixture's one summary for `session` in `context.db`, covering
+/// its messages from `m1` to `m{last}`. It is the summary the sample session
+/// ([`crate::session::Session::app_sample_snapshot`]) holds when `last` is 1.
+pub(super) fn insert_summary(conn: &Connection, session: &str, last: u64) {
+    conn.execute(
+        "INSERT INTO compartments (session_id, sequence, start_message, end_message,
+             start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance,
+             created_at, harness)
+         VALUES (?1, 1, 1, ?2, 'm1', ?3, 'Earlier work', 'A summary', 'detail', 'short',
+             'tiny', 'cue', 70, 40, 'opencode2')",
+        params![session, last, format!("m{last}")],
+    )
+    .unwrap();
+}
+
+/// A `context.db` holding only the fixture session's summary
+/// ([`insert_summary`]): its directory, its path, and a read-only
+/// connection like the replica's.
+pub(super) fn summary_db(last: u64) -> (tempfile::TempDir, std::path::PathBuf, Connection) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("context.db");
+    let db = crate::context_db::ContextDb::create_for_tests(&path).unwrap();
+    db.with_connection(|conn| {
+        insert_summary(conn, "s", last);
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    (dir, path, conn)
+}
+
 pub(super) fn replica(context: Option<Connection>) -> Replica {
     let s = fixture();
     Replica {
         cache: Default::default(),
         boundaries: HashMap::new(),
+        summaries_unread: Default::default(),
         known: HashSet::new(),
         load_failed: false,
         snapshots: HashMap::from([(s.key.clone(), s)]),
@@ -149,7 +187,8 @@ fn states_distinguishes_raw_dropped_summarized_and_outside_and_is_conditional() 
 
 #[test]
 fn compartment_returns_stored_tiers_and_boundaries() {
-    let mut replica = replica(None);
+    let (_dir, _, conn) = summary_db(1);
+    let mut replica = replica(Some(conn));
     let value = replica
         .read(
             "context.compartment",
@@ -252,8 +291,12 @@ fn search_db() -> (tempfile::TempDir, Connection) {
             )
         })
         .collect();
-    db.with_connection(|conn| crate::search::messages::index(conn, "opencode2", "s", &entries))
-        .unwrap();
+    db.with_connection(|conn| {
+        crate::search::messages::index(conn, "opencode2", "s", &entries)?;
+        insert_summary(conn, "s", 1);
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
     let conn = Connection::open_with_flags(
         dir.path().join("context.db"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -383,7 +426,9 @@ async fn published_replica_survives_restart_and_does_not_take_the_session_store_
             .unwrap()["row"]["compartment_count"],
         1
     );
-    let reopened = AppRead::new(Some(store.path.clone()), None);
+    // The summary comes from `context.db`, which a restart keeps.
+    let (_context, context_path, _) = summary_db(1);
+    let reopened = AppRead::new(Some(store.path.clone()), Some(context_path));
     assert_eq!(
         reopened
             .read(
@@ -741,10 +786,12 @@ async fn archive_message_identity_survives_cut_restart_and_revert() {
     let mut cut = fixture();
     cut.base = 4;
     cut.messages.clear();
-    cut.compartments[0]["last_message_id"] = json!("m3");
-    cut.compartments[0]["last_message_ordinal"] = json!(3);
+    cut.compartments[0].last_message_id = "m3".into();
+    cut.compartments[0].last_message_ordinal = 3;
     store.save_app_snapshot(&cut).unwrap();
-    let app = AppRead::new(Some(store.path.clone()), None);
+    // The summary the cut stands for, as the session stored it.
+    let (_context, context_path, _) = summary_db(3);
+    let app = AppRead::new(Some(store.path.clone()), Some(context_path.clone()));
     let states = app
         .read("context.states", request(json!({"message_ids":["m2"]})))
         .await
@@ -764,6 +811,11 @@ async fn archive_message_identity_survives_cut_restart_and_revert() {
     reverted.newest = 1;
     reverted.messages.retain(|_, message| message.ordinal == 1);
     reverted.compartments.clear();
+    // A revert deletes the summaries it forgets from `context.db`.
+    Connection::open(&context_path)
+        .unwrap()
+        .execute("DELETE FROM compartments", [])
+        .unwrap();
     save_fixture(&store, &reverted, Some(2));
     app.publish(reverted);
     let states = app
@@ -831,12 +883,12 @@ async fn cold_session_records_preserve_runner_identity_and_unready_reads_are_tra
 
 #[test]
 fn incremental_boundary_timestamps_fill_when_the_message_arrives_later() {
-    let mut replica = replica(None);
+    let (_dir, _, conn) = summary_db(1);
+    let mut replica = replica(Some(conn));
     replica.snapshots.clear();
     let mut first = fixture();
     let boundary = first.messages.remove("m1").unwrap();
-    first.compartments[0]["first_at_ms"] = Value::Null;
-    first.compartments[0]["last_at_ms"] = Value::Null;
+    first.compartments[0].at_ms = [None, None];
     let header = Arc::new(Header {
         base: first.base,
         newest: first.newest,
@@ -845,14 +897,19 @@ fn incremental_boundary_timestamps_fill_when_the_message_arrives_later() {
         breakdown: first.breakdown.clone(),
     });
     replica.publish(first);
+    assert_eq!(
+        replica.snapshots[&key()].compartments[0].at_ms,
+        [None, None],
+        "no time is known before the message arrives"
+    );
     replica.update(Update {
         head: Default::default(),
         key: key(),
         header,
-        rows: vec![("m1".into(), Arc::new(boundary))],
+        rows: vec![("m1".into(), boundary)],
         reset_from: None,
         prune_before: None,
-        compartments: None,
+        summaries_changed: false,
         decisions: None,
         reverted: false,
     });
@@ -866,6 +923,22 @@ fn incremental_boundary_timestamps_fill_when_the_message_arrives_later() {
     assert_eq!(compartment["compartment"]["last_at_ms"], 10);
 }
 
+/// A snapshot as versions before 5 saved it, whole, as JSON, with the
+/// summary JSON those versions held too.
+fn legacy_json(snapshot: &Snapshot) -> Value {
+    json!({
+        "key": snapshot.key,
+        "base": snapshot.base,
+        "newest": snapshot.newest,
+        "ready": snapshot.ready,
+        "meta": snapshot.meta,
+        "breakdown": snapshot.breakdown,
+        "compartments": [{"compartment_id":"1","ordinal":1,"title":"Earlier work","first_message_id":"m1","last_message_id":"m1","first_message_ordinal":1,"last_message_ordinal":1,"first_at_ms":10,"last_at_ms":10,"message_count":1,"importance":70,"summary_markdown":"A summary","tiers":{"p1":"detail","p2":"short","p3":"tiny","p4":"cue"}}],
+        "messages": snapshot.messages.iter().map(|(mid, message)| (mid.clone(), json!({"ordinal":message.ordinal,"at_ms":message.at_ms,"row":message.row.to_value(mid)}))).collect::<Map<_, _>>(),
+        "decisions": snapshot.decisions,
+    })
+}
+
 #[tokio::test]
 async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -876,7 +949,9 @@ async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
     // Recent, so the store does not expire it when it opens.
     snapshot.decisions =
         vec![json!({"view_version":1,"status":"accepted","at_ms":now_ms() - 1_000})];
-    let before = AppRead::new(None, None);
+    // Both read the session's summary from the same `context.db`.
+    let (_context, context_path, _) = summary_db(1);
+    let before = AppRead::new(None, Some(context_path.clone()));
     before.publish(snapshot.clone());
     for session in ["s", "another"] {
         let mut saved = snapshot.clone();
@@ -887,7 +962,7 @@ async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
                 saved.key.runner,
                 saved.key.harness,
                 session,
-                serde_json::to_string(&saved).unwrap()
+                legacy_json(&saved).to_string()
             ],
         )
         .unwrap();
@@ -909,7 +984,7 @@ async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        7
+        crate::store::SCHEMA_VERSION
     );
     assert_eq!(
         conn.query_row(
@@ -926,7 +1001,7 @@ async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
             .unwrap(),
         2
     );
-    let after = AppRead::new(Some(path.clone()), None);
+    let after = AppRead::new(Some(path.clone()), Some(context_path));
     for (op, params) in [
         ("session_data.read", json!({"section":"meta"})),
         ("session_data.read", json!({"section":"token_breakdown"})),

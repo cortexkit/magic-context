@@ -21,7 +21,7 @@ fn assistant(ordinal: u64, parts: Vec<Part>) -> Entry {
     )
 }
 
-fn part_tokens(snapshot: &Snapshot, name: &str) -> u64 {
+fn part_tokens(snapshot: &crate::app_read::Rendered, name: &str) -> u64 {
     snapshot.breakdown["parts"]
         .as_array()
         .unwrap()
@@ -32,7 +32,7 @@ fn part_tokens(snapshot: &Snapshot, name: &str) -> u64 {
         .unwrap()
 }
 
-fn items(snapshot: &Snapshot, mid: &str) -> Vec<Value> {
+fn items(snapshot: &crate::app_read::Rendered, mid: &str) -> Vec<Value> {
     snapshot.messages[mid].row["items"]
         .as_array()
         .unwrap()
@@ -49,7 +49,7 @@ fn app_read_breakdown_labels_follow_count_sources() {
     measured.reasoning_tokens = Some(ReasoningTokens::new(9_000, true));
     session.index.extend_counted([measured], Some("claude-v5/1"));
     let snapshot = session.app_snapshot();
-    let estimate = |snapshot: &Snapshot, name: &str| snapshot.breakdown["parts"].as_array().unwrap().iter().find(|part| part["part"] == name).unwrap()["estimate"].clone();
+    let estimate = |snapshot: &crate::app_read::Rendered, name: &str| snapshot.breakdown["parts"].as_array().unwrap().iter().find(|part| part["part"] == name).unwrap()["estimate"].clone();
     assert_eq!(estimate(&snapshot, "history_raw"), false);
     assert_eq!(estimate(&snapshot, "reasoning"), false);
     assert_eq!(snapshot.breakdown["estimation_source"], "runner");
@@ -122,8 +122,8 @@ fn app_read_reasoning_runner_counts_are_separate_and_update_only_the_changed_ent
     assert_eq!(changed.rows.len(), 1);
     assert_eq!(changed.rows[0].0, "m201");
     assert_eq!(session.app_projection.rebuilt_rows, 1);
-    assert_eq!(changed.rows[0].1.row["items"][0]["tokens"], 34);
-    assert_eq!(changed.rows[0].1.row["items"][1]["tokens"], 69);
+    assert_eq!(changed.rows[0].1.row.to_value("m201")["items"][0]["tokens"], 34);
+    assert_eq!(changed.rows[0].1.row.to_value("m201")["items"][1]["tokens"], 69);
     assert_eq!(changed.header.breakdown["parts"][8]["tokens"], 103);
     // A runner's zero is authoritative even when the step reports reasoning.
     entry.reasoning_tokens = Some(ReasoningTokens::new(0, true));
@@ -143,7 +143,7 @@ fn app_read_reasoning_runner_counts_are_separate_and_update_only_the_changed_ent
     session.index.extend_counted([late], Some("claude-v5/1"));
     let changed = session.app_update();
     assert_eq!(changed.rows.len(), 1);
-    assert_eq!(changed.rows[0].1.row["items"][0]["source"], "runner");
+    assert_eq!(changed.rows[0].1.row.to_value("m202")["items"][0]["source"], "runner");
     assert!(session.app_update().rows.is_empty());
 }
 
@@ -250,7 +250,7 @@ fn app_read_reasoning_drops_and_applied_summary_cuts_cost_zero() {
     assert!(items(&snapshot, "m201")
         .iter()
         .all(|item| item["tokens"] == 0));
-    assert_eq!(snapshot.compartments[0]["last_message_id"], "m201");
+    assert_eq!(*snapshot.compartments[0].last_message_id, *"m201");
     session.cut = None;
     assert_eq!(part_tokens(&session.app_snapshot(), "reasoning"), 101);
     session.index.truncate(201);
