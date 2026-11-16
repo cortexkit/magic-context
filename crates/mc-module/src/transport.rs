@@ -369,7 +369,7 @@ impl SubcRunnerClient {
             ..CallOptions::default()
         };
         let identity = BindIdentity::new(session.harness.clone(), session.session.clone());
-        let body = wire::encode(method, params);
+        let body = request_body(role.0, method, params);
         let reply = match scope {
             None => consumer.call(target, identity, body, options).await,
             Some(scope) => {
@@ -388,6 +388,19 @@ impl SubcRunnerClient {
 /// The host family a tool provider's bind identity names for a session a
 /// runner hosts.
 const RUNNER_HOST_FAMILY: &str = "runner";
+
+/// A request's body as `role` frames it. A tool provider reads every
+/// request, `tool.catalog` and `role.describe` included, as a tool call
+/// `{name, arguments}`; AFT answers the `{method, params}` frame of the
+/// other roles with `invalid_request` ("missing field `name`").
+fn request_body<P: Serialize>(role: &str, method: &str, params: &P) -> Vec<u8> {
+    if role == cortexkit_role_tool_provider::ROLE {
+        serde_json::to_vec(&json!({"name": method, "arguments": params}))
+            .expect("tool-call requests serialize")
+    } else {
+        wire::encode(method, params)
+    }
+}
 
 /// The surface of `module_id` that serves `role`. A tool provider serves
 /// `tool.catalog` on its tool-provider route; its management surface is for
@@ -2187,6 +2200,26 @@ mod config_tests {
                 module_id: "broca".into()
             }
         );
+    }
+
+    #[test]
+    fn a_tool_provider_request_is_a_tool_call() {
+        let params = json!({"params": {}, "preset": "reader"});
+        let body: serde_json::Value = serde_json::from_slice(&request_body(
+            cortexkit_role_tool_provider::ROLE,
+            cortexkit_role_tool_provider::ops::TOOL_CATALOG,
+            &params,
+        ))
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({"name": "tool.catalog", "arguments": {"params": {}, "preset": "reader"}})
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&request_body(LLM_RUNNER_ROLE.0, "session.read", &params))
+                .unwrap();
+        assert_eq!(body["method"], "session.read");
+        assert_eq!(body["params"], params);
     }
 
     #[test]

@@ -371,7 +371,8 @@ fn handle(ends: &RunEnds, delivery: &Delivery) -> Outcome {
     };
     let woke = ends.wake(delivery.id.as_deref(), session_ref);
     // One line per run end that a wait was blocked on, so the log shows that
-    // events, not the backstop poll, end ck-mc's waits.
+    // run-end events end ck-mc's waits, rather than the timed re-read each
+    // wait also makes in case an event never comes.
     if let Woke::Waits(waits) = woke {
         let event = delivery
             .subject

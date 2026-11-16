@@ -2227,6 +2227,7 @@ const TEMPLATE_DATA = [
 "historian producer window for \x01: \x01 (host registry)",
 "message FTS reconciliation stalled: \x01; will retry",
 "ck-mc: dreamer: run \x01 \x01 for \x01 in workspace \x01 started",
+"ck-mc: run ends: \x01 for session ref \x01 woke \x01 wait(s)",
 "[dreamer] compiled smart-note sweep failed for \x01:",
 "[magic-context-pi] embedding failed for memory \x01:",
 "[magic-context-pi] proactively embedded memory \x01.",
