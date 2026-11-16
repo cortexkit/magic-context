@@ -228,3 +228,58 @@ fn shapes_for_a_missing_citation() {
         assert!(!path_shaped(not_path), "{not_path}");
     }
 }
+
+fn code_texts(content: &str) -> Vec<String> {
+    code_cites(content, &top_level())
+        .iter()
+        .map(|cite| match cite {
+            Cite::Path(text) => format!("path:{text}"),
+            Cite::Name(text) => format!("name:{text}"),
+        })
+        .collect()
+}
+
+/// Names from a real verify replay (16 Nov 2026) that the citation reader
+/// takes as code names, but that a memory states in prose: a confirmation's
+/// cited code need not hold them. The subject-gone check still reads them.
+#[test]
+fn a_confirmation_needs_only_the_names_that_look_like_code() {
+    let content = "OpenCode and TypeScript on macOS, GitHub, CortexKit and TypeBox keep \
+                   `'never'` as the TTL that `cache_ttl` reads.";
+    assert_eq!(code_texts(content), ["name:cache_ttl"]);
+    // The subject-gone archive check keeps the broader reading.
+    assert_eq!(
+        texts(content),
+        [
+            "name:OpenCode",
+            "name:TypeScript",
+            "name:macOS",
+            "name:GitHub",
+            "name:CortexKit",
+            "name:TypeBox",
+            "name:'never'",
+            "name:cache_ttl",
+        ]
+    );
+}
+
+#[test]
+fn a_name_looks_like_code_in_backticks_with_code_marks_or_in_lower_camel_case() {
+    assert_eq!(
+        code_texts(
+            "`OpenCode` reads `ctx-search-rerank`, CK_LOG, session.entries, \
+             RecipeLane::Pi and clampProviderContextImages in crates/mc-module/src/lib.rs."
+        ),
+        [
+            "name:OpenCode",
+            "name:ctx-search-rerank",
+            "name:CK_LOG",
+            "name:session.entries",
+            "name:RecipeLane::Pi",
+            "name:clampProviderContextImages",
+            "path:crates/mc-module/src/lib.rs",
+        ]
+    );
+    // A quoted word in backticks that is no plain word is still code.
+    assert_eq!(code_texts("The TTL `'64k'` holds."), ["name:'64k'"]);
+}

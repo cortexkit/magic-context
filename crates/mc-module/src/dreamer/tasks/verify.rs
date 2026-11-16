@@ -73,6 +73,8 @@ pub(crate) mod manifest;
 mod numbers;
 pub(crate) mod spans;
 
+#[cfg(test)]
+pub(crate) use apply::Decided;
 use apply::METADATA;
 use cites::Cite;
 use confirm::{confirm, Committed};

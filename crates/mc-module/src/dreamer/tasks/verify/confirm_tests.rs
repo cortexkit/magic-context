@@ -444,3 +444,31 @@ fn audit_row_73_a_call_the_cited_code_does_not_make() {
         "call_with_streamed_body, which the memory names, is in none of the cited lines"
     );
 }
+
+/// A memory that names products in prose (from a real verify replay) is
+/// confirmed from code that holds its code names alone; the same product
+/// written in backticks must be in the cited lines.
+#[test]
+fn products_named_in_prose_need_not_be_in_the_cited_lines() {
+    let held = files(&[(
+        "src/cache.rs",
+        "pub const CACHE_TTL: &str = \"never\";\npub fn cache_ttl() -> &'static str { CACHE_TTL }\n",
+    )]);
+    let cites = Some("src/cache.rs:1-2");
+    assert!(check(
+        &held,
+        "OpenCode and TypeScript hosts on macOS keep `'never'` as the TTL `cache_ttl` returns.",
+        cites,
+        None
+    )
+    .is_ok());
+    assert_eq!(
+        skipped(check(
+            &held,
+            "`OpenCode` keeps the TTL `cache_ttl` returns.",
+            cites,
+            None
+        )),
+        "OpenCode, which the memory names, is in none of the cited lines"
+    );
+}

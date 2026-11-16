@@ -114,7 +114,36 @@ fn directive(memory: &MemoryRow) -> bool {
     patterns.iter().any(|pattern| pattern.is_match(text))
 }
 
+/// What the write does with one verdict, as its checks decide it.
+pub(crate) enum Decided {
+    /// Dropped by a check, with why; nothing is written.
+    Refused(String),
+    /// A confirmation that failed its checks: written as a skip of the
+    /// memory as it is now, with why.
+    Skipped(MemoryRow, String),
+    /// Written as the verdict says, to the memory as it is now; a
+    /// confirmation with the cited lines it rests on.
+    Write(MemoryRow, Option<Confirmation>),
+}
+
 impl VerifyBatch {
+    /// How `verdict` is written, by every check the write runs, inside `tx`
+    /// and without writing anything. The replay harness reports a saved
+    /// reply's verdicts through it, so it shows what a run would write.
+    pub(crate) fn decide(
+        &self,
+        tx: &Transaction<'_>,
+        verdict: &Verdict,
+    ) -> rusqlite::Result<Decided> {
+        Ok(match self.check(tx, verdict)? {
+            Err(reason) => Decided::Refused(reason),
+            Ok(current) => match self.confirmed(verdict) {
+                Some(Err(why)) => Decided::Skipped(current, why),
+                confirmation => Decided::Write(current, confirmation.and_then(Result::ok)),
+            },
+        })
+    }
+
     /// Check and write each of `verdicts`, inside `tx`.
     pub(super) fn write(
         &self,
@@ -129,30 +158,28 @@ impl VerifyBatch {
         };
         let mut remapped = Vec::new();
         for verdict in verdicts {
-            let dropped = match self.check(tx, verdict)? {
-                Err(reason) => Some(reason),
-                Ok(current) => match self.confirmed(verdict) {
-                    // A confirmation that fails its checks counts as a skip:
-                    // the memory is marked checked, and the reason is kept
-                    // with the run's dropped proposals.
-                    Some(Err(why)) => {
-                        let skip = Verdict {
-                            decision: Decision::Skip,
-                            ..verdict.clone()
-                        };
-                        self.write_one(tx, &skip, &current, None, run, now, &mut remapped)?;
-                        Some(format!("memory {}: counted as a skip: {why}", verdict.id))
-                    }
-                    confirmation => self.write_one(
-                        tx,
-                        verdict,
-                        &current,
-                        confirmation.and_then(Result::ok).as_ref(),
-                        run,
-                        now,
-                        &mut remapped,
-                    )?,
-                },
+            let dropped = match self.decide(tx, verdict)? {
+                Decided::Refused(reason) => Some(reason),
+                // A confirmation that fails its checks counts as a skip: the
+                // memory is marked checked, and the reason is kept with the
+                // run's dropped proposals.
+                Decided::Skipped(current, why) => {
+                    let skip = Verdict {
+                        decision: Decision::Skip,
+                        ..verdict.clone()
+                    };
+                    self.write_one(tx, &skip, &current, None, run, now, &mut remapped)?;
+                    Some(format!("memory {}: counted as a skip: {why}", verdict.id))
+                }
+                Decided::Write(current, confirmation) => self.write_one(
+                    tx,
+                    verdict,
+                    &current,
+                    confirmation.as_ref(),
+                    run,
+                    now,
+                    &mut remapped,
+                )?,
             };
             match dropped {
                 Some(reason) => applied.dropped.push(reason),

@@ -3,8 +3,10 @@
 //! the module reads them itself, at the commit the batch checked, and checks
 //! them together:
 //! - every cited span exists: its file is at that commit and has those lines;
-//! - every path and code name the memory states ([`super::cites`]) appears in
-//!   some span, a path also by being a span's file or a folder above it;
+//! - every path the memory states, and every name it states that looks like
+//!   code ([`super::cites::code_cites`]), appears in some span, a path also
+//!   by being a span's file or a folder above it. A product named in prose
+//!   (`OpenCode`, `macOS`) need not;
 //! - every number the memory states ([`super::numbers`]) appears in some
 //!   span in an equal form, or is the left side of a `derive` step whose
 //!   arithmetic holds and whose every number appears in some span.
@@ -15,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use super::cites::{cites_all, Cite};
+use super::cites::{code_cites, Cite};
 use super::numbers::{derivations, quantities, same, Quantity};
 use super::spans::{lines_of, parse_cites, Cited, Confirmation};
 use crate::dreamer::branches::{names, short};
@@ -76,10 +78,10 @@ pub(crate) fn confirm(
     })
 }
 
-/// Every path and code name `content` states appears in some span of
-/// `cited`; `Err` names the first that doesn't.
+/// Every path `content` states, and every name in it that looks like code,
+/// appears in some span of `cited`; `Err` names the first that doesn't.
 fn check_names(content: &str, top_level: &BTreeSet<String>, cited: &[Cited]) -> Result<(), String> {
-    for cite in cites_all(content, top_level) {
+    for cite in code_cites(content, top_level) {
         let found = match &cite {
             Cite::Name(name) => cited
                 .iter()

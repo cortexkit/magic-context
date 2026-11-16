@@ -16,19 +16,29 @@
 //!
 //! A second ignored test, [`verify_apply`], reads the replies the runner
 //! saved (each batch's `verify.trajectory.json`, its final message) and
-//! checks every verdict the way the module checks it, without writing
-//! anything: the module's manifest parse, then for a confirmation the cited
-//! lines read with git at the batch's commit, the checks that they hold
-//! every name and number the memory states and that a `derive`'s arithmetic
-//! holds from numbers they hold ([`super::tasks::verify`]), and the
-//! live-branch check for a memory without a line of its own. It writes one
-//! report, `<out>/verify.apply.json`: each memory's
-//! verdict and outcome (`confirmed`, `skipped`, `update` or `archive`), with
-//! why a skip is one and the cites and derive the reply gave, and totals per
-//! outcome and per kind of skip. The live branches are read as they are when
-//! it runs. A request written before requests carried each memory's text
-//! and line is read with the text from `<out>/store.db`, opened read-only,
-//! and the memory counted as having no line of its own.
+//! decides every verdict the way the module's write decides it, without
+//! writing anything: the module's manifest parse, then every check the write
+//! runs, in a transaction on `<out>/store.db` (opened read-only) that is
+//! rolled back. For a confirmation those are the cited lines read with git
+//! at the batch's commit, the checks that they hold every name that looks
+//! like code and every number the memory states and that a `derive`'s
+//! arithmetic holds from numbers they hold, and the live-branch check for a
+//! memory without a line of its own ([`super::tasks::verify`]). For every
+//! verdict they are the gates before a write: the memory unchanged and in a
+//! covered category, a protected memory never archived, the update and
+//! archive rules, and the live-branch gate on a rewrite or archive of a
+//! memory without a line of its own. It writes one report,
+//! `<out>/verify.apply.json`: each memory's verdict and outcome
+//! (`confirmed`, `skipped`, `update` or `archive`, the outcome a run would
+//! write), with why a skip is one (a refused update or archive is a skip
+//! with the gate's reason, and the model's own reason kept beside it), the
+//! cites and derive the reply gave, and totals per outcome and per kind of
+//! skip. Verdicts are decided one by one against the store copy as planned,
+//! so an earlier verdict's write in the same reply (which a run applies
+//! first) is not seen by a later one. The live branches are read as they are
+//! when it runs. A request written before requests carried each memory's
+//! text and line takes the text from the store copy and counts the memory as
+//! having no line of its own.
 //!
 //! Paths come from the environment, and a path inside the live data folder
 //! (`~/.local/share/cortexkit/`) is refused:
@@ -59,7 +69,7 @@ use super::reflect_replay_tests::refuse_live_path;
 use super::task::{Owner, TaskContext};
 use super::tasks::verify::manifest::{parse_manifest, Decision};
 use super::tasks::verify::tests::replay_batch;
-use super::tasks::verify::{Read, Verify, VerifyBatch, VERIFY, VERIFY_BROAD};
+use super::tasks::verify::{Decided, Read, Verify, VerifyBatch, VERIFY, VERIFY_BROAD};
 use crate::context_db::ContextDb;
 use crate::count::Counter;
 use crate::memory_profile::prompt_profile;
@@ -361,11 +371,34 @@ fn batch_folders(out: &Path, kind: &str) -> Vec<(usize, PathBuf)> {
     folders
 }
 
-/// Which check a skipped confirmation failed, read from its reason, so the
-/// report can count skips by kind.
+/// Which check made a verdict a skip, read from its reason, so the report
+/// can count skips by kind: a confirmation's cited-lines checks, and the
+/// gates every update, archive and verdict passes before it is written.
 fn check_of(reason: &str) -> &'static str {
     if reason.starts_with("the lines differ between live branches") {
         "lines differ between live branches"
+    } else if reason.contains("so it changes only where every live branch agrees") {
+        "rewrite or archive where live branches differ"
+    } else if reason.contains("is protected") {
+        "protected memory"
+    } else if reason.contains("behavioural directive") {
+        "directive rule"
+    } else if reason.contains("the update's text") || reason.contains("drops more than half") {
+        "update text refused"
+    } else if reason.contains("missing=")
+        || reason.contains("is still in the checkout")
+        || reason.contains("was never in this repository")
+        || reason.contains("is gone is undecided")
+        || reason.contains("needs the code's evidence")
+    {
+        "archive evidence refused"
+    } else if reason.contains("changed after the batch read it")
+        || reason.contains("no longer a live memory")
+        || reason.contains("does not cover")
+        || reason.contains("does not declare")
+        || reason.contains("is not in this batch")
+    {
+        "memory changed or out of scope"
     } else if reason.contains("needs cites") {
         "no cites"
     } else if reason.contains("is not path:start-end") || reason.contains("names no lines") {
@@ -387,6 +420,33 @@ fn check_of(reason: &str) -> &'static str {
     }
 }
 
+/// The store copy at `path`, opened so nothing can be written to it or
+/// beside it: read-only and immutable, which also keeps SQLite from creating
+/// the write-ahead log's side files.
+fn open_store_copy(path: &Path) -> Connection {
+    refuse_live_path(path);
+    assert!(path.is_file(), "{} is not a store copy", path.display());
+    let mut uri = String::from("file:");
+    for ch in path
+        .to_str()
+        .expect("the store copy's path is UTF-8")
+        .chars()
+    {
+        match ch {
+            '%' => uri.push_str("%25"),
+            '?' => uri.push_str("%3f"),
+            '#' => uri.push_str("%23"),
+            _ => uri.push(ch),
+        }
+    }
+    uri.push_str("?immutable=1");
+    Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
 /// The code a batch read: the main checkout when it is still at `commit`,
 /// otherwise a temporary copy of `commit`.
 fn checkout_at(main: &Path, commit: Option<&str>) -> Arc<Checkout> {
@@ -402,14 +462,14 @@ fn checkout_at(main: &Path, commit: Option<&str>) -> Arc<Checkout> {
 }
 
 /// Check every saved reply's verdicts as the module checks them, write the
-/// report and return it. Nothing is written anywhere else.
+/// report and return it. Nothing is written anywhere else: each batch's
+/// checks run in a transaction on the read-only store copy that is rolled
+/// back.
 fn apply_replies(args: &ApplyArgs) -> Value {
     let out = &args.out;
     refuse_live_path(out);
     let profile = prompt_profile(None).expect("the bundled profile");
-    // Only a request without the memories' text needs the store copy.
-    let store_path = out.join("store.db");
-    let mut store: Option<Connection> = None;
+    let mut store = open_store_copy(&out.join("store.db"));
     let mut checkouts: HashMap<(PathBuf, Option<String>), Arc<Checkout>> = HashMap::new();
     let mut batches = Vec::new();
     let mut memories = Vec::new();
@@ -483,6 +543,11 @@ fn apply_replies(args: &ApplyArgs) -> Value {
                     .entry((main.clone(), commit.clone()))
                     .or_insert_with(|| checkout_at(&main, commit.as_deref())),
             );
+            // Read-only: the store copy refuses any write, and the
+            // transaction only lets the checks read as the write would.
+            let tx = store
+                .transaction()
+                .expect("a read transaction on the store copy");
             let read: Vec<Read> = request["memories"]
                 .as_array()
                 .into_iter()
@@ -492,15 +557,7 @@ fn apply_replies(args: &ApplyArgs) -> Value {
                     let content = match memory["content"].as_str() {
                         Some(content) => content.to_owned(),
                         None => {
-                            let conn = store.get_or_insert_with(|| {
-                                refuse_live_path(&store_path);
-                                Connection::open_with_flags(
-                                    &store_path,
-                                    OpenFlags::SQLITE_OPEN_READ_ONLY,
-                                )
-                                .unwrap_or_else(|error| panic!("{}: {error}", store_path.display()))
-                            });
-                            get_memory(conn, id)
+                            get_memory(&tx, id)
                                 .expect("read the store copy")
                                 .unwrap_or_else(|| panic!("memory {id} is not in the store copy"))
                                 .content
@@ -524,36 +581,52 @@ fn apply_replies(args: &ApplyArgs) -> Value {
             let batch = replay_batch(&declaration, broad, project, read, checkout, &main);
             for verdict in &verdicts {
                 let mut memory = json!({"kind": kind, "batch": index, "id": verdict.id});
-                let (name, outcome) = match verdict.decision {
-                    Decision::Verified => match batch.confirmation(verdict) {
-                        Ok(_) => ("verified", "confirmed"),
-                        Err(why) => {
-                            let check = check_of(&why);
-                            *skips.entry(check).or_default() += 1;
-                            memory["reason"] = json!(why);
-                            memory["check"] = json!(check);
-                            ("verified", "skipped")
-                        }
-                    },
-                    Decision::Skip => {
-                        *skips.entry("skipped by the model").or_default() += 1;
-                        memory["check"] = json!("skipped by the model");
-                        ("skip", "skipped")
-                    }
-                    Decision::Update => {
-                        memory["content"] = json!(verdict.content);
-                        ("update", "update")
-                    }
-                    Decision::Archive => {
-                        if let Some(missing) = &verdict.missing {
-                            memory["missing"] = json!(missing);
-                        }
-                        ("archive", "archive")
-                    }
+                let name = match verdict.decision {
+                    Decision::Verified => "verified",
+                    Decision::Update => "update",
+                    Decision::Archive => "archive",
+                    Decision::Skip => "skip",
                 };
+                if verdict.decision == Decision::Update {
+                    memory["content"] = json!(verdict.content);
+                }
+                if let Some(missing) = &verdict.missing {
+                    memory["missing"] = json!(missing);
+                }
                 if verdict.decision != Decision::Verified && !verdict.reason.trim().is_empty() {
                     memory["reason"] = json!(verdict.reason);
                 }
+                // The write's own decision, every gate included.
+                let refusal = match batch.decide(&tx, verdict).expect("read the store copy") {
+                    Decided::Refused(reason) => {
+                        let prefix = format!("memory {}: ", verdict.id);
+                        Some(reason.strip_prefix(&prefix).unwrap_or(&reason).to_owned())
+                    }
+                    Decided::Skipped(_, why) => Some(why),
+                    Decided::Write(..) if verdict.decision == Decision::Skip => {
+                        *skips.entry("skipped by the model").or_default() += 1;
+                        memory["check"] = json!("skipped by the model");
+                        None
+                    }
+                    Decided::Write(..) => None,
+                };
+                let outcome = match (refusal, verdict.decision) {
+                    (Some(why), _) => {
+                        let check = check_of(&why);
+                        *skips.entry(check).or_default() += 1;
+                        // The model's own reason gives way to the gate's.
+                        if let Some(proposed) = memory.get("reason").cloned() {
+                            memory["modelReason"] = proposed;
+                        }
+                        memory["reason"] = json!(why);
+                        memory["check"] = json!(check);
+                        "skipped"
+                    }
+                    (None, Decision::Verified) => "confirmed",
+                    (None, Decision::Update) => "update",
+                    (None, Decision::Archive) => "archive",
+                    (None, Decision::Skip) => "skipped",
+                };
                 memory["verdict"] = json!(name);
                 memory["outcome"] = json!(outcome);
                 if let Some(cites) = &verdict.cites {
@@ -565,6 +638,7 @@ fn apply_replies(args: &ApplyArgs) -> Value {
                 *outcomes.entry(outcome).or_default() += 1;
                 memories.push(memory);
             }
+            tx.rollback().expect("end the read transaction");
             let undecided: Vec<i64> = ids
                 .iter()
                 .copied()
@@ -680,17 +754,41 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
     println!("{}", serde_json::to_string_pretty(&broad).unwrap());
 }
 
-/// The apply step on a fixture: a broad batch of two memories whose saved
-/// reply confirms both, one from lines that state it and one from lines
-/// that miss a name it states. Nothing is written but the report.
+/// The apply step on a fixture with two live branches: a broad batch of
+/// five memories whose saved reply confirms two (one from lines that state
+/// it, one from lines that miss a name it states), rewrites two (one in a
+/// file the live branches agree on, one in a file they don't) and archives
+/// a protected one. The report shows what a run would write, every gate
+/// included, and nothing is written but the report.
 #[test]
-fn the_apply_step_checks_each_saved_verdict_as_the_module_would_and_writes_only_its_report() {
+fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_its_report() {
     use super::tasks::verify::tests::{row, Fixture, PROJECT};
-    let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
+    use crate::dreamer::checkout::tests::commit_at;
+    let fixture = Fixture::on(
+        "master",
+        &[
+            ("src/live.rs", "fn live_function() {}\n"),
+            ("src/other.rs", "fn other_function() {}\n"),
+        ],
+    );
+    // A second live branch, whose src/other.rs differs from master's.
+    let (_outer, worktree) = fixture.repo.worktree("feature");
+    commit_at(
+        &worktree,
+        &[("src/other.rs", "fn other_function(x: u8) {}\n")],
+        "feature",
+    );
     fixture.insert(&[
         row(1, "`live_function` in src/live.rs takes no arguments."),
         row(2, "`live_function` calls `helper_function`."),
+        row(
+            3,
+            "`other_function` in src/other.rs takes no arguments at all.",
+        ),
+        row(4, "`live_function` lives in src/live.rs."),
+        row(5, "`live_function` never panics."),
     ]);
+    fixture.execute("UPDATE memories SET safety_critical = 1 WHERE id = 5");
     let out = tempfile::tempdir().unwrap();
     let args = Args {
         store: fixture.db.path.clone(),
@@ -706,21 +804,23 @@ fn the_apply_step_checks_each_saved_verdict_as_the_module_would_and_writes_only_
         &std::fs::read_to_string(args.out.join("verify-broad/batch-0").join(REQUEST)).unwrap(),
     )
     .unwrap();
+    assert_eq!(request["memories"].as_array().unwrap().len(), 5);
     assert_eq!(
         request["memories"][0]["content"],
         "`live_function` in src/live.rs takes no arguments."
     );
     assert_eq!(request["memories"][0]["lined"], false);
     // The reply as `verify-run.ts` saves it: the final message's text.
+    let reply = r#"<verify>
+<verified id="1" files="src/live.rs" cites="src/live.rs:1-1"/>
+<verified id="2" files="src/live.rs" cites="src/live.rs:1-1"/>
+<update id="3" files="src/other.rs">`other_function` in src/other.rs takes one byte argument.</update>
+<update id="4" files="src/live.rs">`live_function` lives in src/live.rs and takes no arguments.</update>
+<archive id="5" reason="it can panic now"/>
+</verify>"#;
     write_json(
         &args.out.join("verify-broad/batch-0").join(TRAJECTORY),
-        &json!({
-            "stopReason": "final",
-            "final": {
-                "text": "<verify>\n<verified id=\"1\" files=\"src/live.rs\" cites=\"src/live.rs:1-1\"/>\n<verified id=\"2\" files=\"src/live.rs\" cites=\"src/live.rs:1-1\"/>\n</verify>",
-                "completeManifest": true,
-            },
-        }),
+        &json!({"stopReason": "final", "final": {"text": reply, "completeManifest": true}}),
     );
     let files = |dir: &Path| -> Vec<(String, Vec<u8>)> {
         let mut found: Vec<(String, Vec<u8>)> = walk(dir)
@@ -754,22 +854,41 @@ fn the_apply_step_checks_each_saved_verdict_as_the_module_would_and_writes_only_
             {"kind": "verify-broad", "batch": 0, "id": 2, "verdict": "verified", "outcome": "skipped",
              "reason": "helper_function, which the memory names, is in none of the cited lines",
              "check": "name not in the cited lines", "cites": "src/live.rs:1-1"},
+            {"kind": "verify-broad", "batch": 0, "id": 3, "verdict": "update", "outcome": "skipped",
+             "content": "`other_function` in src/other.rs takes one byte argument.",
+             "reason": "src/other.rs differs between live branches master and feature; it names no git line of its own, so it changes only where every live branch agrees",
+             "check": "rewrite or archive where live branches differ"},
+            {"kind": "verify-broad", "batch": 0, "id": 4, "verdict": "update", "outcome": "update",
+             "content": "`live_function` lives in src/live.rs and takes no arguments."},
+            {"kind": "verify-broad", "batch": 0, "id": 5, "verdict": "archive", "outcome": "skipped",
+             "modelReason": "it can panic now",
+             "reason": "memory 5 is protected (safety-critical, permanent, a policy, or the person's own) and is never archived",
+             "check": "protected memory"},
         ])
     );
     assert_eq!(
         report["totals"],
         json!({
-            "outcomes": {"confirmed": 1, "skipped": 1, "update": 0, "archive": 0},
-            "skipReasons": {"name not in the cited lines": 1},
+            "outcomes": {"confirmed": 1, "skipped": 3, "update": 1, "archive": 0},
+            "skipReasons": {
+                "name not in the cited lines": 1,
+                "rewrite or archive where live branches differ": 1,
+                "protected memory": 1,
+            },
             "undecided": 0,
             "batches": {"read": 1, "refused": 0, "noReply": 0},
         })
     );
     assert_eq!(report["batches"][0]["status"], "read");
-    // The memories' rows are unchanged: neither was confirmed nor checked.
-    for id in [1, 2] {
-        let (_, _, _, verified_at, metadata, _) = fixture.memory(id);
-        assert_eq!((verified_at, metadata), (None, Value::Null));
+    // The memories' rows are unchanged: none was confirmed, rewritten,
+    // archived or checked.
+    for id in 1..=5 {
+        let (status, content, revision, verified_at, metadata, _) = fixture.memory(id);
+        assert_eq!(
+            (status.as_str(), revision, verified_at, metadata),
+            ("active", 1, None, Value::Null),
+            "{content}"
+        );
     }
 }
 

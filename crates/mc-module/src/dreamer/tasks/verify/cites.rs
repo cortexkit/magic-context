@@ -116,6 +116,58 @@ pub(crate) fn cites_all(content: &str, top_level: &BTreeSet<String>) -> Vec<Cite
     cites_up_to(content, top_level, usize::MAX)
 }
 
+/// What a confirmation's cited lines must hold of what `content` cites
+/// ([`cites_all`]): every path, and every name that looks like code. A name
+/// looks like code when the memory writes it in backticks, unless it is a
+/// quoted plain word (`'never'`); when it holds `_`, `.`, `::`, `/` or `(`;
+/// or when it is lowerCamelCase (`clampProviderContextImages`). A plain word
+/// that starts with a capital (`OpenCode`, `TypeScript`, `GitHub`), or a
+/// product name such as `macOS`, names something in prose and need not be in
+/// the cited code. The subject-gone archive check reads [`cites`] instead,
+/// where the broader reading is the safe side.
+pub(crate) fn code_cites(content: &str, top_level: &BTreeSet<String>) -> Vec<Cite> {
+    static SPAN: OnceLock<Regex> = OnceLock::new();
+    let backticked: BTreeSet<&str> = re(&SPAN, r"`([^`\n]+)`")
+        .captures_iter(content)
+        .filter_map(|span| span.get(1).map(|inner| span_text(inner.as_str())))
+        .collect();
+    cites_all(content, top_level)
+        .into_iter()
+        .filter(|cite| match cite {
+            Cite::Path(_) => true,
+            Cite::Name(name) => looks_like_code(name, backticked.contains(name.as_str())),
+        })
+        .collect()
+}
+
+/// Whether code name `name`, written in backticks or not (`backticked`),
+/// looks like code rather than a word of prose (see [`code_cites`]).
+fn looks_like_code(name: &str, backticked: bool) -> bool {
+    let quoted_word = [('\'', '\''), ('"', '"'), ('‘', '’'), ('“', '”')]
+        .iter()
+        .any(|(open, close)| {
+            name.strip_prefix(*open)
+                .and_then(|rest| rest.strip_suffix(*close))
+                .is_some_and(|word| !word.is_empty() && word.chars().all(char::is_alphabetic))
+        });
+    if quoted_word {
+        return false;
+    }
+    let lower_camel = name
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase())
+        && name
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0].is_ascii_uppercase() && pair[1].is_ascii_lowercase());
+    backticked
+        || ["_", ".", "::", "/", "("]
+            .iter()
+            .any(|mark| name.contains(mark))
+        || lower_camel
+}
+
 fn cites_up_to(content: &str, top_level: &BTreeSet<String>, limit: usize) -> Vec<Cite> {
     static SPAN: OnceLock<Regex> = OnceLock::new();
     static PATH: OnceLock<Regex> = OnceLock::new();
@@ -219,12 +271,18 @@ fn cites_up_to(content: &str, top_level: &BTreeSet<String>, limit: usize) -> Vec
     cites
 }
 
+/// A backticked span's text as a citation of it reads: trimmed, without a
+/// call's `()` and without trailing punctuation.
+fn span_text(raw: &str) -> &str {
+    let text = raw.trim();
+    let text = text.strip_suffix("()").unwrap_or(text);
+    text.trim_end_matches(['.', ',', ';', ':'])
+}
+
 /// What one backticked span cites: a path, a code name, or nothing when it
 /// holds spaces, a placeholder, or a plain word.
 fn span_cite(raw: &str) -> Option<Cite> {
-    let text = raw.trim();
-    let text = text.strip_suffix("()").unwrap_or(text);
-    let text = text.trim_end_matches(['.', ',', ';', ':']);
+    let text = span_text(raw);
     if text.chars().count() < MIN_LEN
         || text.chars().any(char::is_whitespace)
         || ["<", ">", "*", "{", "}", "…", "..."]
