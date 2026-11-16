@@ -1375,7 +1375,15 @@ mod tests {
                 .unwrap(),
             4
         );
-        let fields = ["key", "base", "newest", "ready", "meta", "breakdown", "messages"];
+        let fields = [
+            "key",
+            "base",
+            "newest",
+            "ready",
+            "meta",
+            "breakdown",
+            "messages",
+        ];
         let mut before: Vec<Value> = {
             let mut stmt = conn
                 .prepare("SELECT snapshot FROM app_read_snapshots")

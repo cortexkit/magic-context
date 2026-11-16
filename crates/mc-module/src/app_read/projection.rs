@@ -1541,7 +1541,10 @@ mod tests {
         session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
         let applied = session.app_update();
         assert_eq!(applied.rows.len(), 1);
-        assert_eq!(applied.rows[0].1.row.to_value(&applied.rows[0].0)["state"], "dropped");
+        assert_eq!(
+            applied.rows[0].1.row.to_value(&applied.rows[0].0)["state"],
+            "dropped"
+        );
         assert_eq!(session.app_projection.head_rebuilds, 0);
     }
 

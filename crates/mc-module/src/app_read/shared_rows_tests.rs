@@ -32,7 +32,12 @@ fn states(replica: &mut Replica, ids: Value) -> Vec<(String, Value)> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|message| (message["state"].as_str().unwrap().to_owned(), message["compartment_id"].clone()))
+        .map(|message| {
+            (
+                message["state"].as_str().unwrap().to_owned(),
+                message["compartment_id"].clone(),
+            )
+        })
         .collect()
 }
 
@@ -58,7 +63,10 @@ fn the_replica_holds_the_rows_the_session_built_not_copies() {
     assert!(!Arc::ptr_eq(&rebuilt, &built[1].1));
     assert_eq!(*rebuilt, *built[1].1);
     replica.update(again);
-    assert!(Arc::ptr_eq(&replica.snapshots[&key()].messages["m2"], &rebuilt));
+    assert!(Arc::ptr_eq(
+        &replica.snapshots[&key()].messages["m2"],
+        &rebuilt
+    ));
 }
 
 #[test]
@@ -92,7 +100,10 @@ fn a_summary_read_shows_its_row_in_context_db_now() {
     );
     let writer = Connection::open(&path).unwrap();
     writer
-        .execute("UPDATE compartments SET title = 'Edited' WHERE sequence = 1", [])
+        .execute(
+            "UPDATE compartments SET title = 'Edited' WHERE sequence = 1",
+            [],
+        )
         .unwrap();
     assert_eq!(
         compartment(&mut replica, "1").unwrap()["compartment"]["title"],
@@ -113,7 +124,10 @@ fn a_summary_read_shows_its_row_in_context_db_now() {
     let ids = json!(["m1", "m2"]);
     assert_eq!(
         states(&mut replica, ids.clone()),
-        [("summarized".to_owned(), json!("1")), ("raw".to_owned(), Value::Null)]
+        [
+            ("summarized".to_owned(), json!("1")),
+            ("raw".to_owned(), Value::Null)
+        ]
     );
     assert_eq!(
         compartment(&mut replica, "2").unwrap_err().code,
@@ -124,7 +138,10 @@ fn a_summary_read_shows_its_row_in_context_db_now() {
     replica.update(changed);
     assert_eq!(
         states(&mut replica, ids),
-        [("summarized".to_owned(), json!("1")), ("summarized".to_owned(), json!("2"))]
+        [
+            ("summarized".to_owned(), json!("1")),
+            ("summarized".to_owned(), json!("2"))
+        ]
     );
     let later = compartment(&mut replica, "2").unwrap();
     assert_eq!(later["compartment"]["title"], "Later work");

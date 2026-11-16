@@ -87,7 +87,15 @@ fn version_seven_store(path: &std::path::Path) -> Vec<Saved> {
         for (mid, ordinal, at_ms, row) in &session.rows {
             conn.execute(
                 "INSERT INTO app_read_messages VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![key.runner, key.harness, key.session, mid, ordinal, at_ms, row],
+                params![
+                    key.runner,
+                    key.harness,
+                    key.session,
+                    mid,
+                    ordinal,
+                    at_ms,
+                    row
+                ],
             )
             .unwrap();
         }
@@ -159,7 +167,11 @@ fn opening_a_version_seven_store_compacts_its_rows_and_drops_its_summaries() {
     let saved = version_seven_store(&path);
     let before: u64 = Connection::open(&path)
         .unwrap()
-        .query_row("SELECT SUM(length(row)) FROM app_read_messages", [], |row| row.get(0))
+        .query_row(
+            "SELECT SUM(length(row)) FROM app_read_messages",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     drop(crate::store::Store::open(&path).unwrap());
     let conn = Connection::open(&path).unwrap();
@@ -181,11 +193,18 @@ fn opening_a_version_seven_store_compacts_its_rows_and_drops_its_summaries() {
     assert_eq!(declared, "BLOB");
     assert_rows_read_the_same(&conn, &saved);
     let after: u64 = conn
-        .query_row("SELECT SUM(length(row)) FROM app_read_messages", [], |row| row.get(0))
+        .query_row(
+            "SELECT SUM(length(row)) FROM app_read_messages",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     // The fixture's older rows stay JSON inside the compact form; the
     // sample session's typed rows take a fraction of their JSON.
-    assert!(after * 3 < before, "{after} compact bytes from {before} JSON bytes");
+    assert!(
+        after * 3 < before,
+        "{after} compact bytes from {before} JSON bytes"
+    );
     // The app reads answer from the compacted rows.
     drop(conn);
     let mut app = super::tests::replica(None);
@@ -288,7 +307,9 @@ fn compacting_a_large_store() {
     let tx = conn.transaction().unwrap();
     {
         let mut insert = tx
-            .prepare("INSERT INTO app_read_messages VALUES ('runner', 'opencode2', ?1, ?2, ?3, ?4, ?5)")
+            .prepare(
+                "INSERT INTO app_read_messages VALUES ('runner', 'opencode2', ?1, ?2, ?3, ?4, ?5)",
+            )
             .unwrap();
         for n in 0..count {
             let session = format!("ses_{:04}", n % 1000);
@@ -313,7 +334,11 @@ fn compacting_a_large_store() {
     }
     tx.commit().unwrap();
     let json_bytes: u64 = conn
-        .query_row("SELECT SUM(length(row)) FROM app_read_messages", [], |row| row.get(0))
+        .query_row(
+            "SELECT SUM(length(row)) FROM app_read_messages",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let file_bytes = std::fs::metadata(&path).unwrap().len();
     println!(
@@ -326,10 +351,16 @@ fn compacting_a_large_store() {
     let elapsed = started.elapsed();
     let conn = Connection::open(&path).unwrap();
     let compact_bytes: u64 = conn
-        .query_row("SELECT SUM(length(row)) FROM app_read_messages", [], |row| row.get(0))
+        .query_row(
+            "SELECT SUM(length(row)) FROM app_read_messages",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let rows: u64 = conn
-        .query_row("SELECT count(*) FROM app_read_messages", [], |row| row.get(0))
+        .query_row("SELECT count(*) FROM app_read_messages", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(rows, count);
     println!(
@@ -343,8 +374,10 @@ fn compacting_a_large_store() {
 /// then a row of an older shape.
 fn generated_row(n: u64) -> Row {
     use super::row::{Kind, Origin, Part, PartOrigin, PartState, Size, Source, Typed};
-    if n % 97 == 0 {
-        return Row::from(json!({"message_id":"older","state":"raw","compartment_id":null,"outside_reason":null,"split":null,"stamped_parts":[],"dropped_parts":[],"parts":{"tagged":1,"stamped":0,"dropped":0}}));
+    if n.is_multiple_of(97) {
+        return Row::from(
+            json!({"message_id":"older","state":"raw","compartment_id":null,"outside_reason":null,"split":null,"stamped_parts":[],"dropped_parts":[],"parts":{"tagged":1,"stamped":0,"dropped":0}}),
+        );
     }
     let state = |at: u64| match (n + at) % 7 {
         0 => PartState::Stamped {
@@ -375,8 +408,8 @@ fn generated_row(n: u64) -> Row {
         origin,
         tool: tool.map(Into::into),
     };
-    if n % 3 == 0 {
-        let origin = if n % 2 == 0 {
+    if n.is_multiple_of(3) {
+        let origin = if n.is_multiple_of(2) {
             Origin::Person
         } else {
             Origin::Notice {

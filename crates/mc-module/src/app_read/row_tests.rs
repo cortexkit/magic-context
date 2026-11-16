@@ -90,18 +90,15 @@ fn typed_rows() -> Vec<Typed> {
                 HostPart::new("bare"),
             ],
         ),
-        Typed::new(
-            1,
-            vec![tool, reasoning, unstamped],
-            None,
-            &[],
-        ),
+        Typed::new(1, vec![tool, reasoning, unstamped], None, &[]),
         Typed::new(
             1,
             vec![part(
                 "p",
                 Kind::Text,
-                PartState::Dropped { size: size(Some(12)) },
+                PartState::Dropped {
+                    size: size(Some(12)),
+                },
                 PartOrigin::User,
             )],
             Some(&notice),

@@ -482,8 +482,7 @@ fn app_read_lazy_synthetic_startup_footprint() {
         };
         for ordinal in 1..=len {
             let mid = format!("m{ordinal}");
-            let row =
-                json!({"message_id":mid,"state":"raw","compartment_id":null,"outside_reason":null,
+            let row = json!({"message_id":mid,"state":"raw","compartment_id":null,"outside_reason":null,
                 "split":null,"stamped_parts":["p1","p2"],"dropped_parts":[],
                 "parts":{"tagged":2,"stamped":2,"dropped":0}});
             let row = row::Row::from_json(&mid, row).encode();
@@ -497,9 +496,11 @@ fn app_read_lazy_synthetic_startup_footprint() {
     drop((headers, messages));
     tx.commit().unwrap();
     let row_bytes: u64 = conn
-        .query_row("SELECT SUM(length(row)) FROM app_read_messages", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT SUM(length(row)) FROM app_read_messages",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     drop(conn);
     let before = rss_kib();

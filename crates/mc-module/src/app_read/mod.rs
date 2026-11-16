@@ -930,7 +930,9 @@ impl Replica {
         }
         for (mid, row) in update.rows {
             if let Some(index) = self.boundaries.get(&key) {
-                for (position, field) in index.find(&snapshot.compartments, &mid).collect::<Vec<_>>() {
+                for (position, field) in
+                    index.find(&snapshot.compartments, &mid).collect::<Vec<_>>()
+                {
                     let time = &mut snapshot.compartments[position].at_ms[field];
                     changed |= *time != Some(row.at_ms);
                     *time = Some(row.at_ms);
@@ -1157,8 +1159,7 @@ impl Replica {
             }
             "context.compartment" => {
                 let id = string(p, "compartment_id")?;
-                let not_found =
-                    || error("compartment_not_found", "No compartment matches the id.");
+                let not_found = || error("compartment_not_found", "No compartment matches the id.");
                 let summary = snapshot
                     .compartments
                     .iter()
@@ -1171,7 +1172,10 @@ impl Replica {
                     .map(|conn| summaries::read_body(conn, &key, summary.sequence))
                     .transpose()
                     .map_err(|_| {
-                        error("store_unavailable", "The session's summaries could not be read.")
+                        error(
+                            "store_unavailable",
+                            "The session's summaries could not be read.",
+                        )
                     })?
                     .flatten()
                     .ok_or_else(not_found)?;

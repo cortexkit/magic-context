@@ -356,7 +356,10 @@ impl Session {
                         Origin::Notice {
                             sender: notice.sender.as_str().into(),
                             speaks_for: entry.speaks_for.as_ref().map(|agent| {
-                                (agent.agent_id.as_str().into(), agent.name.as_deref().map(Into::into))
+                                (
+                                    agent.agent_id.as_str().into(),
+                                    agent.name.as_deref().map(Into::into),
+                                )
                             }),
                         }
                     } else if let Some(agent) = &entry.speaks_for {
@@ -1091,18 +1094,16 @@ fn message(
             || (floor && part.signed && part.kind == Kind::Reasoning);
         let queued =
             session.queued.contains(&key) || before.is_some_and(|queued| queued.contains(&key));
-        let (tokens, source) = if cut
-            || messages.contains(&cached.mid)
-            || (removed && part.kind == Kind::Reasoning)
-        {
-            (0, Source::Counted)
-        } else if let Some(replacement) = replacements.get(&key) {
-            (replacement.tokens, Source::Counted)
-        } else if removed {
-            (0, Source::Counted)
-        } else {
-            (part.item_tokens, part.source)
-        };
+        let (tokens, source) =
+            if cut || messages.contains(&cached.mid) || (removed && part.kind == Kind::Reasoning) {
+                (0, Source::Counted)
+            } else if let Some(replacement) = replacements.get(&key) {
+                (replacement.tokens, Source::Counted)
+            } else if removed {
+                (0, Source::Counted)
+            } else {
+                (part.item_tokens, part.source)
+            };
         let size = Size {
             bytes: part.bytes,
             tokens: part.tokens,

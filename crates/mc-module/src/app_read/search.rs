@@ -49,14 +49,9 @@ impl Replica {
                 "The message index contains another harness's rows.",
             ));
         }
-        let identity = summaries::search_identity(
-            conn,
-            &key,
-            query,
-            snapshot.newest,
-            &snapshot.compartments,
-        )
-        .map_err(|_| unavailable())?;
+        let identity =
+            summaries::search_identity(conn, &key, query, snapshot.newest, &snapshot.compartments)
+                .map_err(|_| unavailable())?;
         let offset = match p.get("cursor").filter(|v| !v.is_null()) {
             None => 0,
             Some(value) => {

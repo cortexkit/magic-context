@@ -12,7 +12,9 @@
 //! ([`Row::Json`]) and renders as that JSON.
 //!
 //! In `mode3.db` a row is saved in a compact binary form ([`Row::encode`]):
-//! no field names, integers as LEB128 varints, strings length-prefixed.
+//! no field names, integers as variable-length varints (LEB128: seven bits
+//! a byte, low bits first, the top bit set on every byte but the last),
+//! strings length-prefixed.
 
 use cortexkit_role_compaction::read::HostPart;
 use serde_json::{json, Value};
@@ -247,9 +249,14 @@ pub(crate) enum PartState {
     Live,
     /// Queued to drop: listed under `stamped_parts`, with the time it was
     /// queued when that was recorded.
-    Stamped { at_ms: Option<u64>, size: Size },
+    Stamped {
+        at_ms: Option<u64>,
+        size: Size,
+    },
     /// Dropped, and listed under `dropped_parts`.
-    Dropped { size: Size },
+    Dropped {
+        size: Size,
+    },
     /// Dropped because the cut is past its message: not listed.
     Cut,
 }
@@ -728,16 +735,16 @@ impl Input<'_> {
             host_parts.push(fact);
         }
         let user_origin = user_origin.map(Box::new);
-        // Encoded rows are made from normalized rows; anything else was not
-        // written by `encode`.
-        (user_origin.is_none()
-            == !parts.iter().any(|part| part.origin == PartOrigin::User))
-            .then(|| Typed {
+        // `Typed::new` keeps a user origin exactly when some part names it,
+        // so every row `encode` wrote has one exactly then; a row without
+        // that was not written by `encode`.
+        (user_origin.is_none() == !parts.iter().any(|part| part.origin == PartOrigin::User)).then(
+            || Typed {
                 tagged,
                 parts: parts.into(),
                 user_origin,
                 host_parts: host_parts.into(),
-            })
+            },
+        )
     }
 }
-
