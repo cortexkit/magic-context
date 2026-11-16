@@ -80,7 +80,10 @@ import {
     validateStoredCompartments,
 } from "./compartment-runner-validation";
 import { producerSourceLocalBudget } from "./derive-budgets";
-import { clearRepeatedHistorianFailureWarning, takeRepeatedHistorianFailureWarning } from "./historian-failure-report";
+import {
+    clearRepeatedHistorianFailureWarning,
+    takeRepeatedHistorianFailureWarning,
+} from "./historian-failure-report";
 import {
     clearHistorianHistoryWait,
     recordHistorianNoProgress,

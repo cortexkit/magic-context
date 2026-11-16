@@ -10066,7 +10066,8 @@ it("invalidates pre-publication pressure through repeated Pi turns without disca
 			} catch (error) {
 				expect(error).toMatchObject({ name: "PiDegradedPassError" });
 				expect(String(error)).toContain("stage=emergency historian");
-				expect(String(error)).toContain("This request was not sent.");
+				// The historian wait ran out: the shared refusal wording says so.
+				expect(String(error)).toContain("This turn was not sent: ");
 				return "refused";
 			}
 		};

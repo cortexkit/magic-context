@@ -19,7 +19,11 @@ import type {
 } from "./compartment-runner-types";
 import { BLOCK_UNTIL_DONE_PERCENTAGE } from "./compartment-trigger";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
-import { type HistorianFailureStreak, type HistorianRunProgress, describeHistorianJoinRefusal } from "./historian-failure-report";
+import {
+    describeHistorianJoinRefusal,
+    type HistorianFailureStreak,
+    type HistorianRunProgress,
+} from "./historian-failure-report";
 import {
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,

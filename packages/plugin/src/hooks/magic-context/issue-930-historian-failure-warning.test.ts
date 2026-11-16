@@ -19,8 +19,8 @@ import { acquireCompartmentLease } from "../../features/magic-context/compartmen
 import { replaceAllCompartmentState } from "../../features/magic-context/compartment-storage";
 import { runMigrations } from "../../features/magic-context/migrations";
 import {
-    closeDatabase,
     type ContextDatabase,
+    closeDatabase,
     getHistorianFailureState,
     openDatabase,
     updateSessionMeta,
@@ -249,8 +249,7 @@ describe("issue 930: early warning when summary runs keep failing", () => {
         await observeHistorianModel();
         const { client, prompts } = historianClient(() => COPIED_RANGE_OUTPUT);
         const toasts = captureToasts(sessionId);
-        const run = () =>
-            runHistorian({ db, sessionId, holder, client, messages: () => messages });
+        const run = () => runHistorian({ db, sessionId, holder, client, messages: () => messages });
         const chunkRows = () =>
             db
                 .prepare(
@@ -360,7 +359,10 @@ describe("issue 930: early warning when summary runs keep failing", () => {
             tagger: createTagger(),
             scheduler: { shouldExecute: mock(() => "defer" as const) },
             contextUsageMap: new Map([
-                [sessionId, { usage: { percentage: 40, inputTokens: 40_000 }, updatedAt: Date.now() }],
+                [
+                    sessionId,
+                    { usage: { percentage: 40, inputTokens: 40_000 }, updatedAt: Date.now() },
+                ],
             ]),
             db,
             historyRefreshSessions: new Set<string>(),

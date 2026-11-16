@@ -37,7 +37,6 @@
  * see Pi runs in the same `[magic-context][ses_xxx]` format.
  */
 
-import { type HistorianChunkRange, clearRepeatedHistorianFailureWarning, takeRepeatedHistorianFailureWarning } from "@magic-context/core/hooks/magic-context/historian-failure-report";
 import * as crypto from "node:crypto";
 import { withContentLanguageDirective } from "@magic-context/core/agents/language-directive";
 import { embedAndStoreCompartmentChunks } from "@magic-context/core/features/magic-context/compartment-embedding";
@@ -108,6 +107,11 @@ import {
 	resolveHistorianProducerLimits,
 	resolveKnownHistorianContextLimit,
 } from "@magic-context/core/hooks/magic-context/derive-budgets";
+import {
+	clearRepeatedHistorianFailureWarning,
+	type HistorianChunkRange,
+	takeRepeatedHistorianFailureWarning,
+} from "@magic-context/core/hooks/magic-context/historian-failure-report";
 import {
 	clearHistorianHistoryWait,
 	recordHistorianNoProgress,

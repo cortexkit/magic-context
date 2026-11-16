@@ -166,9 +166,7 @@ export function describeHistorianJoinRefusal(input: {
     const sentences = [
         `This turn was not sent: ${usageClause(input.usagePercentage)}, and Magic Context waited ${formatHistorianSeconds(input.waitedMs)} s for a history summary that did not finish in time.`,
     ];
-    const subject = run?.chunk
-        ? `The summary of ${chunkLabel(run.chunk)}`
-        : "The summary run";
+    const subject = run?.chunk ? `The summary of ${chunkLabel(run.chunk)}` : "The summary run";
     const ownFailure = failureBelongsToRun(failures, run);
     const lastError = failures.lastError ? singleLine(failures.lastError) : "";
     if (ownFailure) {
@@ -210,7 +208,9 @@ export function describeRepeatedHistorianFailures(input: {
     const facts = [
         streakSentence(failures, now) ?? "Summary runs are failing.",
         ...(input.chunk ? [`Last chunk: ${chunkLabel(input.chunk)}.`] : []),
-        ...(failures.lastError ? [endSentence(`Last error: ${singleLine(failures.lastError)}`)] : []),
+        ...(failures.lastError
+            ? [endSentence(`Last error: ${singleLine(failures.lastError)}`)]
+            : []),
         `Now ${usageClause(input.usagePercentage)}; at 95% a turn waits for a summary and is not sent if none finishes in time.`,
     ];
     return [

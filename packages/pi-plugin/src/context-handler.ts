@@ -29,7 +29,6 @@
  * native compaction.
  */
 
-import { type HistorianRunProgress, describeHistorianJoinRefusal, readHistorianFailureStreak } from "@magic-context/core/hooks/magic-context/historian-failure-report";
 import * as crypto from "node:crypto";
 import type {
 	ContextEvent,
@@ -209,6 +208,11 @@ import {
 } from "@magic-context/core/hooks/magic-context/execute-reclaim";
 import { foldExecutesThisPass } from "@magic-context/core/hooks/magic-context/fold-execution-gate";
 import { isHistorianDrainBudgetSpent } from "@magic-context/core/hooks/magic-context/historian-drain-gate";
+import {
+	describeHistorianJoinRefusal,
+	type HistorianRunProgress,
+	readHistorianFailureStreak,
+} from "@magic-context/core/hooks/magic-context/historian-failure-report";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import {
 	hasActiveAnthropicThinkingTurn,
