@@ -411,6 +411,7 @@ const TEMPLATE_DATA = [
 "edit admission: served_prefix_unverified reason=off-mode record does not describe the full raw window held_edits=1",
 "prefix trim: boundary \x01; pass=defer; no in-pass trim applied (Hidden child first step requires a registered marker)",
 "ck-mc: dreamer: \x01 for \x01: the plain search stopped after \x01 of the checkout's files; no citation is listed as not found",
+"ck-mc: session \x01: reading its summaries again after a quiet free failed: \x01; nothing runs on it until a read succeeds",
 "[magic-context] [ERROR] compaction-marker: candidate worker unavailable \x01: \x01; marker unchanged, advancement deferred\x020p",
 "[magic-context] [ERROR] compaction-marker: candidate worker unavailable \x01: \x01; marker unchanged, advancement deferred",
 "historian discard-last: dropped provisional compartment \x01-\x01 (lookaheadMargin=\x01 <= \x01); will re-derive from raw next run",
