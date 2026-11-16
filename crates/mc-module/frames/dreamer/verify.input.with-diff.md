@@ -2,6 +2,7 @@
 [⟦memory.id⟧] ⟦memory.category⟧
 Content: ⟦memory.content⟧
 Backing files: ⟦backingFile1⟧, ⟦backingFile2⟧
+Confirmed from: ⟦citedBefore1⟧, ⟦citedBefore2⟧
 </memories>
 
 <changed-files mode="⟦evidence.mode⟧">
