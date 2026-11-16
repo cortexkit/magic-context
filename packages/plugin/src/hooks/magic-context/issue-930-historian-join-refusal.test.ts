@@ -60,7 +60,7 @@ const EARLIER_RUN_ERROR =
 /** The reported error of the run the pass joins, had it failed in time. */
 const JOINED_RUN_ERROR =
     "Historian returned invalid compartment output: Compartment range 202-443 does not map to raw session lines 407-443";
-/** The chunk of the run the pass joins (run #5488 in the report). */
+/** The chunk of the run the pass joins. */
 const JOINED_CHUNK = { start: 407, end: 443 };
 const ACTIONS =
     "What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.";
@@ -156,7 +156,7 @@ async function setup(args: {
     const db = openDatabase();
     updateSessionMeta(db, args.sessionId, { systemPromptTokens: args.systemPromptTokens });
     // The earlier run failed validation and ended 80 s ago; 20 s later a pass
-    // started the next run, which this pass joins (the report's timeline).
+    // started the next run, which this pass joins (the timeline in issue 930).
     const earlierFailureAt = Date.now() - 80_000;
     incrementHistorianFailure(db, args.sessionId, EARLIER_RUN_ERROR);
     db.prepare("UPDATE session_meta SET historian_last_failure_at = ? WHERE session_id = ?").run(
