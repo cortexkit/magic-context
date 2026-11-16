@@ -230,10 +230,14 @@ fi
 # Every pin the deployed build serves must still be honoured by the staged one
 # (same tool, semantics and schema digest), or running sessions' calls to that
 # tool are refused. An older build without --print-tool-pins would start
-# serving on the unknown flag, so it is only asked when it names the flag.
+# serving on the unknown flag, so it is only asked when its revision contains
+# the commit that added the flag. (Searching the binary for the flag's text
+# doesn't work: the compiler turns a short string comparison into integer
+# compares and keeps no copy of the text.)
+tool_pins_commit=${PLACE_CK_MC_TOOL_PINS_COMMIT:-9bcd6e7de3a991c1b1d232ca092cf26ade870bc8}
 staged_pins=$("$staged" --print-tool-pins) || die "staged binary does not report its tool pins"
 [[ -n "$staged_pins" ]] || die "staged binary reports no tool pins"
-if LC_ALL=C grep -a -q -- '--print-tool-pins' "$deployed"; then
+if git merge-base --is-ancestor "$tool_pins_commit" "$deployed_sha" 2>/dev/null; then
     deployed_pins=$("$deployed" --print-tool-pins) || die "deployed binary does not report its tool pins"
     dropped=$(python3 - "$deployed_pins" "$staged_pins" <<'PY'
 import sys

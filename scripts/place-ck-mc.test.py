@@ -106,6 +106,9 @@ printf '0000000100000000 T _main\\n'
                         PATH=str(self.shims) + os.pathsep + os.environ["PATH"],
                         PYTHONPYCACHEPREFIX=str(root / "pycache"), XDG_CACHE_HOME=str(root / "cache"),
                         FAKE_DEPLOYED=str(self.bin / "ck-mc"), FAKE_POLL_COUNT=str(root / "poll-count"),
+                        # The deployed fake reports pins: its revision contains the commit
+                        # that added the flag.
+                        PLACE_CK_MC_TOOL_PINS_COMMIT=OLD,
                         PLACE_CK_MC_POLL_SECONDS="0")
 
     def versions(self, context, store):
@@ -209,6 +212,8 @@ esac
 ''')
         (self.bin / "ck-mc").write_bytes(old.read_bytes())
         self.env["FAKE_STARTED"] = str(Path(self.tmp.name) / "started")
+        # Its revision predates the commit that added the flag.
+        self.env["PLACE_CK_MC_TOOL_PINS_COMMIT"] = NEW
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("--tool-pins-reviewed", run.stderr)
