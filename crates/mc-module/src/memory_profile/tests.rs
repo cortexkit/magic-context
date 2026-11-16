@@ -153,6 +153,32 @@ fn schema_integer_accepts_integral_json_number() {
     );
 }
 
+#[test]
+fn loading_a_profile_builds_no_regular_expression_twice() {
+    let packages = bundled::packages();
+    // The first load builds what no other test thread has built yet.
+    load_chain(&packages).unwrap();
+    let before = regex_builds();
+    load_chain(&packages).unwrap();
+    load_chain(&packages).unwrap();
+    assert_eq!(regex_builds(), before, "a pattern was built again");
+}
+
+#[test]
+fn kept_schema_patterns_still_reject() {
+    let mut body = bundled::packages()[1].env["body"].clone();
+    body["categories"][0]["tag"] = json!("not a tag");
+    for _ in 0..2 {
+        let refusal = schema::validate(&body).unwrap_err();
+        assert_eq!(refusal.code, "profile_schema_invalid");
+        assert!(
+            refusal.detail.contains("\"not a tag\" does not match"),
+            "{}",
+            refusal.detail
+        );
+    }
+}
+
 fn entry<'a>(body: &'a mut Value, collection: &str, id: &str) -> &'a mut Value {
     body[collection]
         .as_array_mut()

@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use regex::Regex;
 use serde_json::Value;
 
-use super::{refuse, Result};
+use super::{compile_regex, refuse, Result};
 
 /// Validate the frozen schema without network references or implicit coercion.
 pub(super) fn validate(body: &Value) -> Result<()> {
@@ -91,10 +95,7 @@ fn check(s: &Value, v: &Value, root: &Value, at: &str) -> std::result::Result<()
     }
     if let Some(text) = v.as_str() {
         if let Some(pattern) = s["pattern"].as_str() {
-            if !regex::Regex::new(pattern)
-                .map_err(|e| e.to_string())?
-                .is_match(text)
-            {
+            if !pattern_regex(pattern)?.is_match(text) {
                 return fail(format!("{text:?} does not match {pattern}"));
             }
         }
@@ -194,4 +195,23 @@ fn bounds(s: &Value, len: usize, suffix: &str, at: &str) -> std::result::Result<
         }
     }
     Ok(())
+}
+
+/// The built expression for a schema `pattern`, kept for every later check.
+/// Loading a profile checks hundreds of strings against a handful of patterns,
+/// and profiles are loaded on every Setup, so each pattern is built once. Only
+/// the bundled schema is checked, so the cache holds at most its distinct
+/// patterns. A pattern that fails to build is not kept, and every check that
+/// meets it reports the build error.
+fn pattern_regex(pattern: &str) -> std::result::Result<Arc<Regex>, String> {
+    static BUILT: Mutex<BTreeMap<String, Arc<Regex>>> = Mutex::new(BTreeMap::new());
+    // The map is only read or inserted into, so a panic elsewhere while the
+    // lock was held can't leave it half-changed.
+    let mut built = BUILT.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(regex) = built.get(pattern) {
+        return Ok(Arc::clone(regex));
+    }
+    let regex = Arc::new(compile_regex(pattern).map_err(|e| e.to_string())?);
+    built.insert(pattern.to_owned(), Arc::clone(&regex));
+    Ok(regex)
 }

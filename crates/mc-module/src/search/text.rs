@@ -4,7 +4,7 @@
 //! both write the same index rows and render the same results.
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use regex::Regex;
 
@@ -17,8 +17,25 @@ const OMO_INTERNAL_INITIATOR_MARKER: &str = "<!-- OMO_INTERNAL_INITIATOR -->";
 /// The start of a Magic Context directive written into a user message.
 const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: MAGIC-CONTEXT";
 
+/// Build one of this module's patterns. Each is built once and kept, because
+/// search cleans and scores every message it reads and building a pattern
+/// allocates far more than matching with it. Tests count the builds here to
+/// hold that.
+fn compile(pattern: &str) -> Regex {
+    #[cfg(test)]
+    BUILDS.with(|builds| builds.set(builds.get() + 1));
+    Regex::new(pattern).expect("valid regex")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many patterns this thread built through `compile`. Per thread, so
+    /// tests running in parallel don't count each other's.
+    static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
-    cell.get_or_init(|| Regex::new(pattern).expect("valid regex"))
+    cell.get_or_init(|| compile(pattern))
 }
 
 /// Length as JavaScript counts it: UTF-16 code units.
@@ -48,11 +65,55 @@ pub fn collapse_whitespace(text: &str) -> String {
         .join(" ")
 }
 
+/// Callers pass a few fixed name lists. The cap only stops a caller that
+/// builds lists from data from growing the cache without end: a list past it
+/// is built again on every call.
+const BLOCK_PATTERN_CAP: usize = 16;
+
+/// The tag pattern of each list of block names, built on first use and kept.
+struct BlockPatterns {
+    built: Mutex<Vec<(Vec<String>, Arc<Regex>)>>,
+    cap: usize,
+}
+
+impl BlockPatterns {
+    const fn new(cap: usize) -> Self {
+        Self {
+            built: Mutex::new(Vec::new()),
+            cap,
+        }
+    }
+
+    fn get(&self, names: &[&str]) -> Arc<Regex> {
+        // Entries are only pushed whole, so a panic elsewhere while the lock
+        // was held can't leave the list half-changed.
+        let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, tags)) = built
+            .iter()
+            .find(|(key, _)| key.iter().map(String::as_str).eq(names.iter().copied()))
+        {
+            return Arc::clone(tags);
+        }
+        let tags = Arc::new(compile(&format!(
+            r"(?i)<(/?)({})(?:\s[^<>]*?)?\s*(/?)>",
+            names.join("|")
+        )));
+        if built.len() < self.cap {
+            built.push((
+                names.iter().map(|name| (*name).to_owned()).collect(),
+                Arc::clone(&tags),
+            ));
+        }
+        tags
+    }
+}
+
+static BLOCK_PATTERNS: BlockPatterns = BlockPatterns::new(BLOCK_PATTERN_CAP);
+
 /// Remove the tagged regions named in `names`, nested ones and ones never
 /// closed included. Everything after an unclosed opening tag goes.
 pub fn remove_nested_blocks(text: &str, names: &[&str]) -> String {
-    let pattern = format!(r"(?i)<(/?)({})(?:\s[^<>]*?)?\s*(/?)>", names.join("|"));
-    let tags = Regex::new(&pattern).expect("valid regex");
+    let tags = BLOCK_PATTERNS.get(names);
     let mut stack: Vec<String> = Vec::new();
     let mut end = 0;
     let mut result = String::new();
@@ -483,6 +544,55 @@ mod tests {
             "keep "
         );
         assert_eq!(remove_nested_blocks("a<task/>b", &["task"]), "ab");
+    }
+
+    fn builds() -> usize {
+        BUILDS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn cleaning_and_snippets_build_no_pattern_twice() {
+        let content =
+            "keep <system-reminder>noise</system-reminder> the cache <task>gone</task> bust words";
+        let run = || {
+            assert_eq!(clean_search_text(content), "keep the cache bust words");
+            assert_eq!(
+                matched_snippet(content, "cache bust", 60),
+                "keep the cache bust words"
+            );
+            assert!(!remove_system_reminders(content).contains("noise"));
+            assert!(!remove_task_notifications(content).contains("gone"));
+            assert_eq!(
+                indexable_content(true, &[content]),
+                "keep the cache bust words"
+            );
+        };
+        // The first round builds what no other test thread has built yet.
+        run();
+        let before = builds();
+        run();
+        run();
+        assert_eq!(builds(), before, "a pattern was built again");
+    }
+
+    #[test]
+    fn block_pattern_cache_stops_growing_at_its_cap() {
+        let patterns = BlockPatterns::new(1);
+        let before = builds();
+        patterns.get(&["task"]);
+        patterns.get(&["task"]);
+        assert_eq!(builds() - before, 1, "a kept list is built once");
+        let before = builds();
+        let first = patterns.get(&["note"]);
+        let second = patterns.get(&["note"]);
+        assert_eq!(
+            builds() - before,
+            2,
+            "a list past the cap is built per call"
+        );
+        assert_eq!(first.as_str(), second.as_str());
+        assert!(second.is_match("<NOTE id=1>"));
+        assert_eq!(patterns.built.lock().unwrap().len(), 1);
     }
 
     #[test]

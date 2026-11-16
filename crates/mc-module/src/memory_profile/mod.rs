@@ -52,6 +52,28 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
 }
 
+/// Build a regular expression. Every pattern in this module is built once and
+/// kept, in a static or in the schema check's cache: a profile chain is loaded
+/// and checked again on each Setup, and building a pattern allocates far more
+/// than matching with it. Tests count the builds here to hold that.
+fn compile_regex(pattern: &str) -> std::result::Result<regex::Regex, regex::Error> {
+    #[cfg(test)]
+    REGEX_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    regex::Regex::new(pattern)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many regular expressions this thread built through `compile_regex`.
+    /// Per thread, so tests running in parallel don't count each other's.
+    static REGEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn regex_builds() -> usize {
+    REGEX_BUILDS.with(std::cell::Cell::get)
+}
+
 #[cfg(test)]
 mod render_tests;
 #[cfg(test)]

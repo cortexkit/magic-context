@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde_json::{json, Value};
 
-use super::{list, refuse, schema, sha256, text, Result};
+use super::{compile_regex, list, refuse, schema, sha256, text, Result};
 
 const BASE: &str = "@cortexkit/memory-base";
 const REVIEW: &str = "base:review-user-memories";
@@ -124,8 +126,11 @@ impl Package {
                 "invalid ck-package/v1 envelope fields",
             ));
         }
-        let grammar =
-            regex::Regex::new(r"^@[a-z0-9]+(?:-[a-z0-9]+)*/[a-z0-9]+(?:-[a-z0-9]+)*$").unwrap();
+        // `@scope/name`, both parts lowercase kebab-case.
+        static GRAMMAR: LazyLock<Regex> = LazyLock::new(|| {
+            compile_regex(r"^@[a-z0-9]+(?:-[a-z0-9]+)*/[a-z0-9]+(?:-[a-z0-9]+)*$").unwrap()
+        });
+        let grammar = &*GRAMMAR;
         if e["schema"] != "ck-package/v1"
             || e["kind"] != "memory-profile"
             || !grammar.is_match(text(e, "name"))
@@ -748,7 +753,10 @@ fn interface(kind: &str) -> Option<Interface> {
 
 fn frames(profile: &Profile, doc: &str) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
-    let marker = regex::Regex::new(r"(?m)^⟦mc:([^⟧]+)⟧$").unwrap();
+    // An MC frame marker standing alone on its line.
+    static MARKER: LazyLock<Regex> =
+        LazyLock::new(|| compile_regex(r"(?m)^⟦mc:([^⟧]+)⟧$").unwrap());
+    let marker = &*MARKER;
     for section in list(&profile.body["prompts"][doc], "sections") {
         if let Some(frame) = section["mc"].as_str() {
             out.insert(frame.trim_start_matches("dreamer/").into());
@@ -1146,7 +1154,10 @@ fn validate_frame(name: &str) -> Result<()> {
 }
 
 fn validate_markers(p: &Profile) -> Result<()> {
-    let marker = regex::Regex::new(r"⟦(profile:|mc:|if )([^⟧]+)⟧").unwrap();
+    // A profile, MC or condition marker anywhere in a line.
+    static MARKER: LazyLock<Regex> =
+        LazyLock::new(|| compile_regex(r"⟦(profile:|mc:|if )([^⟧]+)⟧").unwrap());
+    let marker = &*MARKER;
     let conditions = super::render::CONDITIONS;
     let generators = super::render::GENERATORS;
     let check_text = |value: &str| -> Result<()> {
