@@ -165,6 +165,13 @@ test("a cause whose facts are missing on either step falls back to the module lo
         "the rewrite": [pair[0]!, withoutFacts(pair[1]!)],
         // A newer Astrocyte may name a cause this watcher has no class for.
         "an unfamiliar cause": [pair[0]!, { ...pair[1]!, cause: "route_changed" }],
+        // A step that carries its account but not the view or digests, as a
+        // runner's request that skipped the module did: "unexplained" then
+        // compared nothing that would show a view or plan change.
+        "the view and digests only": [
+            { ...pair[0]!, view_version: undefined, tools_digest: undefined, system_digest: undefined },
+            pair[1]!,
+        ],
     };
     for (const [missing, rows] of Object.entries(cases)) {
         const s = await scan(rows, [accepted]);

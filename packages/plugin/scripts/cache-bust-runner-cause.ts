@@ -40,6 +40,9 @@ export function carriesCauseFacts(facts: RunnerStepFacts | undefined): boolean {
         facts.system_digest !== undefined || facts.account_ref !== undefined);
 }
 
+/** The facts both steps must carry before Astrocyte's "unexplained" is trusted. */
+const UNEXPLAINED_NEEDS = ["view_version", "tools_digest", "system_digest"] as const;
+
 export interface RunnerFeedStepDecision {
     classification: RunnerStepClassification;
     /** Set when Astrocyte's cause decided a class other than the log-timing guess. */
@@ -76,6 +79,16 @@ export function classifyRunnerFeedStep(
     if (guess.healthy || !guess.class) return { classification: guess };
     const before = previous.facts!;
     const after = current.facts!;
+    // Astrocyte calls a rewrite unexplained when none of the facts it compares
+    // changed, so the verdict only holds when both steps carry each of them. A
+    // step can carry an account and nothing else: a runner may send the view
+    // and digests only on requests that asked the module. Then a view or plan
+    // change is invisible to Astrocyte, and the module log decides.
+    if (
+        cause === "unexplained" &&
+        UNEXPLAINED_NEEDS.some((key) => before[key] === undefined || after[key] === undefined)
+    )
+        return { classification: guess };
     const changed = (key: keyof RunnerStepFacts): boolean =>
         before[key] !== undefined && after[key] !== undefined && before[key] !== after[key];
     // The facts that differ between the two steps, then supporting detail.
