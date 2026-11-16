@@ -204,7 +204,10 @@ fn thalamus_compaction_undo_v1_decode() {
     let stale: NoticeRequest = serde_json::from_slice(files[1].1).unwrap();
     assert!(stale.events.iter().any(|event| matches!(
         event,
-        Event::ViewRefused { version: 3, refusal: ViewRefusal::UnknownPart { .. } }
+        Event::ViewRefused {
+            version: 3,
+            refusal: ViewRefusal::UnknownPart { .. }
+        }
     )));
     let refused: ApplyViewAnswer = serde_json::from_slice(files[2].1).unwrap();
     let ApplyViewAnswer::Refused { refusal } = refused else {

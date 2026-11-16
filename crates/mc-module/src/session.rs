@@ -249,9 +249,10 @@ pub struct Session {
     /// it serves it. Allow one rebuild, but guard against the same reason on
     /// the very next built version so a faulty view cannot loop every pass.
     transcript_retry: Option<(TranscriptRefusal, u64)>,
-    /// A revert removed summaries the head shows. The next notice rebuilds
-    /// the head whatever the usage: the model must not keep seeing history
-    /// that was undone.
+    /// A revert removed summaries the head shows, or the runner refused or
+    /// dropped ck-mc's view and applies none. The next notice rebuilds the
+    /// head whatever the usage: the model must not keep seeing history that
+    /// was undone, and a runner without a view may take no step at all.
     head_stale: bool,
     /// The `ctx_reduce` reminders' cadence.
     nudges: crate::nudges::State,
@@ -1453,6 +1454,9 @@ impl Session {
                 _ => None,
             })
             .collect();
+        // ck-mc's newest view, which the runner holds or was handed before
+        // this notice.
+        let held = self.latest.as_ref().map(|view| view.version);
         self.settle_stated(stated, &refused);
         // A view is offered again now if its offer after a restart waited
         // because the runner couldn't place the view's cut (the point before
@@ -1461,6 +1465,7 @@ impl Session {
         if self.reoffer_pending {
             self.offer_unconfirmed_again(client).await;
         }
+        self.rebuild_when_runner_lost_view(held);
         self.take_render_failures(&notice.events);
         let judged = self.judged_view(stated);
         match standing {
@@ -1592,6 +1597,7 @@ impl Session {
         // so the view's cut message is in the index.
         if self.runner_differs(self.judged_view(stated).as_ref()) {
             self.adopt_runner_view(client).await;
+            self.rebuild_when_runner_lost_view(held);
             // The reading was judged before ck-mc knew its own newest view.
             let judged = self.judged_view(stated);
             match standing {
@@ -1661,6 +1667,36 @@ impl Session {
             }
         }
         decision.summary
+    }
+
+    /// The runner applies no view now, though before this notice it held or
+    /// was handed ck-mc's view `held`: it refused ck-mc's newest view at a
+    /// step boundary, or dropped the view it applied, as a runner does when
+    /// an undo removes the view's cut message or a step finds the view's
+    /// window stale. A session past its host's compaction marker, or moved
+    /// in from another host, takes no step until a view applies, so the
+    /// history head is rebuilt on this notice whatever the usage, as after
+    /// an undo, and stays due until the runner takes a view with it. Only a
+    /// session with a summarizer renders a head, and only one with summaries
+    /// or a cut has history to serve again.
+    fn rebuild_when_runner_lost_view(&mut self, held: Option<u64>) {
+        let Some(version) = held else {
+            return;
+        };
+        if self.head_stale
+            || self.latest.is_some()
+            || self.latest_unknown
+            || self.newest_applied != 0
+            || !self.features.summarizer
+            || (self.summaries.is_empty() && self.cut.is_none())
+        {
+            return;
+        }
+        tracing::info!(
+            "ck-mc: session {}: the runner applies no view after ck-mc's view {version}; the history head is rebuilt and offered on this notice",
+            self.key.session
+        );
+        self.head_stale = true;
     }
 
     /// One permission for the history refresh and every mutation lane. Summary

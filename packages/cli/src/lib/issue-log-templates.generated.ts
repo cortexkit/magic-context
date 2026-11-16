@@ -356,6 +356,7 @@ const TEMPLATE_DATA = [
 "auto-search: decision outcome=disabled reason=\x01 lanes=\x01 nearMisses=\x01 threshold=\x01 pool=\x01 rows=\x01 workerStarted=\x01 peek=\x01 elapsedMs=\x01",
 "v2 fork inheritance: seeded from \x01 through the fork boundary; paired rows=\x01 compartments=\x01 tags=\x01 pending_ops=\x01 facts=\x01 notes=\x01\x020s",
 "compaction-marker hygiene: removed \x01 fork-orphaned marker(s); filterCompacted will now stop at this session's own marker",
+"ck-mc: session \x01: the runner applies no view after ck-mc's view \x01; the history head is rebuilt and offered on this notice",
 "ck-mc: session \x01: summary run started at \x01% inside the account wait (until \x01 ms since the epoch): one try for this history",
 "overflow detected in compaction-off mode via message.updated: reportedLimit=\x01 provenance=\x01 pattern=\x01 — recorded limit only",
 "ck-mc: session \x01: setup (\x01, preset \x01, model \x01/\x01, child harness \x01, window \x01, reserve \x01, applied view \x01, statement epoch \x01, stamp \x01)",

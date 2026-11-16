@@ -120,6 +120,9 @@ mod apply_view_lost_answer_tests;
 #[path = "apply_view_lost_answer_review_tests.rs"]
 mod apply_view_lost_answer_review_tests;
 
+#[path = "compaction_undo_tests.rs"]
+mod compaction_undo_tests;
+
 #[derive(Default)]
 struct Client {
     applied: Mutex<Option<AppliedViewAnswer>>,
