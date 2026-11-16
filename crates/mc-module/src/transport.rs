@@ -643,10 +643,21 @@ impl RunnerClient for SubcRunnerClient {
         provider: &str,
         preset: Option<&str>,
     ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
-        // The provider's project-free route, unscoped: any principal may open
-        // it. A tool provider binds a route by host family, and a session a
-        // runner hosts binds as `runner` (AFT refuses an unknown family with
-        // `config_divergence`). A request without a preset carries none, as
+        let root = child.project_root.as_deref().ok_or_else(|| {
+            ClientError::new("tool.catalog: the run has no project folder to read in")
+        })?;
+        let scope = self
+            .child_scopes
+            .for_project(root)
+            .await
+            .map_err(|error| ClientError::new(format!("tool.catalog: child scope: {error}")))?;
+        // The same provider, preset, params and scope the runner fetches the
+        // plan's tool item with, for the child's session. A tool provider
+        // binds a route by host family, not by the runner's or ck-mc's module
+        // id, and a session a runner hosts binds as `runner` (AFT refuses an
+        // unknown family with `config_divergence`). Unscoped, AFT has no
+        // project folder for the route and refuses the catalog
+        // (`project_required`). A request without a preset carries none, as
         // the role requires.
         let provider = SessionRef::new(
             provider.to_owned(),
@@ -666,7 +677,7 @@ impl RunnerClient for SubcRunnerClient {
                 ),
                 cortexkit_role_tool_provider::ops::TOOL_CATALOG,
                 &request,
-                None,
+                Some(scope),
             )
             .await?;
         // A tool provider's answer is the bare object, never wrapped.
