@@ -896,6 +896,12 @@ describe("Pi doctor", () => {
             },
             recentSessions: [],
             historianDumps: {
+                sessionDumps: {
+                    dir: join(tmpdir(), "pi", "magic-context", "historian"),
+                    count: 0,
+                    sessionCount: 0,
+                    sessions: [],
+                },
                 byProject: [],
                 legacyDumps: {
                     dir: join(tmpdir(), "pi", "magic-context", "historian"),

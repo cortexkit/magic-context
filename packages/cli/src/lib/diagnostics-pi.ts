@@ -6,11 +6,15 @@ import { resolveCortexKitProjectConfigPath } from "@magic-context/core/config/mi
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import {
     getMagicContextStorageResolution,
-    getProjectMagicContextHistorianDir,
     isMagicContextStorageOutsideEngram,
 } from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc } from "comment-json";
+import {
+    type HistorianDumpFile,
+    scanHistorianDumpFiles,
+    scanHistorianSessionDumpDirs,
+} from "./historian-dump-dirs";
 import { inspectMagicContextLogs, type LogFileInspection } from "./log-lines";
 import {
     getMagicContextHistorianDir,
@@ -18,6 +22,7 @@ import {
     getPiSessionsRoot,
     getPiUserConfigPath,
     getPiUserExtensionsPath,
+    getProjectHistorianDumpDir,
 } from "./paths";
 import { detectPiBinary, getPiVersion } from "./pi-helpers";
 import {
@@ -84,7 +89,10 @@ export interface PiDiagnosticReport {
      * directory path with `/` replaced by `-` and bookended by `--`.
      */
     recentSessions: PiRecentSessionSummary[];
-    /** Historian dumps grouped by project directory + legacy tmp-dir fallback. */
+    /**
+     * Historian dumps from the current per-session temp dirs, the project
+     * directories older plugins used, and the flat temp dir of plugins before 0.18.
+     */
     historianDumps: PiHistorianDumpsReport;
 }
 
@@ -117,6 +125,10 @@ export interface PiHistorianDumpMeta {
     ordinalOverlapCount: number;
 }
 
+/**
+ * Dumps that plugins up to 0.49.57 wrote under
+ * `<directory>/.cortexkit/magic-context/historian/`, one bucket per project.
+ */
 export interface PiProjectHistorianBucket {
     directory: string;
     primarySessionId: string;
@@ -125,8 +137,30 @@ export interface PiProjectHistorianBucket {
     recent: PiHistorianDumpSummary[];
 }
 
+/** One session's dump directory under the harness temp dir. */
+export interface PiSessionHistorianBucket {
+    /** Name of the session's directory: the session id, reduced to filename-safe characters. */
+    sessionId: string;
+    count: number;
+    recent: PiHistorianDumpSummary[];
+}
+
 export interface PiHistorianDumpsReport {
+    /**
+     * Dumps written by current plugins: one subdirectory per session under
+     * `${tmpdir}/pi/magic-context/historian/`.
+     */
+    sessionDumps: {
+        dir: string;
+        /** Dump files across every session directory. */
+        count: number;
+        /** Session directories holding at least one dump. */
+        sessionCount: number;
+        /** The sessions with the newest dumps, newest first, capped at 10. */
+        sessions: PiSessionHistorianBucket[];
+    };
     byProject: PiProjectHistorianBucket[];
+    /** Dumps that plugins before 0.18 wrote directly into the harness historian dir. */
     legacyDumps: {
         dir: string;
         count: number;
@@ -311,52 +345,59 @@ function parseHistorianDumpMeta(path: string): PiHistorianDumpMeta | { error: st
     }
 }
 
+/** Summarize the newest `limit` dump files with metadata parsed from their XML. */
+function summarizeDumps(
+    dir: string,
+    files: HistorianDumpFile[],
+    limit: number,
+): PiHistorianDumpSummary[] {
+    const now = Date.now();
+    return files.slice(0, limit).map((entry) => {
+        const meta = parseHistorianDumpMeta(join(dir, entry.name));
+        const summary: PiHistorianDumpSummary = {
+            name: entry.name,
+            ageMinutes: Math.round((now - entry.mtime) / 60000),
+            sizeKb: entry.sizeKb,
+        };
+        if ("error" in meta) {
+            summary.parseError = meta.error;
+        } else {
+            summary.meta = meta;
+        }
+        return summary;
+    });
+}
+
 function listDumpsInDir(
     dir: string,
     limit: number,
 ): { count: number; recent: PiHistorianDumpSummary[] } {
-    if (!existsSync(dir)) return { count: 0, recent: [] };
-    try {
-        const entries = readdirSync(dir)
-            .filter((name) => name.endsWith(".xml"))
-            .map((name) => {
-                const stat = statSync(join(dir, name));
-                return {
-                    name,
-                    mtime: stat.mtimeMs,
-                    sizeKb: Math.round(stat.size / 1024),
-                };
-            })
-            .sort((a, b) => b.mtime - a.mtime);
-
-        const now = Date.now();
-        const recent: PiHistorianDumpSummary[] = entries.slice(0, limit).map((entry) => {
-            const meta = parseHistorianDumpMeta(join(dir, entry.name));
-            const summary: PiHistorianDumpSummary = {
-                name: entry.name,
-                ageMinutes: Math.round((now - entry.mtime) / 60000),
-                sizeKb: entry.sizeKb,
-            };
-            if ("error" in meta) {
-                summary.parseError = meta.error;
-            } else {
-                summary.meta = meta;
-            }
-            return summary;
-        });
-        return { count: entries.length, recent };
-    } catch {
-        return { count: 0, recent: [] };
-    }
+    const files = scanHistorianDumpFiles(dir);
+    return { count: files.length, recent: summarizeDumps(dir, files, limit) };
 }
 
-function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHistorianDumpsReport {
+const SESSION_DUMP_BUCKET_LIMIT = 10;
+const DUMPS_PER_BUCKET_LIMIT = 5;
+
+/**
+ * Collect historian dumps from the per-session temp dirs current plugins write,
+ * the project directories (found through recent sessions) that plugins up to
+ * 0.49.57 wrote, and the flat temp dir of plugins before 0.18.
+ *
+ * `historianRoot` is the harness historian dir; tests pass a scratch dir.
+ */
+export function collectPiHistorianDumps(
+    recentSessions: PiRecentSessionSummary[],
+    historianRoot: string = getMagicContextHistorianDir("pi"),
+): PiHistorianDumpsReport {
+    const sessionDirs = scanHistorianSessionDumpDirs(historianRoot);
+
     const buckets = new Map<string, PiProjectHistorianBucket>();
     for (const session of recentSessions) {
         const dir = session.directory;
         if (!dir) continue;
-        const projectHistorianDir = getProjectMagicContextHistorianDir(dir);
-        const listing = listDumpsInDir(projectHistorianDir, 5);
+        const projectHistorianDir = getProjectHistorianDumpDir(dir);
+        const listing = listDumpsInDir(projectHistorianDir, DUMPS_PER_BUCKET_LIMIT);
         const existing = buckets.get(dir);
         if (existing) {
             if (!existing.sessionIds.includes(session.sessionId)) {
@@ -374,13 +415,22 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
         });
     }
 
-    const legacyDir = getMagicContextHistorianDir("pi");
-    const legacyListing = listDumpsInDir(legacyDir, 5);
+    const legacyListing = listDumpsInDir(historianRoot, DUMPS_PER_BUCKET_LIMIT);
 
     return {
+        sessionDumps: {
+            dir: historianRoot,
+            count: sessionDirs.reduce((sum, session) => sum + session.files.length, 0),
+            sessionCount: sessionDirs.length,
+            sessions: sessionDirs.slice(0, SESSION_DUMP_BUCKET_LIMIT).map((session) => ({
+                sessionId: session.sessionId,
+                count: session.files.length,
+                recent: summarizeDumps(session.dir, session.files, DUMPS_PER_BUCKET_LIMIT),
+            })),
+        },
         byProject: [...buckets.values()],
         legacyDumps: {
-            dir: legacyDir,
+            dir: historianRoot,
             count: legacyListing.count,
             recent: legacyListing.recent,
         },

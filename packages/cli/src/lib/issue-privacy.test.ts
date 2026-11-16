@@ -95,6 +95,25 @@ function fixture() {
             lastActiveAt: "2026-09-05T10:41:03.130Z",
         },
     ];
+    const sessionDumps = {
+        dir: "/Users/avery/tmp/opencode/magic-context/historian",
+        count: 7,
+        sessionCount: 1,
+        sessions: [
+            {
+                sessionId: "ses_private700",
+                count: 7,
+                recent: [
+                    {
+                        name: "payroll-secret.xml",
+                        ageMinutes: 3,
+                        sizeKb: 7,
+                        parseError: "SyntaxError: customer-source-marker",
+                    },
+                ],
+            },
+        ],
+    };
     const report: DiagnosticReport = {
         timestamp: "2026-09-05T10:41:03.130Z",
         platform: "linux",
@@ -137,6 +156,7 @@ function fixture() {
         logFile: { path: env.MAGIC_CONTEXT_LOG_PATH, exists: true, sizeKb: 2 },
         recentSessions: { available: true, rows },
         historianDumps: {
+            sessionDumps,
             byProject: rows.map((row) => ({
                 directory: row.directory,
                 primarySessionId: row.sessionId,
@@ -179,11 +199,11 @@ function fixture() {
             ],
         },
     };
-    return { root, env, flags, rows, report };
+    return { root, env, flags, rows, report, sessionDumps };
 }
 
 it("public issue reports remove seeded identifying strings and retain diagnostics for every host", async () => {
-    const { root, env, flags, rows, report } = fixture();
+    const { root, env, flags, rows, report, sessionDumps } = fixture();
     for (const host of ["opencode1", "opencode2", "pi", "omp"] as const) {
         const output = join(root, `${host}.md`);
         if (host.startsWith("opencode")) {
@@ -230,7 +250,11 @@ it("public issue reports remove seeded identifying strings and retain diagnostic
                     path: join(root, "session.jsonl"),
                     lastUpdatedAt: row.lastActiveAt,
                 })),
-                historianDumps: { byProject: [], legacyDumps: { dir: root, count: 0, recent: [] } },
+                historianDumps: {
+                    sessionDumps,
+                    byProject: [],
+                    legacyDumps: { dir: root, count: 0, recent: [] },
+                },
                 conflicts: {
                     knownConflicts: [],
                     otherPiExtensions: ["git:github.com/avery/private-repository"],
@@ -344,6 +368,8 @@ it("public issue reports remove seeded identifying strings and retain diagnostic
             expect(body).toContain('"total": 7');
             expect(body).toContain('"directory": "~/project-1"');
             expect(body).toContain("~/project-1/<path>");
+            // Dumps in the per-session temp dirs reach the bundle.
+            expect(body).toContain('"sessionCount": 1');
         }
     }
 });

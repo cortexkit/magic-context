@@ -107,7 +107,11 @@ function fakeReport(root: string, opencodeVersion = "1.0.0"): DiagnosticReport {
         },
         logFile: { path: logPath, exists: true, sizeKb: 1 },
         recentSessions: { available: true, rows: [] },
-        historianDumps: { byProject: [], legacyDumps: { dir: root, count: 0, recent: [] } },
+        historianDumps: {
+            sessionDumps: { dir: root, count: 0, sessionCount: 0, sessions: [] },
+            byProject: [],
+            legacyDumps: { dir: root, count: 0, recent: [] },
+        },
         historianFailures: { available: true, rows: [] },
         historianRuns: { available: true, rows: [] },
     };

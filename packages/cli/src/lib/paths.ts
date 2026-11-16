@@ -5,6 +5,7 @@ import { resolveCortexKitUserConfigPath } from "@magic-context/core/config/migra
 import {
     getMagicContextHistorianDir as getMagicContextHistorianDirCore,
     getMagicContextLogPath as getMagicContextLogPathCore,
+    getProjectMagicContextDir,
 } from "@magic-context/core/shared/data-path";
 import type { HarnessId } from "@magic-context/core/shared/harness";
 
@@ -291,9 +292,22 @@ export function getMagicContextLogPath(harness: HarnessId): string {
     return getMagicContextLogPathCore(harness);
 }
 
-/** Historian dump + state-file dir under the harness-scoped temp dir. */
+/**
+ * Root of the historian dump dirs under the harness-scoped temp dir. Current
+ * plugins write each session's dumps into its own subdirectory; plugins before
+ * 0.18 wrote dumps directly into this directory.
+ */
 export function getMagicContextHistorianDir(harness: HarnessId): string {
     return getMagicContextHistorianDirCore(harness);
+}
+
+/**
+ * `<project>/.cortexkit/magic-context/historian/`, where plugins up to 0.49.57
+ * wrote historian dumps. Doctor still reads it so users who have old dumps
+ * there see them; nothing writes to it any more.
+ */
+export function getProjectHistorianDumpDir(directory: string): string {
+    return join(getProjectMagicContextDir(directory), "historian");
 }
 
 /**

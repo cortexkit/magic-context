@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { projectPathToPiDirSlug } from "../commands/migrate";
-import { collectDiagnostics, renderDiagnosticsMarkdown, sanitizeValue } from "./diagnostics-pi";
+import {
+    collectDiagnostics,
+    collectPiHistorianDumps,
+    renderDiagnosticsMarkdown,
+    sanitizeValue,
+} from "./diagnostics-pi";
 
 setDefaultTimeout(15_000);
 
@@ -155,5 +160,49 @@ describe("collectDiagnostics Pi path resolution", () => {
                 lastActiveAt: report.recentSessions[0]?.lastActiveAt,
             },
         ]);
+    });
+});
+
+// Current plugins write historian dumps into per-session temp dirs; plugins up
+// to 0.49.57 wrote them into project directories. Pi doctor lists both.
+describe("Pi historian dump collection", () => {
+    it("lists per-session temp dumps beside old project dumps", () => {
+        const root = makeTempRoot("mc-pi-dumps-");
+        const historianRoot = join(root, "tmp", "pi", "magic-context", "historian");
+        const project = join(root, "project");
+        const writeDump = (dir: string, name: string, ageMinutes: number) => {
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(join(dir, name), "<output></output>\n");
+            const when = new Date(Date.now() - ageMinutes * 60_000);
+            utimesSync(join(dir, name), when, when);
+        };
+        writeDump(join(historianRoot, "pi-session-b"), "historian-initial-2.xml", 1);
+        writeDump(join(historianRoot, "pi-session-a"), "historian-initial-1.xml", 10);
+        writeDump(join(historianRoot, "pi-session-a"), "historian-repair-1.xml", 5);
+        writeDump(
+            join(project, ".cortexkit", "magic-context", "historian"),
+            "old-project-dump.xml",
+            60,
+        );
+
+        const dumps = collectPiHistorianDumps(
+            [{ sessionId: "pi-session-a", directory: project, lastActiveAt: "2026-11-16T20:00:00.000Z" }],
+            historianRoot,
+        );
+
+        expect(dumps.sessionDumps).toMatchObject({ dir: historianRoot, count: 3, sessionCount: 2 });
+        expect(
+            dumps.sessionDumps.sessions.map((session) => [
+                session.sessionId,
+                session.recent.map((dump) => dump.name),
+            ]),
+        ).toEqual([
+            ["pi-session-b", ["historian-initial-2.xml"]],
+            ["pi-session-a", ["historian-repair-1.xml", "historian-initial-1.xml"]],
+        ]);
+        expect(dumps.byProject.map((bucket) => [bucket.directory, bucket.count])).toEqual([
+            [project, 1],
+        ]);
+        expect(dumps.legacyDumps.count).toBe(0);
     });
 });

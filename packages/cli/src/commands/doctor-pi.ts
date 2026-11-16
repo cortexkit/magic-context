@@ -1106,18 +1106,44 @@ async function runHealthChecks(options: {
         }
     }
 
-    // Historian dumps now live per-project under `<dir>/.cortexkit/magic-context/historian/`
-    // and are surfaced grouped by project. The legacy harness-scoped tmp-dir
-    // layout is still listed when no project-local dumps exist (older plugin
-    // versions or fresh installs).
+    // Historian dumps: current plugins write one temp subdirectory per session;
+    // plugins up to 0.49.57 wrote them into project directories, and plugins
+    // before 0.18 directly into the temp historian dir. All three are listed so
+    // users with old dumps still find them.
     const diagnosticsForDumps = await collectDiagnostics(options.cwd);
+    const sessionDumps = diagnosticsForDumps.historianDumps.sessionDumps;
+    if (sessionDumps.count > 0) {
+        add(
+            results,
+            "warn",
+            `Historian debug dumps: ${sessionDumps.count} file(s) across ${sessionDumps.sessionCount} session(s) in ${sessionDumps.dir}`,
+        );
+        for (const session of sessionDumps.sessions) {
+            add(results, "info", `  [${session.sessionId}] ${session.count} file(s)`);
+            for (const dump of session.recent.slice(0, 3)) {
+                const age = dump.ageMinutes;
+                const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+                add(results, "info", `    ${dump.name} (${ageStr})`);
+            }
+            if (session.count > 3) {
+                add(results, "info", `    ... and ${session.count - 3} more`);
+            }
+        }
+        if (sessionDumps.sessionCount > sessionDumps.sessions.length) {
+            add(
+                results,
+                "info",
+                `  ... and ${sessionDumps.sessionCount - sessionDumps.sessions.length} more session(s)`,
+            );
+        }
+    }
     const dumpBuckets = diagnosticsForDumps.historianDumps.byProject;
     if (dumpBuckets.length > 0) {
         const totalCount = dumpBuckets.reduce((sum, b) => sum + b.count, 0);
         add(
             results,
             "warn",
-            `Historian debug dumps: ${totalCount} file(s) across ${dumpBuckets.length} project(s)`,
+            `Historian debug dumps from older plugins in project directories: ${totalCount} file(s) across ${dumpBuckets.length} project(s)`,
         );
         for (const bucket of dumpBuckets) {
             add(results, "info", `  [${bucket.directory}] ${bucket.count} file(s)`);

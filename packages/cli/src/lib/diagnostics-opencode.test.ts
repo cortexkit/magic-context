@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
+    collectHistorianDumps,
     collectOpenCodePluginCacheReport,
     collectRecentSessionsFromDatabase,
     openCodeIssueLogHarnesses,
@@ -148,5 +149,103 @@ describe("collectRecentSessionsFromDatabase", () => {
         } finally {
             database.close();
         }
+    });
+});
+
+// Current plugins write historian dumps into per-session temp dirs; plugins up
+// to 0.49.57 wrote them into project directories, and plugins before 0.18
+// directly into the temp historian dir. Doctor and issue bundles list all three.
+describe("historian dump collection", () => {
+    let root: string;
+    beforeEach(() => {
+        root = createTestTempDirFromPath(join(tmpdir(), "mc-diag-dumps-"));
+    });
+    afterEach(() => {
+        rmSync(root, { recursive: true, force: true });
+    });
+
+    const writeDump = (dir: string, name: string, ageMinutes: number) => {
+        mkdirSync(dir, { recursive: true });
+        const path = join(dir, name);
+        writeFileSync(path, "<output></output>\n");
+        const when = new Date(Date.now() - ageMinutes * 60_000);
+        utimesSync(path, when, when);
+    };
+
+    it("lists per-session temp dumps, old project dumps and flat legacy dumps", () => {
+        const historianRoot = join(root, "tmp", "opencode", "magic-context", "historian");
+        const project = join(root, "project");
+        writeDump(join(historianRoot, "ses_new"), "recomp-pass-1-initial-1.xml", 1);
+        writeDump(join(historianRoot, "ses_new"), "recomp-pass-1-repair-2.xml", 2);
+        writeDump(join(historianRoot, "ses_old"), "historian-initial-3.xml", 30);
+        mkdirSync(join(historianRoot, "ses_empty"));
+        writeDump(historianRoot, "pre-018-dump.xml", 600);
+        writeDump(
+            join(project, ".cortexkit", "magic-context", "historian"),
+            "ses_proj-historian-initial-4.xml",
+            90,
+        );
+        const sessions: RecentSessionSummary[] = [
+            {
+                sessionId: "ses_proj",
+                title: "",
+                directory: project,
+                lastActiveAt: "2026-11-16T20:00:00.000Z",
+            },
+        ];
+
+        const dumps = collectHistorianDumps(sessions, historianRoot);
+
+        expect(dumps.sessionDumps.dir).toBe(historianRoot);
+        expect(dumps.sessionDumps.count).toBe(3);
+        expect(dumps.sessionDumps.sessionCount).toBe(2);
+        expect(
+            dumps.sessionDumps.sessions.map((session) => [
+                session.sessionId,
+                session.count,
+                session.recent.map((dump) => dump.name),
+            ]),
+        ).toEqual([
+            ["ses_new", 2, ["recomp-pass-1-initial-1.xml", "recomp-pass-1-repair-2.xml"]],
+            ["ses_old", 1, ["historian-initial-3.xml"]],
+        ]);
+        expect(dumps.byProject).toHaveLength(1);
+        expect(dumps.byProject[0]).toMatchObject({
+            directory: project,
+            primarySessionId: "ses_proj",
+            count: 1,
+        });
+        expect(dumps.byProject[0]?.recent.map((dump) => dump.name)).toEqual([
+            "ses_proj-historian-initial-4.xml",
+        ]);
+        expect(dumps.legacyDumps).toMatchObject({ dir: historianRoot, count: 1 });
+        expect(dumps.legacyDumps.recent.map((dump) => dump.name)).toEqual(["pre-018-dump.xml"]);
+    });
+
+    it("lists the ten sessions with the newest dumps and still counts every session", () => {
+        const historianRoot = join(root, "historian");
+        for (let index = 0; index < 12; index++) {
+            writeDump(join(historianRoot, `ses_${index}`), `dump-${index}.xml`, index);
+        }
+
+        const dumps = collectHistorianDumps([], historianRoot);
+
+        expect(dumps.sessionDumps.count).toBe(12);
+        expect(dumps.sessionDumps.sessionCount).toBe(12);
+        expect(dumps.sessionDumps.sessions.map((session) => session.sessionId)).toEqual(
+            Array.from({ length: 10 }, (_, index) => `ses_${index}`),
+        );
+    });
+
+    it("reports nothing when no historian dir exists", () => {
+        const dumps = collectHistorianDumps([], join(root, "missing"));
+        expect(dumps.sessionDumps).toEqual({
+            dir: join(root, "missing"),
+            count: 0,
+            sessionCount: 0,
+            sessions: [],
+        });
+        expect(dumps.byProject).toEqual([]);
+        expect(dumps.legacyDumps.count).toBe(0);
     });
 });

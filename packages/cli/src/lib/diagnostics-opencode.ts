@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
@@ -7,7 +7,6 @@ import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import {
     getMagicContextStorageResolution,
-    getProjectMagicContextHistorianDir,
     isMagicContextStorageOutsideEngram,
 } from "@magic-context/core/shared/data-path";
 import {
@@ -22,6 +21,11 @@ import {
 import { parse as parseJsonc } from "comment-json";
 import { pluginEntryPackage } from "../adapters/opencode";
 import { compareSemverPrecedence } from "../commands/doctor-opencode2-cache";
+import {
+    type HistorianDumpFile,
+    scanHistorianDumpFiles,
+    scanHistorianSessionDumpDirs,
+} from "./historian-dump-dirs";
 import { inspectMagicContextLogs, type LogFileInspection } from "./log-lines";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
@@ -37,7 +41,12 @@ import {
     readOpenCodeV2CachedPluginVersion,
 } from "./opencode-plugin-cache";
 import { readPluginEntries } from "./opencode-plugin-registration";
-import { type ConfigPaths, detectConfigPaths, getMagicContextHistorianDir } from "./paths";
+import {
+    type ConfigPaths,
+    detectConfigPaths,
+    getMagicContextHistorianDir,
+    getProjectHistorianDumpDir,
+} from "./paths";
 import { sanitizeConfigValue, sanitizeDiagnosticText, sanitizePathString } from "./redaction";
 
 export interface DiagnosticReport {
@@ -107,9 +116,9 @@ export interface DiagnosticReport {
      */
     recentSessions: DiagnosticRows<RecentSessionSummary>;
     /**
-     * Historian dumps grouped by project directory. Older dumps under the
-     * legacy harness-scoped tmp dir are surfaced separately as `legacyDumps`
-     * so users with old artifacts still see them in doctor.
+     * Historian dumps from all three places plugins have written them: the
+     * current per-session temp dirs, the project directories older plugins
+     * used, and the flat temp dir of plugins before 0.18.
      */
     historianDumps: HistorianDumpsReport;
     /** Most recent historian-failure rows from session_meta across all sessions. */
@@ -134,8 +143,9 @@ export interface PluginCacheInstall {
  * Per-project historian-dump bucket built from the recent-sessions list.
  *
  * One entry per unique project directory that has at least one dump under
- * `<directory>/.cortexkit/magic-context/historian/`. Sessions sharing a
- * directory roll into the same bucket. Empty buckets are omitted.
+ * `<directory>/.cortexkit/magic-context/historian/`, where plugins up to
+ * 0.49.57 wrote dumps. Sessions sharing a directory roll into the same bucket.
+ * Empty buckets are omitted.
  */
 export interface ProjectHistorianBucket {
     /** Project directory the bucket represents. */
@@ -150,13 +160,39 @@ export interface ProjectHistorianBucket {
     recent: HistorianDumpSummary[];
 }
 
+/** One session's dump directory under the harness temp dir. */
+export interface SessionHistorianBucket {
+    /** Name of the session's directory: the session id, reduced to filename-safe characters. */
+    sessionId: string;
+    /** Total dump count in the session's directory. */
+    count: number;
+    /** Up to 5 newest dumps with parsed metadata. */
+    recent: HistorianDumpSummary[];
+}
+
 export interface HistorianDumpsReport {
-    /** Per-project dump buckets, ordered by latest activity. */
+    /**
+     * Dumps written by current plugins: one subdirectory per session under
+     * `${tmpdir}/opencode/magic-context/historian/`.
+     */
+    sessionDumps: {
+        dir: string;
+        /** Dump files across every session directory. */
+        count: number;
+        /** Session directories holding at least one dump. */
+        sessionCount: number;
+        /** The sessions with the newest dumps, newest first, capped at 10. */
+        sessions: SessionHistorianBucket[];
+    };
+    /**
+     * Dumps older plugins wrote into project directories, found through the
+     * recent sessions' directories and ordered by latest activity.
+     */
     byProject: ProjectHistorianBucket[];
     /**
-     * Legacy harness-scoped tmp-dir listing, kept so users with pre-Phase-3
-     * dumps under `${tmpdir}/opencode/magic-context/historian/` still see
-     * them in doctor output. Empty on fresh installs.
+     * Dumps that plugins before 0.18 wrote directly into
+     * `${tmpdir}/opencode/magic-context/historian/`, without a session
+     * subdirectory. Empty on fresh installs.
      */
     legacyDumps: {
         dir: string;
@@ -428,67 +464,69 @@ function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: stri
 }
 
 /**
+ * Summarize the newest `limit` of a directory's dump files, newest first, with
+ * structural metadata parsed from each one's XML.
+ */
+function summarizeDumps(
+    dir: string,
+    files: HistorianDumpFile[],
+    limit: number,
+): HistorianDumpSummary[] {
+    const now = Date.now();
+    return files.slice(0, limit).map((entry) => {
+        const meta = parseHistorianDumpMeta(join(dir, entry.name));
+        const summary: HistorianDumpSummary = {
+            name: entry.name,
+            ageMinutes: Math.round((now - entry.mtime) / 60000),
+            sizeKb: entry.sizeKb,
+        };
+        if ("error" in meta) {
+            summary.parseError = meta.error;
+        } else {
+            summary.meta = meta;
+        }
+        return summary;
+    });
+}
+
+/**
  * Walk a directory's `*.xml` files and return them as HistorianDumpSummary
  * entries, sorted newest-first. Returns up to `limit` entries.
  *
- * Shared by both the project-local walker (one bucket per project) and the
- * legacy tmp-dir fallback walker, so changes to the dump-listing shape live
- * in one place.
+ * Shared by the session, project and legacy walkers, so changes to the
+ * dump-listing shape live in one place.
  */
 function listDumpsInDir(
     dir: string,
     limit: number,
 ): { count: number; recent: HistorianDumpSummary[] } {
-    if (!existsSync(dir)) return { count: 0, recent: [] };
-    try {
-        const entries = readdirSync(dir)
-            .filter((name) => name.endsWith(".xml"))
-            .map((name) => {
-                const stat = statSync(join(dir, name));
-                return {
-                    name,
-                    mtime: stat.mtimeMs,
-                    sizeKb: Math.round(stat.size / 1024),
-                };
-            })
-            .sort((a, b) => b.mtime - a.mtime);
-
-        const now = Date.now();
-        const recent: HistorianDumpSummary[] = entries.slice(0, limit).map((entry) => {
-            const meta = parseHistorianDumpMeta(join(dir, entry.name));
-            const summary: HistorianDumpSummary = {
-                name: entry.name,
-                ageMinutes: Math.round((now - entry.mtime) / 60000),
-                sizeKb: entry.sizeKb,
-            };
-            if ("error" in meta) {
-                summary.parseError = meta.error;
-            } else {
-                summary.meta = meta;
-            }
-            return summary;
-        });
-        return { count: entries.length, recent };
-    } catch {
-        return { count: 0, recent: [] };
-    }
+    const files = scanHistorianDumpFiles(dir);
+    return { count: files.length, recent: summarizeDumps(dir, files, limit) };
 }
 
+const SESSION_DUMP_BUCKET_LIMIT = 10;
+const DUMPS_PER_BUCKET_LIMIT = 5;
+
 /**
- * Group historian dumps by project directory using the recent-sessions list as
- * the lookup index. For each unique directory, opens
- * `<directory>/.cortexkit/magic-context/historian/` and lists dumps there.
+ * Collect historian dumps from every place a plugin version has written them:
+ *   - `sessionDumps`: one subdirectory per session under the harness temp dir,
+ *     where current plugins write. Every session directory is counted; the
+ *     ten with the newest dumps are listed.
+ *   - `byProject`: `<directory>/.cortexkit/magic-context/historian/`, where
+ *     plugins up to 0.49.57 wrote. Project directories are only known through
+ *     the recent sessions, so this is empty when the OpenCode DB could not be
+ *     read (Node runs without bun:sqlite, Pi-only machines).
+ *   - `legacyDumps`: files directly in the harness historian dir, from plugins
+ *     before 0.18.
  *
- * Falls back to the legacy harness-scoped tmp-dir layout when recentSessions
- * is empty (Node runs without bun:sqlite) OR when the project-local dir is
- * missing/empty. This keeps doctor useful on:
- *   - Fresh installs where no historian has run yet under the new path
- *   - Pi-only machines (Node, no bun:sqlite, no OpenCode DB)
- *   - Old machines with pre-Phase-3 dumps still in tmp
+ * `historianRoot` is the harness historian dir; tests pass a scratch dir.
  */
-function collectHistorianDumps(
+export function collectHistorianDumps(
     recentSessions: RecentSessionSummary[],
+    historianRoot: string = getMagicContextHistorianDir("opencode"),
 ): DiagnosticReport["historianDumps"] {
+    const sessionDirs = scanHistorianSessionDumpDirs(historianRoot);
+
     // Build per-project buckets from unique directories. We iterate the recent
     // sessions in time-DESC order, so the first session that touches a given
     // directory becomes the bucket's primarySessionId.
@@ -496,8 +534,8 @@ function collectHistorianDumps(
     for (const session of recentSessions) {
         const dir = session.directory;
         if (!dir) continue;
-        const projectHistorianDir = getProjectMagicContextHistorianDir(dir);
-        const listing = listDumpsInDir(projectHistorianDir, 5);
+        const projectHistorianDir = getProjectHistorianDumpDir(dir);
+        const listing = listDumpsInDir(projectHistorianDir, DUMPS_PER_BUCKET_LIMIT);
         const existing = buckets.get(dir);
         if (existing) {
             // Same directory, multiple sessions — append session id, keep
@@ -517,13 +555,22 @@ function collectHistorianDumps(
         });
     }
 
-    const legacyDir = getMagicContextHistorianDir("opencode");
-    const legacyListing = listDumpsInDir(legacyDir, 5);
+    const legacyListing = listDumpsInDir(historianRoot, DUMPS_PER_BUCKET_LIMIT);
 
     return {
+        sessionDumps: {
+            dir: historianRoot,
+            count: sessionDirs.reduce((sum, session) => sum + session.files.length, 0),
+            sessionCount: sessionDirs.length,
+            sessions: sessionDirs.slice(0, SESSION_DUMP_BUCKET_LIMIT).map((session) => ({
+                sessionId: session.sessionId,
+                count: session.files.length,
+                recent: summarizeDumps(session.dir, session.files, DUMPS_PER_BUCKET_LIMIT),
+            })),
+        },
         byProject: [...buckets.values()],
         legacyDumps: {
-            dir: legacyDir,
+            dir: historianRoot,
             count: legacyListing.count,
             recent: legacyListing.recent,
         },
@@ -934,6 +981,12 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
             : [];
 
     const historianDumps = {
+        sessionDumps: {
+            dir: sanitizeString(report.historianDumps.sessionDumps.dir),
+            count: report.historianDumps.sessionDumps.count,
+            sessionCount: report.historianDumps.sessionDumps.sessionCount,
+            sessions: report.historianDumps.sessionDumps.sessions,
+        },
         byProject: report.historianDumps.byProject.map((bucket) => ({
             directory: sanitizeString(bucket.directory),
             primarySessionId: bucket.primarySessionId,
@@ -1009,7 +1062,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "",
         "### Historian dumps",
         "(Metadata only — XML content is not included in this report.)",
-        "Dumps are stored per-project under `<project>/.cortexkit/magic-context/historian/`.",
+        "`sessionDumps` lists the per-session directories under `<temp dir>/opencode/magic-context/historian/` that current plugins write to. `byProject` lists dumps that plugins up to 0.49.57 wrote under `<project>/.cortexkit/magic-context/historian/`, and `legacyDumps` those from plugins before 0.18.",
         "```json",
         JSON.stringify(historianDumps, null, 2),
         "```",

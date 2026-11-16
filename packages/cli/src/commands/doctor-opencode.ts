@@ -2385,17 +2385,40 @@ export async function runDoctor(
         }
     }
 
-    // Historian dumps live per-project under `<dir>/.cortexkit/magic-context/historian/`.
-    // We surface them grouped by project so users can see which session's dumps are
-    // where. Falls back to the legacy tmp-dir layout when collectDiagnostics returns
-    // empty buckets (Node-only runs, no OpenCode DB, no historian has run yet under
-    // the new path).
+    // Historian dumps: current plugins write one temp subdirectory per session;
+    // plugins up to 0.49.57 wrote them into project directories, and plugins
+    // before 0.18 directly into the temp historian dir. All three are listed so
+    // users with old dumps still find them.
     const diagnostics = await collectDiagnostics();
+    const sessionDumps = diagnostics.historianDumps.sessionDumps;
+    if (sessionDumps.count > 0) {
+        warn(
+            `Historian debug dumps: ${sessionDumps.count} file(s) across ${sessionDumps.sessionCount} session(s) in ${sessionDumps.dir}`,
+        );
+        for (const session of sessionDumps.sessions) {
+            log.info(`  [${session.sessionId}] ${session.count} file(s)`);
+            for (const dump of session.recent.slice(0, 3)) {
+                const age = dump.ageMinutes;
+                const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+                log.info(`    ${dump.name} (${ageStr})`);
+            }
+            if (session.count > 3) {
+                log.info(`    ... and ${session.count - 3} more`);
+            }
+        }
+        if (sessionDumps.sessionCount > sessionDumps.sessions.length) {
+            log.info(
+                `  ... and ${sessionDumps.sessionCount - sessionDumps.sessions.length} more session(s)`,
+            );
+        }
+    }
     const dumpBuckets = diagnostics.historianDumps.byProject;
     if (dumpBuckets.length > 0) {
         const totalCount = dumpBuckets.reduce((sum, b) => sum + b.count, 0);
         const sessionCount = dumpBuckets.length;
-        warn(`Historian debug dumps: ${totalCount} file(s) across ${sessionCount} project(s)`);
+        warn(
+            `Historian debug dumps from older plugins in project directories: ${totalCount} file(s) across ${sessionCount} project(s)`,
+        );
         for (const bucket of dumpBuckets) {
             log.info(`  [${bucket.directory}] ${bucket.count} file(s)`);
             for (const dump of bucket.recent.slice(0, 3)) {
@@ -2408,8 +2431,8 @@ export async function runDoctor(
             }
         }
     }
-    // Legacy tmp-dir dumps from pre-Phase 3 plugin versions — still listed if
-    // present so users can find old artifacts without spelunking the tmp dir.
+    // Flat dumps from plugins before 0.18 — still listed if present so users
+    // can find old artifacts without spelunking the tmp dir.
     const legacy = diagnostics.historianDumps.legacyDumps;
     if (legacy.count > 0) {
         log.info(`Legacy historian dumps (pre-v0.18.x): ${legacy.count} file(s) in ${legacy.dir}`);
