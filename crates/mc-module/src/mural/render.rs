@@ -360,7 +360,7 @@ pub fn tile_area(width: usize, height: usize) -> usize {
 }
 
 /// The combining marks drawn over their base character: U+0334 to U+0338,
-/// the overlaid tilde, strokes and solidi. The compatibility decomposition
+/// the overlaid tilde, strokes and slashes. The compatibility decomposition
 /// of a negated symbol ends in one (`≠` is `=` and U+0338), so dropping it
 /// would draw the symbol's opposite. It is kept instead; the font has no
 /// glyph for it, so such a cue is not drawn at all.

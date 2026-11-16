@@ -222,7 +222,7 @@ fn accents_and_typographic_punctuation_are_drawn_as_ascii() {
 
 /// A character the font draws is never rewritten, the em dash included,
 /// and a negated symbol is not drawn as its opposite: `≠` decomposes to
-/// `=` and an overlaid solidus, which stays, so its cue is left out.
+/// `=` and an overlaid slash, which stays, so its cue is left out.
 #[test]
 fn drawable_characters_stay_and_negations_are_not_inverted() {
     assert_eq!(
