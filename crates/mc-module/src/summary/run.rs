@@ -204,7 +204,13 @@ pub async fn run<C: RunnerClient + Router>(
         .summaries
         .rows(
             fit::chosen_references(&job.summaries, &prompts, &job.session.session, job.from),
-            db.map(|db| (db, job.session.harness.as_str(), job.session.session.as_str())),
+            db.map(|db| {
+                (
+                    db,
+                    job.session.harness.as_str(),
+                    job.session.session.as_str(),
+                )
+            }),
         )
         .map_err(|error| format!("reading the summaries shown as references: {error}"))?
         .iter()

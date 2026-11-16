@@ -167,7 +167,8 @@ fn shared_body(content: String, p1: Option<String>) -> (Arc<str>, Option<Arc<str
 }
 
 /// The columns [`compartment_row`] reads, in its order.
-const COMPARTMENT_COLUMNS: &str = "sequence, start_message, end_message, COALESCE(start_message_id, ''),
+const COMPARTMENT_COLUMNS: &str =
+    "sequence, start_message, end_message, COALESCE(start_message_id, ''),
         COALESCE(end_message_id, ''), title, content, p1, p2, p3, p4,
         importance, episode_type, legacy, created_at";
 
@@ -1331,7 +1332,10 @@ mod tests {
         db.append_compartments("opencode", "s1", &[same.clone(), differs.clone()], 7)
             .unwrap();
         let stored = db.compartments("opencode", "s1").unwrap();
-        let made = [StoredCompartment::from(&same), StoredCompartment::from(&differs)];
+        let made = [
+            StoredCompartment::from(&same),
+            StoredCompartment::from(&differs),
+        ];
         for rows in [&stored[..], &made[..]] {
             let p1 = rows[0].p1.as_ref().unwrap();
             assert!(Arc::ptr_eq(&rows[0].content, p1), "equal texts are one");

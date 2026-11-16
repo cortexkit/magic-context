@@ -135,10 +135,7 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
     build(&mut session, &settings).expect("the first render");
     publish(&mut session, 4, "Newer work on the reader.");
     build(&mut session, &settings).expect("m[1] shows summary 4");
-    let (m0, m1) = (
-        shown(&session, head::M0_ID),
-        shown(&session, head::M1_ID),
-    );
+    let (m0, m1) = (shown(&session, head::M0_ID), shown(&session, head::M1_ID));
     // Summary 2's text is no longer held, and its row is gone.
     execute(&session, "DELETE FROM compartments WHERE sequence=2;");
     session.fold_due = true;
@@ -153,7 +150,9 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
         .collect();
     assert_eq!(texts, [m0, m1]);
     assert!(
-        log.contains("history head kept as shown, reading summaries: summary 2 is not in context.db"),
+        log.contains(
+            "history head kept as shown, reading summaries: summary 2 is not in context.db"
+        ),
         "{log}"
     );
     std::fs::remove_dir_all(dir).unwrap();
@@ -203,7 +202,8 @@ fn a_fold_reads_3700_summaries_back() {
     let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     session.db = Some(Arc::new(db));
     session.features.summarizer = true;
-    let words = "Traced the notice through the summary due check and kept the cached prefix stable. ";
+    let words =
+        "Traced the notice through the summary due check and kept the cached prefix stable. ";
     session.db.as_ref().unwrap().with_connection(|conn| {
         let tx = conn.transaction().unwrap();
         for sequence in 1..=SUMMARIES {

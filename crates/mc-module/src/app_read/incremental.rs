@@ -483,20 +483,13 @@ impl Session {
         // read from context.db. A failed read keeps the rows shown and tries
         // again on the next update.
         let rows = if p.summaries_dirty {
-            self.summary_rows()
-                .map_err(|error| {
-                    tracing::warn!(
-                        "ck-mc: session {}: reading summaries for the app reads failed: {error}",
-                        self.key.session
-                    )
-                })
-                .ok()
+            self.summary_rows().ok()
         } else {
             None
         };
         let compartments = if let Some(rows) = rows {
             p.ranges = summary_ranges(self.summary_index());
-            p.compartments = Arc::new(rows.iter().map(|row| compartment(row)).collect());
+            p.compartments = Arc::new(rows.iter().map(compartment).collect());
             p.queued = p
                 .stamped
                 .iter()

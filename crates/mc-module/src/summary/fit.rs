@@ -15,9 +15,8 @@
 
 use super::prompt::{
     build_compartment_agent_prompt, order_historian_memories, render_historian_memory_block,
-    render_seed_examples_block, render_session_references_block_window,
-    select_session_reference_indices, select_seeds, CompartmentPromptInputs,
-    ReferenceCompartment,
+    render_seed_examples_block, render_session_references_block_window, select_seeds,
+    select_session_reference_indices, CompartmentPromptInputs, ReferenceCompartment,
 };
 use crate::calibration::LocalMass;
 use crate::context_db::StoredMemory;
@@ -164,7 +163,7 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
     let render = |refs: usize, memory_count: usize, seed_count: usize| {
         (
             render_seed_examples_block(&seeds[..seed_count]),
-            render_session_references_block_window(&references, refs),
+            render_session_references_block_window(references, refs),
             render_historian_memory_block(&memories[..memory_count]),
         )
     };

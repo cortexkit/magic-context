@@ -295,15 +295,15 @@ mod tests {
             conn.execute_batch("UPDATE compartments SET content = 'Edited', p1 = 'Edited';")
         })
         .unwrap();
-        let read = summaries
-            .rows(0..3, Some((&db, "mock", "s1")))
-            .unwrap();
+        let read = summaries.rows(0..3, Some((&db, "mock", "s1"))).unwrap();
         assert_eq!(&*read[0].content, "Edited");
         assert_eq!(&*read[1].content, "Edited");
         assert_eq!(*read[2], rows[2], "a held row stays as it was");
 
-        db.with_connection(|conn| conn.execute_batch("DELETE FROM compartments WHERE sequence = 1;"))
-            .unwrap();
+        db.with_connection(|conn| {
+            conn.execute_batch("DELETE FROM compartments WHERE sequence = 1;")
+        })
+        .unwrap();
         assert_eq!(
             summaries.rows(0..3, Some((&db, "mock", "s1"))).unwrap_err(),
             "summary 1 is not in context.db"
