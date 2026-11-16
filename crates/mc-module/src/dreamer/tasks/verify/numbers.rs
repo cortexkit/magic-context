@@ -61,10 +61,41 @@ pub(crate) struct Quantity {
 /// Words after which a number names an item rather than counting anything:
 /// `Mode 3`, `row 12`, `step 2`.
 const LABELS: &[&str] = &[
-    "attempt", "batch", "case", "chapter", "commit", "day", "fence", "figure", "invariant",
-    "issue", "item", "level", "line", "lines", "migration", "mode", "option", "page", "part",
-    "phase", "pr", "round", "row", "rows", "rule", "run", "schema", "section", "spec", "stage",
-    "step", "table", "tier", "version", "week",
+    "attempt",
+    "batch",
+    "case",
+    "chapter",
+    "commit",
+    "day",
+    "fence",
+    "figure",
+    "invariant",
+    "issue",
+    "item",
+    "level",
+    "line",
+    "lines",
+    "migration",
+    "mode",
+    "option",
+    "page",
+    "part",
+    "phase",
+    "pr",
+    "round",
+    "row",
+    "rows",
+    "rule",
+    "run",
+    "schema",
+    "section",
+    "spec",
+    "stage",
+    "step",
+    "table",
+    "tier",
+    "version",
+    "week",
 ];
 
 /// Words before a two-part dotted number that make it a version: release
@@ -78,8 +109,25 @@ const RELEASE_BEFORE: &[&str] = &[
 
 /// Words after a two-part dotted number that make it a version.
 const RELEASE_AFTER: &[&str] = &[
-    "branch", "build", "builds", "code", "crate", "dreamer", "era", "host", "hosts", "lane",
-    "line", "lines", "module", "plugin", "release", "releases", "rust", "series", "transform",
+    "branch",
+    "build",
+    "builds",
+    "code",
+    "crate",
+    "dreamer",
+    "era",
+    "host",
+    "hosts",
+    "lane",
+    "line",
+    "lines",
+    "module",
+    "plugin",
+    "release",
+    "releases",
+    "rust",
+    "series",
+    "transform",
     "typescript",
 ];
 
@@ -243,7 +291,9 @@ fn mask(text: &str) -> String {
     for found in re(&TOKEN, r"[A-Za-z0-9_.@+/~-]+").find_iter(text) {
         let token = found.as_str().trim_end_matches(['.', '-']);
         let slashed = token.contains('/')
-            && !token.chars().all(|ch| ch.is_ascii_digit() || ch == '/' || ch == '.');
+            && !token
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ch == '/' || ch == '.');
         if slashed || path_shaped(token) {
             blank(found.range());
         }
@@ -261,8 +311,10 @@ pub(crate) fn quantities(text: &str) -> Vec<Quantity> {
     for token in re(&NUMBER, r"[0-9](?:[0-9_]|[.,][0-9])*").find_iter(&masked) {
         let (start, mut end) = (token.start(), token.end());
         let digits = token.as_str();
-        let before = masked[..start].chars().next_back();
-        let before_that = before.and_then(|ch| masked[..start - ch.len_utf8()].chars().next_back());
+        // What precedes the number is read in the text itself: a blanked
+        // path or id still makes `task.rs:12` a line number.
+        let before = text[..start].chars().next_back();
+        let before_that = before.and_then(|ch| text[..start - ch.len_utf8()].chars().next_back());
         match before {
             // Inside a word or a code name, a reference, or a decimal part.
             Some(ch) if word_char(ch) || matches!(ch, '#' | '§' | '.' | '$' | '@' | '\\') => {
@@ -329,11 +381,22 @@ pub(crate) fn quantities(text: &str) -> Vec<Quantity> {
         let end = end + unit_length;
         found.push(Quantity {
             raw: text.get(start..end).unwrap_or(digits).to_owned(),
-            value: value * size,
+            value: in_base(value, dim, size),
             dim,
         });
     }
     found
+}
+
+/// `value`, written with a unit of kind `dim` that is `size` base units, in
+/// base units. A percent is divided rather than multiplied, so 95% is
+/// exactly 0.95.
+fn in_base(value: f64, dim: Dim, size: f64) -> f64 {
+    if dim == Dim::Percent {
+        value / 100.0
+    } else {
+        value * size
+    }
 }
 
 /// Whether two values are the same number, allowing for the rounding of
@@ -400,18 +463,28 @@ pub(crate) struct Derivation {
 /// numbers the left side can be written as. `Err` says why not.
 pub(crate) fn derivations(raw: &str) -> Result<Vec<Derivation>, String> {
     let mut steps = Vec::new();
-    for step in raw.split(';').map(str::trim).filter(|step| !step.is_empty()) {
+    for step in raw
+        .split(';')
+        .map(str::trim)
+        .filter(|step| !step.is_empty())
+    {
         let (left, right) = step
             .split_once('=')
             .ok_or_else(|| format!("derive step {step:?} has no `=`"))?;
         let result = match Parser::new(left)?.tokens.as_slice() {
             [Token::Number(quantity)] => quantity.clone(),
-            _ => return Err(format!("the left side of derive step {step:?} is not one number")),
+            _ => {
+                return Err(format!(
+                    "the left side of derive step {step:?} is not one number"
+                ))
+            }
         };
         let mut parser = Parser::new(right)?;
         let value = parser.expression()?;
         if parser.at != parser.tokens.len() {
-            return Err(format!("derive step {step:?} can't be read past its expression"));
+            return Err(format!(
+                "derive step {step:?} can't be read past its expression"
+            ));
         }
         let inputs: Vec<Quantity> = parser
             .tokens
@@ -457,10 +530,7 @@ struct Parser {
 impl Parser {
     fn new(text: &str) -> Result<Self, String> {
         static NUMBER: OnceLock<Regex> = OnceLock::new();
-        let number = re(
-            &NUMBER,
-            r"^[0-9](?:[0-9_]|[.,][0-9])*(?:[eE][+-]?[0-9]+)?",
-        );
+        let number = re(&NUMBER, r"^[0-9](?:[0-9_]|[.,][0-9])*(?:[eE][+-]?[0-9]+)?");
         let mut tokens = Vec::new();
         let mut at = 0;
         while at < text.len() {
@@ -508,11 +578,11 @@ impl Parser {
                     (dim, size)
                 }
                 Ok(None) => (Dim::Count, 1.0),
-                Err(()) => return Err(format!("derive can't read {:?}", &rest[..])),
+                Err(()) => return Err(format!("derive can't read {rest:?}")),
             };
             tokens.push(Token::Number(Quantity {
                 raw: rest[..end].to_owned(),
-                value: value * size,
+                value: in_base(value, dim, size),
                 dim,
             }));
             at += end;
@@ -539,7 +609,11 @@ impl Parser {
         while let Some(Token::Op(op @ ('+' | '-'))) = self.peek().cloned() {
             self.at += 1;
             let right = self.term()?;
-            value = if op == '+' { value + right } else { value - right };
+            value = if op == '+' {
+                value + right
+            } else {
+                value - right
+            };
         }
         Ok(value)
     }

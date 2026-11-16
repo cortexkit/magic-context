@@ -73,11 +73,11 @@ pub(crate) mod manifest;
 mod numbers;
 pub(crate) mod spans;
 
+use apply::METADATA;
 use cites::Cite;
-use confirm::confirm;
+use confirm::{confirm, Committed};
 use live::Gate;
 use manifest::{parse_manifest, Decision, Verdict};
-use apply::METADATA;
 use spans::{find_lines, Cited, Confirmation, STORED_KEY};
 
 /// The kinds memory profiles name.
@@ -217,8 +217,14 @@ pub(crate) fn live_memories(
             content,
             revision,
             files,
-            verified_at: if confirmation.is_some() { verified_at } else { 0 },
-            verified_commit: confirmation.as_ref().map(|confirmation| confirmation.commit.clone()),
+            verified_at: if confirmation.is_some() {
+                verified_at
+            } else {
+                0
+            },
+            verified_commit: confirmation
+                .as_ref()
+                .map(|confirmation| confirmation.commit.clone()),
             confirmation,
             checked_at,
             branch: branch.filter(|branch| !branch.is_empty()),
@@ -320,7 +326,11 @@ pub(crate) fn changed(memory: &Memory, changes: &Changes) -> bool {
 /// the files of the lines its confirmation cited, each once.
 fn watched(memory: &Memory) -> Vec<&str> {
     let mut files: Vec<&str> = memory.files.iter().map(String::as_str).collect();
-    for span in memory.confirmation.iter().flat_map(|confirmation| &confirmation.spans) {
+    for span in memory
+        .confirmation
+        .iter()
+        .flat_map(|confirmation| &confirmation.spans)
+    {
         if !files.contains(&span.path.as_str()) {
             files.push(&span.path);
         }
@@ -1161,7 +1171,7 @@ pub(crate) struct VerifyBatch {
     /// lock is taken, and the write reads the answer from here.
     confirmations: Mutex<HashMap<ConfirmationKey, Result<Confirmation, String>>>,
     /// The files those checks read at the checkout's commit, by cited path.
-    files: Mutex<HashMap<String, Result<Option<(String, String)>, String>>>,
+    files: Mutex<HashMap<String, Committed>>,
 }
 
 /// A confirmation's memory, `cites` and `derive`, as one reply gave them.
@@ -1248,7 +1258,7 @@ impl VerifyBatch {
     }
 
     /// The file `cited` names at the checkout's commit, read once per batch.
-    fn committed(&self, cited: &str) -> Result<Option<(String, String)>, String> {
+    fn committed(&self, cited: &str) -> Committed {
         if let Some(known) = self.files.lock().expect("cited files").get(cited) {
             return known.clone();
         }

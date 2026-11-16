@@ -6,7 +6,10 @@
 //! a copy of a store and the project's checkout, exactly as a run plans it,
 //! and writes each batch's request as `<out>/<kind>/batch-<n>/verify.request.json`:
 //! the system and user text the module sends, the model settings it sends
-//! them with, and the memories the batch read. The runner in
+//! them with, and the memories the batch read. Planning writes to the copy
+//! what a run's planning writes: a confirmed memory whose cited lines are
+//! unchanged is recorded there as confirmed at the checkout's commit, and
+//! gets no request. The runner in
 //! `packages/plugin/scripts/dreamer-replay/` sends one request with
 //! read-only tools over the same checkout and writes the whole trajectory
 //! beside it.
@@ -294,6 +297,7 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
         Row {
             files: vec!["src/timer.rs"],
             verified: Some((1_000, Some(first))),
+            spans: vec![("src/timer.rs", 1, 1, "pub fn start_dream_timer() {}")],
             ..row(1, "`start_dream_timer` in src/timer.rs takes no arguments.")
         },
         row(
@@ -333,6 +337,10 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
         .as_str()
         .unwrap()
         .contains("+pub fn start_dream_timer(every: u64) {}"));
+    assert!(diff["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Confirmed from: src/timer.rs:1-1"));
     let broad = read("verify-broad/batch-0/verify.request.json");
     assert_eq!(broad["settings"]["maxSteps"], 60);
     assert_eq!(broad["model"], "deepseek-flash");

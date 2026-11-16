@@ -23,6 +23,9 @@ pub(crate) struct Row {
     pub files: Vec<&'static str>,
     /// When it was verified, and at which commit.
     pub verified: Option<(i64, Option<String>)>,
+    /// The lines that verification cited (path, first and last line,
+    /// text); none for a confirmation recorded without them.
+    pub spans: Vec<(&'static str, usize, usize, &'static str)>,
     /// When a verify task last skipped it.
     pub checked_at: Option<i64>,
 }
@@ -35,6 +38,7 @@ pub(crate) fn row(id: i64, content: &str) -> Row {
         content: content.to_owned(),
         files: Vec::new(),
         verified: None,
+        spans: Vec::new(),
         checked_at: None,
     }
 }
@@ -79,6 +83,23 @@ impl Fixture {
                 if let Some((at, commit)) = &row.verified {
                     metadata.insert("dreamerVerifiedAt".into(), json!(at));
                     metadata.insert("dreamerVerifiedCommit".into(), json!(commit));
+                    if let (Some(commit), false) = (commit, row.spans.is_empty()) {
+                        let confirmation = Confirmation {
+                            commit: commit.clone(),
+                            spans: row
+                                .spans
+                                .iter()
+                                .map(|(path, start, end, text)| Cited {
+                                    path: (*path).to_owned(),
+                                    start: *start,
+                                    end: *end,
+                                    text: (*text).to_owned(),
+                                })
+                                .collect(),
+                            derive: None,
+                        };
+                        metadata.insert(STORED_KEY.into(), confirmation.json(*at));
+                    }
                 }
                 if let Some(at) = row.checked_at {
                     metadata.insert("dreamerCheckedAt".into(), json!(at));
@@ -274,11 +295,13 @@ fn verify_checks_mapped_memories_whose_files_changed_verified_ones_apart() {
         Row {
             files: vec!["src/a.rs"],
             verified: verified.clone(),
+            spans: vec![("src/a.rs", 1, 1, "old")],
             ..row(1, "A changed.")
         },
         Row {
             files: vec!["src/b.rs"],
             verified: verified.clone(),
+            spans: vec![("src/b.rs", 1, 1, "steady")],
             ..row(2, "B did not change.")
         },
         Row {
@@ -288,23 +311,36 @@ fn verify_checks_mapped_memories_whose_files_changed_verified_ones_apart() {
         row(4, "Not mapped, so not this task's."),
         Row {
             files: vec!["src/gone.rs"],
-            verified,
+            verified: verified.clone(),
+            spans: vec![("src/gone.rs", 1, 1, "soon gone")],
             ..row(5, "Gone was removed.")
+        },
+        // Confirmed before cited lines were required: its file did not
+        // change, yet it is read in full, as one never confirmed.
+        Row {
+            files: vec!["src/b.rs"],
+            verified,
+            ..row(6, "B was confirmed without cited lines.")
         },
     ]);
     let batches = fixture.batches(false);
     assert_eq!(
         batches.iter().map(ids).collect::<Vec<_>>(),
-        [vec![1, 5], vec![3]]
+        [vec![1, 5], vec![3, 6]]
     );
-    // The verified memories are shown their files' diffs since the commit
-    // they were verified at, under the task's diff message.
+    // The memories whose cited lines changed are shown their files' diffs
+    // since the commit they were confirmed at, under the task's diff
+    // message, with the lines they were confirmed from.
     assert!(batches[0].has_diff());
     let message = &batches[0].message;
     assert!(
-        message.contains("The git diff below is the evidence."),
+        message.contains("The git diff below shows what changed."),
         "{message}"
     );
+    assert!(message.contains(
+        "[1] ARCHITECTURE\nContent: A changed.\nBacking files: src/a.rs\nConfirmed from: src/a.rs:1-1\n"
+    ));
+    assert!(message.contains("Confirmed from: src/gone.rs:1-1\n</memories>"));
     assert!(
         message.contains("<changed-files mode=\"diff\">\nFile: src/a.rs (memories: 1)\ndiff --git")
     );
@@ -312,45 +348,78 @@ fn verify_checks_mapped_memories_whose_files_changed_verified_ones_apart() {
     assert!(message.contains("File: src/gone.rs (memories: 5)\ndiff --git"));
     assert!(!message.contains("Not found by a plain search"));
     assert_eq!(batches[0].commit(), fixture.repo.checkout().head());
-    // A memory never verified is checked by reading, under the other
-    // message, with what a plain search didn't find.
+    // A memory never confirmed with cited lines is checked by reading,
+    // under the other message, with what a plain search didn't find.
     assert!(!batches[1].has_diff());
     let message = &batches[1].message;
     assert!(message.contains("Check each memory's claim against its backing files"));
     assert!(message.contains(
-        "[3] ARCHITECTURE\nContent: C was never verified; it cites `missing_helper`.\nBacking files: src/c.rs\nNot found by a plain search of the checkout: missing_helper\n</memories>"
+        "[3] ARCHITECTURE\nContent: C was never verified; it cites `missing_helper`.\nBacking files: src/c.rs\nNot found by a plain search of the checkout: missing_helper\n\n[6]"
     ));
+    assert!(!message.contains("Confirmed from"));
     assert_eq!(batches[1].system, batches[0].system);
     assert!(batches[0].system.starts_with("You are a memory verifier"));
     assert!(!batches[0].system.contains('⟦'));
 }
 
 #[test]
-fn verify_without_a_recorded_commit_falls_back_to_commit_times() {
+fn an_old_confirmation_without_cited_lines_counts_as_never_made() {
     let fixture = Fixture::new(&[("src/a.rs", "a\n")]);
+    let head = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     let now = crate::memory_writes::now_ms();
     fixture.insert(&[
         Row {
             files: vec!["src/a.rs"],
             verified: Some((1, None)),
-            ..row(1, "Verified long before the file's commit.")
+            ..row(1, "Confirmed by 0.49 without a commit.")
         },
         Row {
             files: vec!["src/a.rs"],
-            verified: Some((now + 60_000, None)),
-            ..row(2, "Verified after it.")
+            verified: Some((now + 60_000, Some(head.clone()))),
+            ..row(2, "Confirmed at this very commit, without cited lines.")
+        },
+        Row {
+            files: vec!["src/a.rs"],
+            verified: Some((now + 60_000, Some(head.clone()))),
+            spans: vec![("src/a.rs", 1, 1, "a")],
+            ..row(3, "Confirmed at this commit from its cited line.")
         },
     ]);
-    let batches = fixture.batches(false);
-    assert_eq!(batches.iter().map(ids).collect::<Vec<_>>(), [vec![1]]);
-    // Without a commit there is no diff to show.
-    assert!(!batches[0].has_diff());
-    // An uncommitted change counts too.
-    fixture.repo.write(&[("src/a.rs", "a, changed\n")]);
+    // Spans kept for an earlier confirmation count for nothing either.
+    fixture.execute(&format!(
+        "UPDATE memories SET metadata_json = json_set(metadata_json, '$.{STORED_KEY}.verifiedAt', 5)
+          WHERE id = 3"
+    ));
+    fixture.insert(&[Row {
+        files: vec!["src/a.rs"],
+        verified: Some((now + 60_000, Some(head.clone()))),
+        spans: vec![("src/a.rs", 1, 1, "a")],
+        ..row(
+            4,
+            "Confirmed at this commit from its cited line, and nothing changed.",
+        )
+    }]);
+    let pool = fixture
+        .db
+        .with_connection(|conn| live_memories(conn, PROJECT, &["swe:architecture".to_owned()], 0))
+        .unwrap();
+    let state: Vec<(i64, i64, bool)> = pool
+        .iter()
+        .map(|memory| (memory.id, memory.verified_at, memory.confirmation.is_some()))
+        .collect();
     assert_eq!(
-        fixture.batches(false).iter().map(ids).collect::<Vec<_>>(),
-        [vec![1, 2]]
+        state,
+        [
+            (1, 0, false),
+            (2, 0, false),
+            (3, 0, false),
+            (4, now + 60_000, true)
+        ]
     );
+    // They are read in full, never shown a diff; memory 4 needs nothing.
+    let batches = fixture.batches(false);
+    assert_eq!(batches.iter().map(ids).collect::<Vec<_>>(), [vec![1, 2, 3]]);
+    assert!(!batches[0].has_diff());
 }
 
 #[test]
@@ -386,7 +455,7 @@ fn verify_broad_puts_memories_whose_citations_are_all_gone_first_then_the_least_
     let batches = fixture.batches(true);
     assert_eq!(
         batches.iter().map(ids).collect::<Vec<_>>(),
-        [vec![2, 6, 3, 1, 4, 5]]
+        [vec![2, 6, 3, 1, 4], vec![5]]
     );
     let message = &batches[0].message;
     assert!(message.contains(
@@ -449,7 +518,7 @@ fn a_memory_citing_nothing_never_goes_first() {
 }
 
 #[test]
-fn a_broad_run_sends_twenty_memories_a_batch_and_only_covered_categories() {
+fn a_broad_run_sends_five_memories_a_batch_and_only_covered_categories() {
     let fixture = Fixture::new(&[("README.md", "readme\n")]);
     let mut rows: Vec<Row> = (1..=45).map(|id| row(id, &format!("Fact {id}."))).collect();
     rows.push(Row {
@@ -465,7 +534,7 @@ fn a_broad_run_sends_twenty_memories_a_batch_and_only_covered_categories() {
             .iter()
             .map(|batch| batch.read().len())
             .collect::<Vec<_>>(),
-        [20, 20, 5]
+        [5; 9]
     );
     let all: Vec<i64> = batches.iter().flat_map(ids).collect();
     assert!(all.contains(&46) && !all.contains(&45));
@@ -485,6 +554,7 @@ fn a_search_cut_by_its_limits_lists_nothing_and_puts_nobody_first() {
         files: Vec::new(),
         verified_at: 0,
         verified_commit: None,
+        confirmation: None,
         branch: None,
         checked_at: 0,
     };
@@ -518,6 +588,7 @@ fn the_diff_frame_keeps_the_plugins_shape_and_bounds_long_diffs() {
         files: vec!["src/a.ts".into()],
         verified_at: 1,
         verified_commit: None,
+        confirmation: None,
         branch: None,
         checked_at: 1,
     };
@@ -569,7 +640,7 @@ async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides()
         &[
             Ends::Reply("I checked both; they hold."),
             Ends::Reply(
-                "<verify>\n<verified id=\"1\" files=\"src/live.rs\"/>\n<archive id=\"2\" reason=\"its subject was removed\" missing=\"gone_function\"/>\n</verify>",
+                "<verify>\n<verified id=\"1\" files=\"src/live.rs\" cites=\"src/live.rs:1-1\"/>\n<archive id=\"2\" reason=\"its subject was removed\" missing=\"gone_function\"/>\n</verify>",
             ),
         ],
     );
@@ -671,4 +742,117 @@ async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides()
         })
         .unwrap();
     assert_eq!(key, "dream-run:1:verify-broad:0:2");
+}
+
+/// A confirmed memory whose file changed, but not the lines it cites, stays
+/// confirmed without a model: the module finds the lines again, where they
+/// moved, and records the new commit and their new place.
+#[test]
+fn a_confirmation_whose_cited_lines_are_unchanged_stays_without_a_model() {
+    let fixture = Fixture::new(&[("src/a.rs", "fn keep() {}\nconst CAP: u64 = 64_000;\n")]);
+    let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fixture.repo.write(&[(
+        "src/a.rs",
+        "// The cap.\n\nfn keep() {}\nconst CAP: u64 = 64_000;\n",
+    )]);
+    let second = fixture.repo.commit("move the cap down");
+    fixture.insert(&[Row {
+        files: vec!["src/a.rs"],
+        verified: Some((1_000, Some(first))),
+        spans: vec![("src/a.rs", 2, 2, "const CAP: u64 = 64_000;")],
+        ..row(1, "`CAP` in src/a.rs is 64k.")
+    }]);
+    assert!(fixture.batches(false).is_empty(), "no model is asked");
+    let (_, _, revision, verified_at, metadata, updated_at) = fixture.memory(1);
+    assert_eq!((revision, verified_at, updated_at), (1, Some(1_000), 5));
+    assert_eq!(metadata["dreamerVerifiedAt"], json!(1_000));
+    assert_eq!(metadata["dreamerVerifiedCommit"], json!(second));
+    assert_eq!(
+        metadata[STORED_KEY],
+        json!({
+            "verifiedAt": 1_000,
+            "commit": second,
+            "spans": [{"path": "src/a.rs", "start": 4, "end": 4, "text": "const CAP: u64 = 64_000;"}],
+        })
+    );
+    let verify_commit: String = fixture
+        .db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT verify_commit FROM memories WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(verify_commit, second);
+    // Nothing changed since the commit recorded, so the next run has
+    // nothing to check either.
+    assert!(fixture.batches(false).is_empty());
+}
+
+/// A confirmed memory whose cited lines changed goes to the model with the
+/// diff, here of a file it cites but is not mapped to, and the lines it was
+/// confirmed from.
+#[test]
+fn a_confirmation_whose_cited_lines_changed_goes_to_the_model_with_them() {
+    let fixture = Fixture::new(&[
+        ("src/a.rs", "fn uses_cap() {}\n"),
+        ("src/b.rs", "const CAP: u64 = 64_000;\n"),
+    ]);
+    let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fixture
+        .repo
+        .write(&[("src/b.rs", "const CAP: u64 = 32_000;\n")]);
+    fixture.repo.commit("halve the cap");
+    fixture.insert(&[Row {
+        files: vec!["src/a.rs"],
+        verified: Some((1_000, Some(first))),
+        spans: vec![("src/b.rs", 1, 1, "const CAP: u64 = 64_000;")],
+        ..row(1, "`uses_cap` reads `CAP`, which is 64k.")
+    }]);
+    let batches = fixture.batches(false);
+    assert_eq!(batches.iter().map(ids).collect::<Vec<_>>(), [vec![1]]);
+    assert!(batches[0].has_diff());
+    let message = &batches[0].message;
+    assert!(
+        message.contains("Backing files: src/a.rs\nConfirmed from: src/b.rs:1-1\n</memories>"),
+        "{message}"
+    );
+    assert!(message.contains("File: src/b.rs (memories: 1)\ndiff --git"));
+    assert!(message.contains("-const CAP: u64 = 64_000;\n+const CAP: u64 = 32_000;\n"));
+    // Nothing is recorded for it until the model decides.
+    assert_eq!(
+        fixture.memory(1).4["dreamerVerifiedCommit"],
+        json!(fixture.repo.git(&["rev-parse", "HEAD~1"]).trim())
+    );
+}
+
+#[test]
+fn diff_batches_hold_twenty_memories_and_read_batches_five() {
+    let fixture = Fixture::new(&[("src/a.rs", "old\n")]);
+    let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fixture.repo.write(&[("src/a.rs", "new\n")]);
+    fixture.repo.commit("change");
+    let mut rows: Vec<Row> = (1..=25)
+        .map(|id| Row {
+            files: vec!["src/a.rs"],
+            verified: Some((1_000, Some(first.clone()))),
+            spans: vec![("src/a.rs", 1, 1, "old")],
+            ..row(id, &format!("Fact {id}."))
+        })
+        .collect();
+    rows.extend((26..=32).map(|id| Row {
+        files: vec!["src/a.rs"],
+        ..row(id, &format!("Fact {id}."))
+    }));
+    fixture.insert(&rows);
+    let batches = fixture.batches(false);
+    assert_eq!(
+        batches
+            .iter()
+            .map(|batch| (batch.read().len(), batch.has_diff()))
+            .collect::<Vec<_>>(),
+        [(20, true), (5, true), (5, false), (2, false)]
+    );
 }

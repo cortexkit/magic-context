@@ -561,4 +561,65 @@ mod tests {
         assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso(1_790_789_964_781), "2026-09-30T17:39:24.781Z");
     }
+
+    /// A confirmation recorded without the lines it rests on (every one
+    /// before verify required them) shows as unverified, as verify treats it.
+    #[test]
+    fn a_confirmation_without_cited_lines_shows_as_unverified() {
+        use crate::dreamer::tasks::verify::spans::{Cited, Confirmation};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        drop(crate::context_db::ContextDb::create_for_tests(&path).unwrap());
+        let mut conn = Connection::open(path).unwrap();
+        let who = Writer {
+            harness: "mode3",
+            session: "verify-session",
+            project: "dir:verify-project",
+            authority: None,
+            line: None,
+        };
+        let content = "The batch cap is set in one place.";
+        run(
+            &mut conn,
+            &who,
+            &json!({"action": "write", "content": content, "category": "PROJECT_RULES", "ids": []}),
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM memories WHERE content=?",
+                [content],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut shown = |metadata: serde_json::Value| -> String {
+            conn.execute(
+                "UPDATE memories SET verification_status = 'verified', metadata_json = ?2 WHERE id = ?1",
+                rusqlite::params![id, metadata.to_string()],
+            )
+            .unwrap();
+            run(
+                &mut conn,
+                &who,
+                &json!({"action": "get", "content": "", "category": "PROJECT_RULES", "ids": [id]}),
+            )
+            .unwrap()
+        };
+        let old = shown(json!({"dreamerVerifiedAt": 5}));
+        assert!(old.contains("| unverified |"), "{old}");
+        let spans = Confirmation {
+            commit: "a".repeat(40),
+            spans: vec![Cited {
+                path: "src/cap.rs".into(),
+                start: 1,
+                end: 1,
+                text: "const CAP: usize = 5;".into(),
+            }],
+            derive: None,
+        }
+        .json(5);
+        let cited = shown(json!({"dreamerVerifiedAt": 5, "dreamerVerifiedSpans": spans}));
+        assert!(cited.contains("| verified |"), "{cited}");
+    }
 }

@@ -32,9 +32,7 @@ use std::time::Duration;
 
 use super::cites::Cite;
 use super::spans::{find_lines, Cited};
-use crate::dreamer::branches::{
-    holds_any, names, read_blob, uncommitted, LiveBranch, Refs, Tree,
-};
+use crate::dreamer::branches::{holds_any, names, read_blob, uncommitted, LiveBranch, Refs, Tree};
 use crate::dreamer::checkout::clean_path;
 
 /// The start of the reason a confirmation counts as a skip when its cited

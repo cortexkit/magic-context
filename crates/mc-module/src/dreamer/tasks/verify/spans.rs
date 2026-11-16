@@ -39,7 +39,11 @@ pub(crate) struct Span {
 /// [`MAX_SPANS`] spans, or a span over [`MAX_SPAN_LINES`] lines.
 pub(crate) fn parse_cites(raw: &str) -> Result<Vec<Span>, String> {
     let mut spans = Vec::new();
-    for entry in raw.split(';').map(str::trim).filter(|entry| !entry.is_empty()) {
+    for entry in raw
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
         let malformed = || format!("cites entry {entry:?} is not path:start-end");
         let (path, range) = entry.rsplit_once(':').ok_or_else(malformed)?;
         let path = path.trim();

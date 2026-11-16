@@ -21,10 +21,13 @@ use super::spans::{lines_of, parse_cites, Cited, Confirmation};
 use crate::dreamer::branches::{names, short};
 use crate::dreamer::checkout::clean_path;
 
-/// A file's text at the checked commit, read by its cited path: the path
-/// from the repository's top and the text, `Ok(None)` when the commit has no
-/// such file.
-pub(crate) type ReadFile<'a> = dyn Fn(&str) -> Result<Option<(String, String)>, String> + 'a;
+/// A file read at the checked commit by its cited path: the path from the
+/// repository's top and the text, `Ok(None)` when the commit has no such
+/// file, `Err` when git could not tell.
+pub(crate) type Committed = Result<Option<(String, String)>, String>;
+
+/// How [`confirm`] reads a file at the checked commit.
+pub(crate) type ReadFile<'a> = dyn Fn(&str) -> Committed + 'a;
 
 /// The evidence a `verified` verdict rests on, when the module accepts it:
 /// `content` is the memory's text as the batch sent it, `top_level` the
@@ -101,7 +104,10 @@ fn check_names(content: &str, top_level: &BTreeSet<String>, cited: &[Cited]) -> 
 /// hold; `Err` says which check failed.
 fn check_numbers(content: &str, derive: Option<&str>, cited: &[Cited]) -> Result<(), String> {
     let stated = quantities(content);
-    let held: Vec<Quantity> = cited.iter().flat_map(|span| quantities(&span.text)).collect();
+    let held: Vec<Quantity> = cited
+        .iter()
+        .flat_map(|span| quantities(&span.text))
+        .collect();
     let in_spans = |quantity: &Quantity| held.iter().any(|found| same(quantity, found));
     let steps = match derive {
         Some(derive) => derivations(derive)?,
