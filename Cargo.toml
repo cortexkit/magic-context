@@ -43,7 +43,7 @@ subc-protocol = "=0.37.0"
 subc-control = "=0.40.1"
 subc-transport = "=0.18.0"
 subc-client-rs = "=0.40.3"
-subc-os = "=0.1.39"
+subc-os = "=0.1.40"
 # The daemon the registration live suite boots in-process
 # (crates/mc-module/tests/registration_live.rs), with its test support on.
 # It is the release the cerebellum module's own registration suite boots, and
