@@ -8,6 +8,9 @@
 
 use super::*;
 
+#[path = "compaction_undo_review_tests.rs"]
+mod review_tests;
+
 const UNDO: &[u8] = include_bytes!("../testdata/compaction-undo-v1/a-undo-notice.json");
 const STALE_WINDOW: &[u8] =
     include_bytes!("../testdata/compaction-undo-v1/b-stale-window-notice.json");
