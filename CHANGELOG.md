@@ -21,6 +21,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Wh
 
 ## Unreleased
 
+- OMP WebSocket continuations reuse the LKG root bookkeeping projection, avoiding false refusals when only `completedAt` or `contextSnapshot` changes; nested tool arguments remain part of history identity.
+
 The prompt surface is now split cleanly between desk-oriented system guidance and tool/parameter contracts: agents get a shorter orientation with explicit filing, search, pinboard, tray, and stamping triggers, while each tool owns its operational details. Dreamer bulk memory enumeration moved from `ctx_memory(action="list")` to the dreamer-only `ctx_memory_list` tool, which never appears in a primary provider tool list. Because the system prompt and tool schemas change, every existing session pays one prompt-cache rewrite on its first turn after upgrading.
 
 ## Highlights by release line

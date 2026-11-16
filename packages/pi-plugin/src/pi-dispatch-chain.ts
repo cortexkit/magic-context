@@ -7,6 +7,7 @@ import {
 import { piEncodeChainTail } from "./pi-dispatch-chain-tail";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
 import { piDeduplicatedToolCallIds } from "./pi-dispatch-structure";
+import { piProviderInput } from "./pi-provider-input";
 
 /**
  * Oh My Pi's Responses providers can continue a conversation from the copy the
@@ -128,7 +129,7 @@ export function piPreparedHistory(
 						Object.entries(source ?? {}).filter(([key]) => key !== "timestamp"),
 					)
 				: message;
-		const fields = lkgContentFields(identity);
+		const fields = lkgContentFields(piProviderInput(identity));
 		if (!fields) return undefined;
 		// Position is the identity here: both arrays are prepared output of the
 		// same session, and a shifted message must not match its neighbour.

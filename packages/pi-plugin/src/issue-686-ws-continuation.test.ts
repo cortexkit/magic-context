@@ -314,6 +314,96 @@ test("issue 686 WebSocket continuation: two consecutive user turns on a reused t
 	expect(h.stops).toBe(0);
 });
 
+for (const [field, before, after] of [
+	["completedAt", 10, 11],
+	["contextSnapshot", { promptTokens: 10 }, { promptTokens: 11 }],
+] as const) {
+	test(`WebSocket continuation: changing only an older assistant's ${field} admits`, async () => {
+		const h = harness();
+		const older = { ...a1.prepared, [field]: before };
+		const answer = response({
+			id: "resp_2",
+			text: "done",
+			tag: 4,
+			timestamp: 5,
+		});
+		await h.pass([...m1, older, r1]);
+		h.send(full([...w1, ...a1.wire, outputItem("call_1", "§3§ file body")]));
+		expect(h.refusals).toEqual([]);
+		h.respond(answer.host);
+		await h.pass(
+			[
+				...m1,
+				{ ...older, [field]: after },
+				r1,
+				answer.prepared,
+				user("§5§ next turn", 6),
+			],
+			true,
+		);
+		h.send(chained("resp_2", [userItem("§5§ next turn")]));
+		expect(h.refusals).toEqual([]);
+		expect(h.stops).toBe(0);
+	});
+}
+
+for (const field of ["completedAt", "contextSnapshot"]) {
+	test(`WebSocket continuation guard: changing a nested ${field} tool argument refuses`, async () => {
+		const h = harness();
+		const call = {
+			...callItem("call_1"),
+			arguments: JSON.stringify({ [field]: 10 }),
+		};
+		const older = {
+			...a1.prepared,
+			content: a1.prepared.content.map((block) =>
+				block.type === "toolCall"
+					? { ...block, arguments: { [field]: 10 } }
+					: block,
+			),
+			providerPayload: {
+				...a1.prepared.providerPayload,
+				items: [...a1.prepared.providerPayload.items.slice(0, -1), call],
+			},
+		};
+		const { id: _id, ...wireCall } = call;
+		const answer = response({
+			id: "resp_2",
+			text: "done",
+			tag: 4,
+			timestamp: 5,
+		});
+		await h.pass([...m1, older, r1]);
+		h.send(
+			full([
+				...w1,
+				...a1.wire.slice(0, -1),
+				wireCall,
+				outputItem("call_1", "§3§ file body"),
+			]),
+		);
+		expect(h.refusals).toEqual([]);
+		h.respond(answer.host);
+		const changed = {
+			...older,
+			content: older.content.map((block) =>
+				block.type === "toolCall"
+					? { ...block, arguments: { [field]: 11 } }
+					: block,
+			),
+		};
+		await h.pass(
+			[...m1, changed, r1, answer.prepared, user("§5§ next turn", 6)],
+			true,
+		);
+		h.send(chained("resp_2", [userItem("§5§ next turn")]));
+		expect(h.stops).toBe(1);
+		expect(h.refusals[0]).toContain(
+			"prepared history does not extend the previous managed request",
+		);
+	});
+}
+
 test("issue 686 WebSocket continuation: a provider retry of the admitted continuation admits", async () => {
 	const h = await toolTurn();
 	const frame = chained("resp_1", [outputItem("call_1", "§3§ file body")]);
