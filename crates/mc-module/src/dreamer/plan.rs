@@ -16,8 +16,12 @@
 //! every provider the items name, with the tools each serves, in canonical
 //! order, and the composition's digest. The Agent Runner and Broca both refuse
 //! a plan without them, and refuse one whose provider set differs from the
-//! items'. This module learns the reader's tools by fetching the same catalog
-//! first, under the same scope ([`reader_tools`] checks that answer).
+//! items'. This module learns the reader's tools by fetching the provider's
+//! `reader` catalog first ([`reader_tools`] checks that answer). It fetches
+//! it on the provider's project-free route, outside the child's scope: a
+//! catalog differs by route only in tools the reader preset never holds
+//! (shell, edits, remote execution), so the runner's scoped fetch returns the
+//! same tools.
 //!
 //! Which module is the reader is decided by capability, never by its name
 //! ([`select_reader`]), as Prefrontal core chooses its workers' repository

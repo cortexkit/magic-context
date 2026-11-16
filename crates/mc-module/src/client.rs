@@ -144,11 +144,11 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn tool_providers(&self) -> impl Future<Output = Result<Vec<String>, ClientError>> + Send {
         async { Ok(Vec::new()) }
     }
-    /// Module `provider`'s `tool.catalog` answer in the child's project
-    /// folder, for `preset` or, with `None`, for a request without one
-    /// (whose answer lists the presets the provider serves). Fetched under
-    /// the same scope the runner will fetch the plan's tool item under, so
-    /// the plan's composition lists exactly what the runner will get.
+    /// Module `provider`'s `tool.catalog` answer for the child, for `preset`
+    /// or, with `None`, for a request without one (whose answer lists the
+    /// presets the provider serves). Fetched on the provider's project-free
+    /// route: for the reader preset its answer equals the one the runner
+    /// gets under the child's scope (see [`crate::dreamer::plan`]).
     fn tool_catalog(
         &self,
         _child: &Child,

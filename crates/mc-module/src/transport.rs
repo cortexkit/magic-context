@@ -377,6 +377,10 @@ impl SubcRunnerClient {
     }
 }
 
+/// The host family a tool provider's bind identity names for a session a
+/// runner hosts.
+const RUNNER_HOST_FAMILY: &str = "runner";
+
 /// The surface of `module_id` that serves `role`. A tool provider serves
 /// `tool.catalog` on its tool-provider route; its management surface is for
 /// its own first-party callers, and AFT refuses ck-mc there
@@ -639,20 +643,14 @@ impl RunnerClient for SubcRunnerClient {
         provider: &str,
         preset: Option<&str>,
     ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
-        let root = child.project_root.as_deref().ok_or_else(|| {
-            ClientError::new("tool.catalog: the run has no project folder to read in")
-        })?;
-        let scope = self
-            .child_scopes
-            .for_project(root)
-            .await
-            .map_err(|error| ClientError::new(format!("tool.catalog: child scope: {error}")))?;
-        // The same provider, preset, params and scope the runner fetches the
-        // plan's tool item with, under the child's own identity. A request
-        // without a preset carries none, as the role requires.
+        // The provider's project-free route, unscoped: any principal may open
+        // it. A tool provider binds a route by host family, and a session a
+        // runner hosts binds as `runner` (AFT refuses an unknown family with
+        // `config_divergence`). A request without a preset carries none, as
+        // the role requires.
         let provider = SessionRef::new(
             provider.to_owned(),
-            child.session.harness.clone(),
+            RUNNER_HOST_FAMILY.to_owned(),
             child.session.session.clone(),
         );
         let mut request = json!({"params": {}});
@@ -668,7 +666,7 @@ impl RunnerClient for SubcRunnerClient {
                 ),
                 cortexkit_role_tool_provider::ops::TOOL_CATALOG,
                 &request,
-                Some(scope),
+                None,
             )
             .await?;
         // A tool provider's answer is the bare object, never wrapped.
