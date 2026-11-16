@@ -33,7 +33,7 @@ async fn quiet_review_a_failed_summary_read_on_resume_loses_no_history() {
         panic!("a session with nothing in flight is quiet");
     };
     hide_summaries(&db, true);
-    let mut resumed = Session::resume_quiet(carry, &client).await;
+    let mut resumed = Session::resume_quiet(carry);
     hide_summaries(&db, false);
 
     // The next fold, as a model change or a refold makes one.
@@ -150,7 +150,7 @@ async fn quiet_review_a_freed_session_keeps_the_bound_on_an_immediate_retry() {
     let Ok(carry) = Box::new(session).quiet_carry() else {
         panic!("a session with nothing in flight is quiet");
     };
-    let mut resumed = Session::resume_quiet(carry, &client).await;
+    let mut resumed = Session::resume_quiet(carry);
 
     // The retry, refused for the same reason.
     for session in [&mut kept, &mut resumed] {
@@ -331,47 +331,20 @@ async fn quiet_review_resume_time_for_a_large_head() {
     let free_ms = started.elapsed().as_millis();
     let reads = client.reads.lock().unwrap().len();
     let started = std::time::Instant::now();
-    let resumed = Session::resume_quiet(carry, &client).await;
+    let resumed = Session::resume_quiet(carry);
     let resume_ms = started.elapsed().as_millis();
     let resume_reads = client.reads.lock().unwrap().len() - reads;
-    assert!(resumed.index_ready, "the resume read the transcript");
+    assert!(resumed.index_ready, "the carry kept the transcript index");
     assert_eq!(resumed.index.entries().len(), indexed);
     eprintln!(
         "quiet resume of a large head: {loaded} summaries, cut {cut:?}, {indexed} entries indexed after the cut \
          ({} MiB as compact JSON, {} pages of 1 MiB from a real runner); Setup with the whole \
          transcript {setup_ms} ms; summary read alone {load_ms} ms; freeing {free_ms} ms; \
-         resume {resume_ms} ms in {resume_reads} reads here",
+         resume {resume_ms} ms in {resume_reads} runner reads",
         after_cut_bytes >> 20,
         after_cut_bytes.div_ceil(1 << 20)
     );
-    // The same restore again, step by step, to show where its time goes.
-    let Ok(carry) = Box::new(resumed).quiet_carry() else {
-        panic!("the resumed session is quiet");
-    };
-    let mut session = *carry.0;
-    let step = std::time::Instant::now();
-    session.reload_quiet_summaries();
-    session.set_store(session.store.clone());
-    session.distrust_state_ahead_of_summaries();
-    let summaries_ms = step.elapsed().as_millis();
-    let step = std::time::Instant::now();
-    session.index = Index::starting_at(session.cut.unwrap_or(1));
-    session.index_ready = session.read_until(&client, None, true).await;
-    let read_ms = step.elapsed().as_millis();
-    let step = std::time::Instant::now();
-    session.adopt_runner_view(&client).await;
-    let adopt_ms = step.elapsed().as_millis();
-    let step = std::time::Instant::now();
-    if let Some(view) = &session.latest {
-        session.view_validation.prime(session.index.entries(), view);
-    }
-    let prime_ms = step.elapsed().as_millis();
-    eprintln!(
-        "quiet resume, step by step: summaries and decisions {summaries_ms} ms; transcript read \
-         and index {read_ms} ms; runner's view read back {adopt_ms} ms; view checks primed \
-         {prime_ms} ms; the view has {} edits",
-        session.latest.as_ref().map_or(0, |view| view.edits.len())
-    );
+    drop(resumed);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -383,9 +356,9 @@ async fn quiet_review_resume_time_for_a_large_head() {
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// What a large idle head ([`large_head`]) holds, part by part, and what
-/// freeing it keeps; then how long its restore takes, step by step, and with
-/// the transcript index and the view checks kept instead of read and primed
-/// again. Bytes are the requested sizes dhat counts live, measured as what
+/// freeing it keeps; then how long its restore takes, and what the restore
+/// would add if the carry dropped the transcript index, the view and the
+/// view checks. Bytes are the requested sizes dhat counts live, measured as what
 /// dropping each part frees, in an order that charges a shared allocation
 /// to the part dropped last. Run it alone, in a release build:
 /// `--release --features agent-data,heap-profile -- --ignored --nocapture
@@ -412,22 +385,15 @@ async fn quiet_review_large_head_parts() {
     let step = std::time::Instant::now();
     session.publish_app(&app, false);
     let publish_kept = ms(step);
-    let index = session.index.clone();
-    let checks = session.view_validation.clone();
     let Ok(carry) = Box::new(session).quiet_carry() else {
         panic!("the session is quiet");
     };
-    let carried = carry.1.clone();
+    let reads = client.reads.lock().unwrap().len();
     let step = std::time::Instant::now();
-    let mut session = Session::restore_quiet(carry);
-    let restore_stores = ms(step);
-    let step = std::time::Instant::now();
-    session.index_ready = session.read_until(&client, None, true).await;
-    let restore_read = ms(step);
-    let step = std::time::Instant::now();
-    session.adopt_runner_view(&client).await;
-    let restore_view = ms(step);
-    assert_eq!(session.latest.as_ref().map(View::applied), carried);
+    let mut session = Session::resume_quiet(carry);
+    let restore = ms(step);
+    assert_eq!(client.reads.lock().unwrap().len(), reads, "no runner read");
+    assert!(session.index_ready && session.latest.is_some());
     // The first publish after the restore, in its two costly steps: the
     // projection built again from the index, then the apps' checkpoint of
     // every row; then the rest of the publish.
@@ -442,35 +408,38 @@ async fn quiet_review_large_head_parts() {
     session.publish_app(&app, false);
     let publish_rest = ms(step);
     let publish_rebuilt = publish_build + publish_checkpoint + publish_rest;
+    // For comparison, the restore without what the carry keeps: the
+    // transcript read from the cut, the runner's view read back and the view
+    // checks primed, as a restart's Setup and first view do.
+    let Ok(carry) = Box::new(session).quiet_carry() else {
+        panic!("the resumed session is quiet");
+    };
+    let mut session = Session::resume_quiet(carry);
+    session.index = Index::starting_at(session.cut.unwrap_or(1));
+    session.view_validation = Default::default();
+    let carried = session.latest.take().map(|view| view.applied());
+    session.latest_unknown = true;
+    let step = std::time::Instant::now();
+    session.index_ready = session.read_until(&client, None, true).await;
+    let restore_read = ms(step);
+    let step = std::time::Instant::now();
+    session.adopt_runner_view(&client).await;
+    let restore_view = ms(step);
+    assert_eq!(session.latest.as_ref().map(View::applied), carried);
     let step = std::time::Instant::now();
     if let Some(view) = &session.latest {
         session.view_validation.prime(session.index.entries(), view);
     }
     let prime = ms(step);
-    // The same restore with the index and the view checks kept.
-    let Ok(mut carry) = Box::new(session).quiet_carry() else {
-        panic!("the resumed session is quiet");
-    };
-    carry.0.index = index;
-    carry.0.index_ready = true;
-    carry.0.view_validation = checks;
-    let step = std::time::Instant::now();
-    let mut session = Session::restore_quiet(carry);
-    session.index_ready = true;
-    session.adopt_runner_view(&client).await;
-    let restore_keeping_index = ms(step);
-    assert!(session.latest.is_some());
     drop(session);
     let _ = std::fs::remove_dir_all(&dir);
     eprintln!(
-        "large head restore, ms: summaries and decisions {restore_stores:.1}; transcript read and \
-         index {restore_read:.1}; runner's view read back {restore_view:.1}; whole restore \
-         {:.1}; view checks primed (no longer in the restore) {prime:.1}; first app publish after \
-         the restore {publish_rebuilt:.1} (projection built {publish_build:.1}, checkpoint of \
-         every row {publish_checkpoint:.1}, the rest {publish_rest:.1}), an idle session's \
-         publish {publish_kept:.1}; restore keeping the index and the view checks (no read, no \
-         prime) {restore_keeping_index:.1}",
-        restore_stores + restore_read + restore_view
+        "large head restore, ms: as delivered (summaries and decisions from the stores, no \
+         runner read) {restore:.1}; first app publish after the restore {publish_rebuilt:.1} \
+         (projection built {publish_build:.1}, checkpoint of every row {publish_checkpoint:.1}, \
+         the rest {publish_rest:.1}), an idle session's publish {publish_kept:.1}; for \
+         comparison, what the carry saves: transcript read and index {restore_read:.1}, \
+         runner's view read back {restore_view:.1}, view checks primed {prime:.1}"
     );
 
     // Bytes, with the profiler.
@@ -570,21 +539,33 @@ async fn quiet_review_large_head_parts() {
     drop(session);
     let rest = before - live();
 
-    // What the carry of the same head holds.
+    // What the carry of the same head holds, part by part.
     let LargeHead { session, app, .. } = large_head("quiet-review-parts-carry").await;
     sync(&app).await;
     let before = live();
-    let Ok(mut carry) = Box::new(session).quiet_carry() else {
+    let Ok(carry) = Box::new(session).quiet_carry() else {
         panic!("the session is quiet");
     };
     sync(&app).await;
     let shed = before - live();
+    let mut session = *carry.0;
+    let mut kept = |part: &str, drop_part: &mut dyn FnMut(&mut Session)| {
+        let before = live();
+        drop_part(&mut session);
+        (part.to_owned(), before - live())
+    };
+    let carried = vec![
+        kept("view checks", &mut |s| {
+            s.view_validation = Default::default()
+        }),
+        kept("transcript index", &mut |s| s.index = Index::default()),
+        kept("newest view", &mut |s| s.latest = None),
+        kept("newest summary", &mut |s| s.summaries.replace(Vec::new())),
+    ];
     let before = live();
-    carry.0.app = Default::default();
-    let carry_app = before - live();
-    let before = live();
-    drop(carry);
-    let carry_bytes = carry_app + before - live();
+    drop(session);
+    let carry_rest = before - live();
+    let carry_bytes = carried.iter().map(|(_, bytes)| bytes).sum::<i64>() + carry_rest;
 
     let mut table = String::from("large head, live bytes by part:\n");
     let total: i64 = parts.iter().map(|(_, bytes)| bytes).sum::<i64>() + rest;
@@ -594,7 +575,7 @@ async fn quiet_review_large_head_parts() {
     table.push_str(&format!(
         "  everything else: {}\n  idle session in all: {}\n  the apps' replica snapshot, besides: \
          {}\n  of the view checks, by copies: inserts {}, wire_sizes {}, hash_prefix {}\n  freeing \
-         drops {}; the carry holds {}, of which the app state {}\n",
+         drops {}; the carry holds {}:\n",
         mib(rest),
         mib(total),
         mib(replica_bytes),
@@ -603,7 +584,10 @@ async fn quiet_review_large_head_parts() {
         mib(prefix_bytes),
         mib(shed),
         mib(carry_bytes),
-        mib(carry_app)
     ));
+    for (part, bytes) in &carried {
+        table.push_str(&format!("    {part}: {}\n", mib(*bytes)));
+    }
+    table.push_str(&format!("    everything else: {}\n", mib(carry_rest)));
     eprint!("{table}");
 }

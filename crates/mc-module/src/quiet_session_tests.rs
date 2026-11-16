@@ -1,6 +1,6 @@
 //! A session with no job for a while is freed: its worker stops, and the
 //! apps' replica lets its snapshot go. Its next job starts a worker again,
-//! which reads what was freed before the job runs ([`Session::quiet_carry`],
+//! which resumes the session before the job runs ([`Session::quiet_carry`],
 //! [`Session::resume_quiet`]).
 
 use super::*;
@@ -121,7 +121,7 @@ fn text(ordinal: u64, mid: &str) -> Entry {
 /// The tests run on tokio's paused clock, which jumps to the next timer
 /// whenever every task waits, also while a task waits on the apps' replica
 /// or the search index, which run on threads of their own. So a session
-/// without `hold` may be freed, and read again, at any such wait; the tests
+/// without `hold` may be freed, and resumed, at any such wait; the tests
 /// assert only what holds either way. Waits on the session's own worker
 /// (`idle_foreground`) keep a task runnable and the clock still.
 struct Fixture {
@@ -496,10 +496,13 @@ async fn quiet_a_head_session_waits_its_whole_quiet_time_after_its_run_ended() {
 }
 
 /// A `pre_user` answered from a freed session's carry is followed by the
-/// runner's next request: the worker reads the session again right after
-/// answering, so that request's ride doesn't wait for the reads.
+/// runner's next request: the worker resumes the session right after
+/// answering, so that request doesn't wait for the resume. Seen here through
+/// the summaries, which the resume reads from `context.db`: made unreadable
+/// after the hook, they stop the next tool call only if the session was
+/// still to be resumed.
 #[tokio::test(start_paused = true)]
-async fn quiet_a_pre_user_answered_while_freed_reads_the_session_again_at_once() {
+async fn quiet_a_pre_user_answered_while_freed_resumes_the_session_at_once() {
     let f = Fixture::new("worker", false).await;
     f.wait_quiet_time().await;
     assert!(f.quiet(), "the session went quiet");
@@ -508,9 +511,29 @@ async fn quiet_a_pre_user_answered_while_freed_reads_the_session_again_at_once()
         .pre_user(f.key(), "Carry on with the parser fix", 30 * 60_000)
         .await;
     f.module.idle_foreground(f.key()).await.unwrap();
-    assert!(
-        *f.client().reads.lock().unwrap() > reads,
-        "the session was not read again after the hook"
-    );
     assert!(!f.quiet(), "the hook's worker runs the session");
+    let hide = |hidden: bool| {
+        let sql = if hidden {
+            "ALTER TABLE compartments RENAME TO compartments_hidden"
+        } else {
+            "ALTER TABLE compartments_hidden RENAME TO compartments"
+        };
+        let db = f.module.inner.db.as_ref().unwrap();
+        db.with_connection(|conn| conn.execute_batch(sql)).unwrap();
+    };
+    hide(true);
+    let answer = f
+        .module
+        .tool(&f.route, "ctx_reduce", json!({"drop": "2"}))
+        .await;
+    hide(false);
+    assert!(
+        answer.is_ok(),
+        "the session was not resumed after the hook: {answer:?}"
+    );
+    assert_eq!(
+        *f.client().reads.lock().unwrap(),
+        reads,
+        "resuming reads nothing from the runner"
+    );
 }

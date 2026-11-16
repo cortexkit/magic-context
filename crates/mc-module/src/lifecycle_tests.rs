@@ -2088,16 +2088,17 @@ async fn lifecycle_a_session_freed_while_quiet_answers_its_next_notices_as_one_n
     let Ok(carry) = Box::new(freed).quiet_carry() else {
         panic!("a session with nothing in flight is quiet");
     };
-    // What freeing drops: all but the newest summary and entry, and the
-    // view, which the runner holds.
+    // What freeing drops: all but the newest summary. The transcript index
+    // and the view stay, so resuming reads nothing from the runner.
     assert_eq!(carry.0.summaries.len(), 1);
-    assert_eq!(carry.0.index.entries().len(), 1);
-    assert!(carry.0.latest.is_none() && carry.0.latest_unknown);
+    assert_eq!(carry.0.index.entries(), kept.index.entries());
+    assert!(carry.0.index_ready && carry.0.latest.is_some());
     let reads = client.reads.lock().unwrap().len();
-    let mut resumed = Session::resume_quiet(carry, &client).await;
-    assert!(
-        client.reads.lock().unwrap().len() > reads,
-        "resuming reads the transcript again"
+    let mut resumed = Session::resume_quiet(carry);
+    assert_eq!(
+        client.reads.lock().unwrap().len(),
+        reads,
+        "resuming reads nothing from the runner"
     );
     assert_same_session(&mut kept, &mut resumed, "resumed");
 
@@ -2134,8 +2135,9 @@ async fn lifecycle_a_session_freed_while_quiet_answers_its_next_notices_as_one_n
 }
 
 /// What a failed read, a runner's refusal or another provider's view leaves
-/// in memory is read again on resuming, or left to the next Setup, as after
-/// a restart: none of them keeps a session from being freed.
+/// in memory doesn't keep a session from being freed. The resumed session
+/// keeps it for its next job, as a session never freed does, and reads
+/// nothing on resuming.
 #[tokio::test]
 async fn lifecycle_a_quiet_session_is_freed_whatever_a_failed_read_or_refusal_left() {
     /// What a test leaves in memory before the session is freed.
@@ -2153,17 +2155,30 @@ async fn lifecycle_a_quiet_session_is_freed_whatever_a_failed_read_or_refusal_le
     for (number, (case, leave)) in cases.into_iter().enumerate() {
         let (mut session, client, _app, _) = settled(&format!("quiet-left-{number}")).await;
         leave(&mut session);
-        let suspended = session.suspended;
+        let left = (
+            session.index_ready,
+            session.latest_unknown,
+            session.suspended,
+            session.latest.clone(),
+        );
         let Ok(carry) = Box::new(session).quiet_carry() else {
             panic!("{case}: a session with nothing in flight is kept");
         };
         let reads = client.reads.lock().unwrap().len();
-        let resumed = Session::resume_quiet(carry, &client).await;
-        assert_eq!(resumed.suspended, suspended, "{case}");
-        // A session the runner refused reads nothing until its next Setup.
+        let resumed = Session::resume_quiet(carry);
         assert_eq!(
-            client.reads.lock().unwrap().len() > reads,
-            !suspended,
+            (
+                resumed.index_ready,
+                resumed.latest_unknown,
+                resumed.suspended,
+                resumed.latest.clone(),
+            ),
+            left,
+            "{case}: what the session left for its next job"
+        );
+        assert_eq!(
+            client.reads.lock().unwrap().len(),
+            reads,
             "{case}: transcript reads on resuming"
         );
     }

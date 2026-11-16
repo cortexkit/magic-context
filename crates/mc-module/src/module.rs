@@ -195,8 +195,8 @@ enum Job {
 }
 
 /// How long a session's worker waits without a job before it frees the
-/// session ([`Session::quiet_carry`]). Its next job reads what was freed
-/// again first, as Setup reads a session after a restart.
+/// session ([`Session::quiet_carry`]). Its next job resumes it first, from
+/// what the carry kept and what the stores hold.
 const QUIET_AFTER: Duration = Duration::from_secs(10 * 60);
 /// The same wait, once the runner reported that the run of a session
 /// without a summarizer (a worker or reader) ended: such a session rarely
@@ -1300,8 +1300,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// Run `key`'s jobs from `receiver` on a task of their own, picking the
     /// session up from what its last worker kept (`quiet`) if it went quiet.
     /// After [`QUIET_AFTER`] without a job the worker frees the session and
-    /// stops ([`free_quiet`]); a job that needs the session reads what was
-    /// freed again before it runs ([`Session::resume_quiet`]).
+    /// stops ([`free_quiet`]); a job that needs the session resumes what was
+    /// freed before it runs ([`Session::resume_quiet`]).
     fn run_worker(
         &self,
         key: SessionRef,
@@ -1433,29 +1433,23 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 ) {
                     run_ended = false;
                 }
-                // A quiet session is read again before a job that works on
-                // it, as Setup reads a session after a restart. The jobs that
-                // only ask about work in flight, and a workspace answer, need
-                // nothing read; neither does `pre_user` when the freed
-                // session answers it as the resumed one would.
-                let needs_session = match &job {
+                // A quiet session is resumed before a job that works on it.
+                // The jobs that only ask about work in flight, and a
+                // workspace answer, need nothing of it; the carry answers
+                // `pre_user` as the resumed session would.
+                let needs_session = !matches!(
+                    &job,
                     Job::Idle(_)
-                    | Job::Busy(_)
-                    | Job::Resume
-                    | Job::Park { .. }
-                    | Job::Discard { .. }
-                    | Job::AppCheckpoint { .. }
-                    | Job::Workspace { .. } => false,
-                    Job::PreUser { .. } => !carry
-                        .as_ref()
-                        .is_some_and(crate::session::QuietCarry::answers_pre_user),
-                    _ => true,
-                };
+                        | Job::Busy(_)
+                        | Job::Resume
+                        | Job::Park { .. }
+                        | Job::Discard { .. }
+                        | Job::AppCheckpoint { .. }
+                        | Job::Workspace { .. }
+                        | Job::PreUser { .. }
+                );
                 if let Some(quiet) = carry.take_if(|_| needs_session) {
-                    // A Setup reads the transcript and the runner's view
-                    // itself, once.
-                    let reads = !matches!(&job, Job::Setup(..));
-                    session = Some(resume(&inner, &held_key, quiet, reads).await);
+                    session = Some(resume(&inner, &held_key, quiet).await);
                 }
                 // Nothing runs on summaries a resume could not read again:
                 // each such job tries the read first. Setups and notices wait
@@ -1827,10 +1821,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         };
                         let _ = reply.send(answer);
                         // A person's message is followed by the runner's next
-                        // request: read the freed session again now, while
-                        // the model works, not when that request's ride waits.
+                        // request: resume the freed session now, while the
+                        // model works, not when that request's ride waits.
                         if let Some(quiet) = carry.take() {
-                            session = Some(resume(&inner, &held_key, quiet, true).await);
+                            session = Some(resume(&inner, &held_key, quiet).await);
                         }
                     }
                     Job::Idle(reply) => {
@@ -2104,9 +2098,9 @@ struct Freed<'a> {
 ///
 /// False while the session can't be freed: a move or a summarizer run holds
 /// it, its state, its apps' rows or its search index are not saved yet, or
-/// there is no store to read it again from. False also when a job arrived
-/// meanwhile: the job is then in `ready`, and the session, freed already, is
-/// read again before the job runs.
+/// there is no store to read its summaries and decisions again from. False
+/// also when a job arrived meanwhile: the job is then in `ready`, and the
+/// session, freed already, is resumed before the job runs.
 #[allow(clippy::too_many_arguments)]
 fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &'a Inner<C>,
@@ -2234,23 +2228,17 @@ fn give_up_place<'a, C: RunnerClient + Router + Send + Sync + 'static>(
     Ok(())
 }
 
-/// Read a quiet session's carry again for the job that needs it, the
-/// transcript and the runner's view included unless the job (a Setup)
-/// reads them itself.
+/// Resume a quiet session's carry for the job that needs it
+/// ([`Session::resume_quiet`]).
 async fn resume<C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &Inner<C>,
     key: &SessionRef,
     carry: crate::session::QuietCarry,
-    reads: bool,
 ) -> Session {
     // Hydrate the apps' projection first, as for a new worker.
     inner.app_read.activate(key).await;
     let started = std::time::Instant::now();
-    let session = if reads {
-        Session::resume_quiet(carry, inner.client.as_ref()).await
-    } else {
-        Session::restore_quiet(carry)
-    };
+    let session = Session::resume_quiet(carry);
     tracing::info!(
         "ck-mc: session {}: resumed after a quiet free in {} ms",
         key.session,
