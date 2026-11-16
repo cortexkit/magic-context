@@ -346,9 +346,7 @@ describe("issue 904: reminders need a callable ctx_reduce", () => {
 		await f.serve({ percent: 70 });
 		await f.serve({ percent: 70 });
 		expect(f.reminder()).not.toBeNull();
-		expect(maybeDeliverChannel2Pi(f.pi as never, f.db, f.sessionId)).toBe(
-			true,
-		);
+		expect(maybeDeliverChannel2Pi(f.pi as never, f.db, f.sessionId)).toBe(true);
 		expect(f.sent).toHaveLength(1);
 	});
 });
@@ -367,9 +365,7 @@ describe("issue 904: a session without ctx_reduce from the start", () => {
 			expect(without.reminder()).toBeNull();
 		}
 		expect(withTool.passes[0]?.systemPrompt).toContain("ctx_reduce");
-		expect(prefixes(withTool.passes[0]?.bytes ?? "").length).toBeGreaterThan(
-			0,
-		);
+		expect(prefixes(withTool.passes[0]?.bytes ?? "").length).toBeGreaterThan(0);
 		// Tags are still assigned and stored, and every automatic reduction
 		// the session with the tool got, it got too.
 		const statuses = (rows: ReturnType<typeof getTagsBySession>) =>
