@@ -428,9 +428,20 @@ async fn quiet_review_large_head_parts() {
     session.adopt_runner_view(&client).await;
     let restore_view = ms(step);
     assert_eq!(session.latest.as_ref().map(View::applied), carried);
+    // The first publish after the restore, in its two costly steps: the
+    // projection built again from the index, then the apps' checkpoint of
+    // every row; then the rest of the publish.
+    let step = std::time::Instant::now();
+    let update = session.app_update();
+    let publish_build = ms(step);
+    let step = std::time::Instant::now();
+    session.app_save_snapshot();
+    let publish_checkpoint = ms(step);
+    app.update(update);
     let step = std::time::Instant::now();
     session.publish_app(&app, false);
-    let publish_rebuilt = ms(step);
+    let publish_rest = ms(step);
+    let publish_rebuilt = publish_build + publish_checkpoint + publish_rest;
     let step = std::time::Instant::now();
     if let Some(view) = &session.latest {
         session.view_validation.prime(session.index.entries(), view);
@@ -455,16 +466,40 @@ async fn quiet_review_large_head_parts() {
         "large head restore, ms: summaries and decisions {restore_stores:.1}; transcript read and \
          index {restore_read:.1}; runner's view read back {restore_view:.1}; whole restore \
          {:.1}; view checks primed (no longer in the restore) {prime:.1}; first app publish after \
-         the restore (builds the projection) {publish_rebuilt:.1}, an idle session's publish \
-         {publish_kept:.1}; restore keeping the index and the view checks (no read, no prime) \
-         {restore_keeping_index:.1}",
+         the restore {publish_rebuilt:.1} (projection built {publish_build:.1}, checkpoint of \
+         every row {publish_checkpoint:.1}, the rest {publish_rest:.1}), an idle session's \
+         publish {publish_kept:.1}; restore keeping the index and the view checks (no read, no \
+         prime) {restore_keeping_index:.1}",
         restore_stores + restore_read + restore_view
     );
 
     // Bytes, with the profiler.
     let _profiler = dhat::Profiler::builder().testing().build();
     let live = || dhat::HeapStats::get().curr_bytes as i64;
-    let LargeHead { mut session, .. } = large_head("quiet-review-parts-bytes").await;
+    let LargeHead {
+        mut session, app, ..
+    } = large_head("quiet-review-parts-bytes").await;
+    let key = session.key().clone();
+    // A read goes through the apps' replica after every update sent before
+    // it, so the replica no longer holds rows a dropped part shares.
+    let sync = |app: &crate::app_read::AppRead| {
+        let app = app.clone();
+        let key = key.clone();
+        async move {
+            let _ = app
+                .read(
+                    "session_data.read",
+                    serde_json::json!({"session": key, "section": "meta"}),
+                )
+                .await;
+        }
+    };
+    sync(&app).await;
+    // The replica's snapshot of the session, which a free releases.
+    let before = live();
+    app.forget_session(&key, false);
+    sync(&app).await;
+    let replica_bytes = before - live();
     let view = session.latest.clone().expect("the head's view");
     // The view checks' parts, by what copies of what each one holds cost:
     // the inserted messages, every edit with its size, and the first four
@@ -517,21 +552,39 @@ async fn quiet_review_large_head_parts() {
             s.baseline = None;
             s.mural_image = None;
         }),
+        freed("app state (stamps and counts, saved)", &mut |s| {
+            s.app = Default::default();
+        }),
+        freed("summary scan cache", &mut |s| {
+            s.scan_counts = Default::default();
+        }),
+        freed("summary trigger window", &mut |s| {
+            s.due_window = Default::default();
+        }),
+        freed("image outputs and notes", &mut |s| {
+            s.image_outputs = Default::default();
+            s.notes = Default::default();
+        }),
     ];
     let before = live();
     drop(session);
     let rest = before - live();
 
     // What the carry of the same head holds.
-    let LargeHead { session, .. } = large_head("quiet-review-parts-carry").await;
+    let LargeHead { session, app, .. } = large_head("quiet-review-parts-carry").await;
+    sync(&app).await;
     let before = live();
-    let Ok(carry) = Box::new(session).quiet_carry() else {
+    let Ok(mut carry) = Box::new(session).quiet_carry() else {
         panic!("the session is quiet");
     };
+    sync(&app).await;
     let shed = before - live();
     let before = live();
+    carry.0.app = Default::default();
+    let carry_app = before - live();
+    let before = live();
     drop(carry);
-    let carry_bytes = before - live();
+    let carry_bytes = carry_app + before - live();
 
     let mut table = String::from("large head, live bytes by part:\n");
     let total: i64 = parts.iter().map(|(_, bytes)| bytes).sum::<i64>() + rest;
@@ -539,15 +592,18 @@ async fn quiet_review_large_head_parts() {
         table.push_str(&format!("  {part}: {}\n", mib(*bytes)));
     }
     table.push_str(&format!(
-        "  everything else: {}\n  idle session in all: {}\n  of the view checks, by copies: \
-         inserts {}, wire_sizes {}, hash_prefix {}\n  freeing drops {}; the carry holds {}\n",
+        "  everything else: {}\n  idle session in all: {}\n  the apps' replica snapshot, besides: \
+         {}\n  of the view checks, by copies: inserts {}, wire_sizes {}, hash_prefix {}\n  freeing \
+         drops {}; the carry holds {}, of which the app state {}\n",
         mib(rest),
         mib(total),
+        mib(replica_bytes),
         mib(inserts_bytes),
         mib(sizes_bytes),
         mib(prefix_bytes),
         mib(shed),
-        mib(carry_bytes)
+        mib(carry_bytes),
+        mib(carry_app)
     ));
     eprint!("{table}");
 }

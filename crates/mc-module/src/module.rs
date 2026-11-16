@@ -1471,7 +1471,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         | Job::AccountWait(_)
                 );
                 if on_summaries {
-                    if session.as_mut().is_some_and(|session| !session.summaries_ready()) {
+                    if session
+                        .as_mut()
+                        .is_some_and(|session| !session.summaries_ready())
+                    {
                         hold_unread(job, &mut unread);
                         continue;
                     }

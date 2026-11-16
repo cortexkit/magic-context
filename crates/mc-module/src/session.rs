@@ -1243,8 +1243,8 @@ impl Session {
     /// The session without what [`Session::resume_quiet`] reads again, when
     /// nothing of it is in flight; the session unchanged otherwise. It drops
     /// its summaries but the newest, its transcript index but the newest
-    /// entry, its newest view, and the apps' projection but the head they
-    /// read. Every other field stays as it is, those kept in memory only
+    /// entry, its newest view, the apps' projection but the head they read,
+    /// and the caches derived from those. Every other field stays as it is, those kept in memory only
     /// included (the statement epoch and stamp, the notice number, the
     /// account wait and the rest), so the resumed session decides as one
     /// never freed. The apps' checkpoint is saved first: the projection is
@@ -1295,7 +1295,10 @@ impl Session {
             self.latest_unknown = true;
         }
         self.view_validation = Default::default();
+        // Caches of what the summarizer's trigger derives from the index,
+        // built again for the index the resume reads.
         self.scan_counts = Default::default();
+        self.due_window = Default::default();
         let head_read = std::mem::take(&mut self.app_projection.head_read);
         self.app_projection = Default::default();
         self.app_projection.head_read = head_read;
