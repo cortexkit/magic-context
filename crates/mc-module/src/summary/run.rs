@@ -1075,15 +1075,62 @@ fn run_params(how: &Model<'_>, temperature: bool) -> Map<String, Value> {
     params
 }
 
-/// A run's usage as one step's: the summarizer runs one step.
+/// A run's usage as one step's. `prompt_tokens` is the whole prompt the run
+/// sent, as `StepUsage` defines it: the runner's `input_tokens` counts only
+/// input that was neither read from nor written to the prompt cache, so the
+/// cache reads and writes are added back. A dreamer run's token budget adds
+/// these up across batches, and a tool-using batch sends most of its prompt
+/// from the cache, so counting the uncached part alone let a run spend
+/// several times its budget.
 fn step_usage(run: &cortexkit_role_llm_runner::usage::RunUsage) -> StepUsage {
     let mut usage = StepUsage::new();
-    usage.prompt_tokens = run.input_tokens;
+    usage.prompt_tokens = [
+        run.input_tokens,
+        run.cached_input_tokens,
+        run.cache_write_tokens,
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|total, part| total + part);
     usage.cache_read_tokens = run.cached_input_tokens;
     usage.cache_write_tokens = run.cache_write_tokens;
     usage.output_tokens = run.output_tokens;
     usage.reasoning_tokens = run.reasoning_tokens;
     usage
+}
+
+#[cfg(test)]
+mod step_usage_tests {
+    use super::step_usage;
+
+    fn run_usage(value: serde_json::Value) -> cortexkit_role_llm_runner::usage::RunUsage {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_prompt_counts_cache_reads_and_writes() {
+        let usage = step_usage(&run_usage(serde_json::json!({
+            "steps": 3, "unreported_steps": 0,
+            "input_tokens": 100, "cached_input_tokens": 900,
+            "cache_write_tokens": 50, "output_tokens": 20, "by_model": []
+        })));
+        assert_eq!(usage.prompt_tokens, Some(1_050));
+        assert_eq!(usage.cache_read_tokens, Some(900));
+        assert_eq!(usage.output_tokens, Some(20));
+    }
+
+    #[test]
+    fn an_unreported_prompt_stays_unknown() {
+        let usage = step_usage(&run_usage(serde_json::json!({
+            "steps": 0, "unreported_steps": 0
+        })));
+        assert_eq!(usage.prompt_tokens, None);
+        let usage = step_usage(&run_usage(serde_json::json!({
+            "steps": 1, "unreported_steps": 0,
+            "cached_input_tokens": 400, "by_model": []
+        })));
+        assert_eq!(usage.prompt_tokens, Some(400));
+    }
 }
 
 /// The usage of several calls on one decision, added up. A count either
