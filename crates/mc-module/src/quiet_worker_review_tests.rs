@@ -158,9 +158,10 @@ async fn quiet_review_a_worker_whose_next_run_started_waits_its_whole_quiet_time
     );
 }
 
-/// The reader of run-end events falls back to polling when its durable
-/// goes away, and wakes every wait so that each reads at once. No run ended
-/// then, so no worker may take the wake as its run's end.
+/// The reader of the runner's run-end events falls back to polling when it
+/// can no longer read them (its consumer on the event stream went away),
+/// and wakes every wait so that each polls at once. No run ended then, so no
+/// worker may take that wake as its run's end.
 #[tokio::test(start_paused = true)]
 async fn quiet_review_a_run_end_reader_that_stops_ends_no_run() {
     let f = Fixture::new("worker", false).await;
@@ -172,7 +173,7 @@ async fn quiet_review_a_run_end_reader_that_stops_ends_no_run() {
     assert!(!f.quiet());
     let ends = &f.client().ends;
     ends.reading();
-    ends.stopped("the durable went away");
+    ends.stopped("the event stream went away");
     settle().await;
     tokio::time::advance(QUIET_AFTER_RUN_END + Duration::from_secs(1)).await;
     settle().await;
