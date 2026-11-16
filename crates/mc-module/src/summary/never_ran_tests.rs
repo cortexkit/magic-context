@@ -653,7 +653,8 @@ mod thalamus_send_answers_early {
     #[test]
     fn the_samples_match_their_sums() {
         use sha2::{Digest, Sha256};
-        let sets: [(&[(&str, &[u8])], &str); 3] = [
+        type Set<'a> = (&'a [(&'a str, &'a [u8])], &'a str);
+        let sets: [Set; 3] = [
             (
                 &EARLY,
                 include_str!("../../testdata/send-answers-early-v1/SHA256SUMS"),

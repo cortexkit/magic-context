@@ -1,0 +1,25 @@
+{
+  "caller": "reserved:colliculus",
+  "name": "recent",
+  "request": {
+    "method": "context.recent",
+    "params": {
+      "budget_tokens": 4000,
+      "session": {
+        "harness": "opencode2",
+        "session": "ses_live"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "exact": true,
+      "from_message": 1,
+      "summarized_through": 6,
+      "text": "[1] U: Please fix the parser bug in src/parse.rs.\n[2-6] A: commits: 1a2b3c4d5e Looking at the parser now. / TC: read(src/parse.rs) / TC: Run the parser tests / Fixed the off-by-one and committed with its test.\n[7] U: Now explain the fix: step0 parser step1 parser step2 parser step3 parser step4 parser step5 parser step6 parser step7 parser step8 parser step9 parser step10 parser step11 parser step12 parser step13 parser step14 parser step15 parser step16 parser step17 parser step18 parser step19 parser step20 parser step21 parser step22 parser step23 parser step24 parser step25 parser step26 parser step27 parser step28 parser step29 parser step30 parser step31 parser step32 parser step33 parser step34 parser step35 parser step36 parser step37 parser step38 parser step39 parser\n[8] A: The fix: step0 parser step1 parser step2 parser step3 parser step4 parser step5 parser step6 parser step7 parser step8 parser step9 parser step10 parser step11 parser step12 parser step13 parser step14 parser step15 parser step16 parser step17 parser step18 parser step19 parser step20 parser step21 parser step22 parser step23 parser step24 parser step25 parser step26 parser step27 parser step28 parser step29 parser step30 parser step31 parser step32 parser step33 parser step34 parser step35 parser step36 parser step37 parser step38 parser step39 parser step40 parser step41 parser step42 parser step43 parser step44 parser step45 parser step46 parser step47 parser step48 parser step49 parser step50 parser step51 parser step52 parser step53 parser step54 parser step55 parser step56 parser step57 parser step58 parser step59 parser\n[9] U: And the release notes: step0 parser step1 parser step2 parser step3 parser step4 parser step5 parser step6 parser step7 parser step8 parser step9 parser step10 parser step11 parser step12 parser step13 parser step14 parser step15 parser step16 parser step17 parser step18 parser step19 parser step20 parser step21 parser step22 parser step23 parser step24 parser step25 parser step26 parser step27 parser step28 parser step29 parser step30 parser step31 parser step32 parser step33 parser step34 parser step35 parser step36 parser step37 parser step38 parser step39 parser step40 parser step41 parser step42 parser step43 parser step44 parser step45 parser step46 parser step47 parser step48 parser step49 parser\n[10] A: Release notes: step0 parser step1 parser step2 parser step3 parser step4 parser step5 parser step6 parser step7 parser step8 parser step9 parser step10 parser step11 parser step12 parser step13 parser step14 parser step15 parser step16 parser step17 parser step18 parser step19 parser step20 parser step21 parser step22 parser step23 parser step24 parser step25 parser step26 parser step27 parser step28 parser step29 parser step30 parser step31 parser step32 parser step33 parser step34 parser step35 parser step36 parser step37 parser step38 parser step39 parser step40 parser step41 parser step42 parser step43 parser step44 parser step45 parser step46 parser step47 parser step48 parser step49 parser step50 parser step51 parser step52 parser step53 parser step54 parser step55 parser step56 parser step57 parser step58 parser step59 parser step60 parser step61 parser step62 parser step63 parser step64 parser step65 parser step66 parser step67 parser step68 parser step69 parser step70 parser step71 parser step72 parser step73 parser step74 parser step75 parser step76 parser step77 parser step78 parser step79 parser step80 parser step81 parser step82 parser step83 parser step84 parser step85 parser step86 parser step87 parser step88 parser step89 parser step90 parser step91 parser step92 parser step93 parser step94 parser step95 parser step96 parser step97 parser step98 parser step99 parser step100 parser step101 parser step102 parser step103 parser step104 parser step105 parser step106 parser step107 parser step108 parser step109 parser step110 parser step111 parser step112 parser step113 parser step114 parser step115 parser step116 parser step117 parser step118 parser step119 parser step120 parser step121 parser step122 parser step123 parser step124 parser step125 parser step126 parser step127 parser step128 parser step129 parser step130 parser step131 parser step132 parser step133 parser step134 parser step135 parser step136 parser step137 parser step138 parser step139 parser step140 parser step141 parser step142 parser step143 parser step144 parser step145 parser step146 parser step147 parser step148 parser step149 parser",
+      "through_message": 10,
+      "token_family": "ClaudeV5",
+      "tokens": 1644
+    }
+  }
+}

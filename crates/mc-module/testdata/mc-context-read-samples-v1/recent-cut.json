@@ -1,0 +1,26 @@
+{
+  "caller": "reserved:colliculus",
+  "name": "recent-cut",
+  "request": {
+    "method": "context.recent",
+    "params": {
+      "budget_tokens": 256,
+      "session": {
+        "harness": "opencode2",
+        "session": "ses_live"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "cut": true,
+      "exact": true,
+      "from_message": 10,
+      "summarized_through": 6,
+      "text": "[10] A: … p100 parser step101 parser step102 parser step103 parser step104 parser step105 parser step106 parser step107 parser step108 parser step109 parser step110 parser step111 parser step112 parser step113 parser step114 parser step115 parser step116 parser step117 parser step118 parser step119 parser step120 parser step121 parser step122 parser step123 parser step124 parser step125 parser step126 parser step127 parser step128 parser step129 parser step130 parser step131 parser step132 parser step133 parser step134 parser step135 parser step136 parser step137 parser step138 parser step139 parser step140 parser step141 parser step142 parser step143 parser step144 parser step145 parser step146 parser step147 parser step148 parser step149 parser",
+      "through_message": 10,
+      "token_family": "ClaudeV5",
+      "tokens": 256
+    }
+  }
+}

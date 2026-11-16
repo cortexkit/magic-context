@@ -1,0 +1,20 @@
+{
+  "caller": "reserved:colliculus",
+  "name": "recent-unknown-session",
+  "request": {
+    "method": "context.recent",
+    "params": {
+      "budget_tokens": 1000,
+      "session": {
+        "harness": "opencode2",
+        "session": "ses_unknown"
+      }
+    }
+  },
+  "response": {
+    "error": {
+      "code": "unknown_session",
+      "message": "The context store has no record of this session."
+    }
+  }
+}

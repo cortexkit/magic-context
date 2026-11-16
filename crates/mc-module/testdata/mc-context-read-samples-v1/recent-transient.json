@@ -1,0 +1,24 @@
+{
+  "caller": "reserved:colliculus",
+  "name": "recent-transient",
+  "request": {
+    "method": "context.recent",
+    "params": {
+      "budget_tokens": 1000,
+      "session": {
+        "harness": "opencode2",
+        "session": "ses_unread"
+      }
+    }
+  },
+  "response": {
+    "error": {
+      "code": "transient",
+      "detail": {
+        "class": "transient",
+        "retry_after_ms": 2000
+      },
+      "message": "The session's transcript is still being read; retry later."
+    }
+  }
+}
