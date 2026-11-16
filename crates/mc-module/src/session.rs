@@ -1296,8 +1296,11 @@ impl Session {
         if self.db.is_none() {
             return;
         }
-        let newest = self.summaries.last().cloned();
-        self.summaries.replace(newest.into_iter().collect());
+        // The index stays whole; only the held rows older than the newest
+        // are let go, and the resume reads every row again.
+        if let Some(newest) = self.summaries.last().map(|summary| summary.sequence) {
+            self.summaries.release_through(newest - 1);
+        }
     }
 
     /// Read the summaries of a session resumed after a quiet free again, as

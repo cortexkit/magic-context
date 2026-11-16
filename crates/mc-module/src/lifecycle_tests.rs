@@ -2080,9 +2080,20 @@ fn assert_same_session(kept: &mut Session, resumed: &mut Session, step: &str) {
         timeless(&resumed.app_decisions),
         "{step}"
     );
+    // The projection renders its rows as the apps read them; only their
+    // wall-clock times may differ.
+    let timeless_rendered = |mut rendered: crate::app_read::Rendered| {
+        rendered.meta = timeless(&rendered.meta);
+        for message in rendered.messages.values_mut() {
+            message.at_ms = 0;
+            message.row = timeless(&message.row);
+        }
+        rendered.decisions = rendered.decisions.iter().map(timeless).collect();
+        rendered
+    };
     assert_eq!(
-        timeless(kept.app_snapshot()),
-        timeless(resumed.app_snapshot()),
+        timeless_rendered(kept.app_snapshot()),
+        timeless_rendered(resumed.app_snapshot()),
         "{step}: apps' projection"
     );
 }
@@ -2094,9 +2105,11 @@ async fn lifecycle_a_session_freed_while_quiet_answers_its_next_notices_as_one_n
     let Ok(carry) = Box::new(freed).quiet_carry() else {
         panic!("a session with nothing in flight is quiet");
     };
-    // What freeing drops: all but the newest summary. The transcript index
-    // and the view stay, so resuming reads nothing from the runner.
-    assert_eq!(carry.0.summaries.len(), 1);
+    // What freeing drops: every held summary row but the newest. The
+    // summaries' index, the transcript index and the view stay, so resuming
+    // reads nothing from the runner.
+    assert!(carry.0.summaries.held() <= 1);
+    assert_eq!(carry.0.summaries.len(), kept.summaries.len());
     assert_eq!(carry.0.index.entries(), kept.index.entries());
     assert!(carry.0.index_ready && carry.0.latest.is_some());
     let reads = client.reads.lock().unwrap().len();

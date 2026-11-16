@@ -553,35 +553,37 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         &self,
         recent: crate::context_read::Recent,
     ) -> Result<Value, cortexkit_role_compaction::wire::Refusal> {
+        // A quiet session's slot counts as live: sending to it resumes the
+        // session from what it kept, as for any other job.
         let live = self
             .inner
             .workers
             .lock()
             .expect("worker map")
-            .iter()
-            .filter(|(key, _)| key.harness == recent.harness && key.session == recent.session)
-            .min_by(|(a, _), (b, _)| a.runner.cmp(&b.runner))
-            .map(|(_, worker)| worker.clone());
-        let worker = match live {
-            Some(worker) => worker,
-            None => {
-                let key = recent
-                    .saved?
-                    .into_iter()
-                    .map(|runner| SessionRef::new(runner, &recent.harness, &recent.session))
-                    .find(|key| {
-                        self.inner
-                            .store
-                            .as_ref()
-                            .is_some_and(|store| store.load(key).is_some())
-                    })
-                    .ok_or_else(crate::context_read::unknown_session)?;
-                let mut workers = self.inner.workers.lock().expect("worker map");
-                workers
-                    .entry(key.clone())
-                    .or_insert_with(|| self.spawn_worker(key))
-                    .clone()
-            }
+            .keys()
+            .filter(|key| key.harness == recent.harness && key.session == recent.session)
+            .min_by(|a, b| a.runner.cmp(&b.runner))
+            .cloned();
+        let key = match live {
+            Some(key) => key,
+            None => recent
+                .saved?
+                .into_iter()
+                .map(|runner| SessionRef::new(runner, &recent.harness, &recent.session))
+                .find(|key| {
+                    self.inner
+                        .store
+                        .as_ref()
+                        .is_some_and(|store| store.load(key).is_some())
+                })
+                .ok_or_else(crate::context_read::unknown_session)?,
+        };
+        let worker = {
+            let mut workers = self.inner.workers.lock().expect("worker map");
+            let slot = workers
+                .entry(key.clone())
+                .or_insert_with(|| self.spawn_worker(key.clone()));
+            self.running(slot, &key)
         };
         let (reply, answer) = oneshot::channel();
         // A worker that stops before answering was released by a move; the
