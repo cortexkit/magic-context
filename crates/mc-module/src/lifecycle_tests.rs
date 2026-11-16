@@ -78,6 +78,9 @@ mod head_cache_differential_tests;
 #[path = "session/held_summaries_tests.rs"]
 mod held_summaries_tests;
 
+#[path = "session/summaries_index_review_tests.rs"]
+mod summaries_index_review_tests;
+
 #[path = "embedding_search_tests.rs"]
 mod embedding_search_tests;
 
