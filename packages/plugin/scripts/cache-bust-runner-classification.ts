@@ -61,6 +61,10 @@ export interface RunnerViewRewrite {
     idleGapMs?: number;
 }
 
+/** How long after a step's recorded start ck-mc may still log the Setup or
+ * signed-floor move of the runner preparing that step's request. */
+const STEP_PREPARATION_MS = 2_000;
+
 /** Group only rewrites already attributed to distinct accepted views. */
 export function extendRunnerRebuildChain(
     chain: readonly RunnerViewRewrite[],
@@ -107,7 +111,16 @@ export function classifyRunnerStep(
     const window = decisions.filter(
         (event) => event.at > (facts.previousCompletedAt ?? previous.at) && event.at <= current.at,
     );
-    const afterRestart = window.some((event) => event.kind === "setup");
+    // A runner that restarts a session sends Setup and reports a signed-floor
+    // move while it prepares the step's request, so ck-mc logs them a moment
+    // after the step's recorded start. Both still belong to this step's request.
+    const preparing = decisions.filter(
+        (event) =>
+            (event.kind === "setup" || event.kind === "signed_floor") &&
+            event.at > current.at &&
+            event.at <= current.at + STEP_PREPARATION_MS,
+    );
+    const afterRestart = [...window, ...preparing].some((event) => event.kind === "setup");
     const base = {
         previousTotal,
         rewrittenTokens: Math.max(0, previousTotal - current.read),
@@ -142,7 +155,7 @@ export function classifyRunnerStep(
                   .split(",")
                   .map((cause) => cause.trim())
             : [];
-    const plan = window.find(
+    const plan = [...window, ...preparing].find(
         (event) =>
             event.kind === "signed_floor" ||
             causes(event).some((cause) => ["SurfaceChange", "ModelChange"].includes(cause)),

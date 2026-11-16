@@ -342,6 +342,57 @@ test("04:02 signed floor rewrite is plan_changed, not VIEW, in the store analyze
     expect(rows[1]!.runnerClassification!.class).toBe("plan_changed");
 });
 
+test("a signed floor reported just after the step it prepared is plan_changed, not unexplained", () => {
+    // 16 Nov 04:53Z: after a server restart the runner set the session up again
+    // and moved its signed floor while preparing the first request; ck-mc
+    // logged both 65 ms and 116 ms after the step's recorded start.
+    const at = Date.parse("2026-11-16T04:53:36.272Z");
+    const requests = [
+        {
+            id: "before",
+            at: at - 52 * 60_000,
+            sequence: 0,
+            model: "claude",
+            provider: "anthropic",
+            usage: { input: 1, output: 1, cacheRead: 441_000, cacheWrite: 811 },
+        },
+        {
+            id: "rewrite",
+            at,
+            sequence: 1,
+            model: "claude",
+            provider: "anthropic",
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 439_559 },
+        },
+    ];
+    const evidence = {
+        decisions: [
+            event(at + 65, "setup (opencode2, preset head, model anthropic/claude-opus-5-5)"),
+            event(at + 116, "signed floor moved to msg_42"),
+        ],
+        renders: [],
+        files: [],
+    };
+    const rows = analyzer.analyzeSnapshots(
+        analyzer.runnerSnapshots({ kind: "oc2", session: "head", files: [], requests }, []),
+        [],
+        { runnerEvidence: evidence },
+    );
+    expect(rows[1]!.runnerClassification!.class).toBe("plan_changed");
+
+    // A move logged well after the step belongs to a later request.
+    const late = {
+        ...evidence,
+        decisions: [event(at + 5_000, "signed floor moved to msg_42")],
+    };
+    const lateRows = analyzer.analyzeSnapshots(
+        analyzer.runnerSnapshots({ kind: "oc2", session: "head", files: [], requests }, []),
+        [],
+        { runnerEvidence: late },
+    );
+    expect(lateRows[1]!.runnerClassification!.class).toBe("unexplained");
+});
+
 test("head log discovery excludes workers, summarizers and old setups, including colon ids", () => {
     const root = directory();
     const dir = join(root, "magic-context/logs");
