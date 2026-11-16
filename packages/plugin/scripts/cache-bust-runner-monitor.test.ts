@@ -344,8 +344,9 @@ test("04:02 signed floor rewrite is plan_changed, not VIEW, in the store analyze
 
 test("a signed floor reported just after the step it prepared is plan_changed, not unexplained", () => {
     // 16 Nov 04:53Z: after a server restart the runner set the session up again
-    // and moved its signed floor while preparing the first request; ck-mc
-    // logged both 65 ms and 116 ms after the step's recorded start.
+    // and moved its signed floor while preparing the first request; the Magic
+    // Context module's log (ck-mc) shows both 65 ms and 116 ms after the
+    // step's recorded start.
     const at = Date.parse("2026-11-16T04:53:36.272Z");
     const requests = [
         {

@@ -61,8 +61,9 @@ export interface RunnerViewRewrite {
     idleGapMs?: number;
 }
 
-/** How long after a step's recorded start ck-mc may still log the Setup or
- * signed-floor move of the runner preparing that step's request. */
+/** How long after a step's recorded start the Magic Context module's log
+ * (ck-mc) may still show the Setup or signed-floor move of the runner
+ * preparing that step's request. */
 const STEP_PREPARATION_MS = 2_000;
 
 /** Group only rewrites already attributed to distinct accepted views. */
@@ -112,8 +113,9 @@ export function classifyRunnerStep(
         (event) => event.at > (facts.previousCompletedAt ?? previous.at) && event.at <= current.at,
     );
     // A runner that restarts a session sends Setup and reports a signed-floor
-    // move while it prepares the step's request, so ck-mc logs them a moment
-    // after the step's recorded start. Both still belong to this step's request.
+    // move while it prepares the step's request, so the Magic Context module's
+    // log (ck-mc) shows them a moment after the step's recorded start. Both
+    // still belong to this step's request.
     const preparing = decisions.filter(
         (event) =>
             (event.kind === "setup" || event.kind === "signed_floor") &&
