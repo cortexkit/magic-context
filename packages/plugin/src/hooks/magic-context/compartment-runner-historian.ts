@@ -27,10 +27,7 @@ import {
     hasLengthCappedOutput,
 } from "../../shared/assistant-message-extractor";
 import { teardownChildSession } from "../../shared/child-session-teardown";
-import {
-    ensureCortexKitArtifactGitignore,
-    getProjectMagicContextHistorianDir,
-} from "../../shared/data-path";
+import { getMagicContextHistorianSessionDir } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
 import { hiddenModelCooldowns, selectHiddenModelStart } from "../../shared/hidden-model-cooldown";
 import { rememberV1HiddenRun } from "../../shared/hidden-zen-read";
@@ -71,16 +68,6 @@ import {
 } from "./producer-window-guard";
 import { estimateTokens } from "./read-session-formatting";
 
-// Intentionally kept: historian validation failure dumps are preserved for
-// debugging. They land in the project-local historian dir
-// (<project>/.opencode/magic-context/historian/) so they sit inside the
-// project boundary OpenCode's permission system already trusts AND so users
-// debugging a failed run can find dumps next to the project they belong to.
-// The user has explicitly requested keeping these dumps for now (see audit
-// #21); they survive until manual cleanup.
-function historianResponseDumpDir(directory: string): string {
-    return getProjectMagicContextHistorianDir(directory);
-}
 const MAX_HISTORIAN_RETRIES = 2;
 const unknownProducerWindows = new Set<string>();
 
@@ -890,7 +877,6 @@ async function runHistorianPrompt(args: {
         }
         const dumpPath = dumpHistorianResponse(
             parentSessionId,
-            sessionDirectory,
             dumpLabel ?? "historian-response",
             result,
         );
@@ -1163,20 +1149,26 @@ function cleanupHistorianDump(sessionId: string, dumpPath?: string): void {
     }
 }
 
+/**
+ * Save one historian response for debugging. The caller deletes the file again
+ * when the response passes validation, so only failed passes leave a dump.
+ *
+ * Dumps go to the session's directory under the OS temp dir, next to the
+ * plugin log, and never into the project: they belong to the session (which
+ * can move between projects), and the model never reads them. A write failure
+ * is logged and returns undefined; the historian pass carries on without a
+ * dump.
+ */
 function dumpHistorianResponse(
     sessionId: string,
-    directory: string,
     label: string,
     text: string,
 ): string | undefined {
     try {
-        const dumpDir = historianResponseDumpDir(directory);
+        const dumpDir = getMagicContextHistorianSessionDir(sessionId);
         mkdirSync(dumpDir, { recursive: true });
-        // Keep the transient dump dir out of the user's git status.
-        ensureCortexKitArtifactGitignore(directory);
-        const safeSessionId = sanitizeDumpName(sessionId);
         const safeLabel = sanitizeDumpName(label);
-        const dumpPath = join(dumpDir, `${safeSessionId}-${safeLabel}-${Date.now()}.xml`);
+        const dumpPath = join(dumpDir, `${safeLabel}-${Date.now()}.xml`);
         writeFileSync(dumpPath, text, "utf8");
         shared.sessionLog(sessionId, "compartment agent: historian response dumped", {
             label,

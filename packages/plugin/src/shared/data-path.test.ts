@@ -15,13 +15,14 @@ import {
     getCacheDir,
     getDataDir,
     getLegacyOpenCodeMagicContextStorageDir,
+    getMagicContextHistorianDir,
+    getMagicContextHistorianSessionDir,
     getMagicContextLogPath,
     getMagicContextStorageDir,
     getMagicContextStorageResolution,
     getOpenCodeCacheDir,
     getOpenCodeStorageDir,
     getProjectMagicContextDir,
-    getProjectMagicContextHistorianDir,
     isMagicContextStorageOutsideEngram,
 } from "./data-path";
 import * as logger from "./logger";
@@ -271,19 +272,35 @@ describe("data-path", () => {
     });
 
     test("getProjectMagicContextDir composes <project>/.cortexkit/magic-context", () => {
-        // Project-local artifacts (historian state file, failure dumps) live
-        // inside the project so OpenCode's external_directory permission system
-        // treats them as project-internal. Without this, historian's Read tool
-        // would trigger a permission prompt on every run when artifacts lived
-        // under os.tmpdir(). Moved from .opencode/ to the shared .cortexkit/.
+        // Project-local artifacts (the dreamer's docs-update proposals) live
+        // inside the project because they target the project's own docs.
+        // Moved from .opencode/ to the shared .cortexkit/.
         expect(getProjectMagicContextDir("/Users/me/Work/proj")).toBe(
             path.join("/Users/me/Work/proj", ".cortexkit", "magic-context"),
         );
     });
 
-    test("getProjectMagicContextHistorianDir appends historian/", () => {
-        expect(getProjectMagicContextHistorianDir("/Users/me/Work/proj")).toBe(
-            path.join("/Users/me/Work/proj", ".cortexkit", "magic-context", "historian"),
+    test("historian dumps live per session under the harness temp dir, not in a project", () => {
+        expect(getMagicContextHistorianDir("opencode")).toBe(
+            path.join(os.tmpdir(), "opencode", "magic-context", "historian"),
+        );
+        expect(getMagicContextHistorianSessionDir("ses_abc123", "pi")).toBe(
+            path.join(os.tmpdir(), "pi", "magic-context", "historian", "ses_abc123"),
+        );
+    });
+
+    test("the historian session dir keeps unsafe session ids inside the historian root", () => {
+        const root = getMagicContextHistorianDir("opencode");
+        expect(getMagicContextHistorianSessionDir("a/b\\c:d", "opencode")).toBe(
+            path.join(root, "a-b-c-d"),
+        );
+        for (const id of ["", ".", ".."]) {
+            expect(getMagicContextHistorianSessionDir(id, "opencode")).toBe(
+                path.join(root, "unknown-session"),
+            );
+        }
+        expect(getMagicContextHistorianSessionDir("../..", "opencode")).toBe(
+            path.join(root, "..-.."),
         );
     });
 
@@ -291,7 +308,7 @@ describe("data-path", () => {
         // Project-local paths anchor to the project directory the caller
         // passes in, NOT to any user-config env var. Setting XDG_DATA_HOME
         // (which changes the shared storage dir) must not change the
-        // project-local historian dir.
+        // project-local artifact dir.
         process.env.XDG_DATA_HOME = "/tmp/custom-data";
         expect(getProjectMagicContextDir("/some/project")).toBe(
             path.join("/some/project", ".cortexkit", "magic-context"),

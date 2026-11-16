@@ -67,14 +67,35 @@ export function getMagicContextLogPath(harness: HarnessId = getHarness()): strin
 }
 
 /**
- * Directory used for both historian validation-failure dumps and the
- * existing-state offload XMLs that large historian/recomp passes write
- * before invoking the model. Per-harness so dumps from different
- * harnesses don't collide on filename and so `doctor --issue` for each
- * harness reports only its own historian artifacts.
+ * Root directory for historian response dumps: debug copies of one historian
+ * pass's raw output, kept only when the pass fails validation. Each session
+ * writes into its own subdirectory (see getMagicContextHistorianSessionDir).
+ *
+ * The dumps belong to the session, not to a project, and the model never
+ * reads them, so they live in the per-harness temp subtree next to the log.
+ * Per-harness so `doctor --issue` for each harness reports only its own
+ * historian artifacts. Plugin versions before 0.18 wrote dumps directly into
+ * this directory without a session subdirectory; doctor lists those as legacy.
  */
 export function getMagicContextHistorianDir(harness: HarnessId = getHarness()): string {
     return path.join(getMagicContextTempDir(harness), "historian");
+}
+
+/**
+ * Per-session historian dump directory:
+ * `${os.tmpdir()}/<harness>/magic-context/historian/<session-id>/`.
+ *
+ * The session id is reduced to filename-safe characters, and an id that would
+ * resolve to the historian root or its parent (empty, `.` or `..`) is replaced
+ * with a fixed name, so a dump can never land outside its session directory.
+ */
+export function getMagicContextHistorianSessionDir(
+    sessionId: string,
+    harness: HarnessId = getHarness(),
+): string {
+    const safeSessionId = sessionId.replace(/[^a-zA-Z0-9._-]/g, "-");
+    const directoryName = /^\.*$/.test(safeSessionId) ? "unknown-session" : safeSessionId;
+    return path.join(getMagicContextHistorianDir(harness), directoryName);
 }
 
 /**
@@ -82,27 +103,24 @@ export function getMagicContextHistorianDir(harness: HarnessId = getHarness()): 
  *
  * Layout: `<project-directory>/.cortexkit/magic-context/`
  *
- * Used for artifacts that the historian/recomp pipeline writes during a run
- * and that the model is asked to read via its native Read tool. OpenCode's
- * `external_directory` permission system asks the user before reading any
- * file outside the project directory or its worktree, which interrupts every
- * historian run when artifacts live under `os.tmpdir()`. Writing under the
- * project's own `.cortexkit/` subtree falls inside the project boundary and
- * never triggers a permission prompt.
+ * Used for the dreamer's docs-update proposals, which target the project's own
+ * ARCHITECTURE.md and STRUCTURE.md and so are project files by design.
  *
  * `.cortexkit/` is the shared CortexKit per-project dir (also holds the
- * project config `magic-context.jsonc`). Because these artifacts are transient
- * debug dumps that shouldn't dirty the user's repo, each writer ensures a
- * self-ignoring `.gitignore` inside this subdir (see
- * ensureCortexKitArtifactGitignore) while leaving `*.jsonc` config tracked.
+ * project config `magic-context.jsonc`). Because the generated artifacts
+ * shouldn't dirty the user's repo, each writer ensures a self-ignoring
+ * `.gitignore` inside this subdir (see ensureCortexKitArtifactGitignore) while
+ * leaving `*.jsonc` config tracked.
  *
- * Migration note: artifacts used to live under `.opencode/magic-context/`. We
- * cut the write path forward only — old transient dumps are git-ignored and
- * regenerated, so they are intentionally NOT migrated (left to be cleaned).
+ * Historian response dumps used to be written to `historian/` under this
+ * directory. They now go to the per-harness temp subtree (see
+ * getMagicContextHistorianSessionDir) because they belong to a session, not a
+ * project, and the model never reads them. Old dumps already in projects are
+ * left in place; `doctor` still lists them.
  *
  * Logger does NOT use this — log files stay in the per-harness tmp subtree
- * because they are written by the plugin process itself (no model-side Read
- * tool call, no permission prompt) and span sessions/projects.
+ * because they are written by the plugin process itself and span
+ * sessions/projects.
  */
 export function getProjectMagicContextDir(directory: string): string {
     return path.join(directory, ".cortexkit", "magic-context");
@@ -141,24 +159,6 @@ export function ensureCortexKitArtifactGitignore(directory: string): void {
     } catch (error) {
         log("Failed to ensure project artifact gitignore", { directory, error: String(error) });
     }
-}
-
-/**
- * Project-local historian artifact directory.
- *
- * Layout: `<project-directory>/.cortexkit/magic-context/historian/`
- *
- * Used for:
- *   - existing-state offload XMLs that long historian/recomp passes write
- *     before invoking the model (the model reads the file via Read tool)
- *   - validation-failure dump XMLs preserved for debugging
- *
- * Callers must `mkdirSync(dir, { recursive: true })` before writing — the
- * `.cortexkit/` parent may not exist on a fresh project, and write failures
- * here must degrade gracefully (e.g. historian falls back to inline state).
- */
-export function getProjectMagicContextHistorianDir(directory: string): string {
-    return path.join(getProjectMagicContextDir(directory), "historian");
 }
 
 export function getOpenCodeStorageDir(): string {
