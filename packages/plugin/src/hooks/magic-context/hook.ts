@@ -1029,6 +1029,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             ? {
                   config: dreamerConfig,
                   projectPath,
+                  // `dreamer.disable` is a live key: a dreamer turned off after
+                  // startup refuses /ctx-dream, as the scheduled runs stop.
+                  isDisabled: () =>
+                      (deps.sampleDreamConfig?.() ?? deps.config).dreamer?.disable === true,
                   // Manual /ctx-dream → Dreamer v2 per-task scheduler. Runs in this
                   // hook's own checkout (not a stale sibling worktree from the
                   // shared git:<sha> identity map).

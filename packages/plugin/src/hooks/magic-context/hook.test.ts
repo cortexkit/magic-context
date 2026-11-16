@@ -1156,6 +1156,44 @@ describe("magic-context hook", () => {
         );
     });
 
+    it("refuses ctx-dream when the dreamer was disabled after startup", async () => {
+        process.env.XDG_DATA_HOME = makeTempDir("hook-dream-live-disable-");
+        const promptMocks = createPromptMocks();
+        const deps = createMockDeps(promptMocks);
+        // The dreamer is on in the configuration the plugin started with.
+        deps.config = {
+            ...deps.config,
+            dreamer: {
+                inject_docs: true,
+                tasks: { curate: { schedule: "0 3 * * *", timeout_minutes: 10 } },
+            },
+        } as never;
+        // The configuration file now sets `dreamer.disable`, a live key.
+        deps.sampleDreamConfig = () =>
+            ({ ...deps.config, dreamer: { ...deps.config.dreamer, disable: true } }) as never;
+        const hook = requireHook(createMagicContextHook(deps));
+        // A memory to curate, so a run that wrongly starts opens a child session.
+        insertMemory(openDatabase(), {
+            projectPath: resolveProjectIdentity("/tmp"),
+            category: "CONFIG_VALUES",
+            content: "Dream me while disabled",
+        });
+
+        await expectSentinel(
+            hook["command.execute.before"]!(
+                { command: "ctx-dream", sessionID: "ses-dream-off-live", arguments: "curate" },
+                { parts: [{ type: "text", text: "" }] },
+            ),
+            "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
+        );
+
+        expect(promptMocks.createSession).not.toHaveBeenCalled();
+        expect(promptMocks.prompt).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(promptMocks.prompt?.mock.calls[0]?.[0])).toContain(
+            "Dreaming is not configured for this project.",
+        );
+    });
+
     it("routes manual classify through MODULE before any transform has run", async () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-classify-module-manual-");
         const promptMocks = createPromptMocks();

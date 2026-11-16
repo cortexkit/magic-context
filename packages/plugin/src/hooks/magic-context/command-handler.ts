@@ -387,6 +387,9 @@ async function executeDreaming(
             /** Run dream tasks NOW (Dreamer v2 per-task scheduler manual path).
              *  `task` forces one task ignoring its gate; omitted runs all enabled. */
             runManual: (task?: DreamTaskName) => Promise<ManualDreamSummary>;
+            /** Whether the current configuration sets `dreamer.disable`, re-read
+             *  on every call because the key applies without a restart. */
+            isDisabled?: () => boolean;
         };
     },
     sessionId: string,
@@ -396,7 +399,7 @@ async function executeDreaming(
         toastDurationMs: deps.sampleToastDurationMs?.() ?? deps.toastDurationMs ?? 5000,
     };
 
-    if (!deps.dreamer) {
+    if (!deps.dreamer || deps.dreamer.isDisabled?.() === true) {
         await deps.sendNotification(
             sessionId,
             "## /ctx-dream\n\nDreaming is not configured for this project.",
@@ -532,6 +535,8 @@ export function createMagicContextCommandHandler(deps: {
         /** Dreamer v2 manual `/ctx-dream` entry — runs tasks now via the per-task
          *  scheduler (one forced task, or all enabled). Wired in hook.ts. */
         runManual: (task?: DreamTaskName) => Promise<ManualRunResult>;
+        /** Whether the current configuration sets `dreamer.disable`. */
+        isDisabled?: () => boolean;
     };
 }) {
     // Notification delivery MUST NOT bypass the sentinel. Every command path
