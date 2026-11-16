@@ -248,6 +248,9 @@ async fn check(preset: &'static str, compacting: bool) {
         // Callers omit facts for a provider without system-text-facts/v1;
         // the kit omits them and verifies the real handler's legacy catalog.
         "system_text_facts_legacy_omitted",
+        // ck-mc declares no session-notices/v1 and refuses the
+        // `notice_templates` member, as the contract asks of a non-declarer.
+        "catalog_notice_templates",
         "terminal_frame_on_success",
         "terminal_frame_on_refusal",
         "call_key_malformed_refused",

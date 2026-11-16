@@ -978,6 +978,16 @@ fn refusals_name_the_offending_field() {
             json!({"params": {"exclude": ["ctx_memory_list"]}}),
             "params.exclude",
         ),
+        // ck-mc declares no session-notices/v1, so it refuses the member
+        // whatever its value.
+        (
+            json!({"params": {}, "notice_templates": true}),
+            "notice_templates",
+        ),
+        (
+            json!({"params": {}, "notice_templates": false}),
+            "notice_templates",
+        ),
         (
             json!({"params": {}, "system_text": {"preset": "primary", "params": {"surface": "tiny"}}}),
             "system_text.params.surface",

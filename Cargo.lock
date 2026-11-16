@@ -533,9 +533,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-agent-data"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54b582c3ddfae1b5070b282318b5a3cfc8feba8a8dd85e5dda0e90e97540d695"
+checksum = "14375c604e88e22f31c67bc4dc6fd3f055ecd9bb84d8f976d2e221a8dab7f82d"
 dependencies = [
  "serde",
  "serde_json",
@@ -627,9 +627,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-tool-provider"
-version = "0.15.8"
+version = "0.15.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6001f2f9e5643b5d64a2a03059031608b3b5926419089c95c746ed4eae3f1e2"
+checksum = "4aca402d38df8423e4e13f8441cc88d6a89429502baff8d0b373f3de87851c51"
 dependencies = [
  "cortexkit-role-tool-display",
  "serde",
@@ -641,9 +641,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-tool-provider-conformance"
-version = "0.15.9"
+version = "0.15.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc8632102e0400ea3857fee20ca70c039d1d011be574527cd28f52d254fe8ee9"
+checksum = "0507201e9e20040651ad9527e38e0a030b3bec5c81f0ef94e5b28a2f050dc2e7"
 dependencies = [
  "async-trait",
  "cortexkit-role-harness",
