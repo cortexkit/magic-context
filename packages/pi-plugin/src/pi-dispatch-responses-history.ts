@@ -63,7 +63,7 @@ export interface PiResponsesUnsignedAlternatives {
 }
 
 /** Cold replay is safe only for plaintext reasoning with no surviving server state. */
-function coldReplayable(items: unknown[]): boolean {
+export function piResponsesColdReplayable(items: unknown[]): boolean {
 	let reasoning = false;
 	for (const value of items) {
 		const item = object(value);
@@ -318,7 +318,7 @@ export function piResponsesAssistantTexts(
 	// choice and a request still holding the stored native bytes is refused.
 	if (unsigned && alternatives) {
 		alternatives.fallback = texts;
-		alternatives.cold = coldReplayable(payload.items) ? replay : texts;
+		alternatives.cold = piResponsesColdReplayable(payload.items) ? replay : texts;
 	}
 	return replay;
 }

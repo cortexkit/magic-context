@@ -41,6 +41,11 @@ import {
 	piResponsesWireTexts,
 } from "./pi-dispatch-responses-history";
 import {
+	type PiResponsesReplayedCalls,
+	piResponsesReplayedCalls,
+	piResponsesReplayRows,
+} from "./pi-dispatch-responses-replay";
+import {
 	type PiDispatchRowDiagnostic,
 	piDispatchRowDiagnostic,
 } from "./pi-dispatch-row-diagnostic";
@@ -1005,6 +1010,14 @@ function buildPiPreparedStructure(
 	const fallbackMessages: MessageStructure[] = [];
 	const coldMessages: MessageStructure[] = [];
 	let unsignedAlternatives = false;
+	// Every row again, for the replay plans below: an assistant row carries the
+	// texts each plan gives it and, when OMP sends its stored output items with
+	// other calls than the rebuilt turn has, those calls.
+	const planRows: {
+		row: MessageStructure;
+		texts?: Record<"warm" | "fallback" | "cold", readonly string[]>;
+		replayed?: PiResponsesReplayedCalls;
+	}[] = [];
 	const appendResponse = (
 		output: MessageStructure[],
 		row: MessageStructure,
@@ -1030,6 +1043,7 @@ function buildPiPreparedStructure(
 				responsesMessages.push(row);
 				fallbackMessages.push(row);
 				coldMessages.push(row);
+				planRows.push({ row });
 				continue;
 			}
 			const alternatives: {
@@ -1053,8 +1067,68 @@ function buildPiPreparedStructure(
 			appendResponse(responsesMessages, row, texts);
 			appendResponse(fallbackMessages, row, alternatives.fallback ?? texts);
 			appendResponse(coldMessages, row, alternatives.cold ?? texts);
+			planRows.push({
+				row,
+				texts: {
+					warm: texts,
+					fallback: alternatives.fallback ?? texts,
+					cold: alternatives.cold ?? texts,
+				},
+				replayed:
+					host === "omp"
+						? piResponsesReplayedCalls(
+								projectedMessages[index],
+								row.calls,
+								row.wireCalls,
+								model,
+							)
+						: undefined,
+			});
 		}
 	}
+	// A turn whose stored items OMP replays with other calls than the rebuilt
+	// turn (a reused call id; see pi-dispatch-responses-replay) changes the rows
+	// of every plan that replays it. Warm provider state replays every such
+	// turn, the fallback plan none, the cold plan the cold-replayable ones. The
+	// rebuilt plans stay as they are, and so do plans no such turn touches.
+	const replays = planRows.some((entry) => entry.replayed);
+	const replayPlan = (
+		rows: MessageStructure[],
+		plan: "warm" | "fallback" | "cold",
+	): MessageStructure[] => {
+		if (!replays) return rows;
+		const replayedIn = (entry: (typeof planRows)[number]) =>
+			plan === "warm" || (plan === "cold" && entry.replayed?.cold)
+				? entry.replayed
+				: undefined;
+		if (!planRows.some(replayedIn)) return rows;
+		return (
+			piResponsesReplayRows<MessageStructure>(
+				planRows.map((entry) =>
+					entry.texts
+						? {
+								row: entry.row,
+								texts: entry.texts[plan],
+								replayed: replayedIn(entry),
+							}
+						: { row: entry.row },
+				),
+				(callId) => ({
+					role: "toolResult",
+					calls: [],
+					results: [callId],
+					wireResults: [callId],
+				}),
+				(source) => ({
+					...source,
+					calls: [],
+					wireCalls: [],
+					responseTexts: [],
+				}),
+			) ?? rows
+		);
+	};
+	if (responsesMessages) responsesMessages = replayPlan(responsesMessages, "warm");
 	const plan = piChatHistoryPlan(projectedMessages, model);
 	let pendingToolImages: PiImageRun[] = [];
 	const chatMessages = plan?.flatMap((step): MessageStructure[] => {
@@ -1096,8 +1170,13 @@ function buildPiPreparedStructure(
 		// 18.12.x :2267-2271 additionally replays cold-safe turns (:2098-2107).
 		// Each alternative is a complete fallback or cold message list for the
 		// whole request; individual rows cannot choose different alternatives.
-		...(responsesMessages && unsignedAlternatives
-			? { responsesAlternatives: [fallbackMessages, coldMessages] }
+		...(responsesMessages && (unsignedAlternatives || replays)
+			? {
+					responsesAlternatives: [
+						replayPlan(fallbackMessages, "fallback"),
+						replayPlan(coldMessages, "cold"),
+					],
+				}
 			: {}),
 		...(model?.api ? { api: model.api } : {}),
 		...(modelsContinuePad ? { anthropicContinuePad: true as const } : {}),
@@ -1487,6 +1566,29 @@ function googleStructure(
 		} else rows.push(row);
 	}
 	return rows;
+}
+
+/** Whether each prepared row names the wire row's call and result ids, as compareRow reads them on Responses. */
+function sameResponsesIds(
+	expected: readonly MessageStructure[],
+	actual: readonly MessageStructure[],
+): boolean {
+	const same = (
+		ids: readonly (string | undefined)[],
+		wire: readonly string[],
+	) => ids.length === wire.length && ids.every((id, index) => id === wire[index]);
+	return expected.every(
+		(row, index) =>
+			!!actual[index] &&
+			same(
+				row.wireCalls ?? row.calls.map((id) => wireId(id, false, true)),
+				actual[index].calls,
+			) &&
+			same(
+				row.wireResults ?? row.results.map((id) => wireId(id, false, true)),
+				actual[index].results,
+			),
+	);
 }
 
 function wireId(
@@ -2052,16 +2154,30 @@ function preparedStructureMismatch(
 					: prepared?.messages;
 		if (responses && rows && prepared?.responsesAlternatives) {
 			const actual = rows;
+			const candidates = [
+				prepared.responsesMessages,
+				...prepared.responsesAlternatives,
+			];
+			const sameTexts = (candidate: readonly MessageStructure[] | undefined) =>
+				candidate?.length === actual.length &&
+				candidate.every(
+					(expected, index) =>
+						JSON.stringify(expected.responseTexts) ===
+						JSON.stringify(actual[index].responseTexts),
+				);
+			// Plans can also differ in their calls: a turn OMP replays from its
+			// stored items may carry other calls than the rebuilt turn. Prefer the
+			// plan whose call and result ids also match; otherwise the first plan
+			// whose texts match is compared, as before, and names the difference.
 			expectedRows =
-				[prepared.responsesMessages, ...prepared.responsesAlternatives].find(
+				candidates.find(
 					(candidate) =>
-						candidate?.length === actual.length &&
-						candidate.every(
-							(expected, index) =>
-								JSON.stringify(expected.responseTexts) ===
-								JSON.stringify(actual[index].responseTexts),
-						),
-				) ?? expectedRows;
+						sameTexts(candidate) &&
+						!!candidate &&
+						sameResponsesIds(candidate, actual),
+				) ??
+				candidates.find(sameTexts) ??
+				expectedRows;
 		}
 		const optionalPlan =
 			expectedRows === prepared?.messages
