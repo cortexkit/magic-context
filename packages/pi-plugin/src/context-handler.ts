@@ -6069,10 +6069,16 @@ export function registerPiContextHandler(
 			const ctxReduceCallable = piCtxReduceCallable(
 				pi,
 				options.compactionOff === true,
+				{ db: options.db, sessionId },
 			);
 			const servedCtxReduceCallable = options.compactionOff
 				? ctxReduceCallable
 				: readServedPiCtxReduceCallable(options.db, sessionId);
+			// Both reminders measure from this baseline. Without the tool there is
+			// none, so a reminder after the tool returns starts from a measurement
+			// taken while the tool was callable again, never from one taken before
+			// it left.
+			if (!ctxReduceCallable) clearPiChannel1State(sessionId);
 			const pipelineArgs: RunPipelineArgs = {
 				ctxReduceCallable,
 				servedCtxReduceCallable,
@@ -10473,9 +10479,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// request. Tools come first in the request, so the provider has already lost
 	// the cache from the tool definitions on, and this pass adds or removes the
 	// tag prefixes anyway: it is a rebuild already paid for, and queued work
-	// rides it. On a primary session whose system prompt also changed with the
-	// tool list (the guidance went in or out), the existing system-prompt fold
-	// rebuilds the history head on the same pass.
+	// rides it. The ctx_reduce guidance in the system prompt is rebuilt only when
+	// a turn starts. When the tool list changed between turns, the guidance
+	// changes on this same pass, and the system-prompt fold runs here as well.
+	// When it changed inside a turn, the old guidance stays until the next turn
+	// starts, and that later prompt change is a second cache loss of its own.
 	const requestToolListChanged =
 		args.ctxReduceCallable !== args.servedCtxReduceCallable;
 	if (requestToolListChanged)

@@ -22,15 +22,22 @@ const CTX_REDUCE = "ctx_reduce";
 /**
  * True when the session's next request can call ctx_reduce: compaction is on
  * and the request sends the tool. When the host's tool lists cannot be read
- * the answer is unknown, and the session keeps the tags, guidance and
- * reminders it had before this check existed.
+ * the answer is unknown, and the session keeps the answer its last served
+ * request was built with, so a failed read never adds or removes tag
+ * prefixes. A session with no served request yet counts as callable, as every
+ * session did before this check existed.
  */
 export function piCtxReduceCallable(
 	pi: { getAllTools?: () => unknown; getActiveTools?: () => unknown },
 	compactionOff: boolean,
+	session?: { db: Database; sessionId: string },
 ): boolean {
 	if (compactionOff) return false;
-	return readPiRequestSendsTool(pi, CTX_REDUCE) !== false;
+	const sent = readPiRequestSendsTool(pi, CTX_REDUCE);
+	if (sent !== undefined) return sent;
+	return session
+		? readServedPiCtxReduceCallable(session.db, session.sessionId)
+		: true;
 }
 
 /**
@@ -76,6 +83,11 @@ export function recordServedPiCtxReduceCallable(
 	callable: boolean,
 ): void {
 	if (readServedPiCtxReduceCallable(db, sessionId) === callable) return;
+	// The request was served either way, so the in-memory answer advances
+	// before the write, whether the write then succeeds, declines or throws.
+	// Only a restart before a later successful write reads the older stored
+	// answer, which costs one extra rebuild.
+	servedBySession.set(sessionId, callable);
 	const written = updateReplayDocument(db, sessionId, (doc) => {
 		const stored = doc[NAMESPACE];
 		if ((typeof stored === "boolean" ? stored : true) === callable)
@@ -84,11 +96,7 @@ export function recordServedPiCtxReduceCallable(
 		doc[NAMESPACE] = callable;
 		return true;
 	});
-	// The request was served either way, so the in-memory answer advances even
-	// when storage was not written. Only a restart before a later successful
-	// write reads the older stored answer, which costs one extra rebuild.
 	if (!written) sessionLog(sessionId, "ctx_reduce served record not written");
-	servedBySession.set(sessionId, callable);
 }
 
 export function clearPiCtxReduceCallableSession(sessionId: string): void {

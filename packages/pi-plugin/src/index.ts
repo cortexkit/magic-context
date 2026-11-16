@@ -175,6 +175,7 @@ import {
 } from "./context-handler";
 import { piCtxReduceCallable } from "./ctx-reduce-callable-pi";
 import {
+	clearPiChannel1State,
 	markPiChannel1Reduced,
 	maybeChannel1ReminderForToolResult,
 	maybeDeliverChannel2Pi,
@@ -2609,7 +2610,11 @@ async function startPiMagicContextRuntime(
 				// Read from the session's tool list every turn: another extension
 				// can remove ctx_reduce or put it back, and a spawned Oh My Pi
 				// session can start without it.
-				ctxReduceCallable: piCtxReduceCallable(pi, compactionOff),
+				ctxReduceCallable: piCtxReduceCallable(
+					pi,
+					compactionOff,
+					sessionId ? { db, sessionId } : undefined,
+				),
 				dreamerEnabled: effectiveProjectDeps.dreamerEnabled,
 				smartNotesEnabled: config.smart_notes.enabled,
 				temporalAwarenessEnabled: effectiveConfig.temporal_awareness ?? false,
@@ -2786,8 +2791,11 @@ async function startPiMagicContextRuntime(
 				: undefined;
 			if (lastAssistant?.stopReason === "stop") {
 				const sessionId = ctx.sessionManager?.getSessionId?.();
-				if (sessionId && db && piCtxReduceCallable(pi, compactionOff))
-					maybeDeliverChannel2Pi(pi, db, sessionId);
+				if (sessionId && db) {
+					if (piCtxReduceCallable(pi, compactionOff, { db, sessionId }))
+						maybeDeliverChannel2Pi(pi, db, sessionId);
+					else clearPiChannel1State(sessionId);
+				}
 			}
 		} catch (err) {
 			log(`agent_end: channel2 delivery skipped: ${String(err)}`);
@@ -2913,8 +2921,18 @@ async function startPiMagicContextRuntime(
 			// an explicitly interruptible wait that is cancelled gets a paired
 			// synthetic result. No-ops unless pending and revalidated; agent_end stays
 			// as the fallback delivery site. Neither reminder goes to a session
-			// that cannot call ctx_reduce.
-			if (!piCtxReduceCallable(pi, compactionOff)) return;
+			// that cannot call ctx_reduce, and its size baseline is dropped, so a
+			// reminder after the tool returns never measures from before it left.
+			if (
+				!piCtxReduceCallable(
+					pi,
+					compactionOff,
+					db ? { db, sessionId } : undefined,
+				)
+			) {
+				clearPiChannel1State(sessionId);
+				return;
+			}
 			const block = maybeChannel1ReminderForToolResult({
 				db,
 				sessionId,
