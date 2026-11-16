@@ -39,6 +39,8 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { runCompartmentAgent } from "./compartment-runner-incremental";
 import {
     clearRepeatedHistorianFailureWarning,
+    describeHistorianJoinRefusal,
+    describeRepeatedHistorianFailures,
     formatHistorianClockTime,
     REPEATED_HISTORIAN_FAILURE_WARNING_INTERVAL_MS,
     shouldWarnRepeatedHistorianFailures,
@@ -51,7 +53,7 @@ import { createTransform } from "./transform";
 const WARNING_TITLE = "Magic Context — History summaries keep failing";
 const HISTORIAN_MODEL = "test/fixture-historian";
 const ACTIONS =
-    "What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.";
+    "What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc (user or project config); or run /ctx-recomp to rebuild the history.";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -214,6 +216,39 @@ describe("issue 930: early warning when summary runs keep failing", () => {
         expect(shouldWarnRepeatedHistorianFailures(other, 6, start + interval)).toBe(true);
     });
 
+    it("redacts secret-shaped values and home paths from the quoted error in both the warning and the refusal", () => {
+        const secret = `sk-ant-api03-${"A".repeat(40)}`;
+        const rawError = `provider rejected the request (key ${secret}) while reading /Users/alice/work/app/.env`;
+        const now = new Date(2026, 10, 15, 15, 51, 22).getTime();
+        const failures = {
+            count: 3,
+            lastError: rawError,
+            lastFailureAt: now - 80_000,
+            since: now - 600_000,
+        };
+        const warning = describeRepeatedHistorianFailures({
+            chunk: { start: 407, end: 443 },
+            failures,
+            usagePercentage: 82,
+            now,
+        });
+        const refusal = describeHistorianJoinRefusal({
+            waitedMs: 60_000,
+            usagePercentage: 96,
+            run: { startedAt: now - 60_000, chunk: { start: 407, end: 443 } },
+            failures,
+            now,
+        });
+        const redacted =
+            "provider rejected the request (key <ANTHROPIC_API_KEY_REDACTED>) while reading /Users/<USER>/work/app/.env";
+        expect(warning).toContain(`Last error: ${redacted}.`);
+        expect(refusal).toContain(`The previous run failed at 15:50:02: ${redacted}.`);
+        for (const text of [warning, refusal]) {
+            expect(text).not.toContain(secret);
+            expect(text).not.toContain("alice");
+        }
+    });
+
     it("shows the warning with its facts at the 3rd failed run in a row, not before or after, and again after a successful run resets the count", async () => {
         const db = new Database(":memory:");
         initializeDatabase(db);
@@ -279,7 +314,7 @@ describe("issue 930: early warning when summary runs keep failing", () => {
             [
                 `## ${WARNING_TITLE}`,
                 "",
-                `Summary runs failed in a row: 3, since ${formatHistorianClockTime(firstFailedRunEnded)}. Last chunk: messages ${chunk!.start}-${chunk!.end}. Last error: ${state.lastError}. Now context is at 82% of the window; at 95% a turn waits for a summary and is not sent if none finishes in time.`,
+                `Summary runs failed in a row: 3, since ${formatHistorianClockTime(firstFailedRunEnded)}. Last chunk: messages ${chunk!.start}-${chunk!.end}. Last error: ${state.lastError}. Context is at 82% of the window; at 95% a turn can be refused if no summary finishes in time.`,
                 "",
                 ACTIONS,
             ].join("\n"),

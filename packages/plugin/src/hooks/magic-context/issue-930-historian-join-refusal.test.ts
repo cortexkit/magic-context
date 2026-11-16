@@ -63,7 +63,7 @@ const JOINED_RUN_ERROR =
 /** The chunk of the run the pass joins. */
 const JOINED_CHUNK = { start: 407, end: 443 };
 const ACTIONS =
-    "What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.";
+    "What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc (user or project config); or run /ctx-recomp to rebuild the history.";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;

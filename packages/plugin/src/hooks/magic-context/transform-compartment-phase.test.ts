@@ -637,7 +637,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
                 now,
             }),
         ).toBe(
-            "This turn was not sent: context is at 96% of the window, and Magic Context waited 60 s for a history summary that did not finish in time. The summary of messages 407-443 is still running after 60 s. The previous run failed at 15:50:02: provider is slow. Summary runs failed in a row: 1, since 15:50:02. What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.",
+            "This turn was not sent: context is at 96% of the window, and Magic Context waited 60 s for a history summary that did not finish in time. The summary of messages 407-443 is still running after 60 s. The previous run failed at 15:50:02: provider is slow. Summary runs failed in a row: 1, since 15:50:02. What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc (user or project config); or run /ctx-recomp to rebuild the history.",
         );
         expect(
             historianJoinFailClosedMessage({
@@ -648,7 +648,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
                 now,
             }),
         ).toBe(
-            "This turn was not sent: context is nearly full, and Magic Context waited 60 s for a history summary that did not finish in time. What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.",
+            "This turn was not sent: context is nearly full, and Magic Context waited 60 s for a history summary that did not finish in time. What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc (user or project config); or run /ctx-recomp to rebuild the history.",
         );
     });
 

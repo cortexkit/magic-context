@@ -32,7 +32,6 @@ import {
     getOrCreateSessionMeta,
     getPendingOps,
     getTagsBySession,
-    incrementHistorianFailure,
     loadProtectedTailMeta,
     openDatabase,
     recordOverflowDetected,
@@ -62,6 +61,7 @@ import {
     startCompartmentAgent as startCompartmentAgentImpl,
 } from "./compartment-runner";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import { clearHistorianAlertState } from "./compartment-runner-incremental";
 import { resolveHistorianProducerWindow } from "./historian-prompt-fit";
 import { renderHistorianMemoryBlock } from "./inject-compartments";
 import { producerPromptFailureReason } from "./producer-window-guard";
@@ -3049,9 +3049,14 @@ describe("runCompartmentAgent", () => {
         ).toContain("(mc-h01)");
     });
 
-    it("escalates the historian alert to an actionable notice after persistent failures", async () => {
+    it("keeps the generic notice without the raw error for failures 1-2 and shows only the repeated-failure warning at the 3rd", async () => {
+        // The 3rd failure in a row used to escalate the same generic notice.
+        // Since issue 930 it shows the repeated-failure warning instead (one
+        // toast, never both), which names the last error (redacted) and the
+        // config file; the first two failures keep the generic notice.
+        const sessionId = "ses-persistent-failure";
         useTempDataHome("compartment-runner-persistent-failure-");
-        createOpenCodeDb("ses-persistent-failure", [
+        createOpenCodeDb(sessionId, [
             { id: "m-1", role: "user", text: "eligible one" },
             { id: "m-2", role: "assistant", text: "eligible two" },
             { id: "m-3", role: "user", text: "protected 1" },
@@ -3061,9 +3066,6 @@ describe("runCompartmentAgent", () => {
             { id: "m-7", role: "user", text: "protected 5" },
         ]);
         const db = openDatabase();
-        // Pre-seed prior failures so this run crosses the persistent threshold.
-        incrementHistorianFailure(db, "ses-persistent-failure", "earlier failure");
-        incrementHistorianFailure(db, "ses-persistent-failure", "earlier failure");
 
         const promptSession = mock(async (input: { body?: { noReply?: boolean } }) => {
             if (input.body?.noReply === true) return {};
@@ -3078,22 +3080,47 @@ describe("runCompartmentAgent", () => {
                 delete: mock(async () => ({})),
             },
         } as unknown as PluginContext["client"];
+        const toasts = () =>
+            drainNotifications(0, sessionId)
+                .filter((n) => n.type === "toast")
+                .map((n) => String(n.payload.message));
+        const failOnce = async () => {
+            // Each failure's toast is observable only past the 60-second
+            // per-failure cooldown; clearing the session's alert state stands in.
+            clearHistorianAlertState(sessionId);
+            await runCompartmentAgentWithLease({
+                client,
+                db,
+                sessionId,
+                historianChunkTokens: 10_000,
+                directory: "/tmp",
+            });
+        };
 
-        await runCompartmentAgentWithLease({
-            client,
-            db,
-            sessionId: "ses-persistent-failure",
-            historianChunkTokens: 10_000,
-            directory: "/tmp",
-        });
+        try {
+            await failOnce();
+            await failOnce();
+            expect(getHistorianFailureState(db, sessionId).failureCount).toBe(2);
+            const generic = toasts();
+            expect(generic).toHaveLength(2);
+            for (const notice of generic) {
+                expect(notice).toContain("(MC-H01)");
+                expect(notice).not.toContain("magic-context.jsonc");
+                expect(notice).not.toContain("historian model unavailable");
+            }
 
-        const notice = String(
-            drainNotifications(0, "ses-persistent-failure").find((n) => n.type === "toast")?.payload
-                .message,
-        );
-        expect(notice).toContain("(MC-H01)");
-        expect(notice).not.toContain("magic-context.jsonc");
-        expect(notice).not.toContain("historian model unavailable");
+            await failOnce();
+            expect(getHistorianFailureState(db, sessionId).failureCount).toBe(3);
+            const third = toasts().slice(2);
+            expect(third).toHaveLength(1);
+            expect(third[0]).toStartWith("## Magic Context — History summaries keep failing");
+            expect(third[0]).not.toContain("(MC-H01)");
+            expect(third[0]).toContain("Summary runs failed in a row: 3");
+            expect(third[0]).toContain("historian model unavailable");
+            expect(third[0]).toContain("magic-context.jsonc (user or project config)");
+        } finally {
+            clearHistorianAlertState(sessionId);
+        }
     });
 
     it("re-reads narrative-gap ordinals after validation rejection", async () => {

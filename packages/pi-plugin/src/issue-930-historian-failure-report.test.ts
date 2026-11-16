@@ -39,7 +39,7 @@ import {
 const EARLIER_RUN_ERROR =
 	"Historian returned invalid compartment output: Compartment range 202-280 does not map to raw session lines 407-432";
 const ACTIONS =
-	"What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.";
+	"What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc (user or project config); or run /ctx-recomp to rebuild the history.";
 const WARNING_HEADING = "## Magic Context — History summaries keep failing";
 /** A historian answer whose range lies outside any chunk these tests read. */
 const UNMAPPABLE_OUTPUT =
@@ -244,7 +244,7 @@ test("issue 930: the Pi historian shows the shared early warning at the 3rd fail
 			[
 				WARNING_HEADING,
 				"",
-				`Summary runs failed in a row: 3, since ${formatHistorianClockTime(firstFailedRunEnded)}. Last chunk: messages 1-5. Last error: ${state.lastError}. Now context is at 82% of the window; at 95% a turn waits for a summary and is not sent if none finishes in time.`,
+				`Summary runs failed in a row: 3, since ${formatHistorianClockTime(firstFailedRunEnded)}. Last chunk: messages 1-5. Last error: ${state.lastError}. Context is at 82% of the window; at 95% a turn can be refused if no summary finishes in time.`,
 				"",
 				ACTIONS,
 			].join("\n"),

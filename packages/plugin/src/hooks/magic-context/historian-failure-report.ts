@@ -19,6 +19,7 @@ import {
     loadPersistedUsage,
 } from "../../features/magic-context/storage";
 import { getRecentFailedHistorianRunTimes } from "../../features/magic-context/storage-historian-runs";
+import { sanitizeDiagnosticText } from "../../shared/redaction";
 
 /** Raw message ordinals a historian run summarizes, both ends included. */
 export interface HistorianChunkRange {
@@ -57,7 +58,11 @@ export const REPEATED_HISTORIAN_FAILURE_WARNING_STEP = 3;
 export const REPEATED_HISTORIAN_FAILURE_WARNING_INTERVAL_MS = 30 * 60 * 1000;
 
 const ACTIONS =
-    "What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc; or run /ctx-recomp to rebuild the history.";
+    "What to do: run /ctx-status for detail; change the historian model or its fallback models in magic-context.jsonc (user or project config); or run /ctx-recomp to rebuild the history.";
+
+/** The longest quoted error in a refusal, and in the warning (which must fit one toast). */
+const REFUSAL_ERROR_MAX_CHARS = 500;
+const WARNING_ERROR_MAX_CHARS = 200;
 
 /**
  * Read the session's failure streak. `unrecordedFailures` counts failures that
@@ -110,6 +115,16 @@ function singleLine(text: string): string {
     return text.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * A stored historian error as the user sees it: on one line, with home paths
+ * and secret-shaped values redacted (provider errors can echo either), and cut
+ * to `maxChars`.
+ */
+function quoteError(error: string, maxChars: number): string {
+    const text = sanitizeDiagnosticText(singleLine(error));
+    return text.length > maxChars ? `${text.slice(0, maxChars - 1).trimEnd()}…` : text;
+}
+
 /** "." ends a sentence unless the quoted error already ends with punctuation. */
 function endSentence(text: string): string {
     return /[.!?]$/.test(text) ? text : `${text}.`;
@@ -119,6 +134,10 @@ function usageClause(usagePercentage: number | null | undefined): string {
     return typeof usagePercentage === "number" && Number.isFinite(usagePercentage)
         ? `context is at ${Math.round(usagePercentage)}% of the window`
         : "context is nearly full";
+}
+
+function capitalize(text: string): string {
+    return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function chunkLabel(chunk: HistorianChunkRange | undefined): string {
@@ -168,7 +187,9 @@ export function describeHistorianJoinRefusal(input: {
     ];
     const subject = run?.chunk ? `The summary of ${chunkLabel(run.chunk)}` : "The summary run";
     const ownFailure = failureBelongsToRun(failures, run);
-    const lastError = failures.lastError ? singleLine(failures.lastError) : "";
+    const lastError = failures.lastError
+        ? quoteError(failures.lastError, REFUSAL_ERROR_MAX_CHARS)
+        : "";
     if (ownFailure) {
         sentences.push(endSentence(`${subject} failed: ${lastError || "no reason recorded"}`));
     } else if (run && run.endedAt === undefined) {
@@ -209,9 +230,13 @@ export function describeRepeatedHistorianFailures(input: {
         streakSentence(failures, now) ?? "Summary runs are failing.",
         ...(input.chunk ? [`Last chunk: ${chunkLabel(input.chunk)}.`] : []),
         ...(failures.lastError
-            ? [endSentence(`Last error: ${singleLine(failures.lastError)}`)]
+            ? [
+                  endSentence(
+                      `Last error: ${quoteError(failures.lastError, WARNING_ERROR_MAX_CHARS)}`,
+                  ),
+              ]
             : []),
-        `Now ${usageClause(input.usagePercentage)}; at 95% a turn waits for a summary and is not sent if none finishes in time.`,
+        `${capitalize(usageClause(input.usagePercentage))}; at 95% a turn can be refused if no summary finishes in time.`,
     ];
     return [
         "## Magic Context — History summaries keep failing",
