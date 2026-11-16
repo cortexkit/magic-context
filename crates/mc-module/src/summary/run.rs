@@ -912,9 +912,23 @@ async fn send_and_wait_inner<C: RunnerClient>(
                 .map_err(|_| "the run did not finish in time".to_owned())?
                 .map_err(|error| send_refused(&error, how.send))?;
         if reply.state == send_states::NOT_DELIVERED {
-            // Every reason, including a future one, proves final non-delivery.
-            // Only that proof permits a new id; an unknown outcome must not
-            // duplicate a prompt that may already have run.
+            // A host that refused the words themselves (an unreadable
+            // attachment, invalid host configuration, an unsupported host
+            // version, a managed policy) refuses the same send again on every
+            // try, so it is never resent. It is an ordinary failure, counted
+            // and backed off like a failed run, not a wait that would probe the
+            // same refusal forever.
+            if reply.reason.as_deref() == Some(cortexkit_role_llm_runner::send::REASON_HOST_REFUSED)
+            {
+                return Err(format!(
+                    "the host refused the {} send; it is not resent (host_refused)",
+                    how.send.name()
+                )
+                .into());
+            }
+            // Every other reason, including a future one, proves final
+            // non-delivery. Only that proof permits a new id; an unknown
+            // outcome must not duplicate a prompt that may already have run.
             let delay = backoff(0);
             if resent || tokio::time::Instant::now() + delay >= how.deadline {
                 return Err(never_ran(send_states::NOT_DELIVERED, how.send).into());
