@@ -562,8 +562,8 @@ mod tests {
         assert_eq!(iso(1_790_789_964_781), "2026-09-30T17:39:24.781Z");
     }
 
-    /// A confirmation recorded without the lines it rests on (every one
-    /// before verify required them) shows as unverified, as verify treats it.
+    /// A confirmation recorded without the lines it rests on shows as
+    /// unverified, as verify treats it.
     #[test]
     fn a_confirmation_without_cited_lines_shows_as_unverified() {
         use crate::dreamer::tasks::verify::spans::{Cited, Confirmation};
