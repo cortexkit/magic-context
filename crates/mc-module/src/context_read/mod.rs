@@ -60,9 +60,9 @@ pub(crate) struct Recent {
     pub harness: String,
     pub session: String,
     pub budget: u64,
-    /// The runners mode3.db keeps saved state of this session under, in
-    /// order, for a session with no live worker; a refusal when mode3.db
-    /// could not be read.
+    /// The names of the runners mode3.db keeps this session's saved state
+    /// under, sorted, for a session with no live worker; a refusal when
+    /// mode3.db could not be read.
     pub saved: Result<Vec<String>, Refusal>,
 }
 
@@ -530,8 +530,8 @@ impl Reader {
     /// overrides cannot apply; user and model settings still do.
     ///
     /// With `newest`, summaries are not folded: the newest ones read are each
-    /// shown at tier 1, as `m[1]` shows a summary published since `m[0]` was
-    /// built.
+    /// shown at tier 1, as the history head shows a summary published since
+    /// its baseline (`m[0]`) was built.
     fn query(
         &self,
         harness: &str,
