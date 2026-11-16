@@ -342,3 +342,168 @@ async fn compaction_undo_v1_an_unknown_refusal_code_is_an_ordinary_refusal() {
     assert!(!session.queued.contains(&queued), "the drop landed");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A Setup on the samples' conditions: the runner's transcript ends at
+/// `newest`, and the runner applies `applied`.
+fn setup_request(newest: &Entry, applied: Option<&View>) -> SetupRequest {
+    let (_, _, _, mut request, _) = fixture();
+    let conditions = sample(UNDO).conditions;
+    request.model = conditions.model;
+    request.context_window = conditions.context_window;
+    request.output_reserve = conditions.output_reserve;
+    request.rules = conditions.rules;
+    request.newest = Some(cursor(newest));
+    request.applied_view = applied.map(View::applied);
+    request
+}
+
+/// Whether `view`'s history head shows the summary that ends on
+/// `msg_00000017`.
+fn shows_second_summary(view: &View) -> bool {
+    serde_json::to_string(&view.edits)
+        .unwrap()
+        .contains(&format!("what happened through {}", mid(18)))
+}
+
+/// After ck-mc restarted, the runner set up again having lost view 2: it
+/// applies no view, and a session past its host's compaction marker takes
+/// no step without one, so no notice may come. Setup builds and offers a
+/// view in its own pass: the history head and the cut through
+/// `msg_00000017`.
+#[tokio::test]
+async fn compaction_undo_v1_a_setup_without_the_runners_view_offers_one() {
+    let dir = scratch("undo-v1-setup-none");
+    let (session, client, settings) = view_2_applied(&dir, transcript()).await;
+    let durable = session.durable();
+    let (mut restored, _, route, _, _) = fixture();
+    restored.db = session.db.clone();
+    restored.load_summaries();
+    restored.restore(durable);
+    let runner = client.entries.lock().unwrap().clone();
+    let request = setup_request(runner.last().unwrap(), None);
+    let before = client.offered.lock().unwrap().len();
+    restored
+        .setup(&client, &settings, &route, &request, session.features)
+        .await;
+    let offered = offered_since(&client, before);
+    let [view] = &offered[..] else {
+        panic!("{} views offered during Setup", offered.len());
+    };
+    assert_eq!(cut_through(view), Some(mid(18).as_str()));
+    assert!(shows_second_summary(view), "{:?}", view.edits);
+    cortexkit_compaction_view::render::apply(&runner, view)
+        .expect("the runner can apply the view to its transcript");
+    assert_eq!(
+        restored.latest.as_ref().map(|latest| latest.version),
+        Some(view.version)
+    );
+    assert!(
+        !restored.head_stale,
+        "the view the runner took shows the head"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A runner restored from its own backup sets up applying ck-mc's view 1,
+/// older than view 2, the one it last applied. Setup takes view 1 back and
+/// offers a newer view in its own pass, showing the summary view 1 lacks
+/// and cutting where the summaries end.
+#[tokio::test]
+async fn compaction_undo_v1_a_setup_with_an_older_view_offers_a_newer_one() {
+    let dir = scratch("undo-v1-setup-older");
+    let (mut session, client, _, _, settings) = fixture();
+    session.conditions = sample(UNDO).conditions;
+    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    summary(&db, 1, 1, 10);
+    session.db = Some(Arc::new(db));
+    session.features.summarizer = true;
+    session.load_summaries();
+    let runner = transcript();
+    session.index.extend(runner.clone());
+    *client.entries.lock().unwrap() = runner.clone();
+    let (view_1, _) = session.build(&settings, None, false, None);
+    let view_1 = view_1.expect("the first summary is not shown yet");
+    assert_eq!(cut_through(&view_1), Some(mid(10).as_str()));
+    assert!(session.publish(&client, view_1.clone()).await);
+    session.settle_unconfirmed(Some(&view_1.applied()), &[]);
+    summary(session.db.as_deref().unwrap(), 2, 11, 18);
+    session.load_summaries();
+    session.summary_unshown = true;
+    let (view_2, _) = session.build(&settings, None, false, None);
+    let view_2 = view_2.expect("the second summary is not shown yet");
+    assert_eq!(cut_through(&view_2), Some(mid(18).as_str()));
+    assert!(session.publish(&client, view_2.clone()).await);
+    session.settle_unconfirmed(Some(&view_2.applied()), &[]);
+    *client.applied.lock().unwrap() = Some(AppliedViewAnswer::new().with_view(view_1.clone()));
+    let request = setup_request(runner.last().unwrap(), Some(&view_1));
+    let (_, _, route, _, _) = fixture();
+    let before = client.offered.lock().unwrap().len();
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &request, features)
+        .await;
+    let offered = offered_since(&client, before);
+    let [view] = &offered[..] else {
+        panic!("{} views offered during Setup", offered.len());
+    };
+    assert!(view.version > view_2.version);
+    assert_eq!(cut_through(view), Some(mid(18).as_str()));
+    assert!(shows_second_summary(view), "{:?}", view.edits);
+    cortexkit_compaction_view::render::apply(&runner, view)
+        .expect("the runner can apply the view to its transcript");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A Setup whose runner applies ck-mc's current view offers nothing.
+#[tokio::test]
+async fn compaction_undo_v1_a_setup_with_the_current_view_offers_nothing() {
+    let dir = scratch("undo-v1-setup-current");
+    let (mut session, client, settings) = view_2_applied(&dir, transcript()).await;
+    let view_2 = session.latest.clone().unwrap();
+    *client.applied.lock().unwrap() = Some(AppliedViewAnswer::new().with_view(view_2.clone()));
+    let runner = client.entries.lock().unwrap().clone();
+    let request = setup_request(runner.last().unwrap(), Some(&view_2));
+    let (_, _, route, _, _) = fixture();
+    let before = client.offered.lock().unwrap().len();
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &request, features)
+        .await;
+    assert_eq!(client.offered.lock().unwrap().len(), before);
+    assert_eq!(
+        session.latest.as_ref().map(|latest| latest.version),
+        Some(2)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The view Setup offers to a runner without one, refused in its turn,
+/// stays due: the next notice offers one again, whatever the usage.
+#[tokio::test]
+async fn compaction_undo_v1_a_refused_setup_offer_stays_due() {
+    let dir = scratch("undo-v1-setup-refused");
+    let (mut session, client, settings) = view_2_applied(&dir, transcript()).await;
+    let runner = client.entries.lock().unwrap().clone();
+    let request = setup_request(runner.last().unwrap(), None);
+    let (_, _, route, _, _) = fixture();
+    *client.refuse.lock().unwrap() = true;
+    let before = client.offered.lock().unwrap().len();
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &request, features)
+        .await;
+    assert_eq!(offered_since(&client, before).len(), 1);
+    assert!(session.latest.is_none(), "the refused view was rolled back");
+    *client.refuse.lock().unwrap() = false;
+    let newest = runner.last().map(cursor);
+    session
+        .notice(&client, &settings, notice(&session, 1, newest))
+        .await;
+    let offered = offered_since(&client, before);
+    assert_eq!(offered.len(), 2, "the view was not offered again");
+    assert_eq!(
+        session.latest.as_ref().map(|latest| latest.version),
+        offered.last().map(|view| view.version)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

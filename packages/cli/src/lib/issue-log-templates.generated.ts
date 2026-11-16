@@ -387,6 +387,7 @@ const TEMPLATE_DATA = [
 "latest-turn thinking recovery: restore unavailable (missing-thinking-original); removing the turn's thinking instead",
 "prefix trim: boundary \x01; pass=defer; no in-pass trim applied (Hidden completion accepts text-only calibrated prompts)",
 "fail-closed blocking surface registered (\x01); primary turns will error until storage recovers or the build is upgraded",
+"ck-mc: session \x01: Setup found the runner applying \x01, behind ck-mc's view \x01; the history head is rebuilt and offered now",
 "signed thinking hold: held=false reason=\x01 heavyStepsBack=\x01 heavyStepTokens=\x01 usage=\x01% cap=\x01% (sized reading, local count)",
 "ck-mc: context.db migration 106 removes the removed Rust transform mode's write guards; \x01 projects were still guarded",
 "TRANSIENT STORAGE FAILURE SQLITE_BUSY_OR_LOCKED: LKG unavailable (compaction_off); refusing unreduced \x01-message input",

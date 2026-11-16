@@ -1314,12 +1314,16 @@ impl Session {
             }
         };
         self.app_resume_head();
+        // The newest view the runner reported applying before this Setup.
+        // After a restart ck-mc holds no copy of it, only its version.
+        let applied_before = self.newest_applied;
         self.settle_unconfirmed(request.applied_view.as_ref(), &[]);
         // Before anything is offered: a view offered again must meet the
         // floor too.
         self.load_move_floor(client).await;
         self.judge_acceptance_afresh();
         self.offer_unconfirmed_again(client).await;
+        let behind = self.runner_behind_at_setup(request.applied_view.as_ref(), applied_before);
         let Some(forget_from) = forget_from else {
             self.index_ready = false;
             return;
@@ -1353,11 +1357,99 @@ impl Session {
             self.view_validation.prime(self.index.entries(), view);
         }
         self.app_projection.head_read.ready = !self.latest_unknown;
-        if self.features.summarizer && self.latest.is_none() && request.newest.is_none() {
-            let (view, _) = self.build_now(client, settings).await;
-            if let Some(view) = view {
+        // An empty transcript keeps its own rule: a session with a head and
+        // no view of ck-mc's gets its first view now.
+        if request.newest.is_none() {
+            if self.features.summarizer && self.latest.is_none() {
+                let (view, _) = self.build_now(client, settings).await;
+                if let Some(view) = view {
+                    self.publish(client, view).await;
+                }
+            }
+        } else if let Some(current) = behind {
+            self.offer_at_setup(client, settings, request.applied_view.as_ref(), current)
+                .await;
+        }
+    }
+
+    /// Whether Setup finds that the runner lost ck-mc's view, once Setup has
+    /// settled the views and offered a waiting one again: ck-mc has a view,
+    /// and the runner applies none, or one older than ck-mc's newest view
+    /// that it applied or was handed. Only that lost-view case counts. A
+    /// session that never had a view of ck-mc's has no host compaction
+    /// marker: the runner renders it unreduced and it keeps sending notices,
+    /// so its summaries wait for the next permitted rebuild, and Setup
+    /// doesn't rewrite the request bytes the provider has cached for it.
+    /// `applied_before` is the newest view the runner reported applying
+    /// before this Setup, which is all ck-mc knows of its confirmed view
+    /// after a restart. A view the runner took on this Setup's offer again
+    /// counts as held, and so does one whose offer again is still waiting
+    /// for an answer or for the runner to place its cut. Returns ck-mc's
+    /// current view's version when the runner lost it.
+    fn runner_behind_at_setup(
+        &self,
+        applied: Option<&AppliedView>,
+        applied_before: u64,
+    ) -> Option<u64> {
+        if self.reoffer_pending
+            || self
+                .unconfirmed
+                .last()
+                .is_some_and(|pending| pending.accepted)
+        {
+            return None;
+        }
+        let current = match &self.latest {
+            Some(view) => view.version,
+            None if self.latest_unknown => applied_before,
+            None => 0,
+        };
+        (current > 0 && applied.is_none_or(|applied| applied.version < current)).then_some(current)
+    }
+
+    /// Setup found that the runner lost ck-mc's view (see
+    /// [`Session::runner_behind_at_setup`]), and it has read the transcript
+    /// and taken the view the runner applies. A session past its host's
+    /// compaction marker (written at an applied view's cut, after which the
+    /// host no longer loads the messages before it), or moved in from
+    /// another host, takes no step until a view applies, so no notice may
+    /// come to offer one: Setup builds and offers it itself, whatever the
+    /// usage. The head is marked stale first, as after an undo, so a refused
+    /// view stays due on later notices. Only a session with a summarizer
+    /// renders a head, and only one with summaries or a cut has history to
+    /// serve; a view another provider applies is left to it.
+    async fn offer_at_setup<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        applied: Option<&AppliedView>,
+        current: u64,
+    ) {
+        if !self.features.summarizer
+            || (self.summaries.is_empty() && self.cut.is_none())
+            || self.latest_unknown
+            || (self.latest.is_none() && self.newest_applied != 0)
+        {
+            return;
+        }
+        let applying = applied.map_or_else(
+            || "no view".to_owned(),
+            |view| format!("view {}", view.version),
+        );
+        tracing::info!(
+            "ck-mc: session {}: Setup found the runner applying {applying}, behind ck-mc's view {current}; the history head is rebuilt and offered now",
+            self.key.session
+        );
+        let was_stale = std::mem::replace(&mut self.head_stale, true);
+        let (view, _) = self.build_now(client, settings).await;
+        match view {
+            Some(view) => {
                 self.publish(client, view).await;
             }
+            // The view the runner applies already shows what a rebuild
+            // would, so nothing is due.
+            None if self.latest.is_some() => self.head_stale = was_stale,
+            None => {}
         }
     }
 
@@ -1673,8 +1765,10 @@ impl Session {
     /// was handed ck-mc's view `held`: it refused ck-mc's newest view at a
     /// step boundary, or dropped the view it applied, as a runner does when
     /// an undo removes the view's cut message or a step finds the view's
-    /// window stale. A session past its host's compaction marker, or moved
-    /// in from another host, takes no step until a view applies, so the
+    /// window stale. A session past its host's compaction marker (written at
+    /// an applied view's cut, after which the host no longer loads the
+    /// messages before it), or moved in from another host, takes no step
+    /// until a view applies, so the
     /// history head is rebuilt on this notice whatever the usage, as after
     /// an undo, and stays due until the runner takes a view with it. Only a
     /// session with a summarizer renders a head, and only one with summaries
