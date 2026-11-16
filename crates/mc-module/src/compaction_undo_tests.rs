@@ -306,18 +306,18 @@ async fn compaction_undo_v1_a_refused_rebuild_stays_due() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// (c) An `apply_view` answer refusing a view under a code this contract
-/// version doesn't name (`edit_before_cut`, from a later one) is an ordinary
+/// (c) An `apply_view` answer refusing a view with `edit_before_cut` (an edit
+/// at or before the view's own cut, which ck-mc never builds) is an ordinary
 /// refusal: the view is rolled back, and the session goes on to offer its
 /// work again.
 #[tokio::test]
-async fn compaction_undo_v1_an_unknown_refusal_code_is_an_ordinary_refusal() {
+async fn compaction_undo_v1_an_edit_before_cut_refusal_is_an_ordinary_refusal() {
     let answer: ApplyViewAnswer = serde_json::from_slice(EDIT_BEFORE_CUT).unwrap();
     let ApplyViewAnswer::Refused { refusal } = answer.clone() else {
         panic!("not a refusal: {answer:?}");
     };
     assert!(
-        matches!(&refusal, ViewRefusal::Unknown { name, .. } if name == "edit_before_cut"),
+        matches!(&refusal, ViewRefusal::EditBeforeCut { index: 2, mid } if mid == "msg_00000017"),
         "{refusal:?}"
     );
     let dir = scratch("undo-v1-c");
