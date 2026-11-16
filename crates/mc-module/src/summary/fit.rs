@@ -19,8 +19,8 @@ use super::prompt::{
     select_session_reference_indices, CompartmentPromptInputs, ReferenceCompartment,
 };
 use crate::calibration::LocalMass;
-use crate::context_db::StoredMemory;
-use crate::summary::index::SummaryIndex;
+use crate::context_db::{ContextDb, StoredMemory};
+use crate::summary::index::{Summaries, SummaryIndex};
 
 /// Smallest chunk worth a run: below it the fixed parts take the whole window
 /// and a run could not summarize even one ordinary message.
@@ -140,6 +140,25 @@ pub fn chosen_references(
         .map(|summary| (summary.has_content, summary.importance))
         .collect();
     select_session_reference_indices(&candidates, &seeds, session_id, chunk_start as i64)
+}
+
+/// The references a run's prompt shows ([`chosen_references`]), oldest
+/// first, with their bodies: held rows from memory, the others read from
+/// the session's rows in `context.db` (`store`: the store, harness and
+/// session). No other summary's body is read.
+pub fn references(
+    summaries: &Summaries,
+    prompts: &super::prompts::SummaryPrompts,
+    session_id: &str,
+    chunk_start: u64,
+    store: Option<(&ContextDb, &str, &str)>,
+) -> Result<Vec<ReferenceCompartment>, String> {
+    let chosen = chosen_references(summaries, prompts, session_id, chunk_start);
+    Ok(summaries
+        .rows(chosen, store)?
+        .iter()
+        .map(|row| ReferenceCompartment::from(&**row))
+        .collect())
 }
 
 /// Fit the prompt to every model in `input.windows`. `Err` names why not
@@ -501,6 +520,54 @@ mod tests {
             anchored_facts: false,
             turn_one_instruction: &prompts().turn_one,
         })
+    }
+
+    /// A run reads the bodies of the references it shows from `context.db`
+    /// and needs no other summary's: here the store holds the chosen ones
+    /// alone, and the session holds no row.
+    #[test]
+    fn a_run_reads_only_the_bodies_of_the_references_it_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+        let rows: Vec<_> = (0..60).map(varied).collect();
+        let index: Vec<SummaryIndex> = rows.iter().map(SummaryIndex::from).collect();
+        let chosen = chosen_references(&index, prompts(), "s1", 101);
+        assert!(!chosen.is_empty() && chosen.len() < rows.len());
+        for row in chosen.iter().map(|&position| &rows[position]) {
+            db.with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO compartments (session_id, harness, sequence, start_message,
+                        end_message, start_message_id, end_message_id, title, content, p1, p2,
+                        p3, p4, importance, episode_type, legacy, created_at)
+                     VALUES ('s1', 'mock', ?1, ?2, ?3, '', '', ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                        ?11, 0, 0)",
+                    rusqlite::params![
+                        row.sequence,
+                        row.start_message,
+                        row.end_message,
+                        row.title,
+                        &*row.content,
+                        row.p1.as_deref(),
+                        row.p2,
+                        row.p3,
+                        row.p4,
+                        row.importance,
+                        row.episode_type,
+                    ],
+                )
+            })
+            .unwrap();
+        }
+        let mut summaries = Summaries::default();
+        summaries.replace(rows.clone());
+        summaries.release_through(rows.len() as i64);
+        let read =
+            super::references(&summaries, prompts(), "s1", 101, Some((&db, "mock", "s1"))).unwrap();
+        let expected: Vec<ReferenceCompartment> = chosen
+            .iter()
+            .map(|&position| ReferenceCompartment::from(&rows[position]))
+            .collect();
+        assert_eq!(read, expected);
     }
 
     /// Choosing references on their index entries and reading only the

@@ -200,22 +200,20 @@ pub async fn run<C: RunnerClient + Router>(
     let prompts = SummaryPrompts::for_context(job.memory_context.as_ref())?;
     // The references the prompt shows are chosen on the summaries' index
     // entries, so only the chosen ones' bodies are read.
-    let references: Vec<ReferenceCompartment> = job
-        .summaries
-        .rows(
-            fit::chosen_references(&job.summaries, &prompts, &job.session.session, job.from),
-            db.map(|db| {
-                (
-                    db,
-                    job.session.harness.as_str(),
-                    job.session.session.as_str(),
-                )
-            }),
-        )
-        .map_err(|error| format!("reading the summaries shown as references: {error}"))?
-        .iter()
-        .map(|row| ReferenceCompartment::from(&**row))
-        .collect();
+    let references = fit::references(
+        &job.summaries,
+        &prompts,
+        &job.session.session,
+        job.from,
+        db.map(|db| {
+            (
+                db,
+                job.session.harness.as_str(),
+                job.session.session.as_str(),
+            )
+        }),
+    )
+    .map_err(|error| format!("reading the summaries shown as references: {error}"))?;
     let system = two_pass_system(&prompts.system, job.language.as_deref());
     let carrier = format!("ck-mc:{}", job.session.runner);
     // A runner may host several harnesses with different model support. Route
