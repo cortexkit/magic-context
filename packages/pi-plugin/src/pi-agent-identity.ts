@@ -1,6 +1,6 @@
 // Oh My Pi tells an extension which agent a session runs: `ctx.agent.kind` is
 // "main" for a top-level session and "sub" for any session another agent
-// spawned (task children, eval agents, /tan clones). A spawned session runs in
+// spawned (task children, eval agents, and clones of a session). A spawned session runs in
 // the parent's process with its own extension instance and session id, so
 // without this record Magic Context would treat it as a primary session and
 // give it a history head with the project's docs and memories, a summarizer

@@ -10473,8 +10473,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// request. Tools come first in the request, so the provider has already lost
 	// the cache from the tool definitions on, and this pass adds or removes the
 	// tag prefixes anyway: it is a rebuild already paid for, and queued work
-	// rides it. On a primary session whose system prompt changed with the tool
-	// list, the system-prompt fold also runs.
+	// rides it. On a primary session whose system prompt also changed with the
+	// tool list (the guidance went in or out), the existing system-prompt fold
+	// rebuilds the history head on the same pass.
 	const requestToolListChanged =
 		args.ctxReduceCallable !== args.servedCtxReduceCallable;
 	if (requestToolListChanged)
