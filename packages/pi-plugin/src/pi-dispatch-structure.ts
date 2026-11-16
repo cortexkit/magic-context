@@ -368,29 +368,21 @@ function appendDuplicateSuffix(id: string, suffix: string, max: number) {
  * The input is not mutated; the projection may add, drop, move or replace rows
  * and rename duplicate tool ids.
  */
-function projectMissingToolResults(
-	messages: readonly unknown[],
+/**
+ * The deduplication pass of the host's transformMessages: a call id seen
+ * before is renamed with a duplicate suffix, and the next result for that id
+ * follows it. The output is aligned with `input`, so position i holds message
+ * i with its renamed ids. Also files every real result by its pairing key at
+ * its position, and collects the pairing key of every call left standing.
+ * @oh-my-pi/pi-ai src/providers/transform-messages.ts:227 deduplicateToolCallIds
+ * (the same in every pinned release; see projectMissingToolResults).
+ */
+function deduplicateToolCallIds(
+	input: readonly unknown[],
+	pairingId: (id: string) => string,
 	model?: PiChatHistoryModel,
-	host: PiDispatchHost = "omp",
-): unknown[] {
-	// Excluded executions never reach the host transform (convertToLlm drops
-	// them), so they neither close a window nor take a position.
-	const input = messages.filter((value) => {
-		const message = object(value);
-		return !(
-			(message?.role === "bashExecution" ||
-				message?.role === "pythonExecution") &&
-			message.excludeFromContext === true
-		);
-	});
-	if (host === "pi") return projectPiToolResults(input);
-	const api = model?.api;
-	if (!TRANSFORM_MESSAGES_APIS.has(api ?? ""))
-		return projectUnmodeledToolResults(messages);
-	const pairingId = piToolCallPairing(input);
+) {
 	const { prefix, max } = duplicateSuffix(model);
-	// Deduplication pass: rename reused call ids and file every real result by
-	// its pairing key at its position.
 	const seen = new Map<string, number>();
 	const renames = new Map<string, (string | undefined)[]>();
 	const realResults = new Map<
@@ -468,6 +460,48 @@ function projectMissingToolResults(
 			validToolUseIds.add(pairingId(call.id));
 		return changed ? { ...message, content } : value;
 	});
+	return { deduplicated, realResults, validToolUseIds };
+}
+
+/**
+ * The prepared messages with the call and result ids Oh My Pi's
+ * transformMessages gives them (see deduplicateToolCallIds), aligned with
+ * `messages`; unchanged for an API the host does not run that transform on.
+ */
+export function piDeduplicatedToolCallIds(
+	messages: readonly unknown[],
+	model: PiChatHistoryModel | undefined,
+): unknown[] {
+	if (!TRANSFORM_MESSAGES_APIS.has(model?.api ?? "")) return [...messages];
+	return deduplicateToolCallIds(messages, piToolCallPairing(messages), model)
+		.deduplicated;
+}
+
+function projectMissingToolResults(
+	messages: readonly unknown[],
+	model?: PiChatHistoryModel,
+	host: PiDispatchHost = "omp",
+): unknown[] {
+	// Excluded executions never reach the host transform (convertToLlm drops
+	// them), so they neither close a window nor take a position.
+	const input = messages.filter((value) => {
+		const message = object(value);
+		return !(
+			(message?.role === "bashExecution" ||
+				message?.role === "pythonExecution") &&
+			message.excludeFromContext === true
+		);
+	});
+	if (host === "pi") return projectPiToolResults(input);
+	const api = model?.api;
+	if (!TRANSFORM_MESSAGES_APIS.has(api ?? ""))
+		return projectUnmodeledToolResults(messages);
+	const pairingId = piToolCallPairing(input);
+	const { deduplicated, realResults, validToolUseIds } = deduplicateToolCallIds(
+		input,
+		pairingId,
+		model,
+	);
 	const takeRealResult = (id: string, afterIndex: number) => {
 		for (const entry of realResults.get(pairingId(id)) ?? []) {
 			if (entry.consumed || entry.index <= afterIndex) continue;
@@ -1128,7 +1162,8 @@ function buildPiPreparedStructure(
 			) ?? rows
 		);
 	};
-	if (responsesMessages) responsesMessages = replayPlan(responsesMessages, "warm");
+	if (responsesMessages)
+		responsesMessages = replayPlan(responsesMessages, "warm");
 	const plan = piChatHistoryPlan(projectedMessages, model);
 	let pendingToolImages: PiImageRun[] = [];
 	const chatMessages = plan?.flatMap((step): MessageStructure[] => {
@@ -1576,7 +1611,8 @@ function sameResponsesIds(
 	const same = (
 		ids: readonly (string | undefined)[],
 		wire: readonly string[],
-	) => ids.length === wire.length && ids.every((id, index) => id === wire[index]);
+	) =>
+		ids.length === wire.length && ids.every((id, index) => id === wire[index]);
 	return expected.every(
 		(row, index) =>
 			!!actual[index] &&

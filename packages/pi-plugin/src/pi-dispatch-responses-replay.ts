@@ -39,11 +39,13 @@ function object(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
-const RESPONSES_APIS = [
-	"openai-responses",
-	"azure-openai-responses",
-	"openai-codex-responses",
-];
+// The routes whose input buildResponsesInput builds. The Codex provider builds
+// its own (openai-codex-responses.ts:4390 appends the same unrecorded calls)
+// but repairs orphan calls differently (openai-codex/request-transformer.ts:270
+// repairToolCallPairs looks for an output anywhere, not only later), so its
+// turns keep the rebuilt calls. Line numbers hold for 18.19.0, 18.20.0 and
+// 18.20.3.
+const RESPONSES_APIS = ["openai-responses", "azure-openai-responses"];
 
 /**
  * The part of an id that sanitizeCodexCallId keeps: what precedes the first
@@ -66,6 +68,8 @@ export interface PiResponsesReplayedCalls {
 	calls: readonly string[];
 	/** The wire `call_id` of each entry in `calls`. */
 	wireCalls: readonly string[];
+	/** How many leading entries come from the stored items; the rest are appended. */
+	stored: number;
 	/** Where the replayed text parts sit among the calls: one `text` per output_text part, one `call` per call. */
 	order: readonly ("text" | "call")[];
 	/** Whether OMP replays the stored items even without warm provider state. */
@@ -139,8 +143,9 @@ export function piResponsesReplayedCalls(
 	}
 	// With no replayable output OMP rebuilds the turn from the message.
 	if (!output) return undefined;
-	// Only reasoning, assistant text and calls remain, so every stored call sits
-	// in the final window pickUnrecordedResponsesToolCalls reads.
+	// pickUnrecordedResponsesToolCalls counts as recorded only the calls after
+	// the last tool output or non-assistant message among the stored items. Only
+	// reasoning, assistant text and calls remain here, so that is every stored call.
 	const recorded = new Set(stored.map(callBase));
 	const replayed = [...stored];
 	const wires = [...stored];
@@ -161,6 +166,7 @@ export function piResponsesReplayedCalls(
 	return {
 		calls: replayed,
 		wireCalls: wires,
+		stored: stored.length,
 		order,
 		cold: piResponsesColdReplayable(payload.items),
 	};
@@ -216,7 +222,9 @@ function batchCallId<R>(item: ReplayItem<R>): string | undefined {
  * an assistant message inside a run of calls and outputs moves to the start of
  * that batch. openai-shared.ts:1791-1878 (18.19.0, 18.20.0), :1794-1881 (18.20.3).
  */
-function hoistBatchMessages<R>(items: readonly ReplayItem<R>[]): ReplayItem<R>[] {
+function hoistBatchMessages<R>(
+	items: readonly ReplayItem<R>[],
+): ReplayItem<R>[] {
 	const hasEarlierBatchCall = (index: number, callId: string): boolean => {
 		for (let probe = index - 1; probe >= 0; probe--) {
 			const kind = batchKind(items[probe]);

@@ -4,6 +4,7 @@ import {
 } from "./pi-dispatch-agent-history";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
 import { piOmpUserHistory } from "./pi-dispatch-omp-user";
+import { piResponsesReplayedCalls } from "./pi-dispatch-responses-replay";
 import { piToolCallWireId } from "./pi-dispatch-tool-ids";
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -13,6 +14,102 @@ function object(value: unknown): Record<string, unknown> | undefined {
 }
 
 const OMITTED_IMAGE = "[image omitted: model does not support vision]";
+// The output Oh My Pi gives a call left without one (repairOrphanResponsesToolCalls,
+// openai-shared.ts:1701-1702 in 18.19.0 and 18.20.0, :1704-1705 in 18.20.3).
+const ORPHAN_TOOL_CALL_PLACEHOLDER =
+	"[No tool output recorded: the tool call was interrupted before it produced a result.]";
+
+/**
+ * The items Oh My Pi puts between the response it continues and the tail when
+ * it replays that response's stored items with other calls than the message
+ * has (a reused call id; see pi-dispatch-responses-replay): a placeholder output
+ * for the last stored call when no output of the tail answers it, then each
+ * call the stored items lack, encoded as convertResponsesAssistantMessage
+ * encodes it. Empty when the replay sends the message's own calls; undefined
+ * when OMP could not continue the response (a placeholder would land inside
+ * it) or the appended calls cannot be encoded here.
+ *
+ * `outputs` are the wire ids of the tail's tool outputs, renamed the way
+ * transformMessages renames them. Same in pi-ai 18.19.0, 18.20.0 and 18.20.3:
+ * openai-shared.ts:2405-2429 (18.20.3 :2452-2476) appends the calls,
+ * :2788-2795 (:2841-2848) encodes them, :1718-1761 (:1721-1764) repairs, and
+ * buildResponsesDeltaInput :4520-4552 (:4573-4605) sends what follows the
+ * continued response.
+ */
+function replayedTurnItems(
+	assistant: Record<string, unknown>,
+	responseItems: readonly unknown[],
+	outputs: ReadonlySet<string>,
+	model: PiChatHistoryModel,
+): { items: unknown[]; calls: Map<string, string> } | undefined {
+	const blocks = Array.isArray(assistant.content)
+		? assistant.content.map(object)
+		: [];
+	const calls = blocks.flatMap((block) =>
+		block?.type === "toolCall" && typeof block.id === "string" ? [block] : [],
+	);
+	const replayed = piResponsesReplayedCalls(
+		assistant,
+		calls.map((block) => block.id as string),
+		calls.map((block) =>
+			piToolCallWireId(block.id as string, model, assistant),
+		),
+		model,
+	);
+	const types = new Map<string, string>();
+	if (!replayed) return { items: [], calls: types };
+	const items: unknown[] = [];
+	const orphans = replayed.wireCalls
+		.slice(0, replayed.stored)
+		.flatMap((id, index) => (outputs.has(id) ? [] : [index]));
+	if (orphans.length) {
+		// The placeholder follows its call. Only after the last stored item does
+		// it leave the continued response intact; elsewhere OMP sends the full
+		// request instead.
+		const last = object(responseItems.at(-1));
+		const id = replayed.wireCalls[orphans[0]];
+		if (
+			orphans.length !== 1 ||
+			orphans[0] !== replayed.stored - 1 ||
+			(last?.type !== "function_call" && last?.type !== "custom_tool_call") ||
+			last.call_id !== id
+		)
+			return undefined;
+		items.push({
+			type:
+				last.type === "custom_tool_call"
+					? "custom_tool_call_output"
+					: "function_call_output",
+			call_id: id,
+			output: ORPHAN_TOOL_CALL_PLACEHOLDER,
+		});
+	}
+	// A tool-name prefix needs the catalog's name limit, which is not known here.
+	if (object(model.compat)?.toolNamePrefix) return undefined;
+	for (let index = replayed.stored; index < replayed.calls.length; index++) {
+		const id = replayed.wireCalls[index];
+		const block = calls.find((call) => call.id === replayed.calls[index]);
+		// Custom and computer calls encode differently; a call the tail does not
+		// answer gets an output this encoder does not model.
+		if (
+			!block ||
+			typeof block.name !== "string" ||
+			block.customWireName !== undefined ||
+			object(block.providerMetadata)?.type === "computer" ||
+			!outputs.has(id)
+		)
+			return undefined;
+		items.push({
+			type: "function_call",
+			call_id: id,
+			name: block.name,
+			...(block.namespace ? { namespace: block.namespace } : {}),
+			arguments: JSON.stringify(block.arguments) ?? "null",
+		});
+		types.set(id, "function_call");
+	}
+	return { items, calls: types };
+}
 
 /**
  * Encode only the appended user/developer messages and paired tool results.
@@ -21,6 +118,10 @@ const OMITTED_IMAGE = "[image omitted: model does not support vision]";
  * refuse the continuation rather than passing the rewritten content through.
  * OMP 18.12.3: openai-codex-responses.ts:4989-5024,5091-5102;
  * openai-shared.ts:1843-1892,2671-2784; utils/harmony-leak.ts:23-57.
+ *
+ * `messages` and `assistant` carry the call and result ids transformMessages
+ * gives them (piDeduplicatedToolCallIds). When the continued response reused a
+ * call id, the delta starts with the items replayedTurnItems describes.
  */
 export function piEncodeChainTail(
 	messages: readonly unknown[],
@@ -62,7 +163,20 @@ export function piEncodeChainTail(
 			image_url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
 		};
 	};
-	const items: unknown[] = [];
+	const outputs = new Set<string>();
+	for (const value of messages) {
+		const message = object(value);
+		if (
+			message?.role !== "toolResult" ||
+			typeof message.toolCallId !== "string"
+		)
+			continue;
+		const id = piToolCallWireId(message.toolCallId, model, assistant);
+		if (id) outputs.add(id);
+	}
+	const replayed = replayedTurnItems(assistant, responseItems, outputs, model);
+	if (!replayed) return undefined;
+	const items: unknown[] = [...replayed.items];
 	for (const value of messages) {
 		let message = object(value);
 		if (!message || message.providerPayload !== undefined) return undefined;
@@ -130,10 +244,13 @@ export function piEncodeChainTail(
 		)
 			return undefined;
 		const id = piToolCallWireId(message.toolCallId, model, assistant);
-		const call = responseItems.map(object).find((item) => item?.call_id === id);
+		const callType = id
+			? (replayed.calls.get(id) ??
+				responseItems.map(object).find((item) => item?.call_id === id)?.type)
+			: undefined;
 		if (
 			!id ||
-			(call?.type !== "function_call" && call?.type !== "custom_tool_call")
+			(callType !== "function_call" && callType !== "custom_tool_call")
 		)
 			return undefined;
 		const joined = texts.join("\n");
@@ -149,7 +266,7 @@ export function piEncodeChainTail(
 					);
 		items.push({
 			type:
-				call.type === "custom_tool_call"
+				callType === "custom_tool_call"
 					? "custom_tool_call_output"
 					: "function_call_output",
 			call_id: id,

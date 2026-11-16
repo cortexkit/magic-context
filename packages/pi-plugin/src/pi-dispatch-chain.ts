@@ -6,6 +6,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { piEncodeChainTail } from "./pi-dispatch-chain-tail";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
+import { piDeduplicatedToolCallIds } from "./pi-dispatch-structure";
 
 /**
  * Oh My Pi's Responses providers can continue a conversation from the copy the
@@ -146,9 +147,12 @@ export function piPreparedHistory(
 	const assistant = object(messages[index]);
 	const response = piChainResponse(assistant);
 	if (model && assistant && response) {
+		// The tail's result ids, and the continued turn's calls, as Oh My Pi's
+		// transformMessages renames a reused call id before it encodes them.
+		const renamed = piDeduplicatedToolCallIds(messages, model);
 		const delta = piEncodeChainTail(
-			messages.slice(index + 1),
-			assistant,
+			renamed.slice(index + 1),
+			object(renamed[index]) ?? assistant,
 			response.responseItems,
 			model,
 		);

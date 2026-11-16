@@ -318,7 +318,9 @@ export function piResponsesAssistantTexts(
 	// choice and a request still holding the stored native bytes is refused.
 	if (unsigned && alternatives) {
 		alternatives.fallback = texts;
-		alternatives.cold = piResponsesColdReplayable(payload.items) ? replay : texts;
+		alternatives.cold = piResponsesColdReplayable(payload.items)
+			? replay
+			: texts;
 	}
 	return replay;
 }

@@ -9,6 +9,11 @@ import {
 	reportOmpLogDescriptors,
 } from "./__tests__/omp-log-files";
 import {
+	piChainResponse,
+	piExpandChainedRequest,
+	piPreparedHistory,
+} from "./pi-dispatch-chain";
+import {
 	piPreparedStructureMismatch,
 	preparePiDispatch,
 } from "./pi-dispatch-structure";
@@ -47,14 +52,22 @@ await pinOmpLoggerFiles(
 	root,
 	pins.map((pin) => pin.alias),
 );
-const hosts: { version: string; build: (options: unknown) => any[] }[] = [];
+const hosts: {
+	version: string;
+	build: (options: unknown) => any[];
+	delta: (previous: unknown, items: unknown, current: unknown) => any[] | null;
+	sanitize: (items: unknown[]) => any[] | undefined;
+}[] = [];
 for (const pin of pins) {
 	const path = require.resolve(`${pin.alias}/package.json`).slice(0, -12);
 	expect(require(`${path}package.json`).version).toBe(pin.version);
+	const shared = await import(`${path}src/providers/openai-shared.ts`);
 	hosts.push({
 		version: pin.version,
-		build: (await import(`${path}src/providers/openai-shared.ts`))
-			.buildResponsesInput,
+		build: shared.buildResponsesInput,
+		delta: shared.buildResponsesDeltaInput,
+		sanitize: (await import(`${path}src/utils.ts`))
+			.sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	});
 }
 await exerciseOmpLoggerFiles(pins.map((pin) => pin.alias));
@@ -74,10 +87,15 @@ const model = {
 	input: ["text"],
 	compat: {},
 };
+// buildResponsesInput and the chain encoder read the catalog identity OMP
+// attaches to models.
+const hostModel = { ...model, identity: { class: "gpt" } };
 
 const user = {
 	role: "user",
-	content: [{ type: "text", text: "Complete assignment: read f1.txt and f2.txt." }],
+	content: [
+		{ type: "text", text: "Complete assignment: read f1.txt and f2.txt." },
+	],
 	attribution: "agent",
 	timestamp: 1,
 };
@@ -126,7 +144,12 @@ function reply(timestamp: number, response: string, calls: string[]): any {
 	};
 }
 
-function result(timestamp: number, response: string, index: number, id: string) {
+function result(
+	timestamp: number,
+	response: string,
+	index: number,
+	id: string,
+) {
 	return {
 		role: "toolResult",
 		toolCallId: `${id}|fc_${response}_${index}`,
@@ -167,13 +190,16 @@ type Case = keyof typeof histories;
 
 /**
  * The Responses input OMP's openai-responses provider builds, with the options
- * it passes (openai-responses.ts:1804-1824 in 18.19.0 and 18.20.0, 1851-1871
+ * it passes (openai-responses.ts:1804-1824 in 18.19.0 and 18.20.0, 1851-1872
  * in 18.20.3). `warm` is its native-history state for the session.
  */
-function encode(host: (typeof hosts)[number], messages: unknown[], warm: boolean) {
+function encode(
+	host: (typeof hosts)[number],
+	messages: unknown[],
+	warm: boolean,
+) {
 	return host.build({
-		// buildResponsesInput reads the catalog identity OMP attaches to models.
-		model: { ...model, identity: { class: "gpt" } },
+		model: hostModel,
 		context: { systemPrompt: ["system"], messages },
 		strictResponsesPairing: false,
 		supportsImageDetailOriginal: false,
@@ -198,7 +224,10 @@ const outputs = (input: any[]) =>
 		.map((item) => item.call_id);
 
 // OMP's own wire, per release: these pin the behaviour the fence must model.
-const expectedWire: Record<Case, Record<"warm" | "cold", [string[], string[]]>> = {
+const expectedWire: Record<
+	Case,
+	Record<"warm" | "cold", [string[], string[]]>
+> = {
 	"duplicates within one reply": {
 		warm: [
 			["call_0", "call_0", "call_0_dup1"],
@@ -309,4 +338,151 @@ for (const host of hosts)
 				piPreparedStructureMismatch({ input }, prepared.structure),
 			).toBeDefined();
 		});
+	});
+
+// A chained continuation (previous_response_id) sends only what follows the
+// response it continues. After a replayed turn with a reused id that is the
+// appended renamed call, the renamed outputs and, across replies, the
+// placeholder output. OMP computes it with buildResponsesDeltaInput against the
+// previous request and the response's sanitized items (openai-responses.ts
+// :1454-1479 in 18.19.0 and 18.20.0, :1500-1525 in 18.20.3).
+const expectedDelta: Record<Case, unknown[]> = {
+	"duplicates within one reply": [
+		{
+			type: "function_call",
+			call_id: "call_0_dup1",
+			name: "read",
+			arguments: '{"path":"f2.txt"}',
+		},
+		{
+			type: "function_call_output",
+			call_id: "call_0",
+			output: "contents r1 1",
+		},
+		{
+			type: "function_call_output",
+			call_id: "call_0_dup1",
+			output: "contents r1 2",
+		},
+	],
+	"duplicates across replies": [
+		{
+			type: "function_call_output",
+			call_id: "call_0",
+			output:
+				"[No tool output recorded: the tool call was interrupted before it produced a result.]",
+		},
+		{
+			type: "function_call",
+			call_id: "call_0_dup1",
+			name: "read",
+			arguments: '{"path":"f2.txt"}',
+		},
+		{
+			type: "function_call_output",
+			call_id: "call_1",
+			output: "contents r2 1",
+		},
+		{
+			type: "function_call_output",
+			call_id: "call_0_dup1",
+			output: "contents r2 2",
+		},
+	],
+	"unique ids": [
+		{
+			type: "function_call_output",
+			call_id: "call_b",
+			output: "contents r2 1",
+		},
+		{
+			type: "function_call_output",
+			call_id: "call_c",
+			output: "contents r2 2",
+		},
+	],
+};
+
+/** The previous request, its response and the continuation OMP sends after it. */
+function chained(host: (typeof hosts)[number], name: Case) {
+	const history = histories[name] as readonly any[];
+	const at = history.findLastIndex((message) => message.role === "assistant");
+	const before = preparePiDispatch(
+		structuredClone(history.slice(0, at)) as unknown[],
+		model,
+		true,
+		"/work",
+	);
+	const current = prepare(name);
+	const previousInput = encode(host, before.messages, true);
+	const response = current.messages[at] as any;
+	const delta = host.delta(
+		{ input: previousInput },
+		host.sanitize(structuredClone(response.providerPayload.items)),
+		{ input: encode(host, current.messages, true) },
+	);
+	const recorded = piChainResponse(response);
+	if (!recorded) throw new Error("fixture reply is not a continuation point");
+	const anchor = {
+		input: previousInput,
+		prepared: piPreparedHistory(before.messages, hostModel)!,
+		...recorded,
+	};
+	const expand = (input: unknown[]) =>
+		piExpandChainedRequest(
+			{ previous_response_id: recorded.responseId, input },
+			{ previousResponseId: recorded.responseId, delta: input },
+			anchor,
+			piPreparedHistory(current.messages, hostModel),
+			{ current: undefined, resend: false },
+		);
+	return { delta, current, expand };
+}
+
+for (const host of hosts)
+	describe(`issue 931 chained continuation on OMP ${host.version}`, () => {
+		for (const name of Object.keys(histories) as Case[])
+			test(`${name}: the continuation OMP sends is admitted`, () => {
+				const { delta, current, expand } = chained(host, name);
+				expect(delta).toEqual(expectedDelta[name]);
+				const expanded = expand(delta!);
+				expect("refusal" in expanded ? expanded.refusal : undefined).toBe(
+					undefined,
+				);
+				if ("payload" in expanded)
+					expect(
+						piPreparedStructureMismatch(expanded.payload, current.structure),
+					).toBeUndefined();
+			});
+
+		for (const name of [
+			"duplicates within one reply",
+			"duplicates across replies",
+			"unique ids",
+		] as const)
+			test(`${name}: any other continuation is still refused`, () => {
+				const { delta, expand } = chained(host, name);
+				const changes: ((items: any[]) => void)[] = [
+					(items) => {
+						items.at(-1).call_id = "call_9";
+					},
+					(items) => {
+						items.at(-1).output = "other output";
+					},
+					(items) => {
+						items.splice(0, 1);
+					},
+					(items) => {
+						items.push({ ...items.at(-1) });
+					},
+				];
+				for (const change of changes) {
+					const items = structuredClone(delta!);
+					change(items);
+					const expanded = expand(items);
+					expect("refusal" in expanded ? expanded.refusal : undefined).toBe(
+						"delta differs from the prepared provider input tail",
+					);
+				}
+			});
 	});
