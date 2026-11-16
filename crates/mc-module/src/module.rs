@@ -2079,8 +2079,9 @@ fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
     {
         return false;
     }
-    // The search index forgets a session whose worker stops, with any
-    // stretch it still has to read.
+    // A worker that stops drops its search guard, and the search index then
+    // forgets the session, with any messages it has not indexed yet: free
+    // the session only once the index is idle.
     let searched = inner
         .search
         .as_ref()
