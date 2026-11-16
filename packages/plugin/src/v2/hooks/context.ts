@@ -3639,8 +3639,15 @@ export async function registerContext(context: V2Context) {
     rpcServer.handle("dream", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { ok: false, error: "no session" };
-        // Read per request: `dreamer.disable` takes effect without a restart.
-        const manualDreamer = config.dreamer && !dreamerDisabledNow() ? config.dreamer : undefined;
+        // Sample the live configuration per request, as the scheduled runs do:
+        // `dreamer.disable` and the live dreamer settings (model, variant,
+        // fallback_models, per-task overrides) apply without a restart. The
+        // disabled check and the run read the same sample.
+        const sampled = dreamerRunConfig(config, liveConfigReader.poll().effective);
+        const manualDreamer =
+            config.dreamer && sampled.dreamer?.disable !== true
+                ? (sampled.dreamer ?? config.dreamer)
+                : undefined;
         if (!manualDreamer || !hiddenCompletionExecutor) {
             pushNotification(
                 "toast",
@@ -3679,7 +3686,7 @@ export async function registerContext(context: V2Context) {
                 resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
             directory,
             language: config.language,
-            mural: config.mural,
+            mural: sampled.mural,
             executor: runExecutor,
             sessionId,
             ...(requested.task !== undefined ? { task: requested.task } : {}),
