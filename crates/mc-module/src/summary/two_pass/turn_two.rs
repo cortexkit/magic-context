@@ -89,6 +89,10 @@ pub struct Job {
     pub embedding: Option<crate::embedding::Provider>,
     /// The session's writer authority, for new memories' level records.
     pub authority: Option<crate::memory_levels::Authority>,
+    /// The agent the session works for, as its route's scope names it: the
+    /// attribution facts of the check children name it
+    /// ([`crate::attribution`]).
+    pub agent_id: Option<String>,
 }
 
 /// How a second turn ended.
@@ -148,6 +152,10 @@ struct Carrier {
     language: Option<String>,
     /// Keep the check children this carrier creates ([`Model::keep_child`]).
     keep_child: bool,
+    /// The agent and the project the check children this carrier creates
+    /// are attributed to, with the owning session as their parent.
+    alfonso: Option<String>,
+    project: Option<String>,
 }
 
 impl Carrier {
@@ -164,6 +172,8 @@ impl Carrier {
             output_tokens: job.continuation.output_tokens,
             language: job.continuation.language.clone(),
             keep_child: job.continuation.keep_child,
+            alfonso: job.agent_id.clone(),
+            project: Some(job.project.clone()),
         }
     }
 
@@ -225,18 +235,51 @@ impl Carrier {
             output_tokens: model["outputTokens"].as_u64()?,
             language: model["language"].as_str().map(str::to_owned),
             keep_child,
+            alfonso: None,
+            project: None,
         })
     }
 
-    /// Send `prompt` in `child` under `send_id` with `system`, and wait.
+    /// Attribute the check children of a carrier recovered by `job` to the
+    /// job's project, which every stage it recovers belongs to, and to the
+    /// job's agent when the stage is the job's own session's. A stage of
+    /// another session of the project names no agent: the job doesn't know
+    /// that session's.
+    fn attribute_for(&mut self, job: &Job) {
+        let own = self.runner == job.owner.runner
+            && self.harness == job.owner.harness
+            && self.owner == job.owner.session;
+        self.alfonso = if own { job.agent_id.clone() } else { None };
+        self.project = Some(job.project.clone());
+    }
+
+    /// What the check children this carrier creates are for: the owning
+    /// session's summary.
+    fn purpose(&self) -> crate::attribution::Purpose {
+        crate::attribution::Purpose::summary(
+            &SessionRef::new(
+                self.runner.clone(),
+                self.harness.clone(),
+                self.owner.clone(),
+            ),
+            self.alfonso.as_deref(),
+            self.project.as_deref(),
+        )
+    }
+
+    /// Send `prompt` in `child` under `send_id` with `system`, and wait. A
+    /// send that creates a check child records its attribution fact in `db`
+    /// first.
     async fn send<C: RunnerClient>(
         &self,
         client: &C,
+        db: &ContextDb,
         child: &str,
         send_id: &str,
         prompt: &str,
         system: &str,
     ) -> Result<run::Reply, SummaryError> {
+        let purpose = self.purpose();
         let how = Model {
             model: &self.model,
             decision_id: &self.decision_id,
@@ -256,6 +299,10 @@ impl Carrier {
             } else {
                 SendKind::FactCheck
             },
+            attribution: Some(crate::attribution::Attribution {
+                db,
+                purpose: &purpose,
+            }),
         };
         let mut usage: Option<StepUsage> = None;
         run::send_and_wait(
@@ -1553,6 +1600,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                     .carrier
                     .send(
                         self.client,
+                        self.db,
                         &child,
                         &key,
                         &gates::render_input(check),
@@ -1884,7 +1932,7 @@ async fn recover_one<C: RunnerClient>(
             })
             .map_err(|error| error.to_string())
     };
-    let Some(carrier) =
+    let Some(mut carrier) =
         Carrier::from_stage(&row, job.project_root.clone(), job.continuation.keep_child)
     else {
         if crate::memory_writes::now_ms() - row.started_at >= UNREACHABLE_MAX_AGE_MS {
@@ -1892,6 +1940,7 @@ async fn recover_one<C: RunnerClient>(
         }
         return Ok(None);
     };
+    carrier.attribute_for(job);
     if row.reply.is_none() {
         let prompt = row.request["prompt"].as_str().unwrap_or("").to_owned();
         let system = run::two_pass_system(
@@ -1899,7 +1948,7 @@ async fn recover_one<C: RunnerClient>(
             carrier.language.as_deref(),
         );
         match carrier
-            .send(client, &carrier.child, stage, &prompt, &system)
+            .send(client, db, &carrier.child, stage, &prompt, &system)
             .await
         {
             Ok(reply) => db
@@ -2098,6 +2147,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
     let reply = match carrier
         .send(
             client,
+            db,
             &carrier.child,
             &reserved.stage,
             &reserved.prompt,

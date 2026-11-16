@@ -211,6 +211,11 @@ pub struct ContextDb {
     /// module that publishes them ([`crate::memory_changed`]); a store
     /// without one wakes no one.
     memory_wakes: std::sync::OnceLock<Arc<crate::memory_changed::MemoryWakes>>,
+    /// Signalled after each commit that stores a new attribution fact, so
+    /// its bus event goes out at once ([`crate::attribution`]). Set once by
+    /// the module that publishes those events; a store without one wakes no
+    /// one, and its facts wait for the dreamer's minute tick.
+    attribution_wake: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     /// Read-only connections for searches, opened when first needed.
     readers: readers::Readers,
     #[cfg(feature = "context-db-timing")]
@@ -381,6 +386,7 @@ impl ContextDb {
             connection: Mutex::new(connection),
             notifier: std::sync::OnceLock::new(),
             memory_wakes: std::sync::OnceLock::new(),
+            attribution_wake: std::sync::OnceLock::new(),
             readers: readers::Readers::default(),
             #[cfg(feature = "context-db-timing")]
             timing,
@@ -462,6 +468,19 @@ impl ContextDb {
     /// Only the first call takes effect.
     pub(crate) fn wake_on_memory_changes(&self, wakes: Arc<crate::memory_changed::MemoryWakes>) {
         let _ = self.memory_wakes.set(wakes);
+    }
+
+    /// Signal `wake` after every commit that stores a new attribution fact
+    /// from now on. Only the first call takes effect.
+    pub(crate) fn wake_on_attribution_facts(&self, wake: Arc<tokio::sync::Notify>) {
+        let _ = self.attribution_wake.set(wake);
+    }
+
+    /// A commit stored a new attribution fact: wake its event's publisher.
+    pub(crate) fn attribution_recorded(&self) {
+        if let Some(wake) = self.attribution_wake.get() {
+            wake.notify_one();
+        }
     }
 
     /// Report a committed change to rows the app reads show. Call it after

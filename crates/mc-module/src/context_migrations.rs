@@ -26,7 +26,7 @@ mod catch_up_tests;
 pub const PLUGIN_SCHEMA_VERSION: u32 = crate::context_db::PLUGIN_SCHEMA_VERSION;
 
 /// The schema version this build reads and writes.
-pub const SCHEMA_VERSION: u32 = 110;
+pub const SCHEMA_VERSION: u32 = 111;
 
 struct Migration {
     version: u32,
@@ -69,6 +69,12 @@ const MIGRATIONS: &[Migration] = &[
         description: "the docs-upkeep task's proposals",
         rebuilds_referenced_table: false,
         up: docs_proposals_110,
+    },
+    Migration {
+        version: 111,
+        description: "attribution facts for the child sessions ck-mc starts",
+        rebuilds_referenced_table: false,
+        up: attribution_facts_111,
     },
 ];
 
@@ -614,6 +620,10 @@ mod tests_109;
 #[path = "context_migrations_110_tests.rs"]
 mod tests_110;
 
+#[cfg(test)]
+#[path = "context_migrations_111_tests.rs"]
+mod tests_111;
+
 /// The module's dreamer state, replacing the 0.49 plugin's.
 ///
 /// The plugin kept one queue and one lease per project, and a run record for
@@ -879,5 +889,31 @@ fn docs_proposals_110(tx: &Transaction) -> rusqlite::Result<()> {
            ON docs_proposals(project) WHERE status = 'pending';
          CREATE INDEX idx_docs_proposals_unpublished
            ON docs_proposals(id) WHERE published_at IS NULL AND status = 'pending';",
+    )
+}
+
+/// The attribution facts ([`crate::attribution`]): one row for each child
+/// session ck-mc starts on a runner, saying what the child is for, so
+/// Astrocyte can charge the child's model spend to the agent, task and
+/// project behind it.
+///
+/// `seq` is the order `attribution.read` serves facts in, and its cursor.
+/// `fact_id` is derived from the child the fact describes, so recording the
+/// same child twice keeps one row. `body` is the fact as the read and the
+/// `attribution_fact` event serve it, written once and never changed. Rows
+/// are never updated otherwise or deleted: the table names no session in a
+/// column, so session cleanup never reaches it. `published_at_ms` is null
+/// until the bus acknowledged the fact's event: the row is its own outbox.
+fn attribution_facts_111(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE attribution_facts (
+           seq INTEGER PRIMARY KEY AUTOINCREMENT,
+           fact_id TEXT NOT NULL UNIQUE,
+           body TEXT NOT NULL,
+           recorded_at_ms INTEGER NOT NULL,
+           published_at_ms INTEGER
+         );
+         CREATE INDEX idx_attribution_facts_unpublished
+           ON attribution_facts(seq) WHERE published_at_ms IS NULL;",
     )
 }

@@ -32,6 +32,7 @@ async fn turn_one_then_turn_two(client: &Client, keep_child: bool) -> Vec<SendRe
         deadline: tokio::time::Instant::now() + Duration::from_secs(1),
         continuation: false,
         creates_child: true,
+        attribution: None,
         keep_child,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
         send: SendKind::TurnOne,

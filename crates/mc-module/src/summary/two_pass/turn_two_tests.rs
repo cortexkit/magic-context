@@ -22,6 +22,7 @@ fn job(child_harness: &str) -> Job {
         auto_promote: true,
         embedding: None,
         authority: None,
+        agent_id: None,
     }
 }
 
@@ -35,6 +36,71 @@ fn stored(carrier: &Carrier) -> StageRow {
         request: json!({"model": carrier.stage_model_json()}),
         reply: None,
     }
+}
+
+/// A fact check runs in a child of its own, attributed before its first send
+/// to the session the summary serves, that session's agent and its project;
+/// turn two continues the first turn's child and adds no fact. A stage
+/// recovered for another session of the project names that session and no
+/// agent, since the recovering job knows only its own session's.
+#[tokio::test]
+async fn a_check_child_is_attributed_to_its_head_and_turn_two_adds_no_fact() {
+    use crate::attribution::Purpose;
+    use crate::summary::run::session_class_tests::Client;
+    let dir = tempfile::tempdir().unwrap();
+    let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+    let mut job = job("opencode2");
+    job.agent_id = Some("agent_head".into());
+    let carrier = Carrier::of(&job);
+    let client = Client::new(false);
+    carrier
+        .send(&client, &db, &carrier.child, "turn-two", "prompt", "system")
+        .await
+        .unwrap();
+    assert!(crate::attribution::tests::rows(&db).is_empty());
+    carrier
+        .send(
+            &client,
+            &db,
+            "head:mc-check:0123",
+            "check",
+            "prompt",
+            "system",
+        )
+        .await
+        .unwrap();
+    let rows = crate::attribution::tests::rows(&db);
+    assert_eq!(rows.len(), 1);
+    let fact: Value = serde_json::from_str(&rows[0].1).unwrap();
+    assert_eq!(
+        fact["subject"],
+        json!({"kind": "session", "runner": "runner", "harness": "opencode2", "session": "head:mc-check:0123"})
+    );
+    assert_eq!(
+        fact["parent"],
+        json!({"kind": "session", "runner": "runner", "harness": "pi", "session": "head"})
+    );
+    assert_eq!(fact["alfonso"], "agent_head");
+    assert_eq!(fact["project_id"], "project");
+    assert_eq!(fact["workload"], "summary");
+    assert_eq!(fact["task"], "magic-context.summary");
+
+    let mut own =
+        Carrier::from_stage(&stored(&carrier), carrier.project_root.clone(), false).unwrap();
+    own.attribute_for(&job);
+    assert_eq!(own.purpose(), carrier.purpose());
+    let mut row = stored(&carrier);
+    row.session = "other-head".into();
+    let mut other = Carrier::from_stage(&row, carrier.project_root.clone(), false).unwrap();
+    other.attribute_for(&job);
+    assert_eq!(
+        other.purpose(),
+        Purpose::summary(
+            &SessionRef::new("runner", "pi", "other-head"),
+            None,
+            Some("project")
+        )
+    );
 }
 
 #[test]
@@ -126,6 +192,8 @@ fn turn_two_child_harness_does_not_change_check_keys_or_reported_profiles() {
 async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks_include_it() {
     use crate::runner_capabilities::SessionRetention;
     use crate::summary::run::session_class_tests::Client;
+    let dir = tempfile::tempdir().unwrap();
+    let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
     let carrier = Carrier::of(&job("opencode2"));
     let row = stored(&carrier);
     let request_before = serde_json::to_vec(&row.request).unwrap();
@@ -151,13 +219,14 @@ async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks
         let mut client = Client::new(declares);
         client.retention = declares.then_some(SessionRetention { max_days: Some(30) });
         carrier
-            .send(&client, &carrier.child, "turn-two", "prompt", "system")
+            .send(&client, &db, &carrier.child, "turn-two", "prompt", "system")
             .await
             .unwrap();
         let recovered = Carrier::from_stage(&row, carrier.project_root.clone(), false).unwrap();
         recovered
             .send(
                 &client,
+                &db,
                 &recovered.child,
                 "stored-stage",
                 "prompt",
@@ -166,7 +235,14 @@ async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks
             .await
             .unwrap();
         recovered
-            .send(&client, "check-child", "stored-check", "prompt", "system")
+            .send(
+                &client,
+                &db,
+                "check-child",
+                "stored-check",
+                "prompt",
+                "system",
+            )
             .await
             .unwrap();
         let sends = client.sends.lock().unwrap();
@@ -206,6 +282,8 @@ async fn session_class_turn_two_and_recovered_stages_omit_label_but_fresh_checks
 async fn check_children_are_kept_as_the_first_turn_chose() {
     use crate::runner_capabilities::SessionRetention;
     use crate::summary::run::session_class_tests::Client;
+    let dir = tempfile::tempdir().unwrap();
+    let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
     for (keep, policy) in [
         (
             true,
@@ -224,16 +302,17 @@ async fn check_children_are_kept_as_the_first_turn_chose() {
         let mut client = Client::new(false);
         client.retention = Some(SessionRetention { max_days: Some(30) });
         carrier
-            .send(&client, &carrier.child, "turn-two", "prompt", "system")
+            .send(&client, &db, &carrier.child, "turn-two", "prompt", "system")
             .await
             .unwrap();
         carrier
-            .send(&client, "check-child", "check", "prompt", "system")
+            .send(&client, &db, "check-child", "check", "prompt", "system")
             .await
             .unwrap();
         recovered
             .send(
                 &client,
+                &db,
                 "stored-check-child",
                 "stored-check",
                 "prompt",

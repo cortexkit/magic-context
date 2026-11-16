@@ -117,6 +117,9 @@ struct Inner<C> {
     /// The publisher of the docs-upkeep proposals' bus notices, once the
     /// process set one ([`Module::publish_docs_notices_with`]).
     docs_notices: std::sync::OnceLock<Arc<crate::bus::DocsNotices>>,
+    /// The publisher of the attribution facts' bus events, once the process
+    /// set one ([`Module::publish_attribution_with`]).
+    attribution_events: std::sync::OnceLock<Arc<crate::bus::AttributionEvents>>,
     /// Each set-up session's folder, which its workspace is read for again
     /// when Entorhinal's registry changes ([`Module::spawn_entorhinal_follow`]).
     session_folders: Mutex<HashMap<SessionRef, String>>,
@@ -290,6 +293,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 dreamer,
                 legacy_wake: Arc::default(),
                 docs_notices: std::sync::OnceLock::new(),
+                attribution_events: std::sync::OnceLock::new(),
                 session_folders: Mutex::new(HashMap::new()),
                 entorhinal_watch: Arc::default(),
             }),
@@ -858,6 +862,28 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let _ = self.inner.docs_notices.set(Arc::new(notices));
     }
 
+    /// Publish the attribution facts' bus events through `events`: right
+    /// after each commit that stores a fact, and every unsent one again in
+    /// the dreamer's rounds ([`crate::attribution`]). Only the first call
+    /// takes effect. Without `context.db` there are no facts to publish.
+    pub fn publish_attribution_with(&self, events: crate::bus::AttributionEvents) {
+        let events = Arc::new(events);
+        if self
+            .inner
+            .attribution_events
+            .set(Arc::clone(&events))
+            .is_err()
+        {
+            return;
+        }
+        let Some(db) = self.inner.db.clone() else {
+            return;
+        };
+        let wake = Arc::new(tokio::sync::Notify::new());
+        db.wake_on_attribution_facts(Arc::clone(&wake));
+        tokio::spawn(crate::bus::run_attribution_events(events, db, wake));
+    }
+
     /// Wake other modules on `bus` after each committed change to memories a
     /// session's head can show ([`crate::memory_changed`]). Without
     /// `context.db` nothing changes.
@@ -967,6 +993,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 // after the person switched the dreamer off.
                 if let Some(notices) = module.inner.docs_notices.get() {
                     notices.publish(&db).await;
+                }
+                // So are unsent attribution facts' events: the wake after a
+                // fact's commit finds the bus down, or a fact was stored
+                // before a restart.
+                if let Some(events) = module.inner.attribution_events.get() {
+                    events.publish(&db).await;
                 }
                 tokio::time::sleep(crate::dreamer::engine::TICK).await;
             }

@@ -1,0 +1,17 @@
+{
+  "caller": "reserved:astrocyte",
+  "name": "read-page-next-empty",
+  "request": {
+    "method": "attribution.read",
+    "params": {
+      "after": "2"
+    }
+  },
+  "response": {
+    "result": {
+      "facts": [],
+      "next": null,
+      "through": "2"
+    }
+  }
+}

@@ -231,6 +231,9 @@ pub struct Session {
     /// [`Route::workdir`]): configuration and the summarizer's child sessions
     /// use it even when the session has no project.
     workdir: Option<String>,
+    /// The agent the session works for, from its route's scope
+    /// ([`Route::agent_id`]): its summaries' attribution facts name it.
+    agent_id: Option<String>,
     /// The baseline a view being published was built on; it replaces
     /// `baseline` once the runner takes the view.
     next_baseline: Option<Arc<Baseline>>,
@@ -816,6 +819,7 @@ impl Session {
             db,
             project: route.project.clone(),
             workdir: folder_of(route),
+            agent_id: route.agent_id.clone(),
             key: route.session.clone(),
             features,
             preset: crate::catalog::Preset::parse(&request.preset)
@@ -1340,6 +1344,7 @@ impl Session {
         self.notice_keep = client.notice_keep(&self.key).await;
         self.project = route.project.clone();
         self.workdir = folder_of(route);
+        self.agent_id = route.agent_id.clone();
         self.seq = 0;
         self.note_transcript_growth(request.newest.as_ref());
         // Before anything is offered, settled or read: a transcript that no
@@ -2490,6 +2495,7 @@ impl Session {
             force_keep_last_compartment,
             memory_context: self.memory_context.clone(),
             keep_subagents: settings.keep_subagents,
+            agent_id: self.agent_id.clone(),
         }
     }
 
@@ -3235,6 +3241,7 @@ impl Session {
             auto_promote: settings.auto_promote,
             embedding: settings.embedding.clone(),
             authority: self.authority.clone(),
+            agent_id: self.agent_id.clone(),
         })
     }
 
@@ -6756,6 +6763,10 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "workspace_follow_tests.rs"]
 mod workspace_follow_tests;
+
+#[cfg(test)]
+#[path = "session_attribution_tests.rs"]
+mod session_attribution_tests;
 
 #[path = "spent_reading.rs"]
 mod spent_reading;

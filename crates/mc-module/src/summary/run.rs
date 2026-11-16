@@ -100,6 +100,9 @@ pub struct Request {
     /// The user's `keep_subagents`: the run's child sessions are kept for
     /// inspection (see [`Model::keep_child`]).
     pub keep_subagents: bool,
+    /// The agent the session works for, as its route's scope names it: the
+    /// run's attribution facts name it ([`crate::attribution`]).
+    pub agent_id: Option<String>,
 }
 
 /// What a run produced.
@@ -200,6 +203,17 @@ pub async fn run<C: RunnerClient + Router>(
     let child_harness = job.child_harness.as_deref().unwrap_or(&job.session.harness);
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
+    // Every child the run creates is attributed to this session, its agent
+    // and its project, before the child's first send.
+    let purpose = crate::attribution::Purpose::summary(
+        &job.session,
+        job.agent_id.as_deref(),
+        job.project.as_deref(),
+    );
+    let attribution = db.map(|db| crate::attribution::Attribution {
+        db,
+        purpose: &purpose,
+    });
     // One deadline for the whole run, retries and fallbacks included.
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     for _ in 0..=MAX_FALLBACKS {
@@ -265,6 +279,7 @@ pub async fn run<C: RunnerClient + Router>(
             system: &system,
             prompts: &prompts,
             keep_child: job.keep_subagents,
+            attribution,
         };
         let outcome =
             summarize_on(client, job, &entries, &call, records.as_ref(), &mut usage).await;
@@ -371,6 +386,8 @@ struct Call<'a> {
     prompts: &'a Arc<SummaryPrompts>,
     /// Keep the children this model is asked in ([`Model::keep_child`]).
     keep_child: bool,
+    /// Where the children this model is asked in are attributed.
+    attribution: Option<crate::attribution::Attribution<'a>>,
 }
 
 /// Where a run keeps the plugin's send and publication records.
@@ -698,6 +715,7 @@ async fn call<C: RunnerClient>(
         // send writes.
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
         plan: None,
+        attribution: call_on.attribution,
     };
     let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage).await?;
     if reply.length_capped {
@@ -737,6 +755,11 @@ pub(crate) struct Model<'a> {
     /// inline system prompt and an empty tool list, since a runner takes no
     /// inline system text next to a plan. `None` for every summarizer call.
     pub plan: Option<&'a PlanRun>,
+    /// What a child this send creates is for. The send that creates a child
+    /// (`creates_child`) records the child's attribution fact right before
+    /// it goes out; a later send to the same child records nothing. `None`
+    /// records nothing, as without a store.
+    pub attribution: Option<crate::attribution::Attribution<'a>>,
 }
 
 /// A fetch plan a child is created with, and how many model steps its run
@@ -851,6 +874,15 @@ async fn send_and_wait_inner<C: RunnerClient>(
     // Registered before the first send, so a run-end event that arrives
     // while a send is being answered ends the next pause at once.
     let watch = client.run_ends().map(|ends| ends.watch(&child.session));
+    // The child's attribution fact is stored before its first model call
+    // can start, so no spend of the child is ever unattributed. Only the
+    // send that creates the child records it; the fact keeps the child's
+    // first purpose whatever later sends to it say.
+    if how.creates_child {
+        if let Some(attribution) = &how.attribution {
+            attribution.record(&child.session);
+        }
+    }
     let mut resent = false;
     let reply = loop {
         let reply =
@@ -1007,6 +1039,10 @@ mod retention_tests;
 #[cfg(test)]
 #[path = "one_summarizer_tests.rs"]
 mod one_summarizer_tests;
+
+#[cfg(test)]
+#[path = "attribution_tests.rs"]
+mod attribution_tests;
 
 /// A summarizer run's own parameters, which ride beside llm-runner's fields
 /// of `session.send`: the model routing picked and its decision, the system

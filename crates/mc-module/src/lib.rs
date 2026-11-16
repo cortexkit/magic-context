@@ -46,6 +46,9 @@
 
 pub mod agent_data;
 pub mod app_read;
+/// What each child session ck-mc starts is for, for Astrocyte's spend
+/// attribution.
+pub(crate) mod attribution;
 pub mod bus;
 pub mod calibration;
 pub mod catalog;

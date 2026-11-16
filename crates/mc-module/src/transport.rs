@@ -127,12 +127,14 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     // management-surface operations, so the reads it uses are also
     // declared there, as queries.
     // Basal's flows read docs proposals over the management surface, so the
-    // flow operations are declared there too, as queries.
+    // flow operations are declared there too, as queries. Astrocyte reads
+    // the attribution facts there ([`crate::attribution::read`]).
     provides.push(ProviderRole::ManagementSurface {
         operations: MANAGEMENT_APP_METHODS
             .iter()
             .chain(cortexkit_role_user_commands::MODULE_OPS.iter())
             .chain(crate::docs_proposals::flow::FLOW_ROUTE_METHODS.iter())
+            .chain(std::iter::once(&crate::attribution::read::METHOD))
             .map(|method| subc_protocol::manifest::ManagementOperation {
                 name: (*method).into(),
                 kind: if *method == "commands.run" {
@@ -219,10 +221,12 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
             must_never_reach: Vec::new(),
         }))
         // The events ck-mc publishes on the bus, with the headers a notice
-        // carries ([`crate::bus`], [`crate::memory_changed`]).
+        // carries ([`crate::bus`], [`crate::memory_changed`],
+        // [`crate::attribution`]).
         .events(Some(vec![
             crate::docs_proposals::event_declaration(),
             crate::memory_changed::event_declaration(),
+            crate::attribution::event_declaration(),
         ]))
         // The build's commit, from MC_BUILD_SHA at compile time. The daemon
         // shows it in module status, and placement checks it to prove the
@@ -1955,6 +1959,8 @@ impl ModuleHandler for Handler {
         let channel = ctx.route_handle().channel;
         let outcome = if let Some(answer) = self.flow_request(channel, &body).await {
             answer
+        } else if let Some(answer) = self.attribution_read(channel, &body) {
+            answer
         } else if let Some(answer) = self.command(channel, &body).await {
             match answer {
                 Ok(value) => {
@@ -1979,6 +1985,42 @@ impl ModuleHandler for Handler {
 }
 
 impl Handler {
+    /// `attribution.read` on a route to ck-mc's management surface: the page
+    /// for `reserved:astrocyte`, `caller_not_admitted` for every other caller
+    /// before the params are read ([`crate::attribution::read`]). `None` for
+    /// another method, or a route to anything but the management surface.
+    fn attribution_read(&self, channel: u16, body: &[u8]) -> Option<HandlerOutcome> {
+        use crate::attribution::read;
+        if !read::requested(body) {
+            return None;
+        }
+        // Every route to the management surface records its caller at bind.
+        let principal = self
+            .command_bound
+            .lock()
+            .expect("command routes")
+            .get(&channel)
+            .cloned()?;
+        let answer =
+            read::admit(&principal).and_then(|()| read::handle(self.module.store_db(), body));
+        Some(match answer {
+            Ok(reply) => HandlerOutcome::Response(
+                serde_json::to_vec(&reply).expect("attribution pages serialize"),
+            ),
+            Err(error) => match error.detail {
+                Some(detail) => HandlerOutcome::ErrorWithDetail {
+                    code: error.code,
+                    message: error.message,
+                    detail,
+                },
+                None => HandlerOutcome::Error {
+                    code: error.code,
+                    message: error.message,
+                },
+            },
+        })
+    }
+
     async fn command(
         &self,
         channel: u16,
@@ -2384,6 +2426,8 @@ mod app_read_tests {
         assert_eq!(
             operations,
             [
+                // Astrocyte's read of the attribution facts.
+                ("attribution.read".into(), "query".into()),
                 ("commands.describe".into(), "query".into()),
                 ("commands.preview".into(), "query".into()),
                 ("commands.run".into(), "mutate".into()),
@@ -2535,6 +2579,138 @@ mod user_commands_tests {
             .command(10, br#"{"method":"session_data.read","params":{}}"#)
             .await
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod attribution_read_tests {
+    use super::*;
+
+    fn handler(db: Option<crate::context_db::ContextDb>) -> Handler {
+        Handler::new(Module::new(
+            SubcRunnerClient::new(
+                PathBuf::from("unused-attribution-connection"),
+                Arc::new(ChildScopes::new("attribution")),
+            ),
+            crate::pass::Settings::default(),
+            db,
+            None,
+        ))
+    }
+
+    async fn bind(handler: &Handler, channel: u16, target: RouteTarget, principal: Principal) {
+        let mut request = RouteBindRequest::new(
+            subc_client_rs::RouteHandle::detached(channel, 1),
+            target,
+            BindIdentity::new("", "attribution-test"),
+        );
+        request.principal = Some(principal);
+        handler.on_bind(&request).await;
+    }
+
+    fn management() -> RouteTarget {
+        RouteTarget::ManagementSurface {
+            module_id: crate::MODULE_ID.into(),
+        }
+    }
+
+    const READ: &[u8] = br#"{"method":"attribution.read","params":{"limit":1}}"#;
+
+    /// Astrocyte's route to the management surface reads the facts; every
+    /// other caller there is refused as an unadmitted user command is,
+    /// before its params are read.
+    #[tokio::test]
+    async fn only_astrocyte_reads_attribution_facts_on_the_management_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            crate::context_db::ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+        let head = SessionRef::new("broca", "pi", "head");
+        let purpose = crate::attribution::Purpose::summary(&head, None, None);
+        for name in ["head:mc-summary:a", "head:mc-summary:b"] {
+            crate::attribution::tests::put(&db, &SessionRef::new("broca", "pi", name), &purpose, 1);
+        }
+        let handler = handler(Some(db));
+        bind(
+            &handler,
+            10,
+            management(),
+            Principal::Reserved {
+                module_id: "astrocyte".into(),
+            },
+        )
+        .await;
+        let Some(HandlerOutcome::Response(bytes)) = handler.attribution_read(10, READ) else {
+            panic!("astrocyte gets a page");
+        };
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page["result"]["facts"].as_array().unwrap().len(), 1);
+        assert_eq!(page["result"]["next"], "1");
+        assert_eq!(page["result"]["through"], "2");
+        assert!(handler
+            .attribution_read(10, br#"{"method":"role.describe","params":{}}"#)
+            .is_none());
+
+        for (channel, caller) in [
+            Principal::Direct,
+            Principal::Unverified,
+            Principal::Reserved {
+                module_id: "occipital".into(),
+            },
+            Principal::Reserved {
+                module_id: "callosum".into(),
+            },
+            Principal::Reserved {
+                module_id: "other".into(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let channel = 20 + channel as u16;
+            bind(&handler, channel, management(), caller.clone()).await;
+            // Bad params too: the caller is judged before they are read.
+            let body = br#"{"method":"attribution.read","params":{"limit":"x"}}"#;
+            match handler.attribution_read(channel, body) {
+                Some(HandlerOutcome::Error { code, message }) => {
+                    assert_eq!(code, "caller_not_admitted", "{caller:?}");
+                    assert_eq!(message, "caller not admitted");
+                }
+                _ => panic!("{caller:?} is refused"),
+            }
+        }
+
+        // A runner's route isn't the management surface: the read isn't
+        // served there at all.
+        bind(
+            &handler,
+            40,
+            RouteTarget::ToolProvider {
+                module_id: crate::MODULE_ID.into(),
+            },
+            Principal::Reserved {
+                module_id: "astrocyte".into(),
+            },
+        )
+        .await;
+        assert!(handler.attribution_read(40, READ).is_none());
+    }
+
+    #[test]
+    fn the_manifest_declares_the_read_as_a_management_query() {
+        let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
+        let surface = manifest["provides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["role"] == "management_surface")
+            .unwrap();
+        let declared = surface["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["name"] == "attribution.read")
+            .expect("attribution.read is declared");
+        assert_eq!(declared["kind"], "query");
     }
 }
 
@@ -2933,6 +3109,11 @@ mod flow_tests {
                 "version": 1,
                 "headers": ["level", "owner_id", "revision"],
                 "summary": "Magic Context memories of a project, a workspace or the person changed",
+            }, {
+                "name": "attribution_fact",
+                "version": 1,
+                "headers": [],
+                "summary": "Magic Context recorded the agent, task and project a child session it started works for",
             }])
         );
         subc_protocol::manifest::validate_hello_event_declarations(&json!({"manifest": manifest}))

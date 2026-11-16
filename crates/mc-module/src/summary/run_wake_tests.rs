@@ -119,6 +119,7 @@ async fn start(reader: bool) -> Fixture {
                 deadline: Instant::now() + RUN_TIMEOUT,
                 continuation: false,
                 creates_child: true,
+                attribution: None,
                 keep_child: false,
                 cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
                 send: SendKind::Dream,

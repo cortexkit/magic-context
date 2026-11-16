@@ -136,6 +136,9 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     // waits on summary and dreamer runs.
     let bus = Arc::new(mc_module::bus::Bus::through_ckbus(connection_file.clone()));
     module.publish_docs_notices_with(mc_module::bus::DocsNotices::over(Arc::clone(&bus)));
+    // Each child session ck-mc starts is attributed in context.db, and the
+    // fact goes out on the bus for Astrocyte.
+    module.publish_attribution_with(mc_module::bus::AttributionEvents::over(Arc::clone(&bus)));
     module.spawn_memory_wakes(Arc::clone(&bus));
     mc_module::bus::spawn_run_end_reader(Arc::clone(&bus), run_end_waits);
     module.spawn_dreamer();

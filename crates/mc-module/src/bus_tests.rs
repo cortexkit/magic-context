@@ -274,6 +274,10 @@ fn only_trusted_ckbus_refusal_codes_leave_the_module() {
 /// headers, and whether the stream had it already.
 pub(crate) type Sent = (String, String, ContentDigest, Headers, bool);
 
+/// One event with a body the test bus's stream took: subject, headers, body,
+/// and whether the stream had a message with its id already.
+pub(crate) type SentPayload = (String, Headers, Vec<u8>, bool);
+
 /// A bus for other modules' tests. Notices go to an in-memory stream and are
 /// recorded as the bus took them; KV buckets are a second in-memory bus.
 /// `down` refuses every session, as a bus that is down or a missing ck-bus
@@ -282,6 +286,11 @@ pub(crate) struct TestBus {
     pub stream: cortexkit_bus_inmemory::InMemoryBus,
     pub kv: cortexkit_bus_inmemory::InMemoryBus,
     pub sent: Mutex<Vec<Sent>>,
+    /// The events with a body the stream acknowledged, in order.
+    pub payloads: Mutex<Vec<SentPayload>>,
+    /// Fails every publish of an event with a body, as a stream that never
+    /// acknowledges it.
+    pub refuse_payloads: AtomicBool,
     pub down: AtomicBool,
     pub opened: AtomicUsize,
     /// The bucket names watches were opened on.
@@ -297,6 +306,8 @@ impl TestBus {
             stream: InMemoryBus::new(InMemoryConfig::default()),
             kv: InMemoryBus::new(InMemoryConfig::default()),
             sent: Mutex::new(Vec::new()),
+            payloads: Mutex::new(Vec::new()),
+            refuse_payloads: AtomicBool::new(false),
             down: AtomicBool::new(false),
             opened: AtomicUsize::new(0),
             watched: Mutex::new(Vec::new()),
@@ -357,6 +368,27 @@ impl EventPublisher for TestPublisher {
 
 struct TestRegisters(Arc<TestBus>);
 
+/// Publishes events with a body to the test bus: refused while the bus is
+/// down or refuses them, otherwise recorded, a repeated `Nats-Msg-Id`
+/// reported as a duplicate the way JetStream reports it.
+struct TestPayloads(Arc<TestBus>);
+
+#[async_trait]
+impl PayloadPublisher for TestPayloads {
+    async fn publish(&self, subject: &str, headers: &Headers, body: &[u8]) -> Result<bool, String> {
+        if self.0.down.load(Ordering::Relaxed) || self.0.refuse_payloads.load(Ordering::Relaxed) {
+            return Err("nats_publish_unacknowledged".into());
+        }
+        let mut payloads = self.0.payloads.lock().unwrap();
+        let id = headers.get("Nats-Msg-Id");
+        let duplicate = payloads
+            .iter()
+            .any(|(_, sent, _, _)| sent.get("Nats-Msg-Id") == id);
+        payloads.push((subject.into(), headers.clone(), body.to_vec(), duplicate));
+        Ok(duplicate)
+    }
+}
+
 #[async_trait]
 impl Registers for TestRegisters {
     async fn watch(&self, bucket: &str, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
@@ -403,7 +435,8 @@ impl SessionFactory for TestSessions {
         self.0.opened.fetch_add(1, Ordering::Relaxed);
         Ok(
             BusSession::fixed(account(), Box::new(TestPublisher(self.0.clone())))
-                .with_registers(Box::new(TestRegisters(self.0.clone()))),
+                .with_registers(Box::new(TestRegisters(self.0.clone())))
+                .with_payloads(Box::new(TestPayloads(self.0.clone()))),
         )
     }
 

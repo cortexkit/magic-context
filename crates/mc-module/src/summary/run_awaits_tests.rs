@@ -136,6 +136,7 @@ async fn send_error(client: &Runner, send: SendKind) -> SummaryError {
         deadline: tokio::time::Instant::now() + Duration::from_secs(2),
         continuation: true,
         creates_child: false,
+        attribution: None,
         keep_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
         plan: None,
@@ -470,6 +471,7 @@ async fn attempt_on(
         },
         deadline,
         system: "system",
+        attribution: None,
     };
     attempt(
         client,

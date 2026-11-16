@@ -337,6 +337,7 @@ fn job() -> TaskRun<'static> {
         run_id: "17",
         project_root: "/work/project",
         reader: None,
+        attribution: None,
     }
 }
 
@@ -397,6 +398,45 @@ async fn an_unusable_or_cut_off_reply_moves_to_the_next_model() {
             "decision-c completed"
         ]
     );
+}
+
+/// Each child a dreamer run creates, one per model it tries, is attributed
+/// to the task and its project, with no head session or agent behind it.
+#[tokio::test(start_paused = true)]
+async fn every_dreamer_child_is_attributed_to_its_task_and_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        crate::context_db::ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+    let purpose = crate::attribution::Purpose::dream("classify-memories", Some("pj-dream"));
+    let mut job = job();
+    job.attribution = Some(crate::attribution::Attribution {
+        db: &db,
+        purpose: &purpose,
+    });
+    let client = Client::new(
+        &["p/a", "p/b"],
+        &[Ends::Reply("nonsense"), Ends::Reply("ok")],
+    );
+    run(&client, &job, &Task { fits: true }).await.unwrap();
+    let facts: Vec<serde_json::Value> = crate::attribution::tests::rows(&db)
+        .into_iter()
+        .map(|(_, body, _)| serde_json::from_str(&body).unwrap())
+        .collect();
+    assert_eq!(facts.len(), 2);
+    for (fact, (runner, harness, child)) in facts.iter().zip([
+        ("ra", "ha", "mc-dream:17:0.0"),
+        ("rb", "hb", "mc-dream:17:1.0"),
+    ]) {
+        assert_eq!(
+            fact["subject"],
+            json!({"kind": "session", "runner": runner, "harness": harness, "session": child})
+        );
+        assert_eq!(fact["workload"], "dreamer");
+        assert_eq!(fact["task"], "magic-context.dream.classify-memories");
+        assert_eq!(fact["project_id"], "pj-dream");
+        assert_eq!(fact["parent"], serde_json::Value::Null);
+        assert_eq!(fact["alfonso"], serde_json::Value::Null);
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -532,6 +572,7 @@ fn verify() -> TaskRun<'static> {
         run_id: "18",
         project_root: "/work/project",
         reader: Some("aft"),
+        attribution: None,
     }
 }
 
@@ -657,6 +698,7 @@ async fn a_later_send_in_a_dreamer_child_carries_no_policy() {
         deadline: tokio::time::Instant::now() + RUN_TIMEOUT,
         continuation: false,
         creates_child: true,
+        attribution: None,
         keep_child: true,
         send: SendKind::Dream,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,

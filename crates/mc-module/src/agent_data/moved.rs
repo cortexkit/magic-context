@@ -578,6 +578,11 @@ const RESCORE: &str = "rescore job state; a rescore on the receiver starts from 
 /// session or for a moved row, or a foreign key to a moved table.
 pub const NOT_MOVED: &[NotMoved] = &[
     NotMoved {
+        name: "attribution_facts",
+        reason: "what the child sessions this machine started were for, Astrocyte's record of this machine's spend; a receiver records its own children",
+        install: Install::Untouched(NO_MOVED_ROWS),
+    },
+    NotMoved {
         name: "compartment_chunk_embeddings",
         reason: "chunk vectors of the summaries for message-history search; the receiver embeds its summaries again",
         install: Install::DeletedWithCompartments,

@@ -294,6 +294,7 @@ fn turn_two_job() -> turn_two::Job {
         auto_promote: true,
         embedding: None,
         authority: None,
+        agent_id: None,
     }
 }
 
@@ -400,6 +401,7 @@ async fn account_wait_review_a_run_the_runner_pauses_for_an_account_is_waited_fo
         deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(5),
         continuation: false,
         creates_child: true,
+        attribution: None,
         keep_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
         plan: None,

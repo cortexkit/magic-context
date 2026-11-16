@@ -73,6 +73,9 @@ pub struct TaskRun<'a> {
     /// The tool provider whose `reader` preset a code-reading child reads
     /// with; `None` for a task that reads no code.
     pub reader: Option<&'a str>,
+    /// Where the run's children are attributed, each right before the send
+    /// that creates it ([`crate::attribution`]); `None` attributes none.
+    pub attribution: Option<crate::attribution::Attribution<'a>>,
 }
 
 /// A run that got a reply the task accepted.
@@ -213,6 +216,7 @@ pub async fn run<C: RunnerClient + Router>(
             send: SendKind::Dream,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
             plan: plan.as_ref(),
+            attribution: job.attribution,
         };
         let mut usage = None;
         let mut retry = 0;

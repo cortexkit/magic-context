@@ -1342,6 +1342,13 @@ impl Engine {
     ) {
         let name = run_id.to_string();
         end.outcome = "nothing_to_do".into();
+        // The run's children are attributed to the task, and to the project
+        // when a project owns the run; a workspace's or the person's run
+        // serves no one project.
+        let purpose = crate::attribution::Purpose::dream(
+            demand.kind,
+            (due.owner.level == "project").then_some(due.owner.owner_id.as_str()),
+        );
         for (index, batch) in batches.iter().enumerate() {
             if end.input_tokens + end.output_tokens >= settings.budget_tokens {
                 end.outcome = "budget_stopped".into();
@@ -1371,6 +1378,10 @@ impl Engine {
                 run_id: &format!("{name}.{index}"),
                 project_root: batch.folder().unwrap_or(root),
                 reader,
+                attribution: Some(crate::attribution::Attribution {
+                    db,
+                    purpose: &purpose,
+                }),
             };
             let reply = match run::run(client, &job, batch.as_ref()).await {
                 Ok(reply) => reply,

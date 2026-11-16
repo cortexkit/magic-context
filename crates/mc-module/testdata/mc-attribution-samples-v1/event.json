@@ -1,0 +1,9 @@
+{
+  "body": "{\"alfonso\":\"agent_7c1e\",\"effective_from_ms\":1767225600000,\"fact_id\":\"6e512eaca88ff836d9c36891fcc08fc88ceaf10838bca7e27656851965e9797e\",\"parent\":{\"harness\":\"opencode2\",\"kind\":\"session\",\"runner\":\"thalamus-harness\",\"session\":\"ses_head1\"},\"project_id\":\"pj-3f9a\",\"recorded_at_ms\":1767225600000,\"subject\":{\"harness\":\"opencode2\",\"kind\":\"session\",\"runner\":\"thalamus-harness\",\"session\":\"ses_head1:mc-summary:12-48:dec_7f3a:turn-one\"},\"supersedes\":null,\"task\":\"magic-context.summary\",\"workload\":\"summary\"}",
+  "headers": {
+    "Ck-Content-Digest": "b4304896cb6085eb051c9372e86a37e978657f9653d39a4290785911dfa55eee",
+    "Nats-Msg-Id": "6e512eaca88ff836d9c36891fcc08fc88ceaf10838bca7e27656851965e9797e"
+  },
+  "name": "event",
+  "subject": "ck.{acct}.event.magic-context.attribution_fact.v1"
+}

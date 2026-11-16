@@ -56,6 +56,7 @@ pub(super) fn job(authority: Option<Authority>) -> Job {
         auto_promote: true,
         embedding: None,
         authority,
+        agent_id: None,
     }
 }
 

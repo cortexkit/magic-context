@@ -44,8 +44,7 @@ fn migration_110_adds_an_empty_proposal_table_and_keeps_the_rest() {
     let before = schema(&conn);
     assert!(!before.iter().any(|(name, _)| name == "docs_proposals"));
 
-    assert_eq!(upgrade(&mut conn, 109).unwrap(), 110);
-    assert_eq!(SCHEMA_VERSION, 110);
+    assert_eq!(upgrade_through(&mut conn, 109, 110).unwrap(), 110);
 
     let after = schema(&conn);
     let added: Vec<&str> = after

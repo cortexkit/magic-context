@@ -1,0 +1,14 @@
+{
+  "caller": "reserved:occipital",
+  "name": "read-refused",
+  "request": {
+    "method": "attribution.read",
+    "params": {}
+  },
+  "response": {
+    "error": {
+      "code": "caller_not_admitted",
+      "message": "caller not admitted"
+    }
+  }
+}

@@ -918,6 +918,7 @@ async fn second_turn(
         auto_promote: true,
         embedding: None,
         authority: inputs.authority(),
+        agent_id: None,
     };
     // The stand-in runner answers every send with an empty reply, so the
     // outcome says nothing about the replay; only the send matters.

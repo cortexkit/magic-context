@@ -35,6 +35,17 @@
 //! it to acknowledge, so the durable would redeliver that message forever.
 //! It pulls one event at a time with explicit acknowledgement
 //! ([`spawn_run_end_reader`]).
+//!
+//! The `attribution_fact` v1 event is the one ck-mc event with a body: its
+//! payload is the fact ([`crate::attribution`]), which Astrocyte reads off
+//! the bus. `cortexkit-bus-nats` publishes headers only, so it is published
+//! with async-nats directly on the shared session's connection, as a
+//! JetStream publish whose acknowledgement is awaited, with the headers that
+//! library would write: `Nats-Msg-Id` (the fact id, so a fact sent again is
+//! the same message) and `Ck-Content-Digest` (the payload's SHA-256 as
+//! lowercase hex). The fact's row is its outbox, as a proposal's is: a new
+//! fact wakes the publisher right after its commit, and the dreamer's minute
+//! tick publishes any still unsent ([`AttributionEvents`]).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -58,6 +69,7 @@ use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
 use subc_protocol::{BindIdentity, RouteTarget};
 
+use crate::attribution;
 use crate::context_db::ContextDb;
 use crate::docs_proposals::{self as proposals, Proposal};
 use crate::run_ends::{self, RunEnds};
@@ -452,6 +464,37 @@ impl EventPublisher for NatsEventPublisher {
     }
 }
 
+/// What publishes an event that carries a body: one JetStream publish of
+/// `body` on `subject` with exactly `headers`, returning once the stream
+/// acknowledged it. Whether the stream already held a message with the same
+/// `Nats-Msg-Id`.
+#[async_trait]
+#[allow(clippy::double_must_use)]
+pub(crate) trait PayloadPublisher: Send + Sync {
+    async fn publish(&self, subject: &str, headers: &Headers, body: &[u8]) -> Result<bool, String>;
+}
+
+/// The JetStream publish of async-nats on the session's own connection.
+struct NatsPayloadPublisher(async_nats::Client);
+
+#[async_trait]
+impl PayloadPublisher for NatsPayloadPublisher {
+    async fn publish(&self, subject: &str, headers: &Headers, body: &[u8]) -> Result<bool, String> {
+        let mut map = async_nats::HeaderMap::new();
+        for (name, value) in headers {
+            map.insert(name.as_str(), value.as_str());
+        }
+        // Only fixed codes leave: a NATS error can name the subject.
+        let ack = async_nats::jetstream::new(self.0.clone())
+            .publish_with_headers(subject.to_owned(), map, body.to_vec().into())
+            .await
+            .map_err(|_| "nats_publish_failed".to_owned())?
+            .await
+            .map_err(|_| "nats_publish_unacknowledged".to_owned())?;
+        Ok(ack.duplicate)
+    }
+}
+
 /// One notice, ready for the bus.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Notice {
@@ -596,6 +639,9 @@ pub(crate) struct BusSession {
     /// The NATS connection itself, for the run-end reader; a test's session
     /// has none.
     connection: Option<NatsConnection>,
+    /// What publishes an event with a payload (the attribution facts); a
+    /// test's session has one only when the test gives it.
+    payloads: Option<Box<dyn PayloadPublisher>>,
 }
 
 impl BusSession {
@@ -610,7 +656,15 @@ impl BusSession {
             registers: Box::new(NoRegisters),
             route: None,
             connection: None,
+            payloads: None,
         }
+    }
+
+    /// The same session, with `payloads` publishing its events with a body.
+    #[cfg(test)]
+    pub(crate) fn with_payloads(mut self, payloads: Box<dyn PayloadPublisher>) -> Self {
+        self.payloads = Some(payloads);
+        self
     }
 
     /// The same session, with `registers` as its KV buckets.
@@ -665,6 +719,7 @@ async fn build_session(
             stream_name,
         }),
         route: Some(route),
+        payloads: Some(Box::new(NatsPayloadPublisher(connection.client()))),
         connection: Some(connection),
     })
 }
@@ -860,6 +915,154 @@ impl DocsNotices {
                 }
             }
         }
+    }
+}
+
+/// The headers an attribution fact's event carries: the bus's message id,
+/// which is the fact id, and the SHA-256 of the payload as lowercase hex.
+pub(crate) fn fact_headers(fact_id: &str, body: &str) -> Headers {
+    BTreeMap::from([
+        ("Nats-Msg-Id".to_owned(), fact_id.to_owned()),
+        (
+            "Ck-Content-Digest".to_owned(),
+            ContentDigest::of_bytes(body.as_bytes()).to_string(),
+        ),
+    ])
+}
+
+/// The subject of the attribution facts' events in `account`.
+pub(crate) fn fact_subject(account: &AccountNames) -> Result<String, String> {
+    account
+        .event_subject(
+            crate::MODULE_ID,
+            attribution::EVENT_NAME,
+            attribution::EVENT_VERSION,
+        )
+        .map_err(|error| format!("event_subject: {error}"))
+}
+
+/// Publish the event of every fact not yet on the bus, oldest first, at
+/// most [`BATCH`]; how many went out. Each is marked once the stream
+/// acknowledged it. The first failed publish ends the round; the facts sent
+/// before it stay sent.
+pub(crate) async fn publish_unsent_facts(
+    db: &ContextDb,
+    account: &AccountNames,
+    publisher: &dyn PayloadPublisher,
+) -> Result<usize, String> {
+    let rows = db
+        .with_connection(|conn| attribution::unpublished(conn, BATCH))
+        .map_err(|error| format!("reading unsent attribution facts: {error}"))?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let subject = fact_subject(account)?;
+    let mut published = 0;
+    for row in rows {
+        let headers = fact_headers(&row.fact_id, &row.body);
+        let duplicate = publisher
+            .publish(&subject, &headers, row.body.as_bytes())
+            .await?;
+        if duplicate {
+            // Sent before a crash kept its row from being marked: the bus
+            // holds the one message already.
+            tracing::debug!(
+                "ck-mc: bus: attribution fact {} was already on the bus",
+                row.fact_id
+            );
+        }
+        db.with_connection(|conn| attribution::mark_published(conn, row.seq, now_ms()))
+            .map_err(|error| format!("recording fact {}'s event: {error}", row.fact_id))?;
+        published += 1;
+    }
+    Ok(published)
+}
+
+/// The module's publisher of `attribution_fact` events, woken after each
+/// commit that stores a fact and called again on the dreamer's minute tick.
+pub struct AttributionEvents {
+    bus: Arc<Bus>,
+    /// Whether the current outage was logged, so it is logged once.
+    logged: AtomicBool,
+    /// Serializes rounds, so the wake and the minute tick never send one
+    /// fact twice at once.
+    round: tokio::sync::Mutex<()>,
+}
+
+impl AttributionEvents {
+    /// Events published through `bus`.
+    pub fn over(bus: Arc<Bus>) -> Self {
+        Self {
+            bus,
+            logged: AtomicBool::new(false),
+            round: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Publish every unsent fact's event, a batch at a time, opening or
+    /// renewing the session first. A failure drops the session, so the next
+    /// round starts a fresh one, leaves the rest unsent, and is logged once
+    /// until a round gets through.
+    pub async fn publish(&self, db: &ContextDb) {
+        let _round = self.round.lock().await;
+        let has_work = db
+            .with_connection(|conn| attribution::unpublished(conn, 1))
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false);
+        if !has_work {
+            return;
+        }
+        let result = async {
+            let session = self.bus.session().await?;
+            let Some(payloads) = session.payloads.as_deref() else {
+                return Err("nats_connection_absent".to_owned());
+            };
+            let mut total = 0;
+            loop {
+                match publish_unsent_facts(db, &session.account, payloads).await {
+                    Ok(published) => {
+                        total += published;
+                        if published < BATCH {
+                            return Ok(total);
+                        }
+                    }
+                    Err(error) => {
+                        session.discard();
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        .await;
+        match result {
+            Ok(published) => {
+                if published > 0 {
+                    tracing::debug!("ck-mc: bus: {published} attribution fact event(s) published");
+                }
+                self.logged.store(false, Ordering::Relaxed);
+            }
+            Err(error) => {
+                if !self.logged.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "ck-mc: bus: attribution fact events wait unsent until the bus is reachable: {error}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Publish the attribution facts' events each time `wake` is signalled,
+/// which a commit that stores a fact does, for as long as the process runs.
+/// A signal that arrives during a round starts another one after it.
+pub(crate) async fn run_attribution_events(
+    events: Arc<AttributionEvents>,
+    db: Arc<ContextDb>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        wake.notified().await;
+        events.publish(&db).await;
     }
 }
 

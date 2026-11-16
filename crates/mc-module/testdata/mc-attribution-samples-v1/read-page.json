@@ -1,0 +1,55 @@
+{
+  "caller": "reserved:astrocyte",
+  "name": "read-page",
+  "request": {
+    "method": "attribution.read",
+    "params": {}
+  },
+  "response": {
+    "result": {
+      "facts": [
+        {
+          "alfonso": "agent_7c1e",
+          "effective_from_ms": 1767225600000,
+          "fact_id": "6e512eaca88ff836d9c36891fcc08fc88ceaf10838bca7e27656851965e9797e",
+          "parent": {
+            "harness": "opencode2",
+            "kind": "session",
+            "runner": "thalamus-harness",
+            "session": "ses_head1"
+          },
+          "project_id": "pj-3f9a",
+          "recorded_at_ms": 1767225600000,
+          "subject": {
+            "harness": "opencode2",
+            "kind": "session",
+            "runner": "thalamus-harness",
+            "session": "ses_head1:mc-summary:12-48:dec_7f3a:turn-one"
+          },
+          "supersedes": null,
+          "task": "magic-context.summary",
+          "workload": "summary"
+        },
+        {
+          "alfonso": null,
+          "effective_from_ms": 1767225660000,
+          "fact_id": "156fd78923ffaf723eb6f44d6a24b35cfeeeb36e17e56825bd0cfd6bbfeab14e",
+          "parent": null,
+          "project_id": "pj-3f9a",
+          "recorded_at_ms": 1767225660000,
+          "subject": {
+            "harness": "broca",
+            "kind": "session",
+            "runner": "broca",
+            "session": "mc-dream:42.0:0.0"
+          },
+          "supersedes": null,
+          "task": "magic-context.dream.map-memories",
+          "workload": "dreamer"
+        }
+      ],
+      "next": null,
+      "through": "2"
+    }
+  }
+}

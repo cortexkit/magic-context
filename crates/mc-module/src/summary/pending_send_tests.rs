@@ -71,6 +71,7 @@ async fn a_send_answered_pending_with_a_run_id_is_followed_to_its_end() {
         deadline: tokio::time::Instant::now() + Duration::from_secs(60),
         continuation: false,
         creates_child: true,
+        attribution: None,
         keep_child: false,
         cache_ttl: cortexkit_role_llm_runner::cache::Ttl::None,
         send: SendKind::TurnOne,
