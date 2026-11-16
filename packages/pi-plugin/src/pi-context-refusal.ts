@@ -691,8 +691,9 @@ export function registerPiGuardedContext(
 			// the run ends. It belongs to no operation of this session, so refuse it
 			// before reading or changing any operation, and quietly: it is not a
 			// turn of this session, so it gets no refusal entry or notice here.
-			// Sessions whose dispatch check is off (compaction off, or the side-turn
-			// latch below) send it unmanaged, as they send every request.
+			// Sessions whose dispatch check is off send it unmanaged, as they send
+			// every request: compaction is off, or OMP has run a side turn (such as
+			// its fork title) in this session, which switches the check off below.
 			if (isOmpUnmanagedCaptureRequest(payload)) {
 				if (options.compactionOff?.(ctx) || sideSessions.get(key)?.sides)
 					return;
