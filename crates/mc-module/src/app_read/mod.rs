@@ -24,9 +24,11 @@ pub(crate) mod idle;
 mod memories;
 mod pages;
 pub(crate) mod persistence;
+pub(crate) mod row;
 mod search;
 pub(crate) mod sessions;
 mod states;
+pub(crate) mod summaries;
 mod watch;
 pub(crate) use watch::Change;
 pub use watch::Subscription;
@@ -295,7 +297,9 @@ pub(crate) struct Update {
     pub rows: Vec<(String, Arc<Message>)>,
     pub reset_from: Option<u64>,
     pub prune_before: Option<u64>,
-    pub compartments: Option<Arc<Vec<Value>>>,
+    /// The session's summaries changed: the replica reads their index from
+    /// `context.db` again.
+    pub summaries_changed: bool,
     pub decisions: Option<Arc<Vec<Value>>>,
     pub reverted: bool,
     pub head: head::ReadState,
@@ -308,14 +312,17 @@ pub(crate) struct IndexRow {
     pub at_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A transcript entry's app row, with its place and time. The session worker
+/// builds it once and the replica shares it.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Message {
     pub ordinal: u64,
     pub at_ms: u64,
-    pub row: Value,
+    pub row: row::Row,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// What the replica holds of one session.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Snapshot {
     pub key: SessionRef,
     pub base: u64,
@@ -323,9 +330,66 @@ pub(crate) struct Snapshot {
     pub ready: bool,
     pub meta: Value,
     pub breakdown: Breakdown,
-    pub compartments: Vec<Value>,
-    pub messages: BTreeMap<String, Message>,
+    /// The session's summaries by ids and ordinals, with their message
+    /// times. Their bodies stay in `context.db` ([`summaries`]).
+    pub compartments: Vec<summaries::Summary>,
+    /// Rows the session worker built, shared with it, by message id.
+    pub messages: BTreeMap<String, Arc<Message>>,
     pub decisions: Vec<Value>,
+}
+
+/// A session's projection with every message row rendered as the JSON the
+/// apps read, for tests to inspect.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Rendered {
+    pub key: SessionRef,
+    pub base: u64,
+    pub newest: u64,
+    pub ready: bool,
+    pub meta: Value,
+    pub breakdown: Breakdown,
+    pub compartments: Vec<summaries::Summary>,
+    pub messages: BTreeMap<String, RenderedMessage>,
+    pub decisions: Vec<Value>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RenderedMessage {
+    pub ordinal: u64,
+    pub at_ms: u64,
+    pub row: Value,
+}
+
+#[cfg(test)]
+impl Snapshot {
+    pub(crate) fn rendered(&self) -> Rendered {
+        Rendered {
+            key: self.key.clone(),
+            base: self.base,
+            newest: self.newest,
+            ready: self.ready,
+            meta: self.meta.clone(),
+            breakdown: self.breakdown.clone(),
+            compartments: self.compartments.clone(),
+            messages: self
+                .messages
+                .iter()
+                .map(|(mid, message)| {
+                    (
+                        mid.clone(),
+                        RenderedMessage {
+                            ordinal: message.ordinal,
+                            at_ms: message.at_ms,
+                            row: message.row.to_value(mid),
+                        },
+                    )
+                })
+                .collect(),
+            decisions: self.decisions.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -376,12 +440,58 @@ impl Notifier {
     }
 }
 
-type BoundaryIndex = HashMap<String, Vec<(usize, &'static str)>>;
+/// Where a session's summaries name a message as their first or last one, so
+/// a late transcript entry can fill those summaries' times without a scan
+/// of every summary. Each entry is a summary's position times two, plus one
+/// for its last message; entries are sorted by the message id they name,
+/// which they find in the summary list they were made from.
+#[derive(Default)]
+struct BoundaryIndex(Vec<u32>);
+
+impl BoundaryIndex {
+    fn new(summaries: &[summaries::Summary]) -> Self {
+        let mut entries: Vec<u32> = (0..summaries.len())
+            .flat_map(|position| [position * 2, position * 2 + 1])
+            .filter(|entry| !Self::mid(summaries, *entry).is_empty())
+            .map(|entry| u32::try_from(entry).expect("summary count fits u32"))
+            .collect();
+        entries.sort_by(|a, b| {
+            Self::mid(summaries, *a as usize)
+                .cmp(Self::mid(summaries, *b as usize))
+                .then(a.cmp(b))
+        });
+        Self(entries)
+    }
+
+    fn mid(summaries: &[summaries::Summary], entry: usize) -> &str {
+        summaries[entry / 2].boundaries()[entry % 2].0
+    }
+
+    /// Each summary that names `mid` as its first (0) or last (1) message,
+    /// by position in `summaries`, the list the index was made from.
+    fn find<'a>(
+        &'a self,
+        summaries: &'a [summaries::Summary],
+        mid: &'a str,
+    ) -> impl Iterator<Item = (usize, usize)> + 'a {
+        let start = self
+            .0
+            .partition_point(|entry| Self::mid(summaries, *entry as usize) < mid);
+        self.0[start..]
+            .iter()
+            .map(|entry| *entry as usize)
+            .take_while(move |entry| Self::mid(summaries, *entry) == mid)
+            .map(|entry| (entry / 2, entry % 2))
+    }
+}
 
 struct Replica {
     cache: cache::Cache,
     snapshots: HashMap<SessionRef, Snapshot>,
     boundaries: HashMap<SessionRef, BoundaryIndex>,
+    /// Sessions whose summary index `context.db` refused to give at the last
+    /// try: their reads try again.
+    summaries_unread: std::cell::RefCell<HashSet<SessionRef>>,
     known: HashSet<SessionRef>,
     load_failed: bool,
     store: Option<Connection>,
@@ -416,6 +526,7 @@ impl AppRead {
                     cache: Default::default(),
                     snapshots: HashMap::new(),
                     boundaries: HashMap::new(),
+                    summaries_unread: Default::default(),
                     known: HashSet::new(),
                     load_failed: store_expected && store.is_none(),
                     store,
@@ -627,6 +738,7 @@ impl Replica {
         for session in sessions {
             self.forget_head(&session);
             self.boundaries.remove(&session);
+            self.summaries_unread.borrow_mut().remove(&session);
             self.known.remove(&session);
             let checkpoint = self.cache.checkpoints.remove(&session);
             self.cache.active.remove(&session);
@@ -696,7 +808,7 @@ impl Replica {
                     snapshot
                         .messages
                         .entry(mid.clone())
-                        .or_insert_with(|| message.clone());
+                        .or_insert_with(|| Arc::clone(message));
                 }
             }
         }
@@ -711,20 +823,53 @@ impl Replica {
         self.watches.changed(key);
     }
 
+    /// Read the session's summary index from `context.db`, and find when
+    /// each summary's first and last message were written: from the rows
+    /// the replica holds, then the saved message index, then the message
+    /// search index. If `context.db` refuses the read, the summaries the
+    /// snapshot held stay, and the session's next read tries again. With no
+    /// `context.db` (a fixture), the snapshot's own list is kept.
     fn enrich(&self, snapshot: &mut Snapshot) {
-        for compartment in &mut snapshot.compartments {
-            for (id, time) in [
-                ("first_message_id", "first_at_ms"),
-                ("last_message_id", "last_at_ms"),
-            ] {
-                let at_ms = compartment[id].as_str().and_then(|mid| snapshot.messages.get(mid)).map(|message| message.at_ms)
-                .or_else(|| self.store.as_ref().and_then(|conn| conn.query_row("SELECT at_ms FROM app_read_message_index WHERE runner=?1 AND harness=?2 AND session=?3 AND message_id=?4",params![snapshot.key.runner,snapshot.key.harness,snapshot.key.session,compartment[id].as_str()], |row| row.get::<_,u64>(0)).ok()))
-                .or_else(|| {
-                    let ordinal = if id == "first_message_id" { &compartment["first_message_ordinal"] } else { &compartment["last_message_ordinal"] };
-                    self.context.as_ref().and_then(|conn| conn.query_row("SELECT map.message_time_ms FROM message_fts_rowid_map map JOIN message_history_source src USING(session_id,message_ordinal) WHERE map.session_id=?1 AND src.harness=?2 AND src.message_id=?3 AND map.message_ordinal=?4", params![snapshot.key.session,snapshot.key.harness,compartment[id].as_str(),ordinal.as_u64()], |row| row.get::<_,Option<u64>>(0)).ok().flatten())
-                });
-                compartment[time] = json!(at_ms);
+        if let Some(conn) = &self.context {
+            match summaries::read_index(conn, &snapshot.key) {
+                Ok(index) => {
+                    snapshot.compartments = index;
+                    self.summaries_unread.borrow_mut().remove(&snapshot.key);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "ck-mc: session {}: reading its summaries for the apps: {error}",
+                        snapshot.key.session
+                    );
+                    self.summaries_unread
+                        .borrow_mut()
+                        .insert(snapshot.key.clone());
+                }
             }
+        }
+        let key = &snapshot.key;
+        for summary in &mut snapshot.compartments {
+            let mut times = [None; 2];
+            for (time, (mid, ordinal)) in times.iter_mut().zip(summary.boundaries()) {
+                *time = snapshot.messages.get(mid).map(|message| message.at_ms)
+                .or_else(|| self.store.as_ref().and_then(|conn| conn.query_row("SELECT at_ms FROM app_read_message_index WHERE runner=?1 AND harness=?2 AND session=?3 AND message_id=?4",params![key.runner,key.harness,key.session,mid], |row| row.get::<_,u64>(0)).ok()))
+                .or_else(|| self.context.as_ref().and_then(|conn| conn.query_row("SELECT map.message_time_ms FROM message_fts_rowid_map map JOIN message_history_source src USING(session_id,message_ordinal) WHERE map.session_id=?1 AND src.harness=?2 AND src.message_id=?3 AND map.message_ordinal=?4", params![key.session,key.harness,mid,u64::try_from(ordinal).ok()], |row| row.get::<_,Option<u64>>(0)).ok().flatten()));
+            }
+            summary.at_ms = times;
+        }
+    }
+
+    /// Read the session's summary index again if `context.db` refused it at
+    /// the last try.
+    fn retry_summaries(&mut self, key: &SessionRef) {
+        if !self.summaries_unread.borrow().contains(key) {
+            return;
+        }
+        if let Some(mut snapshot) = self.snapshots.remove(key) {
+            self.enrich(&mut snapshot);
+            self.boundaries
+                .insert(key.clone(), boundary_index(&snapshot));
+            self.snapshots.insert(key.clone(), snapshot);
         }
     }
 
@@ -784,22 +929,22 @@ impl Replica {
             }
         }
         for (mid, row) in update.rows {
-            if let Some(boundaries) = self.boundaries.get(&key).and_then(|index| index.get(&mid)) {
-                for (index, field) in boundaries {
-                    if let Some(compartment) = snapshot.compartments.get_mut(*index) {
-                        let at = json!(row.at_ms);
-                        changed |= compartment[*field] != at;
-                        compartment[*field] = at;
-                    }
+            if let Some(index) = self.boundaries.get(&key) {
+                for (position, field) in
+                    index.find(&snapshot.compartments, &mid).collect::<Vec<_>>()
+                {
+                    let time = &mut snapshot.compartments[position].at_ms[field];
+                    changed |= *time != Some(row.at_ms);
+                    *time = Some(row.at_ms);
                 }
             }
-            if snapshot.messages.get(&mid) != Some(row.as_ref()) {
-                snapshot.messages.insert(mid, (*row).clone());
-                changed = true;
-            }
+            // The replica keeps the worker's own row, never a copy: an
+            // equal row it held before is replaced too, so the two don't
+            // both stay in memory.
+            changed |= snapshot.messages.get(&mid) != Some(&row);
+            snapshot.messages.insert(mid, row);
         }
-        if let Some(compartments) = update.compartments {
-            snapshot.compartments = (*compartments).clone();
+        if update.summaries_changed {
             self.enrich(&mut snapshot);
             self.boundaries
                 .insert(key.clone(), boundary_index(&snapshot));
@@ -925,6 +1070,7 @@ impl Replica {
         }
         self.identity(&key)?;
         let loaded = self.ensure_loaded(&key);
+        self.retry_summaries(&key);
         let snapshot = match loaded.and_then(|()| self.locate(&key)) {
             Err(refusal)
                 if matches!(method, "context.head" | "context.head_section")
@@ -1000,7 +1146,7 @@ impl Replica {
                     states::message_state(snapshot, mid, ordinal)
                 }).collect();
                 // A page lists only the summaries its requested messages touch.
-                let compartments: Vec<Value> = snapshot.compartments.iter().filter(|c| messages.iter().any(|m| !m["compartment_id"].is_null() && m["compartment_id"] == c["compartment_id"])).map(|c| json!({"compartment_id":c["compartment_id"], "ordinal":c["ordinal"], "first_message_id":c["first_message_id"], "last_message_id":c["last_message_id"]})).collect();
+                let compartments: Vec<Value> = snapshot.compartments.iter().filter(|c| { let id = json!(c.id()); messages.iter().any(|m| !m["compartment_id"].is_null() && m["compartment_id"] == id) }).map(|c| json!({"compartment_id":c.id(), "ordinal":c.sequence, "first_message_id":c.first_message_id, "last_message_id":c.last_message_id})).collect();
                 let body = json!({"messages":messages, "compartments":compartments});
                 let mut result = conditional(p, &body)?;
                 if result["state"] == "ready" {
@@ -1013,14 +1159,28 @@ impl Replica {
             }
             "context.compartment" => {
                 let id = string(p, "compartment_id")?;
-                let row = snapshot
+                let not_found = || error("compartment_not_found", "No compartment matches the id.");
+                let summary = snapshot
                     .compartments
                     .iter()
-                    .find(|c| c["compartment_id"] == id)
-                    .ok_or_else(|| {
-                        error("compartment_not_found", "No compartment matches the id.")
-                    })?;
-                json!({"state":"ready", "version":version(row), "compartment":row})
+                    .find(|c| c.id() == id)
+                    .ok_or_else(not_found)?;
+                // The body is read from `context.db` for this read only.
+                let body = self
+                    .context
+                    .as_ref()
+                    .map(|conn| summaries::read_body(conn, &key, summary.sequence))
+                    .transpose()
+                    .map_err(|_| {
+                        error(
+                            "store_unavailable",
+                            "The session's summaries could not be read.",
+                        )
+                    })?
+                    .flatten()
+                    .ok_or_else(not_found)?;
+                let row = summaries::render(&body, summary.at_ms);
+                json!({"state":"ready", "version":version(&row), "compartment":row})
             }
             "context.cache_why" => {
                 let views = p.get("views").filter(|views| !views.is_null());
@@ -1078,21 +1238,7 @@ impl Replica {
 fn boundary_index(snapshot: &Snapshot) -> BoundaryIndex {
     // Late transcript entries can fill summary boundary dates. Index those
     // references once instead of rescanning every summary on each append.
-    let mut index = BoundaryIndex::new();
-    for (ordinal, compartment) in snapshot.compartments.iter().enumerate() {
-        for (id, time) in [
-            ("first_message_id", "first_at_ms"),
-            ("last_message_id", "last_at_ms"),
-        ] {
-            if let Some(mid) = compartment[id].as_str().filter(|mid| !mid.is_empty()) {
-                index
-                    .entry(mid.to_owned())
-                    .or_default()
-                    .push((ordinal, time));
-            }
-        }
-    }
-    index
+    BoundaryIndex::new(&snapshot.compartments)
 }
 
 fn conditional(p: &Map<String, Value>, row: &Value) -> Result<Value, Refusal> {
@@ -1214,3 +1360,10 @@ mod samples_v18_tests;
 
 #[cfg(test)]
 mod cache_why_tests;
+
+#[cfg(test)]
+mod compact_rows_tests;
+#[cfg(test)]
+mod row_tests;
+#[cfg(test)]
+mod shared_rows_tests;

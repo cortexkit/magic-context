@@ -115,7 +115,7 @@ fn a_version_six_store_moves_every_decision_record_into_its_own_row() {
         .lock()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, crate::store::SCHEMA_VERSION);
     let expected: Vec<(String, String, u64, u64, Value)> = [
         ("opencode2", "two", &two[0]),
         ("opencode2", "two", &two[1]),

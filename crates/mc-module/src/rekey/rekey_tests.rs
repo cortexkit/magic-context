@@ -2,11 +2,10 @@ use super::*;
 use crate::store::{Durable, Store};
 use cortexkit_role_compaction::read::SessionRef;
 
-const TABLES: [&str; 9] = [
+const TABLES: [&str; 8] = [
     "app_read_headers",
     "app_read_message_index",
     "app_read_messages",
-    "app_read_summaries",
     "head_murals",
     "memory_contexts",
     "sessions",
@@ -213,7 +212,7 @@ fn rekey_preserves_every_table_and_restores_session_state() {
         assert_eq!(store.keep_memory_context(&key, memory.clone()), memory);
         let messages = BTreeMap::from_iter((20..=21).map(|ordinal| {
             let mid = format!("m{ordinal}");
-            (mid.clone(), Message { ordinal, at_ms: ordinal * 10, row: json!({"message_id":mid,"state":"raw","parts":{"tagged":1,"stamped":0,"dropped":0}}) })
+            (mid.clone(), Arc::new(Message { ordinal, at_ms: ordinal * 10, row: json!({"message_id":mid,"state":"raw","parts":{"tagged":1,"stamped":0,"dropped":0}}).into() }))
         }));
         let snapshot = Snapshot {
             key: key.clone(),
@@ -222,7 +221,7 @@ fn rekey_preserves_every_table_and_restores_session_state() {
             ready: true,
             meta: json!({"model":"test"}),
             breakdown: crate::app_read::Breakdown::from_value(json!({"total":{"tokens":123}})),
-            compartments: vec![json!({"compartment_id":"1","summary_markdown":"summary"})],
+            compartments: Vec::new(),
             messages,
             decisions: decisions.clone(),
         };

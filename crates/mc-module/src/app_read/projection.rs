@@ -9,10 +9,11 @@ mod incremental;
 pub(super) use incremental::Projection;
 
 impl Session {
+    /// The session's projection with its rows as the JSON the apps read.
     #[cfg(test)]
-    pub(crate) fn app_snapshot(&mut self) -> Snapshot {
+    pub(crate) fn app_snapshot(&mut self) -> crate::app_read::Rendered {
         let _ = self.app_update();
-        self.app_materialize()
+        self.app_materialize().rendered()
     }
 
     pub(super) fn app_record_view(&mut self, view: &View) {
@@ -381,6 +382,13 @@ mod tests {
 
     impl Session {
         pub(crate) fn app_sample_snapshot() -> Snapshot {
+            let mut session = Self::app_sample_session();
+            let _ = session.app_update();
+            session.app_materialize()
+        }
+
+        /// The session the app-read samples show, before its first update.
+        pub(crate) fn app_sample_session() -> Session {
             use cortexkit_role_compaction::{
                 part::Part,
                 read::{Entry, Role, StepUsage},
@@ -563,7 +571,7 @@ mod tests {
             session.accept(view.clone());
             session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
             session.app_decisions[1]["at_ms"] = json!(40);
-            session.app_snapshot()
+            session
         }
 
         /// Decision records for the app-read samples, made through the
@@ -823,8 +831,11 @@ mod tests {
             ]
         );
 
-        // A busy writer must not acknowledge pending rows or summaries. The next
-        // checkpoint retries the complete delta, including intervening updates.
+        // A busy writer must not acknowledge pending rows. The next
+        // checkpoint retries the complete delta, including intervening
+        // updates. A summary change in between adds nothing to it: the
+        // checkpoint holds no summaries, which the app reads take from
+        // `context.db`.
         session
             .index
             .extend([Entry::new(202, "m202", Role::Assistant, 202, vec![])]);
@@ -849,17 +860,14 @@ mod tests {
         for row in reply["messages"].as_array().unwrap() {
             assert_eq!(row["state"], "raw");
         }
-        let summary = reloaded
-            .read(
-                "context.compartment",
-                json!({"session":session.key,"compartment_id":"1"}),
+        let summaries: u64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'app_read_summaries'",
+                [],
+                |row| row.get(0),
             )
-            .await
             .unwrap();
-        assert_eq!(
-            summary["compartment"]["summary_markdown"],
-            "updated summary"
-        );
+        assert_eq!(summaries, 0);
     }
 
     #[tokio::test]
@@ -1237,7 +1245,7 @@ mod tests {
             .index
             .extend_counted([person, notice], Some("claude-v5/1"));
         let snapshot = session.app_snapshot();
-        let category = |snapshot: &Snapshot, name| {
+        let category = |snapshot: &crate::app_read::Rendered, name| {
             snapshot.breakdown["parts"]
                 .as_array()
                 .unwrap()
@@ -1407,14 +1415,14 @@ mod tests {
     }
 
     #[test]
-    fn app_read_updates_only_changed_rows_and_reuses_summary_and_decision_arcs() {
+    fn app_read_updates_carry_only_changed_rows_summaries_and_decisions() {
         let mut session = session();
         let first = session.app_update();
         assert_eq!(first.rows.len(), 200);
-        let summaries = first.compartments.unwrap();
+        assert!(first.summaries_changed);
         let unchanged = session.app_update();
         assert!(unchanged.rows.is_empty());
-        assert!(unchanged.compartments.is_none());
+        assert!(!unchanged.summaries_changed);
         assert!(unchanged.decisions.is_none());
         assert!(Arc::ptr_eq(&first.header, &unchanged.header));
         let mut completed = session.index.at(200).unwrap().clone();
@@ -1436,20 +1444,19 @@ mod tests {
         let appended = session.app_update();
         assert_eq!(appended.rows.len(), 1);
         assert_eq!(appended.rows[0].0, "m201");
-        assert!(appended.compartments.is_none());
+        assert!(!appended.summaries_changed);
         assert!(appended.decisions.is_none());
         session.queued.insert(("m2".into(), "p".into()));
         session.app.stamps.insert(("m2".into(), "p".into()), 42);
         session.app_projection.dirty.insert("m2".into());
         let stamp = session.app_update();
         assert_eq!(stamp.rows.len(), 1);
-        assert_eq!(stamp.rows[0].1.row["stamped_parts"][0]["stamped_at_ms"], 42);
+        assert_eq!(
+            stamp.rows[0].1.row.to_value("m2")["stamped_parts"][0]["stamped_at_ms"],
+            42
+        );
         assert_eq!(stamp.header.meta["queued_stamp_count"], 1);
-        assert!(stamp.compartments.is_none());
-        assert!(Arc::ptr_eq(
-            &summaries,
-            &session.app_projection.summary_arc()
-        ));
+        assert!(!stamp.summaries_changed);
         session.summaries.push(StoredCompartment {
             sequence: 1,
             start_message: 1,
@@ -1459,7 +1466,7 @@ mod tests {
         session.app_projection.summaries_dirty = true;
         let summary = session.app_update();
         assert!(summary.rows.is_empty());
-        assert_eq!(summary.compartments.unwrap().len(), 1);
+        assert!(summary.summaries_changed);
         assert_eq!(summary.header.meta["queued_stamp_count"], 0);
     }
 
@@ -1534,7 +1541,10 @@ mod tests {
         session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
         let applied = session.app_update();
         assert_eq!(applied.rows.len(), 1);
-        assert_eq!(applied.rows[0].1.row["state"], "dropped");
+        assert_eq!(
+            applied.rows[0].1.row.to_value(&applied.rows[0].0)["state"],
+            "dropped"
+        );
         assert_eq!(session.app_projection.head_rebuilds, 0);
     }
 

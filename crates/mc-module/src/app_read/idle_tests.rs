@@ -224,7 +224,7 @@ async fn idle_keep_is_lru_bounded_and_released_on_setup_and_forget() {
         rows: vec![],
         reset_from: None,
         prune_before: None,
-        compartments: None,
+        summaries_changed: false,
         decisions: None,
         reverted: false,
         head: live,

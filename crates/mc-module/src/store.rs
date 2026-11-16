@@ -227,8 +227,10 @@ pub(crate) fn session_tables(connection: &Connection) -> rusqlite::Result<Vec<St
 /// `owner_command_answers`, the stored answers of commands a person runs on
 /// memories, notes and the dreamer rather than on one session. Version 7
 /// keeps each view decision in its own `view_decisions` row, replacing the
-/// one list per session in `app_read_decisions`.
-pub const SCHEMA_VERSION: u32 = 7;
+/// one list per session in `app_read_decisions`. Version 8 saves app message
+/// rows in a compact binary form and drops `app_read_summaries`: the app
+/// reads take a session's summaries from `context.db`.
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// How long the record of a view ck-mc built is kept: the apps explain a
 /// prompt rewrite from it for this long after the view was offered.
@@ -585,6 +587,9 @@ impl Store {
         }
         if version < 7 {
             migrate_view_decisions(&connection)?;
+        }
+        if version < 8 {
+            crate::app_read::persistence::migrate_compact_rows(&connection)?;
         }
         prune_view_decisions(&connection, crate::app_read::now_ms())
             .map_err(|error| format!("store {}: {error}", path.display()))?;
@@ -1353,12 +1358,14 @@ mod tests {
 
     /// Rehearses the version-four app snapshot split on a copy of a real
     /// store: every saved snapshot must load back from the new rows exactly as
-    /// it was stored whole. Decisions are left out of the comparison: app reads
-    /// take them from their own rows (`view_decisions`), which may be newer
-    /// than the copy inside the old snapshot.
+    /// it was stored whole, apart from its summaries, which the replica now
+    /// reads from `context.db`. Decisions are left out of the comparison: app
+    /// reads take them from their own rows (`view_decisions`), which may be
+    /// newer than the copy inside the old snapshot.
     #[test]
     #[ignore = "explicit offline backup only; never opens a live store"]
     fn offline_copy_version_four_migration_preserves_every_app_snapshot() {
+        use serde_json::{json, Value};
         let path = PathBuf::from(
             std::env::var_os("APP_SNAPSHOT_MIGRATION_COPY").expect("supply an offline backup copy"),
         );
@@ -1368,42 +1375,59 @@ mod tests {
                 .unwrap(),
             4
         );
-        let mut before: Vec<crate::app_read::Snapshot> = {
+        let fields = [
+            "key",
+            "base",
+            "newest",
+            "ready",
+            "meta",
+            "breakdown",
+            "messages",
+        ];
+        let mut before: Vec<Value> = {
             let mut stmt = conn
                 .prepare("SELECT snapshot FROM app_read_snapshots")
                 .unwrap();
             let rows = stmt
                 .query_map([], |r| r.get::<_, String>(0))
                 .unwrap()
-                .map(|text| serde_json::from_str(&text.unwrap()).expect("version-four snapshot"))
+                .map(|text| {
+                    let whole: Value =
+                        serde_json::from_str(&text.unwrap()).expect("version-four snapshot");
+                    fields
+                        .iter()
+                        .map(|field| (field.to_string(), whole[field].clone()))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into()
+                })
                 .collect();
             rows
         };
         drop(conn);
         let store = Store::open(&path).unwrap();
-        let mut after = crate::app_read::persistence::load(&store.lock()).unwrap();
-        let order = |s: &crate::app_read::Snapshot| {
-            (
-                s.key.runner.clone(),
-                s.key.harness.clone(),
-                s.key.session.clone(),
-            )
-        };
+        let mut after: Vec<Value> = crate::app_read::persistence::load(&store.lock())
+            .unwrap()
+            .iter()
+            .map(|snapshot| {
+                let s = snapshot.rendered();
+                json!({"key":s.key, "base":s.base, "newest":s.newest, "ready":s.ready, "meta":s.meta, "breakdown":s.breakdown,
+                    "messages":s.messages.iter().map(|(mid, m)| (mid.clone(), json!({"ordinal":m.ordinal, "at_ms":m.at_ms, "row":m.row}))).collect::<serde_json::Map<_, _>>()})
+            })
+            .collect();
+        let order = |s: &Value| s["key"].to_string();
         before.sort_by_key(order);
         after.sort_by_key(order);
         assert_eq!(after.len(), before.len(), "session count changed");
-        for (expected, loaded) in before.iter_mut().zip(after.iter_mut()) {
-            expected.decisions.clear();
-            loaded.decisions.clear();
+        for (expected, loaded) in before.iter().zip(&after) {
             assert!(
                 loaded == expected,
                 "snapshot differs for {}/{}",
-                expected.key.harness,
-                expected.key.session
+                expected["key"]["harness"],
+                expected["key"]["session"]
             );
         }
         println!(
-            "Offline copy migrated 4 -> 5: {}/{} app snapshots load identically",
+            "Offline copy migrated 4 -> {SCHEMA_VERSION}: {}/{} app snapshots load identically",
             before.len(),
             before.len()
         );
@@ -1418,7 +1442,7 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         let answers: u32 = connection
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE name = 'owner_command_answers'",
@@ -1430,8 +1454,8 @@ mod tests {
             answers, 1,
             "version 6 keeps the person's owner-command answers"
         );
-        let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_headers','app_read_messages','app_read_summaries','app_read_message_index','view_decisions')", [], |row| row.get(0)).unwrap();
-        assert_eq!(tables, 5);
+        let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_headers','app_read_messages','app_read_message_index','view_decisions')", [], |row| row.get(0)).unwrap();
+        assert_eq!(tables, 4);
         let lists: u32 = connection
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE name = 'app_read_decisions'",
@@ -1440,6 +1464,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(lists, 0, "version 7 keeps no per-session decision lists");
+        let summaries: u32 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'app_read_summaries'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(summaries, 0, "version 8 keeps no summary rows");
     }
 
     #[test]

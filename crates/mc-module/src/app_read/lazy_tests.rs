@@ -6,7 +6,18 @@ fn saved(store: &crate::store::Store, name: &str) -> Snapshot {
     snapshot.key.session = name.into();
     snapshot.decisions = vec![json!({"view_version":1,"at_ms":123,"reason":"saved decision"})];
     super::tests::save_fixture(store, &snapshot, None);
+    // Its summary, in the `context.db` beside the store.
+    let path = context_path(store);
+    if !path.exists() {
+        crate::context_db::ContextDb::create_for_tests(&path).unwrap();
+    }
+    super::tests::insert_summary(&Connection::open(&path).unwrap(), name, 1);
     snapshot
+}
+
+/// The `context.db` the sessions [`saved`] in `store` keep their summaries in.
+fn context_path(store: &crate::store::Store) -> std::path::PathBuf {
+    store.path.with_file_name("context.db")
 }
 
 fn cold(store: &crate::store::Store) -> Replica {
@@ -14,6 +25,8 @@ fn cold(store: &crate::store::Store) -> Replica {
     replica.snapshots.clear();
     replica.store =
         Some(Connection::open_with_flags(&store.path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap());
+    replica.context =
+        Connection::open_with_flags(context_path(store), OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
     replica.load();
     replica
 }
@@ -27,8 +40,10 @@ fn eager(store: &crate::store::Store) -> Replica {
 }
 
 fn delta(snapshot: &Snapshot) -> Update {
-    let mut message = snapshot.messages["m2"].clone();
-    message.row["state"] = json!("dropped");
+    let mut message = (*snapshot.messages["m2"]).clone();
+    let mut row = message.row.to_value("m2");
+    row["state"] = json!("dropped");
+    message.row = row.into();
     Update {
         key: snapshot.key.clone(),
         header: Arc::new(Header {
@@ -41,7 +56,7 @@ fn delta(snapshot: &Snapshot) -> Update {
         rows: vec![("m2".into(), Arc::new(message))],
         reset_from: None,
         prune_before: None,
-        compartments: None,
+        summaries_changed: false,
         decisions: None,
         reverted: false,
         head: Default::default(),
@@ -165,7 +180,7 @@ fn app_read_lazy_write_before_read_merges_the_saved_checkpoint_like_eager() {
                 }
                 2 => update.prune_before = Some(2),
                 3 => {
-                    update.compartments = Some(Arc::new(snapshot.compartments.clone()));
+                    update.summaries_changed = true;
                     update.decisions = Some(Arc::new(vec![json!({"at_ms":456})]));
                 }
                 _ => {}
@@ -196,6 +211,9 @@ fn app_read_lazy_search_refuses_unloaded_cross_harness_collision() {
     other.key.harness = "pi".into();
     store.save_app_snapshot(&other).unwrap();
     let mut lazy = cold(&store);
+    // With no `context.db`, a search that passes the identity checks stops
+    // at the missing message index, which tells the two refusals apart.
+    lazy.context = None;
     let p = json!({"query":"hello","scope":{"session":snapshot.key}});
     assert_eq!(
         lazy.read("context.search", &p).unwrap_err().code,
@@ -229,7 +247,9 @@ fn app_read_lazy_eviction_bounds_idle_payloads_and_pins_live_updates() {
     lazy.evict_idle(Instant::now() + Duration::from_secs(61));
     assert_eq!(lazy.snapshots.len(), 1);
     assert_eq!(
-        lazy.snapshots[&snapshots[0].key].messages["m2"].row["state"],
+        lazy.snapshots[&snapshots[0].key].messages["m2"]
+            .row
+            .to_value("m2")["state"],
         "dropped"
     );
     assert_eq!(lazy.cache.checkpoints.len(), 12);
@@ -249,7 +269,7 @@ async fn app_read_lazy_two_first_reads_load_one_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
     let snapshot = saved(&store, "concurrent");
-    let app = AppRead::new(Some(store.path.clone()), None);
+    let app = AppRead::new(Some(store.path.clone()), Some(context_path(&store)));
     let p = json!({"session":snapshot.key,"message_ids":["m1","m2"]});
     let started = now_ms();
     let (left, right) = tokio::join!(
@@ -266,7 +286,7 @@ async fn app_read_lazy_load_racing_update_loses_no_saved_or_new_rows() {
     let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
     let snapshot = saved(&store, "race");
     let mut eager = eager(&store);
-    let app = AppRead::new(Some(store.path.clone()), None);
+    let app = AppRead::new(Some(store.path.clone()), Some(context_path(&store)));
     let (started_tx, started_rx) = mpsc::channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     app.tx
@@ -349,7 +369,7 @@ fn app_read_lazy_failed_load_retains_updates_until_checkpoint_can_be_read() {
     let snapshot = saved(&store, "retry");
     let conn = Connection::open(&store.path).unwrap();
     conn.execute(
-        "UPDATE app_read_messages SET row='not JSON' WHERE message_id='m1'",
+        "UPDATE app_read_messages SET row=X'01' WHERE message_id='m1'",
         [],
     )
     .unwrap();
@@ -393,7 +413,7 @@ async fn app_read_lazy_hydration_does_not_emit_a_watch_change() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
     let snapshot = saved(&store, "watched");
-    let app = AppRead::new(Some(store.path.clone()), None);
+    let app = AppRead::new(Some(store.path.clone()), Some(context_path(&store)));
     let mut watch = app
         .watch("reader".into(), json!({"sessions":[snapshot.key]}))
         .await
@@ -449,9 +469,6 @@ fn app_read_lazy_synthetic_startup_footprint() {
     let mut messages = tx
         .prepare("INSERT INTO app_read_messages VALUES('runner','harness',?1,?2,?3,?4,?5)")
         .unwrap();
-    let mut summaries = tx
-        .prepare("INSERT INTO app_read_summaries VALUES('runner','harness',?1,?2,?3)")
-        .unwrap();
     let mut count = 0;
     for n in 0..3000 {
         let session = format!("s{n:04}");
@@ -465,28 +482,26 @@ fn app_read_lazy_synthetic_startup_footprint() {
         };
         for ordinal in 1..=len {
             let mid = format!("m{ordinal}");
-            let row =
-                json!({"message_id":mid,"state":"raw","compartment_id":null,"outside_reason":null,
+            let row = json!({"message_id":mid,"state":"raw","compartment_id":null,"outside_reason":null,
                 "split":null,"stamped_parts":["p1","p2"],"dropped_parts":[],
-                "parts":{"tagged":2,"stamped":2,"dropped":0}})
-                .to_string();
+                "parts":{"tagged":2,"stamped":2,"dropped":0}});
+            let row = row::Row::from_json(&mid, row).encode();
             messages
                 .execute(params![session, mid, ordinal, ordinal * 10, row])
                 .unwrap();
             count += 1;
         }
-        for position in 0..4 {
-            let summary = json!({"compartment_id":format!("c{position}"),"ordinal":position,
-                "summary_markdown":"summary ".repeat(768),"tiers":{"p1":"detail","p2":"short","p3":"tiny","p4":"cue"}}).to_string();
-            summaries
-                .execute(params![session, position, summary])
-                .unwrap();
-        }
     }
     assert_eq!(count, 600_000);
-    drop((headers, messages, summaries));
+    drop((headers, messages));
     tx.commit().unwrap();
-    let json_bytes: u64 = conn.query_row("SELECT (SELECT SUM(length(row)) FROM app_read_messages) + (SELECT SUM(length(row)) FROM app_read_summaries)", [], |row| row.get(0)).unwrap();
+    let row_bytes: u64 = conn
+        .query_row(
+            "SELECT SUM(length(row)) FROM app_read_messages",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     drop(conn);
     let before = rss_kib();
     let started = Instant::now();
@@ -513,5 +528,5 @@ fn app_read_lazy_synthetic_startup_footprint() {
     let after_read = rss_kib();
     replica.activate(&key);
     assert_eq!(replica.snapshots[&key].messages.len(), 2000);
-    println!("synthetic mode={mode} sessions=3000 messages={count} summaries=12000 json_bytes={json_bytes} rss_before_kib={before} rss_startup_kib={after} rss_delta_kib={} startup_ms={startup_ms} first_read_2000_us={first_read_us} rss_after_read_kib={after_read}", after.saturating_sub(before));
+    println!("synthetic mode={mode} sessions=3000 messages={count} row_bytes={row_bytes} rss_before_kib={before} rss_startup_kib={after} rss_delta_kib={} startup_ms={startup_ms} first_read_2000_us={first_read_us} rss_after_read_kib={after_read}", after.saturating_sub(before));
 }

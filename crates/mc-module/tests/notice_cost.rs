@@ -522,7 +522,7 @@ impl Fixture {
             tx.commit().unwrap();
         });
         let conn = Connection::open(self.path("mode3.db")).unwrap();
-        conn.execute_batch("DELETE FROM app_read_headers; DELETE FROM app_read_messages; DELETE FROM app_read_summaries; DELETE FROM view_decisions;")
+        conn.execute_batch("DELETE FROM app_read_headers; DELETE FROM app_read_messages; DELETE FROM view_decisions;")
             .unwrap();
         conn.execute(
             "DELETE FROM app_read_message_index WHERE ordinal > ?1",

@@ -90,7 +90,7 @@ async fn app_read_seed_cost() {
     let started = Instant::now();
     let snapshot = session.app_materialize();
     let materialize_us = started.elapsed().as_micros();
-    let snapshot_bytes = serde_json::to_vec(&snapshot).unwrap().len();
+    let snapshot_bytes = serde_json::to_vec(&snapshot.rendered().messages.values().map(|m| &m.row).collect::<Vec<_>>()).unwrap().len();
     let started = Instant::now();
     store.save_app_snapshot(&snapshot).unwrap();
     let save_us = started.elapsed().as_micros();

@@ -2,6 +2,7 @@
 //! Ordinary notices touch changed transcript ordinals only. View and summary
 //! publications refresh their cached effects; unchanged payloads are shared.
 use super::*;
+use crate::app_read::row::{Kind, Origin, PartOrigin, PartState, Row, Size, Source, Typed};
 use crate::app_read::{Breakdown, BreakdownSummaries, Header, IndexRow, Update};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -10,12 +11,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[derive(Clone, Copy, Default)]
 struct Sources([u64; 4]);
 impl Sources {
-    fn add(&mut self, tokens: u64, source: &str) {
+    fn add(&mut self, tokens: u64, source: Source) {
         let at = match source {
-            "runner" => 0,
-            "counted" => 1,
-            "reported" => 2,
-            _ => 3,
+            Source::Runner => 0,
+            Source::Counted => 1,
+            Source::Reported => 2,
+            Source::Estimate => 3,
         };
         self.0[at] += tokens;
     }
@@ -37,15 +38,15 @@ impl Sources {
 #[derive(Clone, PartialEq)]
 struct PartInfo {
     id: String,
-    kind: &'static str,
+    kind: Kind,
     tag: Option<u64>,
     tokens: u64,
     bytes: Option<u64>,
     tool: Option<String>,
     item_tokens: u64,
-    source: &'static str,
+    source: Source,
     runner_tokens: Option<cortexkit_role_compaction::tokens::PartTokens>,
-    origin: Option<Value>,
+    origin: PartOrigin,
     /// Signed reasoning, which the runner strips at or before its signed
     /// floor.
     signed: bool,
@@ -57,7 +58,9 @@ struct Cached {
     at_ms: u64,
     parts: Vec<PartInfo>,
     reasoning_measure: (u64, &'static str),
-    user_origin: Option<Value>,
+    /// Who wrote a user entry's text; the parts marked
+    /// [`PartOrigin::User`] name it.
+    user_origin: Option<Origin>,
     host_parts: Vec<cortexkit_role_compaction::read::HostPart>,
     row: Option<Arc<Message>>,
     raw: u64,
@@ -110,7 +113,6 @@ pub(crate) struct Projection {
     pub(crate) dirty: BTreeSet<String>,
     pub(crate) summaries_dirty: bool,
     ranges: BTreeMap<u64, u64>,
-    compartments: Arc<Vec<Value>>,
     decisions: Arc<Vec<Value>>,
     decisions_revision: u64,
     view: Option<(u64, cortexkit_role_compaction::Digest)>,
@@ -137,7 +139,6 @@ pub(crate) struct Projection {
     snapshot_rows: BTreeMap<String, Arc<Message>>,
     snapshot_removed: BTreeSet<String>,
     snapshot_reset: bool,
-    snapshot_summaries: bool,
     pending_rows: BTreeMap<u64, IndexRow>,
     revert_from: Option<u64>,
     revert_dirty: Option<u64>,
@@ -183,7 +184,6 @@ impl Default for Projection {
             dirty: BTreeSet::new(),
             summaries_dirty: true,
             ranges: BTreeMap::new(),
-            compartments: Arc::new(Vec::new()),
             decisions: Arc::new(Vec::new()),
             decisions_revision: u64::MAX,
             view: None,
@@ -208,7 +208,6 @@ impl Default for Projection {
             snapshot_rows: BTreeMap::new(),
             snapshot_removed: BTreeSet::new(),
             snapshot_reset: false,
-            snapshot_summaries: false,
             pending_rows: BTreeMap::new(),
             revert_from: None,
             revert_dirty: None,
@@ -223,10 +222,6 @@ impl Default for Projection {
 impl Projection {
     pub(crate) fn render_changed(&mut self) {
         self.render_dirty = true;
-    }
-    #[cfg(test)]
-    pub(crate) fn summary_arc(&self) -> Arc<Vec<Value>> {
-        self.compartments.clone()
     }
     pub(crate) fn revert(&mut self, from: u64) {
         if self.revert_dirty.is_none_or(|old| from < old) {
@@ -358,19 +353,22 @@ impl Session {
             let user_origin =
                 (entry.role == cortexkit_role_compaction::read::Role::User).then(|| {
                     if let Some(notice) = &entry.notice {
-                        let mut origin = json!({"kind":"notice", "sender":notice.sender});
-                        if let Some(agent) = &entry.speaks_for {
-                            origin["speaks_for"] = json!(agent);
+                        Origin::Notice {
+                            sender: notice.sender.as_str().into(),
+                            speaks_for: entry.speaks_for.as_ref().map(|agent| {
+                                (
+                                    agent.agent_id.as_str().into(),
+                                    agent.name.as_deref().map(Into::into),
+                                )
+                            }),
                         }
-                        origin
                     } else if let Some(agent) = &entry.speaks_for {
-                        let mut origin = json!({"kind":"agent", "agent_id":agent.agent_id});
-                        if let Some(name) = &agent.name {
-                            origin["name"] = json!(name);
+                        Origin::Agent {
+                            agent_id: agent.agent_id.as_str().into(),
+                            name: agent.name.as_deref().map(Into::into),
                         }
-                        origin
                     } else {
-                        json!({"kind":"person"})
+                        Origin::Person
                     }
                 });
             let row = p.live.entry(ordinal).or_insert_with(|| Cached {
@@ -408,7 +406,10 @@ impl Session {
                     .map(|part| {
                         let (item_tokens, source) =
                             if matches!(part.body, PartBody::Reasoning { .. }) {
-                                (weights.next().expect("reasoning part weight"), measure.1)
+                                (
+                                    weights.next().expect("reasoning part weight"),
+                                    measured_source(measure.1),
+                                )
                             } else {
                                 item_tokens(part, counter)
                             };
@@ -426,15 +427,13 @@ impl Session {
                             runner_tokens: part.tokens,
                             signed: part.seal == cortexkit_role_compaction::part::Seal::Signed,
                             origin: if let Some(fact) = crate::neutral::host_part(entry, part) {
-                                let mut origin = json!({"kind":"host", "label":crate::neutral::host_label(fact)});
-                                if let Some(code) = &fact.host_code {
-                                    origin["host_code"] = json!(code);
-                                }
-                                Some(origin)
-                            } else if matches!(part.body, PartBody::Text { .. }) {
-                                user_origin.clone()
+                                PartOrigin::Host(fact.host_code.as_deref().map(Into::into))
+                            } else if matches!(part.body, PartBody::Text { .. })
+                                && user_origin.is_some()
+                            {
+                                PartOrigin::User
                             } else {
-                                None
+                                PartOrigin::None
                             },
                             tool: match &part.body {
                                 PartBody::Tool(tool) => Some(tool.name.clone()),
@@ -479,9 +478,14 @@ impl Session {
                 );
             }
         }
-        let compartments = if p.summaries_dirty {
-            p.ranges = summary_ranges(&self.summaries);
-            p.compartments = Arc::new(self.summaries.iter().map(compartment).collect());
+        let summaries_changed = if p.summaries_dirty {
+            // Only the summaries' ordinals are read here. The app reads take
+            // the summaries themselves from `context.db`.
+            p.ranges = summary_ranges(
+                self.summaries
+                    .iter()
+                    .map(|c| (c.start_message, c.end_message)),
+            );
             p.queued = p
                 .stamped
                 .iter()
@@ -489,9 +493,9 @@ impl Session {
                 .map(|(_, count)| count)
                 .sum();
             p.summaries_dirty = false;
-            Some(p.compartments.clone())
+            true
         } else {
-            None
+            false
         };
         let (view, cut) = self
             .unconfirmed
@@ -553,12 +557,12 @@ impl Session {
                             .and_then(|ord| p.live.get(ord))
                             .and_then(|row| row.parts.iter().find(|info| &info.id == part));
                         let permanent = info.is_none_or(|info| match (info.kind, field.as_str()) {
-                            ("file", "text") => true,
-                            ("text", "text") | ("tool", "output") => {
+                            (Kind::File, "text") => true,
+                            (Kind::Text, "text") | (Kind::Tool, "output") => {
                                 info.tag.map(|tag| format!("[dropped §{tag}§]")).as_deref()
                                     == value.as_str()
                             }
-                            ("tool", _) => false,
+                            (Kind::Tool, _) => false,
                             _ => true,
                         });
                         if permanent {
@@ -761,7 +765,7 @@ impl Session {
         for source in p.sources {
             sources.adjust(Sources::default(), source);
         }
-        sources.add(p.head.iter().sum(), "counted");
+        sources.add(p.head.iter().sum(), Source::Counted);
         for surface in [
             self.surface_tokens.0,
             self.surface_tokens.1,
@@ -770,7 +774,7 @@ impl Session {
         .into_iter()
         .flatten()
         {
-            sources.add(surface.count, "runner");
+            sources.add(surface.count, Source::Runner);
         }
         breakdown["estimation_source"] = json!(sources.dominant());
         breakdown["managed"] = json!({"value":!self.tools_only&&!self.suspended});
@@ -842,7 +846,7 @@ impl Session {
             } else {
                 pruned
             },
-            compartments,
+            summaries_changed,
             decisions,
             reverted: reverted.is_some(),
         };
@@ -850,7 +854,6 @@ impl Session {
         // checkpoints may wait a minute or fail. Retain the latest changed rows
         // independently until a transaction commits successfully.
         p.snapshot_rows.extend(update.rows.iter().cloned());
-        p.snapshot_summaries |= update.compartments.is_some();
         let changed =
             !update.rows.is_empty() || update.reset_from.is_some() || update.prune_before.is_some();
         p.snapshot_dirty |= changed;
@@ -895,7 +898,6 @@ impl Session {
                 p.snapshot_rows
                     .iter()
                     .map(|(mid, row)| (mid.as_str(), row.as_ref())),
-                p.snapshot_summaries.then_some(p.compartments.as_slice()),
                 p.snapshot_removed.iter().map(String::as_str),
                 p.snapshot_reset,
             );
@@ -909,7 +911,6 @@ impl Session {
                     self.app_projection.snapshot_rows.clear();
                     self.app_projection.snapshot_removed.clear();
                     self.app_projection.snapshot_reset = false;
-                    self.app_projection.snapshot_summaries = false;
                 }
                 Err(error) => {
                     // Keep the delta, but a busy store must not make an overdue
@@ -1016,7 +1017,20 @@ impl Session {
             ready: h.ready,
             meta: h.meta.clone(),
             breakdown: h.breakdown.clone(),
-            compartments: (*p.compartments).clone(),
+            // The replica reads this index from `context.db`; a session
+            // without one still shows its summaries this way.
+            compartments: self
+                .summaries
+                .iter()
+                .map(|c| crate::app_read::summaries::Summary {
+                    sequence: c.sequence,
+                    first_message_id: c.start_message_id.as_str().into(),
+                    last_message_id: c.end_message_id.as_str().into(),
+                    first_message_ordinal: c.start_message,
+                    last_message_ordinal: c.end_message,
+                    at_ms: [None; 2],
+                })
+                .collect(),
             messages: p
                 .live
                 .values()
@@ -1024,7 +1038,7 @@ impl Session {
                     cached
                         .row
                         .as_ref()
-                        .map(|row| (cached.mid.clone(), (**row).clone()))
+                        .map(|row| (cached.mid.clone(), Arc::clone(row)))
                 })
                 .collect(),
             decisions: (*p.decisions).clone(),
@@ -1055,14 +1069,13 @@ fn message(
     replacements: &BTreeMap<lanes::PartKey, Replacement>,
     cut: Option<u64>,
 ) -> (Message, u64, u64, u64, [u64; 2], usize, [Sources; 5]) {
-    let mut stamped = Vec::new();
-    let mut gone = Vec::new();
+    let mut stamps = 0;
     let mut raw = 0;
     let mut user_text = [0; 2];
     let mut tool = 0;
     let mut reasoning = 0;
     let mut tagged = 0;
-    let mut items = Vec::with_capacity(cached.parts.len());
+    let mut parts = Vec::with_capacity(cached.parts.len());
     let mut sources = [Sources::default(); 5];
     let before = session
         .unconfirmed
@@ -1073,55 +1086,53 @@ fn message(
     // the model never sees it: it counts like reasoning a view dropped.
     let floor = session.signed_floor().is_some_and(|floor| ordinal <= floor);
     for part in &cached.parts {
-        tagged += usize::from(part.tag.is_some());
+        tagged += u64::from(part.tag.is_some());
         let key = (cached.mid.clone(), part.id.clone());
         let removed = cut
             || messages.contains(&cached.mid)
             || dropped.contains(&key)
-            || (floor && part.signed && part.kind == "reasoning");
+            || (floor && part.signed && part.kind == Kind::Reasoning);
         let queued =
             session.queued.contains(&key) || before.is_some_and(|queued| queued.contains(&key));
         let (tokens, source) =
-            if cut || messages.contains(&cached.mid) || (removed && part.kind == "reasoning") {
-                (0, "counted")
+            if cut || messages.contains(&cached.mid) || (removed && part.kind == Kind::Reasoning) {
+                (0, Source::Counted)
             } else if let Some(replacement) = replacements.get(&key) {
-                (replacement.tokens, "counted")
+                (replacement.tokens, Source::Counted)
             } else if removed {
-                (0, "counted")
+                (0, Source::Counted)
             } else {
                 (part.item_tokens, part.source)
             };
-        let mut item = json!({"part_ref":{"part_key":part.id},"kind":part.kind,"tokens":tokens,"source":source,"state":if removed {"dropped"} else if queued {"stamped"} else {"live"}});
-        if let Some(origin) = &part.origin {
-            item["origin"] = origin.clone();
-        }
-        if let Some(tool) = &part.tool {
-            item["tool"] = json!(tool);
-        }
-        items.push(item);
-        let size =
-            json!({"bytes":part.bytes,"tokens":part.tokens,"input_bytes":null,"input_tokens":null});
-        if queued && !removed {
-            stamped.push(json!({"kind":part.kind,"part_ref":{"part_key":part.id},"size":size,"stage":"queued","stamped_at_ms":session.app.stamps.get(&key),"stamped_at_source":"recorded"}));
-        }
+        let size = Size {
+            bytes: part.bytes,
+            tokens: part.tokens,
+        };
+        let state = if removed && cut {
+            PartState::Cut
+        } else if removed {
+            PartState::Dropped { size }
+        } else if queued {
+            stamps += 1;
+            PartState::Stamped {
+                at_ms: session.app.stamps.get(&key).copied(),
+                size,
+            }
+        } else {
+            PartState::Live
+        };
         if !queued {
             session.app.stamps.remove(&key);
         }
-        if removed && !cut {
-            gone.push(json!({"kind":part.kind,"part_ref":{"part_key":part.id},"size":size,"dropped_at_ms":null,"dropped_at_source":"not_recorded","drop_mode":null}));
-        } else if !removed {
-            if part.kind == "tool" {
+        if !removed {
+            if part.kind == Kind::Tool {
                 tool += part.tokens;
                 sources[1].add(part.tokens, source);
-            } else if part.kind == "reasoning" {
+            } else if part.kind == Kind::Reasoning {
                 reasoning += tokens;
                 sources[2].add(tokens, source);
-            } else if let Some(origin) = part
-                .origin
-                .as_ref()
-                .filter(|origin| origin["kind"] != "host")
-            {
-                let category = usize::from(origin["kind"] != "person");
+            } else if let (PartOrigin::User, Some(origin)) = (&part.origin, &cached.user_origin) {
+                let category = usize::from(!origin.is_person());
                 user_text[category] += part.tokens;
                 sources[3 + category].add(part.tokens, source);
             } else {
@@ -1129,22 +1140,27 @@ fn message(
                 sources[0].add(part.tokens, source);
             }
         }
+        parts.push(crate::app_read::row::Part {
+            id: part.id.as_str().into(),
+            kind: part.kind,
+            tokens,
+            source,
+            state,
+            origin: part.origin.clone(),
+            tool: part.tool.as_deref().map(Into::into),
+        });
     }
-    let stamps = stamped.len();
-    let state = if !cached.parts.is_empty() && gone.len() == cached.parts.len() {
-        "dropped"
-    } else {
-        "raw"
-    };
-    let mut row = json!({"message_id":cached.mid,"state":state,"compartment_id":null,"outside_reason":null,"split":null,"parts":{"tagged":tagged,"stamped":stamps,"dropped":gone.len()},"stamped_parts":stamped,"dropped_parts":gone,"items":items});
-    if !cached.host_parts.is_empty() {
-        row["host_parts"] = json!(cached.host_parts);
-    }
+    let row = Typed::new(
+        tagged,
+        parts,
+        cached.user_origin.as_ref(),
+        &cached.host_parts,
+    );
     (
         Message {
             ordinal,
             at_ms: cached.at_ms,
-            row,
+            row: Row::Typed(row),
         },
         raw,
         tool,
@@ -1188,45 +1204,55 @@ fn reasoning_weights(reasoning: &[&cortexkit_role_compaction::part::Part], cost:
 fn item_tokens(
     part: &cortexkit_role_compaction::part::Part,
     counter: crate::count::Counter,
-) -> (u64, &'static str) {
+) -> (u64, Source) {
     use cortexkit_role_compaction::tokens::PartTokens;
     match (&part.body, part.tokens) {
         (PartBody::Tool(tool), counts) => (
             crate::tokens::tool_result(part, tool),
             if matches!(counts, Some(PartTokens::Tool(_))) {
-                "runner"
+                Source::Runner
             } else {
-                "estimate"
+                Source::Estimate
             },
         ),
         (PartBody::Text { .. } | PartBody::File(_), Some(PartTokens::Count(_))) => {
-            (crate::tokens::part(part), "runner")
+            (crate::tokens::part(part), Source::Runner)
         }
-        (PartBody::Text { text }, _) => (counter.count(text), "counted"),
-        _ => (crate::tokens::part(part), "estimate"),
+        (PartBody::Text { text }, _) => (counter.count(text), Source::Counted),
+        _ => (crate::tokens::part(part), Source::Estimate),
     }
-}
-fn kind(body: &PartBody) -> &'static str {
-    match body {
-        PartBody::Text { .. } => "text",
-        PartBody::Reasoning { .. } => "reasoning",
-        PartBody::Tool(_) => "tool",
-        PartBody::File(_) => "file",
-        PartBody::Opaque(_) => "opaque",
-        _ => "opaque",
-    }
-}
-fn compartment(c: &StoredCompartment) -> Value {
-    json!({"compartment_id":c.sequence.to_string(), "ordinal":c.sequence, "title":c.title, "first_message_id":c.start_message_id, "last_message_id":c.end_message_id, "first_message_ordinal":c.start_message, "last_message_ordinal":c.end_message, "first_at_ms":null, "last_at_ms":null, "message_count":(c.end_message-c.start_message+1).max(0), "importance":c.importance, "summary_markdown":c.content, "summary_markdown_bytes":c.content.len(), "summary_markdown_truncated":false, "tiers":{"p1":c.p1, "p2":c.p2, "p3":c.p3, "p4":c.p4}, "tiers_bytes":{"p1":c.p1.as_ref().map(String::len), "p2":c.p2.as_ref().map(String::len), "p3":c.p3.as_ref().map(String::len), "p4":c.p4.as_ref().map(String::len)}, "tiers_truncated":{"p1":false,"p2":false,"p3":false,"p4":false}, "created_at_ms":c.created_at, "legacy":c.legacy!=0, "episode_type":c.episode_type, "facts":{"attribution":"historian_run", "by_category":{}, "session_facts_cursor":null}})
 }
 
-fn summary_ranges(summaries: &[StoredCompartment]) -> BTreeMap<u64, u64> {
+/// The source of a reasoning measure ([`lanes::reasoning_measure`]), which
+/// names one of the sources the apps know.
+fn measured_source(name: &str) -> Source {
+    match name {
+        "runner" => Source::Runner,
+        "counted" => Source::Counted,
+        "reported" => Source::Reported,
+        _ => Source::Estimate,
+    }
+}
+
+fn kind(body: &PartBody) -> Kind {
+    match body {
+        PartBody::Text { .. } => Kind::Text,
+        PartBody::Reasoning { .. } => Kind::Reasoning,
+        PartBody::Tool(_) => Kind::Tool,
+        PartBody::File(_) => Kind::File,
+        PartBody::Opaque(_) => Kind::Opaque,
+        _ => Kind::Opaque,
+    }
+}
+
+/// The union of the summaries' message ranges, each given by its first and
+/// last ordinal.
+fn summary_ranges(summaries: impl Iterator<Item = (i64, i64)>) -> BTreeMap<u64, u64> {
     // Older summaries can share message boundaries. Cache their union so
     // messages already summarized are excluded from pending part removals,
     // regardless of overlapping ranges or row order.
     let mut spans: Vec<_> = summaries
-        .iter()
-        .map(|c| (c.start_message as u64, c.end_message as u64))
+        .map(|(start, end)| (start as u64, end as u64))
         .collect();
     spans.sort_unstable();
     let mut merged = Vec::<(u64, u64)>::new();
