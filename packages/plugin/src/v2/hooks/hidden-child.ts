@@ -25,6 +25,10 @@ import {
 import { withoutHistorianTailCache } from "../../shared/historian-cache";
 import { log } from "../../shared/logger";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
+import {
+    claudeAgentInstructionsText,
+    deliversInstructionsInUserMessage,
+} from "./claude-agent-instructions";
 import type { SessionContext, V2AgentDomain } from "./types";
 
 export const HIDDEN_HISTORIAN_AGENT = "historian";
@@ -584,15 +588,24 @@ export class HiddenChildHook {
         throw refusal;
     }
 
-    private calibratedParts(
+    /**
+     * The run's first user message: its registered prompt, preceded on the
+     * Claude Agent provider by the task's system text, which that provider
+     * would otherwise never send (see `deliversInstructionsInUserMessage`).
+     * Every step and retry rebuilds it from the same inputs, so its bytes stay
+     * identical for the whole run.
+     */
+    private firstMessageParts(
         attempt: HiddenChildAttempt,
         draft: SessionContext,
         raw: string | undefined,
+        system: string,
     ): Array<{ type: "text"; text: string }> {
         const parts = calibratedParts(attempt);
         if (!parts)
             this.refuse("Hidden completion accepts text-only calibrated prompts", draft, raw);
-        return parts;
+        if (!deliversInstructionsInUserMessage(draft.model.providerID)) return parts;
+        return [{ type: "text", text: claudeAgentInstructionsText(system) }, ...parts];
     }
 
     /**
@@ -673,15 +686,14 @@ export class HiddenChildHook {
         const blockedRead =
             needsBlockedRead(selected.identity.agent, draft.model.providerID) &&
             draft.tools.read !== undefined;
-        draft.system = [
-            {
-                type: "text",
-                text: blockedRead ? withBlockedReadInstruction(system, selected.identity) : system,
-            },
-        ];
+        const systemText = blockedRead ? withBlockedReadInstruction(system, selected.identity) : system;
+        draft.system = [{ type: "text", text: systemText }];
         if (!selected.shaped) {
             draft.messages = [
-                { role: "user", content: this.calibratedParts(selected, draft, raw) },
+                {
+                    role: "user",
+                    content: this.firstMessageParts(selected, draft, raw, systemText),
+                },
             ];
         } else {
             // Later steps preserve this run's tool history, starting at its marker or
@@ -709,7 +721,7 @@ export class HiddenChildHook {
             // text sent on step one. Replace only that placeholder, preserving all
             // assistant tool calls and tool results after it.
             draft.messages = [
-                { ...first, content: this.calibratedParts(selected, draft, raw) },
+                { ...first, content: this.firstMessageParts(selected, draft, raw, systemText) },
                 ...draft.messages.slice(start + 1),
             ];
         }
