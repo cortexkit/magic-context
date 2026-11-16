@@ -1822,7 +1822,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         let _ = reply.send(answer);
                         // A person's message is followed by the runner's next
                         // request: resume the freed session now, while the
-                        // model works, not when that request's ride waits.
+                        // model works, rather than making that request wait
+                        // for the resume.
                         if let Some(quiet) = carry.take() {
                             session = Some(resume(&inner, &held_key, quiet).await);
                         }

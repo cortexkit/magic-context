@@ -1251,9 +1251,10 @@ impl Session {
     /// be offered again, a summary run, a transcript held behind the
     /// summaries, ck-mc's newest view not being the one the runner last
     /// reported applying, or app decisions or a checkpoint not saved. An
-    /// index or runner's view a failed read left unknown, and a session the
-    /// runner refused, are not in flight: the resumed session keeps them for
-    /// its next job, as a session never freed does. What only the worker
+    /// index or runner's view a failed read left unknown, and a session whose
+    /// runner refused ck-mc as its compaction provider (`suspended`), are not
+    /// in flight: the resumed session keeps them for its next job, as a
+    /// session never freed does. What only the worker
     /// sees (its queue, its saved state, the search index) is the worker's
     /// to check.
     pub(crate) fn quiet_carry(mut self: Box<Self>) -> Result<QuietCarry, Box<Self>> {
