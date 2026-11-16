@@ -343,6 +343,9 @@ enum Command {
     Publish(Box<Snapshot>),
     Update(Update),
     ForgetSession(SessionRef, bool),
+    /// The session's worker saved its projection and stopped: see
+    /// [`Replica::release`].
+    Release(SessionRef),
     Read(String, Value, oneshot::Sender<Result<Value, Refusal>>),
     RunnerHead(
         String,
@@ -453,6 +456,7 @@ impl AppRead {
                         Command::ForgetSession(key, any_runner) => {
                             replica.forget_session(&key, any_runner)
                         }
+                        Command::Release(key) => replica.release(&key),
                         Command::Read(method, params, reply) => {
                             let _ = reply.send(replica.read(&method, &params));
                         }
@@ -503,6 +507,12 @@ impl AppRead {
         let _ = self
             .tx
             .send(Command::ForgetSession(key.clone(), any_runner));
+    }
+
+    /// The session's worker saved its projection and stopped: the snapshot
+    /// is kept only while reads use it. See [`Replica::release`].
+    pub(crate) fn release(&self, key: &SessionRef) {
+        let _ = self.tx.send(Command::Release(key.clone()));
     }
 
     pub async fn read(&self, method: &str, params: Value) -> Result<Value, Refusal> {

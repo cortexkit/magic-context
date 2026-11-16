@@ -790,6 +790,49 @@ fn same(applied: &AppliedView, view: &View) -> bool {
     applied.version == view.version && applied.checksum == view.checksum
 }
 
+/// A session freed while quiet ([`Session::quiet_carry`]): the session
+/// itself, without what [`Session::resume_quiet`] reads again. Its worker
+/// may stop meanwhile; this is all the module keeps of the session.
+pub(crate) struct QuietCarry(Box<Session>);
+
+impl QuietCarry {
+    /// The session's settings inputs, as [`Session::config_inputs`].
+    pub(crate) fn config_inputs(&self) -> (Option<&str>, String, u64) {
+        self.0.config_inputs()
+    }
+
+    /// Whether [`Session::pre_user`] answers the freed session as it would
+    /// the resumed one, so a person's message need not wait for the reads a
+    /// resume makes. Its time marker counts from the newest entry and its
+    /// memory search stops at the newest summary, both kept. Only a session
+    /// that searches memories and has no summary yet hides by its whole
+    /// transcript what the search finds ([`Session::search_scope`]).
+    pub(crate) fn answers_pre_user(&self) -> bool {
+        !self.0.features.auto_memory || !self.0.summaries.is_empty()
+    }
+
+    /// [`Session::pre_user`] on the freed session; only when
+    /// [`QuietCarry::answers_pre_user`].
+    pub(crate) async fn pre_user(
+        &self,
+        settings: &Settings,
+        text: &str,
+        now_ms: u64,
+    ) -> crate::pre_user::Addition {
+        self.0.pre_user(settings, text, now_ms).await
+    }
+
+    /// [`Session::follow_workspace`] on the freed session, which keeps its
+    /// memory context whole.
+    pub(crate) fn follow_workspace(
+        &mut self,
+        project: Option<&str>,
+        workspace: Option<String>,
+    ) -> bool {
+        self.0.follow_workspace(project, workspace)
+    }
+}
+
 impl Session {
     fn counter(&self) -> crate::count::Counter {
         crate::count::Counter::for_model(Some(&format!(
@@ -1189,6 +1232,100 @@ impl Session {
     /// first notice. This does not count as Setup in the current process.
     pub async fn restore_for_tools<C: RunnerClient>(&mut self, client: &C) {
         self.index_ready = self.read_until(client, None, true).await;
+    }
+
+    /// The session without what [`Session::resume_quiet`] reads again, when
+    /// nothing of it is in flight; the session unchanged otherwise. It drops
+    /// its summaries but the newest, its transcript index but the newest
+    /// entry, its newest view, and the apps' projection but the head they
+    /// read. Every other field stays as it is, those kept in memory only
+    /// included (the statement epoch and stamp, the notice number, the
+    /// account wait and the rest), so the resumed session decides as one
+    /// never freed. The apps' checkpoint is saved first: the projection is
+    /// built again on resuming, and the apps read the saved one meanwhile.
+    ///
+    /// In flight means a view the runner has not confirmed or one waiting to
+    /// be offered again, a summary run, a transcript held behind the
+    /// summaries, a suspended session, an index or runner's view a failed
+    /// read left unknown, a runner that last reported applying a view other
+    /// than ck-mc's newest, or app decisions or a checkpoint not saved. What
+    /// only the worker sees (its queue, its saved state, the search index)
+    /// is the worker's to check.
+    pub(crate) fn quiet_carry(mut self: Box<Self>) -> Result<QuietCarry, Box<Self>> {
+        self.app_checkpoint_if_due(true);
+        let quiet = self.compacting()
+            && self.unconfirmed.is_empty()
+            && !self.reoffer_pending
+            && !self.summarizing
+            && self.run_start.is_none()
+            && self.reservation.is_none()
+            && self.transcript_behind.is_none()
+            && !self.suspended
+            && self.index_ready
+            && !self.latest_unknown
+            && self.latest.as_ref().map_or(0, |view| view.version) == self.newest_applied
+            && self.app_decisions_unsaved.is_empty()
+            && self.app_snapshot_deadline().is_none();
+        if !quiet {
+            return Err(self);
+        }
+        self.drop_quiet_summaries();
+        self.head_summaries = None;
+        let newest = self.index.entries().last().cloned();
+        self.index = Index::starting_at(
+            newest
+                .as_ref()
+                .map_or(self.index.base(), |entry| entry.ordinal),
+        );
+        let _ = self.index.extend(newest);
+        self.index_ready = false;
+        // Read back from the runner on resuming, as after a restart.
+        if self.latest.take().is_some() {
+            self.latest_unknown = true;
+        }
+        self.view_validation = Default::default();
+        self.scan_counts = Default::default();
+        let head_read = std::mem::take(&mut self.app_projection.head_read);
+        self.app_projection = Default::default();
+        self.app_projection.head_read = head_read;
+        self.app_decisions = Vec::new();
+        Ok(QuietCarry(self))
+    }
+
+    /// The session `carry` was made from, with what it dropped read again
+    /// the way Setup reads it after a restart: the summaries from
+    /// `context.db`, the apps' decisions from `mode3.db`, the transcript from
+    /// the cut, then the view the runner applies. A read that fails leaves
+    /// the session as the same failed read leaves it after a restart, for
+    /// its next notice to read again.
+    pub(crate) async fn resume_quiet<C: RunnerClient>(carry: QuietCarry, client: &C) -> Self {
+        let mut session = *carry.0;
+        session.reload_quiet_summaries();
+        session.set_store(session.store.clone());
+        session.distrust_state_ahead_of_summaries();
+        session.index = Index::starting_at(session.cut.unwrap_or(1));
+        session.index_ready = session.read_until(client, None, true).await;
+        if session.index_ready && session.latest_unknown {
+            session.adopt_runner_view(client).await;
+        }
+        if let Some(view) = &session.latest {
+            session.view_validation.prime(session.index.entries(), view);
+        }
+        session
+    }
+
+    /// Drop the summaries of a session freed while quiet, all but the
+    /// newest ([`QuietCarry::answers_pre_user`]). With
+    /// [`Session::reload_quiet_summaries`], the only places freeing a session
+    /// touches its summaries.
+    fn drop_quiet_summaries(&mut self) {
+        let newest = self.summaries.last().cloned();
+        self.summaries.replace(newest.into_iter().collect());
+    }
+
+    /// Read the summaries of a session resumed after a quiet free again.
+    fn reload_quiet_summaries(&mut self) {
+        self.load_summaries();
     }
 
     /// `mode3.db` and `context.db` are backed up separately, and a restore

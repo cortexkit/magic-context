@@ -232,6 +232,14 @@ impl Watch<'_> {
         let due = (tokio::time::Instant::now() + self.ends.poll_interval()).min(deadline);
         let _ = tokio::time::timeout_at(due, self.notify.notified()).await;
     }
+
+    /// Wait, without a timeout, for the next run-end event naming this
+    /// watch's session, or for one that came since the last wait: for a
+    /// waiter that has nothing to read, only something to do once the run
+    /// ended.
+    pub(crate) async fn ended(&self) {
+        self.notify.notified().await;
+    }
 }
 
 impl Drop for Watch<'_> {
