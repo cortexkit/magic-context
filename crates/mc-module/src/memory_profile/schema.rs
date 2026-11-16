@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use regex::Regex;
 use serde_json::Value;
@@ -8,11 +8,32 @@ use super::{compile_regex, refuse, Result};
 
 /// Validate the frozen schema without network references or implicit coercion.
 pub(super) fn validate(body: &Value) -> Result<()> {
-    let schema: Value = serde_json::from_str(include_str!(
+    static SCHEMA: LazyLock<Value> = LazyLock::new(parse_schema);
+    let schema = &*SCHEMA;
+    check(schema, body, schema, "body").map_err(|detail| refuse("profile_schema_invalid", detail))
+}
+
+/// The bundled schema, parsed once and kept: every package in a chain is
+/// checked against it on each profile load.
+fn parse_schema() -> Value {
+    #[cfg(test)]
+    SCHEMA_PARSES.with(|parses| parses.set(parses.get() + 1));
+    serde_json::from_str(include_str!(
         "../../profiles/schema/mc-memory-profile-v1.schema.json"
     ))
-    .expect("bundled JSON schema");
-    check(&schema, body, &schema, "body").map_err(|detail| refuse("profile_schema_invalid", detail))
+    .expect("bundled JSON schema")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread parsed the bundled schema. Per thread, so
+    /// tests running in parallel don't count each other's.
+    static SCHEMA_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn schema_parses() -> usize {
+    SCHEMA_PARSES.with(std::cell::Cell::get)
 }
 
 fn check(s: &Value, v: &Value, root: &Value, at: &str) -> std::result::Result<(), String> {

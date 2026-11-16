@@ -1,9 +1,13 @@
 use super::{Package, Profile, Result};
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
-pub(crate) fn packages() -> Vec<Package> {
-    static PACKAGES: std::sync::OnceLock<Vec<Package>> = std::sync::OnceLock::new();
-    PACKAGES.get_or_init(build_packages).clone()
+/// The bundled packages, decoded and checked once and then shared: each holds
+/// every prompt file's bytes, so copying them per call cost a full copy of
+/// the profile's files. A caller that needs to change one copies it first.
+pub(crate) fn packages() -> &'static [Package] {
+    static PACKAGES: OnceLock<Vec<Package>> = OnceLock::new();
+    PACKAGES.get_or_init(build_packages)
 }
 
 fn build_packages() -> Vec<Package> {
@@ -105,8 +109,30 @@ fn build_packages() -> Vec<Package> {
 }
 
 pub(crate) fn swe() -> Result<Profile> {
-    static SWE: std::sync::OnceLock<Result<Profile>> = std::sync::OnceLock::new();
-    SWE.get_or_init(|| super::load_chain(&packages())).clone()
+    kept_chain(packages())
+}
+
+/// What `load_chain` returns for `chain`, loaded once and kept. Prompts and
+/// memory-context resolution ask for a pinned profile on every Setup, and
+/// loading a chain checks and merges all of it again. The result is kept
+/// under the digests of the chain's ck.json bytes, which also pin every
+/// archive member, so a package whose bytes differ never gets another
+/// package's result. Only for packages exactly as decoded: one whose `env` was
+/// edited afterwards still carries its old digest. Outside tests the chains
+/// are prefixes of the bundled packages, so this holds one entry per bundled
+/// package at most.
+pub(super) fn kept_chain(chain: &[Package]) -> Result<Profile> {
+    static KEPT: Mutex<BTreeMap<Vec<String>, Result<Profile>>> = Mutex::new(BTreeMap::new());
+    let key: Vec<String> = chain.iter().map(pin_manifest_digest).collect();
+    // Entries are only inserted whole, so a panic elsewhere while the lock was
+    // held can't leave the map half-changed.
+    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(profile) = kept.get(&key) {
+        return profile.clone();
+    }
+    let profile = super::load_chain(chain);
+    kept.insert(key, profile.clone());
+    profile
 }
 
 /// Entorhinal hashes raw ck.json bytes, not a decoded or canonicalized body.

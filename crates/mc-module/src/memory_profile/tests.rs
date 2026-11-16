@@ -22,7 +22,7 @@ fn legal_package() -> Package {
 }
 
 fn legal() -> Profile {
-    load_chain(&[bundled::packages().remove(0), legal_package()]).unwrap()
+    load_chain(&[bundled::packages()[0].clone(), legal_package()]).unwrap()
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn bundled_packages_load_and_base_cannot_be_an_agent() {
         load_chain(&packages[..1]).unwrap_err().code,
         "profile_chain_invalid"
     );
-    let profile = load_chain(&packages).unwrap();
+    let profile = load_chain(packages).unwrap();
     assert_eq!(
         profile.digest,
         "b8abec41db47198f0cae3b7241673d873ee03cfc18e34af77329132d5c3fca18"
@@ -133,7 +133,7 @@ fn prompt_section_override_preserves_inherited_condition() {
 
 #[test]
 fn envelope_rejects_version_build_metadata() {
-    let mut packages = bundled::packages();
+    let mut packages = bundled::packages().to_vec();
     packages[1].env["version"] = "1.0.0+build".into();
     assert_eq!(
         load_chain(&packages).unwrap_err().code,
@@ -157,10 +157,10 @@ fn schema_integer_accepts_integral_json_number() {
 fn loading_a_profile_builds_no_regular_expression_twice() {
     let packages = bundled::packages();
     // The first load builds what no other test thread has built yet.
-    load_chain(&packages).unwrap();
+    load_chain(packages).unwrap();
     let before = regex_builds();
-    load_chain(&packages).unwrap();
-    load_chain(&packages).unwrap();
+    load_chain(packages).unwrap();
+    load_chain(packages).unwrap();
     assert_eq!(regex_builds(), before, "a pattern was built again");
 }
 
@@ -176,6 +176,34 @@ fn kept_schema_patterns_still_reject() {
             "{}",
             refusal.detail
         );
+    }
+}
+
+#[test]
+fn the_bundled_schema_is_parsed_once_not_per_check() {
+    let body = &bundled::packages()[1].env["body"];
+    // The first check parses it unless another test thread already has.
+    schema::validate(body).unwrap();
+    let before = schema::schema_parses();
+    schema::validate(body).unwrap();
+    schema::validate(body).unwrap();
+    assert_eq!(
+        schema::schema_parses(),
+        before,
+        "the schema was parsed again"
+    );
+}
+
+#[test]
+fn bundled_packages_are_shared_not_copied() {
+    let (first, second) = (bundled::packages(), bundled::packages());
+    let member = |package: &Package| package.files.values().next().unwrap().as_ptr();
+    for at in 0..2 {
+        assert!(std::ptr::eq(
+            first[at].ck_bytes.as_ptr(),
+            second[at].ck_bytes.as_ptr()
+        ));
+        assert!(std::ptr::eq(member(&first[at]), member(&second[at])));
     }
 }
 
@@ -239,7 +267,7 @@ fn all_28_generated_negative_variants_refuse_with_authored_detail() {
     .unwrap();
     assert_eq!(table.len(), 28);
     for (i, row) in table.iter().enumerate() {
-        let mut packages = bundled::packages();
+        let mut packages = bundled::packages().to_vec();
         let (base, swe) = packages.split_at_mut(1);
         negative(i, &mut base[0].env, &mut swe[0].env);
         let refusal = load_chain(&packages).unwrap_err();
@@ -261,7 +289,7 @@ fn all_28_generated_negative_variants_refuse_with_authored_detail() {
 #[test]
 fn third_party_profile_warns_and_cannot_claim_foreign_default() {
     assert_eq!(legal().warnings, ["third-party memory profile"]);
-    let mut packages = vec![bundled::packages().remove(0), legal_package()];
+    let mut packages = vec![bundled::packages()[0].clone(), legal_package()];
     for field in ["serves", "default_for"] {
         packages[1].env["body"][field]
             .as_array_mut()
@@ -382,6 +410,60 @@ fn one_changed_ck_byte_refuses_pin_identity() {
     let mut pin = swe_pin();
     pin["manifest_sha256"] = sha256(&bytes).into();
     assert_eq!(outcome(None, vec![pin], &[]).profile.state, "unavailable");
+}
+
+fn same_profile(kept: &Profile, loaded: &Profile) {
+    assert_eq!(
+        (&kept.name, &kept.version, &kept.digest, &kept.warnings),
+        (
+            &loaded.name,
+            &loaded.version,
+            &loaded.digest,
+            &loaded.warnings
+        )
+    );
+    assert_eq!(kept.body, loaded.body);
+    assert_eq!(kept.packages.len(), loaded.packages.len());
+    for (kept, loaded) in kept.packages.iter().zip(&loaded.packages) {
+        assert_eq!(kept.ck_bytes, loaded.ck_bytes);
+        assert_eq!(kept.files, loaded.files);
+    }
+}
+
+#[test]
+fn a_pinned_profile_is_loaded_once_not_per_call() {
+    let context = outcome(None, vec![swe_pin()], &[]);
+    resolved(&context, "agent_pin");
+    same_profile(
+        &prompt_profile(Some(&context)).unwrap(),
+        &load_chain(bundled::packages()).unwrap(),
+    );
+    let before = load::chain_loads();
+    for _ in 0..2 {
+        assert_eq!(outcome(None, vec![swe_pin()], &[]), context);
+        let profile = prompt_profile(Some(&context)).unwrap();
+        assert_eq!(Some(&profile.digest), context.profile.digest.as_ref());
+        assert_eq!(prompt_profile(None).unwrap().digest, profile.digest);
+    }
+    assert_eq!(load::chain_loads(), before, "a chain was loaded again");
+}
+
+#[test]
+fn a_kept_profile_is_never_served_for_changed_package_bytes() {
+    let bundled = bundled::packages();
+    let kept = bundled::kept_chain(bundled).unwrap();
+    // Same name, version and body as the bundled coding package, one byte
+    // longer: a different package to anything that pins it.
+    let mut ck = bundled[1].ck_bytes.clone();
+    ck.push(b' ');
+    let changed = [
+        bundled[0].clone(),
+        Package::decode(&ck, bundled[1].files.clone()).unwrap(),
+    ];
+    let reloaded = bundled::kept_chain(&changed).unwrap();
+    assert_ne!(reloaded.digest, kept.digest);
+    same_profile(&reloaded, &load_chain(&changed).unwrap());
+    same_profile(&bundled::kept_chain(bundled).unwrap(), &kept);
 }
 #[test]
 fn archive_hash_is_recorded_not_compared() {

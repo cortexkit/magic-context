@@ -1,7 +1,9 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{bundled, list, text, Profile};
+use super::{bundled, list, text, Package, Profile};
 use crate::memory_context::{ContextAnswer, ProjectContext, SessionContext};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,19 +128,26 @@ pub(crate) fn resolve(
             return context;
         }
         let packages = bundled::packages();
-        let matching_bundle = packages.iter().find(|p| {
+        let matching_bundle = packages.iter().position(|p| {
             p.env["name"] == pin["name"]
                 && p.env["version"] == pin["version"]
                 && pin["manifest_sha256"] == bundled::pin_manifest_digest(p)
         });
-        if let Some(package) = matching_bundle {
-            let chain: Vec<_> = packages
+        if let Some(at) = matching_bundle {
+            let package = &packages[at];
+            // The chain is the packages before the first one of this name, then
+            // this one. Bundled names are distinct, so that is the shared
+            // prefix ending here, and nothing needs copying.
+            let first = packages
                 .iter()
-                .take_while(|p| p.env["name"] != package.env["name"])
-                .cloned()
-                .chain([package.clone()])
-                .collect();
-            if let Ok(profile) = super::load_chain(&chain) {
+                .position(|p| p.env["name"] == package.env["name"])
+                .unwrap_or(at);
+            let chain: Cow<[Package]> = if first == at {
+                Cow::Borrowed(&packages[..=at])
+            } else {
+                Cow::Owned(packages[..first].iter().chain([package]).cloned().collect())
+            };
+            if let Ok(profile) = bundled::kept_chain(&chain) {
                 select(&mut context, &profile, "agent_pin");
                 return context;
             }
@@ -208,7 +217,7 @@ pub(crate) fn prompt_profile(context: Option<&MemoryContext>) -> super::Result<P
         let at = packages
             .iter()
             .position(|p| p.env["name"] == name.as_str() && p.env["version"] == version.as_str())?;
-        let profile = super::load_chain(&packages[..=at]).ok()?;
+        let profile = bundled::kept_chain(&packages[..=at]).ok()?;
         (&profile.digest == digest).then_some(profile)
     });
     match chosen {

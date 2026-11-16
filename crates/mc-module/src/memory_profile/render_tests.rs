@@ -817,7 +817,7 @@ fn historian_documents_must_keep_their_frames() {
             "historian/turn-two.decisions",
         ),
     ] {
-        let mut packages = bundled::packages();
+        let mut packages = bundled::packages().to_vec();
         packages[0].env["body"]["prompts"][document]["sections"]
             .as_array_mut()
             .unwrap()
@@ -830,7 +830,7 @@ fn historian_documents_must_keep_their_frames() {
         );
     }
     // A document no longer declares variants of itself.
-    let mut packages = bundled::packages();
+    let mut packages = bundled::packages().to_vec();
     packages[0].env["body"]["prompts"]["historian/system"]["variants"] = json!(["xml", "combined"]);
     assert_eq!(
         load_chain(&packages).unwrap_err().code,

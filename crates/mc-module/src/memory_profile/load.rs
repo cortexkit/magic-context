@@ -265,6 +265,8 @@ impl Profile {
 }
 
 pub(crate) fn load_chain(chain: &[Package]) -> Result<Profile> {
+    #[cfg(test)]
+    CHAIN_LOADS.with(|loads| loads.set(loads.get() + 1));
     if chain.is_empty() || chain.len() > 4 || chain[0].env["name"] != BASE {
         return Err(refuse(
             "profile_chain_invalid",
@@ -330,6 +332,18 @@ pub(crate) fn load_chain(chain: &[Package]) -> Result<Profile> {
     };
     validate_resolved(&profile)?;
     Ok(profile)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many chains this thread loaded. Per thread, so tests running in
+    /// parallel don't count each other's.
+    static CHAIN_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn chain_loads() -> usize {
+    CHAIN_LOADS.with(std::cell::Cell::get)
 }
 
 fn scope(name: &str) -> &str {
