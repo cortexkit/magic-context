@@ -2,7 +2,8 @@
 //! summaries newer than every baseline it may still render `m[1]` against.
 //! A fold reads the others from `context.db`; a refresh renders the newer
 //! ones from memory, byte for byte as before; a read that fails while a view
-//! is built keeps the head as shown.
+//! is built keeps the head as shown. Its baselines share one `m[0]` text,
+//! after a restart too.
 
 use super::head_bytes_tests::{add_summary, execute, head};
 use super::*;
@@ -155,6 +156,37 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
         log.contains("history head kept as shown, reading summaries: summary 2 is not in context.db"),
         "{log}"
     );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// After a restart, the session's baseline and an unconfirmed view's
+/// before-state share one `m[0]` text, as they did before it.
+#[test]
+fn a_restore_keeps_one_copy_of_the_head_text() {
+    let dir = scratch("held-summaries-m0");
+    let (mut session, settings) = head(&dir);
+    build(&mut session, &settings).expect("the first render");
+    publish(&mut session, 4, "Newer work on the reader.");
+    // A view that refreshes m[1], not yet confirmed: its before-state keeps
+    // the baseline it replaced, with the same m[0].
+    let (view, _) = session.build(&settings, None, false, None);
+    session.accept(view.expect("m[1] shows summary 4"));
+    let before = session.unconfirmed[0].before.baseline.clone().unwrap();
+    let current = session.baseline.clone().unwrap();
+    assert!(!Arc::ptr_eq(&before, &current));
+    assert!(Arc::ptr_eq(&before.m0, &current.m0));
+
+    let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
+    store.save(&session.key, &session.durable()).unwrap();
+    let (mut restored, _, _, _, _) = fixture();
+    restored.db = session.db.clone();
+    restored.features.summarizer = true;
+    restored.load_summaries();
+    restored.restore(store.load(&session.key).unwrap());
+    let before = restored.unconfirmed[0].before.baseline.clone().unwrap();
+    let current = restored.baseline.clone().unwrap();
+    assert_eq!(before.m0, current.m0);
+    assert!(Arc::ptr_eq(&before.m0, &current.m0), "one copy of m[0]");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

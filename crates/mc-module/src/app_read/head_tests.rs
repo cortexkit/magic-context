@@ -141,7 +141,7 @@ fn with_other(mut state: ReadState) -> ReadState {
         previous.slots[0].text
     );
     let mut baseline = previous.baseline.as_ref().unwrap().as_ref().clone();
-    baseline.m0 = m0.clone();
+    baseline.m0 = m0.as_str().into();
     let view = View::seal(
         8,
         head_ops(
@@ -197,7 +197,7 @@ fn with_memory_block(mut state: ReadState, block: &str) -> ReadState {
         .collect::<Vec<_>>()
         .join("\n\n");
     let mut baseline = previous.baseline.as_ref().unwrap().as_ref().clone();
-    baseline.m0 = m0.clone();
+    baseline.m0 = m0.as_str().into();
     let view = View::seal(
         9,
         head_ops(

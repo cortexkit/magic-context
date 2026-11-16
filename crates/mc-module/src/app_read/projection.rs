@@ -1389,7 +1389,7 @@ mod tests {
                 &render::DecayRenderCompartment::from(&summaries[id - 1]),
                 item["tier"].as_u64().unwrap() as u8,
             );
-            let head = if id == 4 { &m1 } else { &baseline.m0 };
+            let head: &str = if id == 4 { &m1 } else { &baseline.m0 };
             assert!(
                 head.contains(&text),
                 "attribution must describe the bytes actually rendered"

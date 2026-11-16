@@ -127,8 +127,11 @@ pub struct Baseline {
     /// What the head shows of each memory: `m[0]`'s text, then each change
     /// `m[1]` showed since.
     pub shown: BTreeMap<i64, Shown>,
+    /// Shared by every copy of the baseline (the session's, an unconfirmed
+    /// view's before-state, the app head's), since it is the largest part
+    /// of one and changes only on a fold.
     #[serde(serialize_with = "crate::store_text::text")]
-    pub m0: String,
+    pub m0: Arc<str>,
     #[serde(default)]
     pub committed: Vec<Committed>,
     /// The memory text the model reads in full: `m[0]`'s, then each change
@@ -422,7 +425,7 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
                 )
             })
             .collect(),
-        m0: sections.join("\n\n").trim().to_owned(),
+        m0: sections.join("\n\n").trim().into(),
         committed: Vec::new(),
         seen: shown_rows()
             .map(|row| (row.id, row.content.clone()))
@@ -1143,11 +1146,11 @@ mod tests {
     fn a_large_m1_folds_instead_of_refreshing_m1() {
         let words = |n: usize| "word ".repeat(n);
         let small_m0 = Baseline {
-            m0: words(10),
+            m0: words(10).into(),
             ..Baseline::default()
         };
         let big_m0 = Baseline {
-            m0: words(4_000),
+            m0: words(4_000).into(),
             ..Baseline::default()
         };
         // Nothing new: never.

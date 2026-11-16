@@ -86,7 +86,7 @@ fn with_update_lines(lines: &[(Form, &str)]) -> ReadState {
             .join("\n")
     );
     let baseline = Baseline {
-        m0: m0.clone(),
+        m0: m0.as_str().into(),
         through_sequence: -1,
         committed: lines
             .iter()

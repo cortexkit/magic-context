@@ -12,6 +12,7 @@
 use cortexkit_role_compaction::read::Entry;
 use cortexkit_role_compaction::rules::ProviderRules;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use cortexkit_compaction_view::render::{self as view, edits_for_transcript};
 use cortexkit_compaction_view::rules;
@@ -20,12 +21,16 @@ use cortexkit_role_compaction::view::{Edit, EditOp, View, ViewRefusal};
 /// Positive certificates for inserted payloads. The full planner still checks
 /// IDs, anchors, conflicts, cuts and transcript targets on every build; only
 /// immutable text/image validation is reused after an exact payload match.
+///
+/// The three caches keep one shared copy of each edit they hold
+/// ([`ValidationCache::shared`]): the history head is usually among them,
+/// and it is the largest text a session holds.
 #[derive(Clone, Default)]
 pub(crate) struct ValidationCache {
-    inserts: Vec<EditOp>,
-    hash_prefix: Vec<(Edit, sha2::Sha256)>,
+    inserts: Vec<Arc<Edit>>,
+    hash_prefix: Vec<(Arc<Edit>, sha2::Sha256)>,
     hash_anchor: Option<String>,
-    wire_sizes: Vec<(Edit, usize)>,
+    wire_sizes: Vec<(Arc<Edit>, usize)>,
 }
 
 impl ValidationCache {
@@ -35,7 +40,7 @@ impl ValidationCache {
             .iter()
             .filter(|e| matches!(e.op, EditOp::Insert { .. }))
             .filter(|e| view::plan(entries, std::slice::from_ref(e)).is_ok())
-            .map(|e| e.op.clone())
+            .map(|e| self.shared(e))
             .collect();
         self.seal(
             view.version,
@@ -44,6 +49,17 @@ impl ValidationCache {
             view.new_signed.clone(),
         );
         self.encoded_size(view);
+    }
+
+    /// The copy of `edit` a cache already holds, or a new one.
+    fn shared(&self, edit: &Edit) -> Arc<Edit> {
+        self.inserts
+            .iter()
+            .chain(self.hash_prefix.iter().map(|(kept, _)| kept))
+            .chain(self.wire_sizes.iter().map(|(kept, _)| kept))
+            .find(|kept| ***kept == *edit)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(edit.clone()))
     }
 
     /// RFC 8785 orders the policy anchor before edits, then the signed policy
@@ -82,7 +98,7 @@ impl ValidationCache {
                 && self
                     .hash_prefix
                     .get(index)
-                    .is_some_and(|(old, _)| old == edit)
+                    .is_some_and(|(old, _)| **old == *edit)
             {
                 hash = self.hash_prefix[index].1.clone();
             } else {
@@ -93,7 +109,7 @@ impl ValidationCache {
             // Cache hashes for up to four leading edits to bound memory even
             // for a long cumulative edit list.
             if index < 4 {
-                prefix.push((edit.clone(), hash.clone()));
+                prefix.push((self.shared(edit), hash.clone()));
             }
         }
         hash.update(b"]");
@@ -128,14 +144,14 @@ impl ValidationCache {
             let bytes = self
                 .wire_sizes
                 .iter()
-                .find(|(old, _)| old == edit)
+                .find(|(old, _)| **old == *edit)
                 .map(|(_, size)| *size)
                 .unwrap_or_else(|| serde_json::to_vec(edit).expect("edit bytes").len());
             size = size
                 .saturating_add(bytes)
                 .saturating_add(usize::from(index > 0));
             if index < 4 {
-                next.push((edit.clone(), bytes));
+                next.push((self.shared(edit), bytes));
             }
         }
         self.wire_sizes = next;
@@ -171,7 +187,7 @@ impl ValidationCache {
         }
         let mut bounded = edits.to_vec();
         for edit in &mut bounded {
-            if self.inserts.contains(&edit.op) {
+            if self.inserts.iter().any(|kept| kept.op == edit.op) {
                 let _timing = crate::notice_cost_timing::span("view.cached_payload");
                 if let EditOp::Insert { message, .. } = &mut edit.op {
                     message.texts.clear();
@@ -261,7 +277,7 @@ impl ValidationCache {
         self.inserts = edits
             .iter()
             .filter(|e| matches!(e.op, EditOp::Insert { .. }))
-            .map(|e| e.op.clone())
+            .map(|e| self.shared(e))
             .collect();
         Ok(())
     }
@@ -468,6 +484,29 @@ mod tests {
     use cortexkit_role_compaction::read::Role;
     use cortexkit_role_compaction::rules::{EditCost, SignedParts};
     use serde_json::json;
+
+    /// The caches share one copy of each edit they hold, the history head
+    /// among them, and keep it across builds that leave the edit as it was.
+    #[test]
+    fn the_caches_share_one_copy_of_each_edit() {
+        let mut cache = ValidationCache::default();
+        let edits = vec![
+            Edit::new(1, insert("m0", &"history ".repeat(10_000))),
+            Edit::new(1, insert("m1", "delta")),
+        ];
+        let view = cache.seal(1, edits.clone(), None, None);
+        cache.encoded_size(&view);
+        cache.prime(&[], &view);
+        let head = cache.hash_prefix[0].0.clone();
+        assert_eq!(*head, edits[0]);
+        assert!(Arc::ptr_eq(&cache.wire_sizes[0].0, &head));
+        assert_eq!(cache.inserts.len(), 2);
+        assert!(Arc::ptr_eq(&cache.inserts[0], &head));
+        let next = cache.seal(2, edits, None, None);
+        cache.encoded_size(&next);
+        assert!(Arc::ptr_eq(&cache.hash_prefix[0].0, &head));
+        assert!(Arc::ptr_eq(&cache.wire_sizes[0].0, &head));
+    }
 
     #[test]
     fn cached_sealing_and_size_match_contract_bytes_on_every_change() {

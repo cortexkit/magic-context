@@ -1135,6 +1135,7 @@ impl Session {
         self.latest_unknown = self.latest.is_none() && self.version > 0;
         self.distrust_state_ahead_of_summaries();
         self.release_summary_bodies();
+        self.share_baseline_text();
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
         self.index = Index::starting_at(self.cut.unwrap_or(1));
@@ -1248,6 +1249,29 @@ impl Session {
             .min();
         if let Some(through) = through {
             self.summaries.release_through(through);
+        }
+    }
+
+    /// A store load decodes each saved baseline on its own, so the
+    /// session's baseline and each unconfirmed view's before-state hold
+    /// separate copies of what is usually the same `m[0]`. Keep one.
+    fn share_baseline_text(&mut self) {
+        let mut kept: Vec<Arc<str>> = self
+            .baseline
+            .iter()
+            .map(|baseline| baseline.m0.clone())
+            .collect();
+        for pending in &mut self.unconfirmed {
+            let Some(baseline) = &mut pending.before.baseline else {
+                continue;
+            };
+            match kept.iter().find(|m0| **m0 == baseline.m0) {
+                Some(m0) if !Arc::ptr_eq(m0, &baseline.m0) => {
+                    Arc::make_mut(baseline).m0 = m0.clone();
+                }
+                Some(_) => {}
+                None => kept.push(baseline.m0.clone()),
+            }
         }
     }
 
