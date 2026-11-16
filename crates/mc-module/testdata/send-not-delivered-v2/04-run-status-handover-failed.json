@@ -1,0 +1,1 @@
+{"error":{"cause":"nothing_written","class":"handover_failed","message":"the prompt was never handed to the host","provider_code":"provider_error"},"state":"error","undelivered_steers":[],"usage":{"by_model":[],"steps":0,"unreported_steps":0}}
