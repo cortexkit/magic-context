@@ -11,14 +11,16 @@ use cortexkit_role_compaction::{notice::Conditions, read::SessionRef};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 pub const ROLE: (&str, &str) = ("mc-context-read", "v1");
-pub const OPS: [&str; 2] = ["context.memories", "context.summaries"];
+pub const OPS: [&str; 3] = ["context.memories", "context.summaries", "context.recent"];
 
 /// How long a caller should wait before asking again about a session whose
 /// state ck-mc keeps in mode3.db but whose project it hasn't learned since
@@ -26,13 +28,48 @@ pub const OPS: [&str; 2] = ["context.memories", "context.summaries"];
 /// restart, so the wait is usually shorter.
 const PROJECT_PENDING_RETRY_MS: u64 = 30_000;
 
+/// How long a caller should wait before asking again for a session's newest
+/// messages while ck-mc is still reading its transcript from the runner.
+const TRANSCRIPT_PENDING_RETRY_MS: u64 = 2_000;
+
+/// The smallest budget `context.recent` takes: enough for any line's
+/// shortest header and `… `, so a cut line always fits and a session with
+/// messages never answers empty.
+const RECENT_MIN_BUDGET: u64 = 256;
+
+/// The most summaries `context.summaries` returns with `newest`.
+const NEWEST_MAX: u64 = 16;
+
 type Reply = Result<Value, Refusal>;
-type Command = (Vec<u8>, oneshot::Sender<Reply>);
+type Command = (Vec<u8>, oneshot::Sender<Routed>);
 type Projects = Arc<Mutex<HashMap<SessionRef, Project>>>;
+
+/// Answers `context.recent` from the session's worker, which the module owns.
+pub(crate) type RecentHandler =
+    Box<dyn Fn(Recent) -> Pin<Box<dyn Future<Output = Reply> + Send>> + Send + Sync>;
+
+/// What the read thread makes of a request: an answer, or a
+/// `context.recent` request it admitted, which the session's worker answers.
+enum Routed {
+    Reply(Reply),
+    Recent(Recent),
+}
+
+/// An admitted `context.recent` request.
+pub(crate) struct Recent {
+    pub harness: String,
+    pub session: String,
+    pub budget: u64,
+    /// The names of the runners mode3.db keeps this session's saved state
+    /// under, sorted, for a session with no live worker; a refusal when
+    /// mode3.db could not be read.
+    pub saved: Result<Vec<String>, Refusal>,
+}
 
 #[derive(Clone)]
 pub struct ContextRead {
     tx: mpsc::Sender<Command>,
+    recent: Arc<OnceLock<RecentHandler>>,
     #[cfg(test)]
     reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -57,15 +94,22 @@ impl ContextRead {
                     gate,
                 };
                 while let Ok((body, reply)) = rx.recv() {
-                    let _ = reply.send(reader.read(&body));
+                    let _ = reply.send(reader.route(&body));
                 }
             })
             .expect("context read worker");
         Self {
             tx,
+            recent: Default::default(),
             #[cfg(test)]
             reads: Default::default(),
         }
+    }
+
+    /// Name who answers `context.recent`; until then it is refused as
+    /// unavailable. The module sets this once, when it is built.
+    pub(crate) fn serve_recent(&self, handler: RecentHandler) {
+        let _ = self.recent.set(handler);
     }
 
     pub(crate) async fn read(&self, body: &[u8]) -> Reply {
@@ -75,7 +119,13 @@ impl ContextRead {
         self.tx
             .send((body.to_vec(), tx))
             .map_err(|_| unavailable())?;
-        rx.await.map_err(|_| unavailable())?
+        match rx.await.map_err(|_| unavailable())? {
+            Routed::Reply(reply) => reply,
+            Routed::Recent(recent) => match self.recent.get() {
+                Some(answer) => answer(recent).await,
+                None => Err(unavailable()),
+            },
+        }
     }
 
     #[cfg(test)]
@@ -86,6 +136,12 @@ impl ContextRead {
 
 #[cfg(test)]
 mod admission_tests;
+
+#[cfg(test)]
+mod recent_tests;
+
+#[cfg(test)]
+mod samples_tests;
 
 #[cfg(test)]
 mod tests;
@@ -103,6 +159,30 @@ fn unavailable() -> Refusal {
     error("store_unavailable", "The context store is unavailable.")
 }
 
+/// The refusal for a session ck-mc keeps nothing of.
+pub(crate) fn unknown_session() -> Refusal {
+    error(
+        "unknown_session",
+        "The context store has no record of this session.",
+    )
+}
+
+/// The refusal of `context.recent` while ck-mc is still reading the
+/// session's transcript from its runner, after a Setup or a restore.
+pub(crate) fn transcript_pending() -> Refusal {
+    Refusal::new(
+        "transient",
+        "The session's transcript is still being read; retry later.",
+        Some(json!({"class": "transient", "retry_after_ms": TRANSCRIPT_PENDING_RETRY_MS})),
+    )
+}
+
+/// The start of every context read's answer: which tokenizer counted its
+/// `tokens`, and whether that count is exact or an estimate.
+pub(crate) fn counted_by(counter: Counter) -> Value {
+    json!({"token_family": counter.family().map_or_else(|| "mc-estimator".to_owned(), |family| format!("{family:?}")), "exact": counter.family().is_some()})
+}
+
 fn open(path: &std::path::Path) -> Result<Connection, Refusal> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| unavailable())?;
@@ -112,7 +192,22 @@ fn open(path: &std::path::Path) -> Result<Connection, Refusal> {
 }
 
 impl Reader {
+    /// Answer a request here, or hand an admitted `context.recent` on to the
+    /// session's worker, which holds the transcript it reads.
+    fn route(&self, body: &[u8]) -> Routed {
+        self.admit(body)
+            .unwrap_or_else(|refusal| Routed::Reply(Err(refusal)))
+    }
+
+    #[cfg(test)]
     fn read(&self, body: &[u8]) -> Reply {
+        match self.route(body) {
+            Routed::Reply(reply) => reply,
+            Routed::Recent(_) => Err(unavailable()),
+        }
+    }
+
+    fn admit(&self, body: &[u8]) -> Result<Routed, Refusal> {
         if body.len() > 64 * 1024 {
             return Err(invalid("request"));
         }
@@ -120,13 +215,14 @@ impl Reader {
         let envelope = object(&request, &["method", "params"])?;
         let method = string(envelope, "method")?;
         if method == "role.describe" {
-            return Ok(
+            return Ok(Routed::Reply(Ok(
                 json!({"majors": [{"version": "mc-context-read/v1", "ops": OPS, "stability": "alpha"}], "implementation_version": crate::version_line()}),
-            );
+            )));
         }
         let allowed = match method {
             "context.memories" => &["session", "purpose", "budget_tokens"][..],
-            "context.summaries" => &["session", "budget_tokens"][..],
+            "context.summaries" => &["session", "budget_tokens", "newest"][..],
+            "context.recent" => &["session", "budget_tokens"][..],
             _ => return Err(error("unknown_method", "Unknown context read operation.")),
         };
         let p = object(envelope.get("params").unwrap_or(&Value::Null), allowed)?;
@@ -142,11 +238,33 @@ impl Reader {
         self.gate
             .check_any_runner(harness, session)
             .map_err(|gated| gated.refusal())?;
+        let least = if method == "context.recent" {
+            RECENT_MIN_BUDGET
+        } else {
+            1
+        };
         let budget = p
             .get("budget_tokens")
             .and_then(Value::as_u64)
-            .filter(|n| (1..=32768).contains(n))
+            .filter(|n| (least..=32768).contains(n))
             .ok_or_else(|| invalid("budget_tokens"))?;
+        if method == "context.recent" {
+            return Ok(Routed::Recent(Recent {
+                harness: harness.to_owned(),
+                session: session.to_owned(),
+                budget,
+                saved: self.saved_runners(harness, session),
+            }));
+        }
+        let newest = match p.get("newest") {
+            None => None,
+            Some(newest) => Some(
+                newest
+                    .as_u64()
+                    .filter(|n| (1..=NEWEST_MAX).contains(n))
+                    .ok_or_else(|| invalid("newest"))?,
+            ),
+        };
         let purpose = if method == "context.memories" {
             let purpose = string(p, "purpose")?;
             if !["bias", "front"].contains(&purpose) {
@@ -156,7 +274,25 @@ impl Reader {
         } else {
             None
         };
-        self.query(harness, session, purpose, budget)
+        Ok(Routed::Reply(
+            self.query(harness, session, purpose, budget, newest),
+        ))
+    }
+
+    /// The runners mode3.db keeps the session's saved state under.
+    fn saved_runners(&self, harness: &str, session: &str) -> Result<Vec<String>, Refusal> {
+        let Some(path) = &self.store else {
+            return Ok(Vec::new());
+        };
+        let conn = open(path)?;
+        let mut statement = conn
+            .prepare("SELECT runner FROM sessions WHERE harness=?1 AND session=?2 ORDER BY runner")
+            .map_err(|_| unavailable())?;
+        let runners = statement
+            .query_map(params![harness, session], |row| row.get::<_, String>(0))
+            .map_err(|_| unavailable())?
+            .collect::<Result<Vec<_>, _>>();
+        runners.map_err(|_| unavailable())
     }
 }
 
@@ -198,12 +334,62 @@ fn known(conn: &Connection, harness: &str, session: &str) -> rusqlite::Result<bo
     Ok(false)
 }
 
+/// The session's newest `count` summaries that have content, oldest first.
+/// Only those rows are read: a long-lived head keeps thousands of summaries.
+/// A row has content as [`render::DecayRenderCompartment::is_no_content`]
+/// says, so rows that only advance coverage are skipped, as the history head
+/// skips them.
+fn newest_summaries(
+    conn: &Connection,
+    harness: &str,
+    session: &str,
+    count: u64,
+) -> rusqlite::Result<Vec<StoredCompartment>> {
+    let mut statement = conn.prepare(
+        "SELECT sequence, start_message, end_message, COALESCE(start_message_id, ''),
+                COALESCE(end_message_id, ''), title, content, p1, p2, p3, p4,
+                importance, episode_type, legacy, created_at
+           FROM compartments
+          WHERE session_id = ?1 AND harness = ?2
+            AND (title <> '' OR content <> '' OR COALESCE(p1, '') <> ''
+                 OR COALESCE(p2, '') <> '' OR COALESCE(p3, '') <> '' OR COALESCE(p4, '') <> '')
+          ORDER BY sequence DESC
+          LIMIT ?3",
+    )?;
+    let mut rows = statement
+        .query_map(params![session, harness, count], |row| {
+            Ok(StoredCompartment {
+                sequence: row.get(0)?,
+                start_message: row.get(1)?,
+                end_message: row.get(2)?,
+                start_message_id: row.get(3)?,
+                end_message_id: row.get(4)?,
+                start_date: None,
+                end_date: None,
+                title: row.get(5)?,
+                content: row.get(6)?,
+                p1: row.get(7)?,
+                p2: row.get(8)?,
+                p3: row.get(9)?,
+                p4: row.get(10)?,
+                importance: row.get(11)?,
+                episode_type: row.get(12)?,
+                legacy: row.get(13)?,
+                created_at: row.get(14)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
 impl Reader {
     fn snapshot(
         &self,
         harness: &str,
         session: &str,
         purpose: Option<&str>,
+        newest: Option<u64>,
     ) -> Result<(Snapshot, Duration), Refusal> {
         // Setup projects already live here. Copy under the lock, never across a database read.
         // After a restart, a session not yet set up has no live project and may return no memories.
@@ -218,10 +404,7 @@ impl Reader {
         let start = Instant::now();
         let tx = conn.transaction().map_err(|_| unavailable())?;
         if !known(&tx, harness, session).map_err(|_| unavailable())? {
-            return Err(error(
-                "unknown_session",
-                "The context store has no record of this session.",
-            ));
+            return Err(unknown_session());
         }
         let project: Option<String> = tx
             .query_row(
@@ -324,8 +507,13 @@ impl Reader {
             }
             Some("front") => {}
             None => {
-                snapshot.summaries = ContextDb::read_compartments(&tx, harness, session)
-                    .map_err(|_| unavailable())?
+                snapshot.summaries = match newest {
+                    Some(count) => {
+                        newest_summaries(&tx, harness, session, count).map_err(|_| unavailable())?
+                    }
+                    None => ContextDb::read_compartments(&tx, harness, session)
+                        .map_err(|_| unavailable())?,
+                }
             }
             _ => unreachable!("purpose validated before opening the store"),
         }
@@ -340,8 +528,19 @@ impl Reader {
     /// budget pressure when a plugin has never recorded a context limit.
     /// Plugin-only sessions have no directory, so project-file history percentage
     /// overrides cannot apply; user and model settings still do.
-    fn query(&self, harness: &str, session: &str, purpose: Option<&str>, budget: u64) -> Reply {
-        let (snapshot, _) = self.snapshot(harness, session, purpose)?;
+    ///
+    /// With `newest`, summaries are not folded: the newest ones read are each
+    /// shown at tier 1, as the history head shows a summary published since
+    /// its baseline (`m[0]`) was built.
+    fn query(
+        &self,
+        harness: &str,
+        session: &str,
+        purpose: Option<&str>,
+        budget: u64,
+        newest: Option<u64>,
+    ) -> Reply {
+        let (snapshot, _) = self.snapshot(harness, session, purpose, newest)?;
         // Tokenizer initialization and all rendering happen after releasing both read transactions.
         let counter = Counter::for_model(snapshot.model.as_deref());
         let settings = self.config.resolve(
@@ -349,7 +548,7 @@ impl Reader {
             snapshot.model.as_deref().unwrap_or(""),
             snapshot.usable,
         );
-        let mut answer = json!({"token_family": counter.family().map_or_else(|| "mc-estimator".to_owned(), |family| format!("{family:?}")), "exact": counter.family().is_some()});
+        let mut answer = counted_by(counter);
         if let Some(purpose) = purpose {
             let memories = if purpose == "front" {
                 // A voice front may receive only persona-marked memories. No such mark exists yet.
@@ -377,44 +576,57 @@ impl Reader {
                 json!({"id": row.id, "category": row.tag, "text": row.content, "tokens": counter.count(&row.content)})
             }).collect());
         } else {
-            let history_budget = (snapshot.usable as f64 * settings.execute_threshold_percentage
-                / 100.0
-                * settings.history_budget_percentage) as u64;
-            let inputs = head::Inputs {
-                counter,
-                summaries: &snapshot.summaries,
-                docs: "",
-                rows: &[],
-                classes: &HashMap::new(),
-                now_ms: 0,
-                gone: &[],
-                history_budget_tokens: history_budget,
-                history_local_budget_tokens: render::history_local_budget(
-                    history_budget as f64,
-                    snapshot.model.as_deref(),
-                ) as u64,
-                memory_budget_tokens: 0,
-                profile_budget_tokens: 0,
+            // Each summary to show, newest first, with the tier it is shown at.
+            let shown: Vec<(&StoredCompartment, u8)> = if newest.is_some() {
+                snapshot.summaries.iter().rev().map(|s| (s, 1)).collect()
+            } else {
+                let history_budget =
+                    (snapshot.usable as f64 * settings.execute_threshold_percentage / 100.0
+                        * settings.history_budget_percentage) as u64;
+                let inputs = head::Inputs {
+                    counter,
+                    summaries: &snapshot.summaries,
+                    docs: "",
+                    rows: &[],
+                    classes: &HashMap::new(),
+                    now_ms: 0,
+                    gone: &[],
+                    history_budget_tokens: history_budget,
+                    history_local_budget_tokens: render::history_local_budget(
+                        history_budget as f64,
+                        snapshot.model.as_deref(),
+                    ) as u64,
+                    memory_budget_tokens: 0,
+                    profile_budget_tokens: 0,
+                };
+                let baseline = head::fold(&inputs, None);
+                baseline
+                    .summary_items
+                    .iter()
+                    .rev()
+                    .map(|item| {
+                        let summary = snapshot
+                            .summaries
+                            .iter()
+                            .find(|s| s.sequence.to_string() == item.compartment_id)
+                            .expect("rendered summary");
+                        (summary, item.tier)
+                    })
+                    .collect()
             };
-            let baseline = head::fold(&inputs, None);
             let mut used = 0;
             let mut summaries = Vec::new();
-            for item in baseline.summary_items.iter().rev() {
-                let summary = &snapshot
-                    .summaries
-                    .iter()
-                    .find(|s| s.sequence.to_string() == item.compartment_id)
-                    .expect("rendered summary");
+            for (summary, tier) in shown {
                 let text = render::render_compartment_at_tier(
-                    &render::DecayRenderCompartment::from(*summary),
-                    item.tier,
+                    &render::DecayRenderCompartment::from(summary),
+                    tier,
                 );
                 let tokens = counter.count(&text);
                 if used + tokens > budget {
                     break;
                 }
                 used += tokens;
-                summaries.push(json!({"id": item.compartment_id, "start": summary.start_message, "end": summary.end_message, "title": summary.title, "text": text, "tokens": tokens}));
+                summaries.push(json!({"id": summary.sequence.to_string(), "start": summary.start_message, "end": summary.end_message, "title": summary.title, "text": text, "tokens": tokens}));
             }
             answer["summaries"] = Value::Array(summaries);
         }
