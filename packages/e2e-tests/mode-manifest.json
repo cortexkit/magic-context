@@ -2765,12 +2765,12 @@
                 {
                     "host": "pi",
                     "reason": "Pi has no native subagent session mode; Magic Context children are isolated subprocesses",
-                    "contract_ref": "packages/pi-plugin/PARITY.md#1-pi-has-no-native-subagents--no-reduced-mode-fullfeaturemode-gate"
+                    "contract_ref": "packages/pi-plugin/PARITY.md#1-subagents-on-pi-and-oh-my-pi"
                 },
                 {
                     "host": "omp",
                     "reason": "OMP uses the Pi-compatible isolated child-process model rather than parent-linked sessions",
-                    "contract_ref": "packages/pi-plugin/PARITY.md#1-pi-has-no-native-subagents--no-reduced-mode-fullfeaturemode-gate"
+                    "contract_ref": "packages/pi-plugin/PARITY.md#1-subagents-on-pi-and-oh-my-pi"
                 }
             ]
         },

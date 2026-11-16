@@ -16,7 +16,7 @@ runtimes differ. "Same effective behavior, different mechanism" is the rule.
 
 ---
 
-## 1. Pi has no native subagents → no reduced-mode (`fullFeatureMode`) gate
+## 1. Subagents on Pi and Oh My Pi
 
 **OpenCode:** users spawn native subagents (via `task()`), which share the
 plugin process and reach `experimental.chat.messages.transform`. OpenCode gates
@@ -33,18 +33,20 @@ process. The full extension uses Pi's public child-session lifecycle events plus
 process-shared `AsyncLocalStorage` to suppress only the child while allowing
 unrelated same-process sessions to initialize normally.
 
-**Consequence:** `is_subagent` is **never written `true`** for any Pi session
-that reaches the context-handler pipeline. Separate child processes load the lean
-entry, while in-process child initialization is suppressed before the normal
-context pipeline is registered.
-There is nothing to gate, so Pi does NOT need OpenCode's `fullFeatureMode`
-reduced-mode enforcement in `context-handler.ts`. The vestigial `!isSubagent`
-checks that exist in the Pi context handler are harmless (always take the
-non-subagent branch); they are not the enforcement OpenCode has and adding that
-gate would be dead code.
+**Oh My Pi:** its own spawned sessions (`task` children, eval agents, `/tan`
+clones) run in the parent's process with a new extension instance and reach the
+pipeline. Oh My Pi names them: `ctx.agent.kind` is `"sub"`. At a session's first
+event (`session_start`, or `before_agent_start` when the extension loaded later)
+the plugin records such a session as a subagent (`pi-agent-identity.ts`), and the
+context handler then gives it the subagent column of ARCHITECTURE.md's session
+modes: no history head (`m[0]`/`m[1]`, so no docs, profile or memories), no
+historian, no note nudges or search hints, and every execute pass is a rebuild
+permission. A Pi session is never recorded as a subagent.
 
-> Recurring false positive: blind councils pattern-match OpenCode's subagent
-> gate onto Pi and report "reduced mode not enforced." It does not apply.
+**Tags, guidance and reminders** follow neither flag: they exist while the
+session can call `ctx_reduce`, read from the request's tool list on every pass
+(`ctx-reduce-callable-pi.ts`). A plan-mode `task` child, which Oh My Pi starts
+without extension tools, gets none of them.
 
 ---
 
