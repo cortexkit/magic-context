@@ -18,9 +18,11 @@
 //! saved (each batch's `verify.trajectory.json`, its final message) and
 //! checks every verdict the way the module checks it, without writing
 //! anything: the module's manifest parse, then for a confirmation the cited
-//! lines read with git at the batch's commit, the name, number and derive
-//! checks, and the live-branch check for a memory without a line of its
-//! own. It writes one report, `<out>/verify.apply.json`: each memory's
+//! lines read with git at the batch's commit, the checks that they hold
+//! every name and number the memory states and that a `derive`'s arithmetic
+//! holds from numbers they hold ([`super::tasks::verify`]), and the
+//! live-branch check for a memory without a line of its own. It writes one
+//! report, `<out>/verify.apply.json`: each memory's
 //! verdict and outcome (`confirmed`, `skipped`, `update` or `archive`), with
 //! why a skip is one and the cites and derive the reply gave, and totals per
 //! outcome and per kind of skip. The live branches are read as they are when
