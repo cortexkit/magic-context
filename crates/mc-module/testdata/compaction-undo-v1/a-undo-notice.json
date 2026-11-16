@@ -1,0 +1,100 @@
+{
+  "conditions": {
+    "context_window": 1000000,
+    "last_prompt_tokens": 123000,
+    "model": {
+      "model": "claude-opus-5",
+      "provider": "anthropic"
+    },
+    "output_reserve": 32000,
+    "rules": {
+      "history_edit_cost": "suffix",
+      "signed_parts": "none"
+    },
+    "system_tokens": {
+      "count": 5965,
+      "exact": false
+    },
+    "tools_tokens": {
+      "count": 10047,
+      "exact": false
+    }
+  },
+  "entries": [
+    {
+      "digest": "e646b0aff2045544c4d899c0aa6fe90674b75e775b5e521fcaa8245559e3c689",
+      "mid": "msg_00000015",
+      "ordinal": 16,
+      "parts": [
+        {
+          "digest": "f4222a2fd40a3aa9d2c8e44d468cc08805f5148ed583a9bcfea4ca1147bb0021",
+          "id": "0",
+          "kind": "reasoning",
+          "text_bytes": 1500
+        },
+        {
+          "digest": "2fcfb82faa6e6c4322cc2ae72267dc22e37a43c52b2aead022621d9be5020751",
+          "id": "1",
+          "kind": "text",
+          "tag": 23,
+          "text": "[17] keeps plans runner reads view after cut the each message window entries and from cut message and after view plans window the each entries runner message keeps maps keeps the view plans each message view maps and maps request reads window reads request provider window plans runner entries runner after into provider each maps view after window message keeps the view from view message window map",
+          "tokens": {
+            "count": 103
+          }
+        },
+        {
+          "call_id": "call_15",
+          "digest": "626ae17dd58f258dacbd1fa19d281835294f1a5beeecb294726332007a1879bf",
+          "id": "2",
+          "input": {
+            "command": "rg -n 'pattern 15' src",
+            "description": "Search"
+          },
+          "kind": "tool",
+          "name": "bash",
+          "output_bytes": 4000,
+          "status": "completed",
+          "tag": 24,
+          "tokens": {
+            "input": 28,
+            "output": 1032
+          }
+        }
+      ],
+      "reasoning_tokens": {
+        "count": 169,
+        "measured": false
+      },
+      "role": "assistant",
+      "usage": {
+        "cache_read_tokens": 120000,
+        "cache_write_tokens": 1000,
+        "output_tokens": 300,
+        "prompt_tokens": 123000
+      },
+      "written_at": 1015
+    }
+  ],
+  "events": [
+    {
+      "event": "transcript_changed",
+      "from_ordinal": 16
+    },
+    {
+      "event": "view_refused",
+      "refusal": {
+        "code": "unknown_message",
+        "mid": "msg_00000017"
+      },
+      "version": 2
+    }
+  ],
+  "newest": {
+    "digest": "e646b0aff2045544c4d899c0aa6fe90674b75e775b5e521fcaa8245559e3c689",
+    "mid": "msg_00000015",
+    "ordinal": 16
+  },
+  "seq": 1,
+  "token_family": "claude-v5/1",
+  "token_family_exact": true
+}

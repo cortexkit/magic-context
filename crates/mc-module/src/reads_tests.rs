@@ -164,3 +164,51 @@ async fn by_tags_error_on_second_of_three_requests_fails_the_read() {
         );
     }
 }
+
+/// THALAMUS's `compaction-undo-v1` bodies from Agent Runner (an undo behind
+/// the cut, a stale window, and an apply_view refusal under a code this
+/// contract version doesn't name) decode through ck-mc's own types.
+#[test]
+fn thalamus_compaction_undo_v1_decode() {
+    use cortexkit_role_compaction::notice::{Event, NoticeRequest};
+    use cortexkit_role_compaction::view::{ApplyViewAnswer, ViewRefusal};
+    use sha2::{Digest, Sha256};
+    let files: [(&str, &[u8]); 3] = [
+        (
+            "a-undo-notice.json",
+            include_bytes!("../testdata/compaction-undo-v1/a-undo-notice.json"),
+        ),
+        (
+            "b-stale-window-notice.json",
+            include_bytes!("../testdata/compaction-undo-v1/b-stale-window-notice.json"),
+        ),
+        (
+            "c-apply-view-edit-before-cut.json",
+            include_bytes!("../testdata/compaction-undo-v1/c-apply-view-edit-before-cut.json"),
+        ),
+    ];
+    let sums = include_str!("../testdata/compaction-undo-v1/SHA256SUMS");
+    for (name, bytes) in files {
+        let line = format!("{:x}  {name}", Sha256::digest(bytes));
+        assert!(sums.lines().any(|sum| sum == line), "{name}");
+    }
+    let undo: NoticeRequest = serde_json::from_slice(files[0].1).unwrap();
+    assert!(undo
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::TranscriptChanged { from_ordinal: 16 })));
+    assert!(undo.events.iter().any(|event| matches!(
+        event,
+        Event::ViewRefused { version: 2, refusal: ViewRefusal::UnknownMessage { mid } } if mid == "msg_00000017"
+    )));
+    let stale: NoticeRequest = serde_json::from_slice(files[1].1).unwrap();
+    assert!(stale.events.iter().any(|event| matches!(
+        event,
+        Event::ViewRefused { version: 3, refusal: ViewRefusal::UnknownPart { .. } }
+    )));
+    let refused: ApplyViewAnswer = serde_json::from_slice(files[2].1).unwrap();
+    let ApplyViewAnswer::Refused { refusal } = refused else {
+        panic!("not a refusal: {refused:?}")
+    };
+    println!("edit_before_cut decodes as {refusal:?}");
+}

@@ -1,0 +1,8 @@
+{
+  "answer": "refused",
+  "refusal": {
+    "code": "edit_before_cut",
+    "index": 2,
+    "mid": "msg_00000017"
+  }
+}
