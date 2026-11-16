@@ -1,15 +1,19 @@
 //! The module's connection to the bus ([`Bus`]), and its `docs_proposal` v1
 //! notices, which say that a project has a new docs-upkeep proposal
 //! ([`crate::docs_proposals`]). The same connection carries the
-//! `memory_changed` wakes ([`crate::memory_changed`]) and the watch on
-//! Entorhinal's change markers ([`crate::entorhinal_changes`]).
+//! `memory_changed` wakes ([`crate::memory_changed`]), the watch on
+//! Entorhinal's change markers ([`crate::entorhinal_changes`]) and the
+//! reader of the runners' run-end events ([`crate::run_ends`]).
 //!
 //! The daemon serves no call that publishes a module's event, so the module
 //! publishes to the bus itself, as Plexus does: it opens a route to ck-bus
 //! (`ckbus`, the NATS credential module) over subc, has it issue a NATS
 //! credential, connects with it (ck-bus signs each connection nonce), and
 //! renews it before it expires. Credential material is never logged, and
-//! each credential's `Debug` leaves it out.
+//! each credential's `Debug` leaves it out. ck-bus keeps one live credential
+//! per module: issuing a second revokes the first and closes its
+//! connections. So everything in the module that uses the bus shares the
+//! one session [`Bus`] holds rather than opening its own.
 //!
 //! A notice carries no body. Its subject is
 //! `ck.<account>.event.magic-context.docs_proposal.v1`, its message id the
@@ -21,15 +25,26 @@
 //! that stops being pending before it is sent is never sent. The bus being
 //! down, or ck-bus not installed, is logged once and leaves the rows unsent;
 //! nothing else fails.
+//!
+//! A runner's run-end event carries no body on the bus either; it names its
+//! session in a `session_ref` header, which is all the reader needs. The
+//! reader binds its durable ([`crate::run_ends::DURABLE`]) with async-nats
+//! directly, on the shared session's connection: `cortexkit-bus-nats` binds
+//! a module's cursor only to `m_{module}`, and its cursor fails on a message
+//! that lacks a `Nats-Msg-Id` or `Ck-Content-Digest` header without keeping
+//! it to acknowledge, so the durable would redeliver that message forever.
+//! It pulls one event at a time with explicit acknowledgement
+//! ([`spawn_run_end_reader`]).
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_nats::jetstream::consumer::{pull, Consumer};
 use async_trait::async_trait;
 use base64::Engine as _;
 use cortexkit_bus_naming::AccountNames;
@@ -37,6 +52,7 @@ use cortexkit_bus_nats::{ConnectConfig, NatsConnection};
 use cortexkit_bus_trait::{
     BusError, ContentDigest, Headers, PublishReceipt, Register, RegisterWatch, Stream,
 };
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerIdentity, ConsumerOptions, SubcConsumer};
@@ -44,6 +60,7 @@ use subc_protocol::{BindIdentity, RouteTarget};
 
 use crate::context_db::ContextDb;
 use crate::docs_proposals::{self as proposals, Proposal};
+use crate::run_ends::{self, RunEnds};
 
 /// The module ck-bus runs as.
 const CKBUS: &str = "ckbus";
@@ -581,6 +598,9 @@ pub(crate) struct BusSession {
     pub(crate) publisher: Box<dyn EventPublisher>,
     registers: Box<dyn Registers>,
     route: Option<Arc<dyn CredentialProvider>>,
+    /// The NATS connection itself, for the run-end reader; a test's session
+    /// has none.
+    connection: Option<NatsConnection>,
 }
 
 impl BusSession {
@@ -594,6 +614,7 @@ impl BusSession {
             publisher,
             registers: Box::new(NoRegisters),
             route: None,
+            connection: None,
         }
     }
 
@@ -645,10 +666,11 @@ async fn build_session(
         account,
         registers: Box::new(NatsRegisters(connection.clone())),
         publisher: Box::new(NatsEventPublisher {
-            connection,
+            connection: connection.clone(),
             stream_name,
         }),
         route: Some(route),
+        connection: Some(connection),
     })
 }
 
@@ -684,13 +706,18 @@ impl SessionFactory for ProductionSessions {
 }
 
 /// The module's one connection to the bus, shared by everything that
-/// publishes or watches: the docs-proposal notices ([`DocsNotices`]), the
-/// memory wakes ([`crate::memory_changed`]) and the watch on Entorhinal's
-/// changes ([`crate::entorhinal_changes`]). It is opened when first needed
-/// and renewed before its credential expires.
+/// publishes, watches or reads: the docs-proposal notices ([`DocsNotices`]),
+/// the memory wakes ([`crate::memory_changed`]), the watch on Entorhinal's
+/// changes ([`crate::entorhinal_changes`]) and the run-end reader
+/// ([`spawn_run_end_reader`]). It is opened when first needed and renewed
+/// before its credential expires.
 pub struct Bus {
     factory: Arc<dyn SessionFactory>,
     session: tokio::sync::Mutex<Option<BusSession>>,
+    /// Advances each time the session gets a new connection, opened or
+    /// renewed, so the run-end reader can tell that it is bound on an older
+    /// one.
+    generation: AtomicU64,
 }
 
 /// The bus's open session, held until dropped.
@@ -723,6 +750,7 @@ impl Bus {
         Self {
             factory,
             session: tokio::sync::Mutex::new(None),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -732,8 +760,12 @@ impl Bus {
     pub(crate) async fn session(&self) -> Result<SessionGuard<'_>, String> {
         let mut session = self.session.lock().await;
         let ready = async {
+            // Whether the session got a new connection: opened, or renewed,
+            // since a renewal opens a new connection too.
+            let mut connected = false;
             if session.is_none() {
                 *session = Some(self.factory.open().await?);
+                connected = true;
             }
             let active = session.as_mut().expect("opened session");
             if active
@@ -742,6 +774,10 @@ impl Bus {
                 .is_some_and(|credential| credential.exp - now_ms() / 1000 < RENEW_WITHIN_S)
             {
                 self.factory.renew(active).await?;
+                connected = true;
+            }
+            if connected {
+                self.generation.fetch_add(1, Ordering::SeqCst);
             }
             Ok::<(), String>(())
         }
@@ -759,6 +795,16 @@ impl Bus {
     /// watch on it ended, so its connection may be gone.
     pub(crate) async fn discard(&self) {
         *self.session.lock().await = None;
+    }
+
+    /// Drop the session after the run-end reader found its connection lost,
+    /// unless it got a new connection after `generation`, which another user
+    /// may already be using.
+    async fn forget(&self, generation: u64) {
+        let mut session = self.session.lock().await;
+        if self.generation.load(Ordering::SeqCst) == generation {
+            *session = None;
+        }
     }
 }
 
@@ -819,6 +865,170 @@ impl DocsNotices {
                 }
             }
         }
+    }
+}
+
+/// How long one pull of the run-end durable waits for an event.
+const PULL_EXPIRES: Duration = Duration::from_secs(10);
+
+/// Read the run-end events of ck-mc's child runs over `bus`, the process's
+/// one bus session, and wake the waits in `ends` ([`crate::run_ends`]), for
+/// as long as the process runs.
+pub fn spawn_run_end_reader(bus: Arc<Bus>, ends: Arc<RunEnds>) {
+    tokio::spawn(run_ends::read(ends, Arc::new(RunEndDurable { bus })));
+}
+
+/// The run-end durable, bound over the bus's connection.
+pub(crate) struct RunEndDurable {
+    pub(crate) bus: Arc<Bus>,
+}
+
+#[async_trait]
+impl run_ends::Durable for RunEndDurable {
+    async fn bind(&self) -> Result<Box<dyn run_ends::Cursor>, String> {
+        let (generation, connection, consumer) = bind_run_ends(&self.bus).await?;
+        Ok(Box::new(RunEndCursor {
+            bus: self.bus.clone(),
+            generation,
+            connection,
+            consumer,
+            in_flight: None,
+        }))
+    }
+}
+
+/// Bind the run-end durable on the bus's current connection, with the
+/// connection's generation.
+async fn bind_run_ends(bus: &Bus) -> Result<(u64, NatsConnection, Consumer<pull::Config>), String> {
+    let (generation, connection, stream) = {
+        let session = bus.session().await?;
+        let active: &BusSession = &session;
+        let connection = active.connection.clone().ok_or("nats_connection_absent")?;
+        (
+            bus.generation.load(Ordering::SeqCst),
+            connection,
+            active.account.streams().event.clone(),
+        )
+    };
+    let consumer = async_nats::jetstream::new(connection.client())
+        .get_consumer_from_stream::<pull::Config, _, _>(run_ends::DURABLE, &stream)
+        .await
+        .map_err(|error| binding_refused(&error))?;
+    Ok((generation, connection, consumer))
+}
+
+/// Why the run-end durable could not be bound, for the log.
+fn binding_refused(error: &async_nats::jetstream::stream::ConsumerError) -> String {
+    use async_nats::jetstream::stream::ConsumerErrorKind;
+    use async_nats::jetstream::ErrorCode;
+    match error.kind() {
+        ConsumerErrorKind::JetStream(error)
+            if error.error_code() == ErrorCode::CONSUMER_NOT_FOUND =>
+        {
+            "the durable is not provisioned".into()
+        }
+        ConsumerErrorKind::JetStream(error)
+            if error.error_code() == ErrorCode::STREAM_NOT_FOUND =>
+        {
+            "the event stream is missing".into()
+        }
+        ConsumerErrorKind::JetStream(error) => {
+            format!("nats_consumer_refused {}", error.error_code().0)
+        }
+        ConsumerErrorKind::TimedOut => "nats_consumer_info_timeout".into(),
+        _ => "nats_consumer_bind_failed".into(),
+    }
+}
+
+/// The run-end durable, bound on one connection of the bus's session.
+struct RunEndCursor {
+    bus: Arc<Bus>,
+    generation: u64,
+    connection: NatsConnection,
+    consumer: Consumer<pull::Config>,
+    /// The event `next` returned and the reader has not acknowledged yet.
+    in_flight: Option<async_nats::jetstream::Message>,
+}
+
+#[async_trait]
+impl run_ends::Cursor for RunEndCursor {
+    async fn next(&mut self) -> Result<Option<run_ends::Delivery>, String> {
+        // Opening the session renews its credential when that is due, which
+        // moves the session to a new connection; the durable is then bound
+        // again on that one.
+        let current = {
+            let _session = self.bus.session().await?;
+            self.bus.generation.load(Ordering::SeqCst)
+        };
+        if current != self.generation {
+            (self.generation, self.connection, self.consumer) = bind_run_ends(&self.bus).await?;
+        }
+        let pulled = self.pull().await;
+        if pulled.is_err()
+            && self.connection.client().connection_state()
+                != async_nats::connection::State::Connected
+        {
+            // A lost connection is not reconnected: the next use of the bus
+            // opens a new session.
+            self.bus.forget(self.generation).await;
+        }
+        pulled
+    }
+
+    async fn ack(&mut self) -> Result<(), String> {
+        let Some(message) = self.in_flight.take() else {
+            return Ok(());
+        };
+        message
+            .double_ack()
+            .await
+            .map_err(|_| "nats_ack_failed".to_owned())
+    }
+}
+
+impl RunEndCursor {
+    /// One pull of at most one event, waiting up to [`PULL_EXPIRES`].
+    async fn pull(&mut self) -> Result<Option<run_ends::Delivery>, String> {
+        let mut batch = self
+            .consumer
+            .fetch()
+            .max_messages(1)
+            .expires(PULL_EXPIRES)
+            .messages()
+            .await
+            .map_err(|error| format!("nats_pull_failed ({})", error.kind()))?;
+        let Some(message) = batch.next().await else {
+            return Ok(None);
+        };
+        let message = message.map_err(|_| "nats_pull_failed".to_owned())?;
+        // The publisher's message id, which a redelivery repeats; the stream
+        // sequence names the same message when a publisher set none.
+        let headers: cortexkit_bus_trait::Headers = message
+            .headers
+            .iter()
+            .flat_map(|headers| headers.iter())
+            .filter_map(|(name, values)| {
+                let name: &str = name.as_ref();
+                values
+                    .last()
+                    .map(|value| (name.to_owned(), value.as_str().to_owned()))
+            })
+            .collect();
+        let id = headers.get("Nats-Msg-Id").cloned().or_else(|| {
+            message
+                .info()
+                .ok()
+                .map(|info| format!("stream:{}", info.stream_sequence))
+        });
+        // Only the headers are kept: the event is a wake, and its payload, if
+        // a publisher ever sent one, is never read.
+        let delivery = run_ends::Delivery {
+            id,
+            subject: message.subject.to_string(),
+            headers,
+        };
+        self.in_flight = Some(message);
+        Ok(Some(delivery))
     }
 }
 

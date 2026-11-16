@@ -411,3 +411,59 @@ impl SessionFactory for TestSessions {
         Ok(())
     }
 }
+
+/// ck-bus revokes a module's credential when it issues another, so every
+/// user of the bus in the process goes through the one session.
+#[tokio::test(start_paused = true)]
+async fn every_user_of_the_bus_shares_one_session() {
+    let test_bus = TestBus::new();
+    let bus = test_bus.bus();
+    // The run-end reader opens the session. A test's session has no NATS
+    // connection, so binding stops there.
+    let refused = run_ends::Durable::bind(&RunEndDurable { bus: bus.clone() })
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(refused, "nats_connection_absent");
+    // The memory wakes publish on it.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap());
+    let wakes = Arc::new(crate::memory_changed::MemoryWakes::default());
+    let mut publisher = crate::memory_changed::publisher_for(&db, bus.clone(), &wakes);
+    crate::memory_changed::tests::agent_save(&db, "pj-a", "Views are immutable.");
+    assert_eq!(publisher.round(&db, wakes.take()).await.len(), 1);
+    // The watch on Entorhinal's changes opens its watch on it.
+    let state = Arc::new(crate::entorhinal_changes::WatchState::default());
+    let follow = tokio::spawn(crate::entorhinal_changes::run(bus.clone(), state, || {}));
+    while test_bus.watched.lock().unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    follow.abort();
+    // The docs notices publish on it.
+    let (fixture, id) = proposed();
+    DocsNotices::over(bus).publish(&fixture.db).await;
+    assert!(fixture.proposal(id).published_at.is_some());
+    assert_eq!(test_bus.opened.load(Ordering::Relaxed), 1);
+}
+
+/// The run-end reader forgets a session whose connection it lost, but never
+/// one that got a new connection since it bound, which other users may
+/// already be on.
+#[tokio::test]
+async fn a_lost_connection_forgets_only_the_session_it_was_on() {
+    let test_bus = TestBus::new();
+    let bus = test_bus.bus();
+    drop(bus.session().await.unwrap());
+    let first = bus.generation.load(Ordering::SeqCst);
+    // Another user dropped the session and the next one opened a new one.
+    bus.discard().await;
+    drop(bus.session().await.unwrap());
+    let second = bus.generation.load(Ordering::SeqCst);
+    assert_ne!(first, second);
+    bus.forget(first).await;
+    drop(bus.session().await.unwrap());
+    assert_eq!(test_bus.opened.load(Ordering::Relaxed), 2, "kept");
+    bus.forget(second).await;
+    drop(bus.session().await.unwrap());
+    assert_eq!(test_bus.opened.load(Ordering::Relaxed), 3, "reopened");
+}

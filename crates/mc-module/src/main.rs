@@ -104,8 +104,10 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         let _ = mc_module::engram_catalog::write_catalog_at_startup(data_dir);
     }
     let child_scopes = Arc::new(ChildScopes::new(module_id.clone()));
+    let client = SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes));
+    let run_end_waits = client.run_end_waits();
     let module = Module::with_journal(
-        SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes)),
+        client,
         Config::Files(Loader::from_environment()),
         Some(db),
         Some(store),
@@ -114,12 +116,15 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     );
     module.spawn_upkeep();
     module.spawn_memory_sync();
-    // One connection to the bus, through ck-bus: the dreamer's rounds
-    // announce new docs proposals on it, memory changes wake other modules,
-    // and Entorhinal's change markers are followed.
+    // One connection to the bus, through ck-bus, which revokes a module's
+    // credential when it issues another: the dreamer's rounds announce new
+    // docs proposals on it, memory changes wake other modules, Entorhinal's
+    // change markers are followed, and the runners' run-end events wake the
+    // waits on summary and dreamer runs.
     let bus = Arc::new(mc_module::bus::Bus::through_ckbus(connection_file.clone()));
     module.publish_docs_notices_with(mc_module::bus::DocsNotices::over(Arc::clone(&bus)));
     module.spawn_memory_wakes(Arc::clone(&bus));
+    mc_module::bus::spawn_run_end_reader(Arc::clone(&bus), run_end_waits);
     module.spawn_dreamer();
     module.spawn_legacy_projects();
     module.spawn_entorhinal_follow(bus);

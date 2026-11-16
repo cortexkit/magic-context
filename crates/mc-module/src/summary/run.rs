@@ -49,7 +49,6 @@ const TEMPERATURE: f64 = 0.1;
 const MAX_OUTPUT_TOKENS: u64 = 65_536;
 /// How long a run may take before it counts as failed.
 const RUN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// What a child session's id adds to its parent's: each summarizer attempt
 /// runs in a child of its own, `<parent session>:mc-summary:<attempt>`, so
 /// the summarizer sees exactly its system prompt and one user message, and a
@@ -849,6 +848,9 @@ async fn send_and_wait_inner<C: RunnerClient>(
     // The routing decision is a typed send field: the runner fixes it
     // for the run and forwards it when it gets an account from routing.
     request.route_decision_id = Some(how.decision_id.to_owned());
+    // Registered before the first send, so a run-end event that arrives
+    // while a send is being answered ends the next pause at once.
+    let watch = client.run_ends().map(|ends| ends.watch(&child.session));
     let mut resent = false;
     let reply = loop {
         let reply =
@@ -882,14 +884,12 @@ async fn send_and_wait_inner<C: RunnerClient>(
             if tokio::time::Instant::now() >= how.deadline {
                 return Err("the run did not finish in time".to_owned().into());
             }
-            tokio::time::sleep_until(
-                (tokio::time::Instant::now() + POLL_INTERVAL).min(how.deadline),
-            )
-            .await;
+            crate::run_ends::pause(watch.as_ref(), how.deadline).await;
         } else {
             break reply;
         }
     };
+    drop(watch);
     // A runner may answer a run-starting send as soon as it is stored,
     // before the prompt reaches its host: `pending` with the run's id. That
     // run is followed like an active one, even if it finished between polls.
@@ -975,6 +975,10 @@ pub(crate) mod session_class_tests;
 #[cfg(test)]
 #[path = "pending_send_tests.rs"]
 mod pending_send_tests;
+
+#[cfg(test)]
+#[path = "run_wake_tests.rs"]
+mod run_wake_tests;
 
 #[cfg(test)]
 #[path = "never_ran_tests.rs"]
@@ -1161,12 +1165,14 @@ fn still_running(state: &str) -> bool {
 }
 
 /// Wait for a run's result until `deadline`, the run's overall limit. The
-/// wait for each answer is bounded by it too. A `paused` run has not ended
-/// (llm-runner §6): a runner may pause it, for example until an account has
-/// room, and continue it by itself, so it is waited for like an active one.
-/// At the deadline, status supplies waits that nonterminal results omit.
-/// A person-owned wait is never a failed attempt; runner-owned waits keep
-/// the existing deadline and classification.
+/// wait for each answer is bounded by it too. Between reads it sleeps the
+/// poll interval, or less when the runner's run-end event wakes it
+/// ([`crate::run_ends`]). A `paused` run has not ended (llm-runner §6): a
+/// runner may pause it, for example until an account has room, and continue
+/// it by itself, so it is waited for like an active one. At the deadline,
+/// status supplies waits that nonterminal results omit. A person-owned wait
+/// is never a failed attempt; runner-owned waits keep the existing deadline
+/// and classification.
 async fn wait_for<C: RunnerClient>(
     client: &C,
     child: &Child,
@@ -1174,6 +1180,10 @@ async fn wait_for<C: RunnerClient>(
     deadline: tokio::time::Instant,
     send: SendKind,
 ) -> Result<RunResult, SummaryError> {
+    // Registered before the first read: an event that comes after that read
+    // wakes the next pause, and one that came before it means the read
+    // already sees the run's end.
+    let watch = client.run_ends().map(|ends| ends.watch(&child.session));
     let mut last: Option<RunResult> = None;
     loop {
         let answer = tokio::time::timeout_at(
@@ -1196,7 +1206,7 @@ async fn wait_for<C: RunnerClient>(
         if tokio::time::Instant::now() >= deadline {
             return timed_out(client, child, run_id, last, send).await;
         }
-        tokio::time::sleep_until((tokio::time::Instant::now() + POLL_INTERVAL).min(deadline)).await;
+        crate::run_ends::pause(watch.as_ref(), deadline).await;
     }
 }
 

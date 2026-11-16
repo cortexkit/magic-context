@@ -1,0 +1,12 @@
+{
+  "body": "{\"at_ms\":1,\"run_id\":\"r1\",\"seq\":3,\"session_ref\":\"32db1a5342168526c10b5dedf01c1760\",\"v\":1}",
+  "headers": {
+    "epoch": "9ff791461dcb486a0d391edf3c54fbde",
+    "kind": "run.started",
+    "run_id": "r1",
+    "seq": "3",
+    "session_ref": "32db1a5342168526c10b5dedf01c1760"
+  },
+  "nats_msg_id": "57393f4fb777925d63681921a8d3e8db138e7ced4e65bf8e97e311f30f2f15f1",
+  "subject": "ck.box_sample.event.broca.run.started.v1"
+}

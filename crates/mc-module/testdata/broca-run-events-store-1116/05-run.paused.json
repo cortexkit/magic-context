@@ -1,0 +1,12 @@
+{
+  "body": "{\"at_ms\":1794790631758,\"pause_reason\":\"auth_required\",\"run_id\":\"r2\",\"seq\":7,\"session_ref\":\"32db1a5342168526c10b5dedf01c1760\",\"v\":1}",
+  "headers": {
+    "epoch": "1624d0ef0d1e218eb93aed2001791fd7",
+    "kind": "run.paused",
+    "run_id": "r2",
+    "seq": "7",
+    "session_ref": "32db1a5342168526c10b5dedf01c1760"
+  },
+  "nats_msg_id": "6c10e78e7bcff60c38c405d316e0485dcf8d92975f8520c411ae4c18dbacf936",
+  "subject": "ck.box_sample.event.broca.run.paused.v1"
+}

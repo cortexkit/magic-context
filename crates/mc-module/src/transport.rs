@@ -249,6 +249,9 @@ pub struct SubcRunnerClient {
     child_scopes: Arc<ChildScopes>,
     runner_capabilities: crate::runner_capabilities::RunnerCapabilities,
     routing_capabilities: crate::routing::Capabilities,
+    /// The waits on summary and dreamer child runs, which the bus's run-end
+    /// reader wakes ([`crate::bus::spawn_run_end_reader`]).
+    run_ends: Arc<crate::run_ends::RunEnds>,
 }
 
 impl SubcRunnerClient {
@@ -259,7 +262,14 @@ impl SubcRunnerClient {
             child_scopes,
             runner_capabilities: Default::default(),
             routing_capabilities: Default::default(),
+            run_ends: Arc::default(),
         }
+    }
+
+    /// The waits on this client's child runs, for the reader that wakes
+    /// them.
+    pub fn run_end_waits(&self) -> Arc<crate::run_ends::RunEnds> {
+        Arc::clone(&self.run_ends)
     }
 
     /// An llm-runner call on a child's route, opened under ck-mc's child
@@ -510,6 +520,10 @@ impl crate::routing::Router for SubcRunnerClient {
 impl RunnerClient for SubcRunnerClient {
     fn runner_setup(&self, runner: &str) {
         self.runner_capabilities.forget(runner);
+    }
+
+    fn run_ends(&self) -> Option<&crate::run_ends::RunEnds> {
+        Some(&self.run_ends)
     }
 
     async fn notice_keep(&self, session: &SessionRef) -> bool {

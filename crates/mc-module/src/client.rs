@@ -102,6 +102,12 @@ impl std::fmt::Display for ClientError {
 pub trait RunnerClient: Send + Sync + 'static {
     /// Setup can signal a runner restart without a consumer reconnect.
     fn runner_setup(&self, _runner: &str) {}
+    /// The waits on ck-mc's child runs and the reader that wakes them
+    /// ([`crate::run_ends`]). Without one, a wait reads its run every
+    /// [`crate::run_ends::FAST_POLL`].
+    fn run_ends(&self) -> Option<&crate::run_ends::RunEnds> {
+        None
+    }
     /// Whether this session's runner marks notices carrying the person's words.
     /// Discovery failure leaves automatic notice reclaim disabled.
     fn notice_keep(&self, _session: &SessionRef) -> impl Future<Output = bool> + Send {

@@ -112,6 +112,7 @@ pub mod reduce;
 pub mod rekey;
 pub mod route;
 pub mod routing;
+pub mod run_ends;
 pub mod runner_capabilities;
 pub mod search;
 pub mod session;
