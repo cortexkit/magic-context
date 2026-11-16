@@ -524,7 +524,7 @@ mod tests {
 
     /// A run reads the bodies of the references it shows from `context.db`
     /// and needs no other summary's: here the store holds the chosen ones
-    /// alone, and the session holds no row.
+    /// alone, and no summary's body is held in memory.
     #[test]
     fn a_run_reads_only_the_bodies_of_the_references_it_shows() {
         let dir = tempfile::tempdir().unwrap();
