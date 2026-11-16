@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { COMPRESS_CUES_SYSTEM_PROMPT } from "./compress-cues-prompt";
 import { MURAL_FONT_GLYPHS, MURAL_FONT_REPLACEMENT_GLYPH } from "./mural-font.generated";
 import {
+    drawableMuralCue,
     MURAL_CELL_WIDTH,
     MURAL_HEIGHT,
     MURAL_LINE_PITCH,
@@ -10,7 +11,6 @@ import {
     MURAL_VISION_TILE,
     MURAL_WIDTH,
     type MuralRenderEntry,
-    drawableMuralCue,
     muralImageTokenEstimateForDimensions,
     renderMural,
 } from "./render-mural";
@@ -303,9 +303,7 @@ describe("cues the mural font cannot draw", () => {
         for (const perCategory of [24, 80] as const) {
             const result = renderMural(drawableTodayPool(perCategory));
             expect(result.undrawableIds).toEqual([]);
-            expect(createHash("sha256").update(result.png).digest("hex")).toBe(
-                before[perCategory],
-            );
+            expect(createHash("sha256").update(result.png).digest("hex")).toBe(before[perCategory]);
         }
         expect(renderMural(drawableTodayPool(80)).droppedIds.length).toBeGreaterThan(0);
     });
@@ -356,9 +354,7 @@ describe("cues the mural font cannot draw", () => {
         ];
         // Precomposed and already-decomposed accents, curly quotes, an en dash, an
         // ellipsis, fullwidth Latin and a narrow no-break space.
-        const rescued = renderMural(
-            entry("café “naïve” ‘re\u0301sumé’ – ＡＢＣ…\u202Fend"),
-        );
+        const rescued = renderMural(entry("café “naïve” ‘re\u0301sumé’ – ＡＢＣ…\u202Fend"));
         const ascii = renderMural(entry(`cafe "naive" 'resume' - ABC... end`));
         expect(rescued.renderedIds).toEqual([1]);
         expect(rescued.undrawableIds).toEqual([]);

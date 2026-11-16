@@ -306,7 +306,13 @@ describe("cues the mural font cannot draw", () => {
             const project = "git:undrawable-coverage";
             const chineseIds = new Set<number>();
             for (let i = 0; i < 40; i++) {
-                const memory = seedMemoryWithCue(db, project, `内存事实 ${i}`, 50, `缓存 ${i} → 破坏`);
+                const memory = seedMemoryWithCue(
+                    db,
+                    project,
+                    `内存事实 ${i}`,
+                    50,
+                    `缓存 ${i} → 破坏`,
+                );
                 chineseIds.add(memory.id);
             }
             for (let i = 0; i < 2; i++) {

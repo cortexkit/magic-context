@@ -674,7 +674,11 @@ describe("Pi mural with cues the font cannot draw", () => {
 	it("sends neither an image nor the mural block for a Chinese-only pool", () => {
 		const db = createTestDb();
 		try {
-			seedCuedPool(db, "git:pi-mural-zh", (index) => `缓存写入 ${index} → 破坏`);
+			seedCuedPool(
+				db,
+				"git:pi-mural-zh",
+				(index) => `缓存写入 ${index} → 破坏`,
+			);
 			seedCuedPool(
 				db,
 				"git:pi-mural-en",
