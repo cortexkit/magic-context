@@ -1356,3 +1356,10 @@ mod samples_v18_tests;
 
 #[cfg(test)]
 mod cache_why_tests;
+
+#[cfg(test)]
+mod compact_rows_tests;
+#[cfg(test)]
+mod row_tests;
+#[cfg(test)]
+mod shared_rows_tests;

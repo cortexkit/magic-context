@@ -382,6 +382,13 @@ mod tests {
 
     impl Session {
         pub(crate) fn app_sample_snapshot() -> Snapshot {
+            let mut session = Self::app_sample_session();
+            let _ = session.app_update();
+            session.app_materialize()
+        }
+
+        /// The session the app-read samples show, before its first update.
+        pub(crate) fn app_sample_session() -> Session {
             use cortexkit_role_compaction::{
                 part::Part,
                 read::{Entry, Role, StepUsage},
@@ -564,8 +571,7 @@ mod tests {
             session.accept(view.clone());
             session.settle_unconfirmed(Some(&AppliedView::new(view.version, view.checksum)), &[]);
             session.app_decisions[1]["at_ms"] = json!(40);
-            let _ = session.app_update();
-            session.app_materialize()
+            session
         }
 
         /// Decision records for the app-read samples, made through the

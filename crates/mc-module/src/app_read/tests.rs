@@ -5,7 +5,7 @@ use cortexkit_role_compaction::{
 };
 use std::collections::BTreeSet;
 
-fn key() -> SessionRef {
+pub(super) fn key() -> SessionRef {
     SessionRef::new("thalamus-harness", "opencode2", "s")
 }
 pub(super) fn fixture() -> Snapshot {

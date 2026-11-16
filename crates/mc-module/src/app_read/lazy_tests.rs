@@ -211,6 +211,9 @@ fn app_read_lazy_search_refuses_unloaded_cross_harness_collision() {
     other.key.harness = "pi".into();
     store.save_app_snapshot(&other).unwrap();
     let mut lazy = cold(&store);
+    // With no `context.db`, a search that passes the identity checks stops
+    // at the missing message index, which tells the two refusals apart.
+    lazy.context = None;
     let p = json!({"query":"hello","scope":{"session":snapshot.key}});
     assert_eq!(
         lazy.read("context.search", &p).unwrap_err().code,
