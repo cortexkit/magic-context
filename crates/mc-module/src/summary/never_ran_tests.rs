@@ -6,7 +6,7 @@ use crate::client::ClientError;
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 use cortexkit_role_llm_runner::run::{FinalMessage, RunError};
-use cortexkit_role_llm_runner::send::{SendReply, REASON_WITHDRAWN};
+use cortexkit_role_llm_runner::send::{SendReply, REASON_HOST_REFUSED, REASON_WITHDRAWN};
 use cortexkit_role_routing::report::ReportRequest;
 use cortexkit_role_routing::select::{SelectAnswer, SelectRequest};
 use std::collections::VecDeque;
@@ -357,6 +357,37 @@ async fn never_ran_handover_exhaustion_is_cancelled_without_fallback() {
     assert!((Duration::from_secs(8)..=Duration::from_secs(11)).contains(&start.elapsed()));
     assert_eq!(client.sends.lock().unwrap().len(), 3);
     assert_eq!(*client.reports.lock().unwrap(), [Outcome::Cancelled]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn never_ran_host_refused_is_a_counted_failure_and_never_resent() {
+    // The send itself: refused by the host, retired by the runner.
+    for send in [SendKind::TurnOne, SendKind::TurnTwo, SendKind::FactCheck] {
+        let reply = SendReply::new(send_states::NOT_DELIVERED)
+            .with_reason(REASON_HOST_REFUSED)
+            .with_run_id("refused-run");
+        let client = Client::new(vec![reply, active()], vec![]);
+        let result = direct(&client, send).await;
+        assert!(matches!(result, Err(SummaryError::Failed(_))));
+        assert_eq!(client.sends.lock().unwrap().len(), 1, "never resent");
+        assert!(client.reads.lock().unwrap().is_empty(), "never followed");
+    }
+    // The run a queued send started, ended by the same refusal.
+    for (cause, code) in [
+        ("host_configuration_invalid", "provider_error"),
+        ("host_policy_refused", "host_policy_refused"),
+    ] {
+        let client = Client::new(
+            vec![active()],
+            vec![RunResult::new("run", states::ERROR).with_error(
+                RunError::new("host_refused", "the host refused the prompt", code)
+                    .with_cause(cause),
+            )],
+        );
+        let result = direct(&client, SendKind::TurnOne).await;
+        assert!(matches!(result, Err(SummaryError::Failed(_))));
+        assert_eq!(client.sends.lock().unwrap().len(), 1, "never resent");
+    }
 }
 
 #[tokio::test(start_paused = true)]
