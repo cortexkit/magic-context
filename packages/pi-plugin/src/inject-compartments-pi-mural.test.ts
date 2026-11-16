@@ -6,7 +6,12 @@ import {
 	MEMORY_MURAL_BLOCK,
 	MEMORY_MURAL_GUIDANCE,
 } from "@magic-context/core/agents/magic-context-prompt";
+import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { resolveMuralWire } from "@magic-context/core/features/magic-context/mural/render-trigger";
+import {
+	computeCueContentHash,
+	setMuralCue,
+} from "@magic-context/core/features/magic-context/mural/storage-mural-cues";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage";
 import {
 	clearModelsDevCache,
@@ -572,6 +577,121 @@ describe("resolveMuralWire Pi provider-prefix translation", () => {
 			expect(wire.supportsVision).toBe(false);
 			expect(wire.dataUrl).toBeUndefined();
 		} finally {
+			closeQuietly(db);
+		}
+	});
+});
+
+describe("Pi mural with cues the font cannot draw", () => {
+	let tempDir: string;
+	let originalXdgData: string | undefined;
+
+	beforeEach(async () => {
+		// Isolate the persisted models-dev cache, then record a vision-capable
+		// model so the mural is resolved on the first render.
+		tempDir = createTestTempDirFromPath(join(tmpdir(), "mc-pi-mural-glyphs-"));
+		originalXdgData = process.env.XDG_DATA_HOME;
+		process.env.XDG_DATA_HOME = tempDir;
+		clearModelsDevCache();
+		await refreshModelLimitsFromApi({
+			config: {
+				providers: async () => ({
+					data: {
+						providers: [
+							{
+								id: "anthropic",
+								models: {
+									"claude-sonnet-4": {
+										limit: { context: 200_000, input: 200_000 },
+										modalities: { input: ["text", "image"] },
+									},
+								},
+							},
+						],
+					},
+				}),
+			},
+		} as never);
+	});
+	afterEach(() => {
+		if (originalXdgData === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = originalXdgData;
+		try {
+			rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			/* ignore */
+		}
+		clearModelsDevCache();
+	});
+
+	function seedCuedPool(
+		db: ReturnType<typeof createTestDb>,
+		project: string,
+		cue: (index: number) => string,
+	): void {
+		for (let index = 0; index < 20; index++) {
+			const content = `pool memory ${index}: ${"rule text ".repeat(20)}`;
+			const memory = insertMemory(db, {
+				projectPath: project,
+				category: "PROJECT_RULES",
+				content,
+				importance: 50,
+			});
+			setMuralCue(
+				db,
+				project,
+				memory.id,
+				cue(index),
+				computeCueContentHash(content),
+			);
+		}
+	}
+
+	function firstRender(
+		db: ReturnType<typeof createTestDb>,
+		sessionId: string,
+		projectIdentity: string,
+	) {
+		getOrCreateSessionMeta(db, sessionId);
+		const messages = [userMessage("hello")];
+		const result = injectM0M1Pi(
+			baseState({
+				sessionId,
+				projectIdentity,
+				muralEnabled: true,
+				// Small enough that every memory overflows into the mural.
+				injectionBudgetTokens: 100,
+			}),
+			db,
+			messages as never,
+			undefined,
+			true,
+		);
+		expect(result.m0Materialized).toBe(true);
+		return messages;
+	}
+
+	it("sends neither an image nor the mural block for a Chinese-only pool", () => {
+		const db = createTestDb();
+		try {
+			seedCuedPool(db, "git:pi-mural-zh", (index) => `缓存写入 ${index} → 破坏`);
+			seedCuedPool(
+				db,
+				"git:pi-mural-en",
+				(index) => `cache write ${index} → ABI break`,
+			);
+
+			const chinese = firstRender(db, `${SESSION_ID}_zh`, "git:pi-mural-zh");
+			expect(textOf(chinese[0])).not.toContain("<memory-mural>");
+			expect(findM0Image(chinese)).toBeNull();
+
+			// The same setup with drawable cues sends the image, so the absence
+			// above comes from the cues rather than from the fixture.
+			const english = firstRender(db, `${SESSION_ID}_en`, "git:pi-mural-en");
+			expect(textOf(english[0])).toContain(MEMORY_MURAL_BLOCK);
+			expect(findM0Image(english)?.mimeType).toBe("image/png");
+		} finally {
+			__test.clearPiMuralProcessCache();
 			closeQuietly(db);
 		}
 	});

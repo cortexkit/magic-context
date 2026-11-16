@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { COMPRESS_CUES_SYSTEM_PROMPT } from "./compress-cues-prompt";
 import { MURAL_FONT_GLYPHS, MURAL_FONT_REPLACEMENT_GLYPH } from "./mural-font.generated";
 import {
@@ -9,6 +10,7 @@ import {
     MURAL_VISION_TILE,
     MURAL_WIDTH,
     type MuralRenderEntry,
+    drawableMuralCue,
     muralImageTokenEstimateForDimensions,
     renderMural,
 } from "./render-mural";
@@ -247,5 +249,138 @@ describe("deterministic mural renderer", () => {
         ]);
         const banners = result.layoutItems.filter((item) => item.kind === "category");
         expect(banners).toHaveLength(2);
+    });
+});
+
+/** Cues that draw with the font's own glyphs: the cue grammar symbols, arrows, an em
+ *  dash, whitespace the renderer collapses, and a cue long enough to wrap. */
+const DRAWABLE_TODAY_CUES = [
+    "⊘cache write (ABI break)",
+    "m[0] → frozen baseline — m[1] → delta",
+    "∀ tool calls ≺ result ≻ pairing",
+    "∅ historian veto ∵ disjoint DBs",
+    "renderer ← cue pool • deterministic",
+    "tabs\tand\nnewlines collapse",
+    "non-breaking\u00a0space stays a space",
+    "▰ bar ─ rule",
+    "very long high importance cue that certainly exceeds one column and must wrap across multiple lines cleanly — with an em dash",
+    "a",
+    "b",
+];
+
+function drawableTodayPool(perCategory: number): MuralRenderEntry[] {
+    const entries: MuralRenderEntry[] = [];
+    for (const category of CATEGORIES) {
+        for (let index = 0; index < perCategory; index++) {
+            entries.push({
+                id: entries.length + 1,
+                category,
+                importance: 90 - (index % 60),
+                cue:
+                    DRAWABLE_TODAY_CUES[index] ??
+                    `cue ${category.toLowerCase()}-${index} anchor→target — relation`,
+            });
+        }
+    }
+    return entries;
+}
+
+function samePng(a: { png: Uint8Array }, b: { png: Uint8Array }): boolean {
+    return Buffer.from(a.png).equals(Buffer.from(b.png));
+}
+
+describe("cues the mural font cannot draw", () => {
+    test("a pool the font draws keeps the exact PNG bytes it rendered before", () => {
+        // SHA-256 of the PNGs these pools rendered before the renderer started leaving
+        // out cues it cannot draw. The mural sits in the cached prompt head, so a
+        // changed hash means every session showing such a mural pays for new image
+        // bytes on its next rebuild. The larger pool overflows the capped image, so
+        // it also covers entries left out for space.
+        const before = {
+            24: "6461f862ddee6aca8ac40982d5e273f5d9de650d3f2b7e108527f3afc4275c5d",
+            80: "d6be794d040dbc3bc209acd9e16be961680767b2f6e67b7fac2a072d0578f459",
+        } as const;
+        for (const perCategory of [24, 80] as const) {
+            const result = renderMural(drawableTodayPool(perCategory));
+            expect(result.undrawableIds).toEqual([]);
+            expect(createHash("sha256").update(result.png).digest("hex")).toBe(
+                before[perCategory],
+            );
+        }
+        expect(renderMural(drawableTodayPool(80)).droppedIds.length).toBeGreaterThan(0);
+    });
+
+    test("a Chinese-only pool places nothing: no cue, no banner, no partial text", () => {
+        const result = renderMural([
+            { id: 1, category: "PROJECT_RULES", importance: 90, cue: "缓存写入会破坏 ABI" },
+            { id: 2, category: "ARCHITECTURE", importance: 80, cue: "历史记录 → 压缩" },
+            { id: 3, category: "NAMING", importance: 50, cue: "文件名使用 kebab-case" },
+        ]);
+        expect(result.renderedIds).toEqual([]);
+        expect(result.undrawableIds).toEqual([1, 2, 3]);
+        expect(result.droppedIds).toEqual([]);
+        expect(result.layoutItems).toEqual([]);
+        expect(result.filledLineCount).toBe(0);
+    });
+
+    test("a mixed pool draws only its drawable cues, and a band left empty loses its banner", () => {
+        const drawable: MuralRenderEntry[] = [
+            { id: 1, category: "PROJECT_RULES", importance: 90, cue: "⊘cache write (ABI break)" },
+            { id: 3, category: "ARCHITECTURE", importance: 80, cue: "m[0] → frozen baseline" },
+            { id: 5, category: "CONSTRAINTS", importance: 70, cue: "execute ≺ force band" },
+        ];
+        const mixed: MuralRenderEntry[] = [
+            drawable[0]!,
+            // Mostly drawable text still leaves the whole cue out, never part of it.
+            { id: 2, category: "PROJECT_RULES", importance: 85, cue: "cache → ABI 破坏" },
+            drawable[1]!,
+            drawable[2]!,
+            { id: 4, category: "NAMING", importance: 60, cue: "文件名使用 kebab-case" },
+        ];
+        const result = renderMural(mixed);
+        expect(result.renderedIds).toEqual([1, 3, 5]);
+        expect(result.undrawableIds).toEqual([2, 4]);
+        expect(result.droppedIds).toEqual([]);
+        expect(
+            result.layoutItems
+                .filter((item) => item.kind === "category")
+                .map((item) => item.category),
+        ).toEqual(["PROJECT_RULES", "ARCHITECTURE", "CONSTRAINTS"]);
+        // Identical pixels to the drawable cues alone: no replacement boxes anywhere.
+        expect(samePng(result, renderMural(drawable))).toBe(true);
+    });
+
+    test("normalization rescues accented Latin and typographic punctuation", () => {
+        const entry = (cue: string): MuralRenderEntry[] => [
+            { id: 1, category: "NAMING", importance: 50, cue },
+        ];
+        // Precomposed and already-decomposed accents, curly quotes, an en dash, an
+        // ellipsis, fullwidth Latin and a narrow no-break space.
+        const rescued = renderMural(
+            entry("café “naïve” ‘re\u0301sumé’ – ＡＢＣ…\u202Fend"),
+        );
+        const ascii = renderMural(entry(`cafe "naive" 'resume' - ABC... end`));
+        expect(rescued.renderedIds).toEqual([1]);
+        expect(rescued.undrawableIds).toEqual([]);
+        expect(rescued.muralText).toBe(ascii.muralText);
+        expect(samePng(rescued, ascii)).toBe(true);
+    });
+
+    test("a character the font draws is never rewritten, and a negated symbol is left out", () => {
+        // The em dash and arrows have their own glyphs, so they stay as written.
+        expect(drawableMuralCue("a — b → c")).toBe("a — b → c");
+        const entry = (cue: string): MuralRenderEntry[] => [
+            { id: 1, category: "NAMING", importance: 50, cue },
+        ];
+        expect(samePng(renderMural(entry("a — b")), renderMural(entry("a - b")))).toBe(false);
+        // Whitespace the renderer collapses never makes a cue undrawable.
+        expect(drawableMuralCue("tabs\tand\nnewlines")).toBe("tabs\tand\nnewlines");
+        // ≠ and ↛ decompose to = and → plus a negating overlay; dropping the overlay
+        // would draw the opposite meaning, so the cue is left out instead.
+        expect(drawableMuralCue("x ≠ y")).toBeNull();
+        expect(drawableMuralCue("p ↛ q")).toBeNull();
+        // A cue made only of combining marks has nothing left to draw.
+        expect(drawableMuralCue("\u0301\u0308")).toBeNull();
+        expect(drawableMuralCue("内存")).toBeNull();
     });
 });

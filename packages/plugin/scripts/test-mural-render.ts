@@ -43,9 +43,9 @@ const identities =
 for (const identity of identities) {
     const coverage = getMuralCoverage(db, identity);
     const gatePassed = muralCoverageGate(coverage.cuedMemoryCount, coverage.activeMemoryCount);
-    const header = `${identity} · active=${coverage.activeMemoryCount} cued=${coverage.cuedMemoryCount}`;
+    const header = `${identity} · active=${coverage.activeMemoryCount} cued=${coverage.cuedMemoryCount} undrawable=${coverage.undrawableCueCount}`;
     if (!gatePassed) {
-        console.log(`${header} → GATE SKIP (needs >=15 cued or >=50% coverage)`);
+        console.log(`${header} → GATE SKIP (needs >=15 drawable cues or >=50% coverage)`);
         continue;
     }
     const entries = resolveMural(db, identity);
@@ -56,10 +56,18 @@ for (const identity of identities) {
         continue;
     }
     const result = renderMural(entries);
+    if (result.renderedIds.length === 0) {
+        // Mirrors ensureMuralRendered: no overflow cue can be drawn by the font, so
+        // production sends no image.
+        console.log(
+            `${header} → NO MURAL (none of ${entries.length} overflow cues is drawable; undrawable=${result.undrawableIds.length})`,
+        );
+        continue;
+    }
     const tokens = muralImageTokenEstimateForDimensions(result.width, result.height);
     const file = join(outDir, `${identity.replace(/[^a-z0-9]/gi, "_").slice(0, 60)}.png`);
     writeFileSync(file, result.png);
     console.log(
-        `${header} → ${result.width}x${result.height} · ${tokens} tokens · rendered=${result.renderedIds.length} dropped=${result.droppedIds.length} · ${file}`,
+        `${header} → ${result.width}x${result.height} · ${tokens} tokens · rendered=${result.renderedIds.length} dropped=${result.droppedIds.length} undrawable=${result.undrawableIds.length} · ${file}`,
     );
 }

@@ -88,7 +88,8 @@ export interface EnsureMuralResult {
     contentHash?: string;
     /** True when this call encoded a new PNG (persisted unless read-only). */
     rerendered: boolean;
-    /** Set when the coverage gate intentionally omitted the mural. */
+    /** Set when the mural was intentionally omitted: the coverage gate failed, or
+     *  no overflow cue can be drawn by the mural font. */
     skipReason?: string;
     width?: number;
     height?: number;
@@ -125,10 +126,16 @@ export function ensureMuralRendered(
         coverage.activeMemoryCount === 0 ||
         !muralCoverageGate(coverage.cuedMemoryCount, coverage.activeMemoryCount)
     ) {
+        // Cues the font cannot draw are not counted as coverage; name them so a
+        // pool written in another script shows why it gets no mural.
+        const undrawable =
+            coverage.undrawableCueCount > 0
+                ? ` the mural font can draw (${coverage.undrawableCueCount} more use characters it has no glyph for)`
+                : "";
         const skipReason =
             coverage.activeMemoryCount === 0
                 ? "no active memories"
-                : `only ${coverage.cuedMemoryCount}/${coverage.activeMemoryCount} active memories have current cues (requires ${MIN_MURAL_CUED_MEMORIES} cues or ${MIN_MURAL_COVERAGE * 100}% coverage)`;
+                : `only ${coverage.cuedMemoryCount}/${coverage.activeMemoryCount} active memories have current cues${undrawable} (requires ${MIN_MURAL_CUED_MEMORIES} cues or ${MIN_MURAL_COVERAGE * 100}% coverage)`;
         log(`[mural] skipped for ${projectIdentity}: ${skipReason}`);
         return { hasMural: false, rerendered: false, skipReason };
     }
@@ -156,6 +163,14 @@ export function ensureMuralRendered(
         return { ...cached.result };
     }
     const plan = planMuralRender(entries);
+    if (plan.layout.renderedIds.length === 0) {
+        // Every overflow cue uses characters the font cannot draw, so the image would
+        // be blank. Send none, like an empty overflow pool, and leave any stored row
+        // alone for the dashboard.
+        const skipReason = `none of the ${entries.length} overflow cues can be drawn (${plan.undrawableIds.length} use characters the mural font has no glyph for)`;
+        log(`[mural] skipped for ${projectIdentity}: ${skipReason}`);
+        return { hasMural: false, rerendered: false, skipReason };
+    }
     const textHash = createHash("sha256").update(plan.layout.text).digest("hex");
     if (
         existing &&
@@ -175,6 +190,10 @@ export function ensureMuralRendered(
     }
 
     const rendered = renderPlannedMural(plan);
+    if (rendered.undrawableIds.length > 0)
+        log(
+            `[mural] rendered for ${projectIdentity}: ${rendered.renderedIds.length} cues drawn, ${rendered.droppedIds.length} left out for space, ${rendered.undrawableIds.length} left out because the mural font has no glyph for their characters`,
+        );
     if (mode === "persist")
         upsertMural(db, {
             projectPath: projectIdentity,

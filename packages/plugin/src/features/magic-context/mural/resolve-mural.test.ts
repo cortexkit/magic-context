@@ -280,3 +280,102 @@ describe("ensureMuralRendered (on-demand render + change detection)", () => {
         }
     });
 });
+
+describe("cues the mural font cannot draw", () => {
+    function seedMemoryWithCue(
+        db: Database,
+        project: string,
+        content: string,
+        importance: number,
+        cue: string,
+    ): Memory {
+        const memory = insertMemory(db, {
+            projectPath: project,
+            category: "ARCHITECTURE",
+            content,
+            sourceSessionId: "s",
+        });
+        setMemoryClassification(db, memory.id, { importance });
+        setMuralCue(db, project, memory.id, cue, computeCueContentHash(content));
+        return memory;
+    }
+
+    test("the coverage gate counts only drawable cues", () => {
+        const db = freshDb();
+        try {
+            const project = "git:undrawable-coverage";
+            const chineseIds = new Set<number>();
+            for (let i = 0; i < 40; i++) {
+                const memory = seedMemoryWithCue(db, project, `内存事实 ${i}`, 50, `缓存 ${i} → 破坏`);
+                chineseIds.add(memory.id);
+            }
+            for (let i = 0; i < 2; i++) {
+                seedMemoryWithCue(db, project, `drawable fact ${i}`, 50, `drawable cue ${i}`);
+            }
+
+            // 42 current cues, but only two the font can draw: below both the
+            // 15-cue floor and half of the pool, so no image.
+            expect(getMuralCoverage(db, project)).toEqual({
+                activeMemoryCount: 42,
+                cuedMemoryCount: 2,
+                undrawableCueCount: 40,
+            });
+            const skipped = ensureMuralRendered(db, project, 1);
+            expect(skipped.hasMural).toBe(false);
+            expect(skipped.dataUrl).toBeUndefined();
+            expect(skipped.skipReason).toContain("2/42");
+            expect(skipped.skipReason).toContain("40 more");
+            expect(getMural(db, project)).toBeNull();
+
+            // Fifteen drawable cues pass the gate; the image holds only those.
+            for (let i = 2; i < 15; i++) {
+                seedMemoryWithCue(db, project, `drawable fact ${i}`, 50, `drawable cue ${i}`);
+            }
+            const rendered = ensureMuralRendered(db, project, 1);
+            expect(rendered.hasMural).toBe(true);
+            expect(rendered.dataUrl).toBeDefined();
+            const stored = getMural(db, project);
+            expect(stored?.memoryIds).toHaveLength(15);
+            expect(stored?.memoryIds.some((id) => chineseIds.has(id))).toBe(false);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("no image when every overflow cue is undrawable, even past the coverage gate", () => {
+        const db = freshDb();
+        try {
+            const project = "git:undrawable-overflow";
+            // Fifteen short drawable memories fit the memory block; long Chinese
+            // memories overflow it, so the mural would show only Chinese cues.
+            for (let i = 0; i < 15; i++) {
+                seedMemoryWithCue(db, project, `short fact ${i}`, 90, `short cue ${i}`);
+            }
+            const chineseIds: number[] = [];
+            for (let i = 0; i < 5; i++) {
+                const memory = seedMemoryWithCue(
+                    db,
+                    project,
+                    `长记忆内容${i}`.repeat(2_000),
+                    10,
+                    `缓存写入 ${i} → 破坏`,
+                );
+                chineseIds.push(memory.id);
+            }
+            const budget = 1_000;
+            expect(
+                resolveMural(db, project, budget)
+                    .map((entry) => entry.id)
+                    .sort((a, b) => a - b),
+            ).toEqual(chineseIds);
+
+            const result = ensureMuralRendered(db, project, budget);
+            expect(result.hasMural).toBe(false);
+            expect(result.dataUrl).toBeUndefined();
+            expect(result.skipReason).toContain("none of the 5 overflow cues can be drawn");
+            expect(getMural(db, project)).toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});

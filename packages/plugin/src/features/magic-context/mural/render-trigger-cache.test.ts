@@ -22,7 +22,7 @@ function seed(db: Database, index: number) {
         db,
         memory.projectPath,
         memory.id,
-        `Fact ${index}: preserve the ordered control flow and Unicode α.`,
+        `Fact ${index}: preserve the ordered control flow and Unicode é ∀.`,
         computeCueContentHash(content),
     );
     return memory;

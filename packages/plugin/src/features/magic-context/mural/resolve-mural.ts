@@ -3,6 +3,7 @@ import { getMemoriesByProject } from "../memory";
 import { getMemoryCategoryOrder } from "../memory/constants";
 import type { Memory } from "../memory/types";
 import { DEFAULT_MURAL_MEMORY_BUDGET, muralOverflowMemories } from "./mural-selection";
+import { drawableMuralCue } from "./render-mural";
 import { computeCueContentHash, getMuralCueState, type MuralCueState } from "./storage-mural-cues";
 
 /** Wire options for the m0 mural image injection: whether the feature is on,
@@ -27,8 +28,12 @@ export interface ResolvedMuralEntry {
 export interface MuralCoverage {
     /** Active and permanent memories eligible for mural cueing. */
     activeMemoryCount: number;
-    /** Eligible memories with a non-null compressed cue generated for current content. */
+    /** Eligible memories with a non-null compressed cue generated for current
+     *  content that the mural font can draw. */
     cuedMemoryCount: number;
+    /** Current cues left out because the mural font cannot draw them. The renderer
+     *  never shows them, so they are not counted in cuedMemoryCount. */
+    undrawableCueCount: number;
 }
 
 export interface MuralPool {
@@ -58,7 +63,9 @@ function poolContentHash(pool: MuralPool | undefined, memory: Memory): string {
     return value;
 }
 
-/** Count current cues across the full live pool before the overflow trim. */
+/** Count current cues across the full live pool before the overflow trim. A cue the
+ *  font cannot draw counts apart from the drawable ones, because the coverage gate
+ *  must not open for cues the mural would leave out. */
 export function getMuralCoverage(
     db: Database,
     projectIdentity: string,
@@ -66,6 +73,7 @@ export function getMuralCoverage(
 ): MuralCoverage {
     const { memories, cueState } = pool ?? readMuralPool(db, projectIdentity);
     let cuedMemoryCount = 0;
+    let undrawableCueCount = 0;
     for (const memory of memories) {
         const state = cueState.get(memory.id);
         if (
@@ -75,10 +83,11 @@ export function getMuralCoverage(
             state.hash !== null &&
             state.hash === poolContentHash(pool, memory)
         ) {
-            cuedMemoryCount += 1;
+            if (drawableMuralCue(state.cue) === null) undrawableCueCount += 1;
+            else cuedMemoryCount += 1;
         }
     }
-    return { activeMemoryCount: memories.length, cuedMemoryCount };
+    return { activeMemoryCount: memories.length, cuedMemoryCount, undrawableCueCount };
 }
 
 /**

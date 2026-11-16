@@ -58,6 +58,10 @@ export interface MuralRenderResult {
     renderedIds: number[];
     /** Entries trimmed because the capped image filled before reaching them. */
     droppedIds: number[];
+    /** Entries left out because their cue has a character the font cannot draw,
+     *  even after normalization (see drawableMuralCue). They never reach the layout,
+     *  so they are not counted in droppedIds. */
+    undrawableIds: number[];
     categoryLineUsage: Record<string, number>;
     /** Content lines actually placed in the grid (excludes blank cells). Used to
      *  assert the three-column fill occupancy. */
@@ -86,6 +90,96 @@ function escapeText(value: string): string {
         .replace(/[\r\n]+/g, " ")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+/**
+ * Typographic punctuation the font has no glyph for, mapped to the ASCII it does
+ * draw. A character is looked up here only when the font lacks it, so the em dash,
+ * which the font draws, keeps its own glyph. Some entries never fire today (the
+ * whitespace cleanup already turns non-breaking spaces into plain ones, and NFKD
+ * alone would expand the ellipsis); they are listed so the mapping reads whole.
+ */
+const PUNCTUATION_FALLBACKS: Readonly<Record<string, string>> = {
+    "\u2018": "'", // left single quotation mark
+    "\u2019": "'", // right single quotation mark
+    "\u201A": "'", // single low-9 quotation mark
+    "\u201B": "'", // single high-reversed-9 quotation mark
+    "\u201C": '"', // left double quotation mark
+    "\u201D": '"', // right double quotation mark
+    "\u201E": '"', // double low-9 quotation mark
+    "\u201F": '"', // double high-reversed-9 quotation mark
+    "\u2013": "-", // en dash
+    "\u2014": "-", // em dash
+    "\u2026": "...", // horizontal ellipsis
+    "\u00A0": " ", // no-break space
+    "\u2007": " ", // figure space
+    "\u202F": " ", // narrow no-break space
+};
+
+/**
+ * Combining marks removed after NFKD, so é (e + U+0301) draws as e. The overlay
+ * marks U+0334-U+0338 are kept: they negate the symbol under them (≠ is = with
+ * U+0338, ↛ is → with U+0338), and removing one would draw the opposite meaning.
+ * Kept, they have no glyph, so a cue containing one is left out instead.
+ */
+const REMOVABLE_COMBINING_MARK = /(?![\u0334-\u0338])\p{M}/gu;
+
+function hasGlyph(character: string): boolean {
+    return MURAL_FONT_GLYPHS[character] !== undefined;
+}
+
+/**
+ * The text the mural draws for a cue, or null when the font cannot draw it.
+ *
+ * A character the font has a glyph for is kept exactly as written, so a cue that
+ * draws today keeps the same bytes. Any other character gets one rescue:
+ * typographic punctuation maps to ASCII, and everything else goes through NFKD
+ * with combining marks removed (é becomes e, fullwidth Ａ becomes A). If a
+ * character still has no glyph (Chinese text, for example), the whole cue is left
+ * out: drawing it in part, or as replacement boxes, would show the model nothing
+ * useful while still costing image tokens.
+ */
+export function drawableMuralCue(cue: string): string | null {
+    const text = escapeText(cue);
+    let normalized = "";
+    let changed = false;
+    for (const character of text) {
+        if (hasGlyph(character)) {
+            normalized += character;
+            continue;
+        }
+        changed = true;
+        const replacement =
+            PUNCTUATION_FALLBACKS[character] ??
+            character.normalize("NFKD").replace(REMOVABLE_COMBINING_MARK, "");
+        for (const part of replacement) {
+            if (!hasGlyph(part)) return null;
+        }
+        normalized += replacement;
+    }
+    // Unchanged cues go back verbatim so the layout sees exactly today's input.
+    if (!changed) return cue;
+    // A decomposition can add spaces (¨ becomes a space plus a mark), and a cue
+    // made only of marks normalizes to nothing, which leaves nothing to draw.
+    const result = escapeText(normalized);
+    return result.length > 0 ? result : null;
+}
+
+/** Split entries into those the font can draw, with their normalized cues, and the
+ *  ids of those it cannot. Order is preserved, so category bands stay intact and a
+ *  band whose every cue is undrawable gets no banner. */
+function partitionDrawableEntries(entries: readonly MuralRenderEntry[]): {
+    drawable: MuralRenderEntry[];
+    undrawableIds: number[];
+} {
+    const drawable: MuralRenderEntry[] = [];
+    const undrawableIds: number[] = [];
+    for (const entry of entries) {
+        const cue = drawableMuralCue(entry.cue);
+        if (cue === null) undrawableIds.push(entry.id);
+        else drawable.push(cue === entry.cue ? entry : { ...entry, cue });
+    }
+    return { drawable, undrawableIds };
 }
 
 function banner(category: MuralCategory, roomWidth: number): string {
@@ -427,8 +521,9 @@ function encodeRgbPng(pixels: Uint8Array, width: number, height: number): Uint8A
     return output;
 }
 
-/** The generated atlas provides real Spleen pixels; unknown characters use a
- * visible, deterministic replacement glyph rather than random-looking noise. */
+/** The generated atlas provides real Spleen pixels. Cues with characters outside
+ * it are left out before layout (drawableMuralCue); the visible, deterministic
+ * replacement glyph remains only as a backstop for banner labels. */
 function glyph(character: string): MuralFontGlyph {
     return MURAL_FONT_GLYPHS[character] ?? MURAL_FONT_REPLACEMENT_GLYPH;
 }
@@ -518,11 +613,12 @@ function snapDimensionToVisionTile(contentPixels: number, maximum: number): numb
  * are all preserved from the author-era renderer; rooms and merges are gone.
  */
 export function planMuralRender(entries: readonly MuralRenderEntry[]) {
-    const roomWidth = chooseRoomWidth(entries);
-    const plan = planLines(entries, roomWidth);
+    const { drawable, undrawableIds } = partitionDrawableEntries(entries);
+    const roomWidth = chooseRoomWidth(drawable);
+    const plan = planLines(drawable, roomWidth);
     const candidates = Array.from({ length: MURAL_COLUMNS }, (_, index) => {
         const requestedColumnCount = index + 1;
-        const layout = renderLayout(entries, plan, roomWidth, requestedColumnCount);
+        const layout = renderLayout(drawable, plan, roomWidth, requestedColumnCount);
         const contentWidth =
             layout.columnCount === 0
                 ? 0
@@ -565,7 +661,13 @@ export function planMuralRender(entries: readonly MuralRenderEntry[]) {
         return candidate.requestedColumnCount < best.requestedColumnCount ? candidate : best;
     }, firstCandidate);
 
-    return { roomWidth, layout: selected.layout, width: selected.width, height: selected.height };
+    return {
+        roomWidth,
+        layout: selected.layout,
+        width: selected.width,
+        height: selected.height,
+        undrawableIds,
+    };
 }
 
 export function rasterMural(plan: ReturnType<typeof planMuralRender>): Uint8Array {
@@ -629,6 +731,7 @@ export function renderPlannedMural(plan: ReturnType<typeof planMuralRender>): Mu
         layoutItems: layout.layoutItems,
         renderedIds: layout.renderedIds,
         droppedIds: layout.droppedIds,
+        undrawableIds: plan.undrawableIds,
         categoryLineUsage: layout.usage,
         filledLineCount: layout.filledLineCount,
         width,
