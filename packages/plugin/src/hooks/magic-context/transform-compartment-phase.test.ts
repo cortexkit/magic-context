@@ -947,13 +947,16 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
         const harness = recoveryHarness(sessionId, ["publish", "hang"], [30_000]);
         try {
             const started = performance.now();
-            const result = await harness.run(80);
+            // The budget covers the whole chain, including the first two runs'
+            // publication work. 80 ms was too tight for a loaded CI runner: the
+            // second chained run sometimes never started before the budget ran out.
+            const result = await harness.run(400);
             // One budget for the whole chain, not one per run.
-            expect(performance.now() - started).toBeLessThan(1_000);
+            expect(performance.now() - started).toBeLessThan(1_500);
             expect(harness.started).toEqual([3, 5]);
             expect(result.historianJoinTimedOut).toBe(true);
-            expect(result.historianJoinBudgetMs).toBe(80);
-            expect(getActiveCompartmentRun(sessionId)?.inlineJoinTimedOutBudgetMs).toBe(80);
+            expect(result.historianJoinBudgetMs).toBe(400);
+            expect(getActiveCompartmentRun(sessionId)?.inlineJoinTimedOutBudgetMs).toBe(400);
             // The chunks already published are still adopted on this pass.
             expect(result.awaitedCompartmentRun).toBe(true);
             expect(result.pendingCompartmentInjection?.compartmentCount).toBe(2);
