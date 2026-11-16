@@ -320,7 +320,9 @@ impl SubcRunnerClient {
     }
 
     /// One call on the route to `session` for `role`: an unscoped route for
-    /// the session's own calls, or one opened under `scope`.
+    /// the session's own calls, or one opened under `scope`. The route goes to
+    /// the module's tool-provider surface for the tool-provider role and to
+    /// its management surface for every other role.
     async fn call_raw<P: Serialize>(
         &self,
         session: &SessionRef,
@@ -336,9 +338,7 @@ impl SubcRunnerClient {
             })
             .await
             .map_err(|error| ClientError::new(format!("connect: {error:?}")))?;
-        let target = RouteTarget::ManagementSurface {
-            module_id: session.runner.clone(),
-        };
+        let target = route_target(role.0, &session.runner);
         let options = CallOptions {
             timeout: RUNNER_CALL_TIMEOUT,
             role_versions: Some(std::collections::BTreeMap::from([(
@@ -361,6 +361,23 @@ impl SubcRunnerClient {
         }
         .map_err(|error| call_error(method, &error))?;
         Ok(reply)
+    }
+}
+
+/// The surface of `module_id` that serves `role`. A tool provider serves
+/// `tool.catalog` on its tool-provider route; its management surface is for
+/// its own first-party callers, and AFT refuses ck-mc there
+/// (`route_refused`). Every other role ck-mc calls is served on the module's
+/// management surface.
+fn route_target(role: &str, module_id: &str) -> RouteTarget {
+    if role == cortexkit_role_tool_provider::ROLE {
+        RouteTarget::ToolProvider {
+            module_id: module_id.to_owned(),
+        }
+    } else {
+        RouteTarget::ManagementSurface {
+            module_id: module_id.to_owned(),
+        }
     }
 }
 
@@ -2082,6 +2099,23 @@ mod agent_data_transport_tests;
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    /// A tool catalog is read on the provider's tool-provider route, which
+    /// any principal may open; runner calls stay on the management surface.
+    #[test]
+    fn a_tool_catalog_goes_to_the_tool_provider_route() {
+        assert_eq!(
+            route_target(cortexkit_role_tool_provider::ROLE, "aft"),
+            RouteTarget::ToolProvider {
+                module_id: "aft".into()
+            }
+        );
+        assert_eq!(
+            route_target(LLM_RUNNER_ROLE.0, "broca"),
+            RouteTarget::ManagementSurface {
+                module_id: "broca".into()
+            }
+        );
+    }
 
     #[test]
     fn folder_only_catalog_uses_project_tier() {
