@@ -125,7 +125,12 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
         let store = Store::open(&dir.path().join("mode3.db")).unwrap();
-        let module = Module::new(Client::default(), Settings::default(), Some(db), Some(store));
+        let module = Module::new(
+            Client::default(),
+            Settings::default(),
+            Some(db),
+            Some(store),
+        );
         let route = Route {
             session: SessionRef::new("runner", "mock", "s1"),
             project: None,
@@ -139,7 +144,15 @@ impl Fixture {
             .zip(1..)
             .map(|(mid, ordinal)| text(ordinal, mid))
             .collect();
-        let mut setup = SetupRequest::new(preset, model.clone(), 100_000, 1000, rules.clone(), vec![], 1);
+        let mut setup = SetupRequest::new(
+            preset,
+            model.clone(),
+            100_000,
+            1000,
+            rules.clone(),
+            vec![],
+            1,
+        );
         setup.newest = entries.last().map(cursor);
         setup.statement_epoch = Some("epoch".into());
         setup.statement_seq = Some(1);
@@ -297,7 +310,10 @@ async fn quiet_a_freed_session_answers_its_next_jobs_as_one_never_freed() {
         f.wait_quiet_time().await;
     }
     assert!(!kept.quiet(), "a session with a run in flight was freed");
-    assert!(freed.quiet(), "a session without a job for its quiet time stays");
+    assert!(
+        freed.quiet(),
+        "a session without a job for its quiet time stays"
+    );
     assert_eq!(
         freed.app_reads().await,
         before,
@@ -307,21 +323,24 @@ async fn quiet_a_freed_session_answers_its_next_jobs_as_one_never_freed() {
     let now = 30 * 60_000;
     let mut answers = Vec::new();
     for f in [&kept, &freed] {
-        let hint = f.module.pre_user(f.key(), "Carry on with the parser fix", now).await;
+        let hint = f
+            .module
+            .pre_user(f.key(), "Carry on with the parser fix", now)
+            .await;
         f.notice(3, Some(text(5, "e")), Some(10_000)).await;
         // Sent again, the same notice is not run twice.
         f.notice(3, None, Some(10_000)).await;
         f.drop_tag(3, 4, 72_000).await;
         f.notice(6, Some(text(6, "f")), Some(10_000)).await;
-        answers.push((
-            hint,
-            f.client().offered.lock().unwrap().clone(),
-            f.saved(),
-            f.app_reads().await,
-        ));
+        let reads = f.app_reads().await;
+        let views = f.client().offered.lock().unwrap().clone();
+        answers.push((hint, views, f.saved(), reads));
     }
     assert!(!kept.quiet(), "a session with a run in flight was freed");
-    assert!(answers[0].0.prepend.is_some(), "the time marker counts the gap");
+    assert!(
+        answers[0].0.prepend.is_some(),
+        "the time marker counts the gap"
+    );
     assert_eq!(answers[0].0, answers[1].0, "pre_user");
     assert_eq!(answers[0].1, answers[1].1, "views handed over");
     assert_eq!(answers[0].2, answers[1].2, "saved state");
@@ -351,7 +370,10 @@ async fn quiet_a_busy_session_is_never_freed() {
     drop(in_flight);
     tokio::time::advance(QUIET_AFTER).await;
     settle().await;
-    assert!(f.quiet(), "a session with nothing in flight stays in memory");
+    assert!(
+        f.quiet(),
+        "a session with nothing in flight stays in memory"
+    );
 }
 
 #[tokio::test(start_paused = true)]

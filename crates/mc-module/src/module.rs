@@ -1330,12 +1330,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let mut ready: VecDeque<Job> = VecDeque::new();
             // A session without a summarizer is freed sooner once the runner
             // says its run ended.
-            let watch_run_end = || {
-                inner
-                    .client
-                    .run_ends()
-                    .map(|ends| ends.watch(&held_key))
-            };
+            let watch_run_end = || inner.client.run_ends().map(|ends| ends.watch(&held_key));
             let mut run_end = if subagent { watch_run_end() } else { None };
             let mut run_ended = false;
             loop {
@@ -2086,9 +2081,10 @@ fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
     }
     // The search index forgets a session whose worker stops, with any
     // stretch it still has to read.
-    let searched = inner.search.as_ref().is_none_or(|search| {
-        matches!(search.idle(key).now_or_never(), Some(Ok(())))
-    });
+    let searched = inner
+        .search
+        .as_ref()
+        .is_none_or(|search| matches!(search.idle(key).now_or_never(), Some(Ok(()))));
     if !searched {
         return false;
     }
@@ -2117,8 +2113,7 @@ fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
         return false;
     }
     let ours = |worker: &mpsc::UnboundedSender<Job>| {
-        own.upgrade()
-            .is_some_and(|own| own.same_channel(worker))
+        own.upgrade().is_some_and(|own| own.same_channel(worker))
     };
     let Some(slot) = workers
         .get_mut(key)
