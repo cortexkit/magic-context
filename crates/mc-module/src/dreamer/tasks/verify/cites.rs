@@ -123,8 +123,9 @@ pub(crate) fn cites_all(content: &str, top_level: &BTreeSet<String>) -> Vec<Cite
 /// or when it is lowerCamelCase (`clampProviderContextImages`). A plain word
 /// that starts with a capital (`OpenCode`, `TypeScript`, `GitHub`), or a
 /// product name such as `macOS`, names something in prose and need not be in
-/// the cited code. The subject-gone archive check reads [`cites`] instead,
-/// where the broader reading is the safe side.
+/// the cited code. The check that may archive a memory because everything it
+/// names is gone from the code reads [`cites`] instead: there, counting more
+/// words as names makes an archive harder, which is the safe side.
 pub(crate) fn code_cites(content: &str, top_level: &BTreeSet<String>) -> Vec<Cite> {
     static SPAN: OnceLock<Regex> = OnceLock::new();
     let backticked: BTreeSet<&str> = re(&SPAN, r"`([^`\n]+)`")
