@@ -286,3 +286,66 @@ fn a_copy_holds_one_commit_reads_its_history_up_to_there_and_is_deleted_when_dro
     drop(copy);
     assert!(!folder.exists());
 }
+
+/// Worktrees inside the CortexKit data root (agents' task checkouts,
+/// verification and deploy copies) are no live branch, whatever commits they
+/// have. The main checkout always is, and a sibling folder whose name only
+/// starts like the root's is not inside it.
+#[test]
+fn worktrees_inside_the_cortexkit_data_root_are_not_live() {
+    let repo = Repo::on("master", &[("a.rs", "one\n")]);
+    let data = tempfile::tempdir().unwrap();
+    let root = data.path().join("cortexkit");
+    let add = |path: &Path, branch: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        git_at(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ],
+        );
+        let text = format!("{branch}\n");
+        commit_at(path, &[("a.rs", text.as_str())], branch);
+    };
+    add(&root.join("alfonso/worktrees/task"), "task");
+    add(&data.path().join("cortexkit-scratch/wt"), "scratch");
+    let (_outer, feature) = repo.worktree("feature");
+    commit_at(&feature, &[("a.rs", "feature\n")], "feature");
+    let refs = Refs::read(repo.path()).unwrap();
+    let live = |refs: &Refs, root: &Path| -> Vec<String> {
+        let mut names: Vec<String> = refs
+            .live_outside(repo.path(), root)
+            .unwrap()
+            .into_iter()
+            .map(|branch| branch.name)
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(live(&refs, &root), ["feature", "master", "scratch"]);
+    // With the data root elsewhere every head with commits of its own counts.
+    assert_eq!(
+        live(&refs, &data.path().join("elsewhere")),
+        ["feature", "master", "scratch", "task"]
+    );
+    // The root reached through a symlink still matches.
+    #[cfg(unix)]
+    {
+        let link = data.path().join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert_eq!(live(&refs, &link), ["feature", "master", "scratch"]);
+    }
+    // The main checkout is never left out, even when it is the root itself.
+    git_at(repo.path(), &["checkout", "-q", "-b", "own"]);
+    commit_at(repo.path(), &[("b.rs", "own\n")], "own");
+    let refs = Refs::read(repo.path()).unwrap();
+    assert_eq!(
+        live(&refs, repo.path()),
+        ["feature", "master", "own", "scratch", "task"]
+    );
+}

@@ -6,7 +6,7 @@ Tools (read-only): read, grep, glob, plus any available AFT navigation tools. Us
 
 For each memory decide ONE of:
 - Backing files found → the specific repo-relative paths whose code the memory is about; do not chase every caller or related implementation.
-- File-independent → the memory describes EXTERNAL behavior (a provider / API / platform / protocol limit, e.g. "Anthropic returns 400 on empty content"), or a pure process / workflow / philosophy rule, with NO specific local file that backs it. A BEHAVIORAL claim (when to act, how to work, who decides, or tool-usage discipline) is file-independent even when it cites file paths or commands as examples: a named file is not the file backing the rule.
+- File-independent → the memory describes EXTERNAL behavior (a provider / API / platform / protocol limit, e.g. "Anthropic returns 400 on empty content"), or a pure process / workflow / philosophy rule, with NO specific local file that backs it. A BEHAVIORAL claim about how people or agents work (when to act, how to work, who decides, or tool-usage discipline) is file-independent even when it cites file paths or commands as examples: a named file is not the file backing the rule. A rule that says what a named file, script, test or check DOES (it refuses X, checks Y, runs before Z, pins W) is a claim about that file's code, not a behavioral rule: map it to that file.
 
 ⟦mc:map-memories.output-contract⟧
 
@@ -14,7 +14,7 @@ Rules:
 - Every decided input memory id MUST appear exactly once. Omit uncertain ids rather than inventing backing files or declaring them independent.
 - files: repo-relative, comma-separated, no spaces inside a path. Only files that actually exist and genuinely back the memory.
 - A BACKING FILE is CODE that implements or handles the claim — not a file that merely mentions it. A path named inside a process directive is an action target or example, not evidence that the file backs the directive. A markdown doc (.md), a PARITY/notes file, or a test that only DESCRIBES an external fact is NOT a backing file. If the only place a memory's fact appears is prose/docs/a test (no code implements or handles it), mark it independent="true".
-- Many CONSTRAINTS are HYBRID: "external system does X, and OUR code handles it here." Map those to the HANDLING code (you can verify the handling, even though you can't verify the external behavior). Only mark independent when there is NO local code that implements or handles the fact.
+- Many CONSTRAINTS are HYBRID: "external system does X, and OUR code handles it here." Map those to the HANDLING code (you can verify the handling, even though you can't verify the external behavior). Only mark independent when there is NO local code that implements or handles the fact: before marking an external fact independent, spend one search on the local code that guards against it or works around it.
 - Prefer the most specific file(s); do not pad with tangential files. Most memories map to one file; some to a few.
 - Mark independent="true" only for the file-independent cases above; an investigation that runs out of calls stays unmapped.
 - A memory about THIS project's own code (a table, setting, function, type or file it says the project has) is never file-independent, even when your searches find none of it: leave it unmapped. The code may have been renamed or removed; a later verification pass decides that, not you.

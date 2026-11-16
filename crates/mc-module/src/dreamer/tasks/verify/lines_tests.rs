@@ -300,3 +300,134 @@ fn a_single_branch_repository_changes_old_memories_as_before() {
     );
     assert_eq!(line_of(&fixture, 2), None);
 }
+
+/// Audit rows 269, 232 and 258 (wrong line, and false on the default
+/// branch): facts about the next version confirmed from code only the
+/// default branch holds. With the next version's branch live, a confirmation
+/// of a memory without a line of its own stands only where every live branch
+/// holds the lines it cites.
+#[test]
+fn a_confirmation_stands_only_where_every_live_branch_holds_its_lines() {
+    const PHASE: &str = "packages/plugin/src/hooks/magic-context/transform-postprocess-phase.ts";
+    const DAEMON: &str = "crates/mc-module/tests/real_daemon.rs";
+    const WAL: &str = "packages/dashboard/src-tauri/src/broca_wal.rs";
+    let fixture = Fixture::on(
+        "master",
+        &[
+            (
+                PHASE,
+                "// An expired provider cache grants no fold.\nconst cacheExpiredIsExecute = true;\n",
+            ),
+            (DAEMON, "fn register_broca_surface() {}\n"),
+            (
+                WAL,
+                "//! Reads Broca's write-ahead logs.\npub fn read_wal() {}\n",
+            ),
+            ("src/shared.rs", "pub const SHARED_LIMIT: u32 = 7;\n"),
+        ],
+    );
+    // The next version's line, in its own worktree with commits of its own.
+    let (_outer, worktree) = fixture.repo.worktree("mode3-clean");
+    std::fs::remove_file(worktree.join(DAEMON)).unwrap();
+    std::fs::remove_file(worktree.join(WAL)).unwrap();
+    commit_at(
+        &worktree,
+        &[(
+            PHASE,
+            "// cache_expired is Forgotten: no rebuild permission.\n",
+        )],
+        "the next version",
+    );
+    fixture.insert(&[
+        row(
+            1,
+            "ck-mc treats `cacheExpiredIsExecute` rides as execute passes.",
+        ),
+        row(
+            2,
+            "The supervised tests register `register_broca_surface` in crates/mc-module/tests/real_daemon.rs.",
+        ),
+        row(
+            3,
+            "The dashboard reads Broca's write-ahead logs with `read_wal`.",
+        ),
+        row(4, "`SHARED_LIMIT` is 7."),
+    ]);
+    let batch = fixture.batches(true).remove(0);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(&format!(
+            r#"<verified id="1" cites="{PHASE}:1-2"/>
+<verified id="2" cites="{DAEMON}:1-1"/>
+<verified id="3" cites="{WAL}:1-2"/>
+<verified id="4" cites="src/shared.rs:1-1"/>"#
+        )),
+    );
+    assert_eq!(applied.applied, 1, "{applied:?}");
+    assert_eq!(
+        applied.dropped,
+        [
+            format!("memory 1: counted as a skip: the lines differ between live branches ({PHASE}:1-2 is not on live branch mode3-clean)"),
+            format!("memory 2: counted as a skip: the lines differ between live branches ({DAEMON}:1-1 is not on live branch mode3-clean)"),
+            format!("memory 3: counted as a skip: the lines differ between live branches ({WAL}:1-2 is not on live branch mode3-clean)"),
+        ]
+    );
+    assert!(fixture.memory(1).3.is_none());
+    // Lines every live branch holds confirm a memory without a line.
+    assert!(fixture.memory(4).3.is_some());
+
+    // A memory learned on the default branch is checked there alone.
+    learned_on(&fixture, 1, "master");
+    let batch = fixture
+        .batches(true)
+        .into_iter()
+        .find(|batch| batch.read().iter().any(|read| read.id == 1))
+        .unwrap();
+    let applied = fixture.apply(
+        &batch,
+        &manifest(&format!(
+            r#"<verified id="1" cites="{PHASE}:1-2"/>
+<skip id="2"/>
+<skip id="3"/>"#
+        )),
+    );
+    assert_eq!(applied.dropped, Vec::<String>::new());
+    assert!(fixture.memory(1).3.is_some());
+}
+
+/// A memory without a line of its own stays confirmed by its stored lines
+/// only while every live branch holds them; once another live branch
+/// changes them, it goes to the model.
+#[test]
+fn stored_lines_keep_a_memory_confirmed_only_while_every_live_branch_holds_them() {
+    use super::tests::Row;
+
+    let fixture = Fixture::on("master", &[("src/a.rs", "const CAP: u64 = 64_000;\n")]);
+    let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fixture
+        .repo
+        .write(&[("src/a.rs", "// Caps.\nconst CAP: u64 = 64_000;\n")]);
+    fixture.repo.commit("a comment");
+    fixture.insert(&[Row {
+        files: vec!["src/a.rs"],
+        verified: Some((1_000, Some(first.clone()))),
+        spans: vec![("src/a.rs", 1, 1, "const CAP: u64 = 64_000;")],
+        ..row(1, "`CAP` is 64k.")
+    }]);
+    let (_outer, worktree) = fixture.repo.worktree("next");
+    commit_at(
+        &worktree,
+        &[("src/a.rs", "const CAP: u64 = 32_000;\n")],
+        "next",
+    );
+    let batches = fixture.batches(false);
+    assert_eq!(read(&batches[0]), [(1, false)]);
+    assert!(batches[0].has_diff());
+
+    // With the other branch gone, master alone holds the lines unchanged.
+    git_at(
+        fixture.repo.path(),
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    assert!(fixture.batches(false).is_empty());
+}

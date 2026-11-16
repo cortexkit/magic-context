@@ -116,6 +116,20 @@ fn iso(ms: i64) -> String {
     )
 }
 
+/// A memory's verification as the `get` table shows it. A confirmation that
+/// kept no cited lines (every one recorded before verify required them)
+/// shows as `unverified`, as the dreamer's verify treats it.
+fn shown_verification(memory: &memory_writes::MemoryRow) -> String {
+    if memory.verification_status == "verified"
+        && !crate::dreamer::tasks::verify::spans::cites_its_confirmation(
+            memory.metadata_json.as_deref(),
+        )
+    {
+        return "unverified".into();
+    }
+    memory.verification_status.clone()
+}
+
 /// The `get` table, as the TypeScript tool lays it out.
 fn format_list(memories: &[memory_writes::MemoryRow]) -> String {
     if memories.is_empty() {
@@ -128,7 +142,7 @@ fn format_list(memories: &[memory_writes::MemoryRow]) -> String {
                 memory.id.to_string(),
                 memory.category.clone(),
                 memory.status.clone(),
-                memory.verification_status.clone(),
+                shown_verification(memory),
                 iso(memory.updated_at),
                 memory
                     .content
@@ -546,5 +560,66 @@ mod tests {
     fn dates_print_as_javascript_iso_strings() {
         assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso(1_790_789_964_781), "2026-09-30T17:39:24.781Z");
+    }
+
+    /// A confirmation recorded without the lines it rests on shows as
+    /// unverified, as verify treats it.
+    #[test]
+    fn a_confirmation_without_cited_lines_shows_as_unverified() {
+        use crate::dreamer::tasks::verify::spans::{Cited, Confirmation};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        drop(crate::context_db::ContextDb::create_for_tests(&path).unwrap());
+        let mut conn = Connection::open(path).unwrap();
+        let who = Writer {
+            harness: "mode3",
+            session: "verify-session",
+            project: "dir:verify-project",
+            authority: None,
+            line: None,
+        };
+        let content = "The batch cap is set in one place.";
+        run(
+            &mut conn,
+            &who,
+            &json!({"action": "write", "content": content, "category": "PROJECT_RULES", "ids": []}),
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM memories WHERE content=?",
+                [content],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut shown = |metadata: serde_json::Value| -> String {
+            conn.execute(
+                "UPDATE memories SET verification_status = 'verified', metadata_json = ?2 WHERE id = ?1",
+                rusqlite::params![id, metadata.to_string()],
+            )
+            .unwrap();
+            run(
+                &mut conn,
+                &who,
+                &json!({"action": "get", "content": "", "category": "PROJECT_RULES", "ids": [id]}),
+            )
+            .unwrap()
+        };
+        let old = shown(json!({"dreamerVerifiedAt": 5}));
+        assert!(old.contains("| unverified |"), "{old}");
+        let spans = Confirmation {
+            commit: "a".repeat(40),
+            spans: vec![Cited {
+                path: "src/cap.rs".into(),
+                start: 1,
+                end: 1,
+                text: "const CAP: usize = 5;".into(),
+            }],
+            derive: None,
+        }
+        .json(5);
+        let cited = shown(json!({"dreamerVerifiedAt": 5, "dreamerVerifiedSpans": spans}));
+        assert!(cited.contains("| verified |"), "{cited}");
     }
 }

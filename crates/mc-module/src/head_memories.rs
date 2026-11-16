@@ -130,6 +130,9 @@ impl Row {
     /// The last time the memory was genuinely met again: seen again by a
     /// summary or an agent's save, or confirmed by a verification.
     pub fn last_met(&self) -> Option<i64> {
+        // Every confirmation counts here, those without cited lines too:
+        // ranking reads a verification as the memory being met again, not as
+        // proof that it holds, which the dreamer's verify checks on its own.
         self.last_seen_at.into_iter().chain(self.verified_at).max()
     }
 

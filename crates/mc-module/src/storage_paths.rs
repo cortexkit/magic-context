@@ -45,13 +45,37 @@ fn resolve_context_db_path(
         under_data_home(&non_empty("XDG_DATA_HOME").unwrap_or(test_data))
     } else if let Some(explicit) = non_empty("MAGIC_CONTEXT_STORAGE_DIR") {
         PathBuf::from(explicit)
-    } else if let Some(data_home) = non_empty("XDG_DATA_HOME") {
-        under_data_home(&data_home)
     } else {
-        home.unwrap_or_else(|| PathBuf::from("."))
-            .join(".local/share/cortexkit/magic-context")
+        resolve_cortexkit_data_root(&env, home).join("magic-context")
     };
     storage_dir.join("context.db")
+}
+
+/// The folder CortexKit's tools keep their data under on this machine,
+/// resolved from the process environment ([`resolve_cortexkit_data_root`]).
+pub(crate) fn cortexkit_data_root() -> PathBuf {
+    resolve_cortexkit_data_root(|name| std::env::var(name), user_home_dir())
+}
+
+/// The CortexKit data root: `$XDG_DATA_HOME/cortexkit` when `XDG_DATA_HOME`
+/// is set and not blank, otherwise `<home>/.local/share/cortexkit`. Magic
+/// Context's own store lives in its `magic-context` folder
+/// ([`resolve_context_db_path`]), and agents keep their task checkouts and
+/// working copies elsewhere below it.
+fn resolve_cortexkit_data_root(
+    env: impl Fn(&str) -> Result<String, std::env::VarError>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    match env("XDG_DATA_HOME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(data_home) => Path::new(&data_home).join("cortexkit"),
+        None => home
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".local/share/cortexkit"),
+    }
 }
 
 #[cfg(test)]
@@ -111,6 +135,38 @@ mod tests {
                 Some(PathBuf::from("home")),
             );
             assert_eq!(actual, PathBuf::from(expected), "{vars:?}");
+        }
+    }
+
+    #[test]
+    fn the_data_root_is_under_xdg_data_home_when_set_and_the_home_folder_otherwise() {
+        let cases: &[(&[(&str, &str)], &str)] = &[
+            (&[], "home/.local/share/cortexkit"),
+            (&[("XDG_DATA_HOME", "xdg")], "xdg/cortexkit"),
+            (&[("XDG_DATA_HOME", " xdg ")], "xdg/cortexkit"),
+            (&[("XDG_DATA_HOME", "  ")], "home/.local/share/cortexkit"),
+            // The store's own overrides move the store, not the data root.
+            (
+                &[("MAGIC_CONTEXT_STORAGE_DIR", "explicit")],
+                "home/.local/share/cortexkit",
+            ),
+        ];
+        for (vars, expected) in cases {
+            let env = |name: &str| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+                    .ok_or(std::env::VarError::NotPresent)
+            };
+            let root = resolve_cortexkit_data_root(env, Some(PathBuf::from("home")));
+            assert_eq!(root, PathBuf::from(expected), "{vars:?}");
+            // Without the store's own overrides, the store is in the root.
+            if !vars.iter().any(|(key, _)| key.starts_with("MAGIC_CONTEXT")) {
+                assert_eq!(
+                    resolve_context_db_path(env, Some(PathBuf::from("home"))),
+                    root.join("magic-context/context.db")
+                );
+            }
         }
     }
 }
