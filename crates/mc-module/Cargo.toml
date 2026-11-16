@@ -57,13 +57,13 @@ unicode-normalization = "0.1.24"
 serde_jcs = "0.2"
 # Model tool calls and the edit to a person's message come through these
 # published contracts, each on a route of its own.
-cortexkit-role-tool-provider = "=0.15.8"
+cortexkit-role-tool-provider = "=0.15.9"
 cortexkit-role-step-transform-provider = "=0.5.0"
 # Routing picks a summarizer model the session's own runner can run; ck-mc
 # has no model chain of its own and never falls back to the session's model.
 cortexkit-role-routing = "=0.7.23"
 # A session moves between machines through the agent-data/v1 contract.
-cortexkit-role-agent-data = "=0.3.0"
+cortexkit-role-agent-data = "=0.3.1"
 cortexkit-role-user-commands = "=0.1.4"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
 # A session's memory context comes from Entorhinal, in these
@@ -94,11 +94,11 @@ nix = { version = "0.31.3", features = ["fs"] }
 windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-cortexkit-role-tool-provider-conformance = "=0.15.9"
+cortexkit-role-tool-provider-conformance = "=0.15.10"
 rusqlite = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["test-util"] }
 # The contract's published vectors, for the participant's own tests.
-cortexkit-role-agent-data = { version = "=0.3.0", features = ["test-vectors"] }
+cortexkit-role-agent-data = { version = "=0.3.1", features = ["test-vectors"] }
 mc-mock-runner = { workspace = true }
 tempfile = "3"
 filetime = "0.2"

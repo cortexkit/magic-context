@@ -439,6 +439,11 @@ pub(crate) fn catalog_answer(
     let request: CatalogRequest = serde_json::from_value(arguments.clone()).map_err(|error| {
         CatalogError::invalid("arguments", format!("tool.catalog arguments: {error}"))
     })?;
+    // ck-mc serves no session notices and so doesn't declare
+    // session-notices/v1: the contract has a provider like it refuse the
+    // `notice_templates` member, even `false`.
+    catalog::check_notice_templates_request(&request, &[])
+        .map_err(|refusal| CatalogError::invalid("notice_templates", refusal.message))?;
     let preset = request_preset(&request)?;
     check_tool_params(&request.params)?;
     if let Some(item) = &request.system_text {
