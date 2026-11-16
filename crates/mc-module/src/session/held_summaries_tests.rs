@@ -128,6 +128,8 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A fold whose read of `context.db` fails keeps the head as shown, and
+/// the next pass reads again.
 #[test]
 fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
     let dir = scratch("held-summaries-unreadable");
@@ -136,8 +138,11 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
     publish(&mut session, 4, "Newer work on the reader.");
     build(&mut session, &settings).expect("m[1] shows summary 4");
     let (m0, m1) = (shown(&session, head::M0_ID), shown(&session, head::M1_ID));
-    // Summary 2's text is no longer held, and its row is gone.
-    execute(&session, "DELETE FROM compartments WHERE sequence=2;");
+    // Summaries 1-3 are no longer held, and their table can't be read.
+    execute(
+        &session,
+        "ALTER TABLE compartments RENAME TO compartments_away;",
+    );
     session.fold_due = true;
     let (ops, log) = crate::test_log::logged(|| session.render_head(&settings));
     assert!(session.next_baseline.is_none(), "no new baseline");
@@ -150,10 +155,90 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
         .collect();
     assert_eq!(texts, [m0, m1]);
     assert!(
-        log.contains(
-            "history head kept as shown, reading summaries: summary 2 is not in context.db"
-        ),
+        log.contains("history head kept as shown, reading summaries: "),
         "{log}"
+    );
+    assert!(session.summaries_missing.is_none(), "nothing to reload");
+
+    execute(
+        &session,
+        "ALTER TABLE compartments_away RENAME TO compartments;",
+    );
+    build(&mut session, &settings).expect("the fold lands");
+    assert!(!session.fold_due);
+    assert!(shown(&session, head::M0_ID).contains("## 13-16 · Work 4"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Another writer deletes the newest summary after the session let its
+/// text go. The session reads its summaries from `context.db` again: the
+/// cut moves back to where they now end, the transcript is read again from
+/// there, and the next view moves the cut back and folds, keeping the
+/// earlier views' edits. It is the one rebuild the deletion causes.
+#[test]
+fn the_newest_summary_deleted_elsewhere_moves_the_cut_back_and_keeps_earlier_edits() {
+    let dir = scratch("held-summaries-newest-deleted");
+    let (mut session, settings) = head(&dir);
+    build(&mut session, &settings).expect("the first render");
+    publish(&mut session, 4, "Newer work on the reader.");
+    build(&mut session, &settings).expect("m[1] shows summary 4");
+    session.fold_due = true;
+    build(&mut session, &settings).expect("a fold takes summary 4 into m[0]");
+    assert_eq!(session.cut, Some(16));
+    // An earlier edit every later view carries.
+    let dropped = EditOp::Drop {
+        mid: "m40".into(),
+        part: Some("p".into()),
+    };
+    let view = session.seal_unchecked(vec![dropped.clone()]);
+    session.accept(view.clone());
+    session.settle_unconfirmed(
+        Some(&AppliedView::new(view.version, view.checksum.clone())),
+        &[],
+    );
+
+    execute(&session, "DELETE FROM compartments WHERE sequence = 4;");
+    session.fold_due = true;
+    let (view, log) = crate::test_log::logged(|| build(&mut session, &settings));
+    assert!(view.is_none(), "the head stays as shown");
+    assert!(
+        log.contains("history head kept as shown, summaries [4] are not in context.db"),
+        "{log}"
+    );
+    // The next build reads the summaries again. The cut moves back past
+    // what the index holds, so the transcript is read again first.
+    let (view, log) = crate::test_log::logged(|| build(&mut session, &settings));
+    assert!(view.is_none());
+    assert!(
+        log.contains("summaries [4] are no longer in context.db"),
+        "{log}"
+    );
+    assert_eq!(session.summaries.len(), 3);
+    assert_eq!(session.cut, Some(12));
+    assert!(!session.index_ready);
+    // The transcript from the cut on, as the next notice reads it.
+    session
+        .index
+        .extend((12..=60).map(|n| text(n, &format!("m{n}"))));
+    session.index_ready = true;
+    let view = build(&mut session, &settings).expect("the view that moves the cut back");
+    assert!(
+        view.edits.iter().any(|edit| edit.op == dropped),
+        "the earlier drop stays"
+    );
+    assert!(view.edits.iter().any(|edit| edit.op
+        == EditOp::Cut {
+            through: "m12".into()
+        }));
+    assert!(!session.fold_due);
+    let m0 = shown(&session, head::M0_ID);
+    assert!(
+        m0.contains("## 9-12 · Work 3") && !m0.contains("Work 4"),
+        "{m0}"
+    );
+    assert!(
+        build(&mut session, &settings).is_none(),
+        "nothing else rebuilds"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
