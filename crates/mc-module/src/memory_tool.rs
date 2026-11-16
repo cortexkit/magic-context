@@ -116,6 +116,20 @@ fn iso(ms: i64) -> String {
     )
 }
 
+/// A memory's verification as the `get` table shows it. A confirmation that
+/// kept no cited lines (every one recorded before verify required them)
+/// shows as `unverified`, as the dreamer's verify treats it.
+fn shown_verification(memory: &memory_writes::MemoryRow) -> String {
+    if memory.verification_status == "verified"
+        && !crate::dreamer::tasks::verify::spans::cites_its_confirmation(
+            memory.metadata_json.as_deref(),
+        )
+    {
+        return "unverified".into();
+    }
+    memory.verification_status.clone()
+}
+
 /// The `get` table, as the TypeScript tool lays it out.
 fn format_list(memories: &[memory_writes::MemoryRow]) -> String {
     if memories.is_empty() {
@@ -128,7 +142,7 @@ fn format_list(memories: &[memory_writes::MemoryRow]) -> String {
                 memory.id.to_string(),
                 memory.category.clone(),
                 memory.status.clone(),
-                memory.verification_status.clone(),
+                shown_verification(memory),
                 iso(memory.updated_at),
                 memory
                     .content

@@ -12,7 +12,11 @@
 //!   checkout;
 //! - an archive because its subject is gone: besides the history proof the
 //!   archive already needs, every path and code name the memory cites is
-//!   absent from every live branch.
+//!   absent from every live branch;
+//! - a confirmation: each span of lines it cites ([`super::spans`]) is in its
+//!   file on every live branch, anywhere in the file; otherwise it counts as
+//!   a skip, because [`LINES_DIFFER`]. A later `verify` run checks the stored
+//!   spans of such a memory the same way before it asks a model.
 //!
 //! The live branches are the default branch and the head of every worktree
 //! that has commits the default branch doesn't contain ([`Refs::live_in`]).
@@ -27,8 +31,15 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use super::cites::Cite;
-use crate::dreamer::branches::{holds_any, names, uncommitted, LiveBranch, Refs, Tree};
+use super::spans::{find_lines, Cited};
+use crate::dreamer::branches::{
+    holds_any, names, read_blob, uncommitted, LiveBranch, Refs, Tree,
+};
 use crate::dreamer::checkout::clean_path;
+
+/// The start of the reason a confirmation counts as a skip when its cited
+/// lines are not the same on every live branch.
+pub(crate) const LINES_DIFFER: &str = "the lines differ between live branches";
 
 /// The repository's live branches as one batch read them.
 pub(crate) struct Live {
@@ -79,6 +90,8 @@ pub(crate) struct Gate {
     /// Each subject-gone archive's answer, by memory: why it may not apply,
     /// or `None` when it may.
     present: Mutex<HashMap<i64, Option<String>>>,
+    /// The text of each file the confirmation check read, by blob id.
+    blobs: Mutex<HashMap<String, Result<String, String>>>,
 }
 
 impl Gate {
@@ -88,6 +101,7 @@ impl Gate {
             timeout,
             live: OnceLock::new(),
             present: Mutex::default(),
+            blobs: Mutex::default(),
         }
     }
 
@@ -139,6 +153,57 @@ impl Gate {
             }
         }
         None
+    }
+
+    /// Why a confirmation citing `spans` may not stand for a memory without
+    /// a line of its own: some span's lines are not in its file on some live
+    /// branch (the file may have moved them), or a branch could not be read.
+    /// `None` when every live branch holds every span, or there is only one.
+    pub(crate) fn lines_differ(&self, spans: &[Cited]) -> Option<String> {
+        let live = match self.live() {
+            Ok(live) => live,
+            Err(why) => return Some(why),
+        };
+        if live.single() {
+            return None;
+        }
+        for span in spans {
+            for (branch, tree) in live.branches.iter().zip(&live.trees) {
+                let held = match tree.blob(&span.path) {
+                    None => false,
+                    Some(object) => match self.blob(object) {
+                        Ok(text) => find_lines(&text, &span.text).is_some(),
+                        Err(why) => {
+                            return Some(format!(
+                                "reading {} on live branch {} failed: {why}",
+                                span.path, branch.name
+                            ))
+                        }
+                    },
+                };
+                if !held {
+                    return Some(format!(
+                        "{LINES_DIFFER} ({} is not on live branch {})",
+                        span.label(),
+                        branch.name
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// The text of blob `object`, read once per batch.
+    fn blob(&self, object: &str) -> Result<String, String> {
+        if let Some(known) = self.blobs.lock().expect("live blobs").get(object) {
+            return known.clone();
+        }
+        let text = read_blob(&self.repo, object);
+        self.blobs
+            .lock()
+            .expect("live blobs")
+            .insert(object.to_owned(), text.clone());
+        text
     }
 
     /// Why archiving memory `id`, whose subject `cites` names, as gone may

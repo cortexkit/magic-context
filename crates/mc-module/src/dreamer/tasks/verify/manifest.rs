@@ -1,7 +1,10 @@
 //! The `<verify>` manifest a verify batch's reply ends with: one verdict per
 //! memory, read the way the 0.49.x Rust module kept in `crates_old/` read it
 //! (`mc-module/src/dream_tasks/verify.rs`), plus the `missing` attribute an
-//! archive may carry.
+//! archive may carry and the `cites` and `derive` a confirmation carries.
+//! Their content is checked when the verdict is written, not here: a
+//! confirmation without usable cites counts as a skip, never refuses the
+//! reply.
 //!
 //! Only the reply's final message reaches the task, so the manifest must be
 //! complete there: a reply without the closing `</verify>` is refused, never
@@ -50,6 +53,11 @@ pub(crate) struct Verdict {
     pub consolidation: bool,
     /// An archive's path or code name that is gone from the checkout.
     pub missing: Option<String>,
+    /// A confirmation's cited lines, as written ([`super::spans`]).
+    pub cites: Option<String>,
+    /// A confirmation's arithmetic for a number no cited line holds as
+    /// written ([`super::numbers::derivations`]).
+    pub derive: Option<String>,
 }
 
 /// The value of attribute `name` in `attributes`, as written.
@@ -137,6 +145,12 @@ pub(crate) fn parse_manifest(text: &str, expected: &[i64]) -> Result<Vec<Verdict
                     .flatten()
                     .map(|value| js_trim(&value).to_owned())
                     .filter(|value| !value.is_empty()),
+                cites: (*decision == Decision::Verified)
+                    .then(|| attribute(&entry[1], "cites"))
+                    .flatten(),
+                derive: (*decision == Decision::Verified)
+                    .then(|| attribute(&entry[1], "derive"))
+                    .flatten(),
             });
         }
     }

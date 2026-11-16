@@ -310,6 +310,23 @@ impl Tree {
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
     }
+
+    /// The blob id of the file at exactly `path`, when the commit holds one.
+    pub(crate) fn blob(&self, path: &str) -> Option<&str> {
+        self.files.get(path).map(String::as_str)
+    }
+}
+
+/// The text of blob `object` in the repository at `repo`, read with git's
+/// timeout.
+pub(crate) fn read_blob(repo: &Path, object: &str) -> Result<String, String> {
+    if !(object.len() == 40 || object.len() == 64)
+        || !object.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(format!("{object} is not a blob id"));
+    }
+    run_git_within(repo, &["cat-file", "blob", object], GIT_TIMEOUT)
+        .map_err(|error| format!("reading blob {}: {error}", short(object)))
 }
 
 /// Whether cited path `path` (cleaned) names `file` or a folder above it:

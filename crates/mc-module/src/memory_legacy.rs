@@ -43,6 +43,8 @@ fn selection_order(left: &StoredMemory, right: &StoredMemory) -> Ordering {
         return permanent(right).cmp(&permanent(left));
     }
     let reinforced = |memory: &StoredMemory| {
+        // Counts confirmations without cited lines too, as the head's
+        // ranking does (`head_memories::Row::last_met`).
         memory
             .last_seen_at
             .into_iter()

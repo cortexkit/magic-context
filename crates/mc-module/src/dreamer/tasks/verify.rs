@@ -6,12 +6,15 @@
 //! `dream_dispatch/verify_host.rs`, and `mc-store/src/dream_verify.rs`).
 //!
 //! - `verify` checks the memories mapped to files (`memory_verifications`)
-//!   whose files changed since the memory was last verified: since its
-//!   verified commit when it has one, otherwise since its verification
-//!   time. Memories verified before and memories never verified go in
-//!   separate batches. A batch of verified memories whose commits git can
-//!   still diff is shown the diff of each file since then, bounded as 0.49
-//!   bounded it; any other batch is checked by reading the files.
+//!   that were never confirmed with cited lines, and those whose files, or
+//!   the files of the lines their confirmation cited, changed since the
+//!   commit that confirmation read. For such a memory the module first looks
+//!   for each cited span's text again ([`spans`]): when every span is still
+//!   in its file, the memory stays confirmed at the new commit and no model
+//!   is asked. A memory with a span that changed or is gone is shown the
+//!   diff of its files since then, bounded as 0.49 bounded it, with the
+//!   spans it was confirmed from; every other memory is checked by reading
+//!   the files.
 //! - `verify-broad` checks every live memory of the task's categories,
 //!   mapped or not, least recently checked first.
 //!
@@ -22,9 +25,16 @@
 //! the search reached its limit, nothing is listed and nobody goes first:
 //! an unfinished search proves no absence.
 //!
-//! A batch holds twenty memories. The model reads code with the read-only
-//! tools and answers with one `<verify>` manifest ([`manifest`]); each
-//! verdict is checked and written on its own ([`apply`]).
+//! A batch checked by reading holds five memories, and a batch shown a diff
+//! twenty. The model reads code with the read-only tools and answers with
+//! one `<verify>` manifest ([`manifest`]); each verdict is checked and
+//! written on its own ([`apply`]). A confirmation must cite the lines that
+//! state the claim, which the module reads and checks itself ([`confirm`]);
+//! one that fails a check counts as a skip.
+//!
+//! A confirmation recorded without cited lines (every one before they were
+//! required, the 0.49 plugin's included) counts as never made: such a memory
+//! is read in full again, never shown a diff.
 //!
 //! Which code a memory is checked against depends on the git line it was
 //! learned on ([`crate::memory_line`]). The tasks never read the folder of
@@ -57,12 +67,18 @@ use crate::summary::fit::Window;
 
 mod apply;
 pub(crate) mod cites;
+mod confirm;
 mod live;
 pub(crate) mod manifest;
+mod numbers;
+pub(crate) mod spans;
 
 use cites::Cite;
+use confirm::confirm;
 use live::Gate;
-use manifest::{parse_manifest, Decision};
+use manifest::{parse_manifest, Decision, Verdict};
+use apply::METADATA;
+use spans::{find_lines, Cited, Confirmation, STORED_KEY};
 
 /// The kinds memory profiles name.
 pub(crate) const VERIFY: &str = "verify";
@@ -71,8 +87,12 @@ pub(crate) const VERIFY_BROAD: &str = "verify-broad";
 const INPUT_FRAME: &str = "dreamer/verify.input";
 /// Its frame for memories shown with the diff of their files.
 const DIFF_FRAME: &str = "dreamer/verify.input.with-diff";
-/// At most this many memories go in one message.
-pub(crate) const BATCH_SIZE: usize = 20;
+/// At most this many memories go in one message checked by reading code.
+/// Each step of such a message resends every file read so far, so a longer
+/// batch costs far more than its share.
+pub(crate) const READ_BATCH_SIZE: usize = 5;
+/// At most this many memories go in one message shown a diff.
+pub(crate) const DIFF_BATCH_SIZE: usize = 20;
 /// Above this many UTF-16 units of diff in one batch, each file shows its
 /// changed line ranges instead (0.49's bound).
 const DIFF_BOUND: usize = 36_000;
@@ -93,10 +113,13 @@ pub(crate) struct Memory {
     pub revision: i64,
     /// The files it is mapped to.
     pub files: Vec<String>,
-    /// When it was last verified, in milliseconds; 0 when never.
+    /// When it was last confirmed with cited lines, in milliseconds; 0 when
+    /// never. A confirmation without them counts as never made.
     pub verified_at: i64,
-    /// The commit it was verified at, when that verification recorded one.
+    /// The commit that confirmation read.
     pub verified_commit: Option<String>,
+    /// The lines that confirmation cited, as the module read them.
+    pub confirmation: Option<Confirmation>,
     /// When a verify task last decided anything about it, a skip included.
     pub checked_at: i64,
     /// The branch it was learned on ([`crate::memory_line`]); `None` when
@@ -175,14 +198,14 @@ pub(crate) fn live_memories(
             .as_deref()
             .and_then(|text| serde_json::from_str(text).ok())
             .unwrap_or(Value::Null);
-        // The commit counts only when it was stamped by the verification
-        // the memory's time comes from, as the plugin's verifier read it.
-        let verified_commit = (verified_at > 0
+        // A confirmation counts only with the lines it cited, kept by the
+        // verification the memory's time comes from; one recorded without
+        // them, as every confirmation before they were required, counts as
+        // never made, so the memory is read in full again.
+        let confirmation = (verified_at > 0
             && metadata["dreamerVerifiedAt"].as_i64() == Some(verified_at))
-        .then(|| metadata["dreamerVerifiedCommit"].as_str())
-        .flatten()
-        .filter(|commit| commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .map(str::to_owned);
+        .then(|| Confirmation::stored(&metadata, verified_at))
+        .flatten();
         let checked_at = metadata["dreamerCheckedAt"]
             .as_i64()
             .unwrap_or(0)
@@ -194,8 +217,9 @@ pub(crate) fn live_memories(
             content,
             revision,
             files,
-            verified_at,
-            verified_commit,
+            verified_at: if confirmation.is_some() { verified_at } else { 0 },
+            verified_commit: confirmation.as_ref().map(|confirmation| confirmation.commit.clone()),
+            confirmation,
             checked_at,
             branch: branch.filter(|branch| !branch.is_empty()),
         });
@@ -257,8 +281,9 @@ impl Changes {
 }
 
 /// Whether the `verify` task checks `memory`: it is mapped, and it was never
-/// verified, or one of its files is gone or changed since its verification.
-/// When git can't tell, it is checked.
+/// confirmed with cited lines, or one of its files is gone, or one of its
+/// files or of the files its confirmation cited changed since that
+/// confirmation's commit. When git can't tell, it is checked.
 pub(crate) fn changed(memory: &Memory, changes: &Changes) -> bool {
     if memory.files.is_empty() {
         return false;
@@ -275,7 +300,7 @@ pub(crate) fn changed(memory: &Memory, changes: &Changes) -> bool {
         return changes
             .since
             .get(commit)
-            .is_none_or(|files| memory.files.iter().any(|file| files.contains(file)));
+            .is_none_or(|files| watched(memory).iter().any(|file| files.contains(*file)));
     }
     let Some(uncommitted) = &changes.uncommitted else {
         return true;
@@ -289,6 +314,18 @@ pub(crate) fn changed(memory: &Memory, changes: &Changes) -> bool {
                 .get(file)
                 .is_none_or(|at| *at >= memory.verified_at - 1_000)
     })
+}
+
+/// The files whose changes concern `memory`: the files it is mapped to, then
+/// the files of the lines its confirmation cited, each once.
+fn watched(memory: &Memory) -> Vec<&str> {
+    let mut files: Vec<&str> = memory.files.iter().map(String::as_str).collect();
+    for span in memory.confirmation.iter().flat_map(|confirmation| &confirmation.spans) {
+        if !files.contains(&span.path.as_str()) {
+            files.push(&span.path);
+        }
+    }
+    files
 }
 
 /// The order of a broad run: memories none of whose citations was found
@@ -469,14 +506,15 @@ pub(crate) fn bounded_evidence(mut files: Vec<EvidenceFile>) -> Evidence {
 }
 
 /// The diff of each file of `batch` since the earliest verification of a
-/// memory mapped to it. `None` when one of those has no commit or git can't
-/// diff it: the batch is then checked by reading the files.
+/// memory it concerns: the files each memory is mapped to, and those of the
+/// lines its confirmation cited. `None` when one of those has no commit or
+/// git can't diff it: the batch is then checked by reading the files.
 fn evidence(checkout: &Checkout, batch: &[&Memory]) -> Option<Evidence> {
     checkout.head()?;
     let mut by_file: BTreeMap<&str, Vec<&Memory>> = BTreeMap::new();
     for memory in batch {
-        for file in &memory.files {
-            by_file.entry(file.as_str()).or_default().push(memory);
+        for file in watched(memory) {
+            by_file.entry(file).or_default().push(memory);
         }
     }
     let mut files = Vec::new();
@@ -492,9 +530,21 @@ fn evidence(checkout: &Checkout, batch: &[&Memory]) -> Option<Evidence> {
     Some(bounded_evidence(files))
 }
 
-/// The text that fills [`DIFF_FRAME`].
+/// The text that fills [`DIFF_FRAME`]: each memory with the spans it was
+/// confirmed from, and the diff of its files.
 pub(crate) fn diff_input(memories: &[&Memory], evidence: &Evidence) -> String {
-    let entries: Vec<String> = memories.iter().map(|memory| entry(memory, &[])).collect();
+    let entries: Vec<String> = memories
+        .iter()
+        .map(|memory| {
+            let mut text = entry(memory, &[]);
+            if let Some(confirmation) = &memory.confirmation {
+                let spans: Vec<String> = confirmation.spans.iter().map(Cited::label).collect();
+                text.push_str("\nConfirmed from: ");
+                text.push_str(&spans.join(", "));
+            }
+            text
+        })
+        .collect();
     let files: Vec<String> = evidence
         .files
         .iter()
@@ -630,6 +680,7 @@ impl Verify {
             .and_then(|refs| refs.main_branch().map(str::to_owned));
         let groups = group_by_line(&candidates, refs.as_ref());
         let mut planned: Vec<Plans<'_>> = Vec::new();
+        let mut rechecked: Vec<Rechecked> = Vec::new();
         for (target, group) in groups {
             let checkout = match &target {
                 Target::Main => Checkout::open(&main)?,
@@ -647,7 +698,12 @@ impl Verify {
                 },
             };
             let checkout = Arc::new(checkout);
-            let (plans, lookup) = self.plan_group(&checkout, &group.memories);
+            // The main checkout's memories without a line of their own stay
+            // confirmed only where every live branch holds their lines.
+            let live = (target == Target::Main).then(|| Gate::new(&main, HISTORY_TIMEOUT));
+            let (plans, lookup, kept) =
+                self.plan_group(&checkout, &group.memories, &group.lined, live.as_ref());
+            rechecked.extend(kept);
             if lookup.cut {
                 tracing::warn!(
                     "ck-mc: dreamer: {} for {project}: the plain search stopped after {} of the checkout's files; no citation is listed as not found",
@@ -662,6 +718,24 @@ impl Verify {
                 plans,
                 lookup,
             });
+        }
+        // No model is asked about a memory whose cited lines are unchanged;
+        // it is recorded as confirmed at the new commit now, so the next
+        // run looks only at what changes after it.
+        if !rechecked.is_empty() {
+            match context
+                .db
+                .with_connection(|conn| record_rechecked(conn, &rechecked))
+            {
+                Ok(recorded) => tracing::info!(
+                    "ck-mc: dreamer: {} for {project}: {recorded} memories stay confirmed, the lines they cite unchanged",
+                    declared.task
+                ),
+                Err(error) => tracing::warn!(
+                    "ck-mc: dreamer: {} for {project}: recording the memories whose cited lines are unchanged failed: {error}",
+                    declared.task
+                ),
+            }
         }
         // `verify` checks memories without a diff under its other message.
         let read_document = if self.broad {
@@ -741,29 +815,38 @@ impl Verify {
                     gate,
                     history_timeout: HISTORY_TIMEOUT,
                     absence: Mutex::default(),
+                    confirmations: Mutex::default(),
+                    files: Mutex::default(),
                 });
             }
         }
         Ok(batches)
     }
 
-    /// The messages for `memories`, all checked in `checkout`, and the
-    /// plain search behind their `Not found` lines.
+    /// The messages for `memories`, all checked in `checkout`, the plain
+    /// search behind their `Not found` lines, and the confirmed memories
+    /// that still stand at the checkout's commit because every line they
+    /// cite is unchanged ([`recheck`]), which need no message. `lined` holds
+    /// the memories checked against their own line; every other memory
+    /// stays confirmed only where every live branch holds its lines
+    /// (`live`, for the main checkout's group).
     fn plan_group<'a>(
         &self,
         checkout: &Checkout,
         memories: &[&'a Memory],
-    ) -> (Vec<Planned<'a>>, Lookup) {
+        lined: &HashSet<i64>,
+        live: Option<&Gate>,
+    ) -> (Vec<Planned<'a>>, Lookup, Vec<Rechecked>) {
         let mut plans: Vec<Planned<'a>> = Vec::new();
         if self.broad {
             let lookup = look_up(checkout, memories, &SEARCH_LIMITS);
-            for chunk in broad_order(memories, &lookup.gone).chunks(BATCH_SIZE) {
+            for chunk in broad_order(memories, &lookup.gone).chunks(READ_BATCH_SIZE) {
                 plans.push(Planned {
                     memories: chunk.to_vec(),
                     evidence: None,
                 });
             }
-            return (plans, lookup);
+            return (plans, lookup, Vec::new());
         }
         let changes = Changes::read(checkout, memories);
         let selected: Vec<&Memory> = memories
@@ -771,33 +854,131 @@ impl Verify {
             .copied()
             .filter(|memory| changed(memory, &changes))
             .collect();
-        let (verified, never): (Vec<&Memory>, Vec<&Memory>) = selected
+        let (confirmed, never): (Vec<&Memory>, Vec<&Memory>) = selected
             .into_iter()
-            .partition(|memory| memory.verified_at > 0);
-        for chunk in verified.chunks(BATCH_SIZE) {
-            plans.push(Planned {
-                memories: chunk.to_vec(),
-                evidence: evidence(checkout, chunk),
-            });
+            .partition(|memory| memory.confirmation.is_some());
+        let mut kept = Vec::new();
+        let mut stale = Vec::new();
+        for memory in confirmed {
+            let live = live.filter(|_| !lined.contains(&memory.id));
+            match memory
+                .confirmation
+                .as_ref()
+                .and_then(|confirmation| recheck(checkout, confirmation, live))
+            {
+                Some(confirmation) => kept.push(Rechecked {
+                    id: memory.id,
+                    revision: memory.revision,
+                    verified_at: memory.verified_at,
+                    confirmation,
+                }),
+                None => stale.push(memory),
+            }
         }
-        for chunk in never.chunks(BATCH_SIZE) {
+        let mut read: Vec<&Memory> = Vec::new();
+        for chunk in stale.chunks(DIFF_BATCH_SIZE) {
+            match evidence(checkout, chunk) {
+                Some(evidence) => plans.push(Planned {
+                    memories: chunk.to_vec(),
+                    evidence: Some(evidence),
+                }),
+                None => read.extend(chunk),
+            }
+        }
+        read.extend(never);
+        for chunk in read.chunks(READ_BATCH_SIZE) {
             plans.push(Planned {
                 memories: chunk.to_vec(),
                 evidence: None,
             });
         }
-        let read: Vec<&Memory> = plans
-            .iter()
-            .filter(|plan| plan.evidence.is_none())
-            .flat_map(|plan| plan.memories.iter().copied())
-            .collect();
         let lookup = if read.is_empty() {
             Lookup::default()
         } else {
             look_up(checkout, &read, &SEARCH_LIMITS)
         };
-        (plans, lookup)
+        (plans, lookup, kept)
     }
+}
+
+/// A confirmed memory whose cited lines are unchanged, as a re-check found
+/// it: it stays confirmed, now at the re-check's commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Rechecked {
+    pub id: i64,
+    /// The revision the re-check read; a memory changed since is left as it
+    /// is.
+    pub revision: i64,
+    /// The time of the confirmation that stands.
+    pub verified_at: i64,
+    /// Its spans, where they are at the new commit.
+    pub confirmation: Confirmation,
+}
+
+/// `confirmation`, still standing at `checkout`'s commit, or `None` when a
+/// line it cites changed or is gone. Each stored span's text must be in the
+/// same file at that commit, anywhere, so lines that moved still match; for
+/// a memory without a line of its own (`live`), on every live branch too.
+/// What it returns carries the new commit and where each span is now. Git
+/// failing counts as a change: the memory then goes to a model.
+fn recheck(
+    checkout: &Checkout,
+    confirmation: &Confirmation,
+    live: Option<&Gate>,
+) -> Option<Confirmation> {
+    let commit = checkout.head()?;
+    let mut spans = Vec::new();
+    for span in &confirmation.spans {
+        let (path, file) = checkout.committed(&span.path).ok()??;
+        if path != span.path {
+            return None;
+        }
+        let (start, end) = find_lines(&file, &span.text)?;
+        spans.push(Cited {
+            path,
+            start,
+            end,
+            text: span.text.clone(),
+        });
+    }
+    if live.is_some_and(|live| live.lines_differ(&spans).is_some()) {
+        return None;
+    }
+    Some(Confirmation {
+        commit: commit.to_owned(),
+        spans,
+        derive: confirmation.derive.clone(),
+    })
+}
+
+/// Record that each of `rechecked` stays confirmed at its new commit: the
+/// commit and the spans' new places replace the old ones, the time of the
+/// confirmation stays. A memory whose text or confirmation changed since
+/// the re-check read it is left alone. Returns how many were recorded.
+fn record_rechecked(conn: &mut Connection, rechecked: &[Rechecked]) -> rusqlite::Result<usize> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut recorded = 0;
+    for memory in rechecked {
+        recorded += tx.execute(
+            &format!(
+                "UPDATE memories SET verify_commit = ?2,
+                        metadata_json = json_set({METADATA}, '$.dreamerVerifiedCommit', ?2,
+                                                 '$.{STORED_KEY}', json(?3))
+                  WHERE id = ?1 AND revision = ?4
+                    AND CASE WHEN json_valid(metadata_json)
+                             THEN json_extract(metadata_json, '$.{STORED_KEY}.verifiedAt') END = ?5"
+            ),
+            params![
+                memory.id,
+                memory.confirmation.commit,
+                memory.confirmation.json(memory.verified_at).to_string(),
+                memory.revision,
+                memory.verified_at
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(recorded)
 }
 
 /// Where each of `memories` is checked, the main checkout first and then
@@ -974,7 +1155,17 @@ pub(crate) struct VerifyBatch {
     /// lookups run when the reply is accepted, before the store's write lock
     /// is taken, and the write reads the answer from here.
     absence: Mutex<HashMap<Cite, Absence>>,
+    /// Each confirmation's check, by memory and the `cites` and `derive` the
+    /// reply gave: the cited lines it rests on, or why it counts as a skip.
+    /// The checks run when the reply is accepted, before the store's write
+    /// lock is taken, and the write reads the answer from here.
+    confirmations: Mutex<HashMap<ConfirmationKey, Result<Confirmation, String>>>,
+    /// The files those checks read at the checkout's commit, by cited path.
+    files: Mutex<HashMap<String, Result<Option<(String, String)>, String>>>,
 }
+
+/// A confirmation's memory, `cites` and `derive`, as one reply gave them.
+type ConfirmationKey = (i64, Option<String>, Option<String>);
 
 impl VerifyBatch {
     #[cfg(test)]
@@ -1022,6 +1213,52 @@ impl VerifyBatch {
             .insert(cite.clone(), found.clone());
         found
     }
+
+    /// The cited lines confirmation `verdict` rests on, or why it counts as
+    /// a skip ([`confirm`]); for a memory without a line of its own, also
+    /// only where every live branch holds those lines ([`live`]).
+    pub(crate) fn confirmation(&self, verdict: &Verdict) -> Result<Confirmation, String> {
+        let key = (verdict.id, verdict.cites.clone(), verdict.derive.clone());
+        if let Some(known) = self.confirmations.lock().expect("confirmations").get(&key) {
+            return known.clone();
+        }
+        let checked = match self.read.iter().find(|read| read.id == verdict.id) {
+            None => Err(format!("memory {} is not in this batch", verdict.id)),
+            Some(read) => confirm(
+                &read.content,
+                self.checkout.top_level(),
+                verdict.cites.as_deref(),
+                verdict.derive.as_deref(),
+                self.commit(),
+                &|cited| self.committed(cited),
+            )
+            .and_then(|confirmation| match (&self.gate, read.lined) {
+                (Some(gate), false) => match gate.lines_differ(&confirmation.spans) {
+                    Some(why) => Err(why),
+                    None => Ok(confirmation),
+                },
+                _ => Ok(confirmation),
+            }),
+        };
+        self.confirmations
+            .lock()
+            .expect("confirmations")
+            .insert(key, checked.clone());
+        checked
+    }
+
+    /// The file `cited` names at the checkout's commit, read once per batch.
+    fn committed(&self, cited: &str) -> Result<Option<(String, String)>, String> {
+        if let Some(known) = self.files.lock().expect("cited files").get(cited) {
+            return known.clone();
+        }
+        let read = self.checkout.committed(cited);
+        self.files
+            .lock()
+            .expect("cited files")
+            .insert(cited.to_owned(), read.clone());
+        read
+    }
 }
 
 impl TaskInput for VerifyBatch {
@@ -1049,8 +1286,14 @@ impl TaskInput for VerifyBatch {
             }
         }
         // The live branches are read here too, before the store's write
-        // lock is taken, for each change the write will check against them.
+        // lock is taken, for each change the write will check against them,
+        // and so are the lines each confirmation cites.
         self.warm_gate(&verdicts);
+        for verdict in &verdicts {
+            if verdict.decision == Decision::Verified {
+                let _ = self.confirmation(verdict);
+            }
+        }
         Ok(())
     }
 }

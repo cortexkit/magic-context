@@ -5,9 +5,13 @@
 //! Every verdict must name a memory the batch sent, still a live memory of
 //! the project at the revision the batch read, in a category the task
 //! covers, and a decision the task declares. Then:
-//! - `verified` records the time and the commit checked, and the files the
-//!   reply names become the memory's mapping when they are tracked files
-//!   inside the checkout, so a memory verified by searching becomes mapped;
+//! - `verified` counts only when the lines it cites pass their checks
+//!   ([`super::confirm`]); it then records the time, the commit checked and
+//!   the cited lines ([`super::spans`]), and the files the reply names become
+//!   the memory's mapping when they are tracked files inside the checkout,
+//!   so a memory verified by searching becomes mapped. One that fails its
+//!   checks is written as a skip, and why goes with the run's dropped
+//!   proposals;
 //! - `skip` records only that the memory was checked;
 //! - `update` keeps 0.49's rules: a project rule that reads as a behavioural
 //!   directive is never rewritten, the text must be non-empty and at most
@@ -49,6 +53,7 @@ use serde_json::{json, Value};
 
 use super::cites::{cites, Cite};
 use super::manifest::{js_trim, Decision, Verdict};
+use super::spans::{Confirmation, STORED_KEY};
 use super::{Absence, Read, VerifyBatch};
 use crate::dreamer::task::Applied;
 use crate::dreamer::tasks::map_memories::{
@@ -69,7 +74,7 @@ const RULES_CATEGORY: &str = "swe:project-rules";
 /// counted.
 const MAX_CONTENT: usize = 20_000;
 /// The memory's metadata as a JSON object, whatever the column holds.
-const METADATA: &str = "CASE WHEN json_valid(metadata_json)
+pub(super) const METADATA: &str = "CASE WHEN json_valid(metadata_json)
         THEN CASE WHEN json_type(metadata_json) = 'object' THEN metadata_json ELSE '{}' END
         ELSE '{}' END";
 
@@ -126,7 +131,28 @@ impl VerifyBatch {
         for verdict in verdicts {
             let dropped = match self.check(tx, verdict)? {
                 Err(reason) => Some(reason),
-                Ok(current) => self.write_one(tx, verdict, &current, run, now, &mut remapped)?,
+                Ok(current) => match self.confirmed(verdict) {
+                    // A confirmation that fails its checks counts as a skip:
+                    // the memory is marked checked, and the reason is kept
+                    // with the run's dropped proposals.
+                    Some(Err(why)) => {
+                        let skip = Verdict {
+                            decision: Decision::Skip,
+                            ..verdict.clone()
+                        };
+                        self.write_one(tx, &skip, &current, None, run, now, &mut remapped)?;
+                        Some(format!("memory {}: counted as a skip: {why}", verdict.id))
+                    }
+                    confirmation => self.write_one(
+                        tx,
+                        verdict,
+                        &current,
+                        confirmation.and_then(Result::ok).as_ref(),
+                        run,
+                        now,
+                        &mut remapped,
+                    )?,
+                },
             };
             match dropped {
                 Some(reason) => applied.dropped.push(reason),
@@ -196,6 +222,12 @@ impl VerifyBatch {
             Some(reason) => Err(format!("memory {id}: {reason}")),
             None => Ok(current),
         })
+    }
+
+    /// For a confirmation, the cited lines it rests on or why it counts as a
+    /// skip; `None` for any other decision.
+    fn confirmed(&self, verdict: &Verdict) -> Option<Result<Confirmation, String>> {
+        (verdict.decision == Decision::Verified).then(|| self.confirmation(verdict))
     }
 
     /// Why a rewrite or an archive of a memory checked without a line of
@@ -328,14 +360,17 @@ impl VerifyBatch {
         files
     }
 
-    /// Write `verdict`, which passed its checks. `Some` when it is dropped
+    /// Write `verdict`, which passed its checks; a confirmation with the
+    /// cited lines it rests on (`confirmation`). `Some` when it is dropped
     /// after all, with why. A mapping a verification replaces is added to
     /// `remapped`.
+    #[allow(clippy::too_many_arguments)]
     fn write_one(
         &self,
         tx: &Transaction<'_>,
         verdict: &Verdict,
         current: &MemoryRow,
+        confirmation: Option<&Confirmation>,
         run: i64,
         now: i64,
         remapped: &mut Vec<MappingChange>,
@@ -361,6 +396,11 @@ impl VerifyBatch {
                 Ok(None)
             }
             Decision::Verified => {
+                let Some(confirmation) = confirmation else {
+                    return Ok(Some(format!(
+                        "memory {id}: a confirmation needs the cited lines it rests on"
+                    )));
+                };
                 let named = self.tracked(&verdict.files);
                 // Without a tracked file named, the mapping stays as it was.
                 let files = if named.is_empty() {
@@ -382,7 +422,7 @@ impl VerifyBatch {
                     }
                     named
                 };
-                stamp_verified(tx, id, "confirmed", &files, commit, now)?;
+                stamp_verified(tx, id, "confirmed", &files, commit, now, Some(confirmation))?;
                 Ok(None)
             }
             Decision::Update => {
@@ -404,7 +444,9 @@ impl VerifyBatch {
                     named
                 };
                 put_mapping(tx, id, &mapping_of(&files, now))?;
-                stamp_verified(tx, id, "updated", &files, commit, now)?;
+                // The new text has no cited lines yet, so it counts as never
+                // confirmed until a later run confirms it.
+                stamp_verified(tx, id, "updated", &files, commit, now, None)?;
                 // A memory checked against its own line now holds what that
                 // line's newest commit says.
                 if self.read.iter().any(|read| read.id == id && read.lined) {
@@ -623,7 +665,9 @@ fn after_snapshot(tx: &Transaction<'_>, id: i64) -> rusqlite::Result<Value> {
 
 /// Record that the memory was verified now, at `commit`, against `files`,
 /// with the metadata stamps the plugin's verifier wrote, so the next
-/// `verify` run diffs from this commit.
+/// `verify` run diffs from this commit. A confirmation keeps the cited lines
+/// it rests on ([`super::spans::STORED_KEY`]); any other verification drops
+/// those of an earlier one.
 fn stamp_verified(
     tx: &Transaction<'_>,
     id: i64,
@@ -631,17 +675,28 @@ fn stamp_verified(
     files: &[String],
     commit: Option<&str>,
     now: i64,
+    confirmation: Option<&Confirmation>,
 ) -> rusqlite::Result<()> {
     tx.execute(
         &format!(
             "UPDATE memories SET verification_status = 'verified', verified_at = ?3,
                     verify_result = ?2, verify_files_json = ?4, verify_commit = ?5,
-                    metadata_json = json_set({METADATA}, '$.dreamerVerifiedAt', ?3,
+                    metadata_json = json_set(json_remove({METADATA}, '$.{STORED_KEY}'),
+                                             '$.dreamerVerifiedAt', ?3,
                                              '$.dreamerVerifiedCommit', ?5, '$.dreamerCheckedAt', ?3)
               WHERE id = ?1"
         ),
         params![id, result, now, json!(files).to_string(), commit],
     )?;
+    if let Some(confirmation) = confirmation {
+        tx.execute(
+            &format!(
+                "UPDATE memories SET metadata_json = json_set(metadata_json, '$.{STORED_KEY}', json(?2))
+                  WHERE id = ?1"
+            ),
+            params![id, confirmation.json(now).to_string()],
+        )?;
+    }
     Ok(())
 }
 

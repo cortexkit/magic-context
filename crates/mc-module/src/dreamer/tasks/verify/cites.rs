@@ -107,6 +107,16 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
 /// the memory is checked against (`Checkout::top_level`), which decide
 /// whether a bare word joined by slashes is a path.
 pub(crate) fn cites(content: &str, top_level: &BTreeSet<String>) -> Vec<Cite> {
+    cites_up_to(content, top_level, MAX_CITES)
+}
+
+/// Everything `content` cites, as [`cites`] reads it but without its limit:
+/// a confirmation's cited lines must hold every one.
+pub(crate) fn cites_all(content: &str, top_level: &BTreeSet<String>) -> Vec<Cite> {
+    cites_up_to(content, top_level, usize::MAX)
+}
+
+fn cites_up_to(content: &str, top_level: &BTreeSet<String>, limit: usize) -> Vec<Cite> {
     static SPAN: OnceLock<Regex> = OnceLock::new();
     static PATH: OnceLock<Regex> = OnceLock::new();
     static QUALIFIED: OnceLock<Regex> = OnceLock::new();
@@ -199,7 +209,7 @@ pub(crate) fn cites(content: &str, top_level: &BTreeSet<String>) -> Vec<Cite> {
     found.sort_by_key(|(at, _)| *at);
     let mut cites: Vec<Cite> = Vec::new();
     for (_, cite) in found {
-        if cites.len() == MAX_CITES {
+        if cites.len() == limit {
             break;
         }
         if !cites.iter().any(|seen| seen.text() == cite.text()) {
