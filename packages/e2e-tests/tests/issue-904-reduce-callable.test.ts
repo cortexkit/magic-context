@@ -104,9 +104,24 @@ function prefixNumbers(body: Body): number[] {
 	);
 }
 
-/** Messages with Anthropic's moving cache breakpoints removed. */
+/**
+ * Messages with Anthropic's moving cache breakpoint removed. The breakpoint
+ * sits on the newest message, and Oh My Pi 18.20 writes that message's text as
+ * a one-block array (to carry the breakpoint) and every older one as a plain
+ * string, so a single text block is written as its string here.
+ */
 function stableMessages(body: Body): string {
-	return JSON.stringify(body.messages ?? [], (key, value) =>
+	const messages = messagesOf(body).map((message) => {
+		const content = message.content;
+		if (
+			Array.isArray(content) &&
+			content.length === 1 &&
+			(content[0] as { type?: string }).type === "text"
+		)
+			return { ...message, content: (content[0] as { text: string }).text };
+		return message;
+	});
+	return JSON.stringify(messages, (key, value) =>
 		key === "cache_control" ? undefined : value,
 	);
 }
@@ -570,12 +585,24 @@ forEachHost(import.meta.url, null, (host) => {
 			const all = [...callable, ...removed, ...restored];
 			const changes = new Set([callable.length, callable.length + removed.length]);
 			const rewrites: number[] = [];
+			const firstDifferences: string[] = [];
 			for (let index = 1; index < all.length; index++) {
 				const earlier = all[index - 1];
 				const later = all[index];
 				if (!earlier || !later) continue;
-				if (!appendsTo(earlier, later)) rewrites.push(index);
+				if (appendsTo(earlier, later)) continue;
+				rewrites.push(index);
+				const before = stableMessages(earlier);
+				const after = stableMessages(later);
+				let at = 0;
+				while (at < before.length && before[at] === after[at]) at++;
+				firstDifferences.push(
+					`${index}@${at}: ${JSON.stringify(before.slice(Math.max(0, at - 60), at + 60))} -> ${JSON.stringify(after.slice(Math.max(0, at - 60), at + 60))}`,
+				);
 			}
+			console.log(
+				`ISSUE904_FLIP_REWRITES ${JSON.stringify({ host, version: run.version, requests: all.length, rewrites, firstDifferences })}`,
+			);
 			expect(rewrites).toEqual([...changes]);
 			// The tags that come back carry the numbers they had before.
 			const before = new Set(prefixNumbers(callable.at(-1) as Body));
