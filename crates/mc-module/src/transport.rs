@@ -391,7 +391,8 @@ const RUNNER_HOST_FAMILY: &str = "runner";
 
 /// A request's body as `role` frames it. A tool provider reads every
 /// request, `tool.catalog` and `role.describe` included, as a tool call
-/// `{name, arguments}`; AFT answers the `{method, params}` frame of the
+/// `{name, arguments}`; AFT, the fleet's code-tools provider, answers the
+/// `{method, params}` frame of the
 /// other roles with `invalid_request` ("missing field `name`").
 fn request_body<P: Serialize>(role: &str, method: &str, params: &P) -> Vec<u8> {
     if role == cortexkit_role_tool_provider::ROLE {
