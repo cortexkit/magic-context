@@ -369,7 +369,19 @@ fn handle(ends: &RunEnds, delivery: &Delivery) -> Outcome {
         }
         return Outcome::NoSession;
     };
-    Outcome::Ended(ends.wake(delivery.id.as_deref(), session_ref))
+    let woke = ends.wake(delivery.id.as_deref(), session_ref);
+    // One line per run end that a wait was blocked on, so the log shows that
+    // events, not the backstop poll, end ck-mc's waits.
+    if let Woke::Waits(waits) = woke {
+        let event = delivery
+            .subject
+            .rsplit_once(".event.")
+            .map_or(delivery.subject.as_str(), |(_, event)| event);
+        tracing::info!(
+            "ck-mc: run ends: {event} for session ref {session_ref} woke {waits} wait(s)"
+        );
+    }
+    Outcome::Ended(woke)
 }
 
 #[cfg(test)]
