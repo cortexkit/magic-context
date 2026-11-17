@@ -318,6 +318,13 @@ impl Machine {
     /// from `prepare`'s items, and return `prepare`'s reply.
     async fn send_out(&self, cut: &str, names: &[&str]) -> Value {
         let prepared = self.op("prepare", cut, names).await.unwrap();
+        self.seal(cut, &prepared);
+        self.op("export", cut, names).await.unwrap();
+        prepared
+    }
+
+    /// Seal the cut from `prepare`'s items, as Entorhinal does.
+    fn seal(&self, cut: &str, prepared: &Value) {
         for item in prepared["items"].as_array().unwrap() {
             self.shared.door.lock().unwrap().sealed.insert(
                 (
@@ -330,8 +337,6 @@ impl Machine {
                 ),
             );
         }
-        self.op("export", cut, names).await.unwrap();
-        prepared
     }
 
     async fn release(&self, cut: &str, names: &[&str], holder: &str) {
@@ -1203,6 +1208,249 @@ async fn the_app_reads_hold_nothing_of_a_session_a_move_replaced_or_released() {
         // Past the source's gate, which refuses the session session_moved.
         assert_eq!(app_meta(&a, &key("s1")).await, Err(never_seen));
     }
+}
+
+/// Broca's module id, the owner of the `broca-session` kind.
+const BROCA: &str = "broca";
+
+/// A Broca session's ref, as Broca registers it: the session's llm-runner
+/// `sessionRef`, which is also its stream on the door.
+fn broca_ref(session: &str) -> String {
+    source::session_ref(&SessionRef::new(BROCA, HARNESS, session))
+}
+
+/// Entorhinal's binding of a Broca session under its ref.
+fn bind_broca(shared: &Shared, session: &str) {
+    shared.bindings.lock().unwrap().insert(
+        broca_ref(session),
+        json!({
+            "agent_id": "agent_0000000000000101",
+            "ref_kind": "broca-session",
+            "ref": broca_ref(session),
+            "harness": HARNESS,
+            "session_id": session,
+            "project_root": null,
+            "incarnation": "0123456789abcdef",
+            "runner": BROCA,
+        }),
+    );
+}
+
+/// Entorhinal on a machine a session moves to binds no session under its
+/// ref until the move is activated.
+fn unbind(shared: &Shared, reference: &str) {
+    shared.bindings.lock().unwrap().remove(reference).unwrap();
+}
+
+impl Machine {
+    /// `op` for `broca-session` refs, named by their values.
+    async fn broca(
+        &self,
+        op: &str,
+        cut: &str,
+        values: &[impl AsRef<str>],
+    ) -> Result<Value, ErrorBody> {
+        let refs: Vec<Value> = values
+            .iter()
+            .map(|value| json!({"ref_kind": "broca-session", "ref": value.as_ref()}))
+            .collect();
+        let mut params = json!({"refs": refs, "cutId": cut});
+        if op == "release" {
+            params["holder"] = json!("the other machine");
+        }
+        self.call(&format!("agent_data.{op}"), params).await
+    }
+
+    /// [`Self::send_out`] for `broca-session` refs.
+    async fn broca_out(&self, cut: &str, values: &[impl AsRef<str>]) -> Value {
+        let prepared = self.broca("prepare", cut, values).await.unwrap();
+        self.seal(cut, &prepared);
+        self.broca("export", cut, values).await.unwrap();
+        prepared
+    }
+
+    async fn broca_diverged(&self, cut: &str, values: &[impl AsRef<str>]) -> Vec<String> {
+        self.broca("diverged", cut, values).await.unwrap()["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["state"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn broca_entry(&self, session: &str) -> Option<journal_file::SessionEntry> {
+        self.module
+            .journal()
+            .contents()
+            .unwrap()
+            .session(BROCA, HARNESS, session)
+            .cloned()
+    }
+
+    fn broca_gate(&self, session: &str) -> Result<(), &'static str> {
+        self.module
+            .journal()
+            .gate()
+            .check(&SessionRef::new(BROCA, HARNESS, session))
+            .map_err(|gated| gated.code)
+    }
+}
+
+/// A Broca session moved to a machine whose Entorhinal binds no session
+/// under its ref yet, as Entorhinal binds it only once the move is
+/// activated: `diverged` answers `at_cut` without reading the cut, `import`
+/// takes the session from the snapshot the cut holds under the ref, and
+/// `abort` and `activate` work from what `import` recorded. The move back
+/// to the first machine, where Entorhinal still binds the ref and the
+/// journal records the session released, replaces its hidden copy.
+#[tokio::test]
+async fn a_broca_session_moves_to_a_machine_whose_entorhinal_does_not_bind_it_yet() {
+    let shared = Arc::new(Shared::default());
+    bind_broca(&shared, "s1");
+    let (a, b, c) = (
+        Machine::new(&shared),
+        Machine::new(&shared),
+        Machine::new(&shared),
+    );
+    seed(&a.conn(), "s1", PROJECT);
+    let before = a.fingerprint("s1");
+    let s1 = broca_ref("s1");
+    let prepared = a.broca_out(CUT, &[&s1]).await;
+    assert_eq!(prepared["items"][0]["sessionRef"], json!(s1));
+    unbind(&shared, &s1);
+
+    assert_eq!(b.broca_diverged(CUT, &[&s1]).await, ["at_cut"]);
+    // Not even a cut the door cannot serve is read.
+    assert_eq!(b.broca_diverged(THIRD, &[&s1]).await, ["at_cut"]);
+
+    // A receiver that aborts after its import drops the staging.
+    c.broca("import", CUT, &[&s1]).await.unwrap();
+    assert_eq!(
+        c.broca_entry("s1")
+            .unwrap()
+            .moving
+            .map(|moving| moving.state),
+        Some(MovingState::Staged)
+    );
+    assert_eq!(c.broca("abort", CUT, &[&s1]).await.unwrap(), json!({}));
+    assert_eq!(c.status(CUT).await, "aborted");
+    assert_eq!(c.broca_entry("s1"), None);
+    assert!(!source::cut_folder(&c.db, CUT).exists());
+    assert_eq!(c.fingerprint("s1").rows, 0);
+
+    let imported = b.broca("import", CUT, &[&s1]).await.unwrap();
+    for member in ["sessionRef", "endOffset", "digest"] {
+        assert_eq!(
+            imported["items"][0][member], prepared["items"][0][member],
+            "{member}"
+        );
+    }
+    assert_eq!(b.broca_gate("s1"), Err(SESSION_MOVING));
+    assert_eq!(b.fingerprint("s1").rows, 0);
+    a.broca("release", CUT, &[&s1]).await.unwrap();
+    assert_eq!(b.broca("activate", CUT, &[&s1]).await.unwrap(), json!({}));
+    assert_eq!(b.status(CUT).await, "activated");
+    assert_eq!(b.fingerprint("s1"), before);
+    assert_eq!(b.broca_gate("s1"), Ok(()));
+    assert_eq!(
+        b.broca_entry("s1").unwrap().baseline,
+        Some(before.digest.clone())
+    );
+
+    // Entorhinal binds the ref once the move is activated. The first
+    // machine keeps its hidden copy and the session's tombstone.
+    bind_broca(&shared, "s1");
+    assert_eq!(a.broca_gate("s1"), Err(SESSION_MOVED));
+    assert!(a.broca_entry("s1").unwrap().released.is_some());
+    b.broca_out(BACK, &[&s1]).await;
+    assert_eq!(a.broca_diverged(BACK, &[&s1]).await, ["at_cut"]);
+    a.broca("import", BACK, &[&s1]).await.unwrap();
+    b.broca("release", BACK, &[&s1]).await.unwrap();
+    assert_eq!(a.broca("activate", BACK, &[&s1]).await.unwrap(), json!({}));
+    assert_eq!(a.broca_gate("s1"), Ok(()));
+    assert_eq!(a.fingerprint("s1"), before);
+    let entry = a.broca_entry("s1").unwrap();
+    assert_eq!((entry.moving, entry.released), (None, None));
+    assert_eq!(entry.baseline, Some(before.digest));
+    assert_eq!(b.broca_gate("s1"), Err(SESSION_MOVED));
+}
+
+/// Without Entorhinal's binding, a cut names a Broca ref's session only if
+/// the snapshot under the ref hashes to the ref and runs under Broca. A
+/// snapshot of another session copied under the ref, or of a session of
+/// another runner whose `sessionRef` is the ref, is refused
+/// `incompatible_version` and nothing is staged.
+#[tokio::test]
+async fn import_refuses_a_cut_under_a_broca_ref_that_names_another_session() {
+    let shared = Arc::new(Shared::default());
+    bind_broca(&shared, "s2");
+    let a = Machine::new(&shared);
+    seed(&a.conn(), "s2", PROJECT);
+    let s2 = broca_ref("s2");
+    a.broca_out(CUT, &[&s2]).await;
+    unbind(&shared, &s2);
+    // The stream of s2 and its seal, under the ref of s1.
+    let s1 = broca_ref("s1");
+    {
+        let mut door = shared.door.lock().unwrap();
+        let stream = door.streams[&s2].clone();
+        let seal = door.sealed[&(CUT.to_owned(), s2.clone())].clone();
+        door.streams.insert(s1.clone(), stream);
+        door.sealed.insert((CUT.to_owned(), s1.clone()), seal);
+    }
+    // The pi-session ref of s1 names the stream of a session of
+    // thalamus-harness, not of Broca.
+    let (b, _) = machines(&["s1"]);
+    seed(&b.conn(), "s1", PROJECT);
+    b.send_out(BACK, &["s1"]).await;
+    let thalamus = source::session_ref(&key("s1"));
+
+    let c = Machine::new(&shared);
+    let c_on_b = Machine::new(&b.shared);
+    for (machine, cut, value, said) in [
+        (&c, CUT, &s1, "whose sessionRef is"),
+        (
+            &c_on_b,
+            BACK,
+            &thalamus,
+            "which runs under thalamus-harness, not under broca",
+        ),
+    ] {
+        let refused = machine.broca("import", cut, &[value]).await.unwrap_err();
+        assert_eq!(code(&refused), "incompatible_version", "{said}");
+        assert!(refused.message.contains(said), "{}", refused.message);
+        assert_eq!(machine.status(cut).await, "none");
+        assert!(!source::cut_folder(&machine.db, cut).exists());
+        assert!(machine
+            .module
+            .journal()
+            .contents()
+            .unwrap()
+            .sessions
+            .is_empty());
+    }
+}
+
+/// A THALAMUS harness ref is a hash of the harness, the project folder and
+/// the session, so it does not name the session's stream on the door: on a
+/// machine whose Entorhinal binds no session under it, `diverged` and
+/// `import` stay `unavailable`, and nothing is staged.
+#[tokio::test]
+async fn a_thalamus_ref_without_a_binding_stays_unavailable() {
+    let (a, b) = machines(&["s1"]);
+    seed(&a.conn(), "s1", PROJECT);
+    a.send_out(CUT, &["s1"]).await;
+    unbind(&a.shared, "s1");
+    for op in ["diverged", "import"] {
+        let refused = b.op(op, CUT, &["s1"]).await.unwrap_err();
+        assert_eq!(code(&refused), "unavailable", "{op}");
+        assert_eq!(
+            refused.message,
+            "Magic Context does not hold pi-session/s1: Entorhinal has no session under this ref."
+        );
+    }
+    assert_eq!(b.status(CUT).await, "none");
+    assert!(!source::cut_folder(&b.db, CUT).exists());
 }
 
 #[path = "crash_tests.rs"]

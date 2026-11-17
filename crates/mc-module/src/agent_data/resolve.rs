@@ -3,7 +3,9 @@
 //! One ref is one runner session. Entorhinal registered it and resolves it
 //! (`agent.session_for_ref` on its management surface), and its answer is
 //! the only place the session's runner, harness and id come from: nothing
-//! in the request is trusted to name a session.
+//! in the request is trusted to name a session. The one exception is a
+//! receiver whose Entorhinal does not bind the ref yet, which takes the
+//! session from the cut it imports ([`super::receiver`]).
 
 use std::time::Duration;
 
@@ -37,6 +39,13 @@ pub fn owner(kind: &str) -> Option<&'static str> {
         .map(|(_, owner)| *owner)
 }
 
+/// The ref kinds whose ref is the session's llm-runner `sessionRef`, the
+/// hash of its runner, harness and id ([`super::source::session_ref`]),
+/// which is also the session's stream on the door. Broca registers its
+/// sessions so. THALAMUS's harness registers a hash of the harness, the
+/// project folder and the session instead, which no snapshot carries.
+pub const SESSION_REF_KINDS: &[&str] = &["broca-session"];
+
 const SESSION_FOR_REF: &str = "agent.session_for_ref";
 
 /// How long one lookup waits for Entorhinal.
@@ -68,9 +77,19 @@ pub(crate) async fn session<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, Er
 }
 
 /// The session a ref names, by Entorhinal's binding alone, whatever this
-/// machine holds of it. The receiver resolves refs this way: a session
-/// released from here earlier is the one a move back brings home.
+/// machine holds of it. A session released from here earlier is the one a
+/// move back brings home.
 pub(crate) async fn lookup<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, ErrorBody> {
+    bound(host, r)
+        .await?
+        .ok_or_else(|| unknown_ref(r, "Entorhinal has no session under this ref"))
+}
+
+/// [`lookup`], with `None` when Entorhinal answers that it has no session
+/// under the ref. The receiver resolves refs this way: on a machine a
+/// session moves to, Entorhinal binds the ref only once the move is
+/// activated, after every participant's own `activate`.
+pub(crate) async fn bound<H: Host>(host: &H, r: &Ref) -> Result<Option<SessionRef>, ErrorBody> {
     let Some(owner) = owner(&r.ref_kind) else {
         return Err(unknown_ref(r, "ck-mc holds no ref of this kind"));
     };
@@ -81,9 +100,7 @@ pub(crate) async fn lookup<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, Err
     let body = serde_json::to_vec(&request).expect("a lookup is JSON");
     let bytes = match tokio::time::timeout(BUDGET, host.entorhinal(body)).await {
         Ok(Some(Ok(bytes))) => bytes,
-        Ok(Some(Err(refusal))) if refusal.code == "not_found" => {
-            return Err(unknown_ref(r, "Entorhinal has no session under this ref"))
-        }
+        Ok(Some(Err(refusal))) if refusal.code == "not_found" => return Ok(None),
         Ok(Some(Err(refusal))) => {
             return Err(unavailable(format!(
                 "Entorhinal refused the ref lookup: {} ({})",
@@ -95,7 +112,7 @@ pub(crate) async fn lookup<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, Err
     let found: AgentSessionForRefReply = match serde_json::from_slice(&bytes) {
         Ok(Outcome::Success(success)) => success.result,
         Ok(Outcome::Refusal(refusal)) if refusal.code == EntorhinalCode::NotFound => {
-            return Err(unknown_ref(r, "Entorhinal has no session under this ref"))
+            return Ok(None)
         }
         Ok(Outcome::Refusal(refusal)) => {
             return Err(unavailable(format!(
@@ -130,7 +147,7 @@ pub(crate) async fn lookup<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, Err
             "the ref's session runs under another module than its kind's owner",
         ));
     }
-    Ok(SessionRef::new(runner, harness, id))
+    Ok(Some(SessionRef::new(runner, harness, id)))
 }
 
 pub(crate) fn unknown_ref(r: &Ref, why: &str) -> ErrorBody {
