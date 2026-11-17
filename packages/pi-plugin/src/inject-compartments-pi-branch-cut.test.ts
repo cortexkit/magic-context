@@ -76,14 +76,22 @@ type EventItem = Entry | { extra: Record<string, unknown>; entryId?: string };
  */
 function cut(branch: Entry[], items: EventItem[], boundary: string) {
 	const messages = items.map((item) =>
-		"extra" in item ? structuredClone(item.extra) : structuredClone(item.message),
+		"extra" in item
+			? structuredClone(item.extra)
+			: structuredClone(item.message),
 	) as never[];
 	const entryIds = items.map((item) =>
 		"extra" in item ? item.entryId : item.id,
 	);
 	const raw = convertEntriesToRawMessages(branch as never);
 	withRawMessageProvider(SESSION, { readMessages: () => raw }, () =>
-		__test.trimPiMessagesToBoundary(messages, entryIds, boundary, false, SESSION),
+		__test.trimPiMessagesToBoundary(
+			messages,
+			entryIds,
+			boundary,
+			false,
+			SESSION,
+		),
 	);
 	return {
 		labels: (messages as Record<string, unknown>[]).map(label),
@@ -145,7 +153,11 @@ describe("history cut placed by branch position", () => {
 			user("u2"),
 			answer("a-err"),
 		];
-		const first = cut(live, [live[0], live[1], live[2], live[3], live[4]], "a-err");
+		const first = cut(
+			live,
+			[live[0], live[1], live[2], live[3], live[4]],
+			"a-err",
+		);
 		expect(first.labels).toEqual(["u2"]);
 		// Pi's retry answers u2 after the hidden failure, then the person writes again.
 		const later = [...live, answer("a-retry"), user("u3")];
@@ -219,7 +231,15 @@ describe("history cut placed by branch position", () => {
 			later.filter((entry) => entry.id !== "m1"),
 			"m1",
 		);
-		expect(next.labels).toEqual(["u1", "call:c3", "r3", "f3", "u2", "a4", "u3"]);
+		expect(next.labels).toEqual([
+			"u1",
+			"call:c3",
+			"r3",
+			"f3",
+			"u2",
+			"a4",
+			"u3",
+		]);
 		expect(next.bytes.startsWith(missing.bytes.slice(0, -1))).toBe(true);
 	});
 

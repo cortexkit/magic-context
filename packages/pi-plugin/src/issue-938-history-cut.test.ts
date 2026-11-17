@@ -84,7 +84,11 @@ function turn(n: number, parentId: string | null): Entry[] {
 				toolName: "generate_image",
 				content: [
 					{ type: "text", text: `generated image ${n}` },
-					{ type: "image", data: "A".repeat(IMAGE_BYTES), mimeType: "image/png" },
+					{
+						type: "image",
+						data: "A".repeat(IMAGE_BYTES),
+						mimeType: "image/png",
+					},
 				],
 				isError: false,
 				timestamp: t + 2,
@@ -165,7 +169,13 @@ function hostSession(withCompaction: boolean) {
 			api: "google-generative-ai",
 			provider: "google",
 			model: "gemini-3.8-flash",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+			},
 			stopReason: "error",
 			errorMessage: "413 status code (no body)",
 			timestamp: tLate + 2,
@@ -429,9 +439,10 @@ describe("Pi history head insertion failure", () => {
 	test("replays the last good request when one exists", async () => {
 		captureSessionLog();
 		const recoveryLines: string[] = [];
-		const restoreLog = contextHandlerInternals.setLkgRecoveryLogObserverForTests(
-			(line) => recoveryLines.push(line),
-		);
+		const restoreLog =
+			contextHandlerInternals.setLkgRecoveryLogObserverForTests((line) =>
+				recoveryLines.push(line),
+			);
 		const sessionId = session("inject-replay");
 		const db = createTestDb();
 		try {
