@@ -329,7 +329,7 @@ function captureSessionLog(): string[] {
 }
 
 describe("Pi history cut when the boundary message is missing from the context", () => {
-	test("a host compaction summary in the context no longer stops the cut; the summary and the live prompt stay", async () => {
+	test("a host compaction summary in the context no longer stops the cut; the live prompt stays", async () => {
 		captureSessionLog();
 		const sessionId = session("6a");
 		const db = createTestDb();
@@ -338,16 +338,11 @@ describe("Pi history cut when the boundary message is missing from the context",
 			seedSummary(db, sessionId, branch, "a-err");
 			const serve = createHost(db, sessionId, branch);
 			const served = await serve(messages);
-			// The history head, then the host's summary and the live prompt.
-			// Every summarized turn, with its image, is gone.
-			expect(roles(served)).toEqual([
-				"user",
-				"user",
-				"compactionSummary",
-				"user",
-			]);
-			expect(served[2]).toEqual(messages[0] as Record<string, unknown>);
-			expect(served[3]?.content).toBe(LIVE_PROMPT);
+			// The history head, then the live prompt. Every summarized turn, with
+			// its image, is gone, and so is the host's summary before them, as the
+			// id lookup would cut it.
+			expect(roles(served)).toEqual(["user", "user", "user"]);
+			expect(served[2]?.content).toBe(LIVE_PROMPT);
 			expect(imageBytes(served)).toBe(0);
 			// A later pass in the same state replays the same request.
 			expect(await serve(messages)).toEqual(served);

@@ -12462,9 +12462,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				`compartment injection failed; replaying the last good request or refusing the turn: ${err instanceof Error ? err.message : String(err)}`,
 			);
-			// Without the history head this pass would also skip the cut, so Pi's
-			// messages would go out with every summarized message and none of the
-			// summaries. Fail it like the other stages the request depends on (see
+			// Serving this pass without the history head is wrong in both cases.
+			// Before any head is cached, the only cut is the one head insertion
+			// makes, so Pi's messages would go out with every summarized message and
+			// none of the summaries. Once a head is cached, the early trim to its
+			// boundary has already removed the summarized messages, so the request
+			// would carry neither those messages nor the summaries that replace
+			// them. Fail it like the other stages the request depends on (see
 			// runPersistedReplayStage): the handler's recovery replays the last good
 			// request if it fits and otherwise refuses the turn. A busy store keeps
 			// its own error so that path can treat it as one.
