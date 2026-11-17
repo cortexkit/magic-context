@@ -398,10 +398,16 @@ export function signalPiDeferredCompactionMarkerDrain(sessionId: string): void {
  * a first_render HARD fold on the next context pass.
  *
  * Pi (not Oh My Pi, whose event has no `reason`) says why it compacts. When
- * the reason is an overflow, cancelling alone would leave the session with no
+ * a request failed for an overflow and Pi will retry it (`reason: "overflow"`,
+ * `willRetry: true`), cancelling alone would leave the session with no
  * recovery at all, so Magic Context's own provider-overflow recovery is armed
- * for the next pass. A compaction for the context threshold or a manual
- * `/compact` arms nothing.
+ * for the next pass. Pi also compacts with `reason: "overflow"` after a reply
+ * that completed but reported more input than Pi's configured window
+ * (`willRetry: false`). The provider accepted that request, and Magic Context
+ * may legitimately serve more than Pi's window (its proven input floor: the
+ * largest prompt the provider has accepted, see pi-proven-floor.ts), so
+ * that compaction arms nothing; neither does one for the context threshold or
+ * a manual `/compact`.
  */
 export async function handlePiSessionBeforeCompact(args: {
 	db: ContextDatabase;
@@ -410,10 +416,10 @@ export async function handlePiSessionBeforeCompact(args: {
 		sessionManager?: { getSessionId?: () => string | undefined };
 		model?: { provider?: unknown; id?: unknown };
 	};
-	event?: { reason?: unknown };
+	event?: { reason?: unknown; willRetry?: unknown };
 }): Promise<{ cancel: true } | undefined> {
 	if (!args.compactionOff) {
-		if (args.event?.reason === "overflow") {
+		if (args.event?.reason === "overflow" && args.event.willRetry === true) {
 			try {
 				const sessionId = args.ctx.sessionManager?.getSessionId?.();
 				if (typeof sessionId === "string" && sessionId.length > 0) {

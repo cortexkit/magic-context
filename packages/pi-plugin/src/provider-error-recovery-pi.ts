@@ -90,9 +90,10 @@ function armPiProviderOverflowRecovery(args: {
 }
 
 /**
- * Arm provider-overflow recovery because the host is compacting for an
- * overflow (Pi's `session_before_compact` with `reason: "overflow"`), which
- * Magic Context cancels. The host decided from the same failed reply that
+ * Arm provider-overflow recovery because the host is compacting to retry a
+ * request that failed for an overflow (Pi's `session_before_compact` with
+ * `reason: "overflow"` and `willRetry: true`), which Magic Context cancels.
+ * The host decided from the same failed reply that
  * `message_end` already classified, so a recovery that is already armed is left
  * as it is: arming it again would count that one failure as a second,
  * confirming rejection.
