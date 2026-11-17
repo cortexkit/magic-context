@@ -12,7 +12,12 @@ async function doctor(name: string, config: string) {
     const home = join(root, name);
     const bin = join(home, "bin");
     const configDir = join(home, "config");
+    // Doctor reads historian dumps and plugin logs under the temp directory.
+    // A temp directory inside this test's root keeps it away from files other
+    // tests or earlier runs left in the machine's temp directory.
+    const tempDir = join(home, "tmp");
     mkdirSync(bin, { recursive: true });
+    mkdirSync(tempDir, { recursive: true });
     mkdirSync(join(configDir, "opencode"), { recursive: true });
     writeFileSync(join(configDir, "opencode", "opencode.json"), config);
     // Only installation discovery needs this executable; no host or provider starts.
@@ -28,6 +33,9 @@ async function doctor(name: string, config: string) {
             XDG_RUNTIME_DIR: join(home, "runtime"),
             XDG_CACHE_HOME: join(home, "cache"),
             MAGIC_CONTEXT_STORAGE_DIR: join(home, "mc"),
+            TMPDIR: tempDir,
+            TMP: tempDir,
+            TEMP: tempDir,
             // Doctor asks the npm registry for the latest version. Point it at a closed
             // local port so the lookup fails at once: on a busy runner the real
             // registry round trip pushed this spawn past the test timeout.
