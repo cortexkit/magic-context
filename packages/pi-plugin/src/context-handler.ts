@@ -6071,14 +6071,23 @@ export function registerPiContextHandler(
 				options.compactionOff === true,
 				{ db: options.db, sessionId },
 			);
-			const servedCtxReduceCallable = options.compactionOff
-				? ctxReduceCallable
-				: readServedPiCtxReduceCallable(options.db, sessionId);
+			// An Oh My Pi side turn renders its own request for the tools it sends,
+			// but that request is not the session's next one and records nothing
+			// as served. Comparing it with the served answer would let it take the
+			// tool-list ride and land durable drops that the session's own next
+			// request then replays without permission, so for a side turn the
+			// served answer is its own: the tool list never counts as changed.
+			const servedCtxReduceCallable =
+				options.compactionOff || budget.sideTurn
+					? ctxReduceCallable
+					: readServedPiCtxReduceCallable(options.db, sessionId);
 			// Both reminders measure from this baseline. Without the tool there is
 			// none, so a reminder after the tool returns starts from a measurement
 			// taken while the tool was callable again, never from one taken before
-			// it left.
-			if (!ctxReduceCallable) clearPiChannel1State(sessionId);
+			// it left. The baseline belongs to the session's own requests, so a
+			// side turn leaves it alone.
+			if (!ctxReduceCallable && !budget.sideTurn)
+				clearPiChannel1State(sessionId);
 			const pipelineArgs: RunPipelineArgs = {
 				ctxReduceCallable,
 				servedCtxReduceCallable,

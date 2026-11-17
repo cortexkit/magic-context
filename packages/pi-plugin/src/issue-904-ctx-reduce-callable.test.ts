@@ -5,6 +5,7 @@ import {
 	casChannel2NudgeState,
 	getChannel2NudgeState,
 	getOrCreateSessionMeta,
+	getPendingOps,
 	getTagsBySession,
 	incrementHistorianFailure,
 	openDatabase,
@@ -1083,6 +1084,58 @@ describe("issue 904: what rides the rebuild at a change of the tool list", () =>
 		expect(changed.permitted).toBe(true);
 		expect(prefixes(changed.bytes)).toEqual([]);
 		expect(f.toolTag("dup-a")?.status).toBe("dropped");
+	});
+
+	// A side turn's request is not the session's next request and records
+	// nothing as served, so its tool list never counts as a change: nothing
+	// rides it, and the session's own next request replays byte for byte.
+	it("an Oh My Pi side turn without ctx_reduce takes no ride: no drop, no cleanup, the next request unchanged", async () => {
+		__setPiHarnessKindForTesting("omp");
+		try {
+			const f = fixture("side-turn-no-ride", { systemPrompt: "fixed" });
+			await f.serve();
+			await f.serve();
+			// A duplicate only routine cleanup removes, and a queued drop: both
+			// land on the next pass that has rebuild permission.
+			addDuplicateReads(f);
+			const before = await f.serve();
+			expect(before.permitted).toBe(false);
+			const old = f.toolTag("old-call");
+			if (!old || old.status !== "active")
+				throw new Error("the old tool output has no active tag");
+			queuePendingOp(f.db, f.sessionId, old.tagNumber, "drop");
+
+			f.setActive(WITHOUT_REDUCE);
+			const side = await f.serve({
+				extra: [
+					{
+						role: "developer",
+						attribution: "agent",
+						content: OMP_SIDE_REMINDER,
+						timestamp: 200,
+					} as unknown as PiMessage,
+					{
+						...userMessage("a quick side question", 201),
+						attribution: "agent",
+					} as PiMessage,
+				],
+			});
+			// The side turn's own request follows the tools it sends.
+			expect(prefixes(side.bytes)).toEqual([]);
+			expect(side.permitted).toBe(false);
+			expect(f.toolTag("old-call")?.status).toBe("active");
+			expect(f.toolTag("dup-a")?.status).toBe("active");
+			expect(getPendingOps(f.db, f.sessionId)).toHaveLength(1);
+
+			f.setActive(WITH_REDUCE);
+			const after = await f.serve();
+			expect(after.permitted).toBe(false);
+			expect(after.bytes).toBe(before.bytes);
+			expect(f.toolTag("old-call")?.status).toBe("active");
+			expect(f.toolTag("dup-a")?.status).toBe("active");
+		} finally {
+			__setPiHarnessKindForTesting(undefined);
+		}
 	});
 });
 
