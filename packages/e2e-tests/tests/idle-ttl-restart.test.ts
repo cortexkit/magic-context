@@ -1020,7 +1020,7 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 	// answers every request with a 404 at once (npm does not retry one) and records
 	// it, so a host that still asks either one fails here on that record instead of
 	// timing out in a later test. Both settings belong to the shared OpenCode spawn,
-	// so the TypeScript lane covers both modes.
+	// which Rust mode uses too, so running this check in TypeScript mode is enough.
 	it.skipIf(host !== "opencode" || RUST_MODE)(
 		"boots the OpenCode host and serves a turn without contacting the npm registry or the models catalogue",
 		async () => {
