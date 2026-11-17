@@ -377,7 +377,7 @@ fn batch_folders(out: &Path, kind: &str) -> Vec<(usize, PathBuf)> {
 fn check_of(reason: &str) -> &'static str {
     if reason.starts_with("the lines differ between live branches") {
         "lines differ between live branches"
-    } else if reason.contains("so it changes only where every live branch agrees") {
+    } else if reason.starts_with("older memory: only confirmed while branches differ") {
         "rewrite or archive where live branches differ"
     } else if reason.contains("is protected") {
         "protected memory"
@@ -757,9 +757,10 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
 /// The apply step on a fixture with two live branches: a broad batch of
 /// five memories whose saved reply confirms two (one from lines that state
 /// it, one from lines that miss a name it states), rewrites two (one in a
-/// file the live branches agree on, one in a file they don't) and archives
-/// a protected one. The report shows what a run would write, every gate
-/// included, and nothing is written but the report.
+/// file the live branches agree on, one in a file they don't; both refused,
+/// since a memory without a line of its own is not rewritten while there
+/// are two) and archives a protected one. The report shows what a run would
+/// write, every gate included, and nothing is written but the report.
 #[test]
 fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_its_report() {
     use super::tasks::verify::tests::{row, Fixture, PROJECT};
@@ -856,10 +857,12 @@ fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_
              "check": "name not in the cited lines", "cites": "src/live.rs:1-1"},
             {"kind": "verify-broad", "batch": 0, "id": 3, "verdict": "update", "outcome": "skipped",
              "content": "`other_function` in src/other.rs takes one byte argument.",
-             "reason": "src/other.rs differs between live branches master and feature; it names no git line of its own, so it changes only where every live branch agrees",
+             "reason": "older memory: only confirmed while branches differ (live branches: master, feature)",
              "check": "rewrite or archive where live branches differ"},
-            {"kind": "verify-broad", "batch": 0, "id": 4, "verdict": "update", "outcome": "update",
-             "content": "`live_function` lives in src/live.rs and takes no arguments."},
+            {"kind": "verify-broad", "batch": 0, "id": 4, "verdict": "update", "outcome": "skipped",
+             "content": "`live_function` lives in src/live.rs and takes no arguments.",
+             "reason": "older memory: only confirmed while branches differ (live branches: master, feature)",
+             "check": "rewrite or archive where live branches differ"},
             {"kind": "verify-broad", "batch": 0, "id": 5, "verdict": "archive", "outcome": "skipped",
              "modelReason": "it can panic now",
              "reason": "memory 5 is protected (safety-critical, permanent, a policy, or the person's own) and is never archived",
@@ -869,10 +872,10 @@ fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_
     assert_eq!(
         report["totals"],
         json!({
-            "outcomes": {"confirmed": 1, "skipped": 3, "update": 1, "archive": 0},
+            "outcomes": {"confirmed": 1, "skipped": 4, "update": 0, "archive": 0},
             "skipReasons": {
                 "name not in the cited lines": 1,
-                "rewrite or archive where live branches differ": 1,
+                "rewrite or archive where live branches differ": 2,
                 "protected memory": 1,
             },
             "undecided": 0,

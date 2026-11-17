@@ -163,7 +163,7 @@ fn the_default_branch_is_origins_head_then_a_local_main_or_master() {
 }
 
 #[test]
-fn a_tree_matches_cited_paths_as_the_checkout_does_with_their_blobs() {
+fn a_tree_lists_each_file_of_its_commit_with_its_blob() {
     let repo = Repo::on(
         "master",
         &[
@@ -179,64 +179,12 @@ fn a_tree_matches_cited_paths_as_the_checkout_does_with_their_blobs() {
             .trim()
             .to_owned()
     };
-    let task = tree.matching("dreamer/task.rs:12");
-    assert_eq!(
-        task.into_iter()
-            .map(|(path, object)| (path.to_owned(), object.to_owned()))
-            .collect::<Vec<_>>(),
-        [(
-            "crates/mc-module/src/dreamer/task.rs".to_owned(),
-            blob("crates/mc-module/src/dreamer/task.rs")
-        )]
-    );
-    assert_eq!(tree.matching("mc-module/src").len(), 2);
-    assert!(tree.matching("src/task.rs").is_empty());
-    assert!(tree.matching("/etc/passwd").is_empty());
-    assert_eq!(tree.paths().count(), 3);
-}
-
-#[test]
-fn uncommitted_lists_changed_staged_deleted_and_new_files() {
-    let repo = Repo::on(
-        "master",
-        &[
-            ("a.rs", "a\n"),
-            ("b.rs", "b\n"),
-            ("c.rs", "c\n"),
-            ("d.rs", "d\n"),
-        ],
-    );
-    repo.write(&[("a.rs", "a changed\n"), ("new/e.rs", "e\n")]);
-    repo.write(&[("b.rs", "b staged\n")]);
-    repo.git(&["add", "b.rs"]);
-    std::fs::remove_file(repo.path().join("c.rs")).unwrap();
-    assert_eq!(
-        uncommitted(repo.path()).unwrap(),
-        ["a.rs", "b.rs", "c.rs", "new/e.rs"]
-            .map(str::to_owned)
-            .into()
-    );
-}
-
-#[test]
-fn holds_any_searches_one_commit_for_literal_names() {
-    let repo = Repo::on("master", &[("a.rs", "fn kept_name() {}\nlet x = a.b;\n")]);
-    let first = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
-    repo.write(&[("a.rs", "fn other() {}\n")]);
-    repo.commit("second");
-    let wait = Duration::from_secs(30);
-    assert_eq!(
-        holds_any(repo.path(), &first, &["kept_name"], wait),
-        Ok(true)
-    );
-    // Literal, not a pattern.
-    assert_eq!(holds_any(repo.path(), &first, &["a.c"], wait), Ok(false));
-    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
-    assert_eq!(
-        holds_any(repo.path(), &head, &["kept_name", "missing_name"], wait),
-        Ok(false)
-    );
-    assert!(holds_any(repo.path(), &"1".repeat(40), &["kept_name"], wait).is_err());
+    for path in ["crates/mc-module/src/dreamer/task.rs", "README.md"] {
+        assert_eq!(tree.blob(path).map(str::to_owned), Some(blob(path)));
+    }
+    // Only a file's whole path from the top names it.
+    assert_eq!(tree.blob("dreamer/task.rs"), None);
+    assert_eq!(tree.blob("crates/mc-module/src"), None);
 }
 
 #[test]

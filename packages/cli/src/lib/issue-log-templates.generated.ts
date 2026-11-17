@@ -287,6 +287,7 @@ const TEMPLATE_DATA = [
 "compaction-marker drain: refusing ordinal \x01 because prefix trim through \x01 was not proven; preserving deferred history refresh signal\x021i",
 "[magic-context] conflict-detector: resolved v2 config carried no explicit compaction.auto (\x01); falling back to file-based detection",
 "[magic-context] sqlite writer site=compaction-marker-inject db=opencode acquire_ms=\x01 hold_ms=\x01 work_ms=\x01 end_ms=\x01 outcome=not_acquired",
+"ck-mc: dreamer: \x01 for \x01: \x01 older memories are not checked this run: every file each is mapped to differs between live branches (ids \x01)",
 "compartment injection re-anchored: natural boundary \x01 not visible for \x01 passes; splicing at visible compartment boundary \x01 (ordinal \x01)\x021s",
 "auto-search: decision outcome=timeout reason=worker-busy lanes=\x01 nearMisses=\x01 threshold=\x01 pool=\x01 rows=\x01 workerStarted=\x01 peek=\x01 elapsedMs=\x01",
 "history boundary repair: the cached prefix boundary \x01 is not in the host store; rebuilding it on this pass against compartment end \x01\x021i",

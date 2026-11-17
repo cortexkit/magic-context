@@ -3,7 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::tests::{row, Fixture};
+use serde_json::Value;
+
+use super::tests::{row, Fixture, Row};
 use super::*;
 use crate::dreamer::checkout::tests::{commit_at, git_at};
 use crate::memory_line::{of_memory, Line};
@@ -146,89 +148,120 @@ fn a_memory_learned_on_a_branch_is_checked_on_a_copy_of_its_newest_commit() {
     assert!(!folder.exists());
 }
 
-#[test]
-fn an_old_memory_is_rewritten_only_where_every_live_branch_agrees() {
+/// A repository on master and memory 2, which names no line of its own, is
+/// mapped to src/b.rs and cites it. With `second`, the repository has a
+/// second live branch: a worktree with a commit of its own that leaves
+/// src/b.rs as master has it. The worktree's folder is returned with the
+/// guard that deletes it.
+fn agreed_file(second: bool) -> (Fixture, Option<(tempfile::TempDir, PathBuf)>) {
     let fixture = Fixture::on(
         "master",
         &[
-            ("src/a.rs", "fn alpha() {}\n"),
             ("src/b.rs", "fn beta() {}\n"),
+            ("src/other.rs", "fn other() {}\n"),
         ],
     );
-    let (_outer, worktree) = fixture.repo.worktree("feature");
-    commit_at(
-        &worktree,
-        &[("src/a.rs", "fn alpha(x: u8) {}\n")],
-        "feature",
-    );
-    fixture.insert(&[
-        row(1, "`alpha` in src/a.rs takes no arguments at all."),
-        row(2, "`beta` in src/b.rs takes no arguments at all."),
-    ]);
-    let batch = fixture.batches(true).remove(0);
-    let applied = fixture.apply(
-        &batch,
-        &manifest(
-            r#"<update id="1" files="src/a.rs">`alpha` in src/a.rs takes one byte argument.</update>
-<update id="2" files="src/b.rs">`beta` in src/b.rs takes no arguments and returns unit.</update>"#,
-        ),
-    );
-    assert_eq!(applied.applied, 1, "{applied:?}");
-    assert_eq!(
-        applied.dropped,
-        ["memory 1: src/a.rs differs between live branches master and feature; it names no git line of its own, so it changes only where every live branch agrees"]
-    );
-    assert_eq!(
-        fixture.memory(1).1,
-        "`alpha` in src/a.rs takes no arguments at all."
-    );
-    // The file both branches agree on was rewritten, and the memory still
-    // names no line.
-    assert_eq!(
-        fixture.memory(2).1,
-        "`beta` in src/b.rs takes no arguments and returns unit."
-    );
-    assert_eq!(line_of(&fixture, 2), None);
-    // An archive because the code contradicts it is refused the same way.
-    let batch = fixture.batches(true).remove(0);
-    let applied = fixture.apply(
-        &batch,
-        &manifest(r#"<archive id="1" reason="alpha takes an argument now"/>"#),
-    );
-    assert_eq!(applied.applied, 0);
-    assert!(
-        applied.dropped[0].contains("src/a.rs differs between live branches master and feature"),
-        "{applied:?}"
-    );
-    assert_eq!(fixture.memory(1).0, "active");
+    let feature = second.then(|| {
+        let (outer, worktree) = fixture.repo.worktree("feature");
+        commit_at(
+            &worktree,
+            &[("src/other.rs", "fn other(x: u8) {}\n")],
+            "feature",
+        );
+        (outer, worktree)
+    });
+    fixture.insert(&[Row {
+        files: vec!["src/b.rs"],
+        ..row(2, "`beta` in src/b.rs takes no arguments at all.")
+    }]);
+    (fixture, feature)
 }
 
+const OLDER_ON_TWO_BRANCHES: &str =
+    "memory 2: older memory: only confirmed while branches differ (live branches: master, feature)";
+
+/// While the repository has two live branches, an old memory is never
+/// archived, even when every file the archive rests on is the same on both.
 #[test]
-fn an_old_memory_is_not_rewritten_over_an_uncommitted_change_in_the_main_checkout() {
-    let fixture = Fixture::on("master", &[("src/b.rs", "fn beta() {}\n")]);
-    // A second live branch whose src/b.rs is the same as master's.
-    let (_outer, worktree) = fixture.repo.worktree("feature");
-    commit_at(&worktree, &[("src/other.rs", "\n")], "feature");
-    fixture.insert(&[row(2, "`beta` in src/b.rs takes no arguments at all.")]);
-    fixture.repo.write(&[("src/b.rs", "fn beta(y: u8) {}\n")]);
+fn an_old_memory_is_never_archived_while_there_are_two_live_branches() {
+    let (fixture, _feature) = agreed_file(true);
     let batch = fixture.batches(true).remove(0);
     let applied = fixture.apply(
         &batch,
-        &manifest(r#"<update id="2" files="src/b.rs">`beta` in src/b.rs takes one byte argument.</update>"#),
+        &manifest(r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now"/>"#),
     );
-    assert_eq!(applied.applied, 0);
-    assert_eq!(
-        applied.dropped,
-        ["memory 2: src/b.rs has an uncommitted change in the main checkout; it names no git line of its own, so it changes only where every live branch agrees"]
+    assert_eq!(applied.applied, 0, "{applied:?}");
+    assert_eq!(applied.dropped, [OLDER_ON_TWO_BRANCHES]);
+    assert_eq!(fixture.memory(2).0, "active");
+}
+
+/// Nor rewritten.
+#[test]
+fn an_old_memory_is_never_rewritten_while_there_are_two_live_branches() {
+    let (fixture, _feature) = agreed_file(true);
+    let batch = fixture.batches(true).remove(0);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(r#"<update id="2" files="src/b.rs">`beta` in src/b.rs takes no arguments and returns unit.</update>"#),
     );
+    assert_eq!(applied.applied, 0, "{applied:?}");
+    assert_eq!(applied.dropped, [OLDER_ON_TWO_BRANCHES]);
     assert_eq!(
         fixture.memory(2).1,
         "`beta` in src/b.rs takes no arguments at all."
     );
 }
 
+/// With one live branch, the same archive is applied.
 #[test]
-fn a_subject_gone_archive_needs_its_names_gone_from_every_live_branch() {
+fn an_old_memory_is_archived_when_there_is_one_live_branch() {
+    let (fixture, _) = agreed_file(false);
+    let batch = fixture.batches(true).remove(0);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now"/>"#),
+    );
+    assert_eq!(
+        (applied.applied, applied.dropped.len()),
+        (1, 0),
+        "{applied:?}"
+    );
+    assert_eq!(fixture.memory(2).0, "archived");
+}
+
+/// A memory that names its branch is archived on that branch's evidence
+/// while there are two live branches, in the same batch as an old memory
+/// whose archive is refused.
+#[test]
+fn a_memory_that_names_its_branch_is_archived_while_there_are_two_live_branches() {
+    let (fixture, _feature) = agreed_file(true);
+    fixture.insert(&[row(3, "`other` in src/other.rs takes no arguments.")]);
+    learned_on(&fixture, 2, "master");
+    let batch = fixture.batches(true).remove(0);
+    let mut sent = read(&batch);
+    sent.sort();
+    assert_eq!(sent, [(2, true), (3, false)]);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(
+            r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now"/>
+<archive id="3" files="src/other.rs" reason="other takes an argument on feature"/>"#,
+        ),
+    );
+    assert_eq!(applied.applied, 1, "{applied:?}");
+    assert_eq!(
+        applied.dropped,
+        ["memory 3: older memory: only confirmed while branches differ (live branches: master, feature)"]
+    );
+    assert_eq!(fixture.memory(2).0, "archived");
+    assert_eq!(fixture.memory(3).0, "active");
+}
+
+/// An archive of an old memory because its subject is gone waits, like any
+/// other change to it, until the repository has one live branch; it is
+/// then applied on the proof every such archive needs.
+#[test]
+fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
     let fixture = Fixture::on("master", &[("src/live.rs", "fn live_function() {}\n")]);
     let repo = &fixture.repo;
     repo.write(&[("src/old/gone.rs", "fn gone_function() {}\n")]);
@@ -255,7 +288,7 @@ fn a_subject_gone_archive_needs_its_names_gone_from_every_live_branch() {
     assert_eq!(applied.applied, 0);
     assert_eq!(
         applied.dropped,
-        ["memory 2: a code name it cites (gone_function) is still on live branch keep; it names no git line of its own, so it changes only where every live branch agrees"]
+        ["memory 2: older memory: only confirmed while branches differ (live branches: master, keep)"]
     );
     assert_eq!(fixture.memory(2).0, "active");
 
@@ -400,16 +433,22 @@ fn a_confirmation_stands_only_where_every_live_branch_holds_its_lines() {
 /// changes them, it goes to the model.
 #[test]
 fn stored_lines_keep_a_memory_confirmed_only_while_every_live_branch_holds_them() {
-    use super::tests::Row;
-
-    let fixture = Fixture::on("master", &[("src/a.rs", "const CAP: u64 = 64_000;\n")]);
+    let fixture = Fixture::on(
+        "master",
+        &[
+            ("src/a.rs", "const CAP: u64 = 64_000;\n"),
+            ("src/b.rs", "const UNIT: &str = \"tokens\";\n"),
+        ],
+    );
     let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     fixture
         .repo
         .write(&[("src/a.rs", "// Caps.\nconst CAP: u64 = 64_000;\n")]);
     fixture.repo.commit("a comment");
+    // Also mapped to src/b.rs, which every live branch agrees on, so it is
+    // not left out of the run.
     fixture.insert(&[Row {
-        files: vec!["src/a.rs"],
+        files: vec!["src/a.rs", "src/b.rs"],
         verified: Some((1_000, Some(first.clone()))),
         spans: vec![("src/a.rs", 1, 1, "const CAP: u64 = 64_000;")],
         ..row(1, "`CAP` is 64k.")
@@ -430,4 +469,62 @@ fn stored_lines_keep_a_memory_confirmed_only_while_every_live_branch_holds_them(
         &["worktree", "remove", "--force", worktree.to_str().unwrap()],
     );
     assert!(fixture.batches(false).is_empty());
+}
+
+/// While the repository has two live branches, an old memory every file of
+/// whose mapping differs between them is sent to no model: a confirmation
+/// from lines of those files is almost always refused. Nothing is written
+/// for it, so it is not counted as checked, and a later run with one live
+/// branch sends it. A memory with one mapped file both branches agree on,
+/// one mapped to nothing, and one that names its branch are sent.
+#[test]
+fn an_old_memory_whose_mapped_files_all_differ_between_live_branches_is_not_sent() {
+    let fixture = Fixture::on(
+        "master",
+        &[
+            ("src/a.rs", "fn alpha() {}\n"),
+            ("src/b.rs", "fn beta() {}\n"),
+            ("src/c.rs", "fn gamma() {}\n"),
+        ],
+    );
+    let (_outer, worktree) = fixture.repo.worktree("feature");
+    commit_at(
+        &worktree,
+        &[
+            ("src/a.rs", "fn alpha(x: u8) {}\n"),
+            ("src/c.rs", "fn gamma(x: u8) {}\n"),
+        ],
+        "feature",
+    );
+    fixture.insert(&[
+        Row {
+            files: vec!["src/a.rs", "src/c.rs"],
+            ..row(1, "`alpha` in src/a.rs calls `gamma` in src/c.rs.")
+        },
+        Row {
+            files: vec!["src/a.rs", "src/b.rs"],
+            ..row(2, "`alpha` in src/a.rs calls `beta` in src/b.rs.")
+        },
+        row(3, "`beta` takes no arguments at all."),
+        Row {
+            files: vec!["src/a.rs", "src/c.rs"],
+            ..row(4, "`alpha` in src/a.rs takes no arguments.")
+        },
+    ]);
+    learned_on(&fixture, 4, "master");
+    let sent = |broad: bool| {
+        let mut sent: Vec<(i64, bool)> = fixture.batches(broad).iter().flat_map(read).collect();
+        sent.sort();
+        sent
+    };
+    // `verify` checks mapped memories only; `verify-broad` every one.
+    assert_eq!(sent(false), [(2, false), (4, true)]);
+    assert_eq!(sent(true), [(2, false), (3, false), (4, true)]);
+    assert_eq!(fixture.memory(1).4, Value::Null);
+
+    git_at(
+        fixture.repo.path(),
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    assert_eq!(sent(false), [(1, false), (2, false), (4, true)]);
 }

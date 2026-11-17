@@ -287,10 +287,7 @@ pub(crate) fn replay_batch(
     checkout: Arc<Checkout>,
     main: &std::path::Path,
 ) -> VerifyBatch {
-    let gate = read
-        .iter()
-        .any(|read| !read.lined)
-        .then(|| Gate::new(main, HISTORY_TIMEOUT));
+    let gate = read.iter().any(|read| !read.lined).then(|| Gate::new(main));
     VerifyBatch {
         declared: Arc::new(Declared::of(declaration, Verify { broad }.kind())),
         index: 0,

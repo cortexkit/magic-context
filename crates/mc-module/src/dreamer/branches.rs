@@ -9,7 +9,8 @@
 //! that check memories against code read the main checkout instead, and a
 //! repository can carry more than one live line (a release branch next to the
 //! next version's), so a memory is checked against the line it was learned
-//! on, or changed only where every live line agrees.
+//! on, or, when it names none, only confirmed while more than one line is
+//! live.
 //!
 //! Every git command runs with a timeout and never takes git's index lock
 //! ([`super::checkout::run_git_output`]); a command that fails or runs out of
@@ -22,7 +23,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::checkout::{clean_path, is_commit, run_git_output, run_git_within, GIT_TIMEOUT};
+use super::checkout::{is_commit, run_git_output, run_git_within, GIT_TIMEOUT};
 
 /// How long making a copy of one commit may take.
 const COPY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -379,26 +380,6 @@ impl Tree {
         Ok(Self { files })
     }
 
-    /// The files `cited` names, each with its blob id: the file whose path
-    /// is `cited`, or ends with it, and every file in a folder so named, as
-    /// [`super::checkout::Checkout::has_path`] matches a cited path. Empty
-    /// when none, or when `cited` is no path.
-    pub(crate) fn matching(&self, cited: &str) -> BTreeMap<&str, &str> {
-        let Some(path) = clean_path(cited) else {
-            return BTreeMap::new();
-        };
-        self.files
-            .iter()
-            .filter(|(file, _)| names(&path, file))
-            .map(|(file, object)| (file.as_str(), object.as_str()))
-            .collect()
-    }
-
-    /// Every file's path.
-    pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
-        self.files.keys().map(String::as_str)
-    }
-
     /// The blob id of the file at exactly `path`, when the commit holds one.
     pub(crate) fn blob(&self, path: &str) -> Option<&str> {
         self.files.get(path).map(String::as_str)
@@ -424,60 +405,6 @@ pub(crate) fn names(path: &str, file: &str) -> bool {
     let wanted: Vec<&str> = path.split('/').collect();
     let parts: Vec<&str> = file.split('/').collect();
     parts.windows(wanted.len()).any(|window| window == wanted)
-}
-
-/// The paths in the working tree of the checkout at `repo` with changes
-/// not committed: changed, staged, deleted, or new and not ignored.
-pub(crate) fn uncommitted(repo: &Path) -> Result<BTreeSet<String>, String> {
-    let listed = run_git_within(
-        repo,
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--no-renames",
-        ],
-        GIT_TIMEOUT,
-    )
-    .map_err(|error| format!("reading the uncommitted changes: {error}"))?;
-    Ok(listed
-        .split('\0')
-        .filter_map(|entry| entry.get(3..))
-        .filter(|path| !path.is_empty())
-        .map(|path| path.trim_end_matches('/').to_owned())
-        .collect())
-}
-
-/// Whether some file of `commit` holds one of `names` as literal text.
-pub(crate) fn holds_any(
-    repo: &Path,
-    commit: &str,
-    names: &[&str],
-    timeout: Duration,
-) -> Result<bool, String> {
-    if names.is_empty() {
-        return Ok(false);
-    }
-    if !is_commit(commit) {
-        return Err(format!("{commit} is not a commit id"));
-    }
-    let mut args = vec!["grep", "-F", "-q", "--no-color"];
-    for name in names {
-        args.extend(["-e", name]);
-    }
-    args.extend([commit, "--"]);
-    let output = run_git_output(repo, &args, timeout)?;
-    match output.code {
-        Some(0) => Ok(true),
-        // `git grep` exits 1 when nothing matched.
-        Some(1) if output.stderr.trim().is_empty() => Ok(false),
-        _ => Err(format!(
-            "searching {}: {}",
-            short(commit),
-            output.stderr.trim().chars().take(300).collect::<String>()
-        )),
-    }
 }
 
 /// A temporary folder holding the files of one commit, deleted when
