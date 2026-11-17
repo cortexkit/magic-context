@@ -291,13 +291,15 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn door_stream(&self) -> String {
         format!("reserved:{}", crate::MODULE_ID)
     }
-    /// One call to the management surface of core (the `prefrontal-core`
-    /// module) under this module's own principal, given at most `deadline`:
-    /// `persona.workspace_document`, for the workspace guidance the curate
-    /// tasks show. The answer is the reply's JSON. A refusal carries core's
-    /// code; a core that is not installed is `unknown_module`, and one that
-    /// can't be reached or answers no JSON is `unavailable`. Without a daemon
-    /// core is not installed, which is the default here.
+    /// One call to the management surface of core (the `prefrontal` module,
+    /// installed as `prefrontal-core` before its rename; either id answers,
+    /// see [`crate::prefrontal`]) under this module's own principal, given at
+    /// most `deadline`: `persona.workspace_document`, for the workspace
+    /// guidance the curate tasks show. The answer is the reply's JSON. A
+    /// refusal carries core's code; a core installed under neither id is
+    /// `unknown_module`, and one that can't be reached or answers no JSON is
+    /// `unavailable`. Without a daemon core is not installed, which is the
+    /// default here.
     fn core_call(
         &self,
         _method: &str,
@@ -309,7 +311,8 @@ pub trait RunnerClient: Send + Sync + 'static {
 }
 
 /// Core refused a call, or could not be reached: `unknown_module` when it is
-/// not installed, `unavailable` for any other failure to get an answer.
+/// installed under neither of its module ids, `unavailable` for any other
+/// failure to get an answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreRefusal {
     pub code: String,
@@ -321,7 +324,7 @@ impl CoreRefusal {
     pub fn not_installed() -> Self {
         Self {
             code: "unknown_module".to_owned(),
-            message: "core (prefrontal-core) is not installed".to_owned(),
+            message: "core is not installed as prefrontal or prefrontal-core".to_owned(),
             detail: None,
         }
     }
