@@ -190,6 +190,7 @@ describe("history cut fallback: byte stability across passes", () => {
 
 	// Not tested here: keeping the live prompt when the next message after a
 	// hidden boundary is a new prompt. That case is reachable only when Pi exits
-	// during the retry, and keeping the prompt there would need stored state;
-	// keptPromptIndex names it as a known one-time flip.
+	// during the retry, and keeping the prompt there would need stored state.
+	// There the prompt is cut once, which rewrites the request once; the comment
+	// on keptPromptIndex describes the case.
 });

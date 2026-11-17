@@ -5950,7 +5950,7 @@ export function registerPiContextHandler(
 			// re-renders the history block — busting Anthropic prompt
 			// cache on EVERY tool call once context crosses the execute
 			// threshold, exactly the regression Oracle flagged.
-			// PEEK-then-drain-on-success pattern (Oracle audit Round 8 #6):
+			// PEEK-then-drain-on-success pattern:
 			// capture the boolean here, but DELETE only after
 			// `injectSessionHistoryIntoPi(...)` succeeds inside
 			// `runPipeline`. If injection throws, the flag survives so
@@ -11158,7 +11158,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Normal drains wait while this session's historian is in flight. Force
 	// materialization and successfully executed m[0] folds may bypass that veto.
 	//
-	// PEEK-then-drain-on-success pattern (Oracle audit Round 8 #6):
+	// PEEK-then-drain-on-success pattern:
 	// the signal is only deleted AFTER applyPendingOperations succeeds.
 	// If the call throws, the flag survives so the next pass retries.
 	//
@@ -12439,7 +12439,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					stripPiLeadingTemporalMarker(message);
 				}
 			}
-			// PEEK-then-drain-on-success (Oracle audit Round 8 #6):
+			// PEEK-then-drain-on-success:
 			// only drain `historyRefreshSessions` if the rebuild
 			// succeeded AND this pass was busting the cache. If
 			// injection throws, the flag survives so the next pass
