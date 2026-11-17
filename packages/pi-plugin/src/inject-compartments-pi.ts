@@ -203,29 +203,44 @@ function trimPiMessagesToBoundary(
 			break;
 		}
 	}
-	if (cutoffIndex < 0 && sessionId && hasRawMessageProvider(sessionId)) {
+	// Messages before the boundary that the branch-position fallback keeps where
+	// they are; see placeCutByBranchPosition. Empty when the id was found.
+	let keepInPlace: ReadonlySet<number> | undefined;
+	if (
+		cutoffIndex < 0 &&
+		sessionId &&
+		piMessages.length > 0 &&
+		hasRawMessageProvider(sessionId)
+	) {
 		// The active branch can still place a boundary omitted from event.messages.
 		// Never infer that position from the shortened live-array indices.
+		let placement: BranchCutPlacement;
 		try {
-			const branch = readRawSessionMessages(sessionId);
-			const positions = new Map(
-				branch.map((message, index) => [message.id, index]),
+			placement = placeCutByBranchPosition(
+				piMessages,
+				entryIds,
+				cutoffMessageId,
+				sessionId,
 			);
-			const boundaryPosition = positions.get(cutoffMessageId);
-			if (boundaryPosition === undefined) return 0;
-			let previous = -1;
-			for (const [index, message] of piMessages.entries()) {
-				if (isPiSystemEntry(message)) continue;
-				const id = resolveStableId(message, index, entryIds);
-				const position =
-					positions.get(id) ?? positions.get(`${SYNTH_USER_ID_PREFIX}${id}`);
-				if (position === undefined || position <= previous) return 0;
-				previous = position;
-				if (position <= boundaryPosition) cutoffIndex = index;
-			}
-		} catch {
+		} catch (error) {
+			placement = {
+				placed: false,
+				reason: `the branch could not be read (${error instanceof Error ? error.message : String(error)})`,
+				firstUnplacedRole: "unknown",
+			};
+		}
+		if (!placement.placed) {
+			logUnplacedCut(
+				sessionId,
+				cutoffMessageId,
+				piMessages.length,
+				placement.reason,
+				placement.firstUnplacedRole,
+			);
 			return 0;
 		}
+		cutoffIndex = placement.cutoffIndex;
+		keepInPlace = placement.keepInPlace;
 	}
 	if (cutoffIndex < 0) return 0;
 
@@ -242,7 +257,7 @@ function trimPiMessagesToBoundary(
 	let preserved = 0;
 	for (let i = 0; i <= cutoffIndex; i++) {
 		if (isPiSystemEntry(piMessages[i])) preserved++;
-		else remove.add(i);
+		else if (!keepInPlace?.has(i)) remove.add(i);
 	}
 	if (preserved > 0)
 		logSession(
@@ -328,6 +343,190 @@ function trimPiMessagesToBoundary(
 	// a full rebuild of the cached request prefix, so a new hint adds no extra cache miss.
 	retireDecisions?.(retiredIds);
 	return removed;
+}
+
+type BranchCutPlacement =
+	| {
+			placed: true;
+			/** Last event index at or before the boundary on the branch, or -1. */
+			cutoffIndex: number;
+			/** Event indices at or before `cutoffIndex` that the cut leaves in place. */
+			keepInPlace: ReadonlySet<number>;
+	  }
+	| {
+			placed: false;
+			/** Why the boundary could not be placed, worded to follow "and". */
+			reason: string;
+			/** Role of the first event message with no branch position, or "none". */
+			firstUnplacedRole: string;
+	  };
+
+/**
+ * Place a cut whose boundary message is not among the context event's
+ * messages, using positions in the session's raw branch (the walk the historian
+ * numbered when it wrote the compartment). The boundary is missing when Pi hides
+ * it (a failed reply that a `context_edit` omits before Pi retries) or when its
+ * entry id does not resolve.
+ *
+ * Every event message whose branch position is at or before the boundary is
+ * cut, with two exceptions.
+ *
+ * - Messages with no branch position stay where they are. Pi builds some
+ *   context messages from entries that are not messages: a host compaction's
+ *   `compactionSummary`, branch summaries and custom messages. A tool result
+ *   that is not the first of its run, or that a user message follows, is folded
+ *   into another raw message and has no position of its own; the orphan sweep
+ *   in trimPiMessagesToBoundary still removes it together with its call. Giving
+ *   up at the first such message would leave the whole summarized window,
+ *   images included, on the wire on every pass.
+ * - The last real user prompt at or before the boundary stays while the
+ *   boundary sits inside that prompt's turn: no other user prompt lies between
+ *   them on the branch, and the next chat message after the boundary is not a
+ *   user prompt (or there is none). A summary can end inside the live turn, for
+ *   example a `/ctx-recomp` rebuild of every summary that ends on the last raw
+ *   message, a failed reply Pi hid; cutting there would remove the prompt the
+ *   model is answering. The rule reads only the branch,
+ *   not which prompt is newest, so later turns keep the same cut and the prompt
+ *   stays served even though the summary covers it: a session pays one rewrite,
+ *   and the cut moves again only when a newer summary moves the boundary. When a
+ *   user prompt follows the boundary the turn is closed, nothing is protected,
+ *   and the cut equals the one the id lookup makes, so a boundary that one pass
+ *   finds by id and a later pass cannot find keeps the same bytes. A found
+ *   boundary that later goes missing inside a turn gets that turn's prompt back:
+ *   one rewrite, accepted because that is rare, while a boundary hidden inside a
+ *   live turn is the common case and must keep its cut on the next turn.
+ *
+ * Cache: only sessions whose boundary is missing from the event come here. One
+ * that this fallback could not cut before sent its summarized window again on
+ * every pass; the next pass that renders the history head cuts it, rewriting
+ * the cached request once, and later passes replay that cut. Sessions whose
+ * boundary is found by id never reach this function, so their bytes do not
+ * change.
+ */
+function placeCutByBranchPosition(
+	piMessages: readonly PiAgentMessage[],
+	entryIds: readonly (string | undefined)[] | undefined,
+	cutoffMessageId: string,
+	sessionId: string,
+): BranchCutPlacement {
+	const branch = readRawSessionMessages(sessionId);
+	const positions = new Map(
+		branch.map((message, index) => [message.id, index]),
+	);
+	const eventPositions = new Map<number, number>();
+	let firstUnplacedRole: string | undefined;
+	for (const [index, message] of piMessages.entries()) {
+		if (isPiSystemEntry(message)) continue;
+		const id = resolveStableId(message, index, entryIds);
+		const position =
+			positions.get(id) ?? positions.get(`${SYNTH_USER_ID_PREFIX}${id}`);
+		if (position === undefined) firstUnplacedRole ??= String(message.role);
+		else eventPositions.set(index, position);
+	}
+	const unplacedRole = firstUnplacedRole ?? "none";
+	const boundaryPosition = positions.get(cutoffMessageId);
+	if (boundaryPosition === undefined)
+		return {
+			placed: false,
+			reason: "it is not on the active branch either",
+			firstUnplacedRole: unplacedRole,
+		};
+	let cutoffIndex = -1;
+	let promptIndex = -1;
+	let previous = -1;
+	const unplaced: number[] = [];
+	for (const [index, message] of piMessages.entries()) {
+		if (isPiSystemEntry(message)) continue;
+		const position = eventPositions.get(index);
+		if (position === undefined) {
+			unplaced.push(index);
+			continue;
+		}
+		// Pi builds the context in branch order. An event that is not cannot be
+		// cut by branch position without removing messages after the boundary.
+		if (position <= previous)
+			return {
+				placed: false,
+				reason: "the context messages are not in branch order",
+				firstUnplacedRole: unplacedRole,
+			};
+		previous = position;
+		if (position > boundaryPosition) continue;
+		cutoffIndex = index;
+		if (message.role === "user") promptIndex = index;
+	}
+	const keepInPlace = new Set(unplaced.filter((index) => index < cutoffIndex));
+	const promptPosition = eventPositions.get(promptIndex);
+	if (
+		promptPosition !== undefined &&
+		boundaryInsidePromptTurn(branch, promptPosition, boundaryPosition)
+	)
+		keepInPlace.add(promptIndex);
+	return { placed: true, cutoffIndex, keepInPlace };
+}
+
+/** A raw user message the person wrote, not a carrier for folded tool results. */
+function isRealUserPrompt(message: { id: string; role: string }): boolean {
+	return (
+		message.role === "user" && !message.id.startsWith(SYNTH_USER_ID_PREFIX)
+	);
+}
+
+/**
+ * Whether the turn that the prompt at `promptPosition` starts on the raw branch
+ * is still open at `boundaryPosition`: no other user prompt lies between them,
+ * and the next user or assistant message after the boundary is not a new user
+ * prompt.
+ */
+function boundaryInsidePromptTurn(
+	branch: readonly { id: string; role: string }[],
+	promptPosition: number,
+	boundaryPosition: number,
+): boolean {
+	for (let p = promptPosition + 1; p <= boundaryPosition; p++) {
+		const message = branch[p];
+		if (message && isRealUserPrompt(message)) return false;
+	}
+	for (let p = boundaryPosition + 1; p < branch.length; p++) {
+		const message = branch[p];
+		if (!message) continue;
+		if (message.role !== "user" && message.role !== "assistant") continue;
+		return !isRealUserPrompt(message);
+	}
+	return true;
+}
+
+/**
+ * Sessions whose unplaceable cut was already logged in the current pass. One
+ * pass can try the same cut several times (the early trim to the cached
+ * boundary, the head's own trim, an outgoing-fit rerun); the context handler
+ * clears the session's entry when a pass starts.
+ */
+const unplacedCutLoggedSessions = new Set<string>();
+
+/**
+ * Let the next unplaceable cut for this session log again. The context handler
+ * calls it when a pass starts and when it forgets a session.
+ */
+export function resetPiUnplacedCutLog(sessionId: string): void {
+	unplacedCutLoggedSessions.delete(sessionId);
+}
+
+// Without the warning written here, a cut that silently fails looks like a
+// session whose summaries cover nothing: the request keeps every message.
+function logUnplacedCut(
+	sessionId: string,
+	boundaryMessageId: string,
+	eventLength: number,
+	reason: string,
+	firstUnplacedRole: string,
+): void {
+	if (unplacedCutLoggedSessions.has(sessionId)) return;
+	unplacedCutLoggedSessions.add(sessionId);
+	logSession(
+		sessionId,
+		`pi history cut not placed: boundary ${boundaryMessageId} is not among the ${eventLength} context messages and ${reason}; first message without a branch position: ${firstUnplacedRole}; nothing was cut`,
+	);
 }
 
 function toolPairKey(callId: string, assistantIndex: number): string {
