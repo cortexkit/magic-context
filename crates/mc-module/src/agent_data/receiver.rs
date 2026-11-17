@@ -10,6 +10,15 @@
 //! publication id already here) count as local rows no baseline covers:
 //! the install never touches them, so a move must not go ahead over them.
 //!
+//! A ref names its session by Entorhinal's binding. On a machine a session
+//! moves to, Entorhinal binds the ref only when the move is activated,
+//! after every participant's `activate`. Until then a ref that is itself
+//! the session's `sessionRef` (a Broca ref) is a session this machine does
+//! not hold yet: `diverged` answers it `at_cut` without reading the cut,
+//! and `import` takes the session from the snapshot the cut holds under
+//! the ref. `activate` and `abort` work from what `import` recorded, so
+//! they never need the binding.
+//!
 //! `import` reads the cut through Engram's session door, checks it, and
 //! stages it in a private file; nothing of it is live until `activate`.
 //! `activate` then takes these steps, each for every ref before the next
@@ -102,7 +111,16 @@ pub(crate) async fn diverged<H: Host>(
     let contents = host.journal().contents().ok_or_else(journal_unreadable)?;
     let mut entries = Vec::with_capacity(refs.len());
     for r in refs.iter() {
-        let incoming = read(host, &db, Op::Diverged, cut, r).await?;
+        let Some(session) = lookup(host, r).await? else {
+            // Entorhinal binds no session under the ref here, so no move
+            // brought one here under it: the contract answers a ref this
+            // machine does not hold `at_cut`, without reading the cut.
+            // `import` checks this machine's rows once the cut names the
+            // session.
+            entries.push(DivergedEntry::new(DivergedState::AtCut));
+            continue;
+        };
+        let incoming = read(host, &db, Op::Diverged, cut, r, Some(session)).await?;
         let baseline = baseline(&contents, &incoming.session);
         let snapshot = incoming.snapshot;
         let state = match blocking(&db, move |conn| snapshot::local(conn, &snapshot)).await {
@@ -227,10 +245,19 @@ async fn stage_each<H: Host>(
     cut: &str,
     refs: &Refs,
 ) -> Result<Vec<(Staged, BTreeMap<String, u64>)>, ErrorBody> {
-    let mut sessions = Vec::with_capacity(refs.len());
+    // Each ref's session, by Entorhinal's binding or, where Entorhinal
+    // binds none here yet, by the cut's snapshot, which is read for it now.
+    let mut named = Vec::with_capacity(refs.len());
     for r in refs.iter() {
-        sessions.push(lookup(host, r).await?);
+        named.push(match lookup(host, r).await? {
+            Some(session) => (session, None),
+            None => {
+                let incoming = read(host, db, Op::Import, cut, r, None).await?;
+                (incoming.session.clone(), Some(incoming))
+            }
+        });
     }
+    let sessions: Vec<&SessionRef> = named.iter().map(|(session, _)| session).collect();
     for (index, session) in sessions.iter().enumerate() {
         if let Some(earlier) = sessions[..index].iter().position(|earlier| {
             earlier.harness == session.harness && earlier.session == session.session
@@ -264,8 +291,11 @@ async fn stage_each<H: Host>(
         }
     }
     let mut staged = Vec::with_capacity(refs.len());
-    for r in refs.iter() {
-        let incoming = read(host, db, Op::Import, cut, r).await?;
+    for (r, (session, incoming)) in refs.iter().zip(named) {
+        let incoming = match incoming {
+            Some(incoming) => incoming,
+            None => read(host, db, Op::Import, cut, r, Some(session)).await?,
+        };
         let contents = host.journal().contents().ok_or_else(journal_unreadable)?;
         let baseline = baseline(&contents, &incoming.session);
         check_local(db, r, &incoming, baseline).await?;
@@ -345,33 +375,48 @@ async fn check_local(
 }
 
 /// Resolve a ref on the receiver by Entorhinal's binding, whatever this
-/// machine holds of the session. A ref Entorhinal does not resolve here is
-/// answered `unavailable`: the receiver accepts refs it holds nothing of,
-/// so only Entorhinal's own binding can be missing, and it may be there on
-/// the next attempt.
-async fn lookup<H: Host>(host: &H, r: &Ref) -> Result<SessionRef, ErrorBody> {
-    resolve::lookup(host, r).await.map_err(|refusal| {
-        if refusal.code == RefusalCode::UnknownRef {
-            unavailable(refusal.message)
-        } else {
-            refusal
-        }
-    })
+/// machine holds of the session. On a machine a session moves to,
+/// Entorhinal binds its ref only once the move is activated, after every
+/// participant's `activate`, so a ref with no binding here is a session no
+/// move brought here yet. For a kind whose ref is the session's
+/// `sessionRef` ([`resolve::SESSION_REF_KINDS`]) that is `None`: the cut's
+/// stream under the ref names the session ([`identify`]). For any other
+/// kind it is `unavailable`, which stops a move at `diverged`, before
+/// anything is staged: its ref does not name the session's stream on the
+/// door, so the cut cannot be read without the binding. Any other failure
+/// of the lookup is `unavailable` too, and may pass on the next attempt.
+async fn lookup<H: Host>(host: &H, r: &Ref) -> Result<Option<SessionRef>, ErrorBody> {
+    let refusal = match resolve::bound(host, r).await {
+        Ok(Some(session)) => return Ok(Some(session)),
+        Ok(None) if resolve::SESSION_REF_KINDS.contains(&r.ref_kind.as_str()) => return Ok(None),
+        Ok(None) => resolve::unknown_ref(r, "Entorhinal has no session under this ref"),
+        Err(refusal) => refusal,
+    };
+    if refusal.code == RefusalCode::UnknownRef {
+        Err(unavailable(refusal.message))
+    } else {
+        Err(refusal)
+    }
 }
 
 /// Read one ref's snapshot of the cut through the door, and check that this
 /// build can install it: the snapshot decodes and checks against the moved
 /// list, names the ref's session, and was read at the schema version both
-/// this build and this machine's `context.db` are at.
+/// this build and this machine's `context.db` are at. `named` is the
+/// session Entorhinal's binding names; without one, the ref is the
+/// session's stream and the snapshot names the session ([`identify`]).
 async fn read<H: Host>(
     host: &H,
     db: &Path,
     op: Op,
     cut: &str,
     r: &Ref,
+    named: Option<SessionRef>,
 ) -> Result<Incoming, ErrorBody> {
-    let session = lookup(host, r).await?;
-    let session_ref = session_ref(&session);
+    let session_ref = match &named {
+        Some(session) => session_ref(session),
+        None => r.r#ref.clone(),
+    };
     let stream = door::read_cut(host, &session_ref, cut)
         .await
         .map_err(|error| cut_refusal(op, &error))?;
@@ -397,6 +442,10 @@ async fn read<H: Host>(
         )
     })?;
     let header = &snapshot.header;
+    let session = match named {
+        Some(session) => session,
+        None => identify(cut, r, &snapshot)?,
+    };
     if (
         header.runner.as_str(),
         header.harness.as_str(),
@@ -451,6 +500,46 @@ async fn read<H: Host>(
         bytes,
         snapshot,
     })
+}
+
+/// The session a cut's snapshot names, for a ref Entorhinal binds no
+/// session under here. The snapshot was read from the door stream the ref
+/// names, and its bytes checked against the end and digest the cut
+/// recorded. It is the ref's session only if that session's `sessionRef`
+/// is the ref itself, and if it runs under the module that owns the ref's
+/// kind, so nothing in the request names the session. Anything else is
+/// `incompatible_version`, which `import` may refuse with and the driver
+/// never retries.
+fn identify(cut: &str, r: &Ref, snapshot: &Snapshot) -> Result<SessionRef, ErrorBody> {
+    let header = &snapshot.header;
+    let session = SessionRef::new(&header.runner, &header.harness, &header.session);
+    let hashed = session_ref(&session);
+    if hashed != r.r#ref {
+        return Err(incompatible(
+            snapshot,
+            format!(
+                "the snapshot under {}/{} in cut {cut} is of session {}, whose sessionRef is {hashed}, not the ref",
+                r.ref_kind,
+                r.r#ref,
+                label(&session)
+            ),
+        ));
+    }
+    let owner = resolve::owner(&r.ref_kind).unwrap_or_default();
+    if header.runner != owner {
+        return Err(incompatible(
+            snapshot,
+            format!(
+                "the snapshot under {}/{} in cut {cut} is of session {}, which runs under {}, not under {owner}, the module that owns {}",
+                r.ref_kind,
+                r.r#ref,
+                label(&session),
+                header.runner,
+                r.ref_kind
+            ),
+        ));
+    }
+    Ok(session)
 }
 
 /// The snapshot format and schema version this build installs, or a
