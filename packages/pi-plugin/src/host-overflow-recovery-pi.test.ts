@@ -252,7 +252,7 @@ describe("provider-overflow recovery from Pi's overflow compaction", () => {
 	});
 });
 
-describe("the host overflow check is the host's, not a bundled copy", () => {
+describe("the extension bundle leaves pi-ai to the host", () => {
 	const packageJson = JSON.parse(
 		readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"),
 	) as { scripts: Record<string, string> };

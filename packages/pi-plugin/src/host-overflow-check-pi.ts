@@ -1,7 +1,8 @@
 import { log } from "@magic-context/core/shared/logger";
 
 /**
- * The running host's own classifier for "the request was too long" errors.
+ * The host's classifier for "the request was too long" errors, as its pi-ai
+ * package exports it (`isContextOverflow`).
  *
  * Pi decides on its own whether a failed reply was a context overflow, and
  * starts its compaction when it was. Magic Context cancels that compaction and
@@ -10,16 +11,19 @@ import { log } from "@magic-context/core/shared/logger";
  * (`detectOverflow`) misses some that Pi's catches, such as `request_too_large`,
  * `413 status code (no body)` and `Token limit exceeded`.
  *
- * Pi and Oh My Pi both serve the root of `@earendil-works/pi-ai` to extensions
- * from their own copy: Pi maps it to its pi-ai compat entry (a jiti alias, or a
- * virtual module in the compiled binary), and Oh My Pi rewrites the specifier
- * to its legacy shim, which re-exports `isContextOverflow` from
- * `@oh-my-pi/pi-ai/error`. The extension build keeps this import external, so
- * the check below is the host's, not a copy bundled with Magic Context.
+ * Where the root of `@earendil-works/pi-ai` comes from depends on the host:
+ * - Oh My Pi rewrites the specifier to its legacy shim, which re-exports
+ *   `isContextOverflow` from `@oh-my-pi/pi-ai/error`: the running host's check.
+ * - Pi's compiled binary serves it from the pi-ai bundled into the binary.
+ * - An npm-installed Pi imports this ESM bundle natively, so the specifier
+ *   resolves like any package import: to the pi-ai installed beside the
+ *   extension (it comes with the peer pi-coding-agent), or to nothing.
+ * The extension build keeps the import external, so Magic Context never ships
+ * its own copy of pi-ai.
  *
  * The import runs on first use, never while the extension loads, and any
  * failure (no such module, no such export, or the check throwing) only means
- * the host's check is not consulted.
+ * the check is not consulted; Magic Context's own patterns still apply.
  */
 export type PiHostOverflowCheck = (message: unknown) => boolean;
 
