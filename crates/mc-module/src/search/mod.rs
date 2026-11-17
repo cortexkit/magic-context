@@ -752,13 +752,16 @@ fn fuse_history(messages: Vec<MessageHit>, chunks: Vec<ChunkHit>, limit: usize) 
 }
 
 /// How the message lane reached the session's rows, for a slow call's log
-/// line ([`crate::tool_timing`]). `scan` means proving which rows are mapped
-/// read the whole store's rowid map first.
-fn reach_detail(reach: messages::Reach, scanned: bool) -> &'static str {
+/// line ([`crate::tool_timing`]). `partly` means the session's rows the
+/// rowid map lacks were screened in by their rowids; `scan` means proving
+/// which rows are mapped read the whole store's rowid map first.
+fn reach_detail(reach: &messages::Reach, scanned: bool) -> &'static str {
     match (reach, scanned) {
         (messages::Reach::Nothing, _) => "nothing",
         (messages::Reach::Mapped, false) => "mapped",
         (messages::Reach::Mapped, true) => "mapped,scan",
+        (messages::Reach::Partly(_), false) => "partly",
+        (messages::Reach::Partly(_), true) => "partly,scan",
         (messages::Reach::Unmapped, false) => "unmapped",
         (messages::Reach::Unmapped, true) => "unmapped,scan",
     }
@@ -873,7 +876,7 @@ fn collect(
         let reach = messages::reach(conn, coverage, scope.session, dates);
         stamps.mark_detail(
             "message_reach",
-            reach_detail(reach, coverage.scans() > scans),
+            reach_detail(&reach, coverage.scans() > scans),
         );
         if explicit {
             diagnostics.live_message_matches = messages::count_live_matches(
@@ -883,7 +886,7 @@ fn collect(
                 scope.cutoff,
                 dates,
                 scope.visible_messages.as_ref(),
-                reach,
+                &reach,
             );
             diagnostics.visibility_from_view = scope.visible_messages.is_some();
             stamps.mark("message_count");
@@ -903,7 +906,7 @@ fn collect(
             depths,
             scope.cutoff,
             explicit,
-            reach,
+            &reach,
         )
         .into_iter();
         stamps.mark_detail("message_fts", probes_detail(probes.len()));

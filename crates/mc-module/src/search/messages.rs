@@ -7,6 +7,7 @@
 //! assistant text is indexed; tool output, reasoning, notices and agent relays are not.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use cortexkit_role_compaction::part::PartBody;
 use cortexkit_role_compaction::read::{Entry, Role};
@@ -394,7 +395,7 @@ impl DateRange {
 }
 
 /// How the message lane reaches one session's rows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reach {
     /// The session has nothing indexed: no row in `message_fts_rowid_map`
     /// and an index watermark of 0. Its reads would find nothing, so no
@@ -404,9 +405,15 @@ pub enum Reach {
     /// so matches are screened by the session's mapped rowids before any
     /// row's stored content is read.
     Mapped,
-    /// Some full-text rows of the session may be missing from the map (rows
-    /// written before the map existed): every match in the store is checked
-    /// by its session id, which is read from the row's stored content.
+    /// Some full-text rows of the session are missing from the map (rows
+    /// written before the map existed), and the coverage proof found every
+    /// one of them: these are their rowids, in ascending order. Matches are
+    /// screened by the session's mapped rowids and these rowids, the same
+    /// way as for [`Reach::Mapped`].
+    Partly(Arc<[i64]>),
+    /// No proof says which of the session's full-text rows the map lacks:
+    /// every match in the store is checked by its session id, which is read
+    /// from the row's stored content.
     Unmapped,
 }
 
@@ -420,20 +427,49 @@ pub enum Reach {
 const SESSION_SCREEN: &str = "+message_history_fts.rowid IN (
     SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id = ?1) AND";
 
+/// The screen a read of `reach` starts its conditions with: for
+/// [`Reach::Partly`], [`SESSION_SCREEN`] widened by the session's rowids
+/// the map lacks, bound as a JSON array at `?{slot}` (see
+/// [`unmapped_rowids`]). Without the screen, an unscreened read loads the
+/// stored row of every match in the store to test its session.
+fn screen(reach: &Reach, slot: usize) -> String {
+    match reach {
+        Reach::Mapped => SESSION_SCREEN.to_owned(),
+        Reach::Partly(_) => format!(
+            "+message_history_fts.rowid IN (
+                SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id = ?1
+                UNION ALL SELECT value FROM json_each(?{slot})) AND"
+        ),
+        Reach::Nothing | Reach::Unmapped => String::new(),
+    }
+}
+
+/// The parameter [`screen`] binds at its slot, when it binds one.
+fn unmapped_rowids(reach: &Reach) -> Option<rusqlite::types::Value> {
+    match reach {
+        Reach::Partly(rowids) => Some(rusqlite::types::Value::Text(
+            serde_json::to_string(&rowids[..]).expect("rowids serialize"),
+        )),
+        _ => None,
+    }
+}
+
 /// Above this many unmapped full-text rows the coverage proof gives up and
 /// every session keeps the unscreened query. Finding a row's session reads
 /// its stored content, and a store whose rows the plugin has not yet mapped
 /// can have millions of them.
 const UNMAPPED_LIMIT: usize = 10_000;
 
-/// Which sessions have full-text rows missing from `message_fts_rowid_map`,
-/// as last proven on one connection. This is the TypeScript plugin's
-/// coverage check (`message-fts-session-filter.ts`): a session is screened
-/// by its mapped rowids only when no physical row of the store whose rowid
-/// the map lacks belongs to it. The plugin finds those rows with SQL
-/// `EXCEPT`, which takes about two seconds on a store of two million
-/// messages; here the map's rowids are sorted and merged with the row-size
-/// table's rowids, which are already in order.
+/// Which full-text rows of the store are missing from
+/// `message_fts_rowid_map`, and whose they are, as last proven on one
+/// connection. This is the TypeScript plugin's coverage check
+/// (`message-fts-session-filter.ts`), which screens a session by its mapped
+/// rowids only when no physical row of the store whose rowid the map lacks
+/// belongs to it. Here a session that owns such rows is screened too, by
+/// its mapped rowids and those rows' rowids ([`Reach::Partly`]). The plugin
+/// finds those rows with SQL `EXCEPT`, which takes about two seconds on a
+/// store of two million messages; here the map's rowids are sorted and
+/// merged with the row-size table's rowids, which are already in order.
 ///
 /// A proof is reused until the connection sees another connection's commit
 /// (`PRAGMA data_version`) or makes a change itself (`total_changes()`), and
@@ -454,7 +490,9 @@ struct Proof {
 }
 
 enum Incomplete {
-    Sessions(std::collections::HashSet<String>),
+    /// The rowids the map lacks, in ascending order, by the session whose
+    /// row each is.
+    Sessions(HashMap<String, Arc<[i64]>>),
     /// No proof for any session: too many unmapped rows, or the store could
     /// not be read as expected (for example, without a row-size table).
     All,
@@ -463,12 +501,20 @@ enum Incomplete {
 impl Coverage {
     /// Whether every full-text row of `session` has its rowid in the map.
     pub fn complete(&mut self, conn: &Connection, session: &str) -> bool {
+        self.unmapped(conn, session)
+            .is_some_and(|rowids| rowids.is_empty())
+    }
+
+    /// The rowids of `session`'s full-text rows that the map lacks, in
+    /// ascending order (empty when the map has them all), or `None` when no
+    /// proof could be made.
+    pub fn unmapped(&mut self, conn: &Connection, session: &str) -> Option<Arc<[i64]>> {
         let Ok(stamp) = conn.query_row(
             "SELECT total_changes(), data_version FROM pragma_data_version",
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         ) else {
-            return false;
+            return None;
         };
         let reusable = conn
             .is_readonly(rusqlite::DatabaseName::Main)
@@ -481,8 +527,13 @@ impl Coverage {
             });
         }
         match self.proof.as_ref().map(|proof| &proof.incomplete) {
-            Some(Incomplete::Sessions(sessions)) => !sessions.contains(session),
-            _ => false,
+            Some(Incomplete::Sessions(sessions)) => Some(
+                sessions
+                    .get(session)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::from([])),
+            ),
+            _ => None,
         }
     }
 
@@ -492,7 +543,7 @@ impl Coverage {
     }
 }
 
-/// The sessions owning a full-text row whose rowid the map lacks.
+/// The full-text rows whose rowid the map lacks, by the session owning each.
 fn unmapped_sessions(conn: &Connection) -> Incomplete {
     let scan = || -> rusqlite::Result<Incomplete> {
         let mut mapped: Vec<i64> = conn
@@ -519,24 +570,30 @@ fn unmapped_sessions(conn: &Connection) -> Incomplete {
         drop(rows);
         let mut owner =
             conn.prepare("SELECT session_id FROM message_history_fts WHERE rowid = ?1")?;
-        let mut sessions = std::collections::HashSet::new();
+        let mut sessions: HashMap<String, Vec<i64>> = HashMap::new();
+        // `missing` is in ascending order, so each session's list is too.
         for id in missing {
             let session: Option<rusqlite::types::Value> =
                 owner.query_row(params![id], |row| row.get(0)).optional()?;
             // Searches bind the session as text, which never equals a stored
             // value of another type.
             if let Some(rusqlite::types::Value::Text(session)) = session {
-                sessions.insert(session);
+                sessions.entry(session).or_default().push(id);
             }
         }
-        Ok(Incomplete::Sessions(sessions))
+        Ok(Incomplete::Sessions(
+            sessions
+                .into_iter()
+                .map(|(session, rowids)| (session, Arc::from(rowids)))
+                .collect(),
+        ))
     };
     scan().unwrap_or(Incomplete::All)
 }
 
 /// How the message lane reaches `session`'s rows. A dated read joins the
 /// rowid map anyway, so it only ever finds mapped rows and can always be
-/// screened, as the plugin does.
+/// screened by them alone, as the plugin does.
 pub fn reach(
     conn: &Connection,
     coverage: &mut Coverage,
@@ -555,10 +612,13 @@ pub fn reach(
         Ok(_) => {}
         Err(_) => return Reach::Unmapped,
     }
-    if dates.is_some() || coverage.complete(conn, session) {
-        Reach::Mapped
-    } else {
-        Reach::Unmapped
+    if dates.is_some() {
+        return Reach::Mapped;
+    }
+    match coverage.unmapped(conn, session) {
+        Some(rowids) if rowids.is_empty() => Reach::Mapped,
+        Some(rowids) => Reach::Partly(rowids),
+        None => Reach::Unmapped,
     }
 }
 
@@ -570,7 +630,7 @@ struct Within<'a> {
     cutoff: i64,
     dates: Option<DateRange>,
     visible: Option<&'a BTreeSet<i64>>,
-    reach: Reach,
+    reach: &'a Reach,
 }
 
 impl Within<'_> {
@@ -588,7 +648,7 @@ impl Within<'_> {
 /// and message number fall to the rowid, so a shorter page is always the
 /// start of a longer one.
 fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize)) -> Vec<Row> {
-    if fts.is_empty() || within.reach == Reach::Nothing {
+    if fts.is_empty() || *within.reach == Reach::Nothing {
         return Vec::new();
     }
     // The table also indexes `role`, so restrict matching to the content.
@@ -601,11 +661,7 @@ fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize))
         ),
         None => ("", ""),
     };
-    let screen = if within.reach == Reach::Mapped {
-        SESSION_SCREEN
-    } else {
-        ""
-    };
+    let screen = screen(within.reach, 9);
     let sql = format!(
         "SELECT message_history_fts.message_ordinal, message_history_fts.message_id,
                 message_history_fts.role, message_history_fts.content
@@ -635,20 +691,19 @@ fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize))
         };
         let visible = serde_json::to_string(&within.visible.cloned().unwrap_or_default())
             .expect("ordinals serialize");
+        let mut values: Vec<rusqlite::types::Value> = vec![
+            within.session.to_owned().into(),
+            matching.clone().into(),
+            within.cutoff.into(),
+            (page.0 as i64).into(),
+            within.dates.map(|dates| dates.from).into(),
+            within.dates.map(|dates| dates.to).into(),
+            visible.into(),
+            (page.1 as i64).into(),
+        ];
+        values.extend(unmapped_rowids(within.reach));
         let rows = statement
-            .query_map(
-                params![
-                    within.session,
-                    matching,
-                    within.cutoff,
-                    page.0 as i64,
-                    within.dates.map(|dates| dates.from),
-                    within.dates.map(|dates| dates.to),
-                    visible,
-                    page.1 as i64
-                ],
-                map,
-            )?
+            .query_map(rusqlite::params_from_iter(values), map)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     };
@@ -687,7 +742,7 @@ pub fn app_page(
         cutoff: i64::MAX,
         dates: None,
         visible: None,
-        reach: Reach::Unmapped,
+        reach: &Reach::Unmapped,
     };
     let base = sanitize_fts_query(text.trim());
     let mut rows = query_rows_page(conn, within, &base, (limit, offset));
@@ -707,42 +762,53 @@ pub fn app_page(
 
 /// How many messages up to the cutoff match `fts`, for one probe's weight.
 fn count_matches(conn: &Connection, within: Within, fts: &str) -> u64 {
-    if fts.is_empty() || within.reach == Reach::Nothing {
+    if fts.is_empty() || *within.reach == Reach::Nothing {
         return 0;
     }
     let matching = format!("content : ({fts})");
     let visible = serde_json::to_string(&within.visible.cloned().unwrap_or_default())
         .expect("ordinals serialize");
-    let screen = if within.reach == Reach::Mapped {
-        SESSION_SCREEN
-    } else {
-        ""
-    };
-    let result = match within.dates {
-        Some(dates) => conn.query_row(
-            &format!(
+    let (sql, mut values): (String, Vec<rusqlite::types::Value>) = match within.dates {
+        Some(dates) => (
+            format!(
                 "SELECT COUNT(*) FROM message_history_fts
                    JOIN message_fts_rowid_map AS map ON map.session_id = message_history_fts.session_id
                     AND map.fts_rowid = message_history_fts.rowid
-                  WHERE {screen} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
+                  WHERE {} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
                     AND map.message_time_ms BETWEEN ?3 AND ?4
                     AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?5
-                    AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?6))"
+                    AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?6))",
+                screen(within.reach, 7)
             ),
-            params![within.session, matching, dates.from, dates.to, within.cutoff, visible],
-            |row| row.get::<_, i64>(0),
+            vec![
+                within.session.to_owned().into(),
+                matching.into(),
+                dates.from.into(),
+                dates.to.into(),
+                within.cutoff.into(),
+                visible.into(),
+            ],
         ),
-        None => conn.query_row(
-            &format!(
+        None => (
+            format!(
                 "SELECT COUNT(*) FROM message_history_fts
-                  WHERE {screen} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
+                  WHERE {} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
                     AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?3
-                    AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?4))"
+                    AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?4))",
+                screen(within.reach, 5)
             ),
-            params![within.session, matching, within.cutoff, visible],
-            |row| row.get::<_, i64>(0),
+            vec![
+                within.session.to_owned().into(),
+                matching.into(),
+                within.cutoff.into(),
+                visible.into(),
+            ],
         ),
     };
+    values.extend(unmapped_rowids(within.reach));
+    let result = conn.query_row(&sql, rusqlite::params_from_iter(values), |row| {
+        row.get::<_, i64>(0)
+    });
     result.map_or(0, |count| count.max(0) as u64)
 }
 
@@ -755,7 +821,7 @@ pub fn count_live_matches(
     cutoff: i64,
     dates: Option<DateRange>,
     visible: Option<&BTreeSet<i64>>,
-    reach: Reach,
+    reach: &Reach,
 ) -> u64 {
     let fts = sanitize_fts_query(query.trim());
     let eligible = Within {
@@ -806,7 +872,7 @@ pub fn search(
     wanted: &Query,
     cutoff: i64,
     relaxed: bool,
-    reach: Reach,
+    reach: &Reach,
 ) -> Vec<MessageHit> {
     search_at(
         conn,
@@ -833,7 +899,7 @@ pub fn search_at(
     limits: &[usize],
     cutoff: i64,
     relaxed: bool,
-    reach: Reach,
+    reach: &Reach,
 ) -> Vec<Vec<MessageHit>> {
     let Query {
         text: query,
@@ -842,7 +908,7 @@ pub fn search_at(
         visible,
         ..
     } = *wanted;
-    if reach == Reach::Nothing {
+    if *reach == Reach::Nothing {
         return limits.iter().map(|_| Vec::new()).collect();
     }
     let within = Within {

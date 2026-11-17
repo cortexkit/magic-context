@@ -179,18 +179,37 @@ fn reach_follows_the_rowid_map_coverage() {
         .iter()
         .map(|session| reach(&conn, &mut coverage, session, None))
         .collect();
+    // A session with rows the map lacks is screened by those rows' rowids
+    // besides its mapped ones: here, every one of them, in order.
+    let partly = |session: &str, count: usize| {
+        let rowids: Vec<i64> = conn
+            .prepare(
+                "SELECT rowid FROM message_history_fts
+                  WHERE session_id = ?1
+                    AND rowid NOT IN (SELECT fts_rowid FROM message_fts_rowid_map)
+                  ORDER BY rowid",
+            )
+            .unwrap()
+            .query_map([session], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rowids.len(), count, "{session}");
+        Reach::Partly(rowids.into())
+    };
     assert_eq!(
         reached,
         [
             Reach::Mapped,
             Reach::Mapped,
-            Reach::Unmapped,
-            Reach::Unmapped,
-            Reach::Unmapped,
+            partly("partly", 15),
+            partly("legacy", 30),
+            partly("duplicated", 1),
             Reach::Mapped,
             Reach::Nothing,
         ]
     );
+    assert_eq!(coverage.scans(), 1);
     // A dated read joins the map anyway, so it is always screened.
     let dates = Some(DateRange { from: 0, to: 1 });
     assert_eq!(reach(&conn, &mut coverage, "legacy", dates), Reach::Mapped);
@@ -218,7 +237,7 @@ fn screened_and_unscreened_reads_find_the_same_messages_in_every_session() {
                 };
                 for relaxed in [true, false] {
                     let screened =
-                        search_at(&conn, session, &wanted, &[30, 75], cutoff, relaxed, reach);
+                        search_at(&conn, session, &wanted, &[30, 75], cutoff, relaxed, &reach);
                     let unscreened = search_at(
                         &conn,
                         session,
@@ -226,7 +245,7 @@ fn screened_and_unscreened_reads_find_the_same_messages_in_every_session() {
                         &[30, 75],
                         cutoff,
                         relaxed,
-                        Reach::Unmapped,
+                        &Reach::Unmapped,
                     );
                     assert_eq!(
                         screened, unscreened,
@@ -242,7 +261,7 @@ fn screened_and_unscreened_reads_find_the_same_messages_in_every_session() {
                         cutoff,
                         dates,
                         visible.as_ref(),
-                        reach
+                        &reach
                     ),
                     count_live_matches(
                         &conn,
@@ -251,7 +270,7 @@ fn screened_and_unscreened_reads_find_the_same_messages_in_every_session() {
                         cutoff,
                         dates,
                         visible.as_ref(),
-                        Reach::Unmapped
+                        &Reach::Unmapped
                     ),
                     "{session} {query:?} cutoff {cutoff} {visible:?} {dates:?}"
                 );
@@ -287,13 +306,13 @@ fn one_read_at_two_depths_equals_two_searches() {
                         &[shallow, deep],
                         cutoff,
                         true,
-                        reach,
+                        &reach,
                     );
                     assert_eq!(
                         both,
                         [
-                            search(&conn, session, &wanted(shallow), cutoff, true, reach),
-                            search(&conn, session, &wanted(deep), cutoff, true, reach),
+                            search(&conn, session, &wanted(shallow), cutoff, true, &reach),
+                            search(&conn, session, &wanted(deep), cutoff, true, &reach),
                         ],
                         "{session} {query:?} {shallow}/{deep} cutoff {cutoff} {visible:?} {dates:?}"
                     );
@@ -306,6 +325,7 @@ fn one_read_at_two_depths_equals_two_searches() {
 thread_local! {
     static RANKED_READS: Cell<usize> = const { Cell::new(0) };
     static MESSAGE_READS: Cell<usize> = const { Cell::new(0) };
+    static ROW_LOADS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn count_reads(sql: &str) {
@@ -314,6 +334,11 @@ fn count_reads(sql: &str) {
     }
     if sql.contains("ORDER BY bm25(message_history_fts)") {
         RANKED_READS.with(|reads| reads.set(reads.get() + 1));
+    }
+    // FTS5's own read of one stored row, which it makes the first time a
+    // query reads a column other than the rowid of a match.
+    if sql.contains("'message_history_fts_content'") {
+        ROW_LOADS.with(|loads| loads.set(loads.get() + 1));
     }
 }
 
@@ -325,6 +350,61 @@ fn reads_during(conn: &mut Connection, work: impl FnOnce(&Connection)) -> (usize
     work(conn);
     conn.trace(None);
     (RANKED_READS.with(Cell::get), MESSAGE_READS.with(Cell::get))
+}
+
+/// How many stored rows of the full-text table `work` loads on `conn`.
+fn row_loads_during(conn: &mut Connection, work: impl FnOnce(&Connection)) -> usize {
+    ROW_LOADS.with(|loads| loads.set(0));
+    conn.trace(Some(count_reads));
+    work(conn);
+    conn.trace(None);
+    ROW_LOADS.with(Cell::get)
+}
+
+/// A session with rows the map lacks is screened like a covered one: its
+/// reads load the stored rows of its own matches only. Unscreened, a read
+/// loads the stored row of every match in the store to learn its session,
+/// which on a store of two million messages takes seconds per read.
+#[test]
+fn a_partly_mapped_session_loads_only_its_own_stored_rows() {
+    let store = Store::new();
+    let mut conn = store.read_only();
+    let matches = |conn: &Connection, filter: &str| -> usize {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM message_history_fts
+                  WHERE message_history_fts MATCH 'content : (\"alpha\")' {filter}"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let everywhere = matches(&conn, "");
+    for session in ["partly", "legacy", "duplicated"] {
+        let own = matches(&conn, &format!("AND session_id = '{session}'"));
+        assert!(
+            own > 0 && everywhere > 2 * own,
+            "{session}: {own} of {everywhere}"
+        );
+        conn.execute_batch("BEGIN").unwrap();
+        let reach = reach(&conn, &mut Coverage::default(), session, None);
+        // The two counts of `count_live_matches` each load every match they
+        // test for its session once.
+        let loads = |conn: &mut Connection, reach: &Reach| {
+            row_loads_during(conn, |conn| {
+                count_live_matches(conn, session, "alpha", 20, None, None, reach);
+            })
+        };
+        assert_eq!(loads(&mut conn, &reach), 2 * own, "{session} {reach:?}");
+        // The count is not vacuous: unscreened, every match in the store loads.
+        assert_eq!(
+            loads(&mut conn, &Reach::Unmapped),
+            2 * everywhere,
+            "{session}"
+        );
+        conn.execute_batch("COMMIT").unwrap();
+    }
 }
 
 fn scope<'a>(

@@ -688,7 +688,7 @@ fn lanes(
             case.cutoff,
             None,
             case.visible.as_ref(),
-            reach,
+            &reach,
         )
     });
     stages.push(("messages: live-match counts", took));
@@ -709,7 +709,7 @@ fn lanes(
             depths,
             case.cutoff,
             true,
-            reach,
+            &reach,
         )
     });
     stages.push((
@@ -755,9 +755,10 @@ fn count(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> (i64, D
 /// queries match across every session, the per-session work, and what a
 /// query restricted to the session's own rows costs instead. Each search is
 /// timed both ways the lane can reach the session's rows: screened by its
-/// rowid map (what `ctx_search` now does for a covered session) and through
-/// every match's session id (what it did before, and still does for a
-/// session with unmapped rows), with the two results compared.
+/// rowid map (what `ctx_search` now does whenever the store's unmapped rows
+/// are few enough to find their sessions) and through every match's session
+/// id (what it did before, and still does when they are not), with the two
+/// results compared.
 fn message_diagnostics(conn: &Connection, case: &Case, query: &str, prototype: bool) {
     let strict = search::text::sanitize_fts_query(query);
     let relaxed = search::text::relaxed_fts_query(query);
@@ -777,8 +778,8 @@ fn message_diagnostics(conn: &Connection, case: &Case, query: &str, prototype: b
         ms(proof_took)
     );
     for (way, reach) in [
-        ("screened", reach),
-        ("unscreened", messages::Reach::Unmapped),
+        ("screened", &reach),
+        ("unscreened", &messages::Reach::Unmapped),
     ] {
         let (strict_hits, strict_took) = timed(|| {
             messages::search(conn, case.session, &wanted, case.cutoff, false, reach).len()
@@ -811,7 +812,7 @@ fn message_diagnostics(conn: &Connection, case: &Case, query: &str, prototype: b
         &[TIER, 75],
         case.cutoff,
         true,
-        reach,
+        &reach,
     ) == messages::search_at(
         conn,
         case.session,
@@ -819,7 +820,7 @@ fn message_diagnostics(conn: &Connection, case: &Case, query: &str, prototype: b
         &[TIER, 75],
         case.cutoff,
         true,
-        messages::Reach::Unmapped,
+        &messages::Reach::Unmapped,
     );
     println!(
         "MESSAGES {} | {query} | screened and unscreened results identical: {same}",
