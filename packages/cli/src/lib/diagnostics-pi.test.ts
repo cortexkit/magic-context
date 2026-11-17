@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,7 +38,15 @@ function makeTempRoot(prefix = "mc-pi-diagnostics-"): string {
 // Each test gets its own temp root, so files another test left in the shared
 // temp directory never reach the report.
 beforeEach(() => {
-    restoreTempDir = setProcessTempDirForTests(makeTempRoot("mc-pi-diagnostics-tmp-"));
+    const testTempDir = makeTempRoot("mc-pi-diagnostics-tmp-");
+    const restoreEnv = setProcessTempDirForTests(testTempDir);
+    // Once any test in this process has assigned a new object to process.env,
+    // Bun's os.tmpdir() stops seeing later TMPDIR changes, so stub it as well.
+    const tmpdirStub = spyOn(os, "tmpdir").mockReturnValue(testTempDir);
+    restoreTempDir = () => {
+        tmpdirStub.mockRestore();
+        restoreEnv();
+    };
 });
 
 afterEach(() => {

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
@@ -39,7 +40,15 @@ function makeTempRoot(prefix = "mc-pi-doctor-"): string {
 // temp directory cannot change what doctor reports.
 beforeEach(() => {
     sharedTempDir = tmpdir();
-    restoreTempDir = setProcessTempDirForTests(makeTempRoot("mc-pi-doctor-tmp-"));
+    const testTempDir = makeTempRoot("mc-pi-doctor-tmp-");
+    const restoreEnv = setProcessTempDirForTests(testTempDir);
+    // Once any test in this process has assigned a new object to process.env,
+    // Bun's os.tmpdir() stops seeing later TMPDIR changes, so stub it as well.
+    const tmpdirStub = spyOn(os, "tmpdir").mockReturnValue(testTempDir);
+    restoreTempDir = () => {
+        tmpdirStub.mockRestore();
+        restoreEnv();
+    };
 });
 
 /**
