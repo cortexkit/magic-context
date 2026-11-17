@@ -3,14 +3,14 @@ import { Database } from "bun:sqlite";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { homedir, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
-import { SubcClient } from "@cortexkit/subc-client";
 import { loadPluginConfig } from "../src/config";
 import { getDataDir, getMagicContextStorageDir } from "../src/shared/data-path";
 import {
     setStoragePrivatePermissionEnforcement,
     writeStorageFileAtomicSync,
 } from "../src/shared/storage-permissions";
-import { parseAgentDeliverReply } from "./cache-bust-sentinel";
+import { connectSubcWakeClient, parseAgentDeliverReply, type SubcWakeClientFactory } from "./cache-bust-sentinel";
+import { resolvePrefrontalModuleId } from "./prefrontal-wake-module";
 import { parseStepAnswer, parseStepRender, type StepAnswer } from "./step-render-log";
 
 const HOUR = 3_600_000;
@@ -31,7 +31,12 @@ type BusyCounts = { refusals: number; replays: number };
 type Hold = { at: number; site: string; ms: number };
 type State = { version: 1; files: Record<string, Cursor>; sessions: Record<string, Session>; sent: Record<string, Sent>; busy?: Record<string, Record<string, BusyCounts>>; holds?: Hold[]; pendingBusy?: Record<string, number>; lastSummaryDay?: string };
 export type LatencyAlert = { kind: Kind; sessionId: string; name: string; at: string; detail: string; lkgDeclines: Record<string, number>; count: number; p50: number; p90: number; max: number; moduleP50: number | null; moduleP90: number | null; moduleMax: number | null; runnerP50?: number | null; runnerP90?: number | null; runnerMax?: number | null; worstPass?: Pass; pluginP50: number | null; pluginP90: number | null; pluginMax: number | null; busy?: BusyCounts; lock?: { site: string; count: number; p90: number; max: number }; load: number[]; loadSampledAt: string };
-export type LatencyOptions = { files: string[]; stateFile: string; db: string; peerDb?: string; connectionFile: string; send: boolean; now?: () => number; load?: () => number[]; wake?: (content: string, id: string) => Promise<void>; stdout?: (line: string) => void; stderr?: (line: string) => void; since?: number; until?: number; replay?: boolean; summary?: boolean };
+export type LatencyOptions = { files: string[]; stateFile: string; db: string; peerDb?: string; connectionFile: string; send: boolean; now?: () => number; load?: () => number[]; wake?: (content: string, id: string) => Promise<void>;
+    /** The subc module that delivers the wake. When unset, the run reads the daemon's module catalog and uses `prefrontal`, or `prefrontal-core` on a daemon from before the rename. */
+    wakeModuleId?: string;
+    /** Opens the subc connection a wake is sent on; tests replace it. */
+    connect?: SubcWakeClientFactory;
+    stdout?: (line: string) => void; stderr?: (line: string) => void; since?: number; until?: number; replay?: boolean; summary?: boolean };
 const empty = (): State => ({ version: 1, files: {}, sessions: {}, sent: {}, busy: {}, holds: [], pendingBusy: {} });
 const quantile = (values: number[], fraction: number) => values.length ? [...values].sort((a, b) => a - b)[Math.ceil(values.length * fraction) - 1] : 0;
 
@@ -202,6 +207,19 @@ function addLine(state: State, line: string, load: () => number[], file: string)
     return alerts;
 }
 
+/**
+ * The prefrontal store whose agent roster supplies the agent name an alert
+ * shows for a session. A path the caller gives is used as is. Otherwise the
+ * store is looked for under the data directory: renaming the module from
+ * prefrontal-core to prefrontal also moves its data folder, so the new store is
+ * used once it exists and the old one until then.
+ */
+export function resolvePeerDbPath(explicit: string | undefined, dataDir = getDataDir()): string {
+    if (explicit !== undefined) return explicit;
+    const renamed = join(dataDir, "cortexkit/prefrontal/store.db");
+    return existsSync(renamed) ? renamed : join(dataDir, "cortexkit/prefrontal-core/store.db");
+}
+
 function names(dbPath: string, peerDbPath: string | undefined, alerts: LatencyAlert[]): void {
     if (!alerts.length) return;
     if (existsSync(dbPath)) {
@@ -279,9 +297,11 @@ export function formatAlerts(alerts: LatencyAlert[]): string {
 
 async function deliver(options: LatencyOptions, content: string, id: string, urgency: "high" | "normal"): Promise<void> {
     if (options.wake) return options.wake(content, id);
-    const client = await SubcClient.connect({ connectionFile: options.connectionFile, handshakeTimeoutMs: 2_000 });
+    const client = await (options.connect ?? connectSubcWakeClient)({ connectionFile: options.connectionFile, handshakeTimeoutMs: 2_000 });
     try {
-        const reply = await client.call("prefrontal-core", "agent.deliver", {
+        // A run sends at most one wake, so the module is chosen once per run.
+        const moduleId = options.wakeModuleId ?? await resolvePrefrontalModuleId(client);
+        const reply = await client.call(moduleId, "agent.deliver", {
             agent_id: AGENT_ID, delivery_id: id,
             body: { kind: "peer_message", from_agent: "mc-transform-latency-sentinel", from_session_id: "health-sentinel-mc", from_harness: "magic-context", content, one_way: true }, urgency,
         }, { identity: { project_root: process.cwd(), harness: "magic-context", session: "health-sentinel-mc" }, consumerIdentity: null, timeoutMs: 15_000 });
@@ -372,11 +392,18 @@ if (import.meta.main) {
                 // Thalamus's runner logs, whose `step render` times stand in for the plugin's transform times.
                 values.get("--harness-log") ?? join(homedir(), `.local/share/cortexkit/thalamus-harness/logs/thalamus-harness.${date}.log`),
                 values.get("--pi-runner-log") ?? join(homedir(), `.local/share/cortexkit/thalamus-pi/logs/thalamus-pi.${date}.log`)],
-            db: values.get("--db") ?? join(storage, "context.db"), peerDb: values.get("--peer-db") ?? join(getDataDir(), "cortexkit/prefrontal-core/store.db"), stateFile: values.get("--state-file") ?? join(storage, "transform-latency-sentinel-state.json"),
+            db: values.get("--db") ?? join(storage, "context.db"), stateFile: values.get("--state-file") ?? join(storage, "transform-latency-sentinel-state.json"),
             connectionFile: values.get("--connection-file") ?? join(getDataDir(), "cortexkit/run/subc-connection.json"), send: args.includes("--send"), replay, summary: args.includes("--summary"),
             since: values.has("--since") ? Date.parse(values.get("--since")!) : undefined, until: values.has("--until") ? Date.parse(values.get("--until")!) : undefined,
         };
         if (options.since !== undefined && !Number.isFinite(options.since) || options.until !== undefined && !Number.isFinite(options.until)) throw new Error("invalid UTC range");
-        do { await runLatencySentinel(options); if (args.includes("--once") || replay || options.summary) break; await Bun.sleep(300_000); } while (true);
+        do {
+            // Looked up before every run, so a sentinel left running across the
+            // rename starts reading the moved store as soon as it appears.
+            options.peerDb = resolvePeerDbPath(values.get("--peer-db"));
+            await runLatencySentinel(options);
+            if (args.includes("--once") || replay || options.summary) break;
+            await Bun.sleep(300_000);
+        } while (true);
     } catch (error) { console.error(error); process.exitCode = 1; }
 }

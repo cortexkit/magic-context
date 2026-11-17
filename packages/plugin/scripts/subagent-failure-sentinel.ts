@@ -2,14 +2,14 @@
 import { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { SubcClient } from "@cortexkit/subc-client";
 import { loadPluginConfig } from "../src/config";
 import { getDataDir, getMagicContextStorageDir } from "../src/shared/data-path";
 import {
     setStoragePrivatePermissionEnforcement,
     writeStorageFileAtomicSync,
 } from "../src/shared/storage-permissions";
-import { parseAgentDeliverReply } from "./cache-bust-sentinel";
+import { connectSubcWakeClient, parseAgentDeliverReply, type SubcWakeClientFactory } from "./cache-bust-sentinel";
+import { resolvePrefrontalModuleId } from "./prefrontal-wake-module";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -70,6 +70,14 @@ export type FailureSentinelOptions = {
     settleMs?: number;
     now?: () => number;
     wake?: (content: string, deliveryId: string) => Promise<void>;
+    /**
+     * The subc module that delivers the wake. When unset, the run reads the
+     * daemon's module catalog and uses `prefrontal`, or `prefrontal-core` on a
+     * daemon from before the rename.
+     */
+    wakeModuleId?: string;
+    /** Opens the subc connection a wake is sent on; tests replace it. */
+    connect?: SubcWakeClientFactory;
     stdout?: (line: string) => void;
     stderr?: (line: string) => void;
 };
@@ -266,9 +274,11 @@ export function evaluateFailures(allRows: Row[], allNewRows: Row[], now: number,
 
 async function deliver(options: FailureSentinelOptions, content: string, id: string): Promise<void> {
     if (options.wake) return options.wake(content, id);
-    const client = await SubcClient.connect({ connectionFile: options.connectionFile, handshakeTimeoutMs: 2_000 });
+    const client = await (options.connect ?? connectSubcWakeClient)({ connectionFile: options.connectionFile, handshakeTimeoutMs: 2_000 });
     try {
-        const reply = await client.call("prefrontal-core", "agent.deliver", {
+        // A run sends at most one wake, so the module is chosen once per run.
+        const moduleId = options.wakeModuleId ?? await resolvePrefrontalModuleId(client);
+        const reply = await client.call(moduleId, "agent.deliver", {
             agent_id: AGENT_ID, delivery_id: id,
             body: { kind: "peer_message", from_agent: "mc-subagent-failure-sentinel",
                 from_session_id: "health-sentinel-mc", from_harness: "magic-context", content,
