@@ -404,7 +404,8 @@ export function signalPiDeferredCompactionMarkerDrain(sessionId: string): void {
  * for the next pass. Pi also compacts with `reason: "overflow"` after a reply
  * that completed but reported more input than Pi's configured window
  * (`willRetry: false`). The provider accepted that request, and Magic Context
- * may legitimately serve more than Pi's window (its proven input floor), so
+ * may legitimately serve more than Pi's window (its proven input floor: the
+ * largest prompt the provider has accepted, see pi-proven-floor.ts), so
  * that compaction arms nothing; neither does one for the context threshold or
  * a manual `/compact`.
  */
