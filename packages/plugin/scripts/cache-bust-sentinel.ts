@@ -49,8 +49,10 @@ import { Database } from "bun:sqlite";
  * By default the process stays alive and scans every 60 seconds. Use --once from
  * launchd/cron or for a manual pass. Without --send, each new event is printed
  * as one JSON line and nothing is sent. With --send, the sentinel connects to
- * subc (the CortexKit module daemon) and asks the prefrontal-core module, which
+ * subc (the CortexKit module daemon) and asks the prefrontal module, which
  * delivers agent messages, to send each event as a high-urgency peer message.
+ * Daemons from before that module's rename call it prefrontal-core; see
+ * prefrontal-wake-module.ts for how a run picks the name.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -78,6 +80,7 @@ import {
 import { type CacheBustScanProgress, parseScanCursor } from "./cache-bust-scan";
 import { DEFAULT_RUNNER_DATA_DIR } from "./cache-bust-runner-sources";
 import { AstrocyteRunnerMeterSource, type RunnerMeterSource } from "./cache-bust-runner-feed";
+import { type ModuleCatalogReader, resolvePrefrontalModuleId } from "./prefrontal-wake-module";
 import { emptyRunnerState, headsWithoutMeter, loadRunnerHeads, parseRunnerMonitorState, pruneRunnerState, scanRunnerFeed, type RunnerHeads, type RunnerMonitorState, type RunnerRunSummary } from "./cache-bust-runner-monitor";
 
 const STATE_VERSION = 1;
@@ -88,7 +91,6 @@ const MAX_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_LOOKBACK_MS = 5 * 60_000;
 export const DEFAULT_MAX_WAKE_AGE_MS = 30 * 60_000;
 const IDLE_SESSION_RETENTION_MS = 24 * 60 * 60_000;
-const DEFAULT_WAKE_MODULE_ID = "prefrontal-core";
 const DEFAULT_WAKE_AGENT_ID = "agent_b613e5cf2ee55b8c";
 const DEFAULT_WAKE_FROM_AGENT = "mc-cache-bust-sentinel";
 const SENTINEL_FROM_SESSION_ID = "health-sentinel-mc";
@@ -109,7 +111,12 @@ export interface CacheBustSentinelOptions {
     databasePath: string;
     rustStorePath: string;
     connectionFile: string;
-    wakeModuleId: string;
+    /**
+     * The subc module that delivers wakes. When unset, each run reads the
+     * daemon's module catalog and uses `prefrontal`, or `prefrontal-core` on a
+     * daemon from before the rename.
+     */
+    wakeModuleId?: string;
     wakeAgentId: string;
     wakeFromAgent: string;
     mcLogPath?: string;
@@ -560,7 +567,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         connectionFile:
             values.get("--connection-file") ??
             join(getDataDir(), "cortexkit", "run", "subc-connection.json"),
-        wakeModuleId: values.get("--wake-module-id") ?? DEFAULT_WAKE_MODULE_ID,
+        wakeModuleId: values.get("--wake-module-id"),
         wakeAgentId: values.get("--wake-agent-id") ?? DEFAULT_WAKE_AGENT_ID,
         wakeFromAgent: values.get("--wake-from-agent") ?? DEFAULT_WAKE_FROM_AGENT,
         anthropicDir: values.get("--anthropic-dir"),
@@ -1233,7 +1240,11 @@ export function parseAgentDeliverReply(
     return { ...reply, accepted: true, contractViolation: true };
 }
 
-export interface SubcWakeClient {
+/**
+ * A subc client as the wake transport uses it. Reading the module catalog is
+ * needed only when no wake module was given.
+ */
+export interface SubcWakeClient extends ModuleCatalogReader {
     call(
         moduleId: string,
         method: string,
@@ -1248,7 +1259,7 @@ export type SubcWakeClientFactory = (options: {
     handshakeTimeoutMs: number;
 }) => Promise<SubcWakeClient>;
 
-const connectSubcWakeClient: SubcWakeClientFactory = async (options) =>
+export const connectSubcWakeClient: SubcWakeClientFactory = async (options) =>
     await SubcClient.connect(options);
 
 function errorCode(error: unknown): string | undefined {
@@ -1262,10 +1273,16 @@ function errorMessage(error: unknown): string {
 
 export class SubcWakeEventTransport implements CacheBustTransport {
     private clientPromise: Promise<SubcWakeClient> | null = null;
+    private catalogModuleId: Promise<string> | null = null;
 
+    /**
+     * Without a `moduleId`, the first delivery reads the daemon's module
+     * catalog to choose `prefrontal` or `prefrontal-core`. Every later delivery
+     * through this transport, which lives for one run, reuses that choice.
+     */
     constructor(
         private readonly connectionFile: string,
-        private readonly moduleId = DEFAULT_WAKE_MODULE_ID,
+        private readonly moduleId?: string,
         private readonly agentId = DEFAULT_WAKE_AGENT_ID,
         private readonly fromAgent = DEFAULT_WAKE_FROM_AGENT,
         private readonly connect: SubcWakeClientFactory = connectSubcWakeClient,
@@ -1279,19 +1296,33 @@ export class SubcWakeEventTransport implements CacheBustTransport {
         return this.clientPromise;
     }
 
+    private wakeModuleId(client: SubcWakeClient): Promise<string> {
+        if (this.moduleId !== undefined) return Promise.resolve(this.moduleId);
+        if (!this.catalogModuleId) {
+            const resolving = resolvePrefrontalModuleId(client);
+            this.catalogModuleId = resolving;
+            // A failed catalog read is not kept, so the run's next delivery reads it again.
+            resolving.catch(() => {
+                if (this.catalogModuleId === resolving) this.catalogModuleId = null;
+            });
+        }
+        return this.catalogModuleId;
+    }
+
     runnerSource(): RunnerMeterSource {
         return new AstrocyteRunnerMeterSource(() => this.client());
     }
 
     async record(event: CacheBustEvent, timeoutMs = 15_000): Promise<unknown> {
         const client = await this.client();
+        const moduleId = await this.wakeModuleId(client);
         const projectRoot =
             isAbsolute(event.directory) && existsSync(event.directory)
                 ? event.directory
                 : process.cwd();
         try {
             return await client.call(
-                this.moduleId,
+                moduleId,
                 AGENT_DELIVER_METHOD,
                 agentDeliverRequest(event, this.agentId, this.fromAgent),
                 {
@@ -1322,12 +1353,13 @@ export class SubcWakeEventTransport implements CacheBustTransport {
 
     async recordLag(notice: { deliveryId: string; content: string }, timeoutMs = 15_000): Promise<unknown> {
         const client = await this.client();
+        const moduleId = await this.wakeModuleId(client);
         const request: AgentDeliverRequest = {
             agent_id: this.agentId, delivery_id: notice.deliveryId, urgency: "normal",
             body: { kind: "peer_message", from_agent: this.fromAgent, from_session_id: SENTINEL_FROM_SESSION_ID,
                 from_harness: SENTINEL_FROM_HARNESS, content: notice.content, one_way: true },
         };
-        return await client.call(this.moduleId, AGENT_DELIVER_METHOD, request, {
+        return await client.call(moduleId, AGENT_DELIVER_METHOD, request, {
             identity: { project_root: process.cwd(), harness: SENTINEL_FROM_HARNESS, session: SENTINEL_FROM_SESSION_ID },
             consumerIdentity: null, timeoutMs,
         });

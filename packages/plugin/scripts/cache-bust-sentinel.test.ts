@@ -1063,11 +1063,16 @@ describe("agent.deliver contract", () => {
             "agent_override",
             "--wake-from-agent",
             "agent_sender_override",
+            "--wake-module-id",
+            "prefrontal-core",
         ]);
 
-        expect(defaults.wakeModuleId).toBe("prefrontal-core");
+        // With no module given, each run picks prefrontal or prefrontal-core from
+        // the daemon's module catalog (see prefrontal-wake-module.test.ts).
+        expect(defaults.wakeModuleId).toBeUndefined();
         expect(defaults.wakeAgentId).toBe("agent_b613e5cf2ee55b8c");
         expect(defaults.wakeFromAgent).toBe("mc-cache-bust-sentinel");
+        expect(override.wakeModuleId).toBe("prefrontal-core");
         expect(override.wakeAgentId).toBe("agent_override");
         expect(override.wakeFromAgent).toBe("agent_sender_override");
     });
