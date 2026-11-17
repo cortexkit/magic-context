@@ -207,6 +207,19 @@ function addLine(state: State, line: string, load: () => number[], file: string)
     return alerts;
 }
 
+/**
+ * The prefrontal store whose agent roster supplies the agent name an alert
+ * shows for a session. A path the caller gives is used as is. Otherwise the
+ * store is looked for under the data directory: renaming the module from
+ * prefrontal-core to prefrontal also moves its data folder, so the new store is
+ * used once it exists and the old one until then.
+ */
+export function resolvePeerDbPath(explicit: string | undefined, dataDir = getDataDir()): string {
+    if (explicit !== undefined) return explicit;
+    const renamed = join(dataDir, "cortexkit/prefrontal/store.db");
+    return existsSync(renamed) ? renamed : join(dataDir, "cortexkit/prefrontal-core/store.db");
+}
+
 function names(dbPath: string, peerDbPath: string | undefined, alerts: LatencyAlert[]): void {
     if (!alerts.length) return;
     if (existsSync(dbPath)) {
@@ -379,11 +392,18 @@ if (import.meta.main) {
                 // Thalamus's runner logs, whose `step render` times stand in for the plugin's transform times.
                 values.get("--harness-log") ?? join(homedir(), `.local/share/cortexkit/thalamus-harness/logs/thalamus-harness.${date}.log`),
                 values.get("--pi-runner-log") ?? join(homedir(), `.local/share/cortexkit/thalamus-pi/logs/thalamus-pi.${date}.log`)],
-            db: values.get("--db") ?? join(storage, "context.db"), peerDb: values.get("--peer-db") ?? join(getDataDir(), "cortexkit/prefrontal-core/store.db"), stateFile: values.get("--state-file") ?? join(storage, "transform-latency-sentinel-state.json"),
+            db: values.get("--db") ?? join(storage, "context.db"), stateFile: values.get("--state-file") ?? join(storage, "transform-latency-sentinel-state.json"),
             connectionFile: values.get("--connection-file") ?? join(getDataDir(), "cortexkit/run/subc-connection.json"), send: args.includes("--send"), replay, summary: args.includes("--summary"),
             since: values.has("--since") ? Date.parse(values.get("--since")!) : undefined, until: values.has("--until") ? Date.parse(values.get("--until")!) : undefined,
         };
         if (options.since !== undefined && !Number.isFinite(options.since) || options.until !== undefined && !Number.isFinite(options.until)) throw new Error("invalid UTC range");
-        do { await runLatencySentinel(options); if (args.includes("--once") || replay || options.summary) break; await Bun.sleep(300_000); } while (true);
+        do {
+            // Looked up before every run, so a sentinel left running across the
+            // rename starts reading the moved store as soon as it appears.
+            options.peerDb = resolvePeerDbPath(values.get("--peer-db"));
+            await runLatencySentinel(options);
+            if (args.includes("--once") || replay || options.summary) break;
+            await Bun.sleep(300_000);
+        } while (true);
     } catch (error) { console.error(error); process.exitCode = 1; }
 }

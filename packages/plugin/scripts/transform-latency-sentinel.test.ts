@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { readFileSync, renameSync, rmSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestTempDirFromPath } from "../src/shared/test-temp-dir";
-import { alertUrgency, formatAlerts, type LatencyAlert, readNewLines, runLatencySentinel } from "./transform-latency-sentinel";
+import { alertUrgency, formatAlerts, type LatencyAlert, readNewLines, resolvePeerDbPath, runLatencySentinel } from "./transform-latency-sentinel";
 
 const BASE = Date.parse("2026-09-28T18:00:00Z");
 let root: string;
@@ -270,4 +270,23 @@ test("busy-storage markers count by session and hour, threshold and dedupe; lock
             { sessionId: "ses_pi", hour: "2026-09-28T18:00:00.000Z", refusals: 0, replays: 4 },
         ], holds: 4, longHolds: 2,
     }]);
+});
+
+const peerStore = (dataDir: string, module: string) => {
+    mkdirSync(join(dataDir, "cortexkit", module), { recursive: true });
+    writeFileSync(join(dataDir, "cortexkit", module, "store.db"), "");
+    return join(dataDir, "cortexkit", module, "store.db");
+};
+test("the default peer store is the renamed prefrontal store once it exists", () => {
+    peerStore(root, "prefrontal-core");
+    const renamed = peerStore(root, "prefrontal");
+    expect(resolvePeerDbPath(undefined, root)).toBe(renamed);
+});
+test("the default peer store falls back to prefrontal-core until the renamed store exists", () => {
+    const legacy = peerStore(root, "prefrontal-core");
+    expect(resolvePeerDbPath(undefined, root)).toBe(legacy);
+});
+test("an explicit peer store wins even when the renamed store exists", () => {
+    peerStore(root, "prefrontal");
+    expect(resolvePeerDbPath(join(root, "custom.db"), root)).toBe(join(root, "custom.db"));
 });
