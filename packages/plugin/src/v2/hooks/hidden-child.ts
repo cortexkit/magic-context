@@ -686,7 +686,9 @@ export class HiddenChildHook {
         const blockedRead =
             needsBlockedRead(selected.identity.agent, draft.model.providerID) &&
             draft.tools.read !== undefined;
-        const systemText = blockedRead ? withBlockedReadInstruction(system, selected.identity) : system;
+        const systemText = blockedRead
+            ? withBlockedReadInstruction(system, selected.identity)
+            : system;
         draft.system = [{ type: "text", text: systemText }];
         if (!selected.shaped) {
             draft.messages = [

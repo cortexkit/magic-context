@@ -15,7 +15,7 @@ import type { SessionContext } from "./types";
 const MARKER =
     "mc:hidden:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222";
 const SYSTEM =
-    "You classify memories.\n\nOUTPUT CONTRACT: emit <classify><memory id=\"N\" importance=\"75\" scope=\"project\" shareable=\"true\"/></classify>";
+    'You classify memories.\n\nOUTPUT CONTRACT: emit <classify><memory id="N" importance="75" scope="project" shareable="true"/></classify>';
 const PROMPT = "Classify these memories.";
 const FRAME = `Instructions for this task:\n\n<instructions>\n${SYSTEM}\n</instructions>`;
 
