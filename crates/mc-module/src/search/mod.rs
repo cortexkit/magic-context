@@ -38,7 +38,8 @@ const MEMORY_BOOST: f64 = 1.3;
 const MESSAGE_BOOST: f64 = 1.275;
 const GIT_COMMIT_BOOST: f64 = 1.2;
 const PRIMER_BOOST: f64 = 1.25;
-const SOURCES: [&str; 5] = ["memory", "message", "git_commit", "primer", "note"];
+/// The sources a search reads, by the names a call gives them.
+pub(crate) const SOURCES: [&str; 5] = ["memory", "message", "git_commit", "primer", "note"];
 /// Reciprocal-rank constant for fusing message and summary hits.
 const RRF_K: f64 = 60.0;
 /// How deep a reranked search reads the message lane for its candidates.
@@ -750,10 +751,37 @@ fn fuse_history(messages: Vec<MessageHit>, chunks: Vec<ChunkHit>, limit: usize) 
     ranked.into_iter().map(|entry| entry.hit).collect()
 }
 
+/// How the message lane reached the session's rows, for a slow call's log
+/// line ([`crate::tool_timing`]). `scan` means proving which rows are mapped
+/// read the whole store's rowid map first.
+fn reach_detail(reach: messages::Reach, scanned: bool) -> &'static str {
+    match (reach, scanned) {
+        (messages::Reach::Nothing, _) => "nothing",
+        (messages::Reach::Mapped, false) => "mapped",
+        (messages::Reach::Mapped, true) => "mapped,scan",
+        (messages::Reach::Unmapped, false) => "unmapped",
+        (messages::Reach::Unmapped, true) => "unmapped,scan",
+    }
+}
+
+/// How many literal probes the message lane read besides the query, each a
+/// count and a full-text read of its own, for a slow call's log line.
+fn probes_detail(count: usize) -> &'static str {
+    match count {
+        0 => "",
+        1 => "probes:1",
+        2 => "probes:2",
+        3 => "probes:3",
+        4 => "probes:4",
+        _ => "probes:5+",
+    }
+}
+
 /// Every lane the request asks for, scored, ranked and cut to the request's
 /// limit. An explicit search also uses literal probes and a relaxed query
 /// for messages, and counts live matches for the reply; an automatic one
-/// does neither.
+/// does neither. Each lane that runs stamps its end in `stamps`.
+#[allow(clippy::too_many_arguments)]
 fn collect(
     conn: &Connection,
     coverage: &mut messages::Coverage,
@@ -762,13 +790,16 @@ fn collect(
     explicit: bool,
     diagnostics: &mut Diagnostics,
     mut lanes: Option<&mut rerank::Lanes>,
+    stamps: &mut crate::tool_timing::Stamps,
 ) -> Result<Vec<Hit>, String> {
     let (query, dates) = (request.query, request.dates);
     let active = |source: &str| request.active(source);
     let project = scope.project;
     let owners = scope.memory_owners();
     let visible = if owners.any() {
-        visible_memories(conn, owners, scope)
+        let visible = visible_memories(conn, owners, scope);
+        stamps.mark("visible");
+        visible
     } else {
         BTreeSet::new()
     };
@@ -814,6 +845,7 @@ fn collect(
             lanes.memory_fts = halves.words.into_iter().map(Hit::Memory).collect();
             lanes.memory_vector = halves.meaning.into_iter().map(Hit::Memory).collect();
         }
+        stamps.mark("memory");
     }
     if let Some(project) = project.filter(|_| active("primer") && scope.memory_enabled) {
         let mut halves = lanes.is_some().then(sources::Halves::default);
@@ -834,9 +866,15 @@ fn collect(
             lanes.primer_fts = halves.words.into_iter().map(Hit::Primer).collect();
             lanes.primer_vector = halves.meaning.into_iter().map(Hit::Primer).collect();
         }
+        stamps.mark("primer");
     }
     if active("message") {
+        let scans = coverage.scans();
         let reach = messages::reach(conn, coverage, scope.session, dates);
+        stamps.mark_detail(
+            "message_reach",
+            reach_detail(reach, coverage.scans() > scans),
+        );
         if explicit {
             diagnostics.live_message_matches = messages::count_live_matches(
                 conn,
@@ -848,6 +886,7 @@ fn collect(
                 reach,
             );
             diagnostics.visibility_from_view = scope.visible_messages.is_some();
+            stamps.mark("message_count");
         }
         // A rerank also reads the message lane deeper, as the plugin's
         // capture limit does, so the baseline's own ranking is unchanged.
@@ -867,18 +906,23 @@ fn collect(
             reach,
         )
         .into_iter();
+        stamps.mark_detail("message_fts", probes_detail(probes.len()));
         let found = depths.next().unwrap_or_default();
         let deeper = depths.next().unwrap_or_default();
         let chunks = match (scope.semantic, project) {
-            (Some(semantic), Some(project)) => sources::search_chunks(
-                conn,
-                scope.session,
-                project,
-                lane_tier,
-                scope.cutoff,
-                dates,
-                semantic,
-            ),
+            (Some(semantic), Some(project)) => {
+                let chunks = sources::search_chunks(
+                    conn,
+                    scope.session,
+                    project,
+                    lane_tier,
+                    scope.cutoff,
+                    dates,
+                    semantic,
+                );
+                stamps.mark("message_vector");
+                chunks
+            }
             _ => Vec::new(),
         };
         if let Some(lanes) = lanes.as_deref_mut() {
@@ -915,6 +959,7 @@ fn collect(
             lanes.git_fts = halves.words.into_iter().map(Hit::Commit).collect();
             lanes.git_vector = halves.meaning.into_iter().map(Hit::Commit).collect();
         }
+        stamps.mark("git_commit");
     }
     if active("note") {
         let notes_wanted = messages::Query {
@@ -932,6 +977,7 @@ fn collect(
                 .collect();
         }
         hits.extend(found.into_iter().map(Hit::Note));
+        stamps.mark("note");
     }
     hits.sort_by(compare);
     hits.truncate(limit);
@@ -968,6 +1014,11 @@ impl Prepared {
             self.hits = rerank::order(std::mem::take(&mut self.pool), scores, self.limit);
         }
     }
+
+    /// How many results the reply will list.
+    pub fn results(&self) -> usize {
+        self.hits.len()
+    }
 }
 
 /// Score one `ctx_search` call over every lane. With `pool`, a reranker
@@ -980,6 +1031,27 @@ pub fn prepare(
     input: &Value,
     pool: Option<usize>,
 ) -> Result<Prepared, String> {
+    prepare_stamped(
+        conn,
+        coverage,
+        scope,
+        input,
+        pool,
+        &mut crate::tool_timing::Stamps::default(),
+    )
+}
+
+/// [`prepare`], stamping in `stamps` the end of each lane it reads and of
+/// the reranker's candidates, for a slow call's log line
+/// ([`crate::tool_timing`]).
+pub fn prepare_stamped(
+    conn: &Connection,
+    coverage: &mut messages::Coverage,
+    scope: &Scope,
+    input: &Value,
+    pool: Option<usize>,
+    stamps: &mut crate::tool_timing::Stamps,
+) -> Result<Prepared, String> {
     let request = parse(input)?;
     let mut diagnostics = Diagnostics::default();
     let mut lanes = pool.map(|_| rerank::Lanes::default());
@@ -991,6 +1063,7 @@ pub fn prepare(
         true,
         &mut diagnostics,
         lanes.as_mut(),
+        stamps,
     )?;
     let candidates: Vec<Hit> = match (&lanes, pool) {
         (Some(lanes), Some(size)) => rerank::fuse(lanes).into_iter().take(size).collect(),
@@ -1002,6 +1075,9 @@ pub fn prepare(
         }
         _ => Vec::new(),
     };
+    if pool.is_some() {
+        stamps.mark("candidates");
+    }
     Ok(Prepared {
         query: request.query.to_owned(),
         hits,
@@ -1079,6 +1155,7 @@ pub fn auto_hits(
         false,
         &mut diagnostics,
         None,
+        &mut crate::tool_timing::Stamps::default(),
     )
     .unwrap_or_default()
     .into_iter()

@@ -11,7 +11,23 @@ impl Session {
         name: &str,
         input: &Value,
     ) -> Result<String, String> {
-        self.tool_unbounded(client, settings, name, input)
+        let mut timing = crate::tool_timing::ToolTiming::new(std::time::Instant::now());
+        self.tool_timed(client, settings, name, input, &mut timing)
+            .await
+    }
+
+    /// [`Session::tool`], stamping in `timing` the end of each step a
+    /// `ctx_search` or `ctx_memory` call takes, for a slow call's log line
+    /// ([`crate::tool_timing`]).
+    pub async fn tool_timed<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        name: &str,
+        input: &Value,
+        timing: &mut crate::tool_timing::ToolTiming,
+    ) -> Result<String, String> {
+        self.tool_unbounded(client, settings, name, input, timing)
             .await
             .map(crate::tool_output::bounded)
             .map_err(crate::tool_output::bounded)
@@ -23,6 +39,7 @@ impl Session {
         settings: &Settings,
         name: &str,
         input: &Value,
+        timing: &mut crate::tool_timing::ToolTiming,
     ) -> Result<String, String> {
         if !self.tools_only && !self.index_ready && matches!(name, "ctx_reduce" | "ctx_keep") {
             return Err("transcript catch-up is incomplete; retry after the next notice".into());
@@ -51,7 +68,10 @@ impl Session {
                     Some("write" | "update" | "merge")
                 );
                 let line = if writes {
-                    crate::memory_line::of_folder_async(Some(project.root.clone())).await
+                    let line =
+                        crate::memory_line::of_folder_async(Some(project.root.clone())).await;
+                    timing.mark("memory_line");
+                    line
                 } else {
                     None
                 };
@@ -65,8 +85,13 @@ impl Session {
                 // The newest message the session has seen: a fact the agent
                 // passes to the user-profile review names it as its source.
                 let ordinal = self.index.entries().last().map(|entry| entry.ordinal);
-                let answer =
-                    db.with_connection(|conn| crate::memory_tool::call(conn, &who, input, ordinal));
+                // The shared connection may be held by another call; the
+                // stamp inside separates waiting for it from the call itself.
+                let answer = db.with_connection(|conn| {
+                    timing.mark("write_wait");
+                    crate::memory_tool::call(conn, &who, input, ordinal)
+                });
+                timing.mark("memory");
                 // A call may change the project's memories, the workspace's,
                 // or the person's pending observations; each owner's app
                 // pages reload.
@@ -87,15 +112,21 @@ impl Session {
                 let scope = Arc::new(crate::search::OwnedScope::of(
                     &self.search_scope(settings, &empty),
                 ));
-                let by_ids = {
+                timing.mark("scope");
+                let (by_ids, stamps) = {
                     let (db, scope, input) = (Arc::clone(&db), Arc::clone(&scope), input.clone());
                     on_blocking_thread(move || {
                         db.with_search_reader(|conn, _| {
-                            crate::search::by_ids(conn, &scope.scope(None), &input)
+                            let mut stamps = crate::tool_timing::Stamps::default();
+                            stamps.mark("ids_wait");
+                            let answer = crate::search::by_ids(conn, &scope.scope(None), &input);
+                            stamps.mark("ids");
+                            (answer, stamps)
                         })
                     })
                     .await
                 };
+                timing.append(&stamps);
                 if let Some(answer) = by_ids {
                     return answer;
                 }
@@ -110,14 +141,15 @@ impl Session {
                             settings.git_commits_enabled,
                         ) =>
                     {
-                        provider
-                            .embed_search_query(query.trim())
-                            .await
+                        let (vector, outcome) =
+                            provider.embed_search_query_traced(query.trim()).await;
+                        timing.mark_detail("embed", outcome);
+                        vector
                             .map(|vector| (vector, provider.model_id(), provider.chunk_model_id()))
                     }
                     _ => None,
                 };
-                self.search_reranked(client, settings, db, scope, embedded, input)
+                self.search_reranked(client, settings, db, scope, embedded, input, timing)
                     .await
             }
             "ctx_note" => {
@@ -169,7 +201,8 @@ impl Session {
     /// An explicit `ctx_search`, reranked when its query reads as prose and a
     /// reranker is configured (see [`crate::search::rerank`]). The store is
     /// not held while the reranker scores, and any failure keeps the ordinary
-    /// ranking.
+    /// ranking. Each step's end is stamped in `timing`.
+    #[allow(clippy::too_many_arguments)]
     async fn search_reranked<C: RunnerClient>(
         &self,
         client: &C,
@@ -178,6 +211,7 @@ impl Session {
         scope: Arc<crate::search::OwnedScope>,
         embedded: Option<(Vec<f32>, String, String)>,
         input: &Value,
+        timing: &mut crate::tool_timing::ToolTiming,
     ) -> Result<String, String> {
         use crate::search::rerank::{self, Reranker, Skipped};
         let query = input
@@ -200,22 +234,43 @@ impl Session {
                 Ok(pin) => pinned = Some(pin),
                 Err(Skipped(reason)) => rerank::log_fallback(&reason),
             }
+            timing.mark_detail(
+                "pin",
+                if pinned.is_some() {
+                    "pinned"
+                } else {
+                    "skipped"
+                },
+            );
         }
         let pool = match (&settings.rerank, &pinned) {
             (Reranker::Synapse, Some(_)) => Some(rerank::POOL),
             (Reranker::Remote(remote), _) if prose => Some(remote.top_n),
             _ => None,
         };
-        let mut prepared = {
+        let (prepared, stamps) = {
             let (db, scope, input) = (Arc::clone(&db), Arc::clone(&scope), input.clone());
             on_blocking_thread(move || {
                 db.with_search_reader(|conn, coverage| {
+                    let mut stamps = crate::tool_timing::Stamps::default();
+                    stamps.mark("read_wait");
                     let scope = scope.scope(embedded.as_ref().map(semantic));
-                    crate::search::prepare(conn, coverage, &scope, &input, pool)
+                    let prepared = crate::search::prepare_stamped(
+                        conn,
+                        coverage,
+                        &scope,
+                        &input,
+                        pool,
+                        &mut stamps,
+                    );
+                    (prepared, stamps)
                 })
             })
-            .await?
+            .await
         };
+        timing.append(&stamps);
+        timing.mark("read_end");
+        let mut prepared = prepared?;
         let mut skipped_note = None;
         if !prepared.candidates().is_empty() {
             let texts = prepared.candidates().to_vec();
@@ -234,6 +289,16 @@ impl Session {
                 }
                 _ => Err(Skipped("validation".into())),
             };
+            timing.mark_detail(
+                "rerank",
+                match (&settings.rerank, scored.is_ok()) {
+                    (Reranker::Synapse, true) => "synapse,scored",
+                    (Reranker::Synapse, false) => "synapse,fallback",
+                    (Reranker::Remote(_), true) => "remote,scored",
+                    (Reranker::Remote(_), false) => "remote,fallback",
+                    (Reranker::Off, _) => "fallback",
+                },
+            );
             match scored {
                 Ok(scores) => prepared.reorder(&scores),
                 Err(Skipped(reason)) => {
@@ -252,10 +317,20 @@ impl Session {
                 }
             }
         }
-        let mut answer = on_blocking_thread(move || {
-            db.with_connection(|conn| crate::search::finish(conn, &scope.scope(None), prepared))
+        timing.results(prepared.results());
+        let (mut answer, stamps) = on_blocking_thread(move || {
+            // The shared connection may be held by another call; the stamp
+            // inside separates waiting for it from the reply's own work.
+            db.with_connection(|conn| {
+                let mut stamps = crate::tool_timing::Stamps::default();
+                stamps.mark("write_wait");
+                let answer = crate::search::finish(conn, &scope.scope(None), prepared);
+                stamps.mark("finish");
+                (answer, stamps)
+            })
         })
         .await;
+        timing.append(&stamps);
         if let Some(line) = skipped_note {
             answer.push('\n');
             answer.push_str(&line);

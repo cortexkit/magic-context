@@ -1163,8 +1163,10 @@ struct AnswerRoute {
 /// checked against ck-mc's side. From 1,500 ms, the deadline runners give a
 /// step hook, it is a warning. The time runs from the request's arrival to
 /// the handler's return: a Setup or notice is answered when it is queued,
-/// so this is the wait the runner saw, not the session's later work.
-fn log_slow_answer(elapsed: Duration, body: &[u8], route: Option<&AnswerRoute>) {
+/// so this is the wait the runner saw, not the session's later work. `slots`
+/// are the connection's handler slots as the answer leaves
+/// ([`handler_slots`]).
+fn log_slow_answer(elapsed: Duration, body: &[u8], route: Option<&AnswerRoute>, slots: &str) {
     let elapsed_ms = elapsed.as_millis();
     if elapsed_ms < 500 {
         return;
@@ -1182,10 +1184,32 @@ fn log_slow_answer(elapsed: Duration, body: &[u8], route: Option<&AnswerRoute>) 
         .and_then(|route| route.caller.as_deref())
         .unwrap_or("");
     if elapsed_ms >= 1500 {
-        tracing::warn!(op, elapsed_ms, session, caller, "ck-mc slow answer");
+        tracing::warn!(op, elapsed_ms, session, caller, slots, "ck-mc slow answer");
     } else {
-        tracing::info!(op, elapsed_ms, session, caller, "ck-mc slow answer");
+        tracing::info!(op, elapsed_ms, session, caller, slots, "ck-mc slow answer");
     }
+}
+
+/// The connection's handler slots, for the slow-answer line: for each pool,
+/// the slots in use out of its limit, the requests waiting for one, and how
+/// long the oldest of them has waited. A request waits for a slot before
+/// ck-mc's handler starts, so no other ck-mc line counts that wait; the
+/// client library itself warns once one has waited two seconds.
+fn handler_slots(pools: &[subc_client_rs::RequestPoolSnapshot]) -> String {
+    pools
+        .iter()
+        .map(|pool| {
+            format!(
+                "{}:{}/{} waiting={} oldest_wait_ms={}",
+                pool.pool.name(),
+                pool.in_use,
+                pool.limit,
+                pool.waiting,
+                pool.oldest_wait.map_or(0, |wait| wait.as_millis())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Clone, Debug)]
@@ -1512,7 +1536,20 @@ impl Handler {
         Ok(HandlerOutcome::Response(bytes))
     }
 
+    /// An op on a route ck-mc bound, received at `Instant::now()`.
+    #[cfg(test)]
     async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Vec<u8>, Refusal> {
+        self.dispatch_at(channel, body, Instant::now()).await
+    }
+
+    /// An op on a route ck-mc bound, received at `arrived`: a tool call's
+    /// steps are timed from then ([`crate::tool_timing`]).
+    async fn dispatch_at(
+        &self,
+        channel: u16,
+        body: &[u8],
+        arrived: Instant,
+    ) -> Result<Vec<u8>, Refusal> {
         // Every route was checked at bind (`on_bind`): one known role, and a
         // bound session unless it is a module-level hook or tool route, which
         // answers discovery only.
@@ -1528,10 +1565,13 @@ impl Handler {
             // Catalog answers are served as the exact canonical bytes the
             // catalog produced, never re-serialized.
             RouteRole::Tools => {
-                return self.tool(&bound.route, body).await.map_err(|mut refusal| {
-                    refusal.message = crate::tool_output::bounded(refusal.message);
-                    refusal
-                });
+                return self
+                    .tool_at(&bound.route, body, arrived)
+                    .await
+                    .map_err(|mut refusal| {
+                        refusal.message = crate::tool_output::bounded(refusal.message);
+                        refusal
+                    });
             }
             RouteRole::Discovery => return self.discovery(&bound.route, body),
             RouteRole::Hooks => self.hook(&bound.route, body).await?,
@@ -1588,10 +1628,22 @@ impl Handler {
         })
     }
 
+    /// [`Handler::tool_at`] for a call received at `Instant::now()`.
+    #[cfg(test)]
+    async fn tool(&self, route: &Route, body: &[u8]) -> Result<Vec<u8>, Refusal> {
+        self.tool_at(route, body, Instant::now()).await
+    }
+
     /// An op on a `tool-provider/v1` route: a role op by name, or a model's
     /// call to one of the `ctx_*` tools about the session the route is bound
-    /// to, answered with its tool result.
-    async fn tool(&self, route: &Route, body: &[u8]) -> Result<Vec<u8>, Refusal> {
+    /// to, answered with its tool result. `arrived` is when the transport
+    /// received the call.
+    async fn tool_at(
+        &self,
+        route: &Route,
+        body: &[u8],
+        arrived: Instant,
+    ) -> Result<Vec<u8>, Refusal> {
         let call = tool_call(body)?;
         if let Some(answer) = self.role_op(route, &call) {
             return answer;
@@ -1623,7 +1675,11 @@ impl Handler {
                 ));
             }
         }
-        let (text, is_error) = match self.module.tool(route, &call.name, call.arguments).await {
+        let (text, is_error) = match self
+            .module
+            .tool_at(route, &call.name, call.arguments, arrived)
+            .await
+        {
             Ok(output) => (output, false),
             Err(ModuleError::Tool(output)) => (output, true),
             Err(other) => return Err(refusal(other)),
@@ -2067,12 +2123,13 @@ impl ModuleHandler for Handler {
                 },
             }
         } else {
-            self.handle_non_command(ctx, &body).await
+            self.handle_non_command(&ctx, &body, started).await
         };
         let elapsed = started.elapsed();
         if elapsed >= Duration::from_millis(500) && !matches!(outcome, HandlerOutcome::Streamed) {
             let routes = self.answer_routes.lock().expect("answer routes");
-            log_slow_answer(elapsed, &body, routes.get(&channel));
+            let slots = handler_slots(&ctx.module_handle().request_pool_snapshots());
+            log_slow_answer(elapsed, &body, routes.get(&channel), &slots);
         }
         outcome
     }
@@ -2141,7 +2198,12 @@ impl Handler {
         None
     }
 
-    async fn handle_non_command(&self, ctx: RequestCtx, body: &[u8]) -> HandlerOutcome {
+    async fn handle_non_command(
+        &self,
+        ctx: &RequestCtx,
+        body: &[u8],
+        arrived: Instant,
+    ) -> HandlerOutcome {
         // Before any other route: a move's request never reaches a session,
         // app or context handler.
         if let Some(answer) = self.agent_data(ctx.route_handle().channel, body).await {
@@ -2178,9 +2240,9 @@ impl Handler {
                 .await
                 .map(|value| HandlerOutcome::Response(crate::app_read::result_bytes(value)))
         } else if let Some(caller) = caller {
-            self.app(&ctx, body, caller).await
+            self.app(ctx, body, caller).await
         } else {
-            self.dispatch(ctx.route_handle().channel, body)
+            self.dispatch_at(ctx.route_handle().channel, body, arrived)
                 .await
                 .map(HandlerOutcome::Response)
         };
@@ -2249,6 +2311,10 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "transport_slow_answer_tests.rs"]
 mod slow_answer_tests;
+
+#[cfg(test)]
+#[path = "transport_tool_steps_tests.rs"]
+mod tool_steps_tests;
 
 #[cfg(test)]
 #[path = "transport_outcome_tests.rs"]

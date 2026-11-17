@@ -84,6 +84,11 @@ impl Attempt {
             .failure(self.started, Instant::now(), self.probe);
     }
 
+    /// Whether this attempt is the one probe an open circuit lets through.
+    pub(super) fn probe(&self) -> bool {
+        self.probe
+    }
+
     pub(super) fn success(&self) {
         let mut state = self.circuit.lock().unwrap();
         state.failures.clear();

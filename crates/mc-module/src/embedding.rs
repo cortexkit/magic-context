@@ -247,12 +247,22 @@ impl Provider {
     /// rate limited or answers for another model; the caller then searches
     /// by words only.
     pub async fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
-        self.query_with_timeout(query, self.fetch_timeout).await
+        self.query_with_timeout(query, self.fetch_timeout).await.0
     }
 
     /// Explicit search has a shorter semantic budget; expiry is an endpoint
     /// timeout, not cancellation of the keyword search.
     pub async fn embed_search_query(&self, query: &str) -> Option<Vec<f32>> {
+        self.embed_search_query_traced(query).await.0
+    }
+
+    /// [`Self::embed_search_query`], with a word on how the request ended,
+    /// for a slow call's log line ([`crate::tool_timing`]): `ok`, `timeout`,
+    /// `failed`, `unusable` (an answer with no usable vector),
+    /// `rate_limited`, or `circuit_open` when no request was sent because
+    /// the endpoint's circuit is open. `,probe` follows when the request was
+    /// the one probe an open circuit lets through.
+    pub async fn embed_search_query_traced(&self, query: &str) -> (Option<Vec<f32>>, &'static str) {
         self.query_with_timeout(query, self.query_timeout).await
     }
 
@@ -263,7 +273,11 @@ impl Provider {
         self
     }
 
-    async fn query_with_timeout(&self, query: &str, timeout: Duration) -> Option<Vec<f32>> {
+    async fn query_with_timeout(
+        &self,
+        query: &str,
+        timeout: Duration,
+    ) -> (Option<Vec<f32>>, &'static str) {
         let mut input = format!(
             "{}{}",
             self.query_prefix(),
@@ -277,15 +291,18 @@ impl Provider {
             .max(1);
         cap_input(&mut input, budget);
         let input_type = self.query_input_type.as_ref().or(self.input_type.as_ref());
-        let mut vectors = self
+        let (vectors, outcome) = self
             .request(
                 vec![input],
                 input_type.map(String::as_str),
                 "search query",
                 timeout,
             )
-            .await?;
-        vectors.swap_remove(0)
+            .await;
+        (
+            vectors.and_then(|mut vectors| vectors.swap_remove(0)),
+            outcome,
+        )
     }
 
     /// Embed stored texts (memories, commit messages), one slot per text in
@@ -319,34 +336,61 @@ impl Provider {
             self.fetch_timeout,
         )
         .await
+        .0
     }
 
-    /// One `/embeddings` request, without redirects or proxies.
+    /// One `/embeddings` request, without redirects or proxies, and a word on
+    /// how it ended (see [`Self::embed_search_query_traced`]).
     async fn request(
         &self,
         inputs: Vec<String>,
         input_type: Option<&str>,
         what: &str,
         timeout: Duration,
-    ) -> Option<Vec<Option<Vec<f32>>>> {
-        let attempt = Attempt::claim(&self.circuit)?;
+    ) -> (Option<Vec<Option<Vec<f32>>>>, &'static str) {
+        let Some(attempt) = Attempt::claim(&self.circuit) else {
+            return (None, "circuit_open");
+        };
+        let probe = attempt.probe();
+        let outcome = |plain: &'static str, probing: &'static str| {
+            if probe {
+                probing
+            } else {
+                plain
+            }
+        };
         // Bound headers and body together. Dropping this future for caller
         // cancellation only releases the probe; an internal expiry counts once.
         let result = tokio::time::timeout(timeout, self.send(inputs, input_type, timeout)).await;
         match result {
             Ok(Ok(vectors)) => {
-                if vectors.iter().any(Option::is_some) {
+                let usable = vectors.iter().any(Option::is_some);
+                if usable {
                     attempt.success();
                 } else {
                     attempt.failure();
                 }
-                Some(vectors)
+                let ended = if usable {
+                    outcome("ok", "ok,probe")
+                } else {
+                    outcome("unusable", "unusable,probe")
+                };
+                (Some(vectors), ended)
             }
-            Ok(Err(RequestFailure::RateLimited)) => None,
-            Ok(Err(RequestFailure::Unavailable)) | Err(_) => {
+            Ok(Err(RequestFailure::RateLimited)) => {
+                (None, outcome("rate_limited", "rate_limited,probe"))
+            }
+            Ok(Err(RequestFailure::Unavailable)) => {
                 tracing::warn!("ck-mc: {what} embedding failed or timed out");
                 attempt.failure();
-                None
+                (None, outcome("failed", "failed,probe"))
+            }
+            // The client's own limit is the same as the one around it, and
+            // either may fire first.
+            Ok(Err(RequestFailure::TimedOut)) | Err(_) => {
+                tracing::warn!("ck-mc: {what} embedding failed or timed out");
+                attempt.failure();
+                (None, outcome("timeout", "timeout,probe"))
             }
         }
     }
@@ -380,7 +424,7 @@ impl Provider {
             .body(body.to_string())
             .send()
             .await
-            .map_err(|_| RequestFailure::Unavailable)?;
+            .map_err(RequestFailure::of)?;
         let status = response.status().as_u16();
         // A 429 is healthy backpressure, even if its body never finishes.
         if status == 429 {
@@ -389,10 +433,7 @@ impl Provider {
         if status != 200 {
             return Err(RequestFailure::Unavailable);
         }
-        let raw = response
-            .bytes()
-            .await
-            .map_err(|_| RequestFailure::Unavailable)?;
+        let raw = response.bytes().await.map_err(RequestFailure::of)?;
         let vectors =
             parse_response(&raw, &self.model, count).ok_or(RequestFailure::Unavailable)?;
         // A gateway may ignore dimensions and return the model's default
@@ -413,6 +454,19 @@ impl Provider {
 enum RequestFailure {
     RateLimited,
     Unavailable,
+    /// The client's own time limit ran out; it is the same limit as the
+    /// one around the request, so it counts as that limit.
+    TimedOut,
+}
+
+impl RequestFailure {
+    fn of(error: reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::TimedOut
+        } else {
+            Self::Unavailable
+        }
+    }
 }
 
 /// The HTTP client for one endpoint, built on first use and kept for the

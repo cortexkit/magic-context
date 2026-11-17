@@ -144,6 +144,9 @@ enum Job {
         name: String,
         input: Value,
         reply: oneshot::Sender<Result<String, ModuleError>>,
+        /// The call's stamps from its arrival on, logged when it is slow.
+        /// Boxed: the stamps are much larger than any other job's fields.
+        timing: Box<crate::tool_timing::ToolTiming>,
     },
     PreUser {
         text: String,
@@ -826,6 +829,22 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         name: &str,
         input: Value,
     ) -> Result<String, ModuleError> {
+        self.tool_at(route, name, input, std::time::Instant::now())
+            .await
+    }
+
+    /// [`Module::tool`] for a call the transport received at `arrived`. A
+    /// `ctx_search` or `ctx_memory` call that took
+    /// [`crate::tool_timing::SLOW`] or longer from then is logged with the
+    /// time each of its steps took, the wait for the session's worker
+    /// included ([`crate::tool_timing`]).
+    pub async fn tool_at(
+        &self,
+        route: &Route,
+        name: &str,
+        input: Value,
+        arrived: std::time::Instant,
+    ) -> Result<String, ModuleError> {
         self.admit(&route.session)?;
         let (reply, answer) = oneshot::channel();
         {
@@ -834,12 +853,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let slot = workers
                 .entry(key.clone())
                 .or_insert_with(|| self.spawn_worker(key.clone()));
-            self.running(slot, key)
+            let worker = self.running(slot, key);
+            let mut timing = Box::new(crate::tool_timing::ToolTiming::new(arrived));
+            timing.mark("route");
+            worker
                 .send(Job::Tool {
                     route: route.clone(),
                     name: name.to_owned(),
                     input,
                     reply,
+                    timing,
                 })
                 .map_err(|_| ModuleError::Stopped)?;
         }
@@ -1442,6 +1465,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let watch_run_end = || inner.client.run_ends().map(|ends| ends.watch(&held_key));
             let mut run_end = if subagent { watch_run_end() } else { None };
             let mut run_ended = false;
+            // When each recent job started, so a slow tool call can name the
+            // jobs it waited behind.
+            let mut jobs_run = crate::tool_timing::WorkerJobs::default();
             loop {
                 let job = match ready.pop_front() {
                     Some(job) => job,
@@ -1503,7 +1529,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         }
                     }
                 };
-                let job = match inner.journal.gate().check(&held_key) {
+                let mut job = job;
+                let taken = std::time::Instant::now();
+                jobs_run.started(job_kind(&job), taken);
+                if let Job::Tool { timing, .. } = &mut job {
+                    timing.mark_at("queue", taken);
+                }
+                let mut job = match inner.journal.gate().check(&held_key) {
                     Err(gated) => match hold(job, &gated, &mut held, &held_key) {
                         Some(job) => job,
                         None => continue,
@@ -1556,6 +1588,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 );
                 if let Some(quiet) = carry.take_if(|_| needs_session) {
                     session = Some(resume(&inner, &held_key, quiet).await);
+                    if let Job::Tool { timing, .. } = &mut job {
+                        timing.mark("resume");
+                    }
                 }
                 // Nothing runs on summaries a resume could not read again:
                 // each such job tries the read first. Setups and notices wait
@@ -1641,6 +1676,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     // Hydrate before this worker can save a newer checkpoint;
                     // queued reads and deltas then share the same hydrated state.
                     inner.app_read.activate(&held_key).await;
+                    if let Job::Tool { timing, .. } = &mut job {
+                        timing.mark("activate");
+                    }
                 }
                 if let Job::Setup(_, _, features) = &job {
                     // Each Setup names the preset again.
@@ -1883,7 +1921,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         name,
                         input,
                         reply,
+                        mut timing,
                     } => {
+                        timing.mark("settings");
                         if session.is_none() {
                             let mut fresh = Session::tools_only(&route, inner.db.clone());
                             fresh.set_store(inner.store.clone());
@@ -1897,6 +1937,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 fresh.load_summaries();
                                 fresh.restore(durable);
                                 fresh.restore_for_tools(inner.client.as_ref()).await;
+                                timing.mark("restore");
                             }
                             session = Some(fresh);
                         }
@@ -1904,6 +1945,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         let (root, model, usable) = session.config_inputs();
                         let settings = inner.config.resolve(root, &model, usable);
                         let config = inner.config.catalog_config(session.config_inputs().0);
+                        timing.mark("config");
                         let answer = if !session.serves_tool(&name, &config) {
                             Err(ModuleError::UnknownTool(name.clone()))
                         } else if name == "ctx_memory" && !settings.memory_enabled {
@@ -1913,13 +1955,25 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         } else {
                             if name == "ctx_memory" {
                                 ensure_memory_context(&inner, &route, session).await;
+                                timing.mark("memory_context");
                             }
                             session
-                                .tool(inner.client.as_ref(), &settings, &name, &input)
+                                .tool_timed(
+                                    inner.client.as_ref(),
+                                    &settings,
+                                    &name,
+                                    &input,
+                                    &mut timing,
+                                )
                                 .await
                                 .map_err(ModuleError::Tool)
                         };
                         let _ = reply.send(answer);
+                        // After the answer has left, so writing the line
+                        // never delays it.
+                        if matches!(name.as_str(), "ctx_search" | "ctx_memory") {
+                            timing.log(&name, &held_key, &input, &jobs_run);
+                        }
                     }
                     Job::PreUser { text, now, reply } => {
                         let answer = match (&session, &carry) {
@@ -2211,6 +2265,37 @@ fn hold(
         | Job::Park { .. }
         | Job::Discard { .. }
         | Job::AppCheckpoint { .. } => Some(job),
+    }
+}
+
+/// A job's kind, as a slow tool call's log line names the jobs it waited
+/// behind ([`crate::tool_timing`]); a tool call by its tool's name.
+fn job_kind(job: &Job) -> &'static str {
+    match job {
+        Job::Command { .. } => "command",
+        Job::Setup(..) => "setup",
+        Job::Notice(_) => "notice",
+        Job::Ride(..) => "ride",
+        Job::Tool { name, .. } => match name.as_str() {
+            "ctx_search" => "tool:ctx_search",
+            "ctx_memory" => "tool:ctx_memory",
+            "ctx_note" => "tool:ctx_note",
+            "ctx_expand" => "tool:ctx_expand",
+            "ctx_reduce" => "tool:ctx_reduce",
+            "ctx_keep" => "tool:ctx_keep",
+            _ => "tool",
+        },
+        Job::PreUser { .. } => "pre_user",
+        Job::Idle(_) => "idle",
+        Job::Busy(_) => "busy",
+        Job::Resume => "resume",
+        Job::Park { .. } => "park",
+        Job::Discard { .. } => "discard",
+        Job::AppCheckpoint { .. } => "app_checkpoint",
+        Job::SummaryFinished(..) => "summary_finished",
+        Job::AccountWait(_) => "account_wait",
+        Job::Workspace { .. } => "workspace",
+        Job::Recent { .. } => "recent",
     }
 }
 
