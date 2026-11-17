@@ -46,14 +46,14 @@ function result(id: string, callId: string): Entry {
 	};
 }
 
-function answer(id: string): Entry {
+function answer(id: string, stopReason = "stop"): Entry {
 	return {
 		type: "message",
 		id,
 		message: {
 			role: "assistant",
 			content: [{ type: "text", text: id }],
-			stopReason: "stop",
+			stopReason,
 		},
 	};
 }
@@ -66,6 +66,11 @@ const HOST_SUMMARY = {
 	tokensBefore: 900_000,
 };
 const CUSTOM = { role: "custom", customType: "note", content: "custom note" };
+const CUSTOM_AFTER = {
+	role: "custom",
+	customType: "note",
+	content: "custom after",
+};
 
 type EventItem = Entry | { extra: Record<string, unknown>; entryId?: string };
 
@@ -101,7 +106,7 @@ function cut(branch: Entry[], items: EventItem[], boundary: string) {
 
 function label(message: Record<string, unknown>): string {
 	if (message.role === "compactionSummary") return "summary";
-	if (message.role === "custom") return "custom";
+	if (message.role === "custom") return String(message.content);
 	const content = message.content;
 	if (typeof content === "string") return content;
 	if (Array.isArray(content)) {
@@ -118,30 +123,32 @@ afterEach(() => {
 });
 
 describe("history cut placed by branch position", () => {
-	it("cuts around a host compaction summary and a custom message, which stay in place", () => {
+	it("cuts a host compaction summary and a custom message before the boundary, as the id lookup does, and keeps one after it", () => {
 		const branch = [
 			user("u1"),
 			call("a1", "c1"),
 			result("r1", "c1"),
 			answer("f1"),
 			user("u2"),
-			answer("a-err"),
+			answer("a-err", "error"),
 		];
+		const before = [
+			{ extra: HOST_SUMMARY, entryId: "cmp1" },
+			branch[0],
+			branch[1],
+			branch[2],
+			{ extra: CUSTOM },
+			branch[3],
+			branch[4],
+		];
+		const after = { extra: CUSTOM_AFTER };
 		// Pi puts the host's summary first; the failed reply a-err is hidden.
-		const { labels } = cut(
-			branch,
-			[
-				{ extra: HOST_SUMMARY, entryId: "cmp1" },
-				branch[0],
-				branch[1],
-				branch[2],
-				{ extra: CUSTOM },
-				branch[3],
-				branch[4],
-			],
-			"a-err",
-		);
-		expect(labels).toEqual(["summary", "custom", "u2"]);
+		const missing = cut(branch, [...before, after], "a-err");
+		expect(missing.labels).toEqual(["u2", "custom after"]);
+		// After a restart Pi 0.83 shows the failed reply again, and the id lookup
+		// finds it: the same request.
+		const found = cut(branch, [...before, branch[5], after], "a-err");
+		expect(found.bytes).toBe(missing.bytes);
 	});
 
 	it("keeps the live prompt when the summary ends inside its turn, and later turns keep the same cut", () => {
@@ -208,7 +215,7 @@ describe("history cut placed by branch position", () => {
 		expect(missing.bytes).toBe(found.bytes);
 	});
 
-	it("a found boundary that goes missing inside a turn gets the turn's prompt back once, then keeps it", () => {
+	it("a boundary inside a turn keeps that turn's prompt whether it is found by id or missing", () => {
 		const branch = [
 			user("u1"),
 			call("a1", "c1"),
@@ -220,11 +227,11 @@ describe("history cut placed by branch position", () => {
 			user("u2"),
 		];
 		const found = cut(branch, branch, "m1");
-		expect(found.labels).toEqual(["call:c3", "r3", "f3", "u2"]);
+		expect(found.labels).toEqual(["u1", "call:c3", "r3", "f3", "u2"]);
 		const withoutBoundary = branch.filter((entry) => entry.id !== "m1");
 		const missing = cut(branch, withoutBoundary, "m1");
-		// The one rewrite: u1 comes back in front of the rest of its turn.
-		expect(missing.labels).toEqual(["u1", "call:c3", "r3", "f3", "u2"]);
+		expect(missing.bytes).toBe(found.bytes);
+		// A later turn does not change which prompt is kept.
 		const later = [...branch, answer("a4"), user("u3")];
 		const next = cut(
 			later,
@@ -243,6 +250,12 @@ describe("history cut placed by branch position", () => {
 		expect(next.bytes.startsWith(missing.bytes.slice(0, -1))).toBe(true);
 	});
 
+	it("a hidden boundary that is itself a prompt does not keep the prompt before it", () => {
+		const branch = [user("u1"), answer("f1"), user("u2"), answer("f2")];
+		const { labels } = cut(branch, [branch[0], branch[1], branch[3]], "u2");
+		expect(labels).toEqual(["f2"]);
+	});
+
 	it("logs once per pass when the boundary cannot be placed, and cuts nothing", () => {
 		const lines: string[] = [];
 		spyOn(logger, "sessionLog").mockImplementation((_id, ...parts) => {
@@ -256,14 +269,12 @@ describe("history cut placed by branch position", () => {
 		const first = cut(branch, items, "gone");
 		expect(first.labels).toEqual(["summary", "u1", "f1", "u2"]);
 		cut(branch, items, "gone");
-		const cutLines = () =>
-			lines.filter((line) => line.startsWith("pi history cut not placed"));
-		expect(cutLines()).toEqual([
-			"pi history cut not placed: boundary gone is not among the 4 context messages and it is not on the active branch either; first message without a branch position: compactionSummary; nothing was cut",
+		expect(cutLines(lines)).toEqual([
+			"pi history cut not placed: boundary gone is not among the 4 context messages and it is not on the active branch either; first message without a branch position: compactionSummary; nothing was cut at this boundary",
 		]);
 		resetPiUnplacedCutLog(SESSION);
 		cut(branch, items, "gone");
-		expect(cutLines()).toHaveLength(2);
+		expect(cutLines(lines)).toHaveLength(2);
 	});
 
 	it("logs when the context is not in branch order", () => {
@@ -274,10 +285,56 @@ describe("history cut placed by branch position", () => {
 		const branch = [user("u1"), answer("f1"), user("u2"), answer("a-err")];
 		const { labels } = cut(branch, [branch[2], branch[0], branch[1]], "a-err");
 		expect(labels).toEqual(["u2", "u1", "f1"]);
-		expect(
-			lines.filter((line) => line.startsWith("pi history cut not placed")),
-		).toEqual([
-			"pi history cut not placed: boundary a-err is not among the 3 context messages and the context messages are not in branch order; first message without a branch position: none; nothing was cut",
+		expect(cutLines(lines)).toEqual([
+			"pi history cut not placed: boundary a-err is not among the 3 context messages and the context messages are not in branch order; first message without a branch position: none; nothing was cut at this boundary",
 		]);
 	});
+
+	it("logs when no context message has a branch position", () => {
+		const lines: string[] = [];
+		spyOn(logger, "sessionLog").mockImplementation((_id, ...parts) => {
+			lines.push(parts.map(String).join(" "));
+		});
+		const branch = [user("u1"), answer("f1"), user("u2"), answer("a-err")];
+		// Entry ids that did not resolve: nothing can be compared with the boundary.
+		const unresolved = branch
+			.slice(0, 3)
+			.map((entry) => ({ extra: entry.message as Record<string, unknown> }));
+		const { labels } = cut(branch, unresolved, "a-err");
+		expect(labels).toEqual(["u1", "f1", "u2"]);
+		expect(cutLines(lines)).toEqual([
+			"pi history cut not placed: boundary a-err is not among the 3 context messages and none of them has a branch position; first message without a branch position: user; nothing was cut at this boundary",
+		]);
+	});
+
+	it("does not log when an earlier trim of the same messages already cut at this boundary by id", () => {
+		const lines: string[] = [];
+		spyOn(logger, "sessionLog").mockImplementation((_id, ...parts) => {
+			lines.push(parts.map(String).join(" "));
+		});
+		// The boundary has no raw position (for example a tool-result carrier that
+		// a later user message absorbed), but the context still carries it.
+		const branch = [user("u1"), user("u2")];
+		const messages = [
+			structuredClone(user("u1").message),
+			structuredClone(answer("b").message),
+			structuredClone(user("u2").message),
+		] as never[];
+		const entryIds = ["u1", "b", "u2"];
+		const raw = convertEntriesToRawMessages(branch as never);
+		withRawMessageProvider(SESSION, { readMessages: () => raw }, () => {
+			// The early trim finds the boundary by id; the head's trim to the same
+			// boundary no longer can, and the branch cannot place it.
+			__test.trimPiMessagesToBoundary(messages, entryIds, "b", true, SESSION);
+			__test.trimPiMessagesToBoundary(messages, entryIds, "b", true, SESSION);
+		});
+		expect(
+			(messages as Record<string, unknown>[]).map((message) => label(message)),
+		).toEqual(["u2"]);
+		expect(cutLines(lines)).toEqual([]);
+	});
 });
+
+function cutLines(lines: string[]): string[] {
+	return lines.filter((line) => line.startsWith("pi history cut not placed"));
+}

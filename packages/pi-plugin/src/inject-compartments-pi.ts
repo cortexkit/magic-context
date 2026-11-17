@@ -153,7 +153,9 @@ function resolveStableId(
 
 /**
  * Mutate `piMessages` in place: remove non-system messages whose synthesized
- * id appears at or before the cutoff. Preserve all system entries and the tail.
+ * id appears at or before the cutoff. Preserve all system entries, the prompt
+ * keptPromptIndex keeps, and the tail. A boundary missing from the array is
+ * placed by branch position (placeCutByBranchPosition) and cut the same way.
  *
  * Mirrors the `messages.splice(0, cutoffIndex+1)` behavior the shared
  * `prepareCompartmentInjection` does on its (OpenCode) MessageLike[].
@@ -203,11 +205,10 @@ function trimPiMessagesToBoundary(
 			break;
 		}
 	}
-	// Messages before the boundary that the branch-position fallback keeps where
-	// they are; see placeCutByBranchPosition. Empty when the id was found.
-	let keepInPlace: ReadonlySet<number> | undefined;
-	if (
-		cutoffIndex < 0 &&
+	let promptReachesBoundary: ((eventIndex: number) => boolean) | undefined;
+	if (cutoffIndex >= 0) {
+		idCutBoundaryByMessages.set(piMessages, cutoffMessageId);
+	} else if (
 		sessionId &&
 		piMessages.length > 0 &&
 		hasRawMessageProvider(sessionId)
@@ -230,17 +231,21 @@ function trimPiMessagesToBoundary(
 			};
 		}
 		if (!placement.placed) {
-			logUnplacedCut(
-				sessionId,
-				cutoffMessageId,
-				piMessages.length,
-				placement.reason,
-				placement.firstUnplacedRole,
-			);
+			// An earlier trim of this same array (the early trim to the cached
+			// boundary) already cut at this boundary by id, which is why the id is
+			// gone now; nothing is missing from the request.
+			if (idCutBoundaryByMessages.get(piMessages) !== cutoffMessageId)
+				logUnplacedCut(
+					sessionId,
+					cutoffMessageId,
+					piMessages.length,
+					placement.reason,
+					placement.firstUnplacedRole,
+				);
 			return 0;
 		}
 		cutoffIndex = placement.cutoffIndex;
-		keepInPlace = placement.keepInPlace;
+		promptReachesBoundary = placement.promptReachesBoundary;
 	}
 	if (cutoffIndex < 0) return 0;
 
@@ -257,7 +262,7 @@ function trimPiMessagesToBoundary(
 	let preserved = 0;
 	for (let i = 0; i <= cutoffIndex; i++) {
 		if (isPiSystemEntry(piMessages[i])) preserved++;
-		else if (!keepInPlace?.has(i)) remove.add(i);
+		else remove.add(i);
 	}
 	if (preserved > 0)
 		logSession(
@@ -321,6 +326,17 @@ function trimPiMessagesToBoundary(
 			}
 		}
 	}
+	// The kept prompt is a user message, which the sweep never removes, so taking
+	// it out of the cut afterwards leaves the tool pairs as the sweep settled them.
+	// It is chosen from what remains after the cut, so a call the sweep removes
+	// after the boundary does not count as the turn going on.
+	const keptPrompt = keptPromptIndex(
+		piMessages,
+		cutoffIndex,
+		remove,
+		promptReachesBoundary,
+	);
+	if (keptPrompt >= 0) remove.delete(keptPrompt);
 
 	const retiredIds = new Set<string>();
 	if (retireDecisions) {
@@ -348,10 +364,13 @@ function trimPiMessagesToBoundary(
 type BranchCutPlacement =
 	| {
 			placed: true;
-			/** Last event index at or before the boundary on the branch, or -1. */
+			/** Last event index whose branch position is at or before the boundary, or -1. */
 			cutoffIndex: number;
-			/** Event indices at or before `cutoffIndex` that the cut leaves in place. */
-			keepInPlace: ReadonlySet<number>;
+			/**
+			 * Whether no other user prompt lies on the branch between the event
+			 * message at this index and the boundary.
+			 */
+			promptReachesBoundary: (eventIndex: number) => boolean;
 	  }
 	| {
 			placed: false;
@@ -368,40 +387,23 @@ type BranchCutPlacement =
  * it (a failed reply that a `context_edit` omits before Pi retries) or when its
  * entry id does not resolve.
  *
- * Every event message whose branch position is at or before the boundary is
- * cut, with two exceptions.
- *
- * - Messages with no branch position stay where they are. Pi builds some
- *   context messages from entries that are not messages: a host compaction's
- *   `compactionSummary`, branch summaries and custom messages. A tool result
- *   that is not the first of its run, or that a user message follows, is folded
- *   into another raw message and has no position of its own; the orphan sweep
- *   in trimPiMessagesToBoundary still removes it together with its call. Giving
- *   up at the first such message would leave the whole summarized window,
- *   images included, on the wire on every pass.
- * - The last real user prompt at or before the boundary stays while the
- *   boundary sits inside that prompt's turn: no other user prompt lies between
- *   them on the branch, and the next chat message after the boundary is not a
- *   user prompt (or there is none). A summary can end inside the live turn, for
- *   example a full rebuild of every summary (the `/ctx-recomp` command), which
- *   ends on the last raw message, here a failed reply Pi hid; cutting there
- *   would remove the prompt the model is answering. The rule reads only the
- *   branch, not which prompt is newest, so later turns keep the same cut and the prompt
- *   stays served even though the summary covers it: a session pays one rewrite,
- *   and the cut moves again only when a newer summary moves the boundary. When a
- *   user prompt follows the boundary the turn is closed, nothing is protected,
- *   and the cut equals the one the id lookup makes, so a boundary that one pass
- *   finds by id and a later pass cannot find keeps the same bytes. A found
- *   boundary that later goes missing inside a turn gets that turn's prompt back:
- *   one rewrite, accepted because that is rare, while a boundary hidden inside a
- *   live turn is the common case and must keep its cut on the next turn.
+ * The cut point is the last event message whose branch position is at or
+ * before the boundary. trimPiMessagesToBoundary then cuts exactly as it does for
+ * a boundary it finds by id: every event message up to and including the cut
+ * point goes, including messages with no branch position (a host compaction's
+ * `compactionSummary`, branch summaries, custom messages, and tool results
+ * folded into another raw message), and keptPromptIndex keeps the same prompt.
+ * Messages with no branch position after the cut point stay. So the early trim
+ * to the cached boundary, the head's own trim and a later pass that cannot find
+ * the boundary serve the same messages, and a boundary that one pass finds by id
+ * and another cannot find keeps its bytes. Stopping at the first message with no
+ * branch position would leave the whole summarized window, images included, on
+ * the wire on every pass.
  *
  * Cache: only sessions whose boundary is missing from the event come here. One
  * that this fallback could not cut before sent its summarized window again on
  * every pass; the next pass that renders the history head cuts it, rewriting
- * the cached request once, and later passes replay that cut. Sessions whose
- * boundary is found by id never reach this function, so their bytes do not
- * change.
+ * the cached request once, and later passes replay that cut.
  */
 function placeCutByBranchPosition(
 	piMessages: readonly PiAgentMessage[],
@@ -415,8 +417,10 @@ function placeCutByBranchPosition(
 	);
 	const eventPositions = new Map<number, number>();
 	let firstUnplacedRole: string | undefined;
+	let contentMessages = 0;
 	for (const [index, message] of piMessages.entries()) {
 		if (isPiSystemEntry(message)) continue;
+		contentMessages++;
 		const id = resolveStableId(message, index, entryIds);
 		const position =
 			positions.get(id) ?? positions.get(`${SYNTH_USER_ID_PREFIX}${id}`);
@@ -431,17 +435,17 @@ function placeCutByBranchPosition(
 			reason: "it is not on the active branch either",
 			firstUnplacedRole: unplacedRole,
 		};
+	// Typically the event's entry ids did not resolve: nothing can be compared
+	// with the boundary, so the cut would silently remove nothing.
+	if (contentMessages > 0 && eventPositions.size === 0)
+		return {
+			placed: false,
+			reason: "none of them has a branch position",
+			firstUnplacedRole: unplacedRole,
+		};
 	let cutoffIndex = -1;
-	let promptIndex = -1;
 	let previous = -1;
-	const unplaced: number[] = [];
-	for (const [index, message] of piMessages.entries()) {
-		if (isPiSystemEntry(message)) continue;
-		const position = eventPositions.get(index);
-		if (position === undefined) {
-			unplaced.push(index);
-			continue;
-		}
+	for (const [index, position] of eventPositions) {
 		// Pi builds the context in branch order. An event that is not cannot be
 		// cut by branch position without removing messages after the boundary.
 		if (position <= previous)
@@ -451,50 +455,93 @@ function placeCutByBranchPosition(
 				firstUnplacedRole: unplacedRole,
 			};
 		previous = position;
-		if (position > boundaryPosition) continue;
-		cutoffIndex = index;
-		if (message.role === "user") promptIndex = index;
+		if (position <= boundaryPosition) cutoffIndex = index;
 	}
-	const keepInPlace = new Set(unplaced.filter((index) => index < cutoffIndex));
-	const promptPosition = eventPositions.get(promptIndex);
-	if (
-		promptPosition !== undefined &&
-		boundaryInsidePromptTurn(branch, promptPosition, boundaryPosition)
-	)
-		keepInPlace.add(promptIndex);
-	return { placed: true, cutoffIndex, keepInPlace };
-}
-
-/** A raw user message the person wrote, not a carrier for folded tool results. */
-function isRealUserPrompt(message: { id: string; role: string }): boolean {
-	return (
-		message.role === "user" && !message.id.startsWith(SYNTH_USER_ID_PREFIX)
-	);
+	return {
+		placed: true,
+		cutoffIndex,
+		// A prompt with no branch position is judged by the event alone, as the
+		// id lookup judges every prompt.
+		promptReachesBoundary: (eventIndex) => {
+			const promptPosition = eventPositions.get(eventIndex);
+			if (promptPosition === undefined) return true;
+			for (let p = promptPosition + 1; p <= boundaryPosition; p++) {
+				const message = branch[p];
+				if (
+					message?.role === "user" &&
+					!message.id.startsWith(SYNTH_USER_ID_PREFIX)
+				)
+					return false;
+			}
+			return true;
+		},
+	};
 }
 
 /**
- * Whether the turn that the prompt at `promptPosition` starts on the raw branch
- * is still open at `boundaryPosition`: no other user prompt lies between them,
- * and the next user or assistant message after the boundary is not a new user
- * prompt.
+ * The one message at or before the cut point that the cut keeps, or -1: the
+ * last user prompt at or before it, while the boundary sits inside that
+ * prompt's turn. The turn is closed when the first user or assistant message
+ * after the cut point that the cut does not remove (`removed`) is a user
+ * prompt. A failed reply does not count there, because Pi hides one before it
+ * retries and may show it again after a restart. On the branch-position path
+ * the boundary must also follow the prompt with no other user prompt between
+ * them (`promptReachesBoundary`), which matters when the hidden boundary is
+ * itself a prompt.
+ *
+ * Why: a summary can end inside the live turn, for example a full rebuild of
+ * every summary (the `/ctx-recomp` command) that ends on the last raw message,
+ * here a failed reply Pi hid. Cutting
+ * there would remove the prompt the model is answering. The rule reads only the
+ * messages around the boundary, never which prompt is newest, so later passes
+ * keep the same cut, and finding the boundary by id or by branch position keeps
+ * the same prompt. The prompt stays served even though the summary covers it.
+ *
+ * Cache: a boundary that closes a turn keeps nothing, so those cuts are
+ * unchanged. A session whose boundary sits inside a turn, live or older, gets
+ * that turn's prompt back once, on the first pass after this rule shipped, and
+ * keeps it until a newer summary moves the boundary.
+ *
+ * Known one-time flip: if Pi exits while it retries a hidden failed reply that
+ * ends the summary, the person's next prompt lands right after the boundary,
+ * the turn reads as closed, and the prompt kept until then is cut once.
  */
-function boundaryInsidePromptTurn(
-	branch: readonly { id: string; role: string }[],
-	promptPosition: number,
-	boundaryPosition: number,
-): boolean {
-	for (let p = promptPosition + 1; p <= boundaryPosition; p++) {
-		const message = branch[p];
-		if (message && isRealUserPrompt(message)) return false;
+function keptPromptIndex(
+	piMessages: readonly PiAgentMessage[],
+	cutoffIndex: number,
+	removed: ReadonlySet<number>,
+	promptReachesBoundary?: (eventIndex: number) => boolean,
+): number {
+	let promptIndex = -1;
+	for (let i = cutoffIndex; i >= 0; i--) {
+		if (piMessages[i]?.role === "user") {
+			promptIndex = i;
+			break;
+		}
 	}
-	for (let p = boundaryPosition + 1; p < branch.length; p++) {
-		const message = branch[p];
-		if (!message) continue;
-		if (message.role !== "user" && message.role !== "assistant") continue;
-		return !isRealUserPrompt(message);
+	if (promptIndex < 0) return -1;
+	for (let i = cutoffIndex + 1; i < piMessages.length; i++) {
+		if (removed.has(i)) continue;
+		const message = piMessages[i];
+		if (message?.role === "user") return -1;
+		if (
+			message?.role === "assistant" &&
+			(message as { stopReason?: unknown }).stopReason !== "error"
+		)
+			break;
 	}
-	return true;
+	if (promptReachesBoundary && !promptReachesBoundary(promptIndex)) return -1;
+	return promptIndex;
 }
+
+/**
+ * The boundary each message array was last cut at by id. The early trim to the
+ * cached boundary removes the boundary message from the pass's array, so the
+ * head's own trim to the same boundary cannot find it by id and falls back to
+ * branch positions; when those cannot place it either, the cut already happened
+ * and there is nothing to report.
+ */
+const idCutBoundaryByMessages = new WeakMap<object, string>();
 
 /**
  * Sessions whose unplaceable cut was already logged in the current pass. One
@@ -525,10 +572,9 @@ function logUnplacedCut(
 	unplacedCutLoggedSessions.add(sessionId);
 	logSession(
 		sessionId,
-		`pi history cut not placed: boundary ${boundaryMessageId} is not among the ${eventLength} context messages and ${reason}; first message without a branch position: ${firstUnplacedRole}; nothing was cut`,
+		`pi history cut not placed: boundary ${boundaryMessageId} is not among the ${eventLength} context messages and ${reason}; first message without a branch position: ${firstUnplacedRole}; nothing was cut at this boundary`,
 	);
 }
-
 function toolPairKey(callId: string, assistantIndex: number): string {
 	return `${callId}\0${assistantIndex}`;
 }
