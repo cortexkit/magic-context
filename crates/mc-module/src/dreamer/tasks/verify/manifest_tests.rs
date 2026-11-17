@@ -9,6 +9,8 @@ fn verdict(id: i64, decision: Decision) -> Verdict {
         reason: String::new(),
         consolidation: false,
         missing: None,
+        cites: None,
+        derive: None,
     }
 }
 
@@ -67,6 +69,38 @@ fn missing_is_read_only_on_an_archive() {
     .unwrap();
     assert_eq!(verdicts[0].missing, None);
     assert_eq!(verdicts[1].missing, None);
+}
+
+#[test]
+fn cites_and_derive_are_read_on_a_confirmation_only_and_never_refuse_the_reply() {
+    let verdicts = parse_manifest(
+        r#"<verify>
+<verified id="1" files="src/a.rs" cites="src/a.rs:120-128;src/b.rs:40-41" derive="150 s = 10 × 15_000 ms"/>
+<verified id="2" files="src/a.rs" cites="not a span"/>
+<verified id="3" files="src/a.rs"/>
+<skip id="4" cites="src/a.rs:1-2" derive="1 = 1"/>
+</verify>"#,
+        &[1, 2, 3, 4],
+    )
+    .unwrap();
+    let read: Vec<(Option<&str>, Option<&str>)> = verdicts
+        .iter()
+        .map(|verdict| (verdict.cites.as_deref(), verdict.derive.as_deref()))
+        .collect();
+    // A malformed or missing cite is the write's to judge: it counts as a
+    // skip there.
+    assert_eq!(
+        read,
+        [
+            (
+                Some("src/a.rs:120-128;src/b.rs:40-41"),
+                Some("150 s = 10 × 15_000 ms")
+            ),
+            (Some("not a span"), None),
+            (None, None),
+            (None, None),
+        ]
+    );
 }
 
 #[test]

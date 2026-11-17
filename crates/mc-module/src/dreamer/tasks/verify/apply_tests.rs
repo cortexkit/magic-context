@@ -48,7 +48,7 @@ fn a_verified_memory_records_time_commit_and_the_named_files_as_its_mapping() {
     let applied = fixture.apply(
         &batch,
         &manifest(
-            r#"<verified id="1" files="./src/live.rs, src/untracked.rs, src/live.rs"/>
+            r#"<verified id="1" files="./src/live.rs, src/untracked.rs, src/live.rs" cites="src/live.rs:1-1"/>
 <skip id="2" reason="code can't decide it"/>"#,
         ),
     );
@@ -64,9 +64,19 @@ fn a_verified_memory_records_time_commit_and_the_named_files_as_its_mapping() {
     assert_eq!((revision, updated_at), (before.2, before.5));
     let verified_at = verified_at.expect("a verification time");
     let head = fixture.repo.checkout().head().unwrap().to_owned();
+    // The lines it cites are kept, as read at the commit checked.
     assert_eq!(
         metadata,
-        json!({"dreamerVerifiedAt": verified_at, "dreamerVerifiedCommit": head, "dreamerCheckedAt": verified_at})
+        json!({
+            "dreamerVerifiedAt": verified_at,
+            "dreamerVerifiedCommit": head,
+            "dreamerCheckedAt": verified_at,
+            "dreamerVerifiedSpans": {
+                "verifiedAt": verified_at,
+                "commit": head,
+                "spans": [{"path": "src/live.rs", "start": 1, "end": 1, "text": "fn live_function() {}"}],
+            },
+        })
     );
     // A skip records only that the memory was checked.
     let (_, _, revision, verified_at, metadata, updated_at) = fixture.memory(2);
@@ -88,6 +98,87 @@ fn a_verified_memory_records_time_commit_and_the_named_files_as_its_mapping() {
         .unwrap();
     assert!(live.iter().all(|memory| memory.checked_at > 0));
     assert_eq!(live[0].verified_commit.as_deref(), Some(head.as_str()));
+    assert!(live[0].confirmation.is_some());
+}
+
+#[test]
+fn a_confirmation_without_usable_cites_counts_as_a_skip_and_says_why() {
+    let fixture = fixture();
+    let batch = plan_one(&fixture);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(
+            r#"<verified id="1" files="src/live.rs"/>
+<verified id="2" files="src/other.rs" cites="src/other.rs:1-1"/>"#,
+        ),
+    );
+    assert_eq!((applied.proposed, applied.applied), (2, 0));
+    assert_eq!(
+        applied.dropped,
+        [
+            "memory 1: counted as a skip: a verified verdict needs cites, the lines that state the claim",
+            "memory 2: counted as a skip: gone_function, which the memory names, is in none of the cited lines",
+        ]
+    );
+    for id in [1, 2] {
+        // Marked checked, as a skip is, and neither verified nor mapped.
+        let (status, _, revision, verified_at, metadata, _) = fixture.memory(id);
+        assert_eq!(
+            (status.as_str(), revision, verified_at),
+            ("active", 1, None)
+        );
+        assert!(metadata["dreamerCheckedAt"].as_i64().is_some());
+        assert!(metadata.get("dreamerVerifiedSpans").is_none());
+        assert!(fixture.mapping(id).is_empty());
+    }
+    let result: String = fixture
+        .db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT verify_result FROM memories WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(result, "skipped");
+}
+
+#[test]
+fn an_update_drops_the_lines_an_earlier_confirmation_cited() {
+    let fixture = fixture();
+    let batch = plan_one(&fixture);
+    fixture.apply(
+        &batch,
+        &manifest(r#"<verified id="1" files="src/live.rs" cites="src/live.rs:1-1"/>"#),
+    );
+    assert!(fixture.memory(1).4.get("dreamerVerifiedSpans").is_some());
+    let batch = plan_one(&fixture);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(
+            r#"<update id="1" files="src/live.rs">`live_function` in src/live.rs takes no arguments and returns unit.</update>"#,
+        ),
+    );
+    assert_eq!(applied.applied, 1, "{applied:?}");
+    // The new text was never confirmed from cited lines.
+    assert!(fixture.memory(1).4.get("dreamerVerifiedSpans").is_none());
+    let live = fixture
+        .db
+        .with_connection(|conn| {
+            super::super::live_memories(
+                conn,
+                super::super::tests::PROJECT,
+                &["swe:architecture".to_owned()],
+                0,
+            )
+        })
+        .unwrap();
+    let updated = live.iter().find(|memory| memory.id == 1).unwrap();
+    assert_eq!(
+        (updated.verified_at, updated.confirmation.is_none()),
+        (0, true)
+    );
 }
 
 #[test]
@@ -460,18 +551,22 @@ fn a_protected_memory_is_never_archived_but_may_be_verified_updated_or_skipped()
               VALUES ('{}', 'person-edit-2', 'person_edit', '{{}}', 1);",
         super::super::tests::PROJECT
     ));
-    let batch = plan_one(&fixture);
-    let applied = fixture.apply(
-        &batch,
-        &manifest(
-            r#"<archive id="1" missing="gone_guard"/>
+    // Six memories take two batches of the broad run; the one reply is
+    // applied to each, which reads only its own memories' verdicts.
+    let reply = manifest(
+        r#"<archive id="1" missing="gone_guard"/>
 <archive id="2" reason="the helper was removed" missing="gone_helper"/>
 <archive id="3" missing="gone_other"/>
 <update id="4" files="src/live.rs">live_function has exactly two callers.</update>
-<verified id="5" files="src/live.rs"/>
+<verified id="5" files="src/live.rs" cites="src/live.rs:1-1"/>
 <skip id="6"/>"#,
-        ),
     );
+    let mut applied = crate::dreamer::task::Applied::default();
+    for batch in fixture.batches(true) {
+        let one = fixture.apply(&batch, &reply);
+        applied.applied += one.applied;
+        applied.dropped.extend(one.dropped);
+    }
     assert_eq!(
         applied.dropped,
         [
@@ -528,8 +623,8 @@ fn undoing_a_verify_run_puts_back_its_rows_and_the_mappings_it_replaced() {
     let applied = fixture.apply(
         &batch,
         &manifest(
-            r#"<verified id="1" files="src/live.rs"/>
-<verified id="4" files="src/live.rs"/>
+            r#"<verified id="1" files="src/live.rs" cites="src/live.rs:1-1"/>
+<verified id="4" files="src/live.rs" cites="src/live.rs:1-1"/>
 <update id="3" files="src/live.rs">live_function takes one argument.</update>
 <archive id="2" missing="gone_function"/>"#,
         ),

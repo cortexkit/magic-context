@@ -26,7 +26,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use super::branches::Copy;
+use super::branches::{read_blob, Copy};
 
 /// How long one git command may run before it is killed.
 pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -373,6 +373,47 @@ impl Checkout {
         args.extend(self.at.as_deref());
         args.extend(["--", file]);
         run_git(&self.repo, &args).ok()
+    }
+
+    /// The file `cited` names as the checkout's commit holds it, with its
+    /// path from the top: the tracked file at that path, or else the one
+    /// tracked file whose path ends with it. A path inside the checkout's
+    /// folder may be written in full. `Ok(None)` when the commit holds no such
+    /// file; `Err` when the checkout has no commit or git fails. Uncommitted
+    /// changes are not read: the commit is what a confirmation records.
+    pub(crate) fn committed(&self, cited: &str) -> Result<Option<(String, String)>, String> {
+        let head = self.head().ok_or("the checkout has no commit")?;
+        let inside = format!("{}/", self.root.display());
+        let cited = cited.trim();
+        let Some(path) = clean_path(cited.strip_prefix(inside.as_str()).unwrap_or(cited)) else {
+            return Ok(None);
+        };
+        let path = if self.tracked.contains(&path) {
+            path
+        } else {
+            let end = format!("/{path}");
+            let mut ending = self.tracked.iter().filter(|file| file.ends_with(&end));
+            match (ending.next(), ending.next()) {
+                (Some(only), None) => only.clone(),
+                _ => return Ok(None),
+            }
+        };
+        let listed = run_git(
+            &self.repo,
+            &["ls-tree", "-z", "--full-tree", head, "--", path.as_str()],
+        )?;
+        // `<mode> blob <object>\t<path>`
+        let object = listed.split('\0').find_map(|entry| {
+            let (fields, listed_path) = entry.split_once('\t')?;
+            let fields: Vec<&str> = fields.split(' ').collect();
+            (listed_path == path && fields.get(1) == Some(&"blob"))
+                .then(|| fields.get(2).map(|object| (*object).to_owned()))
+                .flatten()
+        });
+        let Some(object) = object else {
+            return Ok(None);
+        };
+        Ok(Some((path, read_blob(&self.repo, &object)?)))
     }
 }
 

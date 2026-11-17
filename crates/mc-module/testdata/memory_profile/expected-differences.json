@@ -724,18 +724,6 @@
       "document": "dreamer/swe:verify-broad/user",
       "class": "ruling",
       "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
-      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked. A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
-      "today": [
-        "Check each memory's claim against its backing files. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
-      ],
-      "rendered": [
-        "Check each memory's claim against its backing files, or, when it has none, by searching the checkout for the paths and names it cites. Decide verified / update / archive / skip (verified only on evidence, skip when unsure; behavioral directives only permit verified or skip, unless everything they cite is gone), then output ONE <verify> manifest covering every id."
-      ]
-    },
-    {
-      "document": "dreamer/swe:verify-broad/user",
-      "class": "ruling",
-      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
       "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
       "today": [],
       "rendered": [
@@ -752,34 +740,10 @@
       "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
       "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
       "today": [
-        "Each memory below comes with its backing file(s) — the code it makes a claim about. For EACH memory: use the provided git diff as evidence when present. If no diff is supplied, read its backing files (you may read more if needed) and decide whether the memory is still accurate."
-      ],
-      "rendered": [
-        "Each memory below comes with its backing file(s) — the code it makes a claim about — when it has been mapped to any. A memory with no backing files says so; for it, search the checkout for the paths and names it cites. For EACH memory: use the provided git diff as evidence when present. If no diff is supplied, read its backing files or search for what it cites (you may read more if needed) and decide whether the memory is still accurate. A memory may also list names a plain search of the checkout did not find; check them yourself before you rely on that."
-      ]
-    },
-    {
-      "document": "dreamer/swe:verify/system",
-      "class": "ruling",
-      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
-      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
-      "today": [
         "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists."
       ],
       "rendered": [
         "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists. Also archive a memory, rule or fact, whose subject is gone: every path and code name it cites no longer exists in the checkout. Name one of them in `missing`."
-      ]
-    },
-    {
-      "document": "dreamer/swe:verify/system",
-      "class": "ruling",
-      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
-      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
-      "today": [
-        "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify, such as an API that no longer exists, a path that moved, or a constant that changed. Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED. A named path inside a directive does not make the directive a code fact, and a file's failure to corroborate a behavioral rule is never grounds to update or archive it."
-      ],
-      "rendered": [
-        "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify, such as an API that no longer exists, a path that moved, or a constant that changed. Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED, with one exception: a directive whose subject is gone, because every path and code name it cites no longer exists in the checkout, is archived with `missing`. A named path inside a directive does not make the directive a code fact, and a file's failure to corroborate a behavioral rule is never grounds to update or archive it."
       ]
     },
     {
@@ -868,18 +832,6 @@
       ]
     },
     {
-      "document": "dreamer/swe:verify/system",
-      "class": "ruling",
-      "ruling": "Dreamer task rule (Ufuk, ask_eb52c10882a5e248) and cleanup design §2 (03b-cleanup-tasks.md): a task hands back one list in its final reply, and the runner returns only the final message's text.",
-      "why": "0.49 told code-reading tasks to stream their manifest across messages because the plugin read the whole transcript; in 0.50 only the final message reaches the task, so a streamed manifest would be lost.",
-      "today": [
-        "Output ONE XML manifest and NOTHING else — no narration or reasoning. Open <verify> before investigating and emit each complete verdict immediately before investigating the next memory, so interruption preserves finished work. Close </verify> when done:"
-      ],
-      "rendered": [
-        "Investigate with the tools first. Then make your final message ONE complete XML manifest with a verdict for every memory, and NOTHING else — no narration or reasoning. Only the final message is read, so a manifest started in an earlier message is lost:"
-      ]
-    },
-    {
       "document": "dreamer/base:review-user-memories/user",
       "class": "ruling",
       "ruling": "Ufuk's memory-profiles approval (ask_4407e8a9759e5d29): the existing user memories become global memories through the global review's one-time reclassification into base or coding categories (memory-profiles-final-shape.md §11).",
@@ -930,51 +882,143 @@
       ]
     },
     {
+      "document": "dreamer/swe:verify-broad/user",
+      "class": "ruling",
+      "ruling": "Cleanup design §2 (03b-cleanup-tasks.md, approved by Ufuk 2026-11-13) and dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: verify reaches unmapped memories by searching for what they cite, and a verified verdict needs cited evidence.",
+      "why": "0.49 verify only checked memories mapped to files, and a confirmation needed no evidence. The first live verify run (16 Nov 2026) confirmed all 271 memories it was given; an audit found 49 loose, 5 false and 7 confirmed from the wrong code line, because a confirmation named only files and needed no evidence.",
+      "today": [
+        "Check each memory's claim against its backing files. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
+      ],
+      "rendered": [
+        "Check each memory's claim against its backing files, or, when it has none, by searching the checkout for the paths and names it cites. Decide verified / update / archive / skip (verified only on cited evidence, skip when unsure; behavioral directives only permit verified or skip, unless everything they cite is gone), then output ONE <verify> manifest covering every id."
+      ]
+    },
+    {
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
-      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): archiving needs positive evidence and uncertainty means skip.",
-      "why": "A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
+      "ruling": "Cleanup design §2 (03b-cleanup-tasks.md) and dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §2: memories without backing files are checked by searching, and a diff shows what changed but no longer stands in for reading the current lines.",
+      "why": "Four of the five false memories in the first live run were confirmed by 0.49 verify and carried forward by the diff path, which marked a memory verified without opening files when the hunks did not touch it.",
+      "today": [
+        "Each memory below comes with its backing file(s) — the code it makes a claim about. For EACH memory: use the provided git diff as evidence when present. If no diff is supplied, read its backing files (you may read more if needed) and decide whether the memory is still accurate."
+      ],
+      "rendered": [
+        "Each memory below comes with its backing file(s) — the code it makes a claim about — when it has been mapped to any. A memory with no backing files says so; for it, search the checkout for the paths and names it cites. For EACH memory, read its backing files or search for what it cites (you may read more if needed) and decide whether the memory is still accurate. When a git diff is supplied, use it to see what changed, then read the current lines. A memory may also list names a plain search of the checkout did not find; check them yourself before you rely on that."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: a confirmation cites the lines that state the claim, so the model reads them before it confirms.",
+      "why": "The verify prompt for this fix allows 4 tool calls per memory instead of 3: a memory is confirmed only after the lines that state it are read and cited.",
+      "today": [
+        "Tools (read-only): read, grep, glob, plus any available AFT navigation tools. Use at most 3 tool calls per memory, including searches and reads. Start with the backing files and likely identifier matches. Never read the same file twice in a batch; reuse evidence. Request short useful line ranges unless the claim concerns the file as a whole. If evidence is insufficient when the call budget runs out, SKIP that memory; uncertainty never justifies archival. You change nothing."
+      ],
+      "rendered": [
+        "Tools (read-only): read, grep, glob, plus any available AFT navigation tools. Use at most 4 tool calls per memory, including searches and reads. Start with the backing files and likely identifier matches. Never read the same file twice in a batch; reuse evidence. Request short useful line ranges unless the claim concerns the file as a whole. If evidence is insufficient when the call budget runs out, SKIP that memory; uncertainty never justifies archival. You change nothing."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: a confirmation must cite the code.",
+      "why": "The first live verify run (16 Nov 2026) confirmed all 271 memories it was given; an audit found 49 loose, 5 false and 7 confirmed from the wrong code line, because a confirmation named only files and needed no evidence.",
       "today": [
         "- VERIFIED — still accurate. Keep it as-is."
       ],
       "rendered": [
-        "- VERIFIED — the code you read supports it, or the diff leaves its claim untouched. Keep it as-is."
+        "- VERIFIED — the code you read states the claim, and you cite the lines that state it (see \"Citing evidence\"). Keep it as-is."
       ]
     },
     {
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
-      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): archiving needs positive evidence and uncertainty means skip.",
-      "why": "A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
+      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1 and §3: other programs' behaviour and numbers code cannot hold are skipped.",
+      "why": "Most of the loose confirmations in the first live run were facts about OpenCode, Pi, providers or subc, confirmed from Magic Context code that only reacts to them, and numbers no code holds (a measured latency, a runtime size).",
+      "today": [
+        "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify, such as an API that no longer exists, a path that moved, or a constant that changed. Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED. A named path inside a directive does not make the directive a code fact, and a file's failure to corroborate a behavioral rule is never grounds to update or archive it."
+      ],
+      "rendered": [
+        "What this repository's code cannot decide, SKIP:",
+        "- How another program behaves: a host such as OpenCode or Pi, a model provider, a library, another module. Code here that reacts to that behaviour does not show it. Reason: \"about another program\".",
+        "- A number code cannot hold: a measured latency, a size seen at runtime, a provider's limit. Reason: \"not a value in the code\"."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: a confirmation lists the spans it rests on, and the module reads them and checks every name and number the memory states against them.",
+      "why": "The first live verify run (16 Nov 2026) confirmed all 271 memories it was given; an audit found 49 loose, 5 false and 7 confirmed from the wrong code line, because a confirmation named only files and needed no evidence.",
       "today": [
         "BE CONSERVATIVE ABOUT ARCHIVING. Wrong archival of a TRUE memory is the worst possible outcome — far worse than leaving a slightly-stale memory. If you cannot find the code, or you are unsure, or it might still be true somewhere you didn't look: mark it VERIFIED or SKIPPED, never archived. Archive ONLY when you have positive evidence the code contradicts a code fact."
       ],
       "rendered": [
-        "BE CONSERVATIVE ABOUT ARCHIVING. Wrong archival of a TRUE memory is the worst possible outcome — far worse than leaving a slightly-stale memory. If you cannot find the code, or you are unsure, or it might still be true somewhere you didn't look: mark it SKIPPED, never archived. Archive ONLY when you have positive evidence the code contradicts a code fact."
+        "Citing evidence. A VERIFIED verdict lists in `cites` every span of lines the claim rests on, as `path:start-end` with the line numbers the read tool showed, separated by `;`: the constant, the config default, the place they are combined, in as many files as the claim needs, up to 16 spans of at most 150 lines each. Cite the lines that state the claim, not the file around them. Do not copy code into the verdict; the module reads the cited lines itself and checks them:",
+        "- every code name the memory states (an identifier, a path, a config key) appears in some cited span;",
+        "- every number the memory states appears in some cited span, in any equal form (64k = 64_000, 5% = 0.05, 15 s = 15_000 ms, 1 h = 3_600_000 ms), or is computed in `derive` from numbers in the cited spans, for example derive=\"150 s = 10 × 15_000 ms\".",
+        "A VERIFIED verdict whose cited lines fail these checks counts as a skip. A name that appears only in a comment saying the code does not use it is not evidence for a claim that the code uses it."
       ]
     },
     {
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
-      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): archiving needs positive evidence and uncertainty means skip.",
-      "why": "A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
+      "ruling": "Cleanup design §2 (03b-cleanup-tasks.md) and the dreamer task rule (Ufuk, ask_eb52c10882a5e248), below the sections dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1 adds: a directive whose subject is gone is archived with missing, uncertainty means skip, and only the final message's manifest is read.",
+      "why": "Each line here is the text its earlier ruling introduced; the line diff joins them into one block now that the citing rules come before them.",
+      "today": [
+        "Output ONE XML manifest and NOTHING else — no narration or reasoning. Open <verify> before investigating and emit each complete verdict immediately before investigating the next memory, so interruption preserves finished work. Close </verify> when done:"
+      ],
+      "rendered": [
+        "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify, such as an API that no longer exists, a path that moved, or a constant that changed. Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED, with one exception: a directive whose subject is gone, because every path and code name it cites no longer exists in the checkout, is archived with `missing`. A named path inside a directive does not make the directive a code fact, and a file's failure to corroborate a behavioral rule is never grounds to update or archive it.",
+        "",
+        "BE CONSERVATIVE ABOUT ARCHIVING. Wrong archival of a TRUE memory is the worst possible outcome — far worse than leaving a slightly-stale memory. If you cannot find the code, or you are unsure, or it might still be true somewhere you didn't look: mark it SKIPPED, never archived. Archive ONLY when you have positive evidence the code contradicts a code fact.",
+        "",
+        "Investigate with the tools first. Then make your final message ONE complete XML manifest with a verdict for every memory, and NOTHING else — no narration or reasoning. Only the final message is read, so a manifest started in an earlier message is lost:"
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: the verified verdict carries cites (path:start-end spans) and an optional derive for a computed number.",
+      "why": "The first live verify run (16 Nov 2026) confirmed all 271 memories it was given; an audit found 49 loose, 5 false and 7 confirmed from the wrong code line, because a confirmation named only files and needed no evidence.",
+      "today": [
+        "<verified id=\"N\" files=\"path/a.ts,path/b.ts\"/>"
+      ],
+      "rendered": [
+        "<verified id=\"N\" files=\"path/a.ts,path/b.ts\" cites=\"path/a.ts:120-128;path/b.ts:40-41\"/>",
+        "<verified id=\"P\" files=\"path/e.ts\" cites=\"path/e.ts:10-14\" derive=\"150 s = 10 × 15_000 ms\"/>"
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/system",
+      "class": "ruling",
+      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md) and dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: verified needs cited lines, and uncertainty means skip.",
+      "why": "The first live verify run (16 Nov 2026) confirmed all 271 memories it was given; an audit found 49 loose, 5 false and 7 confirmed from the wrong code line, because a confirmation named only files and needed no evidence.",
       "today": [
         "- Default to VERIFIED. skip when code cannot decide the claim. update and archive are the exceptions, not the norm."
       ],
       "rendered": [
-        "- VERIFIED needs evidence. When you are unsure, or code cannot decide the claim, SKIP. update and archive are the exceptions, not the norm."
+        "- VERIFIED needs cited lines that state the claim. When you are unsure, or code cannot decide the claim, SKIP. update and archive are the exceptions, not the norm."
       ]
     },
     {
       "document": "dreamer/swe:verify/user.diff-evidence",
       "class": "ruling",
-      "ruling": "Cleanup design §2 Verify (03b-cleanup-tasks.md, approved by Ufuk): archiving needs positive evidence and uncertainty means skip.",
-      "why": "A replay on real code (14 Nov) showed the model marking a memory VERIFIED when it could not decide it; VERIFIED now needs evidence and uncertainty means SKIP.",
+      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §2: re-verification by stored spans; only a memory whose cited lines changed is shown the diff, and it reads the current lines again.",
+      "why": "Four of the five false memories in the first live run were carried forward by the diff path from 0.49 confirmations, which it accepted without opening files.",
       "today": [
         "The git diff below is the evidence. If changed hunks do not touch a claim, mark it verified without opening files. Open files only when a diff suggests the claim may have changed. A rename or deletion requires an update or archive when positively supported; do not archive on uncertainty. Decide verified / update / archive / skip (default verified; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
       ],
       "rendered": [
-        "The git diff below is the evidence. If changed hunks do not touch a claim, mark it verified without opening files. Open files only when a diff suggests the claim may have changed. A rename or deletion requires an update or archive when positively supported; do not archive on uncertainty. Decide verified / update / archive / skip (verified only on evidence, skip when unsure; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
+        "Each memory below was confirmed before from the lines listed under \"Confirmed from\", and at least one of those lines changed or is gone. The git diff below shows what changed. Read the current lines and decide again; a verified verdict cites the current lines, as the rules above say. A rename or deletion requires an update or archive when positively supported; do not archive on uncertainty. Decide verified / update / archive / skip (verified only on cited evidence, skip when unsure; behavioral directives only permit verified or skip), then output ONE <verify> manifest covering every id."
+      ]
+    },
+    {
+      "document": "dreamer/swe:verify/user.diff-evidence",
+      "class": "ruling",
+      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §2: the diff path shows each memory the spans it was confirmed from.",
+      "why": "A memory goes to the model with the diff only when a line it was confirmed from changed or is gone, so the model is told which lines those were.",
+      "today": [],
+      "rendered": [
+        "Confirmed from: ⟦citedBefore1⟧, ⟦citedBefore2⟧"
       ]
     },
     {
