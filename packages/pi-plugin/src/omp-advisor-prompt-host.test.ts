@@ -77,9 +77,7 @@ for (const host of hosts) {
 		expect(advisors).toMatch(
 			/const systemPrompt = \[prompt\.render\(advisorSystemPrompt\b/,
 		);
-		expect(advisors).toContain(
-			"systemPrompt.push(config.instructions.trim())",
-		);
+		expect(advisors).toContain("systemPrompt.push(config.instructions.trim())");
 		expect(advisors).toMatch(/\[adviseTool, \.\.\.tools\]/);
 		expect(read("src/advisor/advise-tool.ts")).toContain(
 			'readonly name = "advise";',
@@ -96,8 +94,7 @@ for (const host of hosts) {
 			dirname(Bun.resolveSync("@oh-my-pi/pi-agent-core", realpathSync(root))),
 		);
 		expect(
-			JSON.parse(readFileSync(join(agentCore, "package.json"), "utf8"))
-				.version,
+			JSON.parse(readFileSync(join(agentCore, "package.json"), "utf8")).version,
 		).toBe(host.version);
 		// The row OMP puts first once it has compacted the advisor's context.
 		const summary = readFileSync(

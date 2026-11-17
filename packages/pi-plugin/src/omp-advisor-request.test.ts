@@ -265,11 +265,12 @@ test("issue 686 advisor: Codex developer blocks must be typed input text", () =>
 	refused(changed);
 });
 
-// Issue 940: real-host captures from OMP 18.19.0 (the last release whose stock
-// advisor prompt starts with a <conventions> block), 18.20.3 and 18.22.0 (after
-// 18.20.2 removed it). Each version has stock and WATCHDOG.yml-customised
-// advisors on the chat-completions and Anthropic lanes, sanitised like the
-// 18.10.4 fixture. "main" is the session's next main request.
+// Real-host captures from OMP 18.19.0 (the last release whose stock advisor
+// prompt starts with a <conventions> block), 18.20.3 and 18.22.0 (after
+// 18.20.2 removed it, and every advisor request was refused as unprepared).
+// Each version has stock and WATCHDOG.yml-customised advisors on the
+// chat-completions and Anthropic lanes, sanitised like the 18.10.4 fixture.
+// "main" is the session's next main request.
 type HostCaptures = {
 	version: string;
 	advisors: Record<string, Body>;
@@ -403,8 +404,7 @@ for (const capture of hostCaptures) {
 			],
 			[
 				"another conventions block",
-				(text: string) =>
-					`<conventions>x</conventions>\n\n${fromRole(text)}`,
+				(text: string) => `<conventions>x</conventions>\n\n${fromRole(text)}`,
 			],
 			[
 				"the stock prompt later in the instruction block",
