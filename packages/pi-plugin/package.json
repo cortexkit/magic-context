@@ -69,6 +69,7 @@
 		"omp-coding-agent-18132": "npm:@oh-my-pi/pi-coding-agent@18.13.2",
 		"omp-coding-agent-18186": "npm:@oh-my-pi/pi-coding-agent@18.18.6",
 		"omp-coding-agent-18190": "npm:@oh-my-pi/pi-coding-agent@18.19.0",
+		"omp-coding-agent-18220": "npm:@oh-my-pi/pi-coding-agent@18.22.0",
 		"omp-pi-ai-171": "npm:@oh-my-pi/pi-ai@17.1.7",
 		"omp-pi-ai-1889": "npm:@oh-my-pi/pi-ai@18.8.9",
 		"omp-pi-ai-1811": "npm:@oh-my-pi/pi-ai@18.11.3",

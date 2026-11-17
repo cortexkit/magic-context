@@ -35,10 +35,26 @@ export function isOmpSideContext(event: ContextEvent): boolean {
 	});
 }
 
-const ADVISOR_PREFIX =
-	"<conventions>\nRFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER`=`MUST NOT`; `AVOID`=`SHOULD NOT`.\n</conventions>\n\nUser, code-quality, robustness advocate; peer-shadow main agent.\n";
+// The opening of OMP's stock advisor prompt (pi-coding-agent
+// prompts/advisor/system.md). OMP makes it the first element of every
+// advisor's system prompt and appends WATCHDOG.yml instructions after it
+// (session/session-advisors.ts, #buildAdvisorRuntime), so it identifies stock
+// and customised advisors alike. Up to 18.20.1 the file began with this
+// conventions block; 18.20.2 removed it. Any other text before the role line,
+// such as 18.2.6's differently worded conventions block, is not accepted.
+const ADVISOR_CONVENTIONS =
+	"<conventions>\nRFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER`=`MUST NOT`; `AVOID`=`SHOULD NOT`.\n</conventions>\n\n";
+const ADVISOR_ROLE =
+	"User, code-quality, robustness advocate; peer-shadow main agent.\n";
 const ADVISOR_WORKFLOW =
 	"<workflow>\nReceive incremental agent transcript, including thoughts.\n";
+// OMP's heading on the first message of every advisor update
+// (advisor/delta-split.ts), and the row OMP puts first once it has compacted
+// the advisor's own context (pi-agent-core
+// compaction/prompts/compaction-summary-context.md).
+const SESSION_UPDATE = "### Session update\n\n";
+const COMPACTION_SUMMARY =
+	"Prior model work/tool state available.\nMUST build on prior work; NEVER duplicate prior work.\n\n<summary>\n";
 const CAPTURE_PREFIX =
 	"Automated capture turn — not a user reply; user has not responded to your previous turn.";
 
@@ -187,17 +203,26 @@ function firstTextBlock(value: unknown): string | undefined {
 		: undefined;
 }
 
-/** OMP's advisor reviews formatted copies of new conversation messages in its own agent history. */
+/** Whether an instruction text starts with OMP's stock advisor prompt, with or without its pre-18.20.2 conventions block. */
+export function isOmpStockAdvisorPrompt(text: string | undefined): boolean {
+	if (typeof text !== "string") return false;
+	const body = text.startsWith(ADVISOR_CONVENTIONS)
+		? text.slice(ADVISOR_CONVENTIONS.length)
+		: text;
+	return body.startsWith(ADVISOR_ROLE) && body.includes(ADVISOR_WORKFLOW);
+}
+
+/**
+ * OMP's advisor reviews formatted copies of new conversation messages in its
+ * own agent history. The stock advisor prompt must lead the provider's
+ * instruction slot, which a typed prompt, a resumed history or a compaction
+ * summary can never reach; the first-row heading alone is not enough, because
+ * a user can type it as the first prompt of an ordinary session.
+ */
 export function isOmpAdvisorRequest(payload: unknown): boolean {
 	const request = providerRequest(payload);
 	if (!request?.tools.includes("advise")) return false;
-	if (
-		!request.system.some(
-			(text) =>
-				text?.startsWith(ADVISOR_PREFIX) && text.includes(ADVISOR_WORKFLOW),
-		)
-	)
-		return false;
+	if (!request.system.some(isOmpStockAdvisorPrompt)) return false;
 	const first = record(request.messages[0]);
 	if (first?.role !== "user") return false;
 	let text = firstText(first.content, request.textType)?.replace(
@@ -208,7 +233,10 @@ export function isOmpAdvisorRequest(payload: unknown): boolean {
 	// the review text. If the first block is only that reminder, read the next.
 	if (text === "" && Array.isArray(first.content))
 		text = firstText(first.content.slice(1, 2), request.textType);
-	return text?.startsWith("### Session update\n\n") === true;
+	return (
+		text?.startsWith(SESSION_UPDATE) === true ||
+		text?.startsWith(COMPACTION_SUMMARY) === true
+	);
 }
 
 /** OMP auto-learn copies raw conversation messages, skipping Magic Context's tagging/pruning; a main-pass receipt cannot authorize that copy. */
