@@ -1,5 +1,5 @@
 // Pi history cut and history-head failures, driven through the real context
-// handler (issue 938). A Pi session whose newest summary ends on a message the
+// handler. A Pi session whose newest summary ends on a message the
 // context event does not carry (a failed reply Pi hid before retrying) must
 // still cut the summarized messages, even when the event also holds a host
 // compaction summary. A pass whose history head cannot be inserted must not go

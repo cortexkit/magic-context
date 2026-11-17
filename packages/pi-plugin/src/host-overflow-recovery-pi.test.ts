@@ -41,8 +41,8 @@ function failedReply(errorMessage: string) {
 	};
 }
 
-// Errors Pi's own check calls an overflow and Magic Context's patterns do not
-// (seen in issue 938).
+// Errors Pi's own check calls an overflow and Magic Context's patterns do not:
+// a session that hits one keeps compacting while Magic Context arms nothing.
 const HOST_ONLY_OVERFLOWS = [
 	'413 {"error":{"type":"request_too_large","message":"Request exceeds the maximum size"}}',
 	"413 status code (no body)",

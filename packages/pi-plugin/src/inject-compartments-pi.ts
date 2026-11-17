@@ -363,8 +363,8 @@ type BranchCutPlacement =
 
 /**
  * Place a cut whose boundary message is not among the context event's
- * messages, using positions in the session's raw branch (the walk the historian
- * numbered when it wrote the compartment). The boundary is missing when Pi hides
+ * messages, using positions in the session's raw branch (the numbering the
+ * summarizer recorded when it wrote the summary). The boundary is missing when Pi hides
  * it (a failed reply that a `context_edit` omits before Pi retries) or when its
  * entry id does not resolve.
  *
@@ -383,10 +383,10 @@ type BranchCutPlacement =
  *   boundary sits inside that prompt's turn: no other user prompt lies between
  *   them on the branch, and the next chat message after the boundary is not a
  *   user prompt (or there is none). A summary can end inside the live turn, for
- *   example a `/ctx-recomp` rebuild of every summary that ends on the last raw
- *   message, a failed reply Pi hid; cutting there would remove the prompt the
- *   model is answering. The rule reads only the branch,
- *   not which prompt is newest, so later turns keep the same cut and the prompt
+ *   example a full rebuild of every summary (the `/ctx-recomp` command), which
+ *   ends on the last raw message, here a failed reply Pi hid; cutting there
+ *   would remove the prompt the model is answering. The rule reads only the
+ *   branch, not which prompt is newest, so later turns keep the same cut and the prompt
  *   stays served even though the summary covers it: a session pays one rewrite,
  *   and the cut moves again only when a newer summary moves the boundary. When a
  *   user prompt follows the boundary the turn is closed, nothing is protected,
