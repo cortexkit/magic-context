@@ -242,26 +242,35 @@ export interface HiddenChildAttempt {
     wireRequests?: number;
 }
 
-/** Last user text on a context draft. 2.0.5 may use a string body, extra parts, or input_text. */
-export function newestUserText(draft: SessionContext): string | undefined {
-    const message = draft.messages.at(-1);
-    if (!message || (message.role !== undefined && message.role !== "user")) return undefined;
+/**
+ * Every non-empty text of a user message, in order: its string body, or each of
+ * its text parts. OpenCode 2.0.5 may use a string body, extra parts, or
+ * input_text. A message with another role has none.
+ */
+function userTexts(message: SessionContext["messages"][number] | undefined): string[] {
+    if (!message || (message.role !== undefined && message.role !== "user")) return [];
     const content: unknown = message.content;
-    if (typeof content === "string" && content.length > 0) return content;
+    if (typeof content === "string" && content.length > 0) return [content];
     const parts = Array.isArray(content)
         ? content
         : Array.isArray(message.parts)
           ? message.parts
           : [];
+    const texts: string[] = [];
     for (const part of parts) {
         if (!part || typeof part !== "object") continue;
         const record = part as { type?: unknown; text?: unknown };
         if (typeof record.text !== "string" || record.text.length === 0) continue;
         if (record.type === undefined || record.type === "text" || record.type === "input_text") {
-            return record.text;
+            texts.push(record.text);
         }
     }
-    return undefined;
+    return texts;
+}
+
+/** First text of the last message on a context draft, when that message is a user message. */
+export function newestUserText(draft: SessionContext): string | undefined {
+    return userTexts(draft.messages.at(-1))[0];
 }
 
 /**
@@ -383,6 +392,53 @@ function markerCandidates(text: string): string[] {
     return [text, stripped, ...(summary === undefined ? [] : [summary])];
 }
 
+/**
+ * Whether any of a message's texts carries `marker` in a form `markerCandidates`
+ * accepts. Another plugin may put its own text parts ahead of the marker's part
+ * (Superpowers prepends its bootstrap to the first user message of every
+ * session without a parent, which includes every hidden run). The message that
+ * carries the marker is replaced wholesale by the registered prompt, so text
+ * another plugin added to it never reaches the hidden model.
+ */
+function carriesMarker(texts: readonly string[], marker: string): boolean {
+    return texts.some((text) => markerCandidates(text).includes(marker));
+}
+
+/** Number of leading bytes `a` and `b` share. */
+function sharedPrefixBytes(a: Buffer, b: Buffer): number {
+    let offset = 0;
+    while (offset < a.length && offset < b.length && a[offset] === b[offset]) offset++;
+    return offset;
+}
+
+/**
+ * The text a refusal reports as received: of the message's texts, the one
+ * whose marker forms share the longest leading bytes with one of `markers`, or
+ * the first text when none shares any. A message that only lacks the marker
+ * because another plugin's text came first is then reported by the part that
+ * resembles the marker, not by the other plugin's text.
+ */
+function closestText(texts: readonly string[], markers: readonly string[]): string | undefined {
+    let closest = texts[0];
+    let best = 0;
+    for (const text of texts) {
+        for (const candidate of markerCandidates(text)) {
+            const bytes = Buffer.from(candidate, "utf8");
+            for (const marker of markers) {
+                const shared = sharedPrefixBytes(bytes, Buffer.from(marker, "utf8"));
+                if (shared > best) {
+                    best = shared;
+                    closest = text;
+                }
+            }
+        }
+    }
+    return closest;
+}
+
+/** Most text parts a refusal lists digests for, so one odd message cannot flood the log. */
+const REFUSAL_PART_DIGESTS = 8;
+
 function textDigest(text: string): { length: number; sha256: string } {
     return {
         length: text.length,
@@ -397,9 +453,7 @@ function firstDifference(
 ): { offset: number; received: string; registered: string } | undefined {
     const left = Buffer.from(a, "utf8");
     const right = Buffer.from(b, "utf8");
-    let offset = 0;
-    while (offset < left.length && offset < right.length && left[offset] === right[offset])
-        offset++;
+    const offset = sharedPrefixBytes(left, right);
     if (offset === left.length && offset === right.length) return undefined;
     return {
         offset,
@@ -544,26 +598,35 @@ export class HiddenChildHook {
      * Log what the guard saw against what it expected, then throw. Only lengths,
      * short hashes and the first differing bytes are written, so a mismatch can
      * be diagnosed from the log without copying either prompt into it.
+     *
+     * `texts` are the newest user message's texts. The one reported as
+     * received, and compared with each registered marker, is the one closest
+     * to a registered marker (see `closestText`). A message with more than one
+     * text also lists every text's digest, up to `REFUSAL_PART_DIGESTS`, so
+     * text another plugin added to the message can be told apart.
      */
     private refuse(
         reason: string,
         draft: Pick<SessionContext, "sessionID" | "messages">,
-        raw: string | undefined,
+        texts: readonly string[] | undefined,
         inFlight?: number,
         code: HiddenCompletionRefusal["code"] = "hidden_prompt_unrecognized",
     ): never {
-        const registered = [...this.attempts.values()]
+        const markers = [...this.attempts.values()]
             .filter((attempt) => attempt.childSessionId === draft.sessionID && attempt.marker)
-            .map((attempt) => {
-                const marker = attempt.marker as string;
-                return {
-                    ...textDigest(marker),
-                    shaped: attempt.shaped,
-                    ...(raw === undefined
-                        ? {}
-                        : { first_difference: firstDifference(raw, marker) }),
-                };
-            });
+            .map((attempt) => ({ attempt, marker: attempt.marker as string }));
+        const raw =
+            texts === undefined
+                ? undefined
+                : closestText(
+                      texts,
+                      markers.map(({ marker }) => marker),
+                  );
+        const registered = markers.map(({ attempt, marker }) => ({
+            ...textDigest(marker),
+            shaped: attempt.shaped,
+            ...(raw === undefined ? {} : { first_difference: firstDifference(raw, marker) }),
+        }));
         const newest = draft.messages.at(-1);
         const summary = raw === undefined ? undefined : hostCheckpointSummary(raw);
         this.note(
@@ -572,6 +635,9 @@ export class HiddenChildHook {
                 messages: draft.messages.length,
                 newest_role: newest?.role ?? null,
                 received: raw === undefined ? null : textDigest(raw),
+                ...(texts !== undefined && texts.length > 1
+                    ? { received_parts: texts.slice(0, REFUSAL_PART_DIGESTS).map(textDigest) }
+                    : {}),
                 checkpoint_summary: summary === undefined ? null : textDigest(summary),
                 registered,
                 active: this.active.has(draft.sessionID),
@@ -598,12 +664,12 @@ export class HiddenChildHook {
     private firstMessageParts(
         attempt: HiddenChildAttempt,
         draft: SessionContext,
-        raw: string | undefined,
+        texts: readonly string[],
         system: string,
     ): Array<{ type: "text"; text: string }> {
         const parts = calibratedParts(attempt);
         if (!parts)
-            this.refuse("Hidden completion accepts text-only calibrated prompts", draft, raw);
+            this.refuse("Hidden completion accepts text-only calibrated prompts", draft, texts);
         if (!deliversInstructionsInUserMessage(draft.model.providerID)) return parts;
         return [{ type: "text", text: claudeAgentInstructionsText(system) }, ...parts];
     }
@@ -629,7 +695,7 @@ export class HiddenChildHook {
                 this.refuse(
                     `Refusing a turn of a Magic Context hidden child of a disposed plugin instance: ${HIDDEN_RUN_DISPOSED_REASON}`,
                     draft,
-                    newestUserText(draft),
+                    userTexts(draft.messages.at(-1)),
                     undefined,
                     "hidden_instance_disposed",
                 );
@@ -638,18 +704,35 @@ export class HiddenChildHook {
                 this.refuse(
                     "Refusing a Magic Context hidden-agent turn this instance did not register",
                     draft,
-                    newestUserText(draft),
+                    userTexts(draft.messages.at(-1)),
                 );
             }
             return false;
         }
 
-        const raw = newestUserText(draft);
-        let attempt: HiddenChildAttempt | undefined;
-        for (const candidate of raw === undefined ? [] : markerCandidates(raw)) {
-            attempt = this.attempts.get(candidate);
-            if (attempt) break;
+        // The run is recognized by its marker in any text of the newest user
+        // message, not only the first (see `carriesMarker`). A message naming
+        // more than one registered run does not identify a single run, so it
+        // is refused rather than credited to whichever marker comes first.
+        const texts = userTexts(draft.messages.at(-1));
+        const named = new Set<HiddenChildAttempt>();
+        for (const text of texts) {
+            for (const candidate of markerCandidates(text)) {
+                const registered = this.attempts.get(candidate);
+                if (registered) {
+                    named.add(registered);
+                    break;
+                }
+            }
         }
+        if (named.size > 1) {
+            this.refuse(
+                "Refusing a prompt that names more than one Magic Context hidden run",
+                draft,
+                texts,
+            );
+        }
+        const attempt: HiddenChildAttempt | undefined = [...named][0];
         const current = this.active.get(draft.sessionID);
         const selected = attempt ?? current;
         if (
@@ -660,7 +743,7 @@ export class HiddenChildHook {
             this.refuse(
                 "Refusing an unregistered prompt on a Magic Context hidden-run session",
                 draft,
-                raw,
+                texts,
             );
         }
         if (selected.request.signal?.aborted) {
@@ -669,7 +752,7 @@ export class HiddenChildHook {
 
         if (!selected.shaped) {
             if (!attempt)
-                this.refuse("Hidden child first step requires a registered marker", draft, raw);
+                this.refuse("Hidden child first step requires a registered marker", draft, texts);
             this.active.set(draft.sessionID, selected);
         }
         const steps = (selected.steps ?? 0) + 1;
@@ -694,20 +777,21 @@ export class HiddenChildHook {
             draft.messages = [
                 {
                     role: "user",
-                    content: this.firstMessageParts(selected, draft, raw, systemText),
+                    content: this.firstMessageParts(selected, draft, texts, systemText),
                 },
             ];
         } else {
             // Later steps preserve this run's tool history, starting at its marker or
             // the host checkpoint that replaced it during compaction. Provider retries
             // must use the same calibrated prompt rather than the carrier placeholder.
+            // Another plugin may add its own text to the marker's message on every
+            // step (Superpowers adds its bootstrap to each request of a session
+            // without a parent); replacing that message drops the text again.
             let start = -1;
             draft.messages.forEach((message, index) => {
-                const text = newestUserText({ ...draft, messages: [message] });
                 if (
-                    text !== undefined &&
                     selected.marker !== undefined &&
-                    markerCandidates(text).includes(selected.marker)
+                    carriesMarker(userTexts(message), selected.marker)
                 )
                     start = index;
             });
@@ -716,14 +800,14 @@ export class HiddenChildHook {
                 this.refuse(
                     "Hidden child history does not contain this run's registered marker",
                     draft,
-                    raw,
+                    texts,
                 );
             }
             // The host saves the placeholder user prompt rather than the calibrated
             // text sent on step one. Replace only that placeholder, preserving all
             // assistant tool calls and tool results after it.
             draft.messages = [
-                { ...first, content: this.firstMessageParts(selected, draft, raw, systemText) },
+                { ...first, content: this.firstMessageParts(selected, draft, texts, systemText) },
                 ...draft.messages.slice(start + 1),
             ];
         }
