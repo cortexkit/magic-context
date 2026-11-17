@@ -135,7 +135,14 @@ export interface PiHeuristicCleanupConfig {
 		usagePercentage?: number;
 		/** Another mutation already rewrites the cached prefix on this pass. */
 		passAlreadyPriced?: boolean;
-		serializedImageTokens?: ReadonlyMap<string, number>;
+		/**
+		 * Token mass of the images inside each tool result, by tool call id.
+		 * Image parts have no text, so the tags' own measurements leave them
+		 * out; this adds them, so a droppable tool output's images count as
+		 * reclaimable instead of fixed floor. The caller chooses the units
+		 * (per-image cost, or serialized size during provider-overflow recovery).
+		 */
+		toolImageTokens?: ReadonlyMap<string, number>;
 		fitCalibration?: { toolsRatio: number; proseRatio: number };
 		/**
 		 * Local token counts of each active tag's content, read before this pass
@@ -175,8 +182,8 @@ export type PiEmergencyServedSnapshot = ReadonlyMap<
  * read from its parts' text and tool input only. Unlike `measureReclaim`, this
  * never asks whether a call may be removed: on Pi that question freezes a
  * durable native-removal decision, and a measurement must not write state.
- * Tool-result images count only when the caller supplies their serialized
- * token counts (provider-overflow recovery), as in the emergency measurement.
+ * Tool-result images count only when the caller supplies their token counts,
+ * as in the emergency measurement.
  */
 function piServedLocalTokens(
 	tag: Pick<TagEntry, "type" | "messageId">,
@@ -551,11 +558,10 @@ export function applyPiHeuristicCleanup(
 			.filter((t) => t.status === "active")
 			.map((tag) => {
 				const target = targets.get(tag.tagNumber);
-				const imageTokens =
-					emergency.serializedImageTokens?.get(tag.messageId) ?? 0;
+				const imageTokens = emergency.toolImageTokens?.get(tag.messageId) ?? 0;
 				const observation = target?.measureReclaim;
 				// Image blocks have no text slot, so the shared observation omits them.
-				// Recovery adds the same serialized image mass used in the whole request.
+				// Add the caller's image mass: a drop removes it with the output.
 				const measuredTarget =
 					imageTokens && observation
 						? {
@@ -594,7 +600,7 @@ export function applyPiHeuristicCleanup(
 					new Set(activeTags.map((tag) => tag.tagNumber)),
 					targets,
 					calibration,
-					emergency.serializedImageTokens,
+					emergency.toolImageTokens,
 				)
 			: 0;
 		const droppableTags = candidateTags

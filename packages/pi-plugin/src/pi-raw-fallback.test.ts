@@ -433,3 +433,83 @@ it("Pi refuses a complete protected over-limit final envelope but not untrusted 
 		),
 	).toBeUndefined();
 });
+
+// Issue 938: base64 image payloads were priced as input text, so any
+// image-heavy request read as over the window.
+function imageToolTurns(count: number, imageBytes: number): unknown[] {
+	const messages: unknown[] = [{ role: "user", content: "make images" }];
+	for (let i = 0; i < count; i++) {
+		messages.push(
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: `img-${i}`,
+						name: "generate_image",
+						arguments: { prompt: `image ${i}` },
+					},
+				],
+			},
+			{
+				role: "toolResult",
+				toolCallId: `img-${i}`,
+				toolName: "generate_image",
+				content: [
+					{ type: "text", text: `generated image ${i}` },
+					{
+						type: "image",
+						mimeType: "image/png",
+						data: "A".repeat(imageBytes),
+					},
+				],
+			},
+		);
+	}
+	return messages;
+}
+
+it("prices each image at its token cost, so an image-heavy request under the window fits", () => {
+	const envelope = {
+		modelKey: "mock/mock",
+		systemTokens: 100,
+		toolDefinitionTokens: 0,
+	};
+	// 30 images of 200 KB base64 each: about 6 MB of payload, 36k image tokens.
+	const messages = imageToolTurns(30, 200_000);
+	for (const limit of [272_000, undefined]) {
+		const estimate = estimatePiOutgoingInputTokens(
+			messages,
+			envelope,
+			undefined,
+			limit,
+		);
+		expect(estimate.trusted).toBe(true);
+		expect(estimate.tokens).toBeLessThan(272_000);
+		expect(classifyPiOutgoingFit(estimate, 272_000)).toBe("fits-or-unknown");
+	}
+});
+
+it("an image count past the window reads as pressure, never as proof", () => {
+	const envelope = {
+		modelKey: "mock/mock",
+		systemTokens: 100,
+		toolDefinitionTokens: 0,
+	};
+	// 300 tiny images: little payload, but 300 images at 1,200 tokens each.
+	const messages = imageToolTurns(300, 64);
+	for (const limit of [272_000, undefined]) {
+		const estimate = estimatePiOutgoingInputTokens(
+			messages,
+			envelope,
+			undefined,
+			limit,
+		);
+		expect(estimate.tokens).toBeGreaterThan(272_000);
+		// A fixed per-image price is no proven minimum.
+		expect(estimate.refusalGrade).toBe(false);
+		expect(classifyPiOutgoingFit(estimate, 272_000)).toBe(
+			"upper-estimate-pressure",
+		);
+	}
+});
