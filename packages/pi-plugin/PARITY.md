@@ -43,6 +43,15 @@ modes: no history head (`m[0]`/`m[1]`, so no docs, profile or memories), no
 historian, no note nudges or search hints, and every execute pass is a rebuild
 permission. A Pi session is never recorded as a subagent.
 
+The exception is a fork. A `/tan` clone also runs as `"sub"`, but clone
+inheritance at its `session_start` copies its source session's compartments
+into it. A spawned session that has compartments at that point continues its
+source session, so it stays primary and keeps its history head, as a fork does
+on OpenCode. Ordinary task children name their parent in their header too, but
+inherit no compartments, only the parent's session facts. Seance task children
+are forks as well, but Oh My Pi starts them with extension discovery off
+(`task/seance-policy.ts`), so Magic Context never runs in them.
+
 **Tags, guidance and reminders** follow neither flag: they exist while the
 session can call `ctx_reduce`, read from the request's tool list on every pass
 (`ctx-reduce-callable-pi.ts`). A plan-mode `task` child, which Oh My Pi starts
