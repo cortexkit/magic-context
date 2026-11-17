@@ -2121,7 +2121,8 @@ async fn lifecycle_a_session_freed_while_quiet_answers_its_next_notices_as_one_n
     );
     assert_same_session(&mut kept, &mut resumed, "resumed");
 
-    // A quiet notice with a new message, then one at the execute threshold,
+    // A quiet notice with a new message, then one whose last prompt (70,000
+    // tokens) reaches the size at which the session may rebuild its view,
     // then one built before a statement already taken.
     let f = text(6, "f");
     for client in [&kept_client, &client] {

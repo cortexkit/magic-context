@@ -1919,7 +1919,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             {
                                 // Restored as for a tool call that arrives
                                 // before the runner's first notice: one read
-                                // of the transcript from the cut on. A read
+                                // of the transcript from the cut on (the first
+                                // message the runner still sends). A read
                                 // that fails leaves the index unready, and
                                 // the answer asks the caller to retry.
                                 inner.app_read.activate(&held_key).await;

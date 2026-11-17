@@ -1478,7 +1478,9 @@ impl Session {
 
     /// A store load decodes each saved baseline on its own, so the
     /// session's baseline and each unconfirmed view's before-state hold
-    /// separate copies of what is usually the same `m[0]`. Keep one.
+    /// separate copies of what is usually the same text: the frozen part of
+    /// the history head (`m[0]`, the summaries, memories and docs rendered at
+    /// the last fold). Keep one.
     fn share_baseline_text(&mut self) {
         let mut kept: Vec<Arc<str>> = self
             .baseline
