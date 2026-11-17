@@ -157,7 +157,10 @@ export function computePiPressure(
 }
 
 /**
- * Normalize old inclusive-cache shapes before judging the prompt reading.
+ * The prompt size of one reply: input plus cache read plus cache write. When
+ * `totalTokens` minus `output` is smaller, that is used instead, because some
+ * providers count cached tokens inside `input` as well and the plain sum would
+ * count them twice.
  *
  * Oh My Pi's `contextTokens` stands in only when the prompt counters read
  * nothing: its Antigravity CLI provider reports each tool-call step with that
