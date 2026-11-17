@@ -188,9 +188,8 @@ describe("history cut fallback: byte stability across passes", () => {
 		expect(missing.bytes).toBe(found.bytes);
 	});
 
-	// The review's fifth witness (the live prompt's protection does not change
-	// when the next message after a hidden boundary is a new prompt) is not kept:
-	// it is reachable only when Pi exits during the retry, and keeping the prompt
-	// there would need stored state. keptPromptIndex names it as a known
-	// one-time flip.
+	// Not tested here: keeping the live prompt when the next message after a
+	// hidden boundary is a new prompt. That case is reachable only when Pi exits
+	// during the retry, and keeping the prompt there would need stored state;
+	// keptPromptIndex names it as a known one-time flip.
 });
