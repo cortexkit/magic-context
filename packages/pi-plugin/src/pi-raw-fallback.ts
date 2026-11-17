@@ -13,7 +13,7 @@ import { UNKNOWN_FIT_RATIO } from "@magic-context/core/hooks/magic-context/token
 import { isTransientSqliteError } from "@magic-context/core/shared/sqlite";
 import { isTransientPiStorageError } from "./pi-lkg";
 import {
-	piFitMessageBytes,
+	PI_IMAGE_TOKENS,
 	piFitMessageBytesPricingImages,
 	type TokenizePiMessagesOptions,
 	tokenizePiMessages,
@@ -451,6 +451,9 @@ export function assertPiRawFallbackFits(
 	);
 	// Explicit count-only callers use a conservative proxy for their measured
 	// envelope. The installed handler supplies the actual serialized host metadata.
+	// The proxy reads four bytes per token, so each image counts as
+	// 4 × PI_IMAGE_TOKENS bytes: the same per-image price the outgoing estimate
+	// and the token count below use, not its base64 payload.
 	let bytes = measured
 		? 1
 		: 1 +
@@ -459,7 +462,7 @@ export function assertPiRawFallbackFits(
 	let serializationFailed = false;
 	try {
 		for (const message of pricedMessages) {
-			bytes += piFitMessageBytes(message) + 1;
+			bytes += piFitMessageBytesPricingImages(message, 4 * PI_IMAGE_TOKENS) + 1;
 			if (baseInputTokens + Math.ceil(bytes / 4) > contextLimit) break;
 		}
 	} catch {
@@ -477,6 +480,9 @@ export function assertPiRawFallbackFits(
 			cause,
 		);
 	}
+	// Image parts are countable: tokenizePiMessages prices each at
+	// PI_IMAGE_TOKENS, as the outgoing estimate does, so both checks agree on a
+	// request that carries images.
 	const complete = pricedMessages.every((message) => {
 		if (!message || typeof message !== "object") return false;
 		const m = message as { role?: string; content?: unknown };
@@ -488,9 +494,13 @@ export function assertPiRawFallbackFits(
 						(p: unknown) =>
 							p !== null &&
 							typeof p === "object" &&
-							["text", "thinking", "redacted_thinking", "toolCall"].includes(
-								String((p as { type?: unknown }).type),
-							),
+							[
+								"text",
+								"thinking",
+								"redacted_thinking",
+								"toolCall",
+								"image",
+							].includes(String((p as { type?: unknown }).type)),
 					)))
 		);
 	});
@@ -510,21 +520,21 @@ export function assertPiRawFallbackFits(
 			observed.calibration ?? calibrationForModelKey(observed.modelKey),
 			true,
 		);
-	if (
-		!complete ||
-		!Number.isFinite(tokens) ||
-		tokens <= 0 ||
-		tokens > contextLimit ||
-		serializationFailed ||
-		proxyTokens > contextLimit
-	) {
+	// Name the actual reason for refusing: a message this count cannot price
+	// is not a request over the limit.
+	if (!complete) {
+		log("raw_fallback_refused completeness=partial messages=unpriceable");
+		throw piFallbackRefusal("fallback-messages-incomplete", cause);
+	}
+	if (!Number.isFinite(tokens) || tokens <= 0) {
+		log(`raw_fallback_refused count=unusable tokens=${tokens}`);
+		throw piFallbackRefusal("fallback-over-context-limit", cause);
+	}
+	if (tokens > contextLimit) {
 		log(
-			`raw_fallback_over_context_limit proxy_bytes=${bytes} proxy_tokens=${proxyTokens} limit=${contextLimit} early_abort=true serialization_failed=${serializationFailed}`,
+			`raw_fallback_over_context_limit tokens=${Math.ceil(tokens)} limit=${contextLimit} proxy_bytes=${bytes} proxy_tokens=${proxyTokens}`,
 		);
-		throw piFallbackRefusal(
-			complete ? "fallback-over-context-limit" : "fallback-messages-incomplete",
-			cause,
-		);
+		throw piFallbackRefusal("fallback-over-context-limit", cause);
 	}
 }
 

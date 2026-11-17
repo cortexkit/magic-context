@@ -513,3 +513,73 @@ it("an image count past the window reads as pressure, never as proof", () => {
 		);
 	}
 });
+
+it("the replay fit check prices images like the outgoing estimate, on both sides of the limit", () => {
+	const envelope = {
+		modelKey: "mock/mock",
+		systemTokens: 100,
+		toolDefinitionTokens: 0,
+	};
+	// About 6 MB of base64 in 30 images: 36k image tokens, well inside 272k.
+	const heavy = imageToolTurns(30, 200_000);
+	const lines: string[] = [];
+	expect(() =>
+		assertPiRawFallbackFits(
+			heavy,
+			272_000,
+			(line) => lines.push(line),
+			null,
+			envelope,
+		),
+	).not.toThrow();
+	expect(
+		classifyPiOutgoingFit(
+			estimatePiOutgoingInputTokens(heavy, envelope, undefined, 272_000),
+			272_000,
+		),
+	).toBe("fits-or-unknown");
+	// 300 tiny images: 360k image tokens, over the limit by count alone.
+	const many = imageToolTurns(300, 64);
+	lines.length = 0;
+	expect(() =>
+		assertPiRawFallbackFits(
+			many,
+			272_000,
+			(line) => lines.push(line),
+			null,
+			envelope,
+		),
+	).toThrow();
+	expect(lines.join("\n")).toContain("raw_fallback_over_context_limit");
+});
+
+it("a replay refused for a part it cannot price says so, not that it is over the limit", () => {
+	const lines: string[] = [];
+	let refusal: unknown;
+	try {
+		assertPiRawFallbackFits(
+			[
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "small" },
+						{ type: "extension-metadata", details: "not provider text" },
+					],
+				},
+			],
+			983_040,
+			(line) => lines.push(line),
+			null,
+			{ modelKey: "mock/mock", systemTokens: 100, toolDefinitionTokens: 0 },
+		);
+	} catch (error) {
+		refusal = error;
+	}
+	expect(String((refusal as Error | undefined)?.message)).toContain(
+		"fallback-messages-incomplete",
+	);
+	expect(lines.join("\n")).toContain(
+		"raw_fallback_refused completeness=partial messages=unpriceable",
+	);
+	expect(lines.join("\n")).not.toContain("raw_fallback_over_context_limit");
+});

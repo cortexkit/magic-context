@@ -412,13 +412,19 @@ export function piFitMessageBytes(raw: unknown): number {
 }
 
 /**
- * piFitMessageBytes for the outgoing request-size estimate, which reads a
- * message's bytes as an upper bound on its tokens. Each image part counts at
- * PI_IMAGE_TOKENS, the per-image cost tokenizePiMessages uses, instead of its
- * base64 payload: providers price an image by the image, not by the length of
- * its encoding. A message without images measures exactly as piFitMessageBytes.
+ * piFitMessageBytes with each image part's base64 payload replaced by a fixed
+ * `bytesPerImage`: providers price an image by the image, not by the length of
+ * its encoding. Callers choose the figure that makes an image cost
+ * PI_IMAGE_TOKENS, the per-image cost tokenizePiMessages uses, in their own
+ * reading of bytes: the outgoing estimate reads bytes as an upper bound on
+ * tokens (the default, one byte per token), the replay fit proxy reads four
+ * bytes per token. A message without images measures exactly as
+ * piFitMessageBytes.
  */
-export function piFitMessageBytesPricingImages(raw: unknown): number {
+export function piFitMessageBytesPricingImages(
+	raw: unknown,
+	bytesPerImage = PI_IMAGE_TOKENS,
+): number {
 	const message = raw as MaybeMessage | null;
 	if (
 		!Array.isArray(message?.content) ||
@@ -434,7 +440,7 @@ export function piFitMessageBytesPricingImages(raw: unknown): number {
 		const { data: _data, ...rest } = part as MaybePart;
 		return rest;
 	});
-	return piFitMessageBytes({ ...message, content }) + images * PI_IMAGE_TOKENS;
+	return piFitMessageBytes({ ...message, content }) + images * bytesPerImage;
 }
 
 function tokenCacheFingerprintsEqual(

@@ -218,8 +218,10 @@ test("correlated provider input includes cached tokens and prices only the appen
 	expect(replay.measuredPrefix?.inputTokens).toBe(130);
 	expect(replay.measuredPrefix?.appendedMessages).toEqual(h.tail);
 	const logs: string[] = [];
-	// The already accepted image is measurable through provider usage, even
-	// though the local full-prefix tokenizer cannot completely price images.
+	// The already accepted image prefix is priced by the provider's own input
+	// count. Without that basis the whole request is priced from host metadata,
+	// the image at its per-image cost, which a 500-token limit cannot hold while
+	// the measured basis can.
 	expect(() =>
 		assertPiRawFallbackFits(
 			replay.messages,
@@ -234,7 +236,17 @@ test("correlated provider input includes cached tokens and prices only the appen
 		"lkg_fit_basis=provider_input measured_input=130",
 	);
 	expect(() =>
-		assertPiRawFallbackFits(replay.messages, 5000, () => {}, null, h.envelope),
+		assertPiRawFallbackFits(
+			replay.messages,
+			500,
+			() => {},
+			null,
+			h.envelope,
+			replay.measuredPrefix,
+		),
+	).not.toThrow();
+	expect(() =>
+		assertPiRawFallbackFits(replay.messages, 500, () => {}, null, h.envelope),
 	).toThrow();
 	if (!replay.measuredPrefix)
 		throw new Error("correlated provider basis required");
@@ -258,16 +270,19 @@ test("provider usage from a different model is not a captured-slot fit basis", (
 	const replay = h.replay();
 	if (!replay.ok) throw new Error(replay.reason);
 	expect(replay.measuredPrefix).toBeUndefined();
+	// Priced from host metadata, the image prefix alone exceeds this limit.
+	const logs: string[] = [];
 	expect(() =>
 		assertPiRawFallbackFits(
 			replay.messages,
-			5000,
-			() => {},
+			500,
+			(line) => logs.push(line),
 			null,
 			h.envelope,
 			replay.measuredPrefix,
 		),
 	).toThrow();
+	expect(logs.join("\n")).toContain("lkg_fit_basis=host_metadata");
 });
 
 test("provider usage requires the real JSONL parent and the exact captured pass", () => {
@@ -485,10 +500,11 @@ test("changed host metadata cannot borrow the old measured prefix", () => {
 		envelopeSignature: "changed-system-or-tools",
 	};
 	const logs: string[] = [];
+	// The measured prefix would fit 500 tokens; host metadata pricing does not.
 	expect(() =>
 		assertPiRawFallbackFits(
 			replay.messages,
-			5000,
+			500,
 			(line) => logs.push(line),
 			null,
 			changed,
@@ -496,6 +512,16 @@ test("changed host metadata cannot borrow the old measured prefix", () => {
 		),
 	).toThrow();
 	expect(logs.join("\n")).toContain("lkg_fit_basis=host_metadata");
+	expect(() =>
+		assertPiRawFallbackFits(
+			replay.messages,
+			500,
+			() => {},
+			null,
+			h.envelope,
+			replay.measuredPrefix,
+		),
+	).not.toThrow();
 });
 
 test("unaccepted, incomplete or older usage cannot become a measured prefix", () => {
