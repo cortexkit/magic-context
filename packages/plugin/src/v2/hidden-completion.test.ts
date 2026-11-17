@@ -147,8 +147,9 @@ test("host unknown terminal error retains the hook's typed local refusal", async
                 messages: [
                     {
                         role: "user",
-                        // No text part is exactly the run's marker: an instruction
-                        // appended to it makes the part foreign, so the hook refuses.
+                        // No text part equals the run's registered prompt
+                        // (`input.text`): an instruction appended to it makes the
+                        // part foreign, so the hook refuses.
                         content: [
                             { type: "text", text: "extra instruction before marker" },
                             { type: "text", text: `${input.text} extra instruction after marker` },
