@@ -11,7 +11,6 @@ import {
 	recordPiLiveModel,
 	registerPiContextHandler,
 } from "./context-handler";
-import { PI_IMAGE_TOKENS } from "./tokenize-pi-messages";
 import {
 	assistantMessage,
 	assistantToolCall,
@@ -21,6 +20,7 @@ import {
 	toolResultMessage,
 	userMessage,
 } from "./test-utils.test";
+import { PI_IMAGE_TOKENS } from "./tokenize-pi-messages";
 
 // Issue 938: the force-band emergency drop counted the images inside
 // droppable tool outputs as fixed mass, so it refused to drop the very outputs
