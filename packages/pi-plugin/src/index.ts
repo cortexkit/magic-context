@@ -199,6 +199,7 @@ import {
 	unregisterPiProjectEmbeddings,
 } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
+import { loadPiHostOverflowCheck } from "./host-overflow-check-pi";
 import { schedulePiAssistantIndexOnMessageEnd } from "./message-end-index-pi";
 import {
 	describeInertEmergencyDrainLatch,
@@ -241,7 +242,10 @@ import {
 	resolvePiProvenInputFloor,
 } from "./pi-proven-floor";
 import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
-import { handlePiProviderFailure } from "./provider-error-recovery-pi";
+import {
+	armPiRecoveryForHostOverflowCompaction,
+	handlePiProviderFailure,
+} from "./provider-error-recovery-pi";
 import { bindStaleBuildNotice } from "./stale-build-notice";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { registerStreamTagPrefixStrip } from "./stream-tag-prefix-strip";
@@ -392,13 +396,46 @@ export function signalPiDeferredCompactionMarkerDrain(sessionId: string): void {
  * Only an allowed native compaction invalidates MC's cached m[0]/m[1].
  * A cancelled attempt changes no history; clearing its cache would manufacture
  * a first_render HARD fold on the next context pass.
+ *
+ * Pi (not Oh My Pi, whose event has no `reason`) says why it compacts. When
+ * the reason is an overflow, cancelling alone would leave the session with no
+ * recovery at all, so Magic Context's own provider-overflow recovery is armed
+ * for the next pass. A compaction for the context threshold or a manual
+ * `/compact` arms nothing.
  */
 export async function handlePiSessionBeforeCompact(args: {
 	db: ContextDatabase;
 	compactionOff: boolean;
-	ctx: { sessionManager?: { getSessionId?: () => string | undefined } };
+	ctx: {
+		sessionManager?: { getSessionId?: () => string | undefined };
+		model?: { provider?: unknown; id?: unknown };
+	};
+	event?: { reason?: unknown };
 }): Promise<{ cancel: true } | undefined> {
 	if (!args.compactionOff) {
+		if (args.event?.reason === "overflow") {
+			try {
+				const sessionId = args.ctx.sessionManager?.getSessionId?.();
+				if (typeof sessionId === "string" && sessionId.length > 0) {
+					const provider = args.ctx.model?.provider;
+					const model = args.ctx.model?.id;
+					const outcome = armPiRecoveryForHostOverflowCompaction({
+						db: args.db,
+						sessionId,
+						modelKey:
+							typeof provider === "string" && typeof model === "string"
+								? `${provider}/${model}`
+								: undefined,
+					});
+					info(
+						`session_before_compact: host compacting for overflow; provider-overflow recovery ${outcome}`,
+					);
+				}
+			} catch (err) {
+				// Arming is best-effort; the host's compaction is still cancelled.
+				warn("session_before_compact: overflow recovery arm failed:", err);
+			}
+		}
 		info("session_before_compact: cancelling — magic-context owns compaction");
 		return { cancel: true };
 	}
@@ -2954,8 +2991,8 @@ async function startPiMagicContextRuntime(
 	// undefined, and short-circuits on the first truthy `cancel`; listener order
 	// therefore cannot undo this veto. In compaction-off mode the same hook must
 	// return nothing because native Pi compaction is the selected context manager.
-	pi.on("session_before_compact", async (_event, ctx) =>
-		handlePiSessionBeforeCompact({ db, compactionOff, ctx }),
+	pi.on("session_before_compact", async (event, ctx) =>
+		handlePiSessionBeforeCompact({ db, compactionOff, ctx, event }),
 	);
 
 	// Strip injected `§N§` tag prefix from assistant text BEFORE Pi
@@ -3148,15 +3185,28 @@ async function startPiMagicContextRuntime(
 				| undefined;
 			const sessionId = sm?.getSessionId?.();
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
+			// Load the host's overflow check only for a failed reply, the one
+			// case that consults it.
+			const failed = event.message as
+				| { role?: unknown; errorMessage?: unknown }
+				| undefined;
+			const hostOverflowCheck =
+				!compactionOff &&
+				failed?.role === "assistant" &&
+				typeof failed.errorMessage === "string" &&
+				failed.errorMessage.length > 0
+					? await loadPiHostOverflowCheck()
+					: undefined;
 			const recovery = handlePiProviderFailure({
 				db,
 				sessionId,
 				message: event.message,
 				compactionOff,
+				hostOverflowCheck,
 			});
 			if (recovery.kind === "overflow") {
 				log(
-					`[magic-context][${sessionId}] overflow detected: reportedLimit=${
+					`[magic-context][${sessionId}] overflow detected: source=${recovery.source} reportedLimit=${
 						recovery.reportedLimit ?? "?"
 					} provenance=${recovery.reportedLimitProvenance ?? "?"} pattern=${recovery.matchedPattern ?? "?"}`,
 				);

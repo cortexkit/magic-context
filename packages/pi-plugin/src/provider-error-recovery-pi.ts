@@ -8,6 +8,7 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import {
 	addMergedReasoningStrippedIds,
 	getMergedReasoningStrippedIds,
+	getOverflowState,
 	getThinkingBindingRecoveryTarget,
 	recordOverflowDetected,
 	THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
@@ -26,6 +27,7 @@ import { dropSlot } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { isAnthropicFamilyRoute } from "@magic-context/core/hooks/magic-context/sentinel";
 import { getHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
+import type { PiHostOverflowCheck } from "./host-overflow-check-pi";
 import { resetPiUpperEstimateReclaim } from "./pi-fit-reclaim";
 import { clearPiLkgSessionState } from "./pi-lkg";
 import { resolvePiStableId } from "./read-session-pi";
@@ -44,10 +46,68 @@ export type PiProviderFailureResult =
 	| { kind: "thinking_binding"; armed: boolean }
 	| {
 			kind: "overflow";
+			/**
+			 * Who recognised the overflow: Magic Context's own patterns, or only
+			 * the host's check (which yields no reported limit).
+			 */
+			source: "magic-context" | "host";
 			reportedLimit?: number;
 			reportedLimitProvenance?: string;
 			matchedPattern?: string;
 	  };
+
+/**
+ * Arm provider-overflow recovery for the next context pass. A provider
+ * rejection proves a capacity issue, unlike a metadata over-count, so the saved
+ * repeat-reclaim suppression is cleared too: recovery can run again after a
+ * restart even when the session's content has not changed.
+ */
+function armPiProviderOverflowRecovery(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	modelKey?: string;
+	reportedLimit?: number;
+	reportedLimitProvenance?: Parameters<typeof recordOverflowDetected>[5];
+	reportedInputTokens?: number;
+	report?: (message: string) => void;
+}): void {
+	recordOverflowDetected(
+		args.db,
+		args.sessionId,
+		args.reportedLimit,
+		args.modelKey,
+		"provider_overflow",
+		args.reportedLimitProvenance,
+		args.reportedInputTokens,
+	);
+	if (getHarness() === "pi") {
+		try {
+			resetPiUpperEstimateReclaim(args.db, args.sessionId);
+		} catch (error) {
+			args.report?.(`upper-estimate reclaim reset deferred: ${String(error)}`);
+		}
+	}
+}
+
+/**
+ * Arm provider-overflow recovery because the host is compacting for an
+ * overflow (Pi's `session_before_compact` with `reason: "overflow"`), which
+ * Magic Context cancels. The host decided from the same failed reply that
+ * `message_end` already classified, so a recovery that is already armed is left
+ * as it is: arming it again would count that one failure as a second,
+ * confirming rejection.
+ */
+export function armPiRecoveryForHostOverflowCompaction(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	modelKey?: string;
+	report?: (message: string) => void;
+}): "armed" | "already-armed" {
+	if (getOverflowState(args.db, args.sessionId).needsEmergencyRecovery)
+		return "already-armed";
+	armPiProviderOverflowRecovery(args);
+	return "armed";
+}
 
 /** Persist recovery state from Pi's assistant `message_end` error payload. */
 export function handlePiProviderFailure(args: {
@@ -56,6 +116,12 @@ export function handlePiProviderFailure(args: {
 	message: unknown;
 	compactionOff?: boolean;
 	thinkingBindingRecoveryEnabled?: boolean;
+	/**
+	 * The host's own overflow classifier (see host-overflow-check-pi.ts). An
+	 * error it calls an overflow arms recovery even when Magic Context's
+	 * patterns do not match it.
+	 */
+	hostOverflowCheck?: PiHostOverflowCheck;
 	report?: (message: string) => void;
 }): PiProviderFailureResult {
 	if (!args.message || typeof args.message !== "object")
@@ -111,29 +177,21 @@ export function handlePiProviderFailure(args: {
 
 	if (args.compactionOff) return { kind: "none" };
 	const overflow = detectOverflow(message.errorMessage);
-	if (!overflow.isOverflow) return { kind: "none" };
-	const modelKey = provider && model ? `${provider}/${model}` : undefined;
-	recordOverflowDetected(
-		args.db,
-		args.sessionId,
-		overflow.reportedLimit,
-		modelKey,
-		"provider_overflow",
-		overflow.reportedLimitProvenance,
-		overflow.reportedInputTokens,
-	);
-	// Unlike a metadata over-count, a provider rejection proves a capacity issue.
-	// Clear the saved repeat-reclaim suppression so recovery can run again after
-	// a restart, even when the session's content has not changed.
-	if (getHarness() === "pi") {
-		try {
-			resetPiUpperEstimateReclaim(args.db, args.sessionId);
-		} catch (error) {
-			args.report?.(`upper-estimate reclaim reset deferred: ${String(error)}`);
-		}
-	}
+	const hostOnly =
+		!overflow.isOverflow && args.hostOverflowCheck?.(args.message) === true;
+	if (!overflow.isOverflow && !hostOnly) return { kind: "none" };
+	armPiProviderOverflowRecovery({
+		db: args.db,
+		sessionId: args.sessionId,
+		modelKey: provider && model ? `${provider}/${model}` : undefined,
+		reportedLimit: overflow.reportedLimit,
+		reportedLimitProvenance: overflow.reportedLimitProvenance,
+		reportedInputTokens: overflow.reportedInputTokens,
+		report: args.report,
+	});
 	return {
 		kind: "overflow",
+		source: hostOnly ? "host" : "magic-context",
 		...(overflow.reportedLimit !== undefined
 			? { reportedLimit: overflow.reportedLimit }
 			: {}),

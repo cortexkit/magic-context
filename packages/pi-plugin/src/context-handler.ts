@@ -466,6 +466,7 @@ import {
 	estimatePiOverflowRecoveryInputTokens,
 	piRecoveryFitCalibration,
 	piRecoveryToolImageTokens,
+	piToolImageCostTokens,
 	resolvePiOverflowRecoveryUsage,
 } from "./pi-overflow-recovery";
 import {
@@ -11357,6 +11358,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		? tagsSinceReading(transcript.messages, newTargets)
 		: undefined;
 	const queuedDropTags = new Set(pendingOps.map((op) => op.tagId));
+	// Images inside tool results are mass the emergency drop can remove, so
+	// both the planner and the measurement before the drain count them. During
+	// provider-overflow recovery they count at their serialized size, the units
+	// of recovery's own request estimate; otherwise at the per-image token cost
+	// the provider's reading of the request reflects.
+	const emergencyToolImageTokens = () =>
+		args.providerOverflowRecovery === true
+			? piRecoveryToolImageTokens(workingMessages)
+			: piToolImageCostTokens(workingMessages);
 	const emergencyServedBeforeDrain =
 		emergencyPlannerMayRun && shouldApplyPendingOps && queuedDropTags.size > 0
 			? snapshotPiEmergencyServedMass(
@@ -11366,9 +11376,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 							!tagsNewerThanReading?.has(tag.tagNumber),
 					),
 					newTargets,
-					args.providerOverflowRecovery === true
-						? piRecoveryToolImageTokens(workingMessages)
-						: undefined,
+					emergencyToolImageTokens(),
 				)
 			: undefined;
 	mutationGateObserverForTests?.({
@@ -11748,9 +11756,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 										ceilingTokens: args.emergencyCeilingTokens,
 										usagePercentage: args.contextUsage.percentage,
 										passAlreadyPriced: independentMutationBeforeHeuristics,
-										serializedImageTokens: providerOverflow
-											? piRecoveryToolImageTokens(workingMessages)
-											: undefined,
+										toolImageTokens: emergencyToolImageTokens(),
 										fitCalibration: providerOverflow
 											? piRecoveryFitCalibration(recoveryCalibration)
 											: undefined,

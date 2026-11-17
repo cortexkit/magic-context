@@ -14,6 +14,7 @@ import { isTransientSqliteError } from "@magic-context/core/shared/sqlite";
 import { isTransientPiStorageError } from "./pi-lkg";
 import {
 	piFitMessageBytes,
+	piFitMessageBytesPricingImages,
 	type TokenizePiMessagesOptions,
 	tokenizePiMessages,
 } from "./tokenize-pi-messages";
@@ -155,13 +156,30 @@ export function estimatePiOutgoingInputTokens(
 					(p) =>
 						p &&
 						typeof p === "object" &&
-						["text", "thinking", "redacted_thinking", "toolCall"].includes(
-							String(p.type),
-						),
+						[
+							"text",
+							"thinking",
+							"redacted_thinking",
+							"toolCall",
+							"image",
+						].includes(String(p.type)),
 				))
 		);
 	};
 	const complete = messages.every(countable);
+	// An image is priced at a fixed per-image cost (PI_IMAGE_TOKENS), an
+	// estimate that a small image can come in under. It can ask for reclaim but
+	// is no proven minimum, so a request with images never yields refusal-grade
+	// evidence from this count.
+	const hasImages = messages.some((message) => {
+		const content = (message as { content?: unknown } | null)?.content;
+		return (
+			Array.isArray(content) &&
+			content.some(
+				(part) => part && typeof part === "object" && part.type === "image",
+			)
+		);
+	});
 	const measuredForBounds =
 		measuredPrefix &&
 		measuredPrefix.modelKey === observed.modelKey &&
@@ -236,7 +254,7 @@ export function estimatePiOutgoingInputTokens(
 			envelope +
 			Math.max(UNKNOWN_FIT_RATIO, fit.toolsRatio, fit.proseRatio) *
 				priced.reduce<number>(
-					(sum, message) => sum + piFitMessageBytes(message),
+					(sum, message) => sum + piFitMessageBytesPricingImages(message),
 					0,
 				);
 		if (upper <= contextLimit)
@@ -258,7 +276,7 @@ export function estimatePiOutgoingInputTokens(
 					tools:
 						observed.toolDefinitionTokens +
 						messages.reduce<number>(
-							(sum, message) => sum + piFitMessageBytes(message),
+							(sum, message) => sum + piFitMessageBytesPricingImages(message),
 							0,
 						),
 				},
@@ -293,7 +311,7 @@ export function estimatePiOutgoingInputTokens(
 					tools:
 						observed.toolDefinitionTokens +
 						messages.reduce<number>(
-							(sum, message) => sum + piFitMessageBytes(message),
+							(sum, message) => sum + piFitMessageBytesPricingImages(message),
 							0,
 						),
 				},
@@ -325,6 +343,7 @@ export function estimatePiOutgoingInputTokens(
 	);
 	const refusalGrade =
 		Number.isFinite(tokens) &&
+		!hasImages &&
 		messages.every((rawMessage) => {
 			const content = (rawMessage as { content: unknown }).content;
 			if (typeof content === "string") return !tokenCountUsesByteBound(content);

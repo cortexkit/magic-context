@@ -21,8 +21,35 @@ export function piRecoveryFitCalibration(calibration: DecisionCalibration): {
 		: { toolsRatio: UNKNOWN_FIT_RATIO, proseRatio: UNKNOWN_FIT_RATIO };
 }
 
+/**
+ * Image mass of each tool result, by tool call id, as provider-overflow
+ * recovery counts it: the serialized payload, the same units its whole-request
+ * estimate uses (see estimatePiOverflowRecoveryInputTokens).
+ */
 export function piRecoveryToolImageTokens(
 	messages: readonly unknown[],
+): Map<string, number> {
+	return piToolResultImageTokens(messages, (part) =>
+		estimateTokens(JSON.stringify(part)),
+	);
+}
+
+/**
+ * Image mass of each tool result, by tool call id, at the fixed per-image token
+ * cost the request's own token count uses (PI_IMAGE_TOKENS), whatever the
+ * size of the base64 payload. The emergency planner uses it outside
+ * provider-overflow recovery, where it is set against the provider's reading of
+ * the previous request.
+ */
+export function piToolImageCostTokens(
+	messages: readonly unknown[],
+): Map<string, number> {
+	return piToolResultImageTokens(messages, () => PI_IMAGE_TOKENS);
+}
+
+function piToolResultImageTokens(
+	messages: readonly unknown[],
+	priceImage: (part: unknown) => number,
 ): Map<string, number> {
 	const counts = new Map<string, number>();
 	const seen = new Set<string>();
@@ -48,8 +75,7 @@ export function piRecoveryToolImageTokens(
 			if (part?.type === "image")
 				counts.set(
 					message.toolCallId,
-					(counts.get(message.toolCallId) ?? 0) +
-						estimateTokens(JSON.stringify(part)),
+					(counts.get(message.toolCallId) ?? 0) + priceImage(part),
 				);
 		}
 	}
