@@ -3175,23 +3175,24 @@ mod flow_tests {
         }
     }
 
+    /// A flow scope like [`flow_scope`] but owned by `module_id`.
+    fn owned_by(module_id: &str) -> ScopeStamp {
+        let mut scope = flow_scope();
+        scope.owner = Principal::Reserved {
+            module_id: module_id.into(),
+        };
+        scope
+    }
+
     /// Prefrontal owns flow scopes under its current module id, `prefrontal`,
     /// and under the one it had before, `prefrontal-core`; a scope owned by
-    /// either reaches the flow operations. A scope another module owns is
-    /// refused, and the refusal names both ids.
+    /// either reaches both flow operations.
     #[tokio::test]
     async fn a_flow_scope_owned_by_either_prefrontal_id_reaches_the_flow_operations() {
         let dir = tempfile::tempdir().unwrap();
         let handler = handler(dir.path());
         let management = || RouteTarget::ManagementSurface {
             module_id: crate::MODULE_ID.into(),
-        };
-        let owned_by = |module_id: &str| {
-            let mut scope = flow_scope();
-            scope.owner = Principal::Reserved {
-                module_id: module_id.into(),
-            };
-            scope
         };
         let state = || json!({"method": "docs_proposals.state", "params": {"proposal_id": 1}});
         for (channel, owner) in [(60, "prefrontal"), (61, "prefrontal-core")] {
@@ -3211,25 +3212,38 @@ mod flow_tests {
             );
             assert_eq!(call(&handler, channel, state()).await.0, "ok", "{owner}");
         }
-        bind(
-            &handler,
-            62,
-            management(),
-            None,
-            basal(),
-            owned_by("callosum"),
-        )
-        .await;
+    }
+
+    /// A flow scope any other module owns is refused, and the refusal names
+    /// both of prefrontal's ids.
+    #[tokio::test]
+    async fn a_flow_scope_owned_by_another_module_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = handler(dir.path());
+        let management = || RouteTarget::ManagementSurface {
+            module_id: crate::MODULE_ID.into(),
+        };
         let body = serde_json::to_vec(&events_get()).unwrap();
-        match handler.flow_request(62, &body).await {
-            Some(HandlerOutcome::Error { code, message }) => {
-                assert_eq!(code, "caller_forbidden");
-                assert!(
-                    message.contains("reserved:prefrontal or reserved:prefrontal-core"),
-                    "{message}"
-                );
+        for (channel, owner) in [(62, "callosum"), (63, "prefrontal-legacy")] {
+            bind(
+                &handler,
+                channel,
+                management(),
+                None,
+                basal(),
+                owned_by(owner),
+            )
+            .await;
+            match handler.flow_request(channel, &body).await {
+                Some(HandlerOutcome::Error { code, message }) => {
+                    assert_eq!(code, "caller_forbidden", "{owner}");
+                    assert!(
+                        message.contains("reserved:prefrontal or reserved:prefrontal-core"),
+                        "{message}"
+                    );
+                }
+                other => panic!("{owner}: {other:?}"),
             }
-            other => panic!("{other:?}"),
         }
     }
 
