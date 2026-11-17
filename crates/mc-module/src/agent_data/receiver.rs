@@ -508,8 +508,7 @@ async fn read<H: Host>(
 /// recorded. It is the ref's session only if that session's `sessionRef`
 /// is the ref itself, and if it runs under the module that owns the ref's
 /// kind, so nothing in the request names the session. Anything else is
-/// `incompatible_version`, which `import` may refuse with and the driver
-/// never retries.
+/// refused `incompatible_version`.
 fn identify(cut: &str, r: &Ref, snapshot: &Snapshot) -> Result<SessionRef, ErrorBody> {
     let header = &snapshot.header;
     let session = SessionRef::new(&header.runner, &header.harness, &header.session);
