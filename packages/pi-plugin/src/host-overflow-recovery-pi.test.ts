@@ -175,14 +175,14 @@ describe("provider-overflow recovery from Pi's overflow compaction", () => {
 		model: { provider: "google", id: "gemini-3.8-flash" },
 	});
 
-	it("cancels Pi's overflow compaction and arms recovery", async () => {
+	it("cancels Pi's overflow compaction before a retry and arms recovery", async () => {
 		const database = db();
 		expect(
 			await handlePiSessionBeforeCompact({
 				db: database,
 				compactionOff: false,
 				ctx: ctx("compact-overflow"),
-				event: { reason: "overflow" },
+				event: { reason: "overflow", willRetry: true },
 			}),
 		).toEqual({ cancel: true });
 		const state = getOverflowState(database, "compact-overflow");
@@ -190,16 +190,20 @@ describe("provider-overflow recovery from Pi's overflow compaction", () => {
 		expect(state.emergencyRecoveryOrigin).toBe("provider_overflow");
 	});
 
-	it("cancels a threshold, manual or reasonless compaction without arming", async () => {
+	it("cancels a threshold, manual, completed-reply or reasonless compaction without arming", async () => {
 		const database = db();
-		// Oh My Pi's event carries no reason at all.
-		for (const event of [
+		for (const [index, event] of [
 			{ reason: "threshold" },
 			{ reason: "manual" },
+			// A reply that completed but reported more input than Pi's window.
+			{ reason: "overflow", willRetry: false },
+			// No retry flag at all: never treated as a failed request.
+			{ reason: "overflow" },
+			// Oh My Pi's event carries no reason at all.
 			{},
 			undefined,
-		]) {
-			const sessionId = `compact-${event?.reason ?? "no-reason"}-${event ? "event" : "none"}`;
+		].entries()) {
+			const sessionId = `compact-no-arm-${index}`;
 			expect(
 				await handlePiSessionBeforeCompact({
 					db: database,
@@ -230,7 +234,7 @@ describe("provider-overflow recovery from Pi's overflow compaction", () => {
 			db: database,
 			compactionOff: false,
 			ctx: ctx(sessionId),
-			event: { reason: "overflow" },
+			event: { reason: "overflow", willRetry: true },
 		});
 		// A second arm would read as a second provider rejection.
 		expect(isProviderOverflowReconfirmed(sessionId)).toBe(false);
@@ -243,7 +247,7 @@ describe("provider-overflow recovery from Pi's overflow compaction", () => {
 				db: database,
 				compactionOff: true,
 				ctx: ctx("compact-off-overflow"),
-				event: { reason: "overflow" },
+				event: { reason: "overflow", willRetry: true },
 			}),
 		).toBeUndefined();
 		expect(
