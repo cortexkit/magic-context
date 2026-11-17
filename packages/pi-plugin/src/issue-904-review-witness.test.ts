@@ -27,10 +27,12 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-// Witnesses from the independent review of the issue 904 change (ctx_reduce
-// callable on Pi and Oh My Pi). Each test fails on the reviewed code and
-// passes once the defect it names is fixed; its comment says what the fix
-// must achieve, not how.
+// Two guards on how Pi and Oh My Pi sessions follow whether ctx_reduce is in
+// the request's tool list. A request whose tool list did not change gets no
+// rebuild, even when storing which answer the last request was built with
+// failed. And an Oh My Pi session forked from another one (it runs as a
+// spawned session) keeps the history it inherited from its source session.
+// Each test's comment says what must hold, not how the code achieves it.
 
 const WINDOW = 200_000;
 const TOOLS = [

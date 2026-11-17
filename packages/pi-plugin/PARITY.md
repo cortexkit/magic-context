@@ -43,7 +43,8 @@ modes: no history head (`m[0]`/`m[1]`, so no docs, profile or memories), no
 historian, no note nudges or search hints, and every execute pass is a rebuild
 permission. A Pi session is never recorded as a subagent.
 
-The exception is a fork. A `/tan` clone also runs as `"sub"`, but clone
+Forks are the exception to the rule that a session whose first event says
+`"sub"` is recorded as a subagent. A `/tan` clone also runs as `"sub"`, but clone
 inheritance at its `session_start` copies its source session's compartments
 into it. A spawned session that has compartments at that point continues its
 source session, so it stays primary and keeps its history head, as a fork does
