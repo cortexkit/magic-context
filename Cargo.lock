@@ -538,9 +538,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-project-identity"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d621991ba599532775822fc6a9f8d30c6a042b42027550801578d28c592b6c99"
+checksum = "041978e9b041bc7db3f7e5239f2ea18c189ad9aeff2440c9c0a7435dca3d8cc6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2582,9 +2582,9 @@ dependencies = [
 
 [[package]]
 name = "subc-client-rs"
-version = "0.40.3"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50ad1670c324adcdb29af3d6ced11c9c9d1641860a9af90f1b110acf4774ac59"
+checksum = "9d5e18a56ef70e37f6b99f645e6114b908e0ae8d148e7e77a62de536219ed1c5"
 dependencies = [
  "async-trait",
  "serde",
@@ -2615,9 +2615,9 @@ dependencies = [
 
 [[package]]
 name = "subc-control"
-version = "0.40.1"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21069b9d691d90f108f947346b17859a684bab2d298790c885f9282c24022050"
+checksum = "9f972b679936ea9ca8ea154b57879d5996104d0d9ebbdf3b6c45a058cd27eaa2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2627,13 +2627,14 @@ dependencies = [
 
 [[package]]
 name = "subc-daemon"
-version = "0.47.1"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1db3d11d4a28b2068cf43eee831a48ba7ab826a21c19bbf39bd79251650fa0b8"
+checksum = "6d8036305f82bc2ac934e7ea0d8bd29ac191296f51e7d6c2cf29d026388239c1"
 dependencies = [
  "base64 0.22.1",
  "cortexkit-log",
  "cortexkit-paths",
+ "cortexkit-project-identity",
  "fs4",
  "getrandom 0.2.17",
  "hmac",
@@ -2710,9 +2711,9 @@ dependencies = [
 
 [[package]]
 name = "subc-protocol"
-version = "0.37.0"
+version = "0.37.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07235d50c6e0de39c8a91a53b578521222b97eafcaa774fc8168bb65985f9ef6"
+checksum = "6358a80bda1927e234a7d3c8750e2c7e67913af5355eaa971bb97ad012df2b57"
 dependencies = [
  "base64 0.22.1",
  "serde",
