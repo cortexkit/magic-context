@@ -2578,7 +2578,7 @@
           "type": "string"
         },
         "api_key": {
-          "description": "Bearer API key; supports {env:NAME} in user config, like embedding.api_key.",
+          "description": "Bearer API key. In the user config it may be {env:NAME}, {file:path} or {vault:<credential id>}; {vault:} is read only when Magic Context runs as a module (ck-mc) with the CortexKit vault. None of the three expand in a project config.",
           "type": "string"
         },
         "timeout_ms": {
@@ -2630,7 +2630,7 @@
           "type": "string"
         },
         "api_key": {
-          "description": "API key for remote embedding provider (optional)",
+          "description": "API key for remote embedding provider (optional). In the user config it may be {env:NAME}, {file:path} or {vault:<credential id>}; {vault:} is read only when Magic Context runs as a module (ck-mc) with the CortexKit vault. None of the three expand in a project config.",
           "type": "string"
         },
         "input_type": {

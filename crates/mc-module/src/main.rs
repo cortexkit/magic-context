@@ -106,9 +106,14 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     let child_scopes = Arc::new(ChildScopes::new(module_id.clone()));
     let client = SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes));
     let run_end_waits = client.run_end_waits();
+    // API keys the user's file names as `{vault:<credential id>}` are read
+    // from the vault over the client's own connection to the daemon.
+    let vault = mc_module::vault::Vault::new(Arc::new(mc_module::vault::Claustrum::over(
+        client.shared_consumer(),
+    )));
     let module = Module::with_journal(
         client,
-        Config::Files(Loader::from_environment()),
+        Config::Files(Loader::from_environment().with_vault(Arc::clone(&vault))),
         Some(db),
         Some(store),
         journal,
@@ -127,6 +132,8 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     .await?;
     // ck-mc's child scopes are published through its serving connection.
     child_scopes.install(handle);
+    // Registered, so the connection the vault reads go over can be bound.
+    vault.start();
     module.spawn_upkeep();
     module.spawn_memory_sync();
     // One connection to the bus, through ck-bus, which revokes a module's

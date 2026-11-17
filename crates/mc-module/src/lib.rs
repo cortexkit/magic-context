@@ -129,6 +129,7 @@ pub mod tool_timing;
 pub mod transport;
 pub mod upkeep;
 mod user_commands;
+pub mod vault;
 pub mod view_builder;
 pub mod workspace;
 pub(crate) mod workspace_members;

@@ -78,6 +78,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 cortexkit-bus-nats = "=0.4.0"
 cortexkit-bus-trait = "=0.3.1"
 cortexkit-bus-naming = "=0.4.0"
+# API keys the user names as `{vault:<credential id>}` are read from the
+# CortexKit vault over ck-mc's own SDK consumer (`vault.rs`).
+cortexkit-claustrum-client = "=0.12.0"
 # The run-end reader (`run_ends.rs`) binds its durable and pulls its events
 # with async-nats directly: cortexkit-bus-nats binds a module's cursor only to
 # the durable `m_{module}`.

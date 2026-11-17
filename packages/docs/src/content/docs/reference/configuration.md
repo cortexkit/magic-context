@@ -163,7 +163,7 @@ Durable project memory, semantic search, and recall features. OpenAI-compatible 
 | `embedding.fallback_provider` | `"local"` \| `"openai-compatible"` \| `"off"` | — | Fallback provider for the Synapse lane. Required when provider is 'synapse'; local, openai-compatible, and off are valid. |
 | `embedding.model` | string | — | Embedding model name. Required for openai-compatible, ignored for local. |
 | `embedding.endpoint` | string | — | API endpoint URL. Required when provider is openai-compatible. |
-| `embedding.api_key` | string | — | API key for remote embedding provider (optional) |
+| `embedding.api_key` | string | — | API key for remote embedding provider (optional). In the user config it may be {env:NAME}, {file:path} or {vault:<credential id>}; {vault:} is read only when Magic Context runs as a module (ck-mc) with the CortexKit vault. None of the three expand in a project config. |
 | `embedding.input_type` | string | — | Default input_type for stored/indexed (passage) embeddings in the request body. Required by some openai-compatible providers (e.g. NVIDIA NIM). Omitted from the request when unset. |
 | `embedding.query_input_type` | string | — | Optional input_type for query (search) embeddings on asymmetric models (e.g. NVIDIA NIM 'query'). When unset, query embeddings use embedding.input_type. Passage/stored content always uses embedding.input_type. |
 | `embedding.query_instruction` | string \| boolean | — | OpenAI-compatible query prefix override. A string is prepended verbatim to search queries; false disables the built-in model-family instruction. Qwen3-Embedding, gte-Qwen instruct, e5 instruct, and Nomic families have built-in recipes. Query-only changes do not re-embed stored content. User-level only; project values are ignored. |
@@ -203,7 +203,7 @@ Project config may only set `"rerank": {"provider": "off"}`. Project routing, cr
 | `rerank.provider` | `"synapse"` \| `"remote"` \| `"off"` | `"synapse"` | Explicit ctx_search reranker: local Synapse by default, remote for hosted scoring, or off. Projects may only select off. |
 | `rerank.endpoint` | string | — | User-level rerank API base URL; prefix with tei+ for Hugging Face TEI. |
 | `rerank.model` | string | — | Hosted reranker model name. |
-| `rerank.api_key` | string | — | Bearer API key; supports {env:NAME} in user config, like embedding.api_key. |
+| `rerank.api_key` | string | — | Bearer API key. In the user config it may be {env:NAME}, {file:path} or {vault:<credential id>}; {vault:} is read only when Magic Context runs as a module (ck-mc) with the CortexKit vault. None of the three expand in a project config. |
 | `rerank.timeout_ms` | integer (-9007199254740991–9007199254740991) | — | Hosted request timeout in milliseconds, clamped to 50–15000; also cancelled by ctx_search's abort signal. |
 | `rerank.top_n` | integer (1–20) | `20` | Maximum fused candidates sent to the hosted reranker (1–20). Requests ask for a score for every submitted document; partial replies are rejected. |
 

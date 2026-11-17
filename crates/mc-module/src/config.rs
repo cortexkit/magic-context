@@ -10,7 +10,14 @@
 //! floor so more-specific project keys cannot lower a user's threshold:
 //! - a project may raise the execute threshold and `protected_tokens`, never
 //!   lower them, and may only raise a token threshold the user already set;
-//! - `{env:…}` and `{file:…}` are expanded in the user file only;
+//! - `{env:…}`, `{file:…}` and `{vault:…}` are expanded in the user file
+//!   only. `{vault:<credential id>}`, the whole value of a secret setting
+//!   (`embedding.api_key`, `rerank.api_key`), names a key ck-mc reads from
+//!   the CortexKit vault ([`crate::vault`]); it is never turned into text in
+//!   the parsed file. In a project file all three stay the literal text
+//!   written there, so a cloned repository can neither read the person's
+//!   environment and files nor make ck-mc fetch a vault credential and send
+//!   it to the endpoint;
 //! - where text is embedded (provider, endpoint, query wording) is the user's
 //!   choice alone.
 //!
@@ -30,6 +37,7 @@ mod jsonc;
 
 use crate::embedding;
 use crate::pass::Settings;
+use crate::vault::{ApiKey, Secret, Vault};
 
 /// The highest execute threshold any setting can reach, as the plugin caps
 /// it: above it too little room is left to act before the window fills.
@@ -156,6 +164,8 @@ struct Cached {
 pub struct Loader {
     user_path: PathBuf,
     cache: Mutex<HashMap<PathBuf, Cached>>,
+    /// Where `{vault:…}` keys in the user file are read.
+    vault: std::sync::Arc<Vault>,
 }
 
 impl Loader {
@@ -198,7 +208,31 @@ impl Loader {
         Self {
             user_path,
             cache: Mutex::new(HashMap::new()),
+            vault: Vault::none(),
         }
+    }
+
+    /// Read `{vault:…}` keys from `vault`. The keys the user file names now
+    /// are recorded at once, so the vault reads them as soon as it starts;
+    /// a key the file names later is read when a session's settings first
+    /// name it.
+    pub fn with_vault(mut self, vault: std::sync::Arc<Vault>) -> Self {
+        let user = self
+            .read(&self.user_path)
+            .map(|value| expand_user(value, &self.user_path));
+        if let Some(user) = user {
+            for pointer in SECRET_SETTINGS {
+                if let Some(id) = user
+                    .pointer(pointer)
+                    .and_then(Value::as_str)
+                    .and_then(vault_reference)
+                {
+                    vault.key(id);
+                }
+            }
+        }
+        self.vault = vault;
+        self
     }
 
     pub fn resolve(&self, project_root: Option<&Path>, model_key: &str, usable: u64) -> Settings {
@@ -213,7 +247,7 @@ impl Loader {
             project.as_ref(),
             model_key,
             usable,
-            &self.user_path,
+            &self.vault,
         )
     }
 
@@ -287,7 +321,7 @@ fn resolve_tiers(
     project: Option<&Value>,
     model_key: &str,
     usable: u64,
-    user_path: &Path,
+    vault: &Vault,
 ) -> Settings {
     let empty = Value::Null;
     let user = user.unwrap_or(&empty);
@@ -420,8 +454,8 @@ fn resolve_tiers(
             settings.git_max_commits = commits as u64;
         }
     }
-    settings.embedding = embedding::Provider::from_tiers(user, project, user_path);
-    settings.rerank = crate::search::rerank::Reranker::from_tiers(user, project);
+    settings.embedding = embedding::Provider::from_tiers_in(user, project, vault);
+    settings.rerank = crate::search::rerank::Reranker::from_tiers_in(user, project, vault);
     settings.caveman = caveman(user, project);
     settings.commit_clusters = commit_clusters(user, project);
     // Only the user sets the language; a project file cannot.
@@ -894,10 +928,53 @@ fn in_range(value: &Value, pointer: &str, min: f64, max: f64) -> Option<f64> {
 /// `{env:NAME}` and `{file:path}` in every string of the user file. A relative
 /// file path is read from the user file's folder, `~/` from the home folder;
 /// a missing variable or file becomes empty text, as in the plugin.
+/// `{vault:…}` stays as written: [`user_secret`] turns it into a key the
+/// vault reader holds, so the key's text never enters the parsed file.
 fn expand_user(value: Value, user_path: &Path) -> Value {
     expand_user_with(value, user_path, home_dir().as_deref(), &|name| {
         std::env::var(name).ok()
     })
+}
+
+/// The secret settings a `{vault:…}` reference may stand for.
+const SECRET_SETTINGS: [&str; 2] = ["/embedding/api_key", "/rerank/api_key"];
+
+/// The credential id in a `{vault:<credential id>}` reference, when the
+/// reference is the whole value (surrounding whitespace aside).
+pub(crate) fn vault_reference(text: &str) -> Option<&str> {
+    let id = text
+        .trim()
+        .strip_prefix("{vault:")?
+        .strip_suffix('}')?
+        .trim();
+    (!id.is_empty() && !id.contains(['{', '}'])).then_some(id)
+}
+
+/// A secret setting's value from the user file: the vault credential it
+/// names, or its text (`{env:}` and `{file:}` already expanded).
+pub(crate) fn user_secret(text: &str, vault: &Vault) -> ApiKey {
+    match vault_reference(text) {
+        Some(id) => ApiKey::Vault(vault.key(id)),
+        None => ApiKey::Text(Secret::new(text.to_owned())),
+    }
+}
+
+/// A secret setting's value from a project file: the text as written, never
+/// read from the vault (see the trust rules at the top of this module). A
+/// `{vault:…}` reference there is reported once for each credential id.
+pub(crate) fn project_secret(text: &str) -> ApiKey {
+    if let Some(id) = vault_reference(text) {
+        static REPORTED: std::sync::Mutex<BTreeSet<String>> =
+            std::sync::Mutex::new(BTreeSet::new());
+        if REPORTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.to_owned())
+        {
+            tracing::warn!("ck-mc: a project's magic-context.jsonc names the vault credential {id}; only the user's file may, so ck-mc does not read it and sends the setting as written");
+        }
+    }
+    ApiKey::Text(Secret::new(text.to_owned()))
 }
 
 fn expand_user_with(
@@ -991,7 +1068,7 @@ pub(crate) fn resolve_for_test(
         Some(&project),
         model_key,
         usable,
-        Path::new("/nonexistent/magic-context.jsonc"),
+        &Vault::none(),
     )
 }
 

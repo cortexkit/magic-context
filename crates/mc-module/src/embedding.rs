@@ -15,6 +15,13 @@
 //! with `model`, `input`, and `input_type`/`truncate`/`dimensions` when set; no redirects;
 //! a 30-second background limit and a 5-second explicit-search limit; a response
 //! for another model is refused. A failed query embed only drops semantic scores.
+//!
+//! The API key is the user's text, or a vault credential the user's file
+//! names as `{vault:<credential id>}` ([`crate::vault`]). A vault key the
+//! provider refuses with 401 is read again and the request sent once more.
+//! While ck-mc holds no vault key it may send, a request fails as a timed-out
+//! one does; the provider's identity counts the key as present either way,
+//! so stored vectors keep their model id.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,6 +30,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+use crate::vault::{ApiKey, KeyInUse, Keyed, Sent, Vault};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -36,6 +45,8 @@ pub(crate) mod circuit_tests;
 mod client_tests;
 #[cfg(test)]
 mod dimensions_tests;
+#[cfg(test)]
+mod vault_tests;
 /// History chunks are sized for this many input tokens when the user names
 /// no limit; it is part of the chunk vectors' identity.
 const DEFAULT_CHUNK_MAX_INPUT_TOKENS: u64 = 512;
@@ -50,7 +61,7 @@ const QWEN_STYLE_QUERY_INSTRUCTION: &str =
 pub struct Provider {
     endpoint: String,
     model: String,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
     input_type: Option<String>,
     query_input_type: Option<String>,
     /// `Some("")` when the user switched the instruction off.
@@ -78,7 +89,15 @@ impl Provider {
     /// has no remote embedding. The user tier arrives with `{env:}`/`{file:}`
     /// already expanded. A project may tune the model's request, but where
     /// text is sent, how a query is worded and the output width stay the user's choice.
+    /// A `{vault:}` key here is never read (no vault); the configuration
+    /// loader resolves settings with [`Provider::from_tiers_in`].
     pub fn from_tiers(user: &Value, project: &Value, _user_path: &Path) -> Option<Self> {
+        Self::from_tiers_in(user, project, &Vault::none())
+    }
+
+    /// [`Provider::from_tiers`], reading a `{vault:}` key in the user tier
+    /// from `vault`. A project may set its own key, but only as text.
+    pub(crate) fn from_tiers_in(user: &Value, project: &Value, vault: &Vault) -> Option<Self> {
         let mut merged = json!({"provider": "local"});
         merge(
             &mut merged,
@@ -87,7 +106,6 @@ impl Provider {
                 "provider",
                 "endpoint",
                 "model",
-                "api_key",
                 "input_type",
                 "query_input_type",
                 "query_instruction",
@@ -102,7 +120,6 @@ impl Provider {
             &project["embedding"],
             &[
                 "model",
-                "api_key",
                 "input_type",
                 "query_input_type",
                 "truncate",
@@ -118,13 +135,23 @@ impl Provider {
             tracing::info!("ck-mc: the embedding endpoint is not allowed; search uses words only");
             return None;
         }
+        // The last tier that sets the key as text decides it, an empty text
+        // included (it clears the user's key).
+        let api_key = match (
+            project["embedding"]["api_key"].as_str(),
+            user["embedding"]["api_key"].as_str(),
+        ) {
+            (Some(project), _) => nonblank(project).map(crate::config::project_secret),
+            (None, Some(user)) => nonblank(user).map(|key| crate::config::user_secret(key, vault)),
+            (None, None) => None,
+        };
         Some(Self {
             circuit: Circuit::for_endpoint(&endpoint),
             fetch_timeout: FETCH_TIMEOUT,
             query_timeout: QUERY_EMBEDDING_TIMEOUT,
             endpoint,
             model,
-            api_key: text(&merged, "api_key"),
+            api_key,
             input_type: text(&merged, "input_type"),
             query_input_type: text(&merged, "query_input_type"),
             query_instruction: match &merged["query_instruction"] {
@@ -145,8 +172,8 @@ impl Provider {
     }
 
     #[cfg(test)]
-    pub(crate) fn api_key_for_test(&self) -> Option<&str> {
-        self.api_key.as_deref()
+    pub(crate) fn api_key_for_test(&self) -> Option<&ApiKey> {
+        self.api_key.as_ref()
     }
 
     #[cfg(test)]
@@ -361,7 +388,25 @@ impl Provider {
         };
         // Bound headers and body together. Dropping this future for caller
         // cancellation only releases the probe; an internal expiry counts once.
-        let result = tokio::time::timeout(timeout, self.send(inputs, input_type, timeout)).await;
+        // A vault key's second send (after a 401 and a fresh read) shares
+        // the same limit.
+        let sends = crate::vault::send_with_key(self.api_key.as_ref(), |key| {
+            let inputs = &inputs;
+            async move {
+                match self.send(inputs, input_type, timeout, key.as_ref()).await {
+                    Err(RequestFailure::Unauthorized) => Sent::Unauthorized,
+                    other => Sent::Answered(other),
+                }
+            }
+        });
+        let result = tokio::time::timeout(timeout, sends)
+            .await
+            .map(|sent| match sent {
+                Keyed::Answered(result) => result,
+                // No key to send yet, or a key the provider refused: the
+                // request fails as one the endpoint could not answer.
+                Keyed::NoKey | Keyed::Unauthorized => Err(RequestFailure::Unavailable),
+            });
         match result {
             Ok(Ok(vectors)) => {
                 let usable = vectors.iter().any(Option::is_some);
@@ -380,7 +425,7 @@ impl Provider {
             Ok(Err(RequestFailure::RateLimited)) => {
                 (None, outcome("rate_limited", "rate_limited,probe"))
             }
-            Ok(Err(RequestFailure::Unavailable)) => {
+            Ok(Err(RequestFailure::Unavailable | RequestFailure::Unauthorized)) => {
                 tracing::warn!("ck-mc: {what} embedding failed or timed out");
                 attempt.failure();
                 (None, outcome("failed", "failed,probe"))
@@ -397,9 +442,10 @@ impl Provider {
 
     async fn send(
         &self,
-        inputs: Vec<String>,
+        inputs: &[String],
         input_type: Option<&str>,
         timeout: Duration,
+        key: Option<&KeyInUse>,
     ) -> Result<Vec<Option<Vec<f32>>>, RequestFailure> {
         let count = inputs.len();
         let mut body = json!({"model": self.model, "input": inputs});
@@ -417,8 +463,9 @@ impl Provider {
             .post(format!("{}/embeddings", self.endpoint))
             .timeout(timeout)
             .header("content-type", "application/json");
-        if let Some(key) = &self.api_key {
-            request = request.header("authorization", format!("Bearer {key}"));
+        if let Some(key) = key {
+            let authorization = key.authorization().ok_or(RequestFailure::Unavailable)?;
+            request = request.header(reqwest::header::AUTHORIZATION, authorization);
         }
         let response = request
             .body(body.to_string())
@@ -429,6 +476,9 @@ impl Provider {
         // A 429 is healthy backpressure, even if its body never finishes.
         if status == 429 {
             return Err(RequestFailure::RateLimited);
+        }
+        if status == 401 {
+            return Err(RequestFailure::Unauthorized);
         }
         if status != 200 {
             return Err(RequestFailure::Unavailable);
@@ -454,6 +504,9 @@ impl Provider {
 enum RequestFailure {
     RateLimited,
     Unavailable,
+    /// HTTP 401: the key was refused. A vault key is read again and the
+    /// request sent once more; otherwise it counts as [`Self::Unavailable`].
+    Unauthorized,
     /// The client's own time limit ran out; it is the same limit as the
     /// one around the request, so it counts as that limit.
     TimedOut,
@@ -702,11 +755,11 @@ pub fn similarity(a: &[f32], b: &[f32]) -> f64 {
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {
-    value[key]
-        .as_str()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
+    value[key].as_str().and_then(nonblank).map(str::to_owned)
+}
+
+fn nonblank(text: &str) -> Option<&str> {
+    Some(text.trim()).filter(|text| !text.is_empty())
 }
 
 fn merge(target: &mut Value, source: &Value, keys: &[&str]) {
@@ -748,7 +801,12 @@ mod config_regression_tests {
             Some("trusted document")
         );
         assert_eq!(provider.model, "project");
-        assert_eq!(provider.api_key.as_deref(), Some("{env:SECRET}"));
+        assert_eq!(
+            provider.api_key,
+            Some(ApiKey::Text(crate::vault::Secret::new(
+                "{env:SECRET}".into()
+            )))
+        );
         assert_eq!(provider.input_type.as_deref(), Some("document"));
         assert_eq!(provider.query_input_type.as_deref(), Some("query"));
         assert_eq!(provider.truncate.as_deref(), Some("end"));

@@ -479,6 +479,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortexkit-claustrum-client"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64c7b3e66605237d6dfd8cf230cf1db8505676bf4e7ec809cfffd12fc0a17aac"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subc-client-rs",
+ "subc-os",
+ "subc-protocol",
+ "subc-transport",
+ "tokio",
+]
+
+[[package]]
 name = "cortexkit-compaction-view"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1544,6 +1561,7 @@ dependencies = [
  "cortexkit-bus-naming 0.4.0",
  "cortexkit-bus-nats",
  "cortexkit-bus-trait",
+ "cortexkit-claustrum-client",
  "cortexkit-compaction-view",
  "cortexkit-log",
  "cortexkit-persona",

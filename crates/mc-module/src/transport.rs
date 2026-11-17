@@ -251,8 +251,9 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
 /// Calls a session's runner over its management surface. Connects on first
 /// use.
 pub struct SubcRunnerClient {
-    connection_file: PathBuf,
-    consumer: OnceCell<SubcConsumer>,
+    /// The one connection to the daemon, shared with the vault reader
+    /// ([`SubcRunnerClient::shared_consumer`]).
+    consumer: SharedConsumer,
     /// The scopes ck-mc's summarizer children run under.
     child_scopes: Arc<ChildScopes>,
     runner_capabilities: crate::runner_capabilities::RunnerCapabilities,
@@ -264,11 +265,38 @@ pub struct SubcRunnerClient {
     prefrontal: crate::prefrontal::ManagementIds,
 }
 
+/// ck-mc's connection to the daemon as a consumer, made on first use and
+/// then kept. Cloning shares the one connection.
+#[derive(Clone)]
+pub struct SharedConsumer {
+    connection_file: PathBuf,
+    cell: Arc<OnceCell<Arc<SubcConsumer>>>,
+}
+
+impl SharedConsumer {
+    /// The connection, made now if no caller has made it yet. Under a daemon
+    /// that hands ck-mc a registration channel, call this only after ck-mc
+    /// has registered (`serve_with_handle`): the connection is bound with a
+    /// claim minted on that registration.
+    pub async fn get(&self) -> Result<&Arc<SubcConsumer>, String> {
+        self.cell
+            .get_or_try_init(|| async {
+                SubcConsumer::connect(&self.connection_file, ConsumerOptions::default())
+                    .await
+                    .map(Arc::new)
+            })
+            .await
+            .map_err(|error| format!("connect: {error:?}"))
+    }
+}
+
 impl SubcRunnerClient {
     pub fn new(connection_file: PathBuf, child_scopes: Arc<ChildScopes>) -> Self {
         Self {
-            connection_file,
-            consumer: OnceCell::new(),
+            consumer: SharedConsumer {
+                connection_file,
+                cell: Arc::new(OnceCell::new()),
+            },
             child_scopes,
             runner_capabilities: Default::default(),
             routing_capabilities: Default::default(),
@@ -281,6 +309,13 @@ impl SubcRunnerClient {
     /// them.
     pub fn run_end_waits(&self) -> Arc<crate::run_ends::RunEnds> {
         Arc::clone(&self.run_ends)
+    }
+
+    /// This client's connection to the daemon, for another part of ck-mc to
+    /// call over (the vault reader). It is the same connection: made once,
+    /// by whichever side needs it first.
+    pub fn shared_consumer(&self) -> SharedConsumer {
+        self.consumer.clone()
     }
 
     /// An llm-runner call on a child's route, opened under ck-mc's child
@@ -355,13 +390,7 @@ impl SubcRunnerClient {
         params: &P,
         scope: Option<ScopeSelector>,
     ) -> Result<Vec<u8>, ClientError> {
-        let consumer = self
-            .consumer
-            .get_or_try_init(|| {
-                SubcConsumer::connect(&self.connection_file, ConsumerOptions::default())
-            })
-            .await
-            .map_err(|error| ClientError::new(format!("connect: {error:?}")))?;
+        let consumer = self.consumer().await.map_err(ClientError::new)?;
         let target = route_target(role.0, &session.runner);
         let options = CallOptions {
             timeout: RUNNER_CALL_TIMEOUT,
@@ -426,12 +455,7 @@ fn route_target(role: &str, module_id: &str) -> RouteTarget {
 impl SubcRunnerClient {
     /// The connection to the daemon, made on first use.
     async fn consumer(&self) -> Result<&SubcConsumer, String> {
-        self.consumer
-            .get_or_try_init(|| {
-                SubcConsumer::connect(&self.connection_file, ConsumerOptions::default())
-            })
-            .await
-            .map_err(|error| format!("connect: {error:?}"))
+        self.consumer.get().await.map(|consumer| &**consumer)
     }
 
     async fn routing_provider(&self) -> Result<(&SubcConsumer, String), RouteError> {

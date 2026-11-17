@@ -827,7 +827,12 @@ const BaseEmbeddingConfigSchema = z
             .string()
             .optional()
             .describe("API endpoint URL. Required when provider is openai-compatible."),
-        api_key: z.string().optional().describe("API key for remote embedding provider (optional)"),
+        api_key: z
+            .string()
+            .optional()
+            .describe(
+                "API key for remote embedding provider (optional). In the user config it may be {env:NAME}, {file:path} or {vault:<credential id>}; {vault:} is read only when Magic Context runs as a module (ck-mc) with the CortexKit vault. None of the three expand in a project config.",
+            ),
         input_type: z
             .string()
             .optional()
@@ -1022,7 +1027,7 @@ export const RerankConfigSchema = z
             .string()
             .optional()
             .describe(
-                "Bearer API key; supports {env:NAME} in user config, like embedding.api_key.",
+                "Bearer API key. In the user config it may be {env:NAME}, {file:path} or {vault:<credential id>}; {vault:} is read only when Magic Context runs as a module (ck-mc) with the CortexKit vault. None of the three expand in a project config.",
             ),
         timeout_ms: z
             .number()

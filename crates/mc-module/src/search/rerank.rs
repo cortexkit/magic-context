@@ -26,6 +26,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use super::Hit;
+use crate::vault::{Keyed, Sent};
 
 /// Synapse's certified reranker model.
 pub const MODEL: &str = "gte-reranker-modernbert-base-f32";
@@ -55,7 +56,9 @@ pub struct Remote {
     /// The API base; a `tei+` prefix selects the Hugging Face TEI shape.
     pub endpoint: Option<String>,
     pub model: Option<String>,
-    pub api_key: Option<String>,
+    /// The user's text, or a vault credential the user's file names as
+    /// `{vault:<credential id>}`.
+    pub api_key: Option<crate::vault::ApiKey>,
     /// Clamped to 50..=15000 ms; default 1500.
     pub timeout_ms: u64,
     /// The most candidates sent, 1..=20; default 20.
@@ -74,7 +77,18 @@ impl std::fmt::Debug for Remote {
 impl Reranker {
     /// The reranker from the configuration tiers. Only the user picks a
     /// reranker or where text is sent; a project may only switch it off.
+    /// A `{vault:}` key here is never read (no vault); the configuration
+    /// loader resolves settings with [`Reranker::from_tiers_in`].
     pub fn from_tiers(user: &Value, project: &Value) -> Self {
+        Self::from_tiers_in(user, project, &crate::vault::Vault::none())
+    }
+
+    /// [`Reranker::from_tiers`], reading a `{vault:}` key from `vault`.
+    pub(crate) fn from_tiers_in(
+        user: &Value,
+        project: &Value,
+        vault: &crate::vault::Vault,
+    ) -> Self {
         if project.pointer("/rerank/provider").and_then(Value::as_str) == Some("off") {
             return Self::Off;
         }
@@ -87,7 +101,7 @@ impl Reranker {
                 api_key: rerank["api_key"]
                     .as_str()
                     .filter(|key| !key.is_empty())
-                    .map(str::to_owned),
+                    .map(|key| crate::config::user_secret(key, vault)),
                 timeout_ms: rerank["timeout_ms"]
                     .as_f64()
                     .filter(|ms| ms.is_finite() && ms.fract() == 0.0)
@@ -681,31 +695,42 @@ pub async fn remote_scores(
         .timeout(Duration::from_millis(remote.timeout_ms))
         .build()
         .map_err(|_| skipped("remote_error"))?;
-    let mut request = client
-        .post(format!("{endpoint}/rerank"))
-        .header("content-type", "application/json");
-    if let Some(key) = &remote.api_key {
-        request = request.header("authorization", format!("Bearer {key}"));
-    }
-    let response = request
-        .body(body.to_string())
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                skipped("timeout")
-            } else {
-                skipped("remote_error")
+    let url = format!("{endpoint}/rerank");
+    let body = body.to_string();
+    // A vault key the endpoint refuses with 401 is read again and the
+    // request sent once more (`crate::vault::send_with_key`).
+    let sent = crate::vault::send_with_key(remote.api_key.as_ref(), |key| {
+        let (client, url, body) = (&client, &url, &body);
+        async move {
+            let mut request = client.post(url).header("content-type", "application/json");
+            if let Some(key) = key {
+                let Some(authorization) = key.authorization() else {
+                    return Sent::Answered(Err(skipped("remote_error")));
+                };
+                request = request.header(reqwest::header::AUTHORIZATION, authorization);
             }
-        })?;
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
-        return Err(Skipped(format!("http_{status}")));
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| skipped("invalid_reply"))?;
+            let response = match request.body(body.clone()).send().await {
+                Ok(response) => response,
+                Err(error) if error.is_timeout() => return Sent::Answered(Err(skipped("timeout"))),
+                Err(_) => return Sent::Answered(Err(skipped("remote_error"))),
+            };
+            let status = response.status().as_u16();
+            if status == 401 {
+                return Sent::Unauthorized;
+            }
+            if !(200..300).contains(&status) {
+                return Sent::Answered(Err(Skipped(format!("http_{status}"))));
+            }
+            Sent::Answered(response.bytes().await.map_err(|_| skipped("invalid_reply")))
+        }
+    })
+    .await;
+    let bytes = match sent {
+        Keyed::Answered(bytes) => bytes?,
+        // A vault key ck-mc holds no value for yet: nothing was sent.
+        Keyed::NoKey => return Err(skipped("key_unavailable")),
+        Keyed::Unauthorized => return Err(skipped("http_401")),
+    };
     let raw: Value = serde_json::from_slice(&bytes).map_err(|_| skipped("invalid_reply"))?;
     let rows = if tei {
         &raw

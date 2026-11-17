@@ -635,8 +635,64 @@ fn user_strings_expand_and_project_strings_stay_literal() {
     let settings = Loader::with_user_path(user_path).resolve(Some(&project), OPUS, 1_000);
     let provider = settings.embedding.expect("provider");
     assert_eq!(provider.endpoint(), "https://e.invalid/v1");
-    assert_eq!(provider.api_key_for_test(), Some("{file:key}"));
+    assert_eq!(
+        provider.api_key_for_test(),
+        Some(&ApiKey::Text(Secret::new("{file:key}".into())))
+    );
     fs::remove_dir_all(folder).ok();
+}
+
+#[test]
+fn a_vault_reference_is_the_whole_value_of_a_user_secret() {
+    assert_eq!(
+        vault_reference("{vault:apikey:voyage}"),
+        Some("apikey:voyage")
+    );
+    assert_eq!(
+        vault_reference(" {vault: apikey:voyage } "),
+        Some("apikey:voyage")
+    );
+    for not_one in [
+        "Bearer {vault:apikey:voyage}",
+        "{vault:}",
+        "{vault:a}{vault:b}",
+        "{env:X}",
+        "vault:x",
+    ] {
+        assert_eq!(vault_reference(not_one), None, "{not_one}");
+    }
+    let embedding = |api_key: &str| json!({"embedding": {"provider": "openai-compatible", "endpoint": "https://e.invalid/v1", "model": "m", "api_key": api_key}});
+    let user = resolve_for_test(embedding("{vault:apikey:voyage}"), json!({}), OPUS, 1_000)
+        .embedding
+        .unwrap();
+    assert!(
+        matches!(user.api_key_for_test(), Some(ApiKey::Vault(held)) if held.id() == "apikey:voyage")
+    );
+    // A project's reference stays text; a project's empty key still clears
+    // the user's, as before.
+    let project = resolve_for_test(
+        embedding("{vault:apikey:voyage}"),
+        json!({"embedding": {"api_key": "{vault:apikey:project-tier}"}}),
+        OPUS,
+        1_000,
+    )
+    .embedding
+    .unwrap();
+    assert_eq!(
+        project.api_key_for_test(),
+        Some(&ApiKey::Text(Secret::new(
+            "{vault:apikey:project-tier}".into()
+        )))
+    );
+    let cleared = resolve_for_test(
+        embedding("{vault:apikey:voyage}"),
+        json!({"embedding": {"api_key": ""}}),
+        OPUS,
+        1_000,
+    )
+    .embedding
+    .unwrap();
+    assert_eq!(cleared.api_key_for_test(), None);
 }
 
 #[test]
@@ -692,9 +748,9 @@ fn caveman_is_off_by_default_and_its_word_rules_follow_the_language() {
 /// threshold, in the names the earlier ck-mc served.
 #[test]
 fn the_execute_threshold_names_the_setting_that_decided_it() {
-    let path = Path::new("/nonexistent/magic-context.jsonc");
+    let vault = Vault::none();
     let source = |user: Value, project: Option<Value>| {
-        let settings = resolve_tiers(Some(&user), project.as_ref(), OPUS, 100_000, path);
+        let settings = resolve_tiers(Some(&user), project.as_ref(), OPUS, 100_000, &vault);
         (
             settings.execute_threshold_percentage,
             settings.execute_threshold_source,
