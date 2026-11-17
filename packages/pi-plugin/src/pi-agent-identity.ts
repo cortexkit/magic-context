@@ -34,7 +34,8 @@ function readAgentKind(ctx: unknown): unknown {
  * with kind "sub", and those must not reclassify the advising session.
  *
  * Oh My Pi also runs forks of a session as "sub": a `/tan` clone of the
- * current session and a seance task child forked from an earlier one. When the
+ * current session, and a task child forked from an earlier session (Oh My
+ * Pi's "seance" agent). When the
  * session_start handler's clone inheritance (which runs before this record)
  * copied the source session's compartments into the new session, the session
  * continues that one and stays primary, keeping the history head that renders

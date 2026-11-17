@@ -10490,7 +10490,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// tag prefixes anyway: it is a rebuild already paid for, and queued work
 	// rides it. The ctx_reduce guidance in the system prompt is rebuilt only when
 	// a turn starts. When the tool list changed between turns, the guidance
-	// changes on this same pass, and the system-prompt fold runs here as well.
+	// changes on this same pass, and because the system prompt changed, the
+	// history head is rebuilt on this pass as well.
 	// When it changed inside a turn, the old guidance stays until the next turn
 	// starts, and that later prompt change is a second cache loss of its own.
 	const requestToolListChanged =

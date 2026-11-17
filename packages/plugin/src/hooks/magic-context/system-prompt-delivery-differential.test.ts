@@ -392,9 +392,14 @@ async function pi(signed: boolean, seed: number, active = false) {
         lastResponseTime: fixedClock,
     });
     const fake = createFakePi();
+    // An ordinary Magic Context session: it can call ctx_reduce, so its
+    // requests carry tag prefixes.
     Object.assign(fake.pi, {
-        getAllTools: () => [{ name: "read", description: "Read", parameters: { type: "object" } }],
-        getActiveTools: () => ["read"],
+        getAllTools: () => [
+            { name: "read", description: "Read", parameters: { type: "object" } },
+            { name: "ctx_reduce", description: "Reduce", parameters: { type: "object" } },
+        ],
+        getActiveTools: () => ["read", "ctx_reduce"],
     });
     piContext.registerPiContextHandler(fake.pi as never, {
         db,

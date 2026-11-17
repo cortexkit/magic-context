@@ -492,8 +492,9 @@ describe("issue 904: ctx_reduce removed and restored", () => {
 		f.setActive(WITH_REDUCE);
 		const restored = await f.serve();
 		expect(restored.permitted).toBe(true);
-		// Automatic reductions rode the rebuild at the removal (the oldest tool
-		// output left in an age sweep); every tag still shown keeps its number.
+		// Automatic reductions landed in the rebuild at the removal (the oldest
+		// tool output was dropped there), so some tags are no longer shown; every
+		// tag still shown keeps the number it had before the removal.
 		const dropped = getTagsBySession(f.db, f.sessionId)
 			.filter((row) => row.status === "dropped")
 			.map((row) => `§${row.tagNumber}§ `);
