@@ -323,15 +323,17 @@ fn a_run_sends_unmapped_memories_then_at_most_twenty_marked_ones_that_name_a_fil
     let sent: Vec<Vec<i64>> = batches.iter().map(ids).collect();
     let unmapped: Vec<i64> = [1, 2].into_iter().chain(31..=40).collect();
     // Unmapped first (28 is archived, 29 another project's), then the first
-    // twenty marked memories that name a file; twenty to a message.
+    // twenty marked memories that name a file; five to a message.
     let expected: Vec<i64> = unmapped.into_iter().chain(4..=23).collect();
     assert_eq!(sent.concat(), expected);
     assert_eq!(
         sent.iter().map(Vec::len).collect::<Vec<_>>(),
-        [BATCH_SIZE, expected.len() - BATCH_SIZE]
+        [5, 5, 5, 5, 5, 5, 2]
     );
-    // A memory the run re-sends is shown the file its text names.
-    assert_eq!(batches[0].inputs[12].candidates, ["src/view.rs"]);
+    // A memory the run re-sends is shown the file its text names: 4 is the
+    // first of them, third in the third message.
+    assert_eq!(batches[2].inputs[2].id, 4);
+    assert_eq!(batches[2].inputs[2].candidates, ["src/view.rs"]);
 }
 
 #[test]
@@ -843,27 +845,33 @@ fn a_directive_shaped_project_rule_never_maps_to_files() {
         ..row(6)
     });
     let store = store(&rows);
-    let batch = &store.batches()[0];
-    let applied = store.apply(
-        batch,
+    let batches = store.batches();
+    // Five memories to a message: the sixth goes in a second one.
+    assert_eq!(
+        batches.iter().map(ids).collect::<Vec<_>>(),
+        [vec![1, 2, 3, 4, 5], vec![6]]
+    );
+    let first = store.apply(
+        &batches[0],
         &manifest(&[
             (1, "files=\"src/view.rs\""),
             (2, "files=\"src/view.rs\""),
             (3, "files=\"src/view.rs\""),
             (4, "files=\"src/view.rs\""),
             (5, "files=\"src/view.rs\""),
-            (6, "files=\"src/view.rs\""),
         ]),
         8,
     );
-    assert_eq!(applied.applied, 6);
+    let second = store.apply(&batches[1], &manifest(&[(6, "files=\"src/view.rs\"")]), 8);
+    assert_eq!((first.applied, second.applied), (5, 1));
     for id in 1..=4 {
         assert_eq!(store.mapped(id), [mapped("", REJECTED)], "memory {id}");
-        assert!(applied.dropped.contains(&format!(
+        assert!(first.dropped.contains(&format!(
             "memory {id}: a directive-shaped project rule names files to act on, not code that backs it; recorded as file-independent (host_rejected_fallback) instead of src/view.rs"
         )));
     }
-    assert_eq!(applied.dropped.len(), 4);
+    assert_eq!(first.dropped.len(), 4);
+    assert!(second.dropped.is_empty());
     assert_eq!(store.mapped(5), [mapped("src/view.rs", MAPPER)]);
     assert_eq!(store.mapped(6), [mapped("src/view.rs", MAPPER)]);
     assert!(!directive_shaped_rule("swe:project-rules", "   "));

@@ -1267,10 +1267,18 @@ async fn a_due_review_runs_once_for_the_machine_through_the_engine() {
     let settings = Settings::default();
     // Two projects declare the review; the person gets one schedule for it,
     // and neither project gets one of its own. Their own tasks are due at
-    // their next slot, after this test ends.
+    // their next slot, after this test ends. A run starts only in a folder
+    // that exists.
     let now = now_ms();
-    engine.see_project(&db, "pj-a", "/work/a", Arc::clone(&profile), &settings, now);
-    engine.see_project(&db, "pj-b", "/work/b", Arc::clone(&profile), &settings, now);
+    let folders = tempfile::tempdir().unwrap();
+    let folder = |name: &str| {
+        let folder = folders.path().join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder.to_str().unwrap().to_owned()
+    };
+    let (a, b) = (folder("a"), folder("b"));
+    engine.see_project(&db, "pj-a", &a, Arc::clone(&profile), &settings, now);
+    engine.see_project(&db, "pj-b", &b, Arc::clone(&profile), &settings, now);
     let schedules = |db: &ContextDb| -> Vec<(String, String, Option<String>)> {
         db.with_connection(|conn| {
             conn.prepare(
@@ -1310,7 +1318,7 @@ async fn a_due_review_runs_once_for_the_machine_through_the_engine() {
     // One child, in the folder of the first project seen.
     assert_eq!(client.children(), ["mc-dream:1.0:0.0"]);
     let root = client.sends.lock().unwrap()[0].0.project_root.clone();
-    assert_eq!(root.as_deref(), Some("/work/a"));
+    assert_eq!(root.as_deref(), Some(a.as_str()));
     assert_eq!(
         schedules(&db),
         [("global".into(), "self".into(), Some("applied".into()))]

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use super::tests::FOLDER;
 use super::*;
 use crate::dreamer::run::tests::{Client, Ends};
 use crate::dreamer::tasks::lift_workspace::tests::{insert, row, PROJECT};
@@ -79,7 +80,7 @@ fn client(entorhinal: Option<Value>, ends: &[Ends]) -> Arc<Client> {
 /// `workspace` with `profile`.
 fn engine(db: &ContextDb, profile: Arc<Profile>, workspace: &str) -> Arc<Engine> {
     let engine = Arc::new(Engine::new("this", vec![Box::new(LiftWorkspace)]));
-    engine.see_project(db, PROJECT, "/nowhere", profile, &Settings::default(), 1);
+    engine.see_project(db, PROJECT, FOLDER, profile, &Settings::default(), 1);
     engine.see_workspace(PROJECT, Some(workspace));
     engine
 }
@@ -146,7 +147,7 @@ async fn a_round_with_the_bundled_profile_lifts_a_shared_workspace_once() {
     engine.see_project(
         &db,
         PROJECT,
-        "/nowhere",
+        FOLDER,
         Arc::new(crate::memory_profile::prompt_profile(None).unwrap()),
         &Settings::default(),
         now_ms(),
@@ -327,7 +328,7 @@ fn a_lift_is_never_given_a_schedule_whatever_the_settings_say() {
         .schedules
         .insert("lift-workspace".into(), "0 3 * * *".into());
     let engine = Arc::new(Engine::new("this", vec![Box::new(LiftWorkspace)]));
-    engine.see_project(&db, PROJECT, "/nowhere", profile(true), &settings, 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(true), &settings, 1);
     assert!(schedules(&db).is_empty());
 }
 
@@ -381,7 +382,7 @@ async fn a_project_the_settings_leave_out_gets_no_lift() {
         projects: Some([PROJECT.to_owned()].into()),
         ..Settings::default()
     };
-    engine.see_project(&db, PROJECT, "/nowhere", profile(true), &listed, now_ms());
+    engine.see_project(&db, PROJECT, FOLDER, profile(true), &listed, now_ms());
     engine.see_workspace(PROJECT, Some("ws-lift-listed"));
     engine.retain_projects(&listed);
     engine.tick(&db, &client, &listed, now_ms());

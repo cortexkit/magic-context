@@ -349,3 +349,83 @@ fn worktrees_inside_the_cortexkit_data_root_are_not_live() {
         ["feature", "master", "own", "scratch", "task"]
     );
 }
+
+/// A project's tasks run in the main checkout of its sessions' folders that
+/// still exist. A folder that is gone is passed over; only when every one is
+/// gone is the first returned as it is, for the run's skip to name.
+#[test]
+fn a_projects_tasks_run_in_the_main_checkout_of_a_folder_that_still_exists() {
+    let repo = Repo::on("master", &[("a.rs", "one\n")]);
+    let data = tempfile::tempdir().unwrap();
+    let root = data.path().join("cortexkit");
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    // An agent's task checkout inside the data root, and a session's own
+    // worktree outside it.
+    let task = root.join("alfonso/worktrees/task");
+    std::fs::create_dir_all(task.parent().unwrap()).unwrap();
+    git_at(
+        repo.path(),
+        &["worktree", "add", "-q", "-b", "task", &text(&task)],
+    );
+    let (_outer, feature) = repo.worktree("feature");
+    let chosen = |roots: &[String]| {
+        project_folder_outside(roots, &root).map(|folder| canonical(Path::new(&folder)))
+    };
+    let roots = [text(&task), text(&feature)];
+    assert_eq!(chosen(&roots), Some(canonical(repo.path())));
+    // Once the task checkout is removed, the other folder still leads to
+    // the main checkout.
+    git_at(
+        repo.path(),
+        &["worktree", "remove", "--force", &text(&task)],
+    );
+    assert_eq!(chosen(&roots), Some(canonical(repo.path())));
+    // With every folder gone the first comes back as it is.
+    let gone = [
+        text(&data.path().join("gone-a")),
+        text(&data.path().join("gone-b")),
+    ];
+    assert_eq!(project_folder_outside(&gone, &root), Some(gone[0].clone()));
+    assert_eq!(project_folder_outside(&[], &root), None);
+}
+
+/// Of several main checkouts, one outside the CortexKit data root comes
+/// first, then the first by path, whatever order the sessions came in. One
+/// inside the root is used only when there is no other.
+#[test]
+fn a_main_checkout_outside_the_data_root_comes_first_then_the_first_by_path() {
+    let data = tempfile::tempdir().unwrap();
+    let root = data.path().join("cortexkit");
+    let repository = |path: PathBuf| {
+        std::fs::create_dir_all(&path).unwrap();
+        git_at(&path, &["init", "-q"]);
+        path
+    };
+    let inside = repository(root.join("deploy/copy"));
+    let b = repository(data.path().join("b"));
+    let a = repository(data.path().join("a"));
+    let chosen = |roots: &[&PathBuf]| {
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|path| path.to_str().unwrap().to_owned())
+            .collect();
+        project_folder_outside(&roots, &root).map(|folder| canonical(Path::new(&folder)))
+    };
+    assert_eq!(chosen(&[&inside, &b, &a]), Some(canonical(&a)));
+    assert_eq!(chosen(&[&b, &inside]), Some(canonical(&b)));
+    assert_eq!(chosen(&[&inside]), Some(canonical(&inside)));
+    // The root reached through a symlink still matches.
+    #[cfg(unix)]
+    {
+        let link = data.path().join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let roots = [
+            inside.to_str().unwrap().to_owned(),
+            b.to_str().unwrap().to_owned(),
+        ];
+        assert_eq!(
+            project_folder_outside(&roots, &link).map(|folder| canonical(Path::new(&folder))),
+            Some(canonical(&b))
+        );
+    }
+}

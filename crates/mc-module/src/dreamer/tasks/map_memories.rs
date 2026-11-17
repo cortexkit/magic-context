@@ -9,7 +9,7 @@
 //!
 //! A run sends every live memory of the project that has no mapping yet,
 //! then up to twenty memories marked file-independent by the model whose own
-//! text names a file that exists, twenty memories per message. Before a
+//! text names a file that exists, five memories per message. Before a
 //! message goes out the module lists each memory's likely files: the paths
 //! its text names that the checkout tracks, and for a memory naming none, the
 //! files where a bounded literal search finds the code names it mentions. The
@@ -64,8 +64,11 @@ const INPUT_FRAME: &str = "dreamer/map-memories.input";
 const WRITER: &str = "dreamer:map-memories";
 /// The operation the journal records.
 pub(crate) const OPERATION: &str = "map";
-/// At most this many memories go in one message.
-pub(crate) const BATCH_SIZE: usize = 20;
+/// At most this many memories go in one message. Each step of a message
+/// resends every file read so far, so a longer batch costs far more than its
+/// share; verify's batches checked by reading hold the same number
+/// ([`super::verify::READ_BATCH_SIZE`]).
+pub(crate) const BATCH_SIZE: usize = 5;
 /// At most this many memories already marked file-independent are sent
 /// again in one run (see [`select`]).
 pub(crate) const MAX_REPAIRS: usize = 20;

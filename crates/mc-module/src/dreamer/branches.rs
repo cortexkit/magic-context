@@ -1,6 +1,7 @@
 //! The lines of a project's repository, for the dreamer tasks that read its
-//! code: which folder is the repository's main checkout, which branches are
-//! live, what one commit holds, and a temporary copy of one commit.
+//! code: which folder is the repository's main checkout, which folder a
+//! project's tasks run in, which branches are live, what one commit holds,
+//! and a temporary copy of one commit.
 //!
 //! A project is often worked on in several git worktrees at once, each on a
 //! branch of its own, and its sessions run in any of them: a worker's
@@ -54,6 +55,52 @@ pub(crate) fn main_checkout(folder: &Path) -> Result<PathBuf, String> {
     match common.parent() {
         Some(main) if main.is_dir() => Ok(main.to_owned()),
         _ => Ok(folder.to_owned()),
+    }
+}
+
+/// The folder a project's dreamer tasks run in, chosen from `roots`, the
+/// folders its sessions were set up in, in the order of those sessions. Each
+/// recorded folder that still exists stands for the main checkout of its
+/// repository ([`main_checkout`]). Sessions also run in agents' task
+/// checkouts, which may sit on an old base, hold half-finished edits, and
+/// are deleted once their work is settled, so the folder of whichever
+/// session comes first may be gone by the time a task runs.
+///
+/// The main checkouts are ordered so that the same folders always give the
+/// same answer: one outside the CortexKit data root
+/// ([`crate::storage_paths::cortexkit_data_root`]) before one inside it,
+/// then by path. A folder git fails on or runs out of time on this time
+/// stands for itself, after every folder whose main checkout was found.
+/// When none of the recorded folders exists any more, the first is returned
+/// as it is: a run checks that its folder exists before it starts, and
+/// skips naming the folder that is gone. `None` only when `roots` is empty.
+pub(crate) fn project_folder(roots: &[String]) -> Option<String> {
+    project_folder_outside(roots, &crate::storage_paths::cortexkit_data_root())
+}
+
+/// [`project_folder`] with `data_root` as the CortexKit data root, compared
+/// resolved as [`Refs::live_outside`] compares it.
+fn project_folder_outside(roots: &[String], data_root: &Path) -> Option<String> {
+    let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let data_root = real(data_root);
+    // Ordered by: git could not place the folder, the folder is inside the
+    // data root, the folder's path. The first entry is the answer.
+    let mut found: BTreeSet<(bool, bool, PathBuf)> = BTreeSet::new();
+    for root in roots {
+        let folder = Path::new(root);
+        if !folder.is_dir() {
+            continue;
+        }
+        let (unplaced, folder) = match main_checkout(folder) {
+            Ok(main) => (false, main),
+            Err(_) => (true, folder.to_owned()),
+        };
+        let inside = real(&folder).starts_with(&data_root);
+        found.insert((unplaced, inside, folder));
+    }
+    match found.into_iter().next() {
+        Some((_, _, folder)) => Some(folder.to_string_lossy().into_owned()),
+        None => roots.first().cloned(),
     }
 }
 

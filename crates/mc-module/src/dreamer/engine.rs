@@ -340,7 +340,9 @@ impl Engine {
 
     /// Learn `project` from a session set up for it, and schedule its tasks.
     /// A task of the person's own memories gets one schedule for the whole
-    /// machine, however many projects declare it.
+    /// machine, however many projects declare it. `root` is the folder its
+    /// runs use; seeing the project again with another folder moves its
+    /// later runs there and leaves its schedules as they are.
     pub fn see_project(
         &self,
         db: &ContextDb,
@@ -583,6 +585,11 @@ impl Engine {
                 .collect()
         };
         for (project, seen, workspace) in candidates {
+            // A project whose folder is gone waits for a round that finds
+            // one; nothing is recorded for it meanwhile.
+            if folder_missing(&seen.root).is_some() {
+                continue;
+            }
             let declarations: Vec<Value> = self
                 .declarations(&seen.profile)
                 .into_iter()
@@ -844,7 +851,8 @@ impl Engine {
             return;
         };
         let kind = declaration["kind"].as_str().unwrap_or_default().to_owned();
-        if let Some(missing) = missing_evidence(&declaration, root) {
+        if let Some(missing) = folder_missing(root).or_else(|| missing_evidence(&declaration, root))
+        {
             settle(Settled::Skipped { reason: missing });
             return;
         }
@@ -1052,7 +1060,9 @@ impl Engine {
             .map_err(|error| RunNowRefused::Store(error.to_string()))?
             .filter(|due| !due.schedule.trim().is_empty())
             .ok_or(RunNowRefused::NotScheduled)?;
-        if let Some(missing) = missing_evidence(declaration, &root) {
+        if let Some(missing) =
+            folder_missing(&root).or_else(|| missing_evidence(declaration, &root))
+        {
             return Err(RunNowRefused::Evidence(missing));
         }
         let held = db
@@ -1485,7 +1495,8 @@ pub enum RunNowRefused {
     NotScheduled,
     /// A writer holds the project's lock, or a run of it is in progress.
     Locked,
-    /// The task reads files this machine doesn't have for the project.
+    /// The project's folder is gone, or the task reads files this machine
+    /// doesn't have for the project.
     Evidence(String),
     Store(String),
 }
@@ -1565,6 +1576,19 @@ async fn reader_for<C: RunnerClient>(
         return Ok(None);
     }
     super::plan::select_reader(client, root).await.map(Some)
+}
+
+/// Why no task can run in `root` now: the folder is gone. Every run creates
+/// its child sessions in its project's folder, and a runner refuses a folder
+/// that doesn't exist, so this holds for a task that reads no files too.
+fn folder_missing(root: &str) -> Option<String> {
+    let root = Path::new(root);
+    (!root.is_dir()).then(|| {
+        format!(
+            "the project folder {} is not on this machine",
+            root.display()
+        )
+    })
 }
 
 /// Why a task can't run on this machine: it reads the project's files and
