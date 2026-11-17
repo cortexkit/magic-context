@@ -44,8 +44,10 @@
 //!   checked out there, and otherwise in a temporary copy of the commit
 //!   that is deleted after the run; a branch that is gone stands for the
 //!   default branch. Batches never mix two such commits;
-//! - any other memory is checked in the main checkout, and a rewrite or an
-//!   archive of it is applied only where every live branch agrees ([`live`]).
+//! - any other memory is checked in the main checkout. While the repository
+//!   has more than one live branch it is only ever confirmed, never
+//!   rewritten or archived, and it is left out of the run when every file
+//!   it is mapped to differs between live branches ([`live`]).
 //!
 //! A repository with a single live line checks every memory in its main
 //! checkout as before.
@@ -633,7 +635,7 @@ struct Group<'a> {
     memories: Vec<&'a Memory>,
     /// Memories checked against their own line: the branch they name, or
     /// the default branch when that one is gone. Every other memory of the
-    /// main checkout's group passes the live-branch check before it changes.
+    /// main checkout's group passes the live-branch checks ([`live`]).
     lined: HashSet<i64>,
 }
 
@@ -711,11 +713,27 @@ impl Verify {
             };
             let checkout = Arc::new(checkout);
             // The main checkout's memories without a line of their own stay
-            // confirmed only where every live branch holds their lines.
-            let live = (target == Target::Main).then(|| Gate::new(&main, HISTORY_TIMEOUT));
-            let (plans, lookup, kept) =
+            // confirmed only where every live branch holds their lines, and
+            // are not sent while every file they are mapped to differs
+            // between live branches.
+            let live = (target == Target::Main).then(|| Gate::new(&main));
+            let (plans, lookup, kept, left_out) =
                 self.plan_group(&checkout, &group.memories, &group.lined, live.as_ref());
             rechecked.extend(kept);
+            // Nothing is written for them, so they are not counted as
+            // checked and a later run plans them again.
+            if !left_out.is_empty() {
+                tracing::info!(
+                    "ck-mc: dreamer: {} for {project}: {} older memories are not checked this run: every file each is mapped to differs between live branches (ids {})",
+                    declared.task,
+                    left_out.len(),
+                    left_out
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             if lookup.cut {
                 tracing::warn!(
                     "ck-mc: dreamer: {} for {project}: the plain search stopped after {} of the checkout's files; no citation is listed as not found",
@@ -806,7 +824,7 @@ impl Verify {
                 // A batch of the main checkout holding a memory without a
                 // line of its own checks the live branches before writing.
                 let gate = (group.target == Target::Main && read.iter().any(|read| !read.lined))
-                    .then(|| Gate::new(&main, HISTORY_TIMEOUT));
+                    .then(|| Gate::new(&main));
                 batches.push(VerifyBatch {
                     declared: Arc::clone(&declared),
                     index: batches.len(),
@@ -836,29 +854,46 @@ impl Verify {
     }
 
     /// The messages for `memories`, all checked in `checkout`, the plain
-    /// search behind their `Not found` lines, and the confirmed memories
-    /// that still stand at the checkout's commit because every line they
-    /// cite is unchanged ([`recheck`]), which need no message. `lined` holds
-    /// the memories checked against their own line; every other memory
-    /// stays confirmed only where every live branch holds its lines
-    /// (`live`, for the main checkout's group).
+    /// search behind their `Not found` lines, the confirmed memories that
+    /// still stand at the checkout's commit because every line they cite is
+    /// unchanged ([`recheck`]), which need no message, and the ids of the
+    /// memories left out of every message. `lined` holds the memories
+    /// checked against their own line; every other memory stays confirmed
+    /// only where every live branch holds its lines, and is left out when
+    /// every file it is mapped to differs between live branches (`live`, for
+    /// the main checkout's group): a confirmation from lines of those files
+    /// is almost always refused, and a rewrite or an archive always is.
     fn plan_group<'a>(
         &self,
         checkout: &Checkout,
         memories: &[&'a Memory],
         lined: &HashSet<i64>,
         live: Option<&Gate>,
-    ) -> (Vec<Planned<'a>>, Lookup, Vec<Rechecked>) {
+    ) -> (Vec<Planned<'a>>, Lookup, Vec<Rechecked>, Vec<i64>) {
+        let mut left_out = Vec::new();
+        let mut send = |memory: &&Memory| {
+            let unsendable = !lined.contains(&memory.id)
+                && live.is_some_and(|live| live.all_differ(&memory.files));
+            if unsendable {
+                left_out.push(memory.id);
+            }
+            !unsendable
+        };
         let mut plans: Vec<Planned<'a>> = Vec::new();
         if self.broad {
-            let lookup = look_up(checkout, memories, &SEARCH_LIMITS);
-            for chunk in broad_order(memories, &lookup.gone).chunks(READ_BATCH_SIZE) {
+            let sent: Vec<&Memory> = memories.iter().copied().filter(&mut send).collect();
+            let lookup = if sent.is_empty() {
+                Lookup::default()
+            } else {
+                look_up(checkout, &sent, &SEARCH_LIMITS)
+            };
+            for chunk in broad_order(&sent, &lookup.gone).chunks(READ_BATCH_SIZE) {
                 plans.push(Planned {
                     memories: chunk.to_vec(),
                     evidence: None,
                 });
             }
-            return (plans, lookup, Vec::new());
+            return (plans, lookup, Vec::new(), left_out);
         }
         let changes = Changes::read(checkout, memories);
         let selected: Vec<&Memory> = memories
@@ -887,6 +922,8 @@ impl Verify {
                 None => stale.push(memory),
             }
         }
+        stale.retain(&mut send);
+        let never: Vec<&Memory> = never.into_iter().filter(&mut send).collect();
         let mut read: Vec<&Memory> = Vec::new();
         for chunk in stale.chunks(DIFF_BATCH_SIZE) {
             match evidence(checkout, chunk) {
@@ -909,7 +946,7 @@ impl Verify {
         } else {
             look_up(checkout, &read, &SEARCH_LIMITS)
         };
-        (plans, lookup, kept)
+        (plans, lookup, kept, left_out)
     }
 }
 
@@ -1058,8 +1095,9 @@ pub(crate) struct Read {
     pub files: Vec<String>,
     /// Its text as the batch sent it.
     pub content: String,
-    /// Checked against its own line (see [`group_by_line`]); a memory that is not
-    /// changes only where every live branch agrees ([`live`]).
+    /// Checked against its own line (see [`group_by_line`]); a memory that is
+    /// not is only ever confirmed while the repository has more than one
+    /// live branch ([`live`]).
     pub lined: bool,
 }
 

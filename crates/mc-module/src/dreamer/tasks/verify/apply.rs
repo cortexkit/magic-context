@@ -26,10 +26,13 @@
 //!   removed rather than never here; without it, it needs evidence in
 //!   `reason`, and is refused for a directive-shaped rule.
 //!
-//! A memory checked without a line of its own also passes the live-branch
-//! check before it is rewritten or archived ([`super::live`]); one checked
+//! A memory checked without a line of its own is never rewritten or archived
+//! while the repository has more than one live branch ([`super::live`]);
+//! with one, it passes the same checks as any other memory. One checked
 //! against its own line records, when rewritten, the branch and commit its
-//! batch read.
+//! batch read. The proof a `missing` archive needs, that some commit of the
+//! checked-out history held what is now gone, is checked for every memory
+//! that may be archived at all, in `check_archive`.
 //!
 //! A verification or check changes no text, so it advances neither the
 //! revision nor `updated_at` and leaves no history row, as a classification
@@ -51,7 +54,7 @@ use regex::Regex;
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
-use super::cites::{cites, Cite};
+use super::cites::cites;
 use super::manifest::{js_trim, Decision, Verdict};
 use super::spans::{Confirmation, STORED_KEY};
 use super::{Absence, Read, VerifyBatch};
@@ -258,47 +261,32 @@ impl VerifyBatch {
     }
 
     /// Why a rewrite or an archive of a memory checked without a line of
-    /// its own may not be applied ([`super::live`]); `None` when it may, and
-    /// for every other memory and decision.
+    /// its own may not be applied: the repository has more than one live
+    /// branch ([`super::live`]), whatever the reply says. `None` with one,
+    /// and for every other memory and decision.
     fn check_lines(&self, verdict: &Verdict, read: &Read) -> Option<String> {
         if read.lined || !matches!(verdict.decision, Decision::Update | Decision::Archive) {
             return None;
         }
-        let gate = self.gate.as_ref()?;
-        let cited = cites(&read.content, self.checkout.top_level());
-        let refusal = if verdict.decision == Decision::Archive && verdict.missing.is_some() {
-            gate.still_present(read.id, &cited)
-        } else {
-            let mut paths: Vec<String> = verdict.files.clone();
-            paths.extend(read.files.iter().cloned());
-            paths.extend(cited.iter().filter_map(|cite| match cite {
-                Cite::Path(path) => Some(path.clone()),
-                Cite::Name(_) => None,
-            }));
-            gate.differs(&paths)
-        };
-        refusal.map(|why| {
-            format!("{why}; it names no git line of its own, so it changes only where every live branch agrees")
-        })
+        self.gate.as_ref()?.refuses_changes()
     }
 
-    /// Read what the live-branch check of `verdicts` needs now, before the
-    /// store's write lock is taken.
+    /// Read the live branches now when a rewrite or an archive among
+    /// `verdicts` is checked against them, before the store's write lock is
+    /// taken.
     pub(super) fn warm_gate(&self, verdicts: &[Verdict]) {
         let Some(gate) = &self.gate else {
             return;
         };
-        for verdict in verdicts {
-            let Some(read) = self.read.iter().find(|read| read.id == verdict.id) else {
-                continue;
-            };
-            if read.lined || !matches!(verdict.decision, Decision::Update | Decision::Archive) {
-                continue;
-            }
+        let checked = verdicts.iter().any(|verdict| {
+            matches!(verdict.decision, Decision::Update | Decision::Archive)
+                && self
+                    .read
+                    .iter()
+                    .any(|read| read.id == verdict.id && !read.lined)
+        });
+        if checked {
             gate.warm();
-            if verdict.decision == Decision::Archive && verdict.missing.is_some() {
-                gate.still_present(read.id, &cites(&read.content, self.checkout.top_level()));
-            }
         }
     }
 
