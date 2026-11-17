@@ -137,9 +137,13 @@ describe("Pi canonical system ordinals", () => {
 				entries.map((entry) => entry.id),
 				persisted.endMessageId,
 			);
+			// The compartment ends on the prompt u1 and its reply follows, so the
+			// boundary sits inside u1's turn: the cut keeps u1 so the reply is not
+			// served without the prompt it answers (see keptPromptIndex).
 			expect(messages.map((message) => message.role)).toEqual([
 				"system",
 				"system",
+				"user",
 				"assistant",
 			]);
 			expect(messages.at(-1)).toEqual(entries.at(-1)?.message);
