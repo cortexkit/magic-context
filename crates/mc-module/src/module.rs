@@ -1047,7 +1047,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 if let Some(settings) = module.inner.config.dreamer() {
                     let now = now_ms();
                     engine.retain_projects(&settings);
-                    for (project, root, session) in module.projects_with_a_session() {
+                    // Finding each project's folder runs git, so it runs off
+                    // the async threads.
+                    let projects = {
+                        let module = module.clone();
+                        tokio::task::spawn_blocking(move || module.projects_with_a_session())
+                            .await
+                            .expect("finding the dreamer's project folders")
+                    };
+                    for (project, root, session) in projects {
                         if !settings.runs_for(&project) {
                             continue;
                         }
@@ -1085,29 +1093,45 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         });
     }
 
-    /// Each project with a session set up in this process, with its folder
-    /// and one of its sessions (the first by key, so the choice is stable).
+    /// Each project with a session set up in this process, with the folder
+    /// its dreamer tasks run in and one of its sessions (the first by key,
+    /// so the choice is stable). The folder is chosen again on every call
+    /// from the folders of all the project's sessions
+    /// ([`crate::dreamer::branches::project_folder`]): the main checkout of
+    /// their repository, rather than the folder of whichever session comes
+    /// first, which may be an agent's task checkout deleted since. Each call
+    /// runs git once per distinct folder.
     fn projects_with_a_session(&self) -> Vec<(String, String, SessionRef)> {
-        let sessions = self
+        let mut projects: std::collections::BTreeMap<String, Vec<(SessionRef, String)>> =
+            std::collections::BTreeMap::new();
+        for (session, project) in self
             .inner
             .session_projects
             .lock()
-            .expect("session projects");
-        let mut projects: std::collections::BTreeMap<String, (String, SessionRef)> =
-            std::collections::BTreeMap::new();
-        for (session, project) in sessions.iter() {
-            let entry = projects
+            .expect("session projects")
+            .iter()
+        {
+            projects
                 .entry(project.id.clone())
-                .or_insert_with(|| (project.root.clone(), session.clone()));
-            if (&session.runner, &session.harness, &session.session)
-                < (&entry.1.runner, &entry.1.harness, &entry.1.session)
-            {
-                *entry = (project.root.clone(), session.clone());
-            }
+                .or_default()
+                .push((session.clone(), project.root.clone()));
         }
         projects
             .into_iter()
-            .map(|(id, (root, session))| (id, root, session))
+            .filter_map(|(id, mut sessions)| {
+                sessions.sort_by(|(a, _), (b, _)| {
+                    (&a.runner, &a.harness, &a.session).cmp(&(&b.runner, &b.harness, &b.session))
+                });
+                let mut roots: Vec<String> = Vec::new();
+                for (_, root) in &sessions {
+                    if !roots.contains(root) {
+                        roots.push(root.clone());
+                    }
+                }
+                let folder = crate::dreamer::branches::project_folder(&roots)?;
+                let (session, _) = sessions.into_iter().next()?;
+                Some((id, folder, session))
+            })
             .collect()
     }
 
@@ -2128,6 +2152,10 @@ mod agent_data_runner_tests;
 #[cfg(test)]
 #[path = "statement_epoch_tests.rs"]
 mod statement_epoch_tests;
+
+#[cfg(test)]
+#[path = "module_dreamer_tests.rs"]
+mod dreamer_folder_tests;
 
 #[cfg(test)]
 mod config_tests {

@@ -10,6 +10,9 @@ use crate::dreamer::task::{Applied, Batch, Task, TaskContext};
 use crate::summary::fit::Window;
 
 const PROJECT: &str = "pj-test";
+/// A folder that exists, for a project whose tasks read none of its files:
+/// a run starts only in a folder that exists.
+pub(super) const FOLDER: &str = env!("CARGO_MANIFEST_DIR");
 
 /// A classify-memories stand-in: `batches` batches, each accepting only the
 /// reply `"ok"` and writing one row naming its run when applied.
@@ -134,14 +137,7 @@ fn a_project_gets_a_schedule_for_each_task_its_profile_declares_and_the_module_r
     let (_dir, db) = store();
     let engine = engine(1);
     let now = now_ms();
-    engine.see_project(
-        &db,
-        PROJECT,
-        "/nowhere",
-        profile(),
-        &Settings::default(),
-        now,
-    );
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), now);
     let (task, status, _, due) = schedule(&db);
     // The bundled profile declares many tasks; only the one this engine
     // implements is scheduled, at its default time.
@@ -156,7 +152,7 @@ fn a_project_gets_a_schedule_for_each_task_its_profile_declares_and_the_module_r
     settings
         .schedules
         .insert("classify-memories".into(), String::new());
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &settings, now);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &settings, now);
     assert_eq!(schedule(&db).3, None);
 }
 
@@ -168,7 +164,7 @@ async fn a_due_task_sends_each_batch_and_applies_each_accepted_reply() {
         &["p/a"],
         &[Ends::Reply("ok"), Ends::Reply("ok")],
     ));
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
     make_due(&db);
 
     engine.tick(&db, &client, &Settings::default(), now_ms());
@@ -259,7 +255,7 @@ async fn an_applied_memory_task_wakes_its_project() {
         .unwrap();
     let engine = Arc::new(Engine::new("this", vec![Box::new(Journaling)]));
     let client = Arc::new(Client::new(&["p/a"], &[Ends::Reply("ok")]));
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
     make_due(&db);
     engine.tick(&db, &client, &Settings::default(), now_ms());
     settled(&engine).await;
@@ -282,7 +278,7 @@ async fn an_unseen_project_or_one_already_running_starts_nothing() {
     let (_dir, db) = store();
     let engine = engine(1);
     let client = Arc::new(Client::new(&["p/a"], &[Ends::Reply("ok")]));
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
     make_due(&db);
     // A due task of a project no session has set up in this process waits.
     engine.projects.lock().unwrap().clear();
@@ -297,7 +293,7 @@ async fn another_writers_lock_skips_the_run_without_a_record() {
     let (_dir, db) = store();
     let engine = engine(1);
     let client = Arc::new(Client::new(&["p/a"], &[Ends::Reply("ok")]));
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
     make_due(&db);
     db.with_connection(|conn| {
         store::lock(
@@ -332,7 +328,7 @@ async fn a_spent_budget_stops_the_run_before_its_next_batch() {
         budget_tokens: 0,
         ..Settings::default()
     };
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &settings, 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &settings, 1);
     make_due(&db);
     engine.tick(&db, &client, &settings, now_ms());
     settled(&engine).await;
@@ -380,7 +376,7 @@ async fn a_curate_run_stopped_by_its_budget_resumes_at_its_next_part() {
         budget_tokens: 100,
         ..Settings::default()
     };
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &spent, 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &spent, 1);
     make_due(&db);
     let client = Arc::new(Client::new(
         &["p/a"],
@@ -467,7 +463,7 @@ async fn an_account_wait_ends_the_run_as_a_wait_due_when_it_ends() {
         detail: Some(json!({"reason": "quota_or_cooldown", "reset_at_ms": reset})),
     });
     let client = Arc::new(client);
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
     make_due(&db);
     engine.tick(&db, &client, &Settings::default(), now_ms());
     settled(&engine).await;
@@ -494,7 +490,7 @@ async fn a_never_run_send_waits_until_its_deadline_without_counting_a_failure() 
         let engine = engine(1);
         let client = Arc::new(Client::new(&["p/a"], &ends));
         *client.send_replies.lock().unwrap() = replies.into();
-        engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+        engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
         make_due(&db);
         db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET failures = 2", []))
             .unwrap();
@@ -542,7 +538,7 @@ async fn a_failed_model_counts_a_failure_and_releases_the_lock() {
         &["p/a", "p/b", "p/c"],
         &[Ends::Reply("x"), Ends::Reply("y"), Ends::Reply("z")],
     ));
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
     make_due(&db);
     engine.tick(&db, &client, &Settings::default(), now_ms());
     settled(&engine).await;
@@ -573,7 +569,7 @@ async fn a_full_capacity_refusal_ends_the_run_as_a_wait_with_no_failure_counted(
         detail: Some(json!({"reason": "concurrency_full", "reset_at_ms": reset})),
     });
     let client = Arc::new(client);
-    engine.see_project(&db, PROJECT, "/nowhere", profile(), &Settings::default(), 1);
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
     make_due(&db);
     engine.tick(&db, &client, &Settings::default(), now_ms());
     settled(&engine).await;
@@ -657,6 +653,80 @@ fn a_task_reading_files_or_git_needs_them_on_this_machine() {
         missing_evidence(&json!({"reads": ["memory-pool"]}), "/no/such/folder"),
         None
     );
+}
+
+/// A project whose folder is gone runs nothing, not even a task that reads
+/// no files: a runner refuses to create a child session in a folder that
+/// doesn't exist. The task is skipped naming the folder, and a run the
+/// person starts is refused the same way.
+#[tokio::test]
+async fn a_project_whose_folder_is_gone_skips_every_task_and_sends_nothing() {
+    let (_dir, db) = store();
+    let engine = engine(1);
+    let client = Arc::new(Client::new(&["p/a"], &[Ends::Reply("ok")]));
+    let parent = tempfile::tempdir().unwrap();
+    let gone = parent.path().join("removed");
+    let root = gone.to_str().unwrap();
+    engine.see_project(&db, PROJECT, root, profile(), &Settings::default(), 1);
+    make_due(&db);
+    engine.tick(&db, &client, &Settings::default(), now_ms());
+    settled(&engine).await;
+    assert!(client.sends.lock().unwrap().is_empty());
+    assert!(runs(&db).is_empty());
+    let (task, status, error, _) = schedule(&db);
+    assert_eq!(task, "swe:classify-memories");
+    assert_eq!(status.as_deref(), Some("skipped"));
+    assert_eq!(
+        error,
+        Some(format!("the project folder {root} is not on this machine"))
+    );
+    assert!(matches!(
+        engine.run_now(
+            &db,
+            &client,
+            &Settings::default(),
+            PROJECT,
+            "classify-memories"
+        ),
+        Err(RunNowRefused::Evidence(reason)) if reason.contains(root)
+    ));
+    assert!(client.sends.lock().unwrap().is_empty());
+}
+
+/// Seeing a project again with only its folder changed moves its next run
+/// to the new folder and leaves its schedules as they were.
+#[tokio::test]
+async fn a_project_seen_again_in_another_folder_runs_there_on_the_same_schedule() {
+    let (_dir, db) = store();
+    let engine = engine(1);
+    let client = Arc::new(Client::new(&["p/a"], &[Ends::Reply("ok")]));
+    let (old, new) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let new_root = new.path().to_str().unwrap();
+    let now = now_ms();
+    engine.see_project(
+        &db,
+        PROJECT,
+        old.path().to_str().unwrap(),
+        profile(),
+        &Settings::default(),
+        now,
+    );
+    let due = schedule(&db).3;
+    engine.see_project(
+        &db,
+        PROJECT,
+        new_root,
+        profile(),
+        &Settings::default(),
+        now + 1,
+    );
+    assert_eq!(schedule(&db).3, due);
+    make_due(&db);
+    engine.tick(&db, &client, &Settings::default(), now_ms());
+    settled(&engine).await;
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].0.project_root.as_deref(), Some(new_root));
 }
 
 /// A one-batch stand-in for task kind `kind`, accepting the reply `"ok"`.

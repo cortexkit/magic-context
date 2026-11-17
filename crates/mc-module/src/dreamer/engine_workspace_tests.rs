@@ -55,7 +55,7 @@ fn store() -> (tempfile::TempDir, Arc<ContextDb>) {
 }
 
 /// An engine running `tasks` that has seen each of `projects` (by name,
-/// as `pj-<name>` in `/work/pj-<name>`) in `workspace`.
+/// as `pj-<name>` in [`folder`]) in `workspace`.
 fn engine(
     db: &ContextDb,
     tasks: Vec<Box<dyn Task>>,
@@ -87,12 +87,20 @@ fn see(engine: &Engine, db: &ContextDb, workspace: &str, name: &str) {
     engine.see_project(
         db,
         &project,
-        &format!("/work/{project}"),
+        &folder(db, &project),
         profile(),
         &Settings::default(),
         now_ms(),
     );
     engine.see_workspace(&project, Some(workspace));
+}
+
+/// The folder of `project`, `work/<project>` next to the test's store,
+/// created when missing: a run starts only in a folder that exists.
+fn folder(db: &ContextDb, project: &str) -> String {
+    let folder = db.path.parent().unwrap().join("work").join(project);
+    std::fs::create_dir_all(&folder).unwrap();
+    folder.to_str().unwrap().to_owned()
 }
 
 /// Wait until no run is in progress and no workspace is being checked.
@@ -284,7 +292,7 @@ async fn a_due_workspace_curate_runs_in_a_member_projects_folder_and_writes_the_
     assert_eq!(sends.len(), 1);
     assert_eq!(
         sends[0].0.project_root.as_deref(),
-        Some("/work/pj-magic-context")
+        Some(folder(&db, "pj-magic-context").as_str())
     );
     let message = serde_json::to_string(&sends[0].1).unwrap();
     assert!(message.contains("CortexKit, with 2 projects: magic-context, subc"));
