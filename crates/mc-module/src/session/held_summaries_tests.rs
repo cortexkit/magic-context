@@ -93,7 +93,8 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
     publish(&mut session, 4, "Newer work on the reader.");
     build(&mut session, &settings).expect("m[1] shows summary 4");
     let m1 = shown(&session, head::M1_ID);
-    assert!(m1.contains("## 13-16 · Work 4"), "{m1}");
+    // The fixture writes message n at n milliseconds after the epoch.
+    assert!(m1.contains("## 13-16 · 1970-01-01 · Work 4"), "{m1}");
 
     // Another writer edits summary 4, which `m[1]` shows, and summary 1,
     // which only `m[0]` shows.
@@ -105,10 +106,14 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
     publish(&mut session, 5, "Newer work on the writer.");
     build(&mut session, &settings).expect("m[1] shows summary 5 too");
     let five = session.summary_rows().unwrap().pop().unwrap();
-    let five = crate::summary::render::render_compartment_at_tier(
-        &crate::summary::render::DecayRenderCompartment::from(&five),
-        1,
-    );
+    // Headed with the days `m[1]` recorded for it.
+    let days = session.baseline.as_ref().unwrap().newer_days.as_ref().unwrap()[&5]
+        .clone()
+        .expect("summary 5's messages have times");
+    let mut five = crate::summary::render::DecayRenderCompartment::from(&five);
+    five.start_date = Some(days.start);
+    five.end_date = Some(days.end);
+    let five = crate::summary::render::render_compartment_at_tier(&five, 1);
     assert_eq!(
         shown(&session, head::M1_ID),
         m1.replace(

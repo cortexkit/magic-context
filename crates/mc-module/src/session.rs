@@ -693,6 +693,8 @@ struct HeadSummaries {
     /// The baseline items it was computed from. A baseline holding these, or
     /// the items it returned, gives the same result again.
     from: head::SummaryItems,
+    /// The days the baseline it was computed from recorded for `m[1]`.
+    from_days: Option<head::NewerDays>,
     through_sequence: i64,
     summaries_revision: u64,
     /// The model whose tokenizer counted the newer summaries.
@@ -702,9 +704,10 @@ struct HeadSummaries {
 
 impl HeadSummaries {
     /// [`head::newer_summaries`] for `base`: kept in `cache` from an earlier
-    /// call with the same summaries, model and baseline items, or computed
-    /// now from the summaries `store` names and kept there. `Err` when their
-    /// rows can't be read.
+    /// call with the same summaries, model and baseline items and days, or
+    /// computed now from the summaries `store` names and kept there. When
+    /// `m[1]` heads them with new days ([`head::newer_days_due`]), `date`
+    /// fills those days in first. `Err` when their rows can't be read.
     fn for_base(
         cache: &mut Option<Self>,
         base: &Baseline,
@@ -712,9 +715,12 @@ impl HeadSummaries {
         store: Option<(&ContextDb, &str, &str)>,
         model: &str,
         counter: crate::count::Counter,
+        date: impl FnOnce(&mut [StoredCompartment]),
     ) -> Result<head::NewerSummaries, UnreadSummaries> {
         if let Some(kept) = cache.as_ref().filter(|kept| {
-            (kept.from.same(&base.summary_items) || kept.newer.items().same(&base.summary_items))
+            ((kept.from.same(&base.summary_items) && kept.from_days == base.newer_days)
+                || (kept.newer.items().same(&base.summary_items)
+                    && kept.newer.days() == base.newer_days.as_ref()))
                 && kept.through_sequence == base.through_sequence
                 && kept.summaries_revision == summaries.revision()
                 && kept.model == model
@@ -728,9 +734,20 @@ impl HeadSummaries {
         if !newer_rows.missing.is_empty() {
             return Err(UnreadSummaries::Missing(newer_rows.missing));
         }
-        let newer = head::newer_summaries(base, &newer_rows.found, counter);
+        let newer = if head::newer_days_due(base, &newer_rows.found) {
+            let mut rows: Vec<StoredCompartment> = newer_rows
+                .found
+                .iter()
+                .map(|row| StoredCompartment::clone(row))
+                .collect();
+            date(&mut rows);
+            head::newer_summaries(base, &rows, counter)
+        } else {
+            head::newer_summaries(base, &newer_rows.found, counter)
+        };
         *cache = Some(Self {
             from: base.summary_items.clone(),
+            from_days: base.newer_days.clone(),
             through_sequence: base.through_sequence,
             summaries_revision: summaries.revision(),
             model: model.to_owned(),

@@ -69,6 +69,9 @@ mod restart_offer_tests;
 #[path = "head_bytes_tests.rs"]
 mod head_bytes_tests;
 
+#[path = "head_dates_tests.rs"]
+mod head_dates_tests;
+
 #[path = "summary_sharing_tests.rs"]
 mod summary_sharing_tests;
 

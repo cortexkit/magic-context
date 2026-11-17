@@ -217,10 +217,13 @@ impl Session {
                 baseline.as_ref().clone()
             }
             _ => match self.summary_rows() {
-                Ok(summaries) => folded(&head::Inputs {
-                    summaries: &summaries,
-                    ..fold_inputs
-                }),
+                Ok(mut summaries) => {
+                    self.date_summaries(&mut summaries);
+                    folded(&head::Inputs {
+                        summaries: &summaries,
+                        ..fold_inputs
+                    })
+                }
                 Err(unread) => return self.head_as_shown_for(unread),
             },
         };
@@ -243,6 +246,7 @@ impl Session {
             self.summary_store(),
             &model_key,
             fold_inputs.counter,
+            |rows| self.date_summaries(rows),
         ) {
             Ok(newer) => newer,
             Err(unread) => return self.head_as_shown_for(unread),
@@ -260,10 +264,11 @@ impl Session {
             && !self.fold_due
             && head::needs_refold(&base, pressure, history_budget_tokens, fold_inputs.counter)
         {
-            let summaries = match self.summary_rows() {
+            let mut summaries = match self.summary_rows() {
                 Ok(summaries) => summaries,
                 Err(unread) => return self.head_as_shown_for(unread),
             };
+            self.date_summaries(&mut summaries);
             base = folded(&head::Inputs {
                 summaries: &summaries,
                 ..fold_inputs
@@ -277,6 +282,7 @@ impl Session {
                 self.summary_store(),
                 &model_key,
                 fold_inputs.counter,
+                |rows| self.date_summaries(rows),
             ) {
                 Ok(newer) => newer,
                 Err(unread) => return self.head_as_shown_for(unread),
@@ -317,6 +323,78 @@ impl Session {
             _ => Arc::new(next),
         });
         ops
+    }
+
+    /// Fill in the days each of `rows` shows in its heading: the UTC days
+    /// its first and last message were written ([`crate::summary::dates`]).
+    /// Each time comes from the first place that knows it: the transcript
+    /// index, while it still holds the message; the times saved for the
+    /// messages the index let go at a cut; the message search index, which
+    /// also holds the standalone plugin's times for a session moved from
+    /// it (the messages before the move never enter this session's index).
+    /// A row with either time unknown keeps no date. Only a render that
+    /// writes headings anew calls this: a fold, or `m[1]` showing other
+    /// summaries than before.
+    pub(super) fn date_summaries(&self, rows: &mut [StoredCompartment]) {
+        let _timing = crate::notice_cost_timing::span("head.dates");
+        let held = |mid: &str| {
+            self.index
+                .ordinal_of(mid)
+                .and_then(|ordinal| self.index.at(ordinal))
+                .map(|entry| entry.written_at)
+                .filter(|written| *written > 0)
+        };
+        let boundaries = |row: &StoredCompartment| {
+            [
+                (row.start_message, row.start_message_id.clone()),
+                (row.end_message, row.end_message_id.clone()),
+            ]
+        };
+        let unheld: Vec<(i64, String)> = rows
+            .iter()
+            .flat_map(boundaries)
+            .filter(|(_, mid)| held(mid).is_none())
+            .collect();
+        let saved = match &self.store {
+            Some(store) if !unheld.is_empty() => {
+                let mids: Vec<&str> = unheld
+                    .iter()
+                    .map(|(_, mid)| mid.as_str())
+                    .filter(|mid| !mid.is_empty())
+                    .collect();
+                store.message_times(&self.key, &mids)
+            }
+            _ => Default::default(),
+        };
+        let unsaved: Vec<(i64, &str)> = unheld
+            .iter()
+            .filter(|(_, mid)| !saved.contains_key(mid))
+            .map(|(number, mid)| (*number, mid.as_str()))
+            .collect();
+        let searched = match &self.db {
+            Some(db) if !unsaved.is_empty() => db.with_connection(|conn| {
+                crate::summary::dates::search_times(
+                    conn,
+                    &self.key.harness,
+                    &self.key.session,
+                    &unsaved,
+                )
+            }),
+            _ => Default::default(),
+        };
+        let day = |(number, mid): &(i64, String)| {
+            held(mid)
+                .or_else(|| saved.get(mid).copied())
+                .or_else(|| searched.get(number).copied())
+                .and_then(crate::summary::dates::utc_day)
+        };
+        for row in rows.iter_mut() {
+            let [start, end] = boundaries(row);
+            (row.start_date, row.end_date) = match (day(&start), day(&end)) {
+                (Some(start), Some(end)) => (Some(start), Some(end)),
+                _ => (None, None),
+            };
+        }
     }
 
     /// The memory mural for a fold, or `None` when it is off, the model

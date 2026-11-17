@@ -92,6 +92,10 @@ pub struct StoredCompartment {
     pub end_message: i64,
     pub start_message_id: String,
     pub end_message_id: String,
+    /// The UTC days (`YYYY-MM-DD`) the first and last message were written.
+    /// `context.db` doesn't store them: the history head looks them up when
+    /// it renders a heading anew (`Session::date_summaries`), and every
+    /// other reader leaves them empty.
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub title: String,

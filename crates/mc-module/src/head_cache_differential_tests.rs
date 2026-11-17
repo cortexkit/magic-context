@@ -219,13 +219,17 @@ fn scenario(run: &mut Run) {
     );
     // Summary 4 is counted again in the new model's vocabulary. The two
     // vocabularies must count it differently, or a count kept from before
-    // the change would go unseen.
+    // the change would go unseen. It is counted as `m[1]` shows it, headed
+    // with the days its refresh recorded.
     let rows = run.session.summary_rows().unwrap();
     let newer = rows.iter().find(|summary| summary.sequence == 4).unwrap();
-    let text = crate::summary::render::render_compartment_at_tier(
-        &crate::summary::render::DecayRenderCompartment::from(newer),
-        1,
-    );
+    let days = run.session.baseline.as_ref().unwrap().newer_days.as_ref().unwrap()[&4]
+        .clone()
+        .expect("summary 4's messages have times");
+    let mut rendered = crate::summary::render::DecayRenderCompartment::from(newer);
+    rendered.start_date = Some(days.start);
+    rendered.end_date = Some(days.end);
+    let text = crate::summary::render::render_compartment_at_tier(&rendered, 1);
     let exact = crate::count::Counter::for_model(Some("anthropic/claude-opus-5-5")).count(&text);
     let estimate = crate::count::Counter::for_model(Some("test/model")).count(&text);
     assert_ne!(exact, estimate, "{text}");

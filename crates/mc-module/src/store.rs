@@ -945,6 +945,34 @@ impl Store {
         self.lock().query_row("SELECT ordinal,message_id FROM app_read_message_index WHERE runner=?1 AND harness=?2 AND session=?3 ORDER BY ordinal DESC LIMIT 1",params![key.runner,key.harness,key.session],|row|Ok((row.get(0)?,row.get(1)?))).optional().unwrap_or_default()
     }
 
+    /// When each of the messages `mids` was written, in milliseconds since
+    /// the Unix epoch, as the session saved it for the apps when its index
+    /// let the message go. A message with no saved time, or a saved time of
+    /// 0, is left out.
+    pub(crate) fn message_times(
+        &self,
+        key: &SessionRef,
+        mids: &[&str],
+    ) -> std::collections::HashMap<String, u64> {
+        let connection = self.lock();
+        let Ok(mut statement) = connection.prepare_cached(
+            "SELECT at_ms FROM app_read_message_index
+              WHERE runner = ?1 AND harness = ?2 AND session = ?3 AND message_id = ?4",
+        ) else {
+            return Default::default();
+        };
+        mids.iter()
+            .filter_map(|mid| {
+                let at: u64 = statement
+                    .query_row(params![key.runner, key.harness, key.session, mid], |row| {
+                        row.get(0)
+                    })
+                    .ok()?;
+                (at > 0).then(|| ((*mid).to_owned(), at))
+            })
+            .collect()
+    }
+
     pub(crate) fn save_app_index(
         &self,
         key: &SessionRef,

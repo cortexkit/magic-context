@@ -153,6 +153,40 @@ pub struct Baseline {
     /// levels.
     #[serde(default)]
     pub memory_format: u32,
+    /// The days `m[1]` heads each summary it shows with, by summary
+    /// sequence: `None` for a summary it shows without a date. `m[1]` is
+    /// rendered again on every view build, but a summary's days are looked
+    /// up only when `m[1]` first shows it ([`newer_days_due`]), and kept
+    /// here from then on, so its heading keeps its bytes until the next
+    /// fold, whatever a later lookup would find. `None` in a baseline saved
+    /// before headings carried dates: its `m[1]` keeps showing its
+    /// summaries without dates until the summaries it shows change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newer_days: Option<NewerDays>,
+}
+
+/// [`Baseline::newer_days`].
+pub type NewerDays = BTreeMap<i64, Option<SummaryDays>>;
+
+/// The days a summary's first and last message were written, as
+/// `YYYY-MM-DD` in UTC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryDays {
+    pub start: String,
+    pub end: String,
+}
+
+impl SummaryDays {
+    /// The days `summary` carries, when it carries both.
+    fn of(summary: &StoredCompartment) -> Option<Self> {
+        match (&summary.start_date, &summary.end_date) {
+            (Some(start), Some(end)) if !start.is_empty() && !end.is_empty() => Some(Self {
+                start: start.clone(),
+                end: end.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -433,6 +467,8 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
         shape: None,
         mural: mural.map(str::to_owned),
         memory_format: MEMORY_FORMAT,
+        // `m[1]` shows no summary yet; the ones it shows later are dated.
+        newer_days: Some(BTreeMap::new()),
     }
 }
 
@@ -632,15 +668,17 @@ fn overflow_line(ids: &[i64], count: u64) -> String {
 
 /// What newer summaries add to `m[1]`, and the baseline's summary
 /// attribution with them: the items `m[0]` renders, then one per newer
-/// summary at full detail. It depends only on the baseline's items and
-/// `through_sequence`, the summaries and the counter, so a session keeps it
-/// between view builds instead of rendering and counting newer summaries on
-/// every build ([`newer_summaries`]).
+/// summary at full detail. It depends only on the baseline's items,
+/// `through_sequence` and recorded days, the summaries and the counter, so a
+/// session keeps it between view builds instead of rendering and counting
+/// newer summaries on every build ([`newer_summaries`]).
 #[derive(Clone, Debug)]
 pub struct NewerSummaries {
     /// The `<new-compartments>` block, when a newer summary has content.
     block: Option<String>,
     items: SummaryItems,
+    /// The days the block heads each summary with ([`Baseline::newer_days`]).
+    days: Option<NewerDays>,
 }
 
 impl NewerSummaries {
@@ -648,17 +686,19 @@ impl NewerSummaries {
     pub fn items(&self) -> &SummaryItems {
         &self.items
     }
+
+    /// The days a baseline records once `m[1]` shows these summaries.
+    pub fn days(&self) -> Option<&NewerDays> {
+        self.days.as_ref()
+    }
 }
 
-/// The summaries newer than `baseline`'s `m[0]`, rendered for `m[1]`, and
-/// the attribution that goes with them. A baseline that already carries the
-/// returned items gives the same result again. `summaries` may also hold
-/// only the newer ones.
-pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
+/// The summaries newer than `baseline`'s `m[0]` that `m[1]` shows: those
+/// with content, oldest first.
+fn newer_shown<'a, S: std::borrow::Borrow<StoredCompartment>>(
     baseline: &Baseline,
-    summaries: &[S],
-    counter: crate::count::Counter,
-) -> NewerSummaries {
+    summaries: &'a [S],
+) -> impl Iterator<Item = &'a StoredCompartment> + 'a {
     // Summaries are kept in sequence order, so the newer ones are found by a
     // binary search rather than a look at every summary.
     debug_assert!(summaries
@@ -666,14 +706,89 @@ pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
         .all(|pair| pair[0].borrow().sequence <= pair[1].borrow().sequence));
     let first =
         summaries.partition_point(|summary| summary.borrow().sequence <= baseline.through_sequence);
+    summaries[first..]
+        .iter()
+        .map(|summary| summary.borrow())
+        .filter(|summary| !DecayRenderCompartment::from(*summary).is_no_content())
+}
+
+/// Whether `m[1]` for `baseline` and `summaries` heads a summary with days
+/// the baseline doesn't record yet: then [`newer_summaries`] takes that
+/// summary's days from `summaries`, and a caller looks them up first. A
+/// summary `m[1]` already shows keeps the days the baseline records, so a
+/// rebuild for any other reason leaves `m[1]`'s summary block byte for byte
+/// as served.
+///
+/// A baseline from before dates records none. Its `m[1]` keeps its
+/// summaries undated until the summaries it shows change; its attribution
+/// says which ones it showed. When that attribution is empty (it came
+/// later than `m[1]`), what `m[1]` shows is unknown, and it stays undated
+/// until the next fold.
+pub fn newer_days_due<S: std::borrow::Borrow<StoredCompartment>>(
+    baseline: &Baseline,
+    summaries: &[S],
+) -> bool {
+    match &baseline.newer_days {
+        Some(days) => {
+            newer_shown(baseline, summaries).any(|summary| !days.contains_key(&summary.sequence))
+        }
+        None if baseline.summary_items.is_empty() => false,
+        None => {
+            let served: BTreeSet<i64> = baseline
+                .summary_items
+                .iter()
+                .filter_map(|item| item.compartment_id.parse::<i64>().ok())
+                .filter(|id| *id > baseline.through_sequence)
+                .collect();
+            let shown: BTreeSet<i64> = newer_shown(baseline, summaries)
+                .map(|summary| summary.sequence)
+                .collect();
+            shown != served
+        }
+    }
+}
+
+/// The summaries newer than `baseline`'s `m[0]`, rendered for `m[1]`, and
+/// the attribution that goes with them. A baseline that already carries the
+/// returned items and days gives the same result again. `summaries` may
+/// also hold only the newer ones. A summary is headed with the days the
+/// baseline records for it, or, when [`newer_days_due`], with the days its
+/// row carries.
+pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
+    baseline: &Baseline,
+    summaries: &[S],
+    counter: crate::count::Counter,
+) -> NewerSummaries {
+    let due = newer_days_due(baseline, summaries);
+    let days: Option<NewerDays> = match &baseline.newer_days {
+        Some(recorded) => Some(
+            newer_shown(baseline, summaries)
+                .map(|summary| {
+                    let days = match recorded.get(&summary.sequence) {
+                        Some(days) => days.clone(),
+                        None => SummaryDays::of(summary),
+                    };
+                    (summary.sequence, days)
+                })
+                .collect(),
+        ),
+        None if due => Some(
+            newer_shown(baseline, summaries)
+                .map(|summary| (summary.sequence, SummaryDays::of(summary)))
+                .collect(),
+        ),
+        None => None,
+    };
     let mut texts = Vec::new();
     let mut newer = Vec::new();
-    for summary in &summaries[first..] {
-        let summary = summary.borrow();
-        let rendered = DecayRenderCompartment::from(summary);
-        if rendered.is_no_content() {
-            continue;
-        }
+    for summary in newer_shown(baseline, summaries) {
+        let mut rendered = DecayRenderCompartment::from(summary);
+        let shown = days
+            .as_ref()
+            .and_then(|days| days.get(&summary.sequence))
+            .and_then(Option::as_ref);
+        rendered.start_date = shown.map(|days| days.start.clone());
+        rendered.end_date = shown.map(|days| days.end.clone());
         let text = render_compartment_at_tier(&rendered, 1);
         newer.push(SummaryItem {
             compartment_id: summary.sequence.to_string(),
@@ -711,6 +826,7 @@ pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
             )
         }),
         items,
+        days,
     }
 }
 
@@ -747,6 +863,7 @@ pub fn delta_with(
     let line_tokens = |lines: &[String]| line_tokens(lines, inputs.counter);
     let mut next = baseline.clone();
     next.summary_items = newer.items.clone();
+    next.newer_days = newer.days.clone();
     let mut blocks: Vec<String> = newer.block.iter().cloned().collect();
     let independent = if blocks.is_empty() {
         0
@@ -1054,6 +1171,64 @@ mod tests {
         assert_eq!(ids, ["1", "2", "3"]);
         let again = newer_summaries(&shown, &summaries, inputs(&[], &[]).counter);
         assert_eq!(again.items(), &shown.summary_items);
+    }
+
+    /// `m[1]` heads a summary with the days its row carries when it first
+    /// shows it, and keeps them, whatever the row carries later. A baseline
+    /// from before dates keeps its summaries undated until what `m[1]`
+    /// shows changes, and stays undated when it can't tell what that was.
+    #[test]
+    fn m1_dates_a_summary_once_and_an_older_baseline_only_on_a_change() {
+        let dated = |sequence: i64, start: i64, end: i64, days: Option<(&str, &str)>| {
+            let mut row = summary(sequence, start, end);
+            row.start_date = days.map(|(start, _)| start.to_owned());
+            row.end_date = days.map(|(_, end)| end.to_owned());
+            row
+        };
+        let first = [
+            summary(1, 1, 4),
+            dated(2, 5, 8, Some(("2026-03-02", "2026-03-03"))),
+        ];
+        let base = fold(&inputs(&first[..1], &[]), None);
+        assert!(newer_days_due(&base, &first));
+        let (m1, next, _) = delta(&base, &inputs(&first, &[]));
+        assert!(m1.contains("## 5-8 · 2026-03-02→03 · Part 2"), "{m1}");
+
+        // Later rows carry other days, or none: the heading stays.
+        let later = [
+            summary(1, 1, 4),
+            dated(2, 5, 8, None),
+            dated(3, 9, 12, Some(("2026-03-04", "2026-03-04"))),
+        ];
+        assert!(!newer_days_due(&next, &later[..2]));
+        assert_eq!(delta(&next, &inputs(&later[..2], &[])).0, m1);
+        let (m1, _, _) = delta(&next, &inputs(&later, &[]));
+        assert!(m1.contains("## 5-8 · 2026-03-02→03 · Part 2"), "{m1}");
+        assert!(m1.contains("## 9-12 · 2026-03-04 · Part 3"), "{m1}");
+
+        // A baseline saved before dates, whose `m[1]` showed summary 2.
+        let undated = Baseline {
+            newer_days: None,
+            ..next.clone()
+        };
+        assert!(!newer_days_due(&undated, &first));
+        let (m1, kept, _) = delta(&undated, &inputs(&first, &[]));
+        assert!(m1.contains("## 5-8 · Part 2"), "{m1}");
+        assert_eq!(kept.newer_days, None);
+        // Summary 3 arrives: `m[1]` changes anyway, and dates both.
+        let both = [first[0].clone(), first[1].clone(), later[2].clone()];
+        assert!(newer_days_due(&undated, &both));
+        let (m1, _, _) = delta(&undated, &inputs(&both, &[]));
+        assert!(m1.contains("## 5-8 · 2026-03-02→03 · Part 2"), "{m1}");
+        assert!(m1.contains("## 9-12 · 2026-03-04 · Part 3"), "{m1}");
+        // With no attribution, what its `m[1]` showed is unknown.
+        let unattributed = Baseline {
+            summary_items: SummaryItems::default(),
+            ..undated
+        };
+        assert!(!newer_days_due(&unattributed, &both));
+        let (m1, _, _) = delta(&unattributed, &inputs(&both, &[]));
+        assert!(m1.contains("## 9-12 · Part 3"), "{m1}");
     }
 
     #[test]
