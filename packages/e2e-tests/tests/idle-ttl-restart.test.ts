@@ -1013,27 +1013,36 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 	}, 120_000);
 	// Each test here boots a fresh OpenCode host inside its own time budget, and
 	// the midnight cases below leave that budget the least room. On a fresh fixture
-	// OpenCode installs @opencode-ai/plugin from the npm registry and loads plugins
-	// only after that install settles, so a slow or failing registry once kept these
-	// hosts booting for over a minute on CI. The harness runs npm offline. This
-	// stand-in registry answers every request with a 404 at once (npm does not retry
-	// one) and counts connections, so a host that still asks the registry fails
-	// here on its count instead of timing out in a later test. The offline setting
-	// belongs to the shared OpenCode spawn, so the TypeScript lane covers both modes.
+	// OpenCode installs @opencode-ai/plugin from the npm registry before it loads
+	// plugins, and fetches the models.dev catalogue before its provider list is
+	// usable, so a slow or failing service once kept these hosts booting for over
+	// a minute on CI. The harness turns both off. This stand-in for both services
+	// answers every request with a 404 at once (npm does not retry one) and records
+	// it, so a host that still asks either one fails here on that record instead of
+	// timing out in a later test. Both settings belong to the shared OpenCode spawn,
+	// so the TypeScript lane covers both modes.
 	it.skipIf(host !== "opencode" || RUST_MODE)(
-		"boots the OpenCode host and serves a turn without contacting the npm registry",
+		"boots the OpenCode host and serves a turn without contacting the npm registry or the models catalogue",
 		async () => {
-			let connections = 0;
-			const registry = createServer((socket) => {
-				connections++;
+			const requests: string[] = [];
+			const stub = createServer((socket) => {
+				const index = requests.push("connection without a request") - 1;
 				socket.on("error", () => {});
-				socket.once("data", () =>
-					socket.end("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"),
-				);
+				socket.once("data", (chunk) => {
+					requests[index] = chunk.toString().split("\r\n", 1)[0]!;
+					socket.end("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+				});
 			});
-			await new Promise<void>((resolve) => registry.listen(0, "127.0.0.1", resolve));
-			const previousRegistry = process.env.npm_config_registry;
-			process.env.npm_config_registry = `http://127.0.0.1:${(registry.address() as AddressInfo).port}/`;
+			await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
+			const base = `http://127.0.0.1:${(stub.address() as AddressInfo).port}`;
+			const redirected = {
+				npm_config_registry: `${base}/npm-registry/`,
+				OPENCODE_MODELS_URL: `${base}/models-catalogue`,
+			};
+			const previous = Object.fromEntries(
+				Object.keys(redirected).map((key) => [key, process.env[key]]),
+			);
+			Object.assign(process.env, redirected);
 			let h: ScenarioHarness | undefined;
 			try {
 				h = await createScenarioHarness(host, {
@@ -1044,12 +1053,14 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 				const session = await createFreshSession(h);
 				await h.sendPrompt(session, "first turn on a fresh host");
 				await h.waitForMockQuiescence();
-				expect(connections).toBe(0);
+				expect(requests).toEqual([]);
 			} finally {
-				if (previousRegistry === undefined) delete process.env.npm_config_registry;
-				else process.env.npm_config_registry = previousRegistry;
+				for (const [key, value] of Object.entries(previous)) {
+					if (value === undefined) delete process.env[key];
+					else process.env[key] = value;
+				}
 				await h?.dispose();
-				registry.close();
+				stub.close();
 			}
 		},
 		120_000,

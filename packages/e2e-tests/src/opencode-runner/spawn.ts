@@ -157,8 +157,8 @@ export interface SpawnOptions {
      */
     extraEnv?: Record<string, string>;
     /**
-     * models.dev catalogue copied into the host cache before boot. Fetching is then
-     * disabled so the host's model metadata comes from this file alone.
+     * models.dev catalogue copied into the host cache before boot. Hosts never fetch
+     * the live catalogue, so a test that needs models.dev metadata seeds it here.
      */
     modelsCatalog?: string;
     /**
@@ -761,10 +761,15 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
             if (key.toLowerCase() === "npm_config_offline") delete childEnv[key];
         }
         childEnv.npm_config_offline = "true";
+        // OpenCode also fetches the models.dev catalogue on every fresh fixture, and
+        // when that fetch times out its provider list (which readiness waits for)
+        // can stay unusable for minutes. The mock providers are defined in full in
+        // opencode.json, so hosts never fetch the live catalogue; a test that needs
+        // models.dev metadata seeds a repository file through `modelsCatalog`.
+        childEnv.OPENCODE_DISABLE_MODELS_FETCH = "1";
         // Caller overrides (e.g. MAGIC_CONTEXT_LOG_PATH pointing the plugin log at a
         // per-suite file so Rust-mode scenarios can assert on transform decisions).
         // Merged last so an explicit override wins over the inherited value.
-        if (resolvedOpts.modelsCatalog) childEnv.OPENCODE_DISABLE_MODELS_FETCH = "1";
         for (const [key, value] of Object.entries(resolvedOpts.extraEnv ?? {})) {
             childEnv[key] = value;
         }
