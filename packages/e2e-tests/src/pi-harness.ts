@@ -47,6 +47,8 @@ export interface PiTestHarnessOptions {
   historianModel?: PiMockModel;
   /** models.dev catalogue copied into the throwaway host cache. */
   modelsCatalog?: string;
+  /** Extra host CLI arguments, placed before the model selection (for example OMP's `--plan-yolo`). */
+  hostArgs?: string[];
 }
 
 const DEFAULT_MOCK_RESPONSE: MockResponse = {
@@ -253,6 +255,7 @@ export class PiTestHarness implements PiHostHarness {
       extensionsAfterMagicContext: options.extensionsAfterMagicContext,
       historianModel: options.historianModel,
       modelsCatalog: options.modelsCatalog,
+      hostArgs: options.hostArgs,
     });
 
     try {

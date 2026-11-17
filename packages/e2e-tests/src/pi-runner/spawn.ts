@@ -132,6 +132,8 @@ export interface PiRunnerOptions {
   historianModel?: PiMockModel;
   /** Path of a models.dev catalogue to copy into this run's private cache directory, where Pi children read it. */
   modelsCatalog?: string;
+  /** Extra host CLI arguments, placed before the model selection (for example OMP's `--plan-yolo`). */
+  hostArgs?: string[];
   /** Compatibility option from the old spawn-per-turn runner. RPC sessions persist naturally. */
   continueSession?: boolean;
 }

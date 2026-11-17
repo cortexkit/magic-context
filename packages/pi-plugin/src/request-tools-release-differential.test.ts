@@ -93,11 +93,22 @@ async function run(
 				properties: { command: { type: "string" } },
 			},
 		},
+		// Magic Context registers ctx_reduce, so the session can call it.
+		{
+			name: "ctx_reduce",
+			description: "Mark tags for dropping",
+			parameters: {
+				type: "object",
+				properties: { drop: { type: "string" } },
+			},
+		},
 	];
 	const fake = createFakePi();
 	Object.assign(fake.pi, {
 		getAllTools: () => tools,
-		...(withActiveTools ? { getActiveTools: () => ["read", "bash"] } : {}),
+		...(withActiveTools
+			? { getActiveTools: () => ["read", "bash", "ctx_reduce"] }
+			: {}),
 	});
 	registerPiContextHandler(fake.pi as never, {
 		db,

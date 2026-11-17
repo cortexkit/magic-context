@@ -50,9 +50,9 @@ import { measurePiToolResultDelta } from "./tail-hygiene-walk-pi";
 export type Channel1State = SharedChannel1State;
 
 // Per-session Channel 1 metric baseline. Written at the end of each pipeline
-// pass (post-drop), read in the `tool_result` handler. Primary-only: subagents
-// never get a baseline, which is how Channel 1 stays off for them (matches
-// OpenCode's `channel1StateBySession` gating).
+// pass (post-drop), read in the `tool_result` handler. Only a session that can
+// call ctx_reduce gets one, which is how both reminders stay off for a session
+// without the tool.
 const channel1StateBySession = new Map<string, Channel1State>();
 
 export function setPiChannel1Baseline(
@@ -128,7 +128,9 @@ export function maybeChannel1ReminderForToolResult(args: {
 }): PiTextContent | null {
 	const { db, sessionId, toolName } = args;
 	const state = channel1StateBySession.get(sessionId);
-	if (!state) return null; // primary-only: no baseline ⇒ subagent ⇒ off
+	// No baseline: no pass has measured the session yet, or it cannot call
+	// ctx_reduce.
+	if (!state) return null;
 
 	if (toolName === "ctx_reduce") {
 		markPiChannel1Reduced(sessionId, db);

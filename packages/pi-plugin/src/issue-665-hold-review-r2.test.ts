@@ -247,8 +247,17 @@ export async function runPiHoldDriver(options: {
 						properties: { path: { type: "string" } },
 					},
 				},
+				// Magic Context registers ctx_reduce, so the session can call it.
+				{
+					name: "ctx_reduce",
+					description: "Mark tags for dropping",
+					parameters: {
+						type: "object",
+						properties: { drop: { type: "string" } },
+					},
+				},
 			],
-			getActiveTools: () => ["read"],
+			getActiveTools: () => ["read", "ctx_reduce"],
 		});
 		return created;
 	};
