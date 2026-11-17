@@ -747,6 +747,20 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
         childEnv.MAGIC_CONTEXT_STORAGE_DIR = join(env.dataDir, "cortexkit", "magic-context");
         // Ensure anthropic doesn't bail for missing env vars — we use a fake key.
         childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
+        // Every boot of a fresh fixture makes OpenCode install @opencode-ai/plugin
+        // from the npm registry into the fixture's config dir, and it loads plugins
+        // only after that install settles. Registry latency and npm's retry backoff
+        // then decide how long the host takes to boot: up to minutes on CI, which
+        // ran tests out of their own time budget before the host was even ready.
+        // Nothing here reads that install (Magic Context and every fixture plugin
+        // resolve @opencode-ai/plugin from this checkout by path), so npm's offline
+        // mode lets the install fail at once, OpenCode logs "background dependency
+        // install failed", and the plugins load. Inherited spellings are dropped so
+        // a differently cased variable cannot win npm's lookup.
+        for (const key of Object.keys(childEnv)) {
+            if (key.toLowerCase() === "npm_config_offline") delete childEnv[key];
+        }
+        childEnv.npm_config_offline = "true";
         // Caller overrides (e.g. MAGIC_CONTEXT_LOG_PATH pointing the plugin log at a
         // per-suite file so Rust-mode scenarios can assert on transform decisions).
         // Merged last so an explicit override wins over the inherited value.

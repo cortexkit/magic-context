@@ -16,6 +16,7 @@
 import { expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { type AddressInfo, createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { estimateTokens } from "../../plugin/src/hooks/magic-context/read-session-formatting";
 import type { CapturedRequest } from "../src/mock-provider/server";
@@ -1010,6 +1011,49 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 			else process.env.MAGIC_CONTEXT_LOG_PATH = oldLogPath;
 		}
 	}, 120_000);
+	// Each test here boots a fresh OpenCode host inside its own time budget, and
+	// the midnight cases below leave that budget the least room. On a fresh fixture
+	// OpenCode installs @opencode-ai/plugin from the npm registry and loads plugins
+	// only after that install settles, so a slow or failing registry once kept these
+	// hosts booting for over a minute on CI. The harness runs npm offline. This
+	// stand-in registry answers every request with a 404 at once (npm does not retry
+	// one) and counts connections, so a host that still asks the registry fails
+	// here on its count instead of timing out in a later test. The offline setting
+	// belongs to the shared OpenCode spawn, so the TypeScript lane covers both modes.
+	it.skipIf(host !== "opencode" || RUST_MODE)(
+		"boots the OpenCode host and serves a turn without contacting the npm registry",
+		async () => {
+			let connections = 0;
+			const registry = createServer((socket) => {
+				connections++;
+				socket.on("error", () => {});
+				socket.once("data", () =>
+					socket.end("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"),
+				);
+			});
+			await new Promise<void>((resolve) => registry.listen(0, "127.0.0.1", resolve));
+			const previousRegistry = process.env.npm_config_registry;
+			process.env.npm_config_registry = `http://127.0.0.1:${(registry.address() as AddressInfo).port}/`;
+			let h: ScenarioHarness | undefined;
+			try {
+				h = await createScenarioHarness(host, {
+					modelContextLimit: 100_000,
+					magicContextConfig: { historian: { disable: true } },
+					mockDefault: { text: "answer", usage: LOW_USAGE },
+				});
+				const session = await createFreshSession(h);
+				await h.sendPrompt(session, "first turn on a fresh host");
+				await h.waitForMockQuiescence();
+				expect(connections).toBe(0);
+			} finally {
+				if (previousRegistry === undefined) delete process.env.npm_config_registry;
+				else process.env.npm_config_registry = previousRegistry;
+				await h?.dispose();
+				registry.close();
+			}
+		},
+		120_000,
+	);
 	for (const expired of [false, true])
 		it.skipIf(host !== "opencode")(
 			`a ${expired ? "genuinely expired" : "normal warm"} turn across midnight keeps the frozen date until /ctx-flush rebuilds the prompt`,
