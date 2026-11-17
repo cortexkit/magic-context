@@ -382,6 +382,7 @@ import {
 	type PiM0M1PassSnapshot,
 	type PiM0M1State,
 	prepareCachedM0M1PiReplay,
+	resetPiUnplacedCutLog,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import {
@@ -4790,6 +4791,8 @@ export function registerPiContextHandler(
 				return;
 			}
 			sessionIdForError = sessionId;
+			// A history cut that cannot be placed is logged once per pass.
+			resetPiUnplacedCutLog(sessionId);
 			// Context runs after every before_agent_start handler. Measure the final
 			// host prompt before storage admission, so an early validated LKG replay
 			// also records the system bytes served alongside the replayed messages.
@@ -12457,8 +12460,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
-				`compartment injection failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+				`compartment injection failed; replaying the last good request or refusing the turn: ${err instanceof Error ? err.message : String(err)}`,
 			);
+			// Without the history head this pass would also skip the cut, so Pi's
+			// messages would go out with every summarized message and none of the
+			// summaries. Fail it like the other stages the request depends on (see
+			// runPersistedReplayStage): the handler's recovery replays the last good
+			// request if it fits and otherwise refuses the turn. A busy store keeps
+			// its own error so that path can treat it as one.
+			if (isTransientPiStorageError(err)) throw err;
+			throw new PiDegradedPassError("m0-m1-injection-degradation", {
+				cause: err,
+			});
 		}
 	}
 
@@ -13605,6 +13618,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	clearPiCompactionMarkerDrainLogState(sessionId);
 	clearPiInjectionTokenCountCache(sessionId);
 	clearPiMuralProcessCache(sessionId);
+	resetPiUnplacedCutLog(sessionId);
 	// The content memo is shared across sessions, not owned by one session id.
 	// Dropping it at teardown releases old bodies; deterministic counts rebuild.
 	clearPiTailHygieneContentMemo();
