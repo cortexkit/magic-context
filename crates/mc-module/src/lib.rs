@@ -107,6 +107,7 @@ pub mod notice_cost_timing;
 pub mod nudges;
 pub mod pass;
 pub mod pre_user;
+pub(crate) mod prefrontal;
 pub mod preset;
 pub mod project_docs;
 pub mod prompt_notes;
