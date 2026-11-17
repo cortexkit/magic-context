@@ -17,7 +17,7 @@ import {
 } from "../../features/magic-context/dreamer/docs-proposals";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { getHarness } from "../../shared/harness";
-import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { createTestTempDirFromPath, getOriginalTempDirForTests } from "../../shared/test-temp-dir";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 
@@ -30,8 +30,9 @@ afterEach(() => {
 let sessionCounter = 0;
 /**
  * A session id no other test run shares, with its expected dump directory
- * spelled out independently of the production helper. The directory is
- * registered for removal because it lives in the real OS temp dir.
+ * spelled out independently of the production helper. The test preload moves
+ * os.tmpdir() to a throwaway root; the directory is still removed after each
+ * test so one test's dumps never show up in another's.
  */
 function uniqueSession(): { sessionId: string; dumpDir: string } {
     sessionCounter += 1;
@@ -117,6 +118,27 @@ test.each([
     } else {
         expect(existsSync(join(dir, ".cortexkit/.gitignore"))).toBe(false);
     }
+});
+
+test("a historian dump made by a test stays out of the machine's temp directory", async () => {
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-artifact-machine-tmp-"));
+    dirs.push(dir);
+    const { sessionId, dumpDir } = uniqueSession();
+    const machineDumpDir = join(
+        getOriginalTempDirForTests(),
+        getHarness(),
+        "magic-context",
+        "historian",
+        sessionId,
+    );
+
+    const result = await dump(dir, sessionId);
+
+    expect(result.ok).toBe(false);
+    expect(readdirSync(dumpDir).some((name) => name.endsWith(".xml"))).toBe(true);
+    // CLI doctor tests count dumps in the machine's temp directory, so a test
+    // that leaves one there changes their warning totals.
+    expect(existsSync(machineDumpDir)).toBe(false);
 });
 
 test("a dump that cannot be written leaves the pass outcome and the project unchanged", async () => {

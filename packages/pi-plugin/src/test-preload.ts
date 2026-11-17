@@ -4,4 +4,11 @@ await import(new URL("../test-preload.ts", import.meta.url).href);
 const { __setScheduleStartupMaintenanceOnOpenForTests } = await import(
 	"@magic-context/core/features/magic-context/storage-db"
 );
+// Plugin logs and historian response dumps go under os.tmpdir(). Move it to a
+// throwaway root so no unit test writes them into the machine's temp directory.
+const { afterAll } = await import("bun:test");
+const { redirectTempDirForTests } = await import(
+	"@magic-context/core/shared/test-temp-dir"
+);
+redirectTempDirForTests(afterAll);
 __setScheduleStartupMaintenanceOnOpenForTests(false);

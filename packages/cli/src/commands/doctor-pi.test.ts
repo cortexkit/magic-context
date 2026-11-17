@@ -1,11 +1,16 @@
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc } from "comment-json";
-import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
+import {
+    createTestTempDirFromPath,
+    getOriginalTempDirForTests,
+    setProcessTempDirForTests,
+} from "../../../plugin/src/shared/test-temp-dir";
 import { openExistingContextDatabase } from "../lib/database-access";
 import type { PiDiagnosticReport } from "../lib/diagnostics-pi";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
@@ -19,11 +24,52 @@ const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
 const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
+// The process temp directory outside the current test, where other tests in
+// this run may have left historian dumps and logs.
+let sharedTempDir = tmpdir();
+let restoreTempDir: (() => void) | undefined;
 
 function makeTempRoot(prefix = "mc-pi-doctor-"): string {
     const path = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempRoots.push(path);
     return path;
+}
+
+// Doctor reads historian dumps and plugin logs under os.tmpdir(). Each test gets
+// its own temp root, so files another test or an earlier run left in the shared
+// temp directory cannot change what doctor reports.
+beforeEach(() => {
+    sharedTempDir = tmpdir();
+    const testTempDir = makeTempRoot("mc-pi-doctor-tmp-");
+    const restoreEnv = setProcessTempDirForTests(testTempDir);
+    // Once any test in this process has assigned a new object to process.env,
+    // Bun's os.tmpdir() stops seeing later TMPDIR changes, so stub it as well.
+    const tmpdirStub = spyOn(os, "tmpdir").mockReturnValue(testTempDir);
+    restoreTempDir = () => {
+        tmpdirStub.mockRestore();
+        restoreEnv();
+    };
+});
+
+/**
+ * Writes a historian dump for an unrelated session where the Pi plugin would
+ * put it under `tempDir`, and returns a function that removes everything it
+ * created, including the parent directories that did not exist before.
+ */
+function writeForeignHistorianDump(tempDir: string, sessionId: string): () => void {
+    const segments = ["pi", "magic-context", "historian", sessionId];
+    let firstCreated: string | undefined;
+    let current = tempDir;
+    for (const segment of segments) {
+        current = join(current, segment);
+        if (firstCreated === undefined && !existsSync(current)) firstCreated = current;
+    }
+    mkdirSync(current, { recursive: true });
+    const dumpPath = join(current, "historian-initial-1.xml");
+    writeFileSync(dumpPath, "<output>dump left by another test</output>\n");
+    return () => {
+        rmSync(firstCreated ?? dumpPath, { recursive: true, force: true });
+    };
 }
 
 class MockPrompts implements PromptIO {
@@ -207,6 +253,8 @@ function baseOptions(root: string, cwd: string, prompts: MockPrompts): RunDoctor
 }
 
 afterEach(() => {
+    restoreTempDir?.();
+    restoreTempDir = undefined;
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     if (originalPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -449,6 +497,36 @@ describe("Pi doctor", () => {
         expect(output).toContain("postinstall likely failed");
         expect(output).toContain("Stale Pi extension cache found");
         expect(output).toContain("WARN 3");
+    });
+
+    it("does not count historian dumps left in the shared or the machine's temp directory", async () => {
+        // Tests that make the historian dump a response write under os.tmpdir(),
+        // and the machine's temp directory can hold dumps from earlier runs.
+        // Doctor must report neither in this test's otherwise clean setup.
+        const sessionId = `pi-doctor-foreign-${process.pid}-${Date.now()}`;
+        const tempDirs = [...new Set([sharedTempDir, getOriginalTempDirForTests()])];
+        const removers: Array<() => void> = [];
+        try {
+            for (const tempDir of tempDirs) {
+                removers.push(writeForeignHistorianDump(tempDir, sessionId));
+            }
+            const root = makeTempRoot();
+            const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+            const agentDir = setEnv(root, cwd);
+            writeHealthyFiles(agentDir, cwd);
+            createInstalledPiPlugin(agentDir, false);
+            const prompts = new MockPrompts();
+
+            const code = await runDoctor(baseOptions(root, cwd, prompts));
+
+            expect(code).toBe(0);
+            const output = prompts.messages.join("\n");
+            expect(output).not.toContain("Historian debug dumps");
+            expect(output).not.toContain(sessionId);
+            expect(output).toContain("WARN 3");
+        } finally {
+            for (const remove of removers) remove();
+        }
     });
 
     it("skips unrelated local dev-path packages and broken trees when probing the embedding runtime", async () => {

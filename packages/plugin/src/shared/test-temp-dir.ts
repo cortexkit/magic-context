@@ -58,6 +58,13 @@ const registeredTempDirs = new Set<string>();
 let lifecycleCleanupInstalled = false;
 let exitCleanupInstalled = false;
 
+// os.tmpdir() reads TMPDIR on POSIX and TEMP, then TMP, on Windows, on every
+// call. Setting all three moves it on every platform.
+const TEMP_DIR_ENV_KEYS = ["TMPDIR", "TMP", "TEMP"] as const;
+// The temp directory in effect before redirectTempDirForTests ran, while that
+// redirect is active.
+let originalTempDir: string | undefined;
+
 function hasRecognizedPrefix(name: string): boolean {
     return (
         name.startsWith(OWNED_PREFIX) ||
@@ -156,6 +163,58 @@ export function installTestTempDirCleanup(afterAll: AfterAll): void {
         exitCleanupInstalled = true;
         process.once("exit", cleanupRegisteredTestTempDirs);
     }
+}
+
+/**
+ * Points os.tmpdir() at `directory` for this process and the child processes it
+ * starts afterwards. Returns a function that puts back the previous values,
+ * including unsetting variables that were unset.
+ */
+export function setProcessTempDirForTests(directory: string): () => void {
+    const previous = TEMP_DIR_ENV_KEYS.map((key) => [key, process.env[key]] as const);
+    for (const key of TEMP_DIR_ENV_KEYS) process.env[key] = directory;
+    return () => {
+        for (const [key, value] of previous) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    };
+}
+
+/**
+ * Moves os.tmpdir() to a fresh test-owned root for the rest of the test run, so
+ * nothing a test writes there reaches the machine's temp directory.
+ *
+ * Production code writes the plugin log and historian response dumps under
+ * os.tmpdir(), and the CLI doctor counts the dumps it finds there. Without the
+ * redirect, a test that makes the historian dump a response leaves files in the
+ * machine's temp directory, and a doctor test that runs later on the same
+ * machine reports them as an extra warning.
+ *
+ * The previous values come back in `afterAll`. Under `bun test --parallel`, Bun
+ * runs the preload and its afterAll hooks once per test file in the same
+ * process, and the next file's preload creates its roots under os.tmpdir().
+ * By then the cleanup has deleted this root, so the restore must run first.
+ */
+export function redirectTempDirForTests(afterAll: AfterAll): string {
+    const machineTempDir = tmpdir();
+    const { dir } = createTestTempDir("mc-test-tmpdir-");
+    const restore = setProcessTempDirForTests(dir);
+    originalTempDir = machineTempDir;
+    afterAll(() => {
+        restore();
+        originalTempDir = undefined;
+    });
+    return dir;
+}
+
+/**
+ * The temp directory this process had before redirectTempDirForTests moved
+ * os.tmpdir(), so a test can check that nothing reached it. Without an active
+ * redirect it is the current os.tmpdir().
+ */
+export function getOriginalTempDirForTests(): string {
+    return originalTempDir ?? tmpdir();
 }
 
 /**

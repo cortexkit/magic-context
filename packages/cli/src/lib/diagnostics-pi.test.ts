@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
+import {
+    createTestTempDirFromPath,
+    setProcessTempDirForTests,
+} from "../../../plugin/src/shared/test-temp-dir";
 import { projectPathToPiDirSlug } from "../commands/migrate";
 import {
     collectDiagnostics,
@@ -22,6 +26,7 @@ const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 const originalNodeEnv = process.env.NODE_ENV;
 const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
+let restoreTempDir: (() => void) | undefined;
 
 function makeTempRoot(prefix = "mc-pi-diagnostics-"): string {
     const root = createTestTempDirFromPath(join(tmpdir(), prefix));
@@ -29,7 +34,24 @@ function makeTempRoot(prefix = "mc-pi-diagnostics-"): string {
     return root;
 }
 
+// collectDiagnostics scans historian dumps and plugin logs under os.tmpdir().
+// Each test gets its own temp root, so files another test left in the shared
+// temp directory never reach the report.
+beforeEach(() => {
+    const testTempDir = makeTempRoot("mc-pi-diagnostics-tmp-");
+    const restoreEnv = setProcessTempDirForTests(testTempDir);
+    // Once any test in this process has assigned a new object to process.env,
+    // Bun's os.tmpdir() stops seeing later TMPDIR changes, so stub it as well.
+    const tmpdirStub = spyOn(os, "tmpdir").mockReturnValue(testTempDir);
+    restoreTempDir = () => {
+        tmpdirStub.mockRestore();
+        restoreEnv();
+    };
+});
+
 afterEach(() => {
+    restoreTempDir?.();
+    restoreTempDir = undefined;
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     if (originalPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

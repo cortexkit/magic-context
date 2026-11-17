@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { listOpenFiles } from "../../../shared/test-open-files";
+import { getOriginalTempDirForTests } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { addNote, getPendingSmartNotes } from "../storage-notes";
@@ -37,7 +37,10 @@ beforeEach(async () => {
         const dbLines = inventory.paths.filter((path) => /\.db(?:[-\s]|$)/.test(path));
         // Other files in a full-suite worker may hold their own fixtures open.
         // They need not share this file's preload root, but none may be live.
-        for (const line of dbLines) expect(line).toContain(realpathSync(tmpdir()));
+        // Storage roots sit in the temp directory the process started with, not
+        // in the throwaway root the preload later points os.tmpdir() at.
+        const tempRoot = realpathSync(getOriginalTempDirForTests());
+        for (const line of dbLines) expect(line).toContain(tempRoot);
         console.log(`pid ${process.pid}: throwaway database descriptors\n${dbLines.join("\n")}`);
         isolationProven = true;
     }
