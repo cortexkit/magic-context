@@ -290,6 +290,9 @@ afterEach(() => {
 describe("doctor repair-db", () => {
     it("creates private database backup files", () => {
         if (process.platform === "win32") return;
+        // The test preload gives each run a fresh os.tmpdir(), so the shared
+        // magic-context parent may not exist yet.
+        mkdirSync(join(tmpdir(), "magic-context"), { recursive: true });
         const root = createTestTempDirFromPath(
             join(tmpdir(), "magic-context/doctor-backup-permissions-"),
         );

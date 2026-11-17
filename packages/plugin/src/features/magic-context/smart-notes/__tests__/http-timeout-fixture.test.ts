@@ -3,11 +3,13 @@ import * as dns from "node:dns/promises";
 import { realpathSync, rmSync } from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
-import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { Database } from "../../../../shared/sqlite";
 import { listOpenFiles } from "../../../../shared/test-open-files";
-import { createTestTempDirFromPath } from "../../../../shared/test-temp-dir";
+import {
+    createTestTempDirFromPath,
+    getOriginalTempDirForTests,
+} from "../../../../shared/test-temp-dir";
 import { runMigrations } from "../../migrations";
 import { initializeDatabase } from "../../storage-db";
 
@@ -103,7 +105,9 @@ export function timeoutTestDatabase(): { db: Database; dispose: () => void } {
     const configuredRoot = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
     if (!configuredRoot) throw new Error("test preload must isolate storage");
     const root = realpathSync(configuredRoot);
-    if (relative(realpathSync(tmpdir()), root).startsWith(".."))
+    // The preload creates the storage root in the temp directory the process
+    // started with; it then moves os.tmpdir() to a separate throwaway root.
+    if (relative(realpathSync(getOriginalTempDirForTests()), root).startsWith(".."))
         throw new Error("test preload must isolate storage below the temp directory");
     const directory = createTestTempDirFromPath(join(root, "smart-note-http-"));
     const path = join(directory, "timeout.db");
@@ -119,7 +123,7 @@ export function timeoutTestDatabase(): { db: Database; dispose: () => void } {
         // The test runner shares one process across test files, so other files' throwaway
         // databases may still be open here. The invariant is that every database this
         // process holds lives under the temp directory, never in a live store.
-        const tempRoot = realpathSync(tmpdir());
+        const tempRoot = realpathSync(getOriginalTempDirForTests());
         for (const line of dbLines) expect(line).toContain(tempRoot);
         console.log(`pid ${process.pid}: isolated database descriptors\n${dbLines.join("\n")}`);
         isolationProven = true;
