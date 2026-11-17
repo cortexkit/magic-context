@@ -25,8 +25,8 @@ use serde_json::Value;
 /// the threshold of the transport's slow-answer line, which this line
 /// explains.
 pub const SLOW: Duration = Duration::from_millis(500);
-/// From this the line is a warning, as the slow-answer line is: the
-/// deadline runners give a step hook.
+/// From this the line is a warning, as the slow-answer line is: runners
+/// give ck-mc's per-step hook 1,500 ms before they go on without it.
 const WARN: Duration = Duration::from_millis(1_500);
 
 /// How many stamps a call keeps; later ones are dropped. A search takes
