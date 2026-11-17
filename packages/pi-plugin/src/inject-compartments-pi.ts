@@ -383,8 +383,9 @@ type BranchCutPlacement =
  *   boundary sits inside that prompt's turn: no other user prompt lies between
  *   them on the branch, and the next chat message after the boundary is not a
  *   user prompt (or there is none). A summary can end inside the live turn, for
- *   example a full recomp that ends on a failed reply Pi hid; cutting there would
- *   remove the prompt the model is answering. The rule reads only the branch,
+ *   example a `/ctx-recomp` rebuild of every summary that ends on the last raw
+ *   message, a failed reply Pi hid; cutting there would remove the prompt the
+ *   model is answering. The rule reads only the branch,
  *   not which prompt is newest, so later turns keep the same cut and the prompt
  *   stays served even though the summary covers it: a session pays one rewrite,
  *   and the cut moves again only when a newer summary moves the boundary. When a
@@ -511,8 +512,8 @@ export function resetPiUnplacedCutLog(sessionId: string): void {
 	unplacedCutLoggedSessions.delete(sessionId);
 }
 
-// Without this line a cut that silently fails looks like a session whose
-// summaries cover nothing: the request keeps every message.
+// Without the warning written here, a cut that silently fails looks like a
+// session whose summaries cover nothing: the request keeps every message.
 function logUnplacedCut(
 	sessionId: string,
 	boundaryMessageId: string,

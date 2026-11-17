@@ -392,8 +392,9 @@ describe("Pi history cut when the boundary message is missing from the context",
 			expect(boundaryIndex).toBe(messages.length - 2);
 			expect(roles(served)).toEqual(["user", "user", "user"]);
 			expect(served.slice(2)).toEqual(messages.slice(boundaryIndex + 1));
-			// Printed for the byte-identity evidence: the same digest before and
-			// after the branch-position fallback changed.
+			// Printed so a run against the code before the branch-position fallback
+			// changed can be compared with a run after it: a boundary found by id
+			// must produce the same digest in both.
 			console.log(
 				`id-found request sha256=${createHash("sha256").update(JSON.stringify(served)).digest("hex")}`,
 			);
