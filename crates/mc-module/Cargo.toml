@@ -118,12 +118,13 @@ name = "ck-mc"
 path = "src/main.rs"
 
 # Measures what the module holds in memory after Setup, on a copy of real
-# stores. It replaces the global allocator, so it builds only on request:
+# stores. It replaces the global allocator, so its body compiles only with the
+# feature (`#![cfg]` in the file; without it the target is empty, and a
+# `--test '*'` run passes over it):
 # `cargo test -p mc-module --release --features heap-profile --test heap_profile -- --ignored --nocapture`.
 [[test]]
 name = "heap_profile"
 path = "tests/heap_profile.rs"
-required-features = ["heap-profile"]
 
 # Test-only helpers the registration live suite's daemon launches. None of
 # them is shipped: releases take target/release/ck-mc alone.

@@ -32,6 +32,10 @@
 //! first frame in this crate, with the allocator-level frame that tells a
 //! `serde_json` object node from a string or a vector.
 
+// Built only with the opt-in feature, so that `cargo test --test '*'` passes
+// over this target without it.
+#![cfg(feature = "heap-profile")]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -669,7 +673,8 @@ fn time_loads(db: &ContextDb, key: &SessionRef) -> Value {
             .map(|s| {
                 s.content.len()
                     + s.title.len()
-                    + [&s.p1, &s.p2, &s.p3, &s.p4]
+                    + s.p1.as_ref().map_or(0, |text| text.len())
+                    + [&s.p2, &s.p3, &s.p4]
                         .iter()
                         .map(|p| p.as_ref().map_or(0, String::len))
                         .sum::<usize>()
