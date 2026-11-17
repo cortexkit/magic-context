@@ -81,7 +81,13 @@ interface CachedModelMetadata {
 
 // Proven-separate allowlist only. Unknown providers reserve by default because
 // wasting some input capacity is safer than a shared-window hard rejection.
-const SEPARATE_OUTPUT_QUOTA_PROVIDERS = new Set(["google", "google-antigravity"]);
+// `antigravity-cli` is Oh My Pi's driver for Google's Antigravity CLI, serving
+// the same models with the same limits as `google-antigravity`.
+const SEPARATE_OUTPUT_QUOTA_PROVIDERS = new Set([
+    "google",
+    "google-antigravity",
+    "antigravity-cli",
+]);
 const MIN_PLAUSIBLE_CONTEXT_LIMIT = 1024;
 const OUTPUT_RESERVE_CAP_RATIO = 0.25;
 let outputReserveConfig: OutputReserveConfig | undefined;

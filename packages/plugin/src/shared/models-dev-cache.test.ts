@@ -88,6 +88,17 @@ describe("output-token reservation", () => {
         ).toBe(1_048_576);
     });
 
+    test("keeps Oh My Pi's antigravity-cli provider at the full window (issue 939)", () => {
+        // The agy default model's catalog pair in Oh My Pi 18.22.0.
+        expect(
+            resolveLimit(
+                { context: 1_048_576, output: 262_144 },
+                "antigravity-cli",
+                "gemini-4-carbon",
+            ),
+        ).toBe(1_048_576);
+    });
+
     test("output_reserve accepts both harness provider spellings with canonical precedence", () => {
         const limit = { context: 100_000, output: 20_000 };
         expect(

@@ -61,6 +61,9 @@ const PROVIDER_GEOMETRY: Readonly<Record<string, WindowGeometry>> = {
     xai: "shared_truncating",
     google: "separate",
     "google-antigravity": "separate",
+    // Oh My Pi's driver for Google's Antigravity CLI (`agy`): the same account,
+    // model roster and window/output pairs as google-antigravity.
+    "antigravity-cli": "separate",
 };
 
 const geometryClampLogSeen = new Set<string>();
