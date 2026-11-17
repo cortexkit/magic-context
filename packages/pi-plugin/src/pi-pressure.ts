@@ -83,6 +83,13 @@ export interface PiAssistantUsage {
 	cacheRead?: number;
 	cacheWrite?: number;
 	totalTokens?: number;
+	/**
+	 * Oh My Pi's provider-reported context occupancy (`Usage.contextTokens`):
+	 * the size of the conversation after the reply, including the reply's own
+	 * output. It is used only when the counters above give no reading (see
+	 * piUsageInputTokens).
+	 */
+	contextTokens?: number;
 }
 
 export interface PiPressure {
@@ -112,6 +119,8 @@ export function extractAssistantUsage(
 	if (typeof u.cacheRead === "number") result.cacheRead = u.cacheRead;
 	if (typeof u.cacheWrite === "number") result.cacheWrite = u.cacheWrite;
 	if (typeof u.totalTokens === "number") result.totalTokens = u.totalTokens;
+	if (typeof u.contextTokens === "number")
+		result.contextTokens = u.contextTokens;
 	return result;
 }
 
@@ -147,7 +156,16 @@ export function computePiPressure(
 	return { inputTokens, percentage };
 }
 
-/** Normalize old inclusive-cache shapes before judging the prompt reading. */
+/**
+ * Normalize old inclusive-cache shapes before judging the prompt reading.
+ *
+ * Oh My Pi's `contextTokens` stands in only when the prompt counters read
+ * nothing: its Antigravity CLI provider reports each tool-call step with that
+ * field alone. Where the counters are also present (Cursor, Google generations
+ * split into segments, an Antigravity CLI turn end) the value is the whole
+ * conversation including the reply's output, and Cursor has reported it above
+ * the model's window, so it never replaces them.
+ */
 export function piUsageInputTokens(
 	usage: PiAssistantUsage | null,
 ): number | null {
@@ -167,8 +185,15 @@ export function piUsageInputTokens(
 		totalPromptTokens !== undefined && totalPromptTokens > 0
 			? Math.min(componentPromptTokens, totalPromptTokens)
 			: componentPromptTokens;
-	if (inputTokens <= 0 || !Number.isFinite(inputTokens)) return null;
-	return inputTokens;
+	if (inputTokens > 0 && Number.isFinite(inputTokens)) return inputTokens;
+	return positiveContextTokens(usage.contextTokens);
+}
+
+/** Oh My Pi's `contextTokens` when it is a finite count above zero. */
+function positiveContextTokens(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? value
+		: null;
 }
 
 export interface PiPressureSnapshot extends PiPressure {
@@ -255,7 +280,8 @@ function entryUsageTokens(usage: unknown): number {
 		typeof value === "number" && Number.isFinite(value) ? value : 0;
 	return (
 		n(u.totalTokens) ||
-		n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite)
+		n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite) ||
+		(positiveContextTokens(u.contextTokens) ?? 0)
 	);
 }
 
@@ -274,7 +300,8 @@ function entryUsageTokens(usage: unknown): number {
  *
  * Mirrors Pi's rule on the raw branch: the newest assistant entry with usable
  * usage (not aborted or errored, non-zero) against the newest invalidating
- * entry.
+ * entry. Oh My Pi also anchors on a reply whose only usage is `contextTokens`
+ * (its Antigravity CLI tool-call steps), so that counts as usage here too.
  */
 export function isPiLiveUsageRawBranchEstimate(
 	branchEntries: readonly unknown[] | null | undefined,

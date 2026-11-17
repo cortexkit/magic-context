@@ -80,6 +80,25 @@ describe("window geometry", () => {
                 },
             },
             {
+                // Oh My Pi's driver for Google's Antigravity CLI (`agy`).
+                provider: "antigravity-cli",
+                model: "gemini-4-carbon",
+                limit: { context: 1_048_576, output: 262_144 },
+                expected: {
+                    usableSoft: 1_048_576,
+                    usableHard: 1_048_576,
+                    geometry: "separate",
+                    derivation: {
+                        window: 1_048_576,
+                        reserve: 0,
+                        reserveSource: "none",
+                        geometry: "separate",
+                        windowSource: "catalog",
+                        absoluteWall: 1_048_576,
+                    },
+                },
+            },
+            {
                 provider: "xai",
                 model: "grok-3",
                 limit: { context: 131_072, output: 32_768 },
@@ -317,6 +336,7 @@ describe("window geometry", () => {
             ["openai", "zero", { context: 200_000, output: 0 }],
             ["xai", "placeholder", { context: 500_000, output: 500_000 }],
             ["google", "separate", { context: 1_000_000, output: 65_536 }],
+            ["antigravity-cli", "gemini-4-carbon", { context: 1_048_576, output: 262_144 }],
             ["anthropic", "input", { context: 1_000_000, input: 900_000, output: 128_000 }],
         ] as const;
         for (const [provider, model, limit] of corpus) {
