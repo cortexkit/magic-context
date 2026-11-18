@@ -1,5 +1,5 @@
 import { sessionLog } from "../../shared/logger";
-import { Database } from "../../shared/sqlite";
+import { Database, isTransientSqliteError } from "../../shared/sqlite";
 import { configureContextDatabasePragmas } from "../../shared/sqlite-context-pragmas";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { getDatabasePath } from "./storage-db";
@@ -471,20 +471,17 @@ export function scheduleOpenCodeTransformDecisionWrite(args: {
     lastBoundMessageIdBySession.set(args.sessionId, args.messageId);
     const token = addScheduledWriteToken(args.sessionId);
     inRootAsyncContext(() =>
-        setTimeout(() => {
-            try {
-                if (!hasScheduledWriteToken(args.sessionId, token)) return;
-                writeTransformDecisionBestEffort(dbPath, {
+        setTimeout(
+            () =>
+                writeQueuedTransformDecision(dbPath, token, {
                     ...pending,
                     sessionId: args.sessionId,
                     harness: "opencode",
                     messageId: args.messageId,
                     inputTokens: args.inputTokens,
-                });
-            } finally {
-                deleteScheduledWriteToken(args.sessionId, token);
-            }
-        }, 0),
+                }),
+            0,
+        ),
     );
     return true;
 }
@@ -549,10 +546,9 @@ export function bindOpenCodeV2TransformDecision(args: {
     if (!dbPath) return false;
     const token = addScheduledWriteToken(args.sessionId);
     inRootAsyncContext(() =>
-        setTimeout(() => {
-            try {
-                if (!hasScheduledWriteToken(args.sessionId, token)) return;
-                writeTransformDecisionBestEffort(dbPath, {
+        setTimeout(
+            () =>
+                writeQueuedTransformDecision(dbPath, token, {
                     ...staged.decision,
                     sessionId: args.sessionId,
                     harness: "opencode2",
@@ -560,11 +556,9 @@ export function bindOpenCodeV2TransformDecision(args: {
                     inputTokens: Number.isFinite(reply.inputTokens)
                         ? reply.inputTokens
                         : staged.decision.inputTokens,
-                });
-            } finally {
-                deleteScheduledWriteToken(args.sessionId, token);
-            }
-        }, 0),
+                }),
+            0,
+        ),
     );
     return true;
 }
@@ -634,27 +628,21 @@ export function schedulePiTransformDecisionResolve(args: {
     const assertQueuedWrite = args.assertQueuedWrite ?? args.assertCurrentPass;
     inRootAsyncContext(() =>
         setTimeout(() => {
+            if (!hasScheduledWriteToken(args.sessionId, token)) return;
             try {
-                if (!hasScheduledWriteToken(args.sessionId, token)) return;
-                try {
-                    pending.publicationGuard?.();
-                    assertQueuedWrite?.();
-                } catch {
-                    sessionLog(
-                        args.sessionId,
-                        "DISCARDED CONTEXT RESULT: queued Pi transform decision",
-                    );
-                    return;
-                }
-                writeTransformDecisionBestEffort(dbPath, {
-                    ...pending,
-                    sessionId: args.sessionId,
-                    harness: "pi",
-                    messageId: targetMessageId,
-                });
-            } finally {
+                pending.publicationGuard?.();
+                assertQueuedWrite?.();
+            } catch {
                 deleteScheduledWriteToken(args.sessionId, token);
+                sessionLog(args.sessionId, "DISCARDED CONTEXT RESULT: queued Pi transform decision");
+                return;
             }
+            writeQueuedTransformDecision(dbPath, token, {
+                ...pending,
+                sessionId: args.sessionId,
+                harness: "pi",
+                messageId: targetMessageId,
+            });
         }, 0),
     );
     return true;
@@ -738,14 +726,46 @@ function findNewestPiAssistantEntryIdAfter(
     return null;
 }
 
-function writeTransformDecisionBestEffort(dbPath: string, row: TransformDecisionRow): void {
+/**
+ * Wait before each new attempt at a queued decision row that found context.db's
+ * write lock held by another connection; about two seconds in all.
+ */
+const DECISION_WRITE_RETRY_DELAYS_MS = [10, 25, 50, 100, 250, 500, 1_000] as const;
+
+/**
+ * Write one queued decision row, then release its write token.
+ *
+ * The row is written on its own connection with busy_timeout=0, because a
+ * SQLite busy wait would block the host's event loop. So the write fails at
+ * once whenever another connection holds context.db's write lock, and the host
+ * itself runs writers on other connections: worker threads index completed
+ * messages and write embeddings. A busy or locked failure is therefore retried
+ * on a timer instead of dropping the row; any other failure, or a lock still
+ * held after the last retry, drops it.
+ * The row is best-effort telemetry, so nothing here ever throws into a host
+ * hook. Deleting the session withdraws the token and stops further attempts.
+ */
+function writeQueuedTransformDecision(
+    dbPath: string,
+    token: symbol,
+    row: TransformDecisionRow,
+    attempt = 0,
+): void {
+    let retryInMs: number | undefined;
     try {
-        const writer = writerOverrideForTests ?? writeTransformDecisionRow;
-        writer(dbPath, row);
-    } catch {
-        // Best-effort telemetry only. Never throw into OpenCode/Pi event or
-        // context hooks; a locked/missing DB just drops this attribution row.
+        if (!hasScheduledWriteToken(row.sessionId, token)) return;
+        try {
+            (writerOverrideForTests ?? writeTransformDecisionRow)(dbPath, row);
+        } catch (error) {
+            if (isTransientSqliteError(error)) retryInMs = DECISION_WRITE_RETRY_DELAYS_MS[attempt];
+        }
+    } finally {
+        if (retryInMs === undefined) deleteScheduledWriteToken(row.sessionId, token);
     }
+    if (retryInMs === undefined) return;
+    inRootAsyncContext(() =>
+        setTimeout(() => writeQueuedTransformDecision(dbPath, token, row, attempt + 1), retryInMs),
+    );
 }
 
 function writeTransformDecisionRow(dbPath: string, row: TransformDecisionRow): void {
