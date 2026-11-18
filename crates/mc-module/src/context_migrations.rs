@@ -937,9 +937,10 @@ fn attribution_facts_111(tx: &Transaction) -> rusqlite::Result<()> {
 /// in the store are not queued here; a computer sends them when it first
 /// joins the stream.
 ///
-/// The Engram memory sync's tables go (`memory_ops`, `memory_outbox`,
-/// `memory_sync_state`): it only appended new memories to an Engram device
-/// stream that nothing read back, and the hub replaces it.
+/// The old memory sync's tables go (`memory_ops`, `memory_outbox`,
+/// `memory_sync_state`). That sync appended each new memory to a device
+/// stream of Engram, CortexKit's account backup service, and nothing ever
+/// read the stream back; the hub replaces it.
 ///
 /// Unrelated to sharing, and riding the same step: `message_fts_rowid_map`
 /// gets an index on `fts_rowid`. The search's session-reach scan looks map

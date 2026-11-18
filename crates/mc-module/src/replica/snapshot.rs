@@ -29,7 +29,8 @@ pub(crate) const LOCAL_METADATA_KEYS: [&str; 6] = [
     "source_candidate_ids",
     // The sessions and message ordinals the memory came from.
     "source_candidate_provenance",
-    // The 0.49 identity key (a project path) a legacy merge came from.
+    // The project path a legacy project's memories were keyed by before the
+    // move to project ids merged them; a path names this computer's folders.
     "identity_merge_review",
     // The reflect task's run id and the event ids it rests on.
     "run",

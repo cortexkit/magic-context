@@ -17,7 +17,8 @@
 //! - A known global id's snapshot replaces the row's replicated fields,
 //!   even when it was based on an older revision than this computer's:
 //!   stream order decides, the same on every computer. Replaced text goes
-//!   to `memory_history`, where the dreamer's curate sees it. The one
+//!   to `memory_history`, where the dreamer's curate task, which tidies an
+//!   owner's memories, sees it. The one
 //!   exception is a row with a change of this computer's own that the
 //!   stream hasn't delivered back yet: that change is later in the stream,
 //!   so it is the one every computer ends with, and the arrival is skipped.

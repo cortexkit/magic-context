@@ -77,9 +77,10 @@ pub fn box_id(client: &cortexkit_bus_client::BusClient) -> Option<String> {
 /// Name the writer of the changes `tx` makes from here until
 /// [`unname_writer`], so their outbox rows say who made them. Only the
 /// dreamer's change lists name themselves: every other change is recorded
-/// as its row's source type (a create) or `ck-mc`. `epoch` is the dreamer
-/// lease's epoch, which receivers will check against the owner's fence once
-/// that lease exists; until then it is null.
+/// as its row's source type (a create) or `ck-mc`. `epoch` is the epoch of
+/// the dreamer lease the run held. Once that lease exists, a receiver will
+/// skip a dreamer change whose epoch is older than the newest lease epoch it
+/// knows for that owner; until then the epoch is null.
 pub(crate) fn name_writer(
     tx: &Connection,
     actor: &str,
