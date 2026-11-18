@@ -144,7 +144,8 @@ export type PiMarkerKeptEntry =
  * A folded tool-result boundary (`synth-user-<id>`) is the result entry `<id>`,
  * as the cut reads it. `waiting`: no message follows the boundary yet, or the
  * cut keeps none. `missing`: the boundary message is not on this branch, and
- * the caller places the marker by stored ordinal as before.
+ * the caller places the marker by the summary's stored raw-message ordinal
+ * instead (resolvePiFirstKeptEntry).
  */
 export function resolvePiMarkerKeptEntry(
 	branchEntries: readonly unknown[],

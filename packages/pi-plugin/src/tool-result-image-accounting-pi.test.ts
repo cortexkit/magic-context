@@ -181,8 +181,8 @@ describe("Pi tool results that carry images", () => {
 			const entryIds = Array.from({ length: outputs * 2 }, (_, i) => `e${i}`);
 			tagPass(db, tagger, sessionId, makeMessages, entryIds, false);
 
-			// A 49,152-token protection floor, as on the affected Pi session where
-			// the protected tail covered every image output.
+			// A 49,152-token protection floor: about 41 image outputs fill it, so
+			// the older ones stay outside the protected tail.
 			const window = getProtectionWindowForSession(db, sessionId, 49_152);
 			// Expected from what each output carries, not from the stored rows: its
 			// caption plus one image. The newest outputs are protected until their

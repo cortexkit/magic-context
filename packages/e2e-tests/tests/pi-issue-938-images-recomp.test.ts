@@ -543,7 +543,8 @@ export default function (pi) {
             { timeoutMs: 180_000, label: "mid-turn recomp publishes" },
         );
         // The recomp read the branch during the turn: its newest summary ends on
-        // the live turn's folded tool result, inside that turn.
+        // the live turn's tool result (a raw message whose id starts with
+        // `synth-user-`), inside that turn.
         expect(rebuilt.end_message_id.startsWith("synth-user-")).toBe(true);
         await liveTurn;
         await h.waitForMockQuiescence({ label: "live turn" });
