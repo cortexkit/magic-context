@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use super::hub::InMemoryHub;
-use super::test_support::{box_of, memory, Computer};
+use super::test_support::{memory, Computer};
 use super::wire;
 
 fn contents(computer: &Computer) -> Vec<String> {
@@ -33,7 +33,7 @@ async fn a_memory_reaches_the_other_computer_and_its_arrival_is_never_sent_again
     a.sync().await;
     b.sync().await;
     assert_eq!(contents(&b), ["The parser rejects empty input."]);
-    let global = wire::global_id(&box_of(1), "memory", id);
+    let global = wire::global_id(&a.store_id(), "memory", id);
     assert_eq!(
         b.value::<String>("SELECT global_id FROM memories"),
         global,
@@ -47,7 +47,7 @@ async fn a_memory_reaches_the_other_computer_and_its_arrival_is_never_sent_again
     a.follow_all().await;
     assert!(outbox(&a).is_empty());
     assert_eq!(a.replica.position().unwrap(), 1);
-    assert_eq!(writers(&hub), [box_of(1)]);
+    assert_eq!(writers(&hub), [a.store_id()]);
     assert_eq!(hub.acked(), [1, 1]);
 }
 
@@ -141,34 +141,73 @@ async fn concurrent_edits_converge_on_the_later_message_in_the_stream() {
     assert_eq!(b.value::<i64>("SELECT importance FROM memories"), 90);
 }
 
+/// Each row's live state and the global id of the row that supersedes it,
+/// by global id: what every computer must agree on.
+fn rows(computer: &Computer) -> Vec<String> {
+    computer.texts(
+        "SELECT m.global_id || ' ' || COALESCE(m.status, 'active') || ' '
+                || COALESCE(s.global_id, '-') || ' ' || m.content
+           FROM memories m LEFT JOIN memories s ON s.id = m.superseded_by_memory_id
+          ORDER BY m.global_id",
+    )
+}
+
+/// The same fact written on two computers is two rows, one global id each.
+/// The one with the lower global id stays live on every computer and the
+/// other is archived, superseded by it, whatever order they arrived in.
+/// The archive is each computer's own: it is never sent, and a change to
+/// either row decides again.
 #[tokio::test]
-async fn the_same_fact_written_on_two_computers_links_instead_of_duplicating() {
+async fn the_same_fact_written_on_two_computers_leaves_one_live_row_everywhere() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
-    let first = memory(&a, "pj-a", "Releases need two reviewers.");
-    let second = memory(&b, "pj-a", "Releases need two reviewers.");
+    memory(&a, "pj-a", "Releases need two reviewers.");
+    memory(&b, "pj-a", "Releases need two reviewers.");
     a.sync().await;
     b.sync().await;
     a.follow_all().await;
-    assert_eq!(b.value::<i64>("SELECT COUNT(*) FROM memories"), 1);
-    assert_eq!(a.value::<i64>("SELECT COUNT(*) FROM memories"), 1);
-    let global = wire::global_id(&box_of(1), "memory", first);
+    assert_eq!(hub.messages().len(), 2, "each computer's create was sent");
+    assert_eq!(rows(&a), rows(&b));
+    assert_eq!(a.live(), ["Releases need two reviewers."]);
+    assert_eq!(b.live(), ["Releases need two reviewers."]);
+    let (low, high) = {
+        let mut ids = [
+            wire::global_id(&a.store_id(), "memory", 1),
+            wire::global_id(&b.store_id(), "memory", 1),
+        ];
+        ids.sort();
+        (ids[0].clone(), ids[1].clone())
+    };
     assert_eq!(
-        b.value::<i64>(&format!(
-            "SELECT local_id FROM replica_ids WHERE global_id = '{global}'"
-        )),
-        second
+        rows(&a),
+        [
+            format!("{low} active - Releases need two reviewers."),
+            format!("{high} archived {low} Releases need two reviewers.")
+        ]
     );
+    // The archive is not sent.
+    assert!(outbox(&a).is_empty() && outbox(&b).is_empty());
+    // The surviving row's text changes: the other holds the fact alone and
+    // is live again on both.
+    a.execute(&format!(
+        "UPDATE memories SET content = 'Releases need three reviewers.',
+                normalized_hash = '{}' WHERE global_id = '{low}'",
+        crate::memory_writes::normalized_hash("Releases need three reviewers.")
+    ));
+    a.sync().await;
+    b.follow_all().await;
+    assert_eq!(rows(&a), rows(&b));
     assert_eq!(
-        hub.messages().len(),
-        1,
-        "only the first computer's create was sent"
+        a.live(),
+        [
+            "Releases need three reviewers.",
+            "Releases need two reviewers."
+        ]
     );
-    // A later change on B travels under the shared id.
-    b.execute("UPDATE memories SET importance = 77");
-    b.sync().await;
-    a.follow_all().await;
-    assert_eq!(a.value::<i64>("SELECT importance FROM memories"), 77);
+    // A computer joining late ends with the same rows.
+    let c = Computer::new(&hub, 3);
+    c.sync().await;
+    assert_eq!(rows(&c), rows(&a));
 }
 
 #[tokio::test]
@@ -191,7 +230,7 @@ async fn a_link_to_a_memory_not_seen_yet_waits_and_resolves_when_it_arrives() {
         .message_id
         .as_deref()
         .unwrap()
-        .starts_with(&wire::global_id(&box_of(1), "memory", survivor)));
+        .starts_with(&wire::global_id(&a.store_id(), "memory", survivor)));
     // B reads the survivor alone first: its links wait.
     let only_first = InMemoryHub::new();
     only_first.inject(
@@ -269,8 +308,11 @@ async fn a_bad_message_is_recorded_and_skipped_and_the_next_one_applies() {
     assert_eq!(b.replica.position().unwrap(), 4);
 }
 
+/// B's own copy of a fact A sent first is sent too, and archived on every
+/// computer unless its global id is the lower one, so each computer ends
+/// with one live row per fact and the same rows.
 #[tokio::test]
-async fn a_joining_computer_applies_the_history_first_and_converges_without_duplicates() {
+async fn a_joining_computer_applies_the_history_first_and_converges_with_one_live_row_per_fact() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
     memory(&a, "pj-a", "Shared fact.");
@@ -286,14 +328,22 @@ async fn a_joining_computer_applies_the_history_first_and_converges_without_dupl
     ));
     b.sync().await;
     a.follow_all().await;
-    let expected = ["Only on A.", "Only on B, archived.", "Shared fact."];
+    b.follow_all().await;
+    let expected = [
+        "Only on A.",
+        "Only on B, archived.",
+        "Shared fact.",
+        "Shared fact.",
+    ];
     assert_eq!(contents(&a), expected);
     assert_eq!(contents(&b), expected);
+    assert_eq!(a.live(), ["Only on A.", "Shared fact."]);
+    assert_eq!(rows(&a), rows(&b));
     assert_eq!(
         a.value::<String>("SELECT status FROM memories WHERE content = 'Only on B, archived.'"),
         "archived"
     );
-    assert_eq!(hub.messages().len(), 3);
+    assert_eq!(hub.messages().len(), 4);
     assert!(b.replica.joined_at().unwrap().is_some());
 }
 
@@ -335,14 +385,13 @@ async fn a_delete_for_good_reaches_every_computer_and_a_late_snapshot_never_brin
         b.value::<i64>("SELECT COUNT(*) FROM replica_ids WHERE deleted_at IS NOT NULL"),
         1
     );
-    // A late snapshot from a computer that hadn't seen the delete.
+    // A late snapshot from a computer that hadn't seen the delete is a good
+    // message for a row that is gone: skipped, not recorded as a bad one.
     hub.inject(&create.subject, Some("late@9"), create.payload.clone());
     b.follow_all().await;
     assert_eq!(b.value::<i64>("SELECT COUNT(*) FROM memories"), 0);
-    assert_eq!(
-        b.value::<String>("SELECT reason FROM replica_rejects"),
-        "the row was deleted"
-    );
+    assert_eq!(b.value::<i64>("SELECT COUNT(*) FROM replica_rejects"), 0);
+    assert_eq!(b.replica.position().unwrap(), hub.messages().len() as u64);
     // A computer joining later replays the create, the edit and the
     // tombstone, and ends without the row.
     let c = Computer::new(&hub, 3);
@@ -409,7 +458,7 @@ async fn several_changes_before_a_send_go_out_as_one_message_with_the_newest_sta
     assert_eq!(hub.messages().len(), 2);
     assert_eq!(
         hub.messages()[1].message_id.as_deref(),
-        Some(format!("{}@2", wire::global_id(&box_of(1), "memory", 1)).as_str())
+        Some(format!("{}@2", wire::global_id(&a.store_id(), "memory", 1)).as_str())
     );
     b.sync().await;
     assert_eq!(contents(&b), ["Version three."]);
@@ -476,13 +525,13 @@ async fn a_memory_an_observation_and_a_primer_with_one_local_id_all_arrive() {
         .iter()
         .map(|message| message.message_id.clone().unwrap())
         .collect();
-    let boxed = box_of(1);
+    let store = a.store_id();
     assert_eq!(
         ids,
         [
-            format!("{boxed}.o1@1"),
-            format!("{boxed}.p1@1"),
-            format!("{boxed}.m1@1")
+            format!("{store}.o1@1"),
+            format!("{store}.p1@1"),
+            format!("{store}.m1@1")
         ]
     );
     assert_eq!(contents(&b), ["Builds use cargo."]);
@@ -514,8 +563,8 @@ async fn observations_and_primers_travel_and_local_columns_stay() {
     assert_eq!(
         b.texts("SELECT kind || ':' || global_id FROM replica_ids ORDER BY kind"),
         [
-            format!("observation:{}.o1", box_of(1)),
-            format!("primer:{}.p1", box_of(1))
+            format!("observation:{}.o1", a.store_id()),
+            format!("primer:{}.p1", a.store_id())
         ]
     );
     assert_eq!(
@@ -584,5 +633,284 @@ async fn metadata_keys_naming_this_computer_stay_and_the_rest_travel() {
     assert_eq!(
         metadata,
         serde_json::json!({"promoted_at": 6, "archive_reason": "kept", "user_memory_id": 40})
+    );
+}
+
+/// A sighting on A (the summarizer seeing a fact again) raises the memory's
+/// revision there, with nothing replicated changed. It must never hold back
+/// B's real edit on A, nor reach the hub.
+#[tokio::test]
+async fn a_sighting_never_wins_over_another_computers_edit() {
+    use crate::summary::two_pass::applier::{admit, Admission};
+    let hub = InMemoryHub::new();
+    let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
+    let text = "Releases need two reviewers.";
+    memory(&a, "pj-a", text);
+    a.sync().await;
+    b.sync().await;
+    b.execute(&format!(
+        "UPDATE memories SET content = 'Releases need three reviewers.', normalized_hash = '{}'",
+        crate::memory_writes::normalized_hash("Releases need three reviewers.")
+    ));
+    b.publish_all().await;
+    let revision: i64 = a.value("SELECT revision FROM memories");
+    a.db.with_connection(|conn| {
+        let receipt = admit(
+            conn,
+            &Admission {
+                key: "fact-seen-again",
+                operation: "new",
+                project: "pj-a",
+                category: "ARCHITECTURE",
+                content: text,
+                source_session: "ses-1",
+                memory_enabled: true,
+                auto_promote: true,
+                conflict_target: None,
+                fact_id: 1,
+                reservation: None,
+                authority: None,
+                owner: None,
+                expires: None,
+                line: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.reason, "live_match");
+    });
+    assert_eq!(
+        a.value::<i64>("SELECT revision FROM memories"),
+        revision + 1,
+        "the summarizer raised the revision of what it saw again"
+    );
+    assert_eq!(outbox(&a), ["memory:1:raised"]);
+    a.follow_all().await;
+    a.publish_all().await;
+    b.follow_all().await;
+    assert_eq!(contents(&a), ["Releases need three reviewers."]);
+    assert_eq!(contents(&b), ["Releases need three reviewers."]);
+    assert_eq!(hub.messages().len(), 2, "the sighting was never sent");
+    assert!(outbox(&a).is_empty(), "the arrival cleared the raised row");
+}
+
+/// A is restored from a copy of its store taken before it published a
+/// memory, then writes and publishes another. The new memory must not take
+/// the global id the first one was sent under, so every computer ends with
+/// both.
+#[tokio::test]
+async fn a_store_restored_from_an_earlier_copy_keeps_every_memory_on_every_computer() {
+    let hub = InMemoryHub::new();
+    let b = Computer::new(&hub, 2);
+    b.sync().await;
+    let a = Computer::new(&hub, 1);
+    a.sync().await;
+    let backup = a.copy();
+    let before = a.store_id();
+    memory(&a, "pj-a", "Written before the restore.");
+    a.sync().await;
+    b.follow_all().await;
+    drop(a);
+    let a = Computer::open(&hub, 1, backup);
+    assert_eq!(
+        a.store_id(),
+        before,
+        "the copy has the store id it was taken with"
+    );
+    memory(&a, "pj-a", "Written after the restore.");
+    a.sync().await;
+    b.follow_all().await;
+    let both = ["Written after the restore.", "Written before the restore."];
+    assert_eq!(b.live(), both);
+    assert_eq!(a.live(), both);
+    assert_ne!(
+        a.store_id(),
+        before,
+        "the restored store found what a later state of it sent"
+    );
+    let ids: Vec<String> = hub
+        .messages()
+        .iter()
+        .map(|message| message.message_id.clone().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [format!("{before}.m1@1"), format!("{}.m1@1", a.store_id())]
+    );
+}
+
+/// A store copied to another computer takes a new store id there before it
+/// sends anything, so the copy and the original never form one id twice.
+#[tokio::test]
+async fn a_store_copied_to_another_computer_takes_a_new_store_id() {
+    let hub = InMemoryHub::new();
+    let a = Computer::new(&hub, 1);
+    memory(&a, "pj-a", "Written on the original.");
+    a.sync().await;
+    let c = Computer::open(&hub, 3, a.copy());
+    c.sync().await;
+    assert_ne!(c.store_id(), a.store_id());
+    memory(&c, "pj-a", "Written on the copy.");
+    memory(&a, "pj-a", "Written on the original again.");
+    c.sync().await;
+    a.sync().await;
+    a.follow_all().await;
+    c.follow_all().await;
+    let all = [
+        "Written on the copy.",
+        "Written on the original again.",
+        "Written on the original.",
+    ];
+    assert_eq!(a.live(), all);
+    assert_eq!(c.live(), all);
+}
+
+/// The vault opens nothing for now (a key it can't reach for the moment):
+/// the round ends before the message and reads it again later, rather than
+/// skipping it.
+#[tokio::test]
+async fn a_transient_vault_refusal_reads_the_message_again_later() {
+    use super::seal::{OpenInput, Opened, SealError, SealInput, Sealed, Sealer};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Unreachable {
+        sealer: Arc<super::test_support::TestSealer>,
+        refuse: AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl Sealer for Unreachable {
+        async fn seal_batch(&self, items: &[SealInput]) -> Result<Vec<Sealed>, SealError> {
+            self.sealer.seal_batch(items).await
+        }
+        async fn open_batch(&self, items: &[OpenInput]) -> Result<Vec<Opened>, SealError> {
+            if self.refuse.swap(false, Ordering::SeqCst) {
+                return Ok(items
+                    .iter()
+                    .map(|_| Opened::Refused {
+                        code: "store_error".into(),
+                        class: "transient".into(),
+                    })
+                    .collect());
+            }
+            self.sealer.open_batch(items).await
+        }
+    }
+
+    let hub = InMemoryHub::new();
+    let a = Computer::new(&hub, 1);
+    memory(&a, "pj-a", "Opened on the second try.");
+    a.sync().await;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        crate::context_db::ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap(),
+    );
+    let b = super::Replica::new(
+        Arc::clone(&db),
+        Arc::clone(&hub) as Arc<dyn super::hub::Hub>,
+        Arc::new(Unreachable {
+            sealer: super::test_support::TestSealer::new(super::test_support::KEY, 1),
+            refuse: AtomicBool::new(true),
+        }),
+        super::test_support::box_of(2),
+    );
+    assert!(b.follow().await.is_err(), "the round ended");
+    assert_eq!(b.position().unwrap(), 0);
+    assert_eq!(b.follow().await.unwrap(), 1);
+    let (rejected, arrived): (i64, i64) = db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM replica_rejects), (SELECT COUNT(*) FROM memories)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((rejected, arrived), (0, 1));
+}
+
+/// A body whose snapshot names another owner than the subject it was sealed
+/// for and sent on is refused, so a row never lands under an owner the
+/// stream didn't file it under.
+#[tokio::test]
+async fn a_snapshot_under_another_owners_subject_is_rejected() {
+    use super::seal::{OpenInput, Opened, SealInput, Sealer};
+    let hub = InMemoryHub::new();
+    let a = Computer::new(&hub, 1);
+    memory(&a, "pj-a", "Filed under pj-a.");
+    a.sync().await;
+    let sent = hub.messages()[0].clone();
+    let envelope: wire::Envelope = serde_json::from_slice(&sent.payload).unwrap();
+    let sealer = super::test_support::TestSealer::new(super::test_support::KEY, 1);
+    let opened = sealer
+        .open_batch(&[OpenInput {
+            epoch: envelope.epoch,
+            nonce: envelope.nonce.clone(),
+            ciphertext: envelope.ciphertext.clone(),
+            aad: wire::aad(&envelope.global_id, envelope.revision, &sent.subject),
+        }])
+        .await
+        .unwrap();
+    let Opened::Plaintext(bytes) = &opened[0] else {
+        panic!("the message opens");
+    };
+    let mut body: wire::Body = serde_json::from_slice(bytes).unwrap();
+    let snapshot = body.snapshot.as_mut().unwrap();
+    snapshot.insert("owner_id".into(), serde_json::json!("pj-b"));
+    let resealed = sealer
+        .seal_batch(&[SealInput {
+            aad: wire::aad(&body.global_id, body.revision, &sent.subject),
+            plaintext: zeroize::Zeroizing::new(body.to_bytes()),
+        }])
+        .await
+        .unwrap()
+        .remove(0);
+    let forged = wire::Envelope {
+        epoch: resealed.epoch,
+        nonce: resealed.nonce,
+        ciphertext: resealed.ciphertext,
+        ..envelope
+    };
+    // Another computer reads a stream holding only the forged message.
+    let forged_stream = InMemoryHub::new();
+    forged_stream.inject(&sent.subject, Some("forged@1"), forged.to_bytes());
+    let b = Computer::new(&forged_stream, 2);
+    b.follow_all().await;
+    assert_eq!(b.value::<i64>("SELECT COUNT(*) FROM memories"), 0);
+    assert_eq!(
+        b.value::<String>("SELECT reason FROM replica_rejects"),
+        "the snapshot belongs on ck.fleet.memory.project.pj-b, not on the subject it came on"
+    );
+}
+
+/// Two computers write the same fact, one changes its text before it hears
+/// of the other's, and a third joins only afterwards: all three end with the
+/// same rows and the same live ones.
+#[tokio::test]
+async fn a_computer_joining_late_ends_with_the_same_live_rows() {
+    let hub = InMemoryHub::new();
+    let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
+    b.replica.join().await.unwrap();
+    memory(&a, "pj-a", "Releases need two reviewers.");
+    a.sync().await;
+    memory(&b, "pj-a", "Releases need two reviewers.");
+    b.publish_all().await;
+    a.execute(&format!(
+        "UPDATE memories SET content = 'Releases need three reviewers.', normalized_hash = '{}'",
+        crate::memory_writes::normalized_hash("Releases need three reviewers.")
+    ));
+    a.publish_all().await;
+    a.follow_all().await;
+    b.follow_all().await;
+    let c = Computer::new(&hub, 3);
+    c.sync().await;
+    for computer in [&b, &c] {
+        assert_eq!(computer.live(), a.live());
+        assert_eq!(rows(computer), rows(&a));
+    }
+    assert_eq!(
+        a.live(),
+        [
+            "Releases need three reviewers.",
+            "Releases need two reviewers."
+        ]
     );
 }

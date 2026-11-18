@@ -931,9 +931,11 @@ fn attribution_facts_111(tx: &Transaction) -> rusqlite::Result<()> {
 /// Memories shared across the user's computers ([`crate::replica`]): a
 /// global id on each replicated row (memories, observations, primers), a
 /// revision on observations and primers (memories have one), the tables
-/// that map global ids, queue changes to send, record skipped messages and
-/// keep the stream position, and the triggers that capture every change of
-/// a replicated column ([`crate::replica::schema::install`]). Rows already
+/// that map global ids, queue changes to send, record skipped messages,
+/// keep the stream position and this store's random store id, and record
+/// the memories archived because another holds the same fact, and the
+/// triggers that capture every change of a replicated column
+/// ([`crate::replica::schema::install`]). Rows already
 /// in the store are not queued here; a computer sends them when it first
 /// joins the stream.
 ///

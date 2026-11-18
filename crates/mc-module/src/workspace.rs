@@ -402,10 +402,10 @@ mod tests {
         // Memories at the workspace (8) or global (9) level are not project
         // memories, so no project reader sees them.
         assert_eq!(ids(workspace.memories(&conn, 10).unwrap()), [1, 2, 10, 11]);
-        // A store without the two columns has no capture trigger naming
+        // A store without the two columns has no capture triggers naming
         // them either ([`crate::replica`]).
         conn.execute_batch(
-            "DROP TRIGGER memories_replica_au;
+            "DROP TRIGGER memories_replica_au; DROP TRIGGER memories_replica_raised;
              ALTER TABLE memories DROP COLUMN shareable; ALTER TABLE memories DROP COLUMN scope;",
         )
         .unwrap();

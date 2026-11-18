@@ -18,12 +18,22 @@
 //! - **Join** ([`Replica::join`]): the first time a computer follows the
 //!   stream it applies everyone else's history, then publishes every row of
 //!   its own that has no global id yet.
+//! - **Catch up** ([`Replica::catch_up`]): after every start, the engine
+//!   reads the stream to its end before it sends anything.
 //!
-//! A row's global id is `<box id>.<local id>` of the computer that first
-//! published it ([`wire::global_id`]); the local id agents see keeps naming
-//! the same row on each computer. The box id is the computer's machine id,
-//! read from the bus client ([`box_id`]); without one nothing publishes and
-//! the outbox waits.
+//! A row's global id is `<store id>.<table letter><local id>` of the store
+//! that first published it ([`wire::global_id`]), given when the row is
+//! first sent; the local id agents see keeps naming the same row on each
+//! computer. The store id is 32 random hex characters made once per
+//! `context.db` and kept in `replica_state`, so a store made anew never
+//! reuses an id an earlier store of the same computer sent. A store that
+//! may have been copied or restored takes a new store id before it sends
+//! again ([`Replica::catch_up`], [`apply`]): when it runs on another
+//! computer than the one it last ran on, or when the stream holds a message
+//! it sent that it doesn't know, which a later state of the store sent. The
+//! box id is the computer's machine id, read from the bus client
+//! ([`box_id`]); it names the writer of each message, and without one
+//! nothing publishes and the outbox waits.
 //!
 //! This module is the engine. The live hub connection (JetStream on the
 //! hub's domain, the durable consumer named for the box id) implements
@@ -52,6 +62,7 @@ mod schema_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -117,6 +128,9 @@ pub struct Replica {
     pub(crate) hub: Arc<dyn Hub>,
     pub(crate) sealer: Arc<dyn Sealer>,
     pub(crate) box_id: String,
+    /// Whether this engine read the stream to its end since it started
+    /// ([`Replica::catch_up`]); nothing is sent before it has.
+    caught_up: AtomicBool,
 }
 
 impl Replica {
@@ -131,6 +145,7 @@ impl Replica {
             hub,
             sealer,
             box_id,
+            caught_up: AtomicBool::new(false),
         }
     }
 
@@ -152,13 +167,37 @@ impl Replica {
     /// Join the stream, once: apply everyone else's history up to the
     /// stream's newest message, then queue a create for every row of this
     /// computer that has no global id yet, archived rows included, so undo
-    /// and restore work everywhere. A row of this computer that matches a
-    /// fact the history carried was linked to it while the history applied
-    /// ([`apply`]), and is sent under that fact's id instead.
+    /// and restore work everywhere. A row of this computer that holds a fact
+    /// the history carried under a lower global id is archived here
+    /// ([`apply`]); it is still sent, as it stands, and every computer
+    /// archives it the same way.
     pub async fn join(&self) -> Result<(), String> {
+        self.catch_up().await?;
         if self.joined_at()?.is_some() {
             return Ok(());
         }
+        let queued = self
+            .db
+            .with_connection(|conn| queue_unsent(conn, &self.box_id));
+        let queued = queued.map_err(|error| error.to_string())?;
+        let at = self.position()?;
+        tracing::info!("ck-mc: replica: joined the memory stream at {at}; {queued} rows queued");
+        Ok(())
+    }
+
+    /// Read the stream to its end, once per start of the engine, before
+    /// anything is sent. A store copied to this computer from another one
+    /// takes a new store id first, and a store restored to an earlier state
+    /// takes one when this reading finds a message it sent in a later state
+    /// ([`apply`]): either way, no global id a copy of the store may have
+    /// sent is ever sent again for another row.
+    pub async fn catch_up(&self) -> Result<(), String> {
+        if self.caught_up.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.db
+            .with_connection(|conn| moved_here(conn, &self.box_id))
+            .map_err(|error| error.to_string())?;
         let last = self
             .hub
             .last_seq()
@@ -170,13 +209,9 @@ impl Replica {
             }
         }
         if self.position()? < last {
-            return Err("the stream's history could not all be read".into());
+            return Err("the stream could not all be read".into());
         }
-        let queued = self
-            .db
-            .with_connection(|conn| queue_unsent(conn, &self.box_id));
-        let queued = queued.map_err(|error| error.to_string())?;
-        tracing::info!("ck-mc: replica: joined the memory stream at {last}; {queued} rows queued");
+        self.caught_up.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -226,6 +261,47 @@ impl Replica {
             }
         }
     }
+}
+
+/// The id this store's global ids are formed under.
+pub(crate) fn store_id(conn: &Connection) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT store_id FROM replica_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+}
+
+/// Give this store a new store id, so the global ids it forms from now on
+/// are new everywhere. Rows already sent keep their ids.
+pub(crate) fn new_store_id(conn: &Connection, why: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE replica_state SET store_id = lower(hex(randomblob(16))) WHERE id = 1",
+        [],
+    )?;
+    tracing::info!("ck-mc: replica: this store takes a new store id: {why}");
+    Ok(())
+}
+
+/// A store that last ran on another computer was copied here: it takes a
+/// new store id, and records this computer's box id.
+fn moved_here(conn: &mut Connection, box_id: &str) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let recorded: Option<String> =
+        tx.query_row("SELECT box_id FROM replica_state WHERE id = 1", [], |row| {
+            row.get(0)
+        })?;
+    if recorded
+        .as_deref()
+        .is_some_and(|recorded| recorded != box_id)
+    {
+        new_store_id(&tx, "it last ran on another computer")?;
+        tx.execute(
+            "UPDATE replica_state SET box_id = ?1 WHERE id = 1",
+            [box_id],
+        )?;
+    }
+    tx.commit()
 }
 
 /// Queue a create for every row of this computer that was never sent, and

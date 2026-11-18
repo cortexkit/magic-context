@@ -145,7 +145,14 @@ pub(crate) struct Computer {
 impl Computer {
     pub(crate) fn new(hub: &Arc<InMemoryHub>, n: u8) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let db = Arc::new(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap());
+        drop(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap());
+        Self::open(hub, n, dir)
+    }
+
+    /// Computer `n` running on the store in `dir`, which holds a
+    /// `context.db` already: a store copied or restored there.
+    pub(crate) fn open(hub: &Arc<InMemoryHub>, n: u8, dir: tempfile::TempDir) -> Self {
+        let db = Arc::new(ContextDb::open(&dir.path().join("context.db")).unwrap());
         let replica = Replica::new(
             Arc::clone(&db),
             Arc::clone(hub) as Arc<dyn super::hub::Hub>,
@@ -157,6 +164,33 @@ impl Computer {
             replica,
             _dir: dir,
         }
+    }
+
+    /// A copy of the store as it is now, in a folder of its own, as a
+    /// backup takes it.
+    pub(crate) fn copy(&self) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("context.db");
+        self.db.with_connection(|conn| {
+            conn.execute("VACUUM INTO ?1", [target.to_str().unwrap()])
+                .unwrap()
+        });
+        dir
+    }
+
+    /// The id this store's global ids are formed under.
+    pub(crate) fn store_id(&self) -> String {
+        self.db
+            .with_connection(|conn| super::store_id(conn))
+            .unwrap()
+    }
+
+    /// The live memories' texts, in order.
+    pub(crate) fn live(&self) -> Vec<String> {
+        self.texts(&format!(
+            "SELECT content FROM memories WHERE {} ORDER BY content",
+            crate::context_migrations::LIVE
+        ))
     }
 
     /// Run `sql` on the store, as a writer outside the engine would.
@@ -265,14 +299,19 @@ pub(crate) fn revisions(conn: &rusqlite::Connection) -> std::collections::BTreeM
     found
 }
 
-/// The outbox, one `kind:id change` line per row, in order.
+/// The outbox rows that would be sent, one `kind:id change` line per row,
+/// in order. A `raised` row is a revision raised with nothing replicated
+/// changed, which is never sent by itself.
 pub(crate) fn queued(conn: &rusqlite::Connection) -> Vec<String> {
-    conn.prepare("SELECT kind || ':' || local_id || ' ' || change FROM replica_outbox ORDER BY kind, local_id")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap()
+    conn.prepare(
+        "SELECT kind || ':' || local_id || ' ' || change FROM replica_outbox
+          WHERE state <> 'raised' ORDER BY kind, local_id",
+    )
+    .unwrap()
+    .query_map([], |row| row.get(0))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
 }
 
 /// The writer under test, run after [`mark_sent`] with `before` the
@@ -314,7 +353,11 @@ pub(crate) fn assert_captured(
             .iter()
             .any(|line| line.split(' ').next() == Some(row.as_str()))
         {
-            assert_eq!(after.get(row), Some(old), "{row} did not change");
+            let now = after.get(row).copied();
+            assert!(
+                now == Some(*old) || now.is_some_and(|now| held(conn, row, now)),
+                "{row} did not change"
+            );
         }
     }
 }
@@ -424,12 +467,24 @@ pub(crate) fn assert_changes_captured(
     }
     for (row, (old, _)) in before {
         if !changed.contains(row) {
-            assert_eq!(
-                after.get(row).map(|(revision, _)| *revision),
-                Some(*old),
-                "{row}"
+            let now = after.get(row).map(|(revision, _)| *revision);
+            assert!(
+                now == Some(*old) || now.is_some_and(|now| held(conn, row, now)),
+                "{row}: a row whose replicated state is unchanged keeps its revision, or holds a raised one that is never sent"
             );
         }
     }
     changed
+}
+
+/// Whether row `row` (`kind:id`) holds revision `revision` as `raised`: a
+/// revision raised with nothing replicated changed, never sent by itself.
+fn held(conn: &rusqlite::Connection, row: &str, revision: i64) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replica_outbox
+                        WHERE kind || ':' || local_id = ?1 AND state = 'raised' AND revision = ?2)",
+        rusqlite::params![row, revision],
+        |found| found.get(0),
+    )
+    .unwrap()
 }

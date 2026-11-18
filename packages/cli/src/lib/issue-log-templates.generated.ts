@@ -2220,6 +2220,7 @@ const TEMPLATE_DATA = [
 "[migrations] migration worker connection closed: \x01\x020p",
 "channel2 host-checkpoint reset failed (ignored): \x01",
 "ck-mc: dreamer: closing interrupted runs failed: \x01",
+"ck-mc: replica: this store takes a new store id: \x01",
 "compartment trigger: raw tail inspection failed: \x01",
 "reasoning removal: committed set re-read failed: \x01",
 "session directory lookup failed; using fallback: \x01",

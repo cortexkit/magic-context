@@ -230,3 +230,116 @@ fn a_write_waiting_on_another_connection_during_an_apply_is_still_captured() {
     tx.commit().unwrap();
     assert_eq!(writer.join().unwrap(), "A local write.");
 }
+
+/// At the schema version this build reads, every replicated table and
+/// every child table has its capture triggers. A migration that rebuilds or
+/// alters one of them must create them again, or capture stops silently.
+#[test]
+fn every_replicated_table_has_its_capture_triggers_at_the_schema_version() {
+    let conn = ContextDb::fresh_in_memory();
+    assert_eq!(
+        crate::context_db::live_schema_version(&conn).unwrap(),
+        i64::from(crate::context_migrations::SCHEMA_VERSION)
+    );
+    let triggers: BTreeSet<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let names = TABLES
+        .iter()
+        .map(|table| table.name)
+        .chain(CHILDREN.iter().map(|child| child.name));
+    for name in names {
+        for suffix in ["ai", "au", "ad"] {
+            let trigger = format!("{name}_replica_{suffix}");
+            assert!(triggers.contains(&trigger), "{trigger} is missing");
+        }
+    }
+    assert!(triggers.contains("memories_replica_raised"));
+}
+
+/// Mark the row's queued change sent, so its next change raises the
+/// revision again.
+fn sent(computer: &Computer, seq: i64) {
+    computer.execute(&format!(
+        "UPDATE replica_outbox SET state = 'published', stream_seq = {seq} WHERE state = 'pending'"
+    ));
+}
+
+fn evidence_at_revision(computer: &Computer, id: i64) -> (i64, i64) {
+    computer
+        .value::<String>(&format!(
+            "SELECT revision || ' ' || (SELECT COUNT(*) FROM memory_clause_evidence e
+                                     WHERE e.memory_id = m.id AND e.revision = m.revision)
+           FROM memories m WHERE id = {id}"
+        ))
+        .split_once(' ')
+        .map(|(revision, count)| (revision.parse().unwrap(), count.parse().unwrap()))
+        .unwrap()
+}
+
+/// A revision the capture raises itself, over text it leaves as it was,
+/// keeps the memory's clause evidence, whether the change is the memory's
+/// own or one of its child rows'. A change of the text keeps none.
+#[test]
+fn a_revision_the_capture_raises_keeps_the_clause_evidence_of_unchanged_text() {
+    let hub = super::hub::InMemoryHub::new();
+    let computer = Computer::new(&hub, 1);
+    let id = memory(&computer, "pj-a", "The parser rejects empty input.");
+    computer.execute(&format!(
+        "UPDATE memories SET global_id = 'g.{id}' WHERE id = {id};
+         INSERT INTO memory_clause_evidence (memory_id, revision, clause_ordinal, text_hash, evidence_json)
+             VALUES ({id}, 1, 0, 'clause', '[]');"
+    ));
+    sent(&computer, 1);
+    computer.execute(&format!(
+        "UPDATE memories SET importance = 80 WHERE id = {id}"
+    ));
+    assert_eq!(evidence_at_revision(&computer, id), (2, 1));
+    sent(&computer, 2);
+    computer.execute(&format!(
+        "INSERT INTO memory_verifications (memory_id, file_path, verified_at) VALUES ({id}, 'src/a.rs', 0)"
+    ));
+    assert_eq!(evidence_at_revision(&computer, id), (3, 1));
+    sent(&computer, 3);
+    computer.execute(&format!(
+        "UPDATE memories SET content = 'The parser rejects blank input.' WHERE id = {id}"
+    ));
+    assert_eq!(evidence_at_revision(&computer, id), (4, 0));
+}
+
+/// A revision raised with nothing replicated changed is held as `raised`:
+/// never sent by itself, and the revision the next change is sent at.
+#[test]
+fn a_revision_raised_alone_is_held_and_the_next_change_rides_on_it() {
+    let hub = super::hub::InMemoryHub::new();
+    let computer = Computer::new(&hub, 1);
+    let id = memory(&computer, "pj-a", "The parser rejects empty input.");
+    computer.execute(&format!(
+        "UPDATE memories SET global_id = 'g.{id}' WHERE id = {id};"
+    ));
+    sent(&computer, 1);
+    computer.execute(&format!(
+        "UPDATE memories SET revision = revision + 1, seen_count = seen_count + 1 WHERE id = {id}"
+    ));
+    assert_eq!(
+        outbox(&computer),
+        [
+            format!("memory:{id}@1:create:published"),
+            format!("memory:{id}@2:metadata:raised")
+        ]
+    );
+    computer.execute(&format!(
+        "UPDATE memories SET importance = 70 WHERE id = {id}"
+    ));
+    assert_eq!(
+        outbox(&computer),
+        [
+            format!("memory:{id}@1:create:published"),
+            format!("memory:{id}@2:metadata:pending")
+        ]
+    );
+}

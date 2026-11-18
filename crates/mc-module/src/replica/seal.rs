@@ -12,7 +12,10 @@
 //! holds 1 to 256 items.
 //!
 //! Plaintext is memory content: it is held in buffers wiped when dropped,
-//! and no error, log line or `Debug` output carries it.
+//! and no error, log line or `Debug` output carries it. The request and
+//! reply of a vault call hold it as base64 text, which is wiped once read
+//! ([`wipe_plaintexts`]); the request bytes handed to the SDK are its own
+//! from then on, and are not wiped.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +24,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use subc_client_rs::CallOptions;
 use subc_protocol::{BindIdentity, RouteTarget};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::wire::{decode, encode};
 
@@ -141,6 +144,47 @@ pub fn open_batch_params(items: &[OpenInput]) -> Value {
     })
 }
 
+/// Overwrite every `plaintext` text in a vault request or reply, once it
+/// is no longer needed.
+pub(crate) fn wipe_plaintexts(value: &mut Value) {
+    match value {
+        Value::Object(members) => {
+            for (key, member) in members.iter_mut() {
+                match member {
+                    Value::String(text) if key == "plaintext" => text.zeroize(),
+                    other => wipe_plaintexts(other),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(wipe_plaintexts),
+        _ => {}
+    }
+}
+
+/// A writer that only counts, to size a buffer before writing into it.
+struct Counted(usize);
+
+impl std::io::Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `value` as JSON bytes, written into a buffer of its exact size, so no
+/// growing buffer leaves an unwiped earlier copy behind.
+fn sized_json(value: &Value) -> Result<Zeroizing<Vec<u8>>, SealError> {
+    let encode = |_| SealError::permanent("vault_request_encode");
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, value).map_err(encode)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(counted.0));
+    serde_json::to_writer(&mut *bytes, value).map_err(encode)?;
+    Ok(bytes)
+}
+
 /// The refusal a whole-call error body carries, if `value` is one.
 fn refusal(value: &Value) -> Option<SealError> {
     let error = value.get("error")?;
@@ -239,18 +283,19 @@ impl Claustrum {
             .get()
             .await
             .map_err(|_| SealError::transient("vault_connect"))?;
-        // The request holds plaintext, so its buffer is wiped once sent.
-        let body = Zeroizing::new(
-            serde_json::to_vec(&json!({"method": method, "params": params}))
-                .map_err(|_| SealError::permanent("vault_request_encode"))?,
-        );
+        // The request holds plaintext: its text is wiped once written, and
+        // its bytes go to the SDK, which owns them from then on.
+        let mut request = json!({"method": method, "params": params});
+        let body = sized_json(&request);
+        wipe_plaintexts(&mut request);
+        let mut body = body?;
         let reply = consumer
             .call(
                 RouteTarget::ManagementSurface {
                     module_id: VAULT_MODULE.into(),
                 },
                 BindIdentity::new(crate::MODULE_ID, "replica"),
-                body.to_vec(),
+                std::mem::take(&mut *body),
                 CallOptions {
                     timeout: VAULT_CALL_TIMEOUT,
                     ..Default::default()
@@ -273,9 +318,11 @@ impl Sealer for Claustrum {
     }
 
     async fn open_batch(&self, items: &[OpenInput]) -> Result<Vec<Opened>, SealError> {
-        let reply = self
+        let mut reply = self
             .call("fleet.epoch_open_batch", open_batch_params(items))
             .await?;
-        parse_open_reply(&reply, items.len())
+        let opened = parse_open_reply(&reply, items.len());
+        wipe_plaintexts(&mut reply);
+        opened
     }
 }

@@ -119,11 +119,13 @@ fn migration_112_adds_replication_drops_the_engram_sync_and_keeps_every_row() {
         "index idx_memory_observations_global_id",
         "index idx_message_fts_rowid_map_fts_rowid",
         "index idx_primers_global_id",
+        "index idx_replica_derived_survivor",
         "index idx_replica_ids_local",
         "index idx_replica_outbox_row",
         "index idx_replica_outbox_state",
         "index idx_replica_pending_links_target",
         "table replica_applying",
+        "table replica_derived",
         "table replica_ids",
         "table replica_outbox",
         "table replica_pending_links",
@@ -142,6 +144,7 @@ fn migration_112_adds_replication_drops_the_engram_sync_and_keeps_every_row() {
     .iter()
     .flat_map(|table| ["ai", "au", "ad"].map(|when| format!("trigger {table}_replica_{when}")))
     .collect();
+    triggers.push("trigger memories_replica_raised".into());
     let mut wanted: Vec<String> = expected.drain(..).map(str::to_owned).collect();
     wanted.append(&mut triggers);
     wanted.sort();
@@ -172,14 +175,22 @@ fn migration_112_adds_replication_drops_the_engram_sync_and_keeps_every_row() {
         )
         .unwrap();
     assert_eq!(fresh, (2, 1, 1));
-    let state: (i64, Option<String>, Option<i64>) = conn
+    let state: (i64, Option<String>, Option<i64>, String) = conn
         .query_row(
-            "SELECT stream_seq, box_id, joined_at FROM replica_state",
+            "SELECT stream_seq, box_id, joined_at, store_id FROM replica_state",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(state, (0, None, None));
+    assert_eq!((state.0, state.1, state.2), (0, None, None));
+    assert!(
+        state.3.len() == 32
+            && state
+                .3
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+        "the store id is 32 lowercase hex characters"
+    );
     let queued: i64 = conn
         .query_row("SELECT COUNT(*) FROM replica_outbox", [], |row| row.get(0))
         .unwrap();
@@ -233,4 +244,16 @@ fn a_store_ck_mc_creates_has_the_replication_tables_and_no_engram_sync() {
     assert!(!names
         .iter()
         .any(|name| name == "memory_ops" || name == "memory_sync_state"));
+    // Each store ck-mc creates forms its global ids under a store id of its own.
+    let other = tempfile::tempdir().unwrap();
+    let second =
+        crate::context_db::ContextDb::create_for_tests(&other.path().join("context.db")).unwrap();
+    let ids: Vec<String> = [&db, &second]
+        .iter()
+        .map(|db| {
+            db.with_connection(|conn| crate::replica::store_id(conn))
+                .unwrap()
+        })
+        .collect();
+    assert_ne!(ids[0], ids[1]);
 }

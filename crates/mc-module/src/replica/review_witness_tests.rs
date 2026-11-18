@@ -1,8 +1,7 @@
 //! Witnesses of defects an independent review found in the replica engine
 //! (`.cortexkit/internal-docs/audits/shared-memories-review.md`). Each test
-//! states the behaviour the design promises and fails on the code as it was
-//! reviewed. They are ignored so the suite stays green; the round that fixes
-//! a defect un-ignores its witness.
+//! states the behaviour the design promises; each failed on the code as it
+//! was reviewed.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -36,7 +35,6 @@ fn rewrite(computer: &Computer, text: &str) {
 /// stream but not yet read on A. The person's delete must hold on A, as it
 /// does on every other computer.
 #[tokio::test]
-#[ignore = "review witness: an arrival re-creates a row this computer deleted before its tombstone was sent"]
 async fn a_persons_delete_is_not_undone_by_an_earlier_change_from_another_computer() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
@@ -73,7 +71,6 @@ async fn a_persons_delete_is_not_undone_by_an_earlier_change_from_another_comput
 /// global ids its old ones were sent under, and it must get its old
 /// memories back from the stream like any computer that joins.
 #[tokio::test]
-#[ignore = "review witness: a store made anew on the same box reuses its old global ids and skips its own history"]
 async fn a_store_made_anew_on_the_same_computer_keeps_every_memory_on_every_computer() {
     let hub = InMemoryHub::new();
     let b = Computer::new(&hub, 2);
@@ -124,7 +121,6 @@ fn gives_up_once(attempts: i32) -> bool {
 /// store was only busy. It must apply once the store is free, not be
 /// recorded as rejected and skipped for good.
 #[tokio::test]
-#[ignore = "review witness: a store briefly busy at the start of an apply rejects a good message for good"]
 async fn a_store_busy_for_a_moment_never_skips_a_good_message() {
     let hub = InMemoryHub::new();
     let a = Computer::new(&hub, 1);
@@ -179,13 +175,25 @@ async fn a_store_busy_for_a_moment_never_skips_a_good_message() {
 
 /// The summarizer admits a fact a live memory already holds: the memory is
 /// seen once more, which only moves its read counters. Read counters never
-/// travel, so nothing is queued for the other computers.
-#[test]
-#[ignore = "review witness: a read-counter-only write is captured because the writer raises the revision"]
-fn a_fact_seen_again_queues_nothing_for_the_other_computers() {
-    use crate::summary::two_pass::applier::{admit, Admission};
-    let mut conn = ContextDb::fresh_in_memory();
+/// travel, so nothing is queued for the other computers. The writer still
+/// raises the memory's revision, which its own history row is keyed by; that
+/// raise is held as `raised` and never sent, so the check counts only rows
+/// that would be sent, and a publish round proves the hub receives nothing.
+#[tokio::test]
+async fn a_fact_seen_again_queues_nothing_for_the_other_computers() {
+    let hub = InMemoryHub::new();
+    let computer = Computer::new(&hub, 1);
+    computer.replica.join().await.unwrap();
     let text = "Releases need two reviewers.";
+    computer.db.with_connection(|conn| sighting_of(conn, text));
+    computer.replica.publish().await.unwrap();
+    assert!(hub.messages().is_empty(), "the hub received nothing");
+}
+
+/// Write memory `text` of project `pj-a` as sent, then have the summarizer
+/// see it again, checking that the sighting changed nothing replicated.
+fn sighting_of(conn: &mut rusqlite::Connection, text: &str) {
+    use crate::summary::two_pass::applier::{admit, Admission};
     conn.execute(
         "INSERT INTO memories (level, owner_id, category, origin_category, content,
              normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
@@ -197,10 +205,10 @@ fn a_fact_seen_again_queues_nothing_for_the_other_computers() {
         ],
     )
     .unwrap();
-    mark_sent(&conn);
-    let before = state(&conn);
+    mark_sent(conn);
+    let before = state(conn);
     let receipt = admit(
-        &mut conn,
+        conn,
         &Admission {
             key: "fact-seen-again",
             operation: "new",
@@ -226,13 +234,12 @@ fn a_fact_seen_again_queues_nothing_for_the_other_computers() {
         .query_row("SELECT seen_count FROM memories", [], |row| row.get(0))
         .unwrap();
     assert!(seen > 0, "the sighting was counted");
-    assert_changes_captured(&conn, &before);
+    assert_changes_captured(conn, &before);
 }
 
 /// A changes a memory's text to a fact B has just written itself and not
 /// sent yet. Both computers must end with the same rows.
 #[tokio::test]
-#[ignore = "review witness: an arrival that collides with a local row's unique key is rejected and the computers diverge"]
 async fn an_arrival_that_matches_a_local_fact_still_converges() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
@@ -256,7 +263,6 @@ async fn an_arrival_that_matches_a_local_fact_still_converges() {
 /// before it hears of the other's. Every computer must end with the same
 /// rows, whatever order the creates reached it in.
 #[tokio::test]
-#[ignore = "review witness: the same-fact link depends on arrival timing, so computers end with different rows"]
 async fn the_same_fact_written_twice_converges_whatever_the_order_it_arrives_in() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
@@ -283,7 +289,6 @@ async fn the_same_fact_written_twice_converges_whatever_the_order_it_arrives_in(
 /// It must still be found at the memory's revision after the arrival, as a
 /// local writer that keeps the text copies it to the revision it makes.
 #[tokio::test]
-#[ignore = "review witness: an arrival raises the revision without carrying the memory's clause evidence"]
 async fn an_arrival_that_keeps_the_text_keeps_its_clause_evidence() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));

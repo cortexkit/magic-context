@@ -206,3 +206,22 @@ async fn a_message_ck_mc_seals_opens_under_the_samples_rules() {
     };
     assert!(matches!(sealer.open_one(&other), Opened::Refused { .. }));
 }
+
+/// The base64 plaintext a vault request or reply holds as text is wiped
+/// once it is no longer needed, and nothing else in it changes.
+#[test]
+fn the_plaintext_text_of_a_vault_request_and_reply_is_wiped() {
+    let mut request = seal_batch_params(&[SealInput {
+        aad: b"aad".to_vec(),
+        plaintext: Zeroizing::new(b"a secret memory".to_vec()),
+    }]);
+    let mut reply: Value = serde_json::json!({
+        "result": {"items": [{"plaintext": encode(b"a secret memory")}, {"error": {"code": "x", "class": "permanent"}}]}
+    });
+    super::seal::wipe_plaintexts(&mut request);
+    super::seal::wipe_plaintexts(&mut reply);
+    assert_eq!(request["items"][0]["plaintext"], "");
+    assert_eq!(request["items"][0]["aad"], encode(b"aad"));
+    assert_eq!(reply["result"]["items"][0]["plaintext"], "");
+    assert_eq!(reply["result"]["items"][1]["error"]["code"], "x");
+}

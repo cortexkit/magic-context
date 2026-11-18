@@ -66,13 +66,15 @@ fn log_unaddressable(kind: &str, owner: &str, reason: &str) {
 
 impl Replica {
     /// Send one batch of the outbox. Nothing is sent before this computer
-    /// joined the stream, so its own rows can link to the facts others
-    /// already published instead of duplicating them.
+    /// joined the stream, so its rows meet the facts others already
+    /// published first, nor after a start before the engine read the stream
+    /// to its end ([`Replica::catch_up`]).
     pub async fn publish(&self) -> Result<PublishReport, String> {
         let mut report = PublishReport::default();
         if self.joined_at()?.is_none() {
             return Ok(report);
         }
+        self.catch_up().await?;
         let (claimed, unaddressable) = self
             .db
             .with_connection(|conn| claim(conn, &self.box_id, BATCH))
@@ -162,6 +164,9 @@ fn claim(
         Option<i64>,
     );
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Read in the claim's own transaction: an apply may have given the
+    // store a new one.
+    let store_id = super::store_id(&tx)?;
     let rows: Vec<Row> = tx
         .prepare(
             "SELECT id, kind, local_id, base_revision, change, global_id, level, owner, actor, epoch
@@ -206,12 +211,12 @@ fn claim(
             let global = match current.global_id {
                 Some(global) => global,
                 None => {
-                    let global = wire::global_id(box_id, &kind, local_id);
+                    let global = wire::global_id(&store_id, &kind, local_id);
                     snapshot::assign(&tx, &kind, local_id, &global)?;
                     global
                 }
             };
-            let snapshot = snapshot::read(&tx, &kind, box_id, local_id)?;
+            let snapshot = snapshot::read(&tx, &kind, &store_id, local_id)?;
             (
                 global,
                 current.revision,

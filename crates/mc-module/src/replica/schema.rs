@@ -198,8 +198,11 @@ pub(crate) const CHILDREN: [Child; 3] = [
 ];
 
 /// Outbox states in which the row's current revision has never left this
-/// computer, so a further change may keep it.
-const UNSENT: &str = "('pending', 'too_large', 'unaddressable')";
+/// computer, so a further change may keep it. `raised` is a revision a
+/// writer raised with no replicated column changed: it is never sent by
+/// itself, but a later change of the row rides on it instead of raising
+/// the revision again.
+const UNSENT: &str = "('pending', 'too_large', 'unaddressable', 'raised')";
 
 /// Milliseconds since the epoch, in SQL any SQLite has.
 const NOW_MS: &str = "CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER)";
@@ -225,15 +228,25 @@ fn writer(fallback: &str) -> String {
 }
 
 /// The statement that records a change of row `id` at `revision` in the
-/// outbox. A row keeps one unpublished outbox row: a later change replaces
-/// it, keeping the base revision and `create` while nothing of it was sent,
-/// and a plain metadata change never hides the more telling kind of an
-/// earlier change it joins.
-fn queue(kind: &str, id: &str, revision: &str, base: &str, change: &str, actor: &str) -> String {
+/// outbox, when `condition` holds. A row keeps one unpublished outbox row:
+/// a later change replaces it, keeping the base revision and `create` while
+/// nothing of it was sent, and a plain metadata change never hides the more
+/// telling kind of an earlier change it joins. A `raised` row becomes a
+/// change to send.
+fn queue(
+    kind: &str,
+    id: &str,
+    revision: &str,
+    base: &str,
+    change: &str,
+    actor: &str,
+    condition: &str,
+) -> String {
     format!(
         "INSERT INTO replica_outbox
              (kind, local_id, revision, base_revision, change, created_at, actor, run_id, epoch)
-         VALUES ('{kind}', {id}, {revision}, {base}, {change}, {NOW_MS}, {writer})
+         SELECT '{kind}', {id}, {revision}, {base}, {change}, {NOW_MS}, {writer}
+          WHERE {condition}
          ON CONFLICT (kind, local_id) WHERE state <> 'published' DO UPDATE SET
              base_revision = CASE WHEN replica_outbox.state IN {UNSENT}
                  THEN replica_outbox.base_revision ELSE excluded.base_revision END,
@@ -254,20 +267,80 @@ fn queue(kind: &str, id: &str, revision: &str, base: &str, change: &str, actor: 
     )
 }
 
-/// Raise row `id`'s revision for a change, unless the current revision is
-/// still unsent: an unsent revision can carry any number of changes, since
-/// the publisher reads the row as it is when it sends it. A row without a
-/// global id was never sent at all.
-fn raise(table: &Table, id: &str, condition: &str) -> String {
+/// The outbox row of a memory revision a writer raised with no replicated
+/// column changed, held as `raised`: never sent by itself, never counted as
+/// a change of this computer's that holds back an arrival, and the revision
+/// a later change of the row is sent at. An unpublished row it meets keeps
+/// its state, and takes the new revision while that row is still unsent.
+fn hold(id: &str, revision: &str, base: &str) -> String {
     format!(
-        "UPDATE {name} SET revision = revision + 1
-          WHERE id = {id} AND {condition} AND global_id IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM replica_outbox o
-                             WHERE o.kind = '{kind}' AND o.local_id = {id}
-                               AND o.state IN {UNSENT} AND o.revision = {name}.revision);",
-        name = table.name,
+        "INSERT INTO replica_outbox
+             (kind, local_id, revision, base_revision, change, created_at, state, actor)
+         VALUES ('memory', {id}, {revision}, {base}, 'metadata', {NOW_MS}, 'raised', 'ck-mc')
+         ON CONFLICT (kind, local_id) WHERE state <> 'published' DO UPDATE SET
+             revision = CASE WHEN replica_outbox.state IN {UNSENT}
+                 THEN excluded.revision ELSE replica_outbox.revision END;"
+    )
+}
+
+/// Copy memory `id`'s clause evidence from revision `from` to revision `to`
+/// (SQL expressions over the memory, `m`) when `condition` holds. Readers
+/// look a memory's clause evidence up at its current revision, so a
+/// revision raised over unchanged text must keep it, as the writers that
+/// raise the revision themselves do. Rows already there stay. The capture
+/// triggers' own raise and an applied arrival ([`super::apply`]) both carry
+/// it through this statement.
+pub(crate) fn carry_evidence(id: &str, from: &str, to: &str, condition: &str) -> String {
+    format!(
+        "INSERT OR IGNORE INTO memory_clause_evidence
+             (memory_id, revision, clause_ordinal, text_hash, evidence_json)
+         SELECT e.memory_id, {to}, e.clause_ordinal, e.text_hash, e.evidence_json
+           FROM memories m
+           JOIN memory_clause_evidence e ON e.memory_id = m.id AND e.revision = {from}
+          WHERE m.id = {id} AND {condition};"
+    )
+}
+
+/// Whether the capture raises row `id`'s revision, with `row` naming the
+/// row's table or an alias of it: the row was sent once, and its current
+/// revision isn't still unsent. An unsent revision can carry any number of
+/// changes, since the publisher reads the row as it is when it sends it.
+fn raisable(table: &Table, row: &str, id: &str) -> String {
+    format!(
+        "{row}.global_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM replica_outbox o
+                          WHERE o.kind = '{kind}' AND o.local_id = {id}
+                            AND o.state IN {UNSENT} AND o.revision = {row}.revision)",
         kind = table.kind,
     )
+}
+
+/// Raise row `id`'s revision for a change when `condition` (its columns
+/// written `{row}.column`) and [`raisable`] hold. A memory's clause evidence
+/// goes to the new revision first, under the same conditions, when
+/// `keeps_text` holds too.
+fn raise(table: &Table, id: &str, condition: &str, keeps_text: &str) -> String {
+    let update = format!(
+        "UPDATE {name} SET revision = revision + 1
+          WHERE id = {id} AND {condition} AND {raisable};",
+        name = table.name,
+        condition = condition.replace("{row}", table.name),
+        raisable = raisable(table, table.name, id),
+    );
+    if table.kind != MEMORIES.kind {
+        return update;
+    }
+    let carry = carry_evidence(
+        id,
+        "m.revision",
+        "m.revision + 1",
+        &format!(
+            "{} AND {} AND {keeps_text}",
+            condition.replace("{row}", "m"),
+            raisable(table, "m", id)
+        ),
+    );
+    format!("{carry}\n{update}")
 }
 
 /// `NEW.a IS NOT OLD.a OR …` over `columns`: an update that rewrites a
@@ -339,7 +412,11 @@ fn table_triggers(table: &Table) -> String {
     let (name, kind) = (table.name, table.kind);
     // Agent-level memories never replicate: an agent lives on one computer,
     // and its memories travel with it through the agent-data move. A row
-    // that moves to another level is captured then, as a create.
+    // that moves from the agent level to another level is captured then, as
+    // a create. A sent row moved into the agent level is not captured at
+    // all, so the other computers keep it at its old level. No writer moves
+    // a memory into the agent level today; one that ever does must send a
+    // tombstone for the row's global id, as a delete does.
     let (new_level, old_level) = if kind == "memory" {
         ("NEW.level <> 'agent' AND ", "OLD.level <> 'agent' AND ")
     } else {
@@ -350,31 +427,49 @@ fn table_triggers(table: &Table) -> String {
     } else {
         "'ck-mc'"
     };
-    let mut watched: Vec<&str> = table.replicated.to_vec();
-    // Writers of memories raise the revision themselves, often in a
-    // statement of its own before the rest of the change; watching it
-    // records that change at the revision the writer gave it.
-    if kind == "memory" {
-        watched.push("revision");
-    }
+    let changed = any_changed(table.replicated);
     let insert = format!(
         "CREATE TRIGGER {name}_replica_ai AFTER INSERT ON {name}
          WHEN {new_level}{CAPTURING}
          BEGIN
              {queue}
          END;",
-        queue = queue(kind, "NEW.id", "NEW.revision", "0", "'create'", created_by),
+        queue = queue(
+            kind,
+            "NEW.id",
+            "NEW.revision",
+            "0",
+            "'create'",
+            created_by,
+            "1"
+        ),
     );
+    // A writer that sets a memory's status or successor itself takes over
+    // from the archive this computer derived for it, the second of two rows
+    // holding one fact ([`super::apply`]): what it wrote is the row's state
+    // from then on, and is what gets sent.
+    let derived = if kind == "memory" {
+        "DELETE FROM replica_derived WHERE local_id = NEW.id
+            AND (NEW.status IS NOT OLD.status
+                 OR NEW.superseded_by_memory_id IS NOT OLD.superseded_by_memory_id);"
+    } else {
+        ""
+    };
     let update = format!(
         "CREATE TRIGGER {name}_replica_au AFTER UPDATE OF {columns} ON {name}
          WHEN {new_level}{CAPTURING} AND ({changed})
          BEGIN
              {raise}
              {queue}
+             {derived}
          END;",
-        columns = watched.join(", "),
-        changed = any_changed(&watched),
-        raise = raise(table, "NEW.id", "NEW.revision = OLD.revision"),
+        columns = table.replicated.join(", "),
+        raise = raise(
+            table,
+            "NEW.id",
+            "NEW.revision = OLD.revision",
+            "NEW.content IS OLD.content"
+        ),
         queue = queue(
             kind,
             "NEW.id",
@@ -382,16 +477,44 @@ fn table_triggers(table: &Table) -> String {
             "OLD.revision",
             &update_change(table),
             "'ck-mc'",
+            "1",
         ),
     );
+    // Writers of memories often raise the revision in a statement of its
+    // own before the rest of their change, and some raise it with nothing
+    // replicated changed at all (the summarizer seeing a fact again). Such a
+    // raise is held as `raised`: the change that follows, in the same
+    // transaction or a later one, is sent at that revision, and a raise
+    // alone is never sent. A row never sent has no revision anywhere else,
+    // so its raises are not recorded.
+    let raised = if kind == "memory" {
+        format!(
+            "CREATE TRIGGER {name}_replica_raised AFTER UPDATE OF revision ON {name}
+             WHEN {new_level}NEW.global_id IS NOT NULL AND {CAPTURING}
+                  AND NEW.revision IS NOT OLD.revision AND NOT ({changed})
+             BEGIN
+                 {hold}
+             END;",
+            hold = hold("NEW.id", "NEW.revision", "OLD.revision"),
+        )
+    } else {
+        String::new()
+    };
     // A row never sent is known nowhere else, so its delete sends nothing.
     // A sent row's delete sends a tombstone under its global id, which the
     // outbox row carries, with the level and owner its subject needs,
-    // because the row is gone by the time it is sent.
+    // because the row is gone by the time it is sent. The global id is
+    // marked deleted at once, in the delete's own transaction, so no
+    // arrival read before the tombstone is sent brings the row back.
     let (level, owner) = match kind {
         "memory" => ("OLD.level", "OLD.owner_id"),
         "primer" => ("NULL", "OLD.project_path"),
         _ => ("NULL", "NULL"),
+    };
+    let derived_gone = if kind == "memory" {
+        "DELETE FROM replica_derived WHERE local_id = OLD.id;"
+    } else {
+        ""
     };
     let delete = format!(
         "CREATE TRIGGER {name}_replica_ad AFTER DELETE ON {name}
@@ -419,37 +542,61 @@ fn table_triggers(table: &Table) -> String {
                  actor = excluded.actor,
                  run_id = excluded.run_id,
                  epoch = excluded.epoch;
+             INSERT INTO replica_ids (kind, global_id, local_id, deleted_at)
+             SELECT '{kind}', OLD.global_id, OLD.id, {NOW_MS}
+              WHERE OLD.global_id IS NOT NULL
+             ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at;
+             {derived_gone}
          END;",
         writer = writer("'ck-mc'"),
     );
-    format!("{insert}\n{update}\n{delete}")
+    format!("{insert}\n{update}\n{raised}\n{delete}")
 }
 
 /// The triggers of a child table: any change to one of its rows is a
-/// change of the memory that owns it. They only raise that memory's
-/// revision; the memory's own update trigger records the change.
+/// change of the memory that owns it, which is raised (with its clause
+/// evidence) and queued.
 fn child_triggers(child: &Child) -> String {
     let (name, owner) = (child.name, child.owner);
-    let raise_for = |row: &str| raise(&MEMORIES, &format!("{row}.{owner}"), "level <> 'agent'");
+    let change_of = |row: &str| {
+        let id = format!("{row}.{owner}");
+        let raise = raise(&MEMORIES, &id, "{row}.level <> 'agent'", "1");
+        let queue = queue(
+            MEMORIES.kind,
+            &id,
+            &format!("(SELECT revision FROM memories WHERE id = {id})"),
+            &format!(
+                "(SELECT CASE WHEN global_id IS NULL THEN 0 ELSE revision - 1 END
+                    FROM memories WHERE id = {id})"
+            ),
+            &format!(
+                "(SELECT CASE WHEN global_id IS NULL THEN 'create' ELSE 'metadata' END
+                    FROM memories WHERE id = {id})"
+            ),
+            "'ck-mc'",
+            &format!("EXISTS (SELECT 1 FROM memories WHERE id = {id} AND level <> 'agent')"),
+        );
+        format!("{raise}\n{queue}")
+    };
     format!(
         "CREATE TRIGGER {name}_replica_ai AFTER INSERT ON {name}
          WHEN {CAPTURING}
          BEGIN
-             {insert_raise}
+             {new_change}
          END;
          CREATE TRIGGER {name}_replica_au AFTER UPDATE ON {name}
          WHEN {CAPTURING} AND ({changed})
          BEGIN
-             {old_raise}
-             {insert_raise}
+             {old_change}
+             {new_change}
          END;
          CREATE TRIGGER {name}_replica_ad AFTER DELETE ON {name}
          WHEN {CAPTURING}
          BEGIN
-             {old_raise}
+             {old_change}
          END;",
-        insert_raise = raise_for("NEW"),
-        old_raise = raise_for("OLD"),
+        new_change = change_of("NEW"),
+        old_change = change_of("OLD"),
         changed = any_changed(child.replicated),
     )
 }
@@ -471,10 +618,10 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
          CREATE UNIQUE INDEX idx_primers_global_id ON primers(global_id)
              WHERE global_id IS NOT NULL;
 
-         -- Which local row each global id names. Several global ids may name
-         -- one row: the same fact written on two computers. A deleted row's
-         -- ids stay, marked deleted, so a late snapshot can't bring it back;
-         -- `local_id` is null for a delete that arrived before its row.
+         -- Which local row each global id names, one row per global id. A
+         -- deleted row's id stays, marked deleted, so a late snapshot can't
+         -- bring it back; `local_id` is null for a delete that arrived
+         -- before its row.
          CREATE TABLE replica_ids (
            kind TEXT NOT NULL CHECK (kind IN ('memory', 'observation', 'primer')),
            global_id TEXT PRIMARY KEY,
@@ -498,7 +645,7 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
              ('create', 'update', 'merge', 'archive', 'restore', 'metadata', 'delete')),
            created_at INTEGER NOT NULL,
            state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN
-             ('pending', 'sending', 'published', 'too_large', 'unaddressable')),
+             ('pending', 'sending', 'published', 'too_large', 'unaddressable', 'raised')),
            global_id TEXT,
            level TEXT,
            owner TEXT,
@@ -522,15 +669,32 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
            recorded_at INTEGER NOT NULL
          );
 
-         -- The stream position applied so far, this computer's box id, and
-         -- when it first joined the stream (null until then).
+         -- The stream position applied so far; the store id this store's
+         -- global ids are formed under (32 random lowercase hex characters,
+         -- made anew when the store may have been copied or restored); the
+         -- box id of the computer it last ran on; and when it first joined
+         -- the stream (null until then).
          CREATE TABLE replica_state (
            id INTEGER PRIMARY KEY CHECK (id = 1),
            stream_seq INTEGER NOT NULL DEFAULT 0,
+           store_id TEXT NOT NULL,
            box_id TEXT,
            joined_at INTEGER
          );
-         INSERT INTO replica_state (id) VALUES (1);
+         INSERT INTO replica_state (id, store_id) VALUES (1, lower(hex(randomblob(16))));
+
+         -- Memories this computer archived because another memory holds the
+         -- same fact (owner, category and text) under a lower global id
+         -- (`survivor`). The archive is this computer's alone: the row's own
+         -- status and successor, as its last change gave them, are kept here,
+         -- and are what is sent if the row is sent.
+         CREATE TABLE replica_derived (
+           local_id INTEGER PRIMARY KEY,
+           survivor INTEGER,
+           status TEXT,
+           superseded_by INTEGER
+         );
+         CREATE INDEX idx_replica_derived_survivor ON replica_derived(survivor);
 
          -- Holds a row only inside an apply transaction; see the triggers.
          CREATE TABLE replica_applying (applying INTEGER NOT NULL);

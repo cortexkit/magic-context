@@ -7,7 +7,10 @@
 //! child tables: `files` (its file mappings), `supersedes` (the memories it
 //! replaced) and `conflicts` (the memories it contradicts, where it is the
 //! newer end). `metadata_json` travels as an object without the keys that
-//! name this computer's state ([`LOCAL_METADATA_KEYS`]).
+//! name this computer's state ([`LOCAL_METADATA_KEYS`]). A memory this
+//! computer archived because another holds the same fact under a lower
+//! global id travels with its own status and successor, not that archive,
+//! which every computer derives for itself ([`super::apply`]).
 
 use rusqlite::types::Value as Sql;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -131,12 +134,12 @@ pub(crate) fn merged_metadata(arriving: &Value, local: Option<&str>) -> Option<S
 
 /// The global id of local memory `id`, for a link that names it: the id it
 /// was sent or arrived under, or, for a row never sent, the id it gets
-/// (`<box id>.<local id>`), with the row queued so the id it is named by
-/// reaches the other computers too. `None` for a memory that doesn't exist
-/// or doesn't replicate.
+/// under this store's id (`<store id>.m<local id>`), with the row queued so
+/// the id it is named by reaches the other computers too. `None` for a
+/// memory that doesn't exist or doesn't replicate.
 pub(crate) fn link_target(
     conn: &Connection,
-    box_id: &str,
+    store_id: &str,
     id: i64,
 ) -> rusqlite::Result<Option<String>> {
     let found: Option<(Option<String>, String, i64)> = conn
@@ -155,7 +158,7 @@ pub(crate) fn link_target(
     if let Some(global) = global {
         return Ok(Some(global));
     }
-    let global = super::wire::global_id(box_id, MEMORIES.kind, id);
+    let global = super::wire::global_id(store_id, MEMORIES.kind, id);
     assign(conn, MEMORIES.kind, id, &global)?;
     conn.execute(
         "INSERT OR IGNORE INTO replica_outbox
@@ -189,7 +192,7 @@ pub(crate) fn assign(conn: &Connection, kind: &str, id: i64, global: &str) -> ru
 pub(crate) fn read(
     conn: &Connection,
     kind: &str,
-    box_id: &str,
+    store_id: &str,
     id: i64,
 ) -> rusqlite::Result<Option<Map<String, Value>>> {
     let table = super::table(kind);
@@ -199,9 +202,20 @@ pub(crate) fn read(
     if kind != MEMORIES.kind {
         return Ok(Some(snapshot));
     }
+    let own: Option<(Option<String>, Option<i64>)> = conn
+        .query_row(
+            "SELECT status, superseded_by FROM replica_derived WHERE local_id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((status, superseded_by)) = own {
+        snapshot.insert("status".into(), json!(status));
+        snapshot.insert(LINK_COLUMNS[0].into(), json!(superseded_by));
+    }
     for column in LINK_COLUMNS {
         let target = match snapshot[column].as_i64() {
-            Some(target) => link_target(conn, box_id, target)?,
+            Some(target) => link_target(conn, store_id, target)?,
             None => None,
         };
         snapshot.insert(column.to_owned(), json!(target));
@@ -217,7 +231,7 @@ pub(crate) fn read(
                 .collect();
             let mut globals = Vec::new();
             for source in ids {
-                if let Some(global) = link_target(conn, box_id, source)? {
+                if let Some(global) = link_target(conn, store_id, source)? {
                     globals.push(Value::String(global));
                 }
             }
@@ -266,7 +280,7 @@ pub(crate) fn read(
             .collect::<rusqlite::Result<_>>()?;
         let mut carried = Vec::new();
         for (other, decision_key) in links {
-            if let Some(global) = link_target(conn, box_id, other)? {
+            if let Some(global) = link_target(conn, store_id, other)? {
                 carried.push(json!({end: global, "decision_key": decision_key}));
             }
         }
