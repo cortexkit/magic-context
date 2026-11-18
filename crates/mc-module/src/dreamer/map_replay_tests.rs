@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 
 use super::checkout::Checkout;
 use super::curate_replay_tests::migrated_copy;
-use super::run::TaskInput;
+use super::run::{TaskInput, STEP_CAP};
 use super::task::{Owner, TaskContext};
 use super::tasks::map_memories::{MapBatch, MapMemories, KIND};
 use super::verify_replay_tests::{env, required, write_json, ANY_WINDOW};
@@ -156,6 +156,9 @@ fn request(batch: &MapBatch, index: usize, args: &Args, commit: Option<&str>) ->
         })
         .collect();
     let counter = Counter::for_model(None);
+    // The run's step bound: the task's step cap, within its kind's bound.
+    let max_steps = TaskInput::step_cap(batch)
+        .map_or(demand().max_steps, |cap| cap.steps.min(demand().max_steps));
     json!({
         "task": TASK_ID,
         "kind": KIND,
@@ -170,7 +173,7 @@ fn request(batch: &MapBatch, index: usize, args: &Args, commit: Option<&str>) ->
         // and code navigation) confined to the project's folder.
         "settings": {
             "maxOutputTokens": DREAM_OUTPUT_TOKENS,
-            "maxSteps": demand().max_steps,
+            "maxSteps": max_steps,
             "tools": "aft reader preset (read, grep, glob, and AFT's navigation tools)",
         },
         "messages": [
@@ -362,13 +365,17 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
     assert_eq!(manifest["commit"], head);
     assert_eq!(manifest["store"]["migratedTo"], SCHEMA_VERSION);
     let task = &manifest["tasks"][0];
+    // One memory to a message.
     assert_eq!(
         (&task["task"], &task["planned"]),
-        (&json!(TASK_ID), &json!(1))
+        (&json!(TASK_ID), &json!(2))
     );
     assert_eq!(
-        task["batches"][0],
-        json!({"batch": 0, "request": "map-memories/batch-0/map.request.json", "memories": [1, 2]})
+        task["batches"],
+        json!([
+            {"batch": 0, "request": "map-memories/batch-0/map.request.json", "memories": [1]},
+            {"batch": 1, "request": "map-memories/batch-1/map.request.json", "memories": [2]},
+        ])
     );
 
     let request = read_request(&args.out, 0);
@@ -376,7 +383,7 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
         (&request["kind"], &request["commit"], &request["model"]),
         (&json!(KIND), &json!(head), &json!("deepseek-flash"))
     );
-    assert_eq!(request["settings"]["maxSteps"], 60);
+    assert_eq!(request["settings"]["maxSteps"], STEP_CAP);
     assert_eq!(request["settings"]["maxOutputTokens"], DREAM_OUTPUT_TOKENS);
     let revision = |id: i64| -> i64 {
         fixture
@@ -395,11 +402,17 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
         json!([
             {"id": 1, "readRevision": revision(1), "candidates": ["src/view.rs"],
              "candidatesFrom": "the paths its text names"},
+        ])
+    );
+    let second = read_request(&args.out, 1);
+    assert_eq!(
+        second["memories"],
+        json!([
             {"id": 2, "readRevision": revision(2), "candidates": ["src/head.rs"],
              "candidatesFrom": "a search of the checkout for the code names its text mentions"},
         ])
     );
-    let user = request["messages"][1]["content"].as_str().unwrap();
+    let user = second["messages"][1]["content"].as_str().unwrap();
     assert!(user.contains(
         "[2] ARCHITECTURE\n`render_head` draws the page header.\nLikely files (candidate paths, confirmed to exist): src/head.rs"
     ), "{user}");

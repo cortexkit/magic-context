@@ -25,10 +25,13 @@
 //! the search reached its limit, nothing is listed and nobody goes first:
 //! an unfinished search proves no absence.
 //!
-//! A batch checked by reading holds five memories, and a batch shown a diff
-//! twenty. The model reads code with the read-only tools and answers with
-//! one `<verify>` manifest ([`manifest`]); each verdict is checked and
-//! written on its own ([`apply`]). A confirmation must cite the lines that
+//! A batch checked by reading holds one memory, and a batch shown a diff
+//! twenty. The model reads code with the read-only tools for at most
+//! [`STEP_CAP`] steps and answers with one `<verify>` manifest ([`manifest`]);
+//! each verdict is checked and written on its own ([`apply`]). A child that
+//! reaches the cap is told to answer with what it has; when that answer is
+//! unusable too, every memory of the batch is written as a skip, as a
+//! `<skip>` verdict is. A confirmation must cite the lines that
 //! state the claim, which the module reads and checks itself ([`confirm`]);
 //! one that fails a check counts as a skip.
 //!
@@ -62,7 +65,7 @@ use serde_json::Value;
 
 use crate::dreamer::branches::{main_checkout, Refs};
 use crate::dreamer::checkout::{Checkout, Limits, SEARCH_LIMITS};
-use crate::dreamer::run::{TaskInput, TaskReply};
+use crate::dreamer::run::{StepCap, TaskInput, TaskReply, STEP_CAP};
 use crate::dreamer::task::{document_prompts, Applied, Batch, Owner, Task, TaskContext};
 use crate::memory_writes::table_exists;
 use crate::summary::fit::Window;
@@ -91,11 +94,15 @@ pub(crate) const VERIFY_BROAD: &str = "verify-broad";
 const INPUT_FRAME: &str = "dreamer/verify.input";
 /// Its frame for memories shown with the diff of their files.
 const DIFF_FRAME: &str = "dreamer/verify.input.with-diff";
-/// At most this many memories go in one message checked by reading code.
-/// Each step of such a message resends every file read so far, so a longer
-/// batch costs far more than its share.
-pub(crate) const READ_BATCH_SIZE: usize = 5;
-/// At most this many memories go in one message shown a diff.
+/// At most this many memories go in one message checked by reading code:
+/// one. Each step of a child run resends every file read so far, so the
+/// memories of one batch paid for each other's reads on every later step;
+/// alone, a memory's run carries only its own reads, while the system text,
+/// tools and task frame every run shares stay cached.
+pub(crate) const READ_BATCH_SIZE: usize = 1;
+/// At most this many memories go in one message shown a diff. Such a
+/// message starts with the diff in hand and rarely reads much, so one run
+/// for each memory would mostly repeat the shared prefix.
 pub(crate) const DIFF_BATCH_SIZE: usize = 20;
 /// Above this many UTF-16 units of diff in one batch, each file shows its
 /// changed line ranges instead (0.49's bound).
@@ -103,6 +110,10 @@ const DIFF_BOUND: usize = 36_000;
 /// How long git may search the checked-out history for one path or name a
 /// reply calls missing before the archive is dropped as undecided.
 const HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
+/// What a child whose run reached [`STEP_CAP`] is sent, once; its reply's
+/// manifest is the batch's answer.
+pub(crate) const FINALIZE: &str =
+    "Stop reading now. Answer with what you have verified; mark anything you could not check as SKIP.";
 
 /// One live project memory as the task reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -654,6 +665,17 @@ impl Verify {
         &self,
         context: &TaskContext<'_>,
     ) -> Result<Vec<VerifyBatch>, String> {
+        self.plan_batches_of(context, READ_BATCH_SIZE)
+    }
+
+    /// [`Verify::plan_batches`], with at most `read_batch` memories in a
+    /// message checked by reading. Tests of a reply that decides several
+    /// such memories at once plan with more than [`READ_BATCH_SIZE`].
+    pub(crate) fn plan_batches_of(
+        &self,
+        context: &TaskContext<'_>,
+        read_batch: usize,
+    ) -> Result<Vec<VerifyBatch>, String> {
         let Owner::Project { id: project, root } = context.owner else {
             return Err(format!(
                 "{} works on a project's memories only",
@@ -717,8 +739,13 @@ impl Verify {
             // are not sent while every file they are mapped to differs
             // between live branches.
             let live = (target == Target::Main).then(|| Gate::new(&main));
-            let (plans, lookup, kept, left_out) =
-                self.plan_group(&checkout, &group.memories, &group.lined, live.as_ref());
+            let (plans, lookup, kept, left_out) = self.plan_group(
+                &checkout,
+                &group.memories,
+                &group.lined,
+                live.as_ref(),
+                read_batch,
+            );
             rechecked.extend(kept);
             // Nothing is written for them, so they are not counted as
             // checked and a later run plans them again.
@@ -862,13 +889,15 @@ impl Verify {
     /// only where every live branch holds its lines, and is left out when
     /// every file it is mapped to differs between live branches (`live`, for
     /// the main checkout's group): a confirmation from lines of those files
-    /// is almost always refused, and a rewrite or an archive always is.
+    /// is almost always refused, and a rewrite or an archive always is. A
+    /// message checked by reading holds at most `read_batch` memories.
     fn plan_group<'a>(
         &self,
         checkout: &Checkout,
         memories: &[&'a Memory],
         lined: &HashSet<i64>,
         live: Option<&Gate>,
+        read_batch: usize,
     ) -> (Vec<Planned<'a>>, Lookup, Vec<Rechecked>, Vec<i64>) {
         let mut left_out = Vec::new();
         let mut send = |memory: &&Memory| {
@@ -887,7 +916,7 @@ impl Verify {
             } else {
                 look_up(checkout, &sent, &SEARCH_LIMITS)
             };
-            for chunk in broad_order(&sent, &lookup.gone).chunks(READ_BATCH_SIZE) {
+            for chunk in broad_order(&sent, &lookup.gone).chunks(read_batch) {
                 plans.push(Planned {
                     memories: chunk.to_vec(),
                     evidence: None,
@@ -935,7 +964,7 @@ impl Verify {
             }
         }
         read.extend(never);
-        for chunk in read.chunks(READ_BATCH_SIZE) {
+        for chunk in read.chunks(read_batch) {
             plans.push(Planned {
                 memories: chunk.to_vec(),
                 evidence: None,
@@ -1346,6 +1375,13 @@ impl TaskInput for VerifyBatch {
         }
         Ok(())
     }
+
+    fn step_cap(&self) -> Option<StepCap> {
+        Some(StepCap {
+            steps: STEP_CAP,
+            finalize: FINALIZE,
+        })
+    }
 }
 
 impl Batch for VerifyBatch {
@@ -1357,6 +1393,33 @@ impl Batch for VerifyBatch {
 
     fn folder(&self) -> Option<&str> {
         Some(&self.folder)
+    }
+
+    /// Each memory of the batch is written as a `<skip>` verdict is, with
+    /// the same checks, so it is marked checked and a broad run reaches the
+    /// memories it has not checked first.
+    fn skip(&self, tx: &Transaction<'_>, run: i64) -> Result<Applied, String> {
+        let skips: Vec<Verdict> = self
+            .read
+            .iter()
+            .map(|read| Verdict {
+                id: read.id,
+                decision: Decision::Skip,
+                files: Vec::new(),
+                content: String::new(),
+                reason: "the model reached its step cap without a usable answer".into(),
+                consolidation: false,
+                missing: None,
+                cites: None,
+                derive: None,
+            })
+            .collect();
+        self.write(tx, &skips, run)
+            .map_err(|error| format!("writing skips: {error}"))
+    }
+
+    fn memory_ids(&self) -> Vec<i64> {
+        self.ids()
     }
 }
 

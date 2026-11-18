@@ -171,6 +171,19 @@ pub(crate) trait Batch: TaskInput + Send {
     fn after_commit(&self, db: &ContextDb) {
         let _ = db;
     }
+    /// Write what a batch whose child reached its step cap without a usable
+    /// answer leaves its memories as ([`super::run::TaskError::Skipped`]),
+    /// inside `tx`, naming `run` as [`Batch::apply`] does. The default
+    /// writes nothing: each memory stays as it was.
+    fn skip(&self, tx: &rusqlite::Transaction<'_>, run: i64) -> Result<Applied, String> {
+        let _ = (tx, run);
+        Ok(Applied::default())
+    }
+    /// The ids of the memories the batch's message asks about, for the line
+    /// the engine logs when the batch is skipped. The default names none.
+    fn memory_ids(&self) -> Vec<i64> {
+        Vec::new()
+    }
 }
 
 /// What applying a batch did.

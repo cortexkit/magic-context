@@ -15,6 +15,7 @@ use super::*;
 use crate::client::ClientError;
 use crate::routing::DREAM_DEMANDS;
 use crate::runner_capabilities::SessionRetention;
+use crate::summary::run::send_and_wait;
 
 /// How the runner ends one run.
 #[derive(Clone)]
@@ -23,6 +24,9 @@ pub(crate) enum Ends {
     /// A reply whose run reports this many input tokens used.
     Spent(&'static str, u64),
     Capped,
+    /// The run stopped at its step limit after this many steps: the last
+    /// step asked for a tool call the limit cut off.
+    StepCapped(u64),
     Error(&'static str),
     /// Ends with routing's full capacity (`concurrency_full`) until this
     /// reset, the way an llm-runner 0.8.51 runner ends a queued run.
@@ -221,6 +225,14 @@ impl RunnerClient for Client {
                 result
             }
             Ends::Capped => completed("{\"partial\":", Some(Finish::Length)),
+            Ends::StepCapped(steps) => {
+                let mut result = RunResult::new("run", states::MAX_STEPS);
+                let mut usage = cortexkit_role_llm_runner::usage::RunUsage::default();
+                usage.steps = steps;
+                usage.input_tokens = Some(1_000);
+                result.usage = Some(usage);
+                result
+            }
             Ends::NeverRan => crate::summary::run::never_ran_tests::handover("nothing_written"),
             Ends::Error(message) => {
                 let mut result = RunResult::new("run", states::ERROR);
@@ -734,5 +746,209 @@ async fn a_runner_without_session_retention_gets_the_same_dreamer_send_bytes_as_
     assert_eq!(
         serde_json::to_string(&sends[0].1).unwrap(),
         r#"{"prompt":"200000 32000","send_id":"mc-dream:17:0.0","route_decision_id":"decision-a","generation":{"max_output_tokens":32000},"model":{"model":"a","provider":"p"},"stop_when":{"max_steps":1},"system":"You classify memories.","tools":[]}"#
+    );
+}
+
+/// A code-reading task with the step cap ([`STEP_CAP`]), accepting only the
+/// reply `"ok"`, as verify's and map-memories' batches are.
+struct CappedTask;
+
+/// The finalize message [`CappedTask`] gives its capped runs.
+const STOP: &str = "Stop reading and answer.";
+
+impl TaskInput for CappedTask {
+    fn system(&self) -> &str {
+        "You verify memories."
+    }
+    fn prompt(&self, _: Window, _: u64) -> Option<String> {
+        Some("memory 1".into())
+    }
+    fn accepts(&self, reply: &str) -> Result<(), String> {
+        Task { fits: true }.accepts(reply)
+    }
+    fn step_cap(&self) -> Option<StepCap> {
+        Some(StepCap {
+            steps: STEP_CAP,
+            finalize: STOP,
+        })
+    }
+}
+
+/// A client whose runners all take plans, with AFT's reader tools.
+fn reading_client(routes: &[&'static str], ends: &[Ends]) -> Client {
+    let mut client = Client::new(routes, ends);
+    client.plans = vec!["ra", "rb", "rc"];
+    client.catalog = Ok(vec![("read", &["code.read/v1"])]);
+    client
+}
+
+/// A capped task's run stops at the cap; the child is then sent the
+/// finalize message once, in the same conversation and for one step, and
+/// that reply is the run's answer.
+#[tokio::test(start_paused = true)]
+async fn a_run_at_its_step_cap_is_told_once_to_answer_and_that_answer_is_used() {
+    let client = reading_client(
+        &["p/a", "p/b"],
+        &[Ends::StepCapped(STEP_CAP), Ends::Spent("ok", 500)],
+    );
+    let reply = run(&client, &verify(), &CappedTask).await.unwrap();
+    assert_eq!(reply.text, "ok");
+    assert_eq!(reply.child, "mc-dream:18:0.0");
+    // Both runs' steps, and both sends' tokens.
+    assert_eq!(reply.steps, Some(STEP_CAP + 1));
+    assert_eq!(reply.usage.unwrap().prompt_tokens, Some(1_500));
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 2, "the finalize message goes out once");
+    let (first_child, first) = &sends[0];
+    assert_eq!(
+        first.runner_params["stop_when"],
+        json!({"max_steps": STEP_CAP})
+    );
+    assert!(first.plan.is_some());
+    let (child, finalize) = &sends[1];
+    assert_eq!(child.session.session, first_child.session.session);
+    assert_eq!(finalize.prompt.as_deref(), Some(STOP));
+    assert_eq!(finalize.send_id, "mc-dream:18:0.0:finalize");
+    assert_eq!(finalize.runner_params["stop_when"], json!({"max_steps": 1}));
+    // The child keeps its plan; a later send carries none of what created
+    // it.
+    assert!(finalize.plan.is_none());
+    assert!(finalize.runner_params.get("system").is_none());
+    assert!(finalize.runner_params.get("tools").is_none());
+    assert!(finalize.cache.is_none());
+    assert!(finalize.session_class.is_none());
+    assert!(finalize.retention_policy.is_none());
+    drop(sends);
+    assert_eq!(client.selects.lock().unwrap().len(), 1);
+    assert_eq!(*client.reports.lock().unwrap(), ["decision-a completed"]);
+}
+
+/// An answer to the finalize message the task can't use, or a finalize run
+/// that asks for another read, skips the batch: no other model is tried, and
+/// the skip carries the whole run's steps and tokens.
+#[tokio::test(start_paused = true)]
+async fn a_capped_run_without_a_usable_answer_is_skipped_without_another_model() {
+    for (last, problem) in [
+        (
+            Ends::Spent("no manifest here", 500),
+            "not ok: no manifest here",
+        ),
+        (Ends::StepCapped(1), "asked for another read"),
+    ] {
+        let client = reading_client(&["p/a", "p/b"], &[Ends::StepCapped(STEP_CAP), last]);
+        let error = run(&client, &verify(), &CappedTask).await.unwrap_err();
+        let TaskError::Skipped(skipped) = error else {
+            panic!("a capped run without an answer was not skipped: {error:?}");
+        };
+        assert!(skipped.reason.contains(problem), "{}", skipped.reason);
+        assert!(
+            skipped.reason.contains("mc-dream:18:0.0"),
+            "{}",
+            skipped.reason
+        );
+        assert_eq!(skipped.reply.child, "mc-dream:18:0.0");
+        assert_eq!(skipped.reply.steps, Some(STEP_CAP + 1));
+        assert!(skipped.reply.usage.is_some());
+        assert_eq!(client.sends.lock().unwrap().len(), 2);
+        assert_eq!(client.selects.lock().unwrap().len(), 1);
+        assert_eq!(*client.reports.lock().unwrap(), ["decision-a failed"]);
+    }
+}
+
+/// The code-reading tasks without a step cap (refresh-primers,
+/// maintain-docs) keep their kind's step bound, and take a run stopped at it
+/// as a failed model, as before: no finalize message, the next model tried.
+#[tokio::test(start_paused = true)]
+async fn an_uncapped_task_takes_a_run_stopped_at_its_step_limit_as_a_failed_model() {
+    for kind in ["refresh-primers", "maintain-docs"] {
+        let demand = DREAM_DEMANDS
+            .iter()
+            .find(|demand| demand.kind == kind)
+            .unwrap();
+        let job = TaskRun { demand, ..verify() };
+        let client = reading_client(
+            &["p/a", "p/b"],
+            &[Ends::StepCapped(demand.max_steps), Ends::Reply("ok")],
+        );
+        let reply = run(&client, &job, &Task { fits: true }).await.unwrap();
+        assert_eq!(reply.runner, "rb");
+        {
+            let sends = client.sends.lock().unwrap();
+            assert_eq!(sends.len(), 2);
+            assert_eq!(
+                sends[0].1.runner_params["stop_when"],
+                json!({"max_steps": demand.max_steps})
+            );
+            assert_ne!(sends[1].1.prompt.as_deref(), Some(STOP));
+        }
+        assert_eq!(client.children(), ["mc-dream:18:0.0", "mc-dream:18:1.0"]);
+        assert_eq!(
+            *client.reports.lock().unwrap(),
+            ["decision-a failed", "decision-b completed"]
+        );
+
+        // Every model stopped so fails the run with the reason it always had.
+        let client = reading_client(
+            &["p/a", "p/b", "p/c"],
+            &[
+                Ends::StepCapped(demand.max_steps),
+                Ends::StepCapped(demand.max_steps),
+                Ends::StepCapped(demand.max_steps),
+            ],
+        );
+        let error = run(&client, &job, &Task { fits: true }).await.unwrap_err();
+        assert!(
+            matches!(&error, TaskError::Failed(reason) if reason.starts_with("the run ended max_steps: ") && reason.contains("mc-dream:18:2.0")),
+            "{error:?}"
+        );
+    }
+}
+
+/// Through the runner's real wait: a run that ends `max_steps` is a failure
+/// naming that state for every caller of `send_and_wait`, and a run marked
+/// step-capped, with its steps, for the dreamer's own send.
+#[tokio::test(start_paused = true)]
+async fn a_run_ended_at_its_step_limit_is_a_failure_or_a_capped_run_by_caller() {
+    let model = ModelRef::new("p", "a");
+    let child = Child {
+        session: SessionRef::new("ra", "ha", child_session("17", 0, 0)),
+        project_root: Some("/work/project".into()),
+    };
+    let how = Model {
+        model: &model,
+        decision_id: "decision-a",
+        output_tokens: 1000,
+        system: "You verify memories.",
+        deadline: tokio::time::Instant::now() + RUN_TIMEOUT,
+        continuation: false,
+        creates_child: true,
+        attribution: None,
+        keep_child: true,
+        send: SendKind::Dream,
+        cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
+        plan: None,
+    };
+    let client = Client::new(&[], &[Ends::StepCapped(7), Ends::StepCapped(7)]);
+    let mut usage = None;
+    let error = send_and_wait(&client, &child, "first", "prompt", &how, &mut usage)
+        .await
+        .err()
+        .expect("a run stopped at its step limit fails a caller that takes none");
+    assert!(
+        matches!(&error, SummaryError::Failed(reason) if reason == "the run ended max_steps: "),
+        "{error}"
+    );
+    // Its tokens still count.
+    assert_eq!(usage.unwrap().prompt_tokens, Some(1_000));
+
+    let ended = send_and_wait_stepped(&client, &child, "second", "prompt", &how, &mut None)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(ended.step_capped);
+    assert_eq!(ended.reply.steps, Some(7));
+    assert!(!ended.reply.length_capped);
+    assert_eq!(
+        ended.completed().err().as_deref(),
+        Some("the run ended max_steps: ")
     );
 }

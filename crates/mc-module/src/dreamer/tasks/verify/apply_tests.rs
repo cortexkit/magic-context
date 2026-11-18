@@ -33,9 +33,10 @@ fn manifest(entries: &str) -> String {
     format!("<verify>\n{entries}\n</verify>")
 }
 
-/// The one batch a broad run of `fixture` plans.
+/// The one batch a broad run of `fixture` plans when a message holds
+/// several memories, so one reply decides both.
 fn plan_one(fixture: &Fixture) -> super::super::VerifyBatch {
-    let mut batches = fixture.batches(true);
+    let mut batches = fixture.several(true);
     assert_eq!(batches.len(), 1);
     batches.remove(0)
 }
@@ -203,7 +204,7 @@ fn a_verdict_outside_the_owner_category_declaration_or_read_revision_is_dropped(
     fixture.insert(&[row(1, "One."), row(2, "Two.")]);
     let mut declaration = fixture.declaration("verify-broad");
     declaration["actions"] = json!(["mark-verified", "skip"]);
-    let batch = fixture.batches_under(true, &declaration).remove(0);
+    let batch = fixture.several_under(true, &declaration).remove(0);
     fixture.execute("UPDATE memories SET owner_id = 'pj-other' WHERE id = 2;");
     let applied = fixture.apply(
         &batch,
@@ -551,8 +552,9 @@ fn a_protected_memory_is_never_archived_but_may_be_verified_updated_or_skipped()
               VALUES ('{}', 'person-edit-2', 'person_edit', '{{}}', 1);",
         super::super::tests::PROJECT
     ));
-    // Six memories take two batches of the broad run; the one reply is
-    // applied to each, which reads only its own memories' verdicts.
+    // Each of the six memories takes a message of its own in the broad run;
+    // the one reply is applied to each, which reads only its own memory's
+    // verdict.
     let reply = manifest(
         r#"<archive id="1" missing="gone_guard"/>
 <archive id="2" reason="the helper was removed" missing="gone_helper"/>

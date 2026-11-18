@@ -8,10 +8,16 @@ use super::*;
 use crate::context_db::ContextDb;
 use crate::context_migrations::frozen_category_id;
 use crate::dreamer::checkout::tests::Repo;
+use crate::dreamer::engine::{Engine, Settings};
+use crate::dreamer::run::tests::{Client, Ends};
 use crate::memory_profile::{prompt_profile, Profile};
 use crate::memory_writes::normalized_hash;
 
 pub(crate) const PROJECT: &str = "pj-verify";
+/// The memories a message checked by reading held before it held one
+/// ([`READ_BATCH_SIZE`]), for tests of a reply that decides several
+/// memories of one message.
+pub(crate) const SEVERAL: usize = 5;
 
 /// A memory row as the tests write it.
 #[derive(Clone)]
@@ -152,13 +158,26 @@ impl Fixture {
 
     /// The batches a run of the task plans now, under `declaration`.
     pub(crate) fn batches_under(&self, broad: bool, declaration: &Value) -> Vec<VerifyBatch> {
-        self.plan_at(broad, declaration, self.repo.path())
+        self.plan_at(broad, declaration, self.repo.path(), READ_BATCH_SIZE)
     }
 
-    /// The batches a run started from a session in `root` plans now.
-    pub(crate) fn batches_at(&self, broad: bool, root: &std::path::Path) -> Vec<VerifyBatch> {
+    /// The batches a run would plan now if a message checked by reading held
+    /// up to [`SEVERAL`] memories, for a test of a reply that decides several
+    /// memories of one message, as a diff message's reply does.
+    pub(crate) fn several(&self, broad: bool) -> Vec<VerifyBatch> {
         let declaration = self.declaration(if broad { VERIFY_BROAD } else { VERIFY });
-        self.plan_at(broad, &declaration, root)
+        self.plan_at(broad, &declaration, self.repo.path(), SEVERAL)
+    }
+
+    /// [`Fixture::several`], for a run started from a session in `root`.
+    pub(crate) fn several_at(&self, broad: bool, root: &std::path::Path) -> Vec<VerifyBatch> {
+        let declaration = self.declaration(if broad { VERIFY_BROAD } else { VERIFY });
+        self.plan_at(broad, &declaration, root, SEVERAL)
+    }
+
+    /// [`Fixture::several`], under `declaration`.
+    pub(crate) fn several_under(&self, broad: bool, declaration: &Value) -> Vec<VerifyBatch> {
+        self.plan_at(broad, declaration, self.repo.path(), SEVERAL)
     }
 
     fn plan_at(
@@ -166,20 +185,24 @@ impl Fixture {
         broad: bool,
         declaration: &Value,
         root: &std::path::Path,
+        read_batch: usize,
     ) -> Vec<VerifyBatch> {
         let owner = Owner::Project {
             id: PROJECT.into(),
             root: root.to_str().unwrap().into(),
         };
         Verify { broad }
-            .plan_batches(&TaskContext {
-                db: &self.db,
-                owner: &owner,
-                profile: &self.profile,
-                declaration,
-                workspace: None,
-                guidance: None,
-            })
+            .plan_batches_of(
+                &TaskContext {
+                    db: &self.db,
+                    owner: &owner,
+                    profile: &self.profile,
+                    declaration,
+                    workspace: None,
+                    guidance: None,
+                },
+                read_batch,
+            )
             .unwrap()
     }
 
@@ -360,7 +383,7 @@ fn verify_checks_mapped_memories_whose_files_changed_verified_ones_apart() {
     let batches = fixture.batches(false);
     assert_eq!(
         batches.iter().map(ids).collect::<Vec<_>>(),
-        [vec![1, 5], vec![3, 6]]
+        [vec![1, 5], vec![3], vec![6]]
     );
     // The memories whose cited lines changed are shown their files' diffs
     // since the commit they were confirmed at, under the task's diff
@@ -382,13 +405,17 @@ fn verify_checks_mapped_memories_whose_files_changed_verified_ones_apart() {
     assert!(message.contains("File: src/gone.rs (memories: 5)\ndiff --git"));
     assert!(!message.contains("Not found by a plain search"));
     assert_eq!(batches[0].commit(), fixture.repo.checkout().head());
-    // A memory never confirmed with cited lines is checked by reading,
-    // under the other message, with what a plain search didn't find.
-    assert!(!batches[1].has_diff());
+    // A memory never confirmed with cited lines is checked by reading, one
+    // to a message, under the other message, with what a plain search
+    // didn't find.
+    assert!(!batches[1].has_diff() && !batches[2].has_diff());
     let message = &batches[1].message;
     assert!(message.contains("Check each memory's claim against its backing files"));
     assert!(message.contains(
-        "[3] ARCHITECTURE\nContent: C was never verified; it cites `missing_helper`.\nBacking files: src/c.rs\nNot found by a plain search of the checkout: missing_helper\n\n[6]"
+        "[3] ARCHITECTURE\nContent: C was never verified; it cites `missing_helper`.\nBacking files: src/c.rs\nNot found by a plain search of the checkout: missing_helper\n</memories>"
+    ));
+    assert!(batches[2].message.contains(
+        "[6] ARCHITECTURE\nContent: B was confirmed without cited lines.\nBacking files: src/b.rs\n</memories>"
     ));
     assert!(!message.contains("Confirmed from"));
     assert_eq!(batches[1].system, batches[0].system);
@@ -450,10 +477,14 @@ fn an_old_confirmation_without_cited_lines_counts_as_never_made() {
             (4, now + 60_000, true)
         ]
     );
-    // They are read in full, never shown a diff; memory 4 needs nothing.
+    // They are read in full, one to a message, never shown a diff; memory 4
+    // needs nothing.
     let batches = fixture.batches(false);
-    assert_eq!(batches.iter().map(ids).collect::<Vec<_>>(), [vec![1, 2, 3]]);
-    assert!(!batches[0].has_diff());
+    assert_eq!(
+        batches.iter().map(ids).collect::<Vec<_>>(),
+        [vec![1], vec![2], vec![3]]
+    );
+    assert!(batches.iter().all(|batch| !batch.has_diff()));
 }
 
 #[test]
@@ -489,19 +520,20 @@ fn verify_broad_puts_memories_whose_citations_are_all_gone_first_then_the_least_
     let batches = fixture.batches(true);
     assert_eq!(
         batches.iter().map(ids).collect::<Vec<_>>(),
-        [vec![2, 6, 3, 1, 4], vec![5]]
+        [vec![2], vec![6], vec![3], vec![1], vec![4], vec![5]]
     );
     let message = &batches[0].message;
     assert!(message.contains(
-        "[2] ARCHITECTURE\nContent: `gone_function` in src/old/gone.rs does it.\nBacking files: (none mapped)\nNot found by a plain search of the checkout: gone_function, src/old/gone.rs\n\n[6]"
+        "[2] ARCHITECTURE\nContent: `gone_function` in src/old/gone.rs does it.\nBacking files: (none mapped)\nNot found by a plain search of the checkout: gone_function, src/old/gone.rs\n</memories>"
     ), "{message}");
-    assert!(message
-        .contains("[6] ARCHITECTURE\nContent: Never checked.\nBacking files: src/live.rs\n\n"));
-    assert!(
-        message.contains("Content: `live_function` runs first.\nBacking files: (none mapped)\n\n")
-    );
-    assert!(message.contains(
-        "Backing files: (none mapped)\nNot found by a plain search of the checkout: gone_thing\n"
+    assert!(batches[1].message.contains(
+        "[6] ARCHITECTURE\nContent: Never checked.\nBacking files: src/live.rs\n</memories>"
+    ));
+    assert!(batches[3].message.contains(
+        "Content: `live_function` runs first.\nBacking files: (none mapped)\n</memories>"
+    ));
+    assert!(batches[4].message.contains(
+        "Backing files: (none mapped)\nNot found by a plain search of the checkout: gone_thing\n</memories>"
     ));
     // verify-broad runs under verify's system prompt and its own message.
     assert!(batches[0].system.starts_with("You are a memory verifier"));
@@ -533,12 +565,17 @@ fn a_memory_citing_nothing_never_goes_first() {
         },
     ]);
     let batches = fixture.batches(true);
-    assert_eq!(batches.iter().map(ids).collect::<Vec<_>>(), [vec![1, 2]]);
-    assert!(
-        !batches[0].message.contains("Not found by a plain search"),
-        "{}",
-        batches[0].message
+    assert_eq!(
+        batches.iter().map(ids).collect::<Vec<_>>(),
+        [vec![1], vec![2]]
     );
+    for batch in &batches {
+        assert!(
+            !batch.message.contains("Not found by a plain search"),
+            "{}",
+            batch.message
+        );
+    }
     let pool = fixture
         .db
         .with_connection(|conn| live_memories(conn, PROJECT, &["swe:project-rules".to_owned()], 0))
@@ -551,8 +588,10 @@ fn a_memory_citing_nothing_never_goes_first() {
     assert!(lookup.gone.is_empty() && lookup.not_found.is_empty());
 }
 
+/// A broad run sends one memory to a message: the memories of one message
+/// paid for each other's reads on every step of its run.
 #[test]
-fn a_broad_run_sends_five_memories_a_batch_and_only_covered_categories() {
+fn a_broad_run_sends_one_memory_a_batch_and_only_covered_categories() {
     let fixture = Fixture::new(&[("README.md", "readme\n")]);
     let mut rows: Vec<Row> = (1..=45).map(|id| row(id, &format!("Fact {id}."))).collect();
     rows.push(Row {
@@ -568,7 +607,7 @@ fn a_broad_run_sends_five_memories_a_batch_and_only_covered_categories() {
             .iter()
             .map(|batch| batch.read().len())
             .collect::<Vec<_>>(),
-        [5; 9]
+        [1; 45]
     );
     let all: Vec<i64> = batches.iter().flat_map(ids).collect();
     assert!(all.contains(&46) && !all.contains(&45));
@@ -650,34 +689,89 @@ fn the_diff_frame_keeps_the_plugins_shape_and_bounds_long_diffs() {
     );
 }
 
-/// The engine runs `verify-broad` end to end: the batch goes to a runner
-/// that takes plans, with AFT's reader tools; a final message without a
-/// complete manifest fails that model, and the next model's manifest is
-/// applied.
-#[tokio::test]
-async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides() {
-    use crate::dreamer::engine::{Engine, Settings};
-    use crate::dreamer::run::tests::{Client, Ends};
+/// A verify-broad run through the engine, ended, and what it ran against.
+struct Ran {
+    db: Arc<ContextDb>,
+    client: Arc<Client>,
+    /// The project's folder, as git names it.
+    root: String,
+    _repo: Repo,
+    _dir: tempfile::TempDir,
+}
 
-    let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
-    fixture
-        .repo
-        .add_then_remove(&[("src/gone.rs", "fn gone_function() {}\n")]);
-    fixture.insert(&[
-        row(1, "`live_function` runs first."),
-        row(2, "`gone_function` does it."),
-    ]);
-    let db = Arc::new(fixture.db);
+impl Ran {
+    /// The run's task, outcome, proposed and applied counts, error and batch
+    /// records.
+    fn run(&self) -> (String, String, i64, i64, Option<String>, Value) {
+        self.db
+            .with_connection(|conn| {
+                conn.query_row(
+                    "SELECT task, outcome, proposed, applied, error, batches_json FROM dream_task_runs",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    },
+                )
+            })
+            .map(|(task, outcome, proposed, applied, error, batches)| {
+                let batches = serde_json::from_str(&batches).unwrap();
+                (task, outcome, proposed, applied, error, batches)
+            })
+            .unwrap()
+    }
+
+    /// Memory `id`'s status, verify result and the time a verify task last
+    /// decided anything about it.
+    fn checked(&self, id: i64) -> (String, Option<String>, Option<i64>) {
+        self.db
+            .with_connection(|conn| {
+                conn.query_row(
+                    "SELECT status, verify_result, json_extract(metadata_json, '$.dreamerCheckedAt')
+                       FROM memories WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap()
+    }
+
+    /// Each send's child and prompt.
+    fn sent(&self) -> Vec<(String, String)> {
+        self.client
+            .sends
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(child, request)| {
+                (
+                    child.session.session.clone(),
+                    request.prompt.clone().unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Run `verify-broad` for `fixture`'s project through the engine, on runners
+/// that take plans with AFT's reader tools, each child run ending as `ends`
+/// says, and wait for the run to end.
+async fn broad_through_engine(fixture: Fixture, ends: &[Ends], settings: &Settings) -> Ran {
+    let Fixture {
+        repo,
+        _dir,
+        db,
+        profile,
+    } = fixture;
+    let db = Arc::new(db);
     let engine = Arc::new(Engine::new("this", vec![Box::new(Verify { broad: true })]));
-    let mut client = Client::new(
-        &["p/a", "p/b"],
-        &[
-            Ends::Reply("I checked both; they hold."),
-            Ends::Reply(
-                "<verify>\n<verified id=\"1\" files=\"src/live.rs\" cites=\"src/live.rs:1-1\"/>\n<archive id=\"2\" reason=\"its subject was removed\" missing=\"gone_function\"/>\n</verify>",
-            ),
-        ],
-    );
+    let mut client = Client::new(&["p/a", "p/b"], ends);
     client.plans = vec!["ra", "rb"];
     client.catalog = Ok(vec![
         ("read", &["code.read/v1"]),
@@ -687,29 +781,11 @@ async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides()
     let client = Arc::new(client);
     // Canonical, as git names the main checkout (macOS keeps temp folders
     // under /private/var behind a /var link).
-    let root = fixture
-        .repo
-        .path()
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string();
-    engine.see_project(
-        &db,
-        PROJECT,
-        &root,
-        Arc::new(fixture.profile),
-        &Settings::default(),
-        1,
-    );
+    let root = repo.path().canonicalize().unwrap().display().to_string();
+    engine.see_project(&db, PROJECT, &root, Arc::new(profile), settings, 1);
     db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
         .unwrap();
-    engine.tick(
-        &db,
-        &client,
-        &Settings::default(),
-        crate::memory_writes::now_ms(),
-    );
+    engine.tick(&db, &client, settings, crate::memory_writes::now_ms());
     for _ in 0..500 {
         let ended: bool = db
             .with_connection(|conn| {
@@ -721,52 +797,95 @@ async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides()
             })
             .unwrap();
         if ended {
-            break;
+            return Ran {
+                db,
+                client,
+                root,
+                _repo: repo,
+                _dir,
+            };
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let (task, outcome, proposed, applied): (String, String, i64, i64) = db
-        .with_connection(|conn| {
-            conn.query_row(
-                "SELECT task, outcome, proposed, applied FROM dream_task_runs",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-        })
-        .unwrap();
+    panic!("the run never ended");
+}
+
+/// A broad run of a live memory and one whose code name is gone from the
+/// checkout but was in its history: the gone one is checked first.
+fn live_and_gone(rows: &[Row]) -> Fixture {
+    let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("src/gone.rs", "fn gone_function() {}\n")]);
+    fixture.insert(rows);
+    fixture
+}
+
+const ARCHIVE_2: &str = "<verify>\n<archive id=\"2\" reason=\"its subject was removed\" missing=\"gone_function\"/>\n</verify>";
+
+/// The engine runs `verify-broad` end to end: each memory goes alone to a
+/// runner that takes plans, with AFT's reader tools; a final message without
+/// a complete manifest fails that model, and the next model's manifest is
+/// applied.
+#[tokio::test]
+async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides() {
+    let fixture = live_and_gone(&[
+        row(1, "`live_function` runs first."),
+        row(2, "`gone_function` does it."),
+    ]);
+    let ran = broad_through_engine(
+        fixture,
+        &[
+            // Memory 2 goes first, its code name gone.
+            Ends::Reply("I checked it; it holds."),
+            Ends::Reply(ARCHIVE_2),
+            Ends::Reply(
+                "<verify>\n<verified id=\"1\" files=\"src/live.rs\" cites=\"src/live.rs:1-1\"/>\n</verify>",
+            ),
+        ],
+        &Settings::default(),
+    )
+    .await;
+    let (task, outcome, proposed, applied, _, _) = ran.run();
     assert_eq!(
         (task.as_str(), outcome.as_str(), proposed, applied),
         ("swe:verify-broad", "applied", 2, 2)
     );
+    let children: Vec<String> = ran.sent().into_iter().map(|(child, _)| child).collect();
+    // The first model's reply about memory 2 was refused; memory 1 had a
+    // child of its own.
+    assert_eq!(
+        children,
+        ["mc-dream:1.0:0.0", "mc-dream:1.0:1.0", "mc-dream:1.1:0.0"]
+    );
     {
-        let sends = client.sends.lock().unwrap();
-        assert_eq!(sends.len(), 2, "the first model's reply was refused");
+        let sends = ran.client.sends.lock().unwrap();
         let (child, request) = &sends[1];
-        assert_eq!(child.project_root.as_deref(), Some(root.as_str()));
+        assert_eq!(child.project_root.as_deref(), Some(ran.root.as_str()));
         let plan = request.plan.as_ref().expect("a plan");
         assert_eq!(
             plan["tool_items"],
             json!([{"params": {}, "preset": "reader", "provider": "aft"}])
         );
-        assert_eq!(request.runner_params["stop_when"], json!({"max_steps": 60}));
+        assert_eq!(
+            request.runner_params["stop_when"],
+            json!({"max_steps": STEP_CAP})
+        );
     }
-    let (verified_mapping, archived): (Vec<String>, String) = db
+    assert_eq!(ran.checked(2).0, "archived");
+    let verified_mapping: Vec<String> = ran
+        .db
         .with_connection(|conn| {
-            let mapping = conn
-                .prepare("SELECT file_path FROM memory_verifications WHERE memory_id = 1")
+            conn.prepare("SELECT file_path FROM memory_verifications WHERE memory_id = 1")
                 .unwrap()
                 .query_map([], |row| row.get(0))
                 .unwrap()
-                .collect::<rusqlite::Result<_>>()?;
-            let status = conn.query_row("SELECT status FROM memories WHERE id = 2", [], |row| {
-                row.get(0)
-            })?;
-            Ok::<_, rusqlite::Error>((mapping, status))
+                .collect::<rusqlite::Result<_>>()
         })
         .unwrap();
     assert_eq!(verified_mapping, ["src/live.rs"]);
-    assert_eq!(archived, "archived");
-    let key: String = db
+    let key: String = ran
+        .db
         .with_connection(|conn| {
             conn.query_row(
                 "SELECT decision_key FROM memory_history WHERE memory_id = 2",
@@ -776,6 +895,111 @@ async fn a_broad_run_goes_through_the_engine_and_writes_what_the_reply_decides()
         })
         .unwrap();
     assert_eq!(key, "dream-run:1:verify-broad:0:2");
+}
+
+/// A child that reaches the step cap is sent verify's finalize message once,
+/// in the same conversation, and the manifest it answers with is written.
+/// One that still answers without a manifest leaves its memory written as a
+/// skip, as a `<skip>` verdict is, and the run goes on to the next memory.
+#[tokio::test]
+async fn a_capped_child_answers_once_more_and_one_without_a_manifest_counts_as_a_skip() {
+    let fixture = live_and_gone(&[
+        row(1, "A plain rule with no names."),
+        row(2, "`gone_function` does it."),
+        row(3, "`live_function` runs first."),
+    ]);
+    let ran = broad_through_engine(
+        fixture,
+        &[
+            // Memory 2, its code name gone, goes first.
+            Ends::StepCapped(STEP_CAP),
+            Ends::Reply(ARCHIVE_2),
+            // Memory 1.
+            Ends::StepCapped(STEP_CAP),
+            Ends::Reply("I ran out of steps before I could decide."),
+            // Memory 3, answered within the cap.
+            Ends::Reply(
+                "<verify>\n<verified id=\"3\" files=\"src/live.rs\" cites=\"src/live.rs:1-1\"/>\n</verify>",
+            ),
+        ],
+        &Settings::default(),
+    )
+    .await;
+    let (_, outcome, proposed, applied, _, batches) = ran.run();
+    // The archive, the skip and the confirmation.
+    assert_eq!((outcome.as_str(), proposed, applied), ("applied", 3, 3));
+    let sent = ran.sent();
+    assert_eq!(sent.len(), 5);
+    // The finalize message goes once to each capped child, in that child.
+    assert_eq!(
+        sent[1],
+        ("mc-dream:1.0:0.0".to_owned(), FINALIZE.to_owned())
+    );
+    assert_eq!(
+        sent[3],
+        ("mc-dream:1.1:0.0".to_owned(), FINALIZE.to_owned())
+    );
+    assert_eq!(
+        sent.iter().filter(|(_, prompt)| prompt == FINALIZE).count(),
+        2
+    );
+    assert_eq!(sent[4].0, "mc-dream:1.2:0.0");
+    assert_eq!(
+        ran.client.sends.lock().unwrap()[1].1.runner_params["stop_when"],
+        json!({"max_steps": 1})
+    );
+    assert_eq!(ran.checked(2).0, "archived");
+    let (status, result, checked_at) = ran.checked(1);
+    assert_eq!(
+        (status.as_str(), result.as_deref()),
+        ("active", Some("skipped"))
+    );
+    assert!(checked_at.is_some_and(|at| at > 0));
+    assert_eq!(ran.checked(3).1.as_deref(), Some("confirmed"));
+    // The skipped message is recorded with the run, with why.
+    let skipped = batches[1]["skipped"].as_str().unwrap();
+    assert!(skipped.contains("mc-dream:1.1:0.0"), "{skipped}");
+    assert!(
+        skipped.contains("verify manifest missing complete root element"),
+        "{skipped}"
+    );
+    assert!(batches[0].get("skipped").is_none() && batches[2].get("skipped").is_none());
+}
+
+/// The run's token budget counts a capped child's two sends, and stops the
+/// run before its next message as before.
+#[tokio::test]
+async fn the_token_budget_stops_a_run_of_one_memory_messages_before_the_next() {
+    let fixture = live_and_gone(&[
+        row(1, "A plain rule with no names."),
+        row(2, "`gone_function` does it."),
+        row(3, "`live_function` runs first."),
+    ]);
+    let settings = Settings {
+        budget_tokens: 1_500,
+        ..Settings::default()
+    };
+    // 1,000 tokens to the cap, 500 for an answer without a manifest.
+    let ran = broad_through_engine(
+        fixture,
+        &[
+            Ends::StepCapped(STEP_CAP),
+            Ends::Spent("I ran out of steps.", 500),
+        ],
+        &settings,
+    )
+    .await;
+    let (_, outcome, _, _, error, _) = ran.run();
+    assert_eq!(outcome, "budget_stopped");
+    assert_eq!(
+        error.as_deref(),
+        Some("used 1500 of 1500 tokens; 2 of 3 batches left unsent")
+    );
+    assert_eq!(ran.sent().len(), 2);
+    // The capped memory counts as checked; the others are untouched.
+    assert_eq!(ran.checked(2).1.as_deref(), Some("skipped"));
+    assert_eq!(ran.checked(1).1, None);
+    assert_eq!(ran.checked(3).1, None);
 }
 
 /// A confirmed memory whose file changed, but not the lines it cites, stays
@@ -862,8 +1086,10 @@ fn a_confirmation_whose_cited_lines_changed_goes_to_the_model_with_them() {
     );
 }
 
+/// Diff messages hold up to twenty memories; a memory checked by reading
+/// goes alone.
 #[test]
-fn diff_batches_hold_twenty_memories_and_read_batches_five() {
+fn diff_batches_hold_twenty_memories_and_read_batches_one() {
     let fixture = Fixture::new(&[("src/a.rs", "old\n")]);
     let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     fixture.repo.write(&[("src/a.rs", "new\n")]);
@@ -887,6 +1113,16 @@ fn diff_batches_hold_twenty_memories_and_read_batches_five() {
             .iter()
             .map(|batch| (batch.read().len(), batch.has_diff()))
             .collect::<Vec<_>>(),
-        [(20, true), (5, true), (5, false), (2, false)]
+        [
+            (20, true),
+            (5, true),
+            (1, false),
+            (1, false),
+            (1, false),
+            (1, false),
+            (1, false),
+            (1, false),
+            (1, false)
+        ]
     );
 }

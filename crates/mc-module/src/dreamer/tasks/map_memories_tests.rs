@@ -13,6 +13,9 @@ use crate::memory_profile::{prompt_profile, FRAMES};
 use crate::memory_writes::normalized_hash;
 
 const PROJECT: &str = "pj-map";
+/// The memories a message held before it held one ([`BATCH_SIZE`]), for
+/// tests of a reply that maps several memories of one message.
+const SEVERAL: usize = 5;
 
 /// A git checkout in a folder of its own, with `files` written and
 /// committed; `untracked` are written and left out.
@@ -188,6 +191,15 @@ impl Store {
         })
     }
 
+    /// The batches a run would plan if a message held up to [`SEVERAL`]
+    /// memories, for a test of a reply that maps several memories of one
+    /// message.
+    fn several(&self) -> Vec<MapBatch> {
+        with_context(&self.db, self.repo.root(), |context| {
+            MapMemories.plan_batches_of(context, SEVERAL).unwrap()
+        })
+    }
+
     fn apply(&self, batch: &MapBatch, text: &str, run: i64) -> Applied {
         self.db.with_connection(|conn| {
             let tx = conn.transaction().unwrap();
@@ -323,17 +335,14 @@ fn a_run_sends_unmapped_memories_then_at_most_twenty_marked_ones_that_name_a_fil
     let sent: Vec<Vec<i64>> = batches.iter().map(ids).collect();
     let unmapped: Vec<i64> = [1, 2].into_iter().chain(31..=40).collect();
     // Unmapped first (28 is archived, 29 another project's), then the first
-    // twenty marked memories that name a file; five to a message.
+    // twenty marked memories that name a file; one to a message.
     let expected: Vec<i64> = unmapped.into_iter().chain(4..=23).collect();
     assert_eq!(sent.concat(), expected);
-    assert_eq!(
-        sent.iter().map(Vec::len).collect::<Vec<_>>(),
-        [5, 5, 5, 5, 5, 5, 2]
-    );
+    assert_eq!(sent.iter().map(Vec::len).collect::<Vec<_>>(), vec![1; 32]);
     // A memory the run re-sends is shown the file its text names: 4 is the
-    // first of them, third in the third message.
-    assert_eq!(batches[2].inputs[2].id, 4);
-    assert_eq!(batches[2].inputs[2].candidates, ["src/view.rs"]);
+    // first of them, in the thirteenth message.
+    assert_eq!(batches[12].inputs[0].id, 4);
+    assert_eq!(batches[12].inputs[0].candidates, ["src/view.rs"]);
 }
 
 #[test]
@@ -514,7 +523,9 @@ fn the_request_bytes_are_pinned() {
         },
     ]);
     store.map(4, &[mapped("", MAPPER)]);
-    let batches = store.batches();
+    // The four memories in one message, so one golden covers each kind; a
+    // run sends each alone in the same frame.
+    let batches = store.several();
     assert_eq!(batches.len(), 1);
     let batch = &batches[0];
     golden(
@@ -637,10 +648,11 @@ fn a_reply_must_hold_one_whole_manifest_with_well_formed_entries() {
     );
 }
 
-/// Five live memories, each naming nothing, in one batch.
+/// Five live memories, each naming nothing, in one message, as a run would
+/// plan them if a message held several.
 fn apply_store() -> (Store, MapBatch) {
     let store = store(&(1..=5).map(row).collect::<Vec<_>>());
-    let batch = store.batches().remove(0);
+    let batch = store.several().remove(0);
     assert_eq!(ids(&batch), [1, 2, 3, 4, 5]);
     (store, batch)
 }
@@ -782,7 +794,7 @@ fn a_file_must_be_tracked_present_and_inside_the_checkout() {
     git(root, &["add", "src/escape.rs", "folder.rs"]);
     commit(root);
     std::fs::remove_file(root.join("web/app.ts")).unwrap();
-    let batch = &store.batches()[0];
+    let batch = &store.several()[0];
     let applied = store.apply(
         batch,
         &manifest(&[
@@ -846,32 +858,27 @@ fn a_directive_shaped_project_rule_never_maps_to_files() {
     });
     let store = store(&rows);
     let batches = store.batches();
-    // Five memories to a message: the sixth goes in a second one.
+    // One memory to a message.
     assert_eq!(
         batches.iter().map(ids).collect::<Vec<_>>(),
-        [vec![1, 2, 3, 4, 5], vec![6]]
+        [vec![1], vec![2], vec![3], vec![4], vec![5], vec![6]]
     );
-    let first = store.apply(
-        &batches[0],
-        &manifest(&[
-            (1, "files=\"src/view.rs\""),
-            (2, "files=\"src/view.rs\""),
-            (3, "files=\"src/view.rs\""),
-            (4, "files=\"src/view.rs\""),
-            (5, "files=\"src/view.rs\""),
-        ]),
-        8,
-    );
-    let second = store.apply(&batches[1], &manifest(&[(6, "files=\"src/view.rs\"")]), 8);
-    assert_eq!((first.applied, second.applied), (5, 1));
+    let applied: Vec<Applied> = batches
+        .iter()
+        .zip(1..)
+        .map(|(batch, id)| store.apply(batch, &manifest(&[(id, "files=\"src/view.rs\"")]), 8))
+        .collect();
+    assert!(applied.iter().all(|applied| applied.applied == 1));
     for id in 1..=4 {
         assert_eq!(store.mapped(id), [mapped("", REJECTED)], "memory {id}");
-        assert!(first.dropped.contains(&format!(
-            "memory {id}: a directive-shaped project rule names files to act on, not code that backs it; recorded as file-independent (host_rejected_fallback) instead of src/view.rs"
-        )));
+        assert_eq!(
+            applied[id as usize - 1].dropped,
+            [format!(
+                "memory {id}: a directive-shaped project rule names files to act on, not code that backs it; recorded as file-independent (host_rejected_fallback) instead of src/view.rs"
+            )]
+        );
     }
-    assert_eq!(first.dropped.len(), 4);
-    assert!(second.dropped.is_empty());
+    assert!(applied[4].dropped.is_empty() && applied[5].dropped.is_empty());
     assert_eq!(store.mapped(5), [mapped("src/view.rs", MAPPER)]);
     assert_eq!(store.mapped(6), [mapped("src/view.rs", MAPPER)]);
     assert!(!directive_shaped_rule("swe:project-rules", "   "));
@@ -916,12 +923,86 @@ async fn ended_run(db: &ContextDb) -> (String, i64, i64, Value) {
     panic!("the run never ended");
 }
 
+/// A map run through the engine, ended, and what it ran against.
+struct Ran {
+    db: Arc<ContextDb>,
+    client: Arc<Client>,
+    /// The project's folder, as git names it.
+    root: String,
+    /// The run's outcome, proposed and applied counts and dropped list.
+    run: (String, i64, i64, Value),
+    _dir: tempfile::TempDir,
+    _repo: Repo,
+}
+
+impl Ran {
+    /// Memory `id`'s mapping now, read in place: the spawned run may still
+    /// hold the store.
+    fn mapped(&self, id: i64) -> Vec<(String, String)> {
+        self.db
+            .with_connection(|conn| mapping_rows(conn, id))
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.file_path, row.mapping_origin))
+            .collect()
+    }
+
+    /// The run's error and its batch records.
+    fn record(&self) -> (Option<String>, Value) {
+        self.db
+            .with_connection(|conn| {
+                conn.query_row(
+                    "SELECT error, batches_json FROM dream_task_runs",
+                    [],
+                    |row| Ok((row.get(0)?, row.get::<_, String>(1)?)),
+                )
+            })
+            .map(|(error, batches)| (error, serde_json::from_str(&batches).unwrap()))
+            .unwrap()
+    }
+}
+
+/// Run map-memories for `store`'s project through the engine, on a runner
+/// that takes plans with AFT's reader tools, each child run ending as `ends`
+/// says, and wait for the run to end.
+async fn through_engine(store: Store, ends: &[Ends], settings: &Settings) -> Ran {
+    let Store { _dir, db, repo } = store;
+    let db = Arc::new(db);
+    let engine = Arc::new(Engine::new("this", vec![Box::new(MapMemories)]));
+    let profile = Arc::new(prompt_profile(None).unwrap());
+    // Canonical, as git names the main checkout (macOS keeps temp folders
+    // under /private/var behind a /var link).
+    let root = repo.root().canonicalize().unwrap().display().to_string();
+    engine.see_project(&db, PROJECT, &root, profile, settings, 1);
+    db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
+        .unwrap();
+    let mut client = Client::new(&["p/a"], ends);
+    client.plans = vec!["ra"];
+    client.catalog = Ok(vec![("read", &["code.read/v1"]), ("grep", &[])]);
+    let client = Arc::new(client);
+    engine.tick(&db, &client, settings, now_ms());
+    let run = ended_run(&db).await;
+    Ran {
+        db,
+        client,
+        root,
+        run,
+        _dir,
+        _repo: repo,
+    }
+}
+
+/// A reply's text that lives as long as the scripted runner needs it.
+fn leaked(text: String) -> &'static str {
+    Box::leak(text.into_boxed_str())
+}
+
 /// A whole run through the engine: the project's schedule comes due, the
-/// task reads the store and the checkout, its one message goes to a child
-/// with AFT's reader tools, and the reply's mappings are written under the
-/// run's id.
+/// task reads the store and the checkout, each memory goes to a child of
+/// its own with AFT's reader tools, and each reply's mappings are written
+/// under the run's id.
 #[tokio::test]
-async fn a_due_run_maps_the_project_s_memories_through_the_engine() {
+async fn a_due_run_maps_each_memory_in_a_child_of_its_own_through_the_engine() {
     let store = store(&[
         Row {
             content: "Views are built in `src/view.rs`.".into(),
@@ -933,82 +1014,187 @@ async fn a_due_run_maps_the_project_s_memories_through_the_engine() {
         },
         row(3),
     ]);
-    let Store { _dir, db, repo } = store;
-    let db = Arc::new(db);
-    let engine = Arc::new(Engine::new("this", vec![Box::new(MapMemories)]));
-    let profile = Arc::new(prompt_profile(None).unwrap());
-    // Canonical, as git names the main checkout (macOS keeps temp folders
-    // under /private/var behind a /var link).
-    let root = repo.root().canonicalize().unwrap().display().to_string();
-    engine.see_project(&db, PROJECT, &root, profile, &Settings::default(), 1);
-    db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
-        .unwrap();
-    let answer: &'static str = Box::leak(
-        manifest(&[
-            (1, "files=\"src/view.rs\""),
-            (2, "independent=\"true\""),
-            (9, "independent=\"true\""),
-        ])
-        .into_boxed_str(),
-    );
-    let mut client = Client::new(&["p/a"], &[Ends::Reply(answer)]);
-    client.plans = vec!["ra"];
-    client.catalog = Ok(vec![("read", &["code.read/v1"]), ("grep", &[])]);
-    let client = Arc::new(client);
+    let ran = through_engine(
+        store,
+        &[
+            Ends::Reply(leaked(manifest(&[(1, "files=\"src/view.rs\"")]))),
+            Ends::Reply(leaked(manifest(&[
+                (2, "independent=\"true\""),
+                (9, "independent=\"true\""),
+            ]))),
+            // Nothing decided: a closed empty manifest leaves 3 unmapped.
+            Ends::Reply("<mappings>\n</mappings>"),
+        ],
+        &Settings::default(),
+    )
+    .await;
 
-    engine.tick(&db, &client, &Settings::default(), now_ms());
-    let (outcome, proposed, applied, dropped) = ended_run(&db).await;
-
-    assert_eq!((outcome.as_str(), proposed, applied), ("applied", 3, 2));
-    assert_eq!(dropped, json!(["memory 9 is not one this batch sent"]));
-    // One child, created with the reader tools in the project's folder, its
-    // message listing every memory with no mapping.
-    let sends = client.sends.lock().unwrap();
-    assert_eq!(sends.len(), 1);
-    let (child, request) = &sends[0];
-    assert_eq!(child.session.session, "mc-dream:1.0:0.0");
-    assert_eq!(child.project_root.as_deref(), Some(root.as_str()));
-    let plan = request.plan.as_ref().expect("a plan");
+    let (outcome, proposed, applied, dropped) = &ran.run;
+    assert_eq!((outcome.as_str(), *proposed, *applied), ("applied", 3, 2));
+    assert_eq!(dropped, &json!(["memory 9 is not one this batch sent"]));
+    let sends = ran.client.sends.lock().unwrap();
     assert_eq!(
-        plan["tool_items"],
-        json!([{"params": {}, "preset": "reader", "provider": "aft"}])
+        sends
+            .iter()
+            .map(|(child, _)| child.session.session.as_str())
+            .collect::<Vec<_>>(),
+        ["mc-dream:1.0:0.0", "mc-dream:1.1:0.0", "mc-dream:1.2:0.0"]
     );
-    assert!(plan["system_text_items"][0]["params"]["text"]
-        .as_str()
-        .unwrap()
-        .starts_with("You are a memory mapper"));
-    assert_eq!(request.runner_params["stop_when"], json!({"max_steps": 60}));
-    let prompt = request.prompt.as_deref().unwrap();
-    assert!(prompt.contains(&format!("Project: {PROJECT}")));
-    assert!(prompt.contains(
+    for (child, request) in sends.iter() {
+        assert_eq!(child.project_root.as_deref(), Some(ran.root.as_str()));
+        let plan = request.plan.as_ref().expect("a plan");
+        assert_eq!(
+            plan["tool_items"],
+            json!([{"params": {}, "preset": "reader", "provider": "aft"}])
+        );
+        assert!(plan["system_text_items"][0]["params"]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("You are a memory mapper"));
+        assert_eq!(
+            request.runner_params["stop_when"],
+            json!({"max_steps": STEP_CAP})
+        );
+        assert!(request
+            .prompt
+            .as_deref()
+            .unwrap()
+            .contains(&format!("Project: {PROJECT}")));
+    }
+    // Each message holds its one memory.
+    let prompts: Vec<&str> = sends
+        .iter()
+        .map(|(_, request)| request.prompt.as_deref().unwrap())
+        .collect();
+    assert!(prompts[0].contains(
         "[1] ARCHITECTURE\nViews are built in `src/view.rs`.\nLikely files (candidate paths, confirmed to exist): src/view.rs"
     ));
-    assert!(prompt.contains("[3] ARCHITECTURE\nFact 3."));
+    assert!(prompts[1].contains("[2] ARCHITECTURE\nAnthropic returns 400 on empty content."));
+    assert!(prompts[2].contains("[3] ARCHITECTURE\nFact 3."));
+    for (index, prompt) in prompts.iter().enumerate() {
+        let others = [1, 2, 3]
+            .into_iter()
+            .filter(|id| *id != index + 1)
+            .filter(|id| prompt.contains(&format!("[{id}] ARCHITECTURE")))
+            .count();
+        assert_eq!(others, 0, "{prompt}");
+    }
     drop(sends);
 
-    // The spawned run may still hold the store, so it is read in place.
-    let mapped_now = |id: i64| -> Vec<(String, String)> {
-        db.with_connection(|conn| mapping_rows(conn, id))
-            .unwrap()
-            .into_iter()
-            .map(|row| (row.file_path, row.mapping_origin))
-            .collect()
-    };
-    assert_eq!(mapped_now(1), [mapped("src/view.rs", MAPPER)]);
-    assert_eq!(mapped_now(2), [mapped("", MAPPER)]);
-    assert!(mapped_now(3).is_empty());
-    let journal: Vec<(String, String)> = db
+    assert_eq!(ran.mapped(1), [mapped("src/view.rs", MAPPER)]);
+    assert_eq!(ran.mapped(2), [mapped("", MAPPER)]);
+    assert!(ran.mapped(3).is_empty());
+    // One journal entry for each message that mapped something.
+    let journal: Vec<(String, String)> = ran
+        .db
         .with_connection(|conn| {
             conn.prepare("SELECT decision_key, receipt_json FROM memory_journal ORDER BY id")?
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()
         })
         .unwrap();
-    assert_eq!(journal.len(), 1);
-    assert_eq!(journal[0].0, "dream-run:1:map-memories:0");
-    let receipt: Value = serde_json::from_str(&journal[0].1).unwrap();
-    assert_eq!(receipt["memoryIds"], json!([1, 2]));
-    drop((_dir, repo));
+    let journal: Vec<(&str, Value)> = journal
+        .iter()
+        .map(|(key, receipt)| {
+            let receipt: Value = serde_json::from_str(receipt).unwrap();
+            (key.as_str(), receipt["memoryIds"].clone())
+        })
+        .collect();
+    assert_eq!(
+        journal,
+        [
+            ("dream-run:1:map-memories:0", json!([1])),
+            ("dream-run:1:map-memories:1", json!([2]))
+        ]
+    );
+}
+
+/// A child that reaches the step cap is sent map's finalize message once,
+/// in the same conversation, and the manifest it answers with is written.
+/// One that still answers without a manifest leaves its memory unmapped,
+/// and the run goes on to the next memory.
+#[tokio::test]
+async fn a_capped_child_answers_once_more_and_one_without_a_manifest_leaves_its_memory_unmapped() {
+    let store = store(&[row(1), row(2), row(3)]);
+    let ran = through_engine(
+        store,
+        &[
+            Ends::StepCapped(STEP_CAP),
+            Ends::Reply(leaked(manifest(&[(1, "files=\"src/view.rs\"")]))),
+            Ends::StepCapped(STEP_CAP),
+            Ends::Reply("I ran out of steps before I could decide."),
+            Ends::Reply(leaked(manifest(&[(3, "independent=\"true\"")]))),
+        ],
+        &Settings::default(),
+    )
+    .await;
+
+    let (outcome, proposed, applied, _) = &ran.run;
+    assert_eq!((outcome.as_str(), *proposed, *applied), ("applied", 2, 2));
+    {
+        let sends = ran.client.sends.lock().unwrap();
+        let sent: Vec<(&str, &str)> = sends
+            .iter()
+            .map(|(child, request)| {
+                (
+                    child.session.session.as_str(),
+                    request.prompt.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(sent.len(), 5);
+        // The finalize message goes once to each capped child, in that child.
+        assert_eq!(sent[1], ("mc-dream:1.0:0.0", FINALIZE));
+        assert_eq!(sent[3], ("mc-dream:1.1:0.0", FINALIZE));
+        assert_eq!(
+            sent.iter()
+                .filter(|(_, prompt)| *prompt == FINALIZE)
+                .count(),
+            2
+        );
+        assert_eq!(sent[4].0, "mc-dream:1.2:0.0");
+        assert_eq!(
+            sends[1].1.runner_params["stop_when"],
+            json!({"max_steps": 1})
+        );
+    }
+    assert_eq!(ran.mapped(1), [mapped("src/view.rs", MAPPER)]);
+    assert!(ran.mapped(2).is_empty());
+    assert_eq!(ran.mapped(3), [mapped("", MAPPER)]);
+    // The skipped message is recorded with the run, with why.
+    let (_, batches) = ran.record();
+    assert_eq!(batches.as_array().unwrap().len(), 3);
+    let skipped = batches[1]["skipped"].as_str().unwrap();
+    assert!(skipped.contains("mc-dream:1.1:0.0"), "{skipped}");
+    assert!(batches[0].get("skipped").is_none() && batches[2].get("skipped").is_none());
+}
+
+/// The run's token budget counts a capped child's two sends, and stops the
+/// run before its next message as before.
+#[tokio::test]
+async fn the_token_budget_stops_a_run_of_one_memory_messages_before_the_next() {
+    let store = store(&[row(1), row(2), row(3)]);
+    let settings = Settings {
+        budget_tokens: 1_500,
+        ..Settings::default()
+    };
+    // 1,000 tokens to the cap, 500 for an answer without a manifest.
+    let ran = through_engine(
+        store,
+        &[
+            Ends::StepCapped(STEP_CAP),
+            Ends::Spent("I ran out of steps.", 500),
+        ],
+        &settings,
+    )
+    .await;
+    assert_eq!(ran.run.0, "budget_stopped");
+    assert_eq!(
+        ran.record().0.as_deref(),
+        Some("used 1500 of 1500 tokens; 2 of 3 batches left unsent")
+    );
+    assert_eq!(ran.client.sends.lock().unwrap().len(), 2);
+    assert!((1..=3).all(|id| ran.mapped(id).is_empty()));
 }
 
 #[test]

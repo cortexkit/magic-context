@@ -9,12 +9,15 @@
 //!
 //! A run sends every live memory of the project that has no mapping yet,
 //! then up to twenty memories marked file-independent by the model whose own
-//! text names a file that exists, five memories per message. Before a
+//! text names a file that exists, one memory per message. Before a
 //! message goes out the module lists each memory's likely files: the paths
 //! its text names that the checkout tracks, and for a memory naming none, the
 //! files where a bounded literal search finds the code names it mentions. The
 //! model reads the checkout with a tool provider's read-only tools
-//! ([`super::super::plan`]) and answers with one `<mappings>` manifest.
+//! ([`super::super::plan`]) for at most [`STEP_CAP`] steps and answers with
+//! one `<mappings>` manifest. A child that reaches the cap is told to answer
+//! with what it has; when that answer is unusable too, the memory stays
+//! unmapped and the run goes on.
 //!
 //! The manifest is checked one entry at a time. An id the batch didn't send,
 //! or a memory changed since the batch read it, is dropped with its reason.
@@ -50,7 +53,7 @@ use serde_json::{json, Value};
 
 use super::classify::{attribute, body, describe_shape, re};
 use crate::dreamer::branches::main_checkout;
-use crate::dreamer::run::{TaskInput, TaskReply};
+use crate::dreamer::run::{StepCap, TaskInput, TaskReply, STEP_CAP};
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
 use crate::memory_profile::Profile;
 use crate::memory_writes::now_ms;
@@ -64,11 +67,16 @@ const INPUT_FRAME: &str = "dreamer/map-memories.input";
 const WRITER: &str = "dreamer:map-memories";
 /// The operation the journal records.
 pub(crate) const OPERATION: &str = "map";
-/// At most this many memories go in one message. Each step of a message
-/// resends every file read so far, so a longer batch costs far more than its
-/// share; verify's batches checked by reading hold the same number
-/// ([`super::verify::READ_BATCH_SIZE`]).
-pub(crate) const BATCH_SIZE: usize = 5;
+/// At most this many memories go in one message: one. Each step of a child
+/// run resends every file read so far, so the memories of one batch paid for
+/// each other's reads on every later step; alone, a memory's run carries only
+/// its own reads, while the system text, tools and task frame every run
+/// shares stay cached. Verify's batches checked by reading hold the same
+/// number ([`super::verify::READ_BATCH_SIZE`]).
+pub(crate) const BATCH_SIZE: usize = 1;
+/// What a child whose run reached [`STEP_CAP`] is sent, once; its reply's
+/// manifest is the batch's answer.
+pub(crate) const FINALIZE: &str = "Stop reading now. Answer with the mappings you have decided; leave any id you could not decide unmapped.";
 /// At most this many memories already marked file-independent are sent
 /// again in one run (see [`select`]).
 pub(crate) const MAX_REPAIRS: usize = 20;
@@ -732,6 +740,17 @@ pub(crate) struct Run {
 impl MapMemories {
     /// The run's batches for the context's owner, in order.
     pub(crate) fn plan_batches(&self, context: &TaskContext<'_>) -> Result<Vec<MapBatch>, String> {
+        self.plan_batches_of(context, BATCH_SIZE)
+    }
+
+    /// [`MapMemories::plan_batches`], with at most `size` memories in a
+    /// message. Tests of a reply that maps several memories at once plan
+    /// with more than [`BATCH_SIZE`].
+    pub(crate) fn plan_batches_of(
+        &self,
+        context: &TaskContext<'_>,
+        size: usize,
+    ) -> Result<Vec<MapBatch>, String> {
         let Owner::Project { id: project, root } = context.owner else {
             return Err(format!("{KIND} works on a project's memories only"));
         };
@@ -759,7 +778,7 @@ impl MapMemories {
         });
         let by_id: HashMap<i64, &Memory> = live.iter().map(|memory| (memory.id, memory)).collect();
         inputs
-            .chunks(BATCH_SIZE)
+            .chunks(size)
             .enumerate()
             .map(|(index, chunk)| {
                 // Rendered now with the paths the memories name, which
@@ -935,6 +954,13 @@ impl TaskInput for MapBatch {
     fn accepts(&self, reply: &str) -> Result<(), String> {
         validate_manifest(reply, &self.ids()).map(|_| ())
     }
+
+    fn step_cap(&self) -> Option<StepCap> {
+        Some(StepCap {
+            steps: STEP_CAP,
+            finalize: FINALIZE,
+        })
+    }
 }
 
 impl Batch for MapBatch {
@@ -946,6 +972,10 @@ impl Batch for MapBatch {
 
     fn folder(&self) -> Option<&str> {
         Some(&self.run.folder)
+    }
+
+    fn memory_ids(&self) -> Vec<i64> {
+        self.ids()
     }
 }
 

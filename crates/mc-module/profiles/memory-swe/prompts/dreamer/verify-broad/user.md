@@ -1,4 +1,4 @@
-## Verify these memories against the code
+## Verify each memory below against the code
 
 Project: ⟦projectIdentity⟧
 

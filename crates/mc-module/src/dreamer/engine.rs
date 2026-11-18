@@ -1393,8 +1393,31 @@ impl Engine {
                     purpose: &purpose,
                 }),
             };
-            let reply = match run::run(client, &job, batch.as_ref()).await {
-                Ok(reply) => reply,
+            let written = match run::run(client, &job, batch.as_ref()).await {
+                Ok(reply) => {
+                    record_batch(end, &reply);
+                    apply(db, locks, &self.holder, batch.as_ref(), &reply, run_id)
+                }
+                // The model left the batch undecided at its step cap: it
+                // counts as skipped, and the run goes on to its next batch.
+                Err(TaskError::Skipped(skipped)) => {
+                    record_batch(end, &skipped.reply);
+                    if let Some(Value::Object(entry)) = end.batches.last_mut() {
+                        entry.insert("skipped".into(), json!(skipped.reason));
+                    }
+                    tracing::info!(
+                        "ck-mc: dreamer: run {run_id} {} for {}: batch {index} (memories {:?}) reached its step cap without a usable answer after {} steps, so it counts as skipped: {}",
+                        due.task,
+                        due.owner.owner_id,
+                        batch.memory_ids(),
+                        skipped
+                            .reply
+                            .steps
+                            .map_or_else(|| "unreported".to_owned(), |steps| steps.to_string()),
+                        skipped.reason
+                    );
+                    write_locked(db, locks, &self.holder, |tx| batch.skip(tx, run_id))
+                }
                 Err(TaskError::AccountWait(wait)) => {
                     end.outcome = "waiting".into();
                     end.error = Some(wait.code.clone());
@@ -1409,8 +1432,7 @@ impl Engine {
                     return;
                 }
             };
-            record_batch(end, &reply);
-            match apply(db, locks, &self.holder, batch.as_ref(), &reply, run_id) {
+            match written {
                 Ok(Some(applied)) => {
                     batch.after_commit(db);
                     if applied.applied > 0 && batch.changes_memories() {
@@ -1465,6 +1487,18 @@ fn apply(
     reply: &TaskReply,
     run_id: i64,
 ) -> Result<Option<super::task::Applied>, String> {
+    write_locked(db, locks, holder, |tx| batch.apply(tx, reply, run_id))
+}
+
+/// Run `write` in its own transaction, after checking in that transaction
+/// that this process still holds every lock of `locks`. `None` when it
+/// doesn't: nothing is written.
+fn write_locked(
+    db: &ContextDb,
+    locks: &[OwnerKey],
+    holder: &str,
+    write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<super::task::Applied, String>,
+) -> Result<Option<super::task::Applied>, String> {
     db.with_connection(|conn| {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1474,7 +1508,7 @@ fn apply(
         {
             return Ok(None);
         }
-        let applied = batch.apply(&tx, reply, run_id)?;
+        let applied = write(&tx)?;
         tx.commit().map_err(|error| error.to_string())?;
         Ok(Some(applied))
     })

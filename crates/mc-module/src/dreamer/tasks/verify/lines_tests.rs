@@ -53,7 +53,7 @@ fn a_run_started_in_a_worktree_reads_the_main_checkout() {
         row(1, "`main_name` in src/a.rs is the entry point."),
         row(2, "`wip_name` in src/a.rs is the entry point."),
     ]);
-    let batches = fixture.batches_at(true, &worktree.join("src"));
+    let batches = fixture.several_at(true, &worktree.join("src"));
     assert_eq!(batches.len(), 1);
     let batch = &batches[0];
     // The child session and every lookup read the main checkout.
@@ -92,7 +92,7 @@ fn a_memory_learned_on_a_branch_is_checked_on_a_copy_of_its_newest_commit() {
     // A branch that is gone stands for the default branch, master, which
     // the main checkout has checked out.
     learned_on(&fixture, 3, "deleted-branch");
-    let batches = fixture.batches(true);
+    let batches = fixture.several(true);
     assert_eq!(batches.len(), 2);
     // The main checkout's batch first: memory 2 without a line, memory 3
     // checked against master as its line.
@@ -237,7 +237,7 @@ fn a_memory_that_names_its_branch_is_archived_while_there_are_two_live_branches(
     let (fixture, _feature) = agreed_file(true);
     fixture.insert(&[row(3, "`other` in src/other.rs takes no arguments.")]);
     learned_on(&fixture, 2, "master");
-    let batch = fixture.batches(true).remove(0);
+    let batch = fixture.several(true).remove(0);
     let mut sent = read(&batch);
     sent.sort();
     assert_eq!(sent, [(2, true), (3, false)]);
@@ -386,7 +386,7 @@ fn a_confirmation_stands_only_where_every_live_branch_holds_its_lines() {
         ),
         row(4, "`SHARED_LIMIT` is 7."),
     ]);
-    let batch = fixture.batches(true).remove(0);
+    let batch = fixture.several(true).remove(0);
     let applied = fixture.apply(
         &batch,
         &manifest(&format!(
@@ -412,7 +412,7 @@ fn a_confirmation_stands_only_where_every_live_branch_holds_its_lines() {
     // A memory learned on the default branch is checked there alone.
     learned_on(&fixture, 1, "master");
     let batch = fixture
-        .batches(true)
+        .several(true)
         .into_iter()
         .find(|batch| batch.read().iter().any(|read| read.id == 1))
         .unwrap();

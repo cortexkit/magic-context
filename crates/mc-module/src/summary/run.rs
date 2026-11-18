@@ -738,7 +738,9 @@ async fn call<C: RunnerClient>(
         plan: None,
         attribution: call_on.attribution,
     };
-    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage).await?;
+    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage)
+        .await?
+        .completed()?;
     if reply.length_capped {
         return Err(CallError::Summary("the reply hit its output limit".into()));
     }
@@ -801,6 +803,33 @@ pub(crate) struct Reply {
     pub steps: Option<u64>,
 }
 
+/// The run a send started, as it ended: completed with its reply, or
+/// stopped at its step limit.
+pub(crate) struct Ended {
+    /// The completed run's reply. For a run stopped at its step limit, the
+    /// final message it left, which answers nothing, and the steps it took.
+    pub reply: Reply,
+    /// The run ended at its step limit (`stop_when.max_steps`): its last
+    /// step asked for a tool call the limit cut off. Only a child with tools
+    /// can end this way.
+    pub step_capped: bool,
+    /// For a run stopped at its step limit, the failure [`Ended::completed`]
+    /// reports; empty for a completed run.
+    failure: String,
+}
+
+impl Ended {
+    /// The reply of a run that completed. A run stopped at its step limit
+    /// is the failure every caller saw before such runs were told apart.
+    pub(crate) fn completed(self) -> Result<Reply, String> {
+        if self.step_capped {
+            Err(self.failure)
+        } else {
+            Ok(self.reply)
+        }
+    }
+}
+
 /// Retry timing stays typed until the first-turn retry loop consumes it.
 /// Direct sends (turn two and fact checks) have no transient retry loop.
 #[derive(Debug)]
@@ -833,6 +862,23 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<Reply, SummaryError> {
+    send_and_wait_stepped(client, child, send_id, prompt, how, usage)
+        .await?
+        .completed()
+        .map_err(SummaryError::from)
+}
+
+/// [`send_and_wait`], with a run stopped at its step limit returned as
+/// such ([`Ended::step_capped`]) instead of as a failure, for a dreamer
+/// child with tools that is asked to answer once more when stopped.
+pub(crate) async fn send_and_wait_stepped<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    send_id: &str,
+    prompt: &str,
+    how: &Model<'_>,
+    usage: &mut Option<StepUsage>,
+) -> Result<Ended, SummaryError> {
     match send_and_wait_inner(client, child, send_id, prompt, how, usage).await {
         Ok(reply) => Ok(reply),
         Err(CallError::Summary(error)) => Err(error),
@@ -849,7 +895,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
     prompt: &str,
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
-) -> Result<Reply, CallError> {
+) -> Result<Ended, CallError> {
     let with_temperature = client.child_temperature(child).await;
     let session_class = if how.creates_child && client.child_session_class(child).await {
         Some(how.send.session_class().to_owned())
@@ -1010,15 +1056,34 @@ async fn send_and_wait_inner<C: RunnerClient>(
         }) {
             return Err(CallError::RetryAt { next_ms, error });
         }
-        return Err(format!("the run ended {}: {error}", result.state).into());
+        let failure = format!("the run ended {}: {error}", result.state);
+        if result.state == states::MAX_STEPS {
+            return Ok(Ended {
+                reply: Reply {
+                    length_capped: false,
+                    steps: result.usage.as_ref().map(|usage| usage.steps),
+                    text: result
+                        .final_message
+                        .map(|message| message.text)
+                        .unwrap_or_default(),
+                },
+                step_capped: true,
+                failure,
+            });
+        }
+        return Err(failure.into());
     }
-    Ok(Reply {
-        length_capped: result.finish == Some(Finish::Length),
-        steps: result.usage.as_ref().map(|usage| usage.steps),
-        text: result
-            .final_message
-            .map(|message| message.text)
-            .unwrap_or_default(),
+    Ok(Ended {
+        reply: Reply {
+            length_capped: result.finish == Some(Finish::Length),
+            steps: result.usage.as_ref().map(|usage| usage.steps),
+            text: result
+                .final_message
+                .map(|message| message.text)
+                .unwrap_or_default(),
+        },
+        step_capped: false,
+        failure: String::new(),
     })
 }
 

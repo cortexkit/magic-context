@@ -289,6 +289,7 @@ const TEMPLATE_DATA = [
 "[magic-context] sqlite writer site=compaction-marker-replace db=opencode acquire_ms=\x01 hold_ms=\x01 work_ms=\x01 end_ms=\x01 outcome=not_acquired",
 "system prompt hash changed: \x01 → \x01 (len=\x01), adopting on the request whose messages are already final; presetChanged=unknown elements=[\x01]",
 "[magic-context] host stall profiler enabled: threshold \x01ms, sample interval \x01ms, clock calibration unavailable, setup \x01ms, reports in \x01",
+"ck-mc: dreamer: run \x01 \x01 for \x01: batch \x01 (memories \x01) reached its step cap without a usable answer after \x01 steps, so it counts as skipped: \x01",
 "compaction-marker drain: refusing ordinal \x01 because prefix trim through \x01 was not proven; preserving deferred history refresh signal\x021i",
 "[magic-context] conflict-detector: resolved v2 config carried no explicit compaction.auto (\x01); falling back to file-based detection",
 "[magic-context] sqlite writer site=compaction-marker-inject db=opencode acquire_ms=\x01 hold_ms=\x01 work_ms=\x01 end_ms=\x01 outcome=not_acquired",

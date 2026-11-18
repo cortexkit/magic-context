@@ -110,13 +110,13 @@
     },
     {
       "path": "prompts/dreamer/map-memories/system.md",
-      "sha256": "5452e11d14b357c55ec5acba60b5a64cf81842d0fe552d846c54504499ec3933",
-      "bytes": 3803
+      "sha256": "b102a169e0a7fce3b6a06f720cddbb13dbff9f7823e6d740250a247ce5283160",
+      "bytes": 3780
     },
     {
       "path": "prompts/dreamer/map-memories/user.md",
-      "sha256": "edb0d88772815083eacbffe297214e72427a02c7ec432de317b5b02f70b490b0",
-      "bytes": 819
+      "sha256": "1f21d2c22a46a03f864786441f9a83c8f56d5e028d161b5a6cf91c29710e851d",
+      "bytes": 820
     },
     {
       "path": "prompts/dreamer/reflect-patterns/system.md",
@@ -145,8 +145,8 @@
     },
     {
       "path": "prompts/dreamer/verify/system.md",
-      "sha256": "368b891bccf1b252c49701be205edd6de85d94d197a3ee5c9f800ab0d29b0fb8",
-      "bytes": 4975
+      "sha256": "173ae52b4c09c4cb6b0e568ba6a80f408765aea5c59a18aea4bfaf0e0094417b",
+      "bytes": 4964
     },
     {
       "path": "prompts/dreamer/verify/user.diff-evidence.md",
@@ -155,8 +155,8 @@
     },
     {
       "path": "prompts/dreamer/verify-broad/user.md",
-      "sha256": "a0b611a000e4166b0dc743834e0ba0ad92420b2372b03d3a56eba16d83847409",
-      "bytes": 764
+      "sha256": "b4c41232272e444b2a7f284c5cd3902f1ac0329a06333d5fee6c244a0710cbb2",
+      "bytes": 767
     },
     {
       "path": "prompts/events/causal_incident.historian.md",

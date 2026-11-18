@@ -138,6 +138,9 @@ fn request(
         .expect("a verify batch fits a window this large");
     let system = crate::dreamer::run::TaskInput::system(batch);
     let counter = Counter::for_model(None);
+    // The run's step bound: the task's step cap, within its kind's bound.
+    let max_steps = crate::dreamer::run::TaskInput::step_cap(batch)
+        .map_or(demand.max_steps, |cap| cap.steps.min(demand.max_steps));
     json!({
         "task": task,
         "kind": kind,
@@ -152,7 +155,7 @@ fn request(
         // project's folder.
         "settings": {
             "maxOutputTokens": DREAM_OUTPUT_TOKENS,
-            "maxSteps": demand.max_steps,
+            "maxSteps": max_steps,
             "tools": "aft reader preset (read, grep, glob, and AFT's navigation tools)",
         },
         "messages": [
@@ -727,7 +730,8 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
         "the source store was written"
     );
     assert_eq!(manifest["tasks"][0]["planned"], 1);
-    assert_eq!(manifest["tasks"][1]["planned"], 1);
+    // verify-broad sends each memory alone.
+    assert_eq!(manifest["tasks"][1]["planned"], 2);
     let read = |path: &str| -> Value {
         serde_json::from_str(&std::fs::read_to_string(args.out.join(path)).unwrap()).unwrap()
     };
@@ -745,7 +749,7 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
         .unwrap()
         .contains("Confirmed from: src/timer.rs:1-1"));
     let broad = read("verify-broad/batch-0/verify.request.json");
-    assert_eq!(broad["settings"]["maxSteps"], 60);
+    assert_eq!(broad["settings"]["maxSteps"], crate::dreamer::run::STEP_CAP);
     assert_eq!(broad["model"], "deepseek-flash");
     assert_eq!(broad["memories"][0]["id"], 2, "everything it cites is gone");
     let user = broad["messages"][1]["content"].as_str().unwrap();
@@ -754,13 +758,15 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
     println!("{}", serde_json::to_string_pretty(&broad).unwrap());
 }
 
-/// The apply step on a fixture with two live branches: a broad batch of
-/// five memories whose saved reply confirms two (one from lines that state
-/// it, one from lines that miss a name it states), rewrites two (one in a
-/// file the live branches agree on, one in a file they don't; both refused,
-/// since a memory without a line of its own is not rewritten while there
-/// are two) and archives a protected one. The report shows what a run would
-/// write, every gate included, and nothing is written but the report.
+/// The apply step on a fixture with two live branches: a broad run of five
+/// memories, one to a message, each message's saved reply the same manifest
+/// that confirms two (one from lines that state it, one from lines that
+/// miss a name it states), rewrites two (one in a file the live branches
+/// agree on, one in a file they don't; both refused, since a memory without
+/// a line of its own is not rewritten while there are two) and archives a
+/// protected one. Each message's reply decides only its own memory. The
+/// report shows what a run would write, every gate included, and nothing is
+/// written but the report.
 #[test]
 fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_its_report() {
     use super::tasks::verify::tests::{row, Fixture, PROJECT};
@@ -805,7 +811,7 @@ fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_
         &std::fs::read_to_string(args.out.join("verify-broad/batch-0").join(REQUEST)).unwrap(),
     )
     .unwrap();
-    assert_eq!(request["memories"].as_array().unwrap().len(), 5);
+    assert_eq!(request["memories"].as_array().unwrap().len(), 1);
     assert_eq!(
         request["memories"][0]["content"],
         "`live_function` in src/live.rs takes no arguments."
@@ -819,10 +825,15 @@ fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_
 <update id="4" files="src/live.rs">`live_function` lives in src/live.rs and takes no arguments.</update>
 <archive id="5" reason="it can panic now"/>
 </verify>"#;
-    write_json(
-        &args.out.join("verify-broad/batch-0").join(TRAJECTORY),
-        &json!({"stopReason": "final", "final": {"text": reply, "completeManifest": true}}),
-    );
+    for batch in 0..5 {
+        write_json(
+            &args
+                .out
+                .join(format!("verify-broad/batch-{batch}"))
+                .join(TRAJECTORY),
+            &json!({"stopReason": "final", "final": {"text": reply, "completeManifest": true}}),
+        );
+    }
     let files = |dir: &Path| -> Vec<(String, Vec<u8>)> {
         let mut found: Vec<(String, Vec<u8>)> = walk(dir)
             .into_iter()
@@ -852,18 +863,18 @@ fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_
         json!([
             {"kind": "verify-broad", "batch": 0, "id": 1, "verdict": "verified", "outcome": "confirmed",
              "cites": "src/live.rs:1-1"},
-            {"kind": "verify-broad", "batch": 0, "id": 2, "verdict": "verified", "outcome": "skipped",
+            {"kind": "verify-broad", "batch": 1, "id": 2, "verdict": "verified", "outcome": "skipped",
              "reason": "helper_function, which the memory names, is in none of the cited lines",
              "check": "name not in the cited lines", "cites": "src/live.rs:1-1"},
-            {"kind": "verify-broad", "batch": 0, "id": 3, "verdict": "update", "outcome": "skipped",
+            {"kind": "verify-broad", "batch": 2, "id": 3, "verdict": "update", "outcome": "skipped",
              "content": "`other_function` in src/other.rs takes one byte argument.",
              "reason": "older memory: only confirmed while branches differ (live branches: master, feature)",
              "check": "rewrite or archive where live branches differ"},
-            {"kind": "verify-broad", "batch": 0, "id": 4, "verdict": "update", "outcome": "skipped",
+            {"kind": "verify-broad", "batch": 3, "id": 4, "verdict": "update", "outcome": "skipped",
              "content": "`live_function` lives in src/live.rs and takes no arguments.",
              "reason": "older memory: only confirmed while branches differ (live branches: master, feature)",
              "check": "rewrite or archive where live branches differ"},
-            {"kind": "verify-broad", "batch": 0, "id": 5, "verdict": "archive", "outcome": "skipped",
+            {"kind": "verify-broad", "batch": 4, "id": 5, "verdict": "archive", "outcome": "skipped",
              "modelReason": "it can panic now",
              "reason": "memory 5 is protected (safety-critical, permanent, a policy, or the person's own) and is never archived",
              "check": "protected memory"},
@@ -879,7 +890,7 @@ fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_
                 "protected memory": 1,
             },
             "undecided": 0,
-            "batches": {"read": 1, "refused": 0, "noReply": 0},
+            "batches": {"read": 5, "refused": 0, "noReply": 0},
         })
     );
     assert_eq!(report["batches"][0]["status"], "read");
