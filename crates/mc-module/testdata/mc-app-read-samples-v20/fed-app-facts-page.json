@@ -1,0 +1,36 @@
+{
+  "name": "fed-app-facts-page",
+  "request": {
+    "method": "facts.page",
+    "params": {
+      "limit": 1,
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "facts": [
+        {
+          "attempts": 1,
+          "category": "CONSTRAINTS",
+          "content": "The runner retries a refused view once.",
+          "id": 1,
+          "reason": "cas_loss",
+          "state": "retryable"
+        }
+      ],
+      "next": "mcc1.WyJmYWN0cy5wYWdlIiwiMzQxYWNiMTMzMzk3ZWIzMiIsWzFdXQ",
+      "op": "facts.page",
+      "schema": 1
+    }
+  },
+  "route": {
+    "harness": "fed-app:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

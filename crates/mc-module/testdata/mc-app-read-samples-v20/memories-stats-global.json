@@ -1,0 +1,27 @@
+{
+  "name": "memories-stats-global",
+  "request": {
+    "method": "memories.stats",
+    "params": {
+      "level": "global"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "by_category": {
+        "base:preferences": {
+          "active": 2,
+          "archived": 0,
+          "permanent": 0
+        }
+      },
+      "level": "global",
+      "op": "memories.stats",
+      "owner": "self",
+      "pending_observations": 3,
+      "schema": 1,
+      "total": 2
+    }
+  }
+}

@@ -1295,15 +1295,24 @@ impl AppCaller {
     }
 }
 
+/// The reads a phone relayed through Callosum may make. Through
+/// `context.states` it gets the per-part token counts and stamp states of
+/// the messages it names, never their text. [`AppCaller::allows_method`]
+/// gives this list to every caller except the remote desktop and a Direct
+/// route on the internal service.
 const PHONE_APP_METHODS: &[&str] = &[
     "session_data.read",
     "context.cache_why",
     "context.search",
     "context.watch",
+    "context.states",
 ];
 
+/// The reads only the remote desktop (a `fed-app:` harness) gets on top of
+/// the phone's: the rendered head of a session's context, its summaries,
+/// and the project-wide stores (memories, observations, facts, the dreamer,
+/// sessions and notes).
 const DESKTOP_ONLY_RELAYED_APP_METHODS: &[&str] = &[
-    "context.states",
     "context.head",
     "context.head_section",
     "context.compartment",

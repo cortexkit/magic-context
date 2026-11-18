@@ -574,6 +574,83 @@ mod tests {
             session
         }
 
+        /// A session of its own whose one assistant message made two tool
+        /// calls: the agent stamped the `read` call with `ctx_reduce` and
+        /// kept the `grep` call. The phone's `context.states` samples read
+        /// it to show a stamped and an unstamped tool call with their token
+        /// counts. The shared sample session above has no stamped tool call,
+        /// and adding one there would change every sample already read from
+        /// it.
+        pub(crate) fn app_sample_tool_calls_snapshot() -> Snapshot {
+            use cortexkit_role_compaction::{
+                part::Part,
+                read::{Entry, Role},
+                rules::{EditCost, ProviderRules, SignedParts},
+                setup::ModelRef,
+                tokens::PartTokens,
+            };
+            let route = Route {
+                session: SessionRef::new("thalamus-harness", "opencode2", "s-tools"),
+                project: None,
+                workdir: None,
+                agent_id: None,
+            };
+            let request = SetupRequest::new(
+                crate::catalog::Preset::Head.as_str(),
+                ModelRef::new("provider", "model"),
+                100000,
+                1000,
+                ProviderRules::new(SignedParts::None, EditCost::Suffix),
+                vec![],
+                1,
+            );
+            let mut session = Session::new(
+                &route,
+                &request,
+                crate::preset::features(crate::catalog::Preset::Head.as_str()).unwrap(),
+                None,
+            );
+            let mut calls = Vec::new();
+            for (tag, id, name, input, output_bytes, tokens) in [
+                (
+                    1,
+                    "call-read",
+                    "read",
+                    json!({"path": "src/lib.rs"}),
+                    6000,
+                    PartTokens::tool(10, 1500),
+                ),
+                (
+                    2,
+                    "call-grep",
+                    "grep",
+                    json!({"pattern": "fn failing"}),
+                    800,
+                    PartTokens::tool(8, 200),
+                ),
+            ] {
+                let mut call: Part = serde_json::from_value(json!({
+                    "id": id, "kind": "tool", "call_id": format!("c-{name}"), "name": name,
+                    "input": input, "status": "completed", "digest": format!("d-{name}"),
+                    "output_bytes": output_bytes
+                }))
+                .unwrap();
+                call.tag = Some(tag);
+                call.tokens = Some(tokens);
+                calls.push(call);
+            }
+            session.index.extend_counted(
+                vec![Entry::new(1, "m1", Role::Assistant, 10, calls)],
+                Some("claude-v5/1"),
+            );
+            let stamped = ("m1".to_owned(), "call-read".to_owned());
+            session.queued.insert(stamped.clone());
+            // A minute before the time every sample's envelope names.
+            session.app.stamps.insert(stamped, 1_699_999_940_000);
+            let _ = session.app_update();
+            session.app_materialize()
+        }
+
         /// Decision records for the app-read samples, made through the
         /// paths a session takes: one for each cause a build names and each
         /// status a view reaches, and one with a cause the apps don't know

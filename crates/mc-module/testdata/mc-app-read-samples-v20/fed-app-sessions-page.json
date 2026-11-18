@@ -1,0 +1,37 @@
+{
+  "name": "fed-app-sessions-page",
+  "request": {
+    "method": "sessions.page",
+    "params": {
+      "limit": 1,
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "next": "mcc1.WyJzZXNzaW9ucy5wYWdlIiwiNTE1MzQyMjRkMTI5NDMxNCIsWzE3MDAwMDkwMDAwMDAsInRoYWxhbXVzLWhhcm5lc3MiLCJvcGVuY29kZTIiLCJzIl1d",
+      "op": "sessions.page",
+      "schema": 1,
+      "sessions": [
+        {
+          "last_activity_at": 1700009000000,
+          "preset": "head",
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          }
+        }
+      ]
+    }
+  },
+  "route": {
+    "harness": "fed-app:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "head-not-ready",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "error": {
+      "code": "head_not_ready",
+      "message": "The session has not set up with its runner since the module started."
+    }
+  }
+}
