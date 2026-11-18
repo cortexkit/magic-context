@@ -1829,12 +1829,18 @@ fn module_discovery(request: &RouteBindRequest) -> bool {
             .is_some_and(|roles| roles.contains_key(crate::app_read::ROLE.0))
 }
 
-/// What ck-mc subscribes to for a preset: `pre_user` for presets that add a
-/// memory hint, with ck-mc's budget, passing on any failure so a message is
+/// What ck-mc subscribes to for a preset: `pre_user` for presets that
+/// declare it, with ck-mc's budget, passing on any failure so a message is
 /// never held up. `None` for a preset ck-mc does not know.
 fn declare(preset: &str) -> Option<Declaration> {
     let features = crate::preset::features(preset)?;
     let mut ops = Vec::new();
+    // Wider than ck-mc's answers, which never prepend now: running sessions'
+    // frozen plans name these ops, and narrowing them refuses a refresh of
+    // such a plan (`plan_stale`).
+    if features.pre_user_prepend {
+        ops.push(Op::Prepend);
+    }
     if features.auto_memory {
         ops.push(Op::Append);
     }
@@ -2345,6 +2351,10 @@ mod tool_steps_tests;
 #[cfg(test)]
 #[path = "transport_outcome_tests.rs"]
 mod outcome_tests;
+
+#[cfg(test)]
+#[path = "transport_declare_tests.rs"]
+mod declare_tests;
 
 #[cfg(test)]
 #[path = "tool_conformance_tests.rs"]

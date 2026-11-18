@@ -22,34 +22,19 @@ pub struct Features {
     /// commits look relevant to it. Not for sessions another agent started:
     /// their prompts come from that agent, not from a person's question.
     pub auto_memory: bool,
-    /// Saved as `"time_marker": false`, where earlier builds kept the switch
-    /// for the time markers they put in a person's message. Those markers
-    /// are gone (the clock note took their place, [`crate::clock_note`]);
-    /// the member stays in the saved state so a build from before can still
-    /// read it.
-    #[serde(rename = "time_marker", default)]
-    pub retired_time_marker: Retired,
+    /// The preset's `pre_user` subscription declares `prepend` as well as
+    /// any `append`, though ck-mc never prepends now: it no longer puts time
+    /// markers in a person's message (the clock note took their place,
+    /// [`crate::clock_note`]). Running sessions' frozen plans name the op,
+    /// and a declaration narrower than a frozen plan refuses a refresh of
+    /// that plan (`plan_stale`). Saved as `time_marker`, its name in the
+    /// builds that used it, so saved state reads the same both ways.
+    #[serde(rename = "time_marker")]
+    pub pre_user_prepend: bool,
     /// Older long text is compressed by age when the user turns
     /// `caveman_text_compression` on. Never for a session another agent
     /// started, as in the plugin.
     pub caveman: bool,
-}
-
-/// A saved switch no build reads any more: always written as `false`, and
-/// any boolean is accepted when read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Retired;
-
-impl serde::Serialize for Retired {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bool(false)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Retired {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        bool::deserialize(deserializer).map(|_| Self)
-    }
 }
 
 impl Features {
@@ -61,7 +46,7 @@ impl Features {
         keep_first_message: false,
         ctx_keep: false,
         auto_memory: false,
-        retired_time_marker: Retired,
+        pre_user_prepend: false,
         caveman: false,
     };
 }
@@ -75,7 +60,7 @@ pub fn features(preset: &str) -> Option<Features> {
             keep_first_message: false,
             ctx_keep: false,
             auto_memory: true,
-            retired_time_marker: Retired,
+            pre_user_prepend: true,
             caveman: true,
         }),
         "worker" => Some(Features {
@@ -83,7 +68,7 @@ pub fn features(preset: &str) -> Option<Features> {
             keep_first_message: true,
             ctx_keep: true,
             auto_memory: false,
-            retired_time_marker: Retired,
+            pre_user_prepend: true,
             caveman: false,
         }),
         "reader" => Some(Features {
@@ -91,7 +76,7 @@ pub fn features(preset: &str) -> Option<Features> {
             keep_first_message: true,
             ctx_keep: true,
             auto_memory: false,
-            retired_time_marker: Retired,
+            pre_user_prepend: false,
             caveman: false,
         }),
         _ => None,
@@ -100,27 +85,33 @@ pub fn features(preset: &str) -> Option<Features> {
 
 #[cfg(test)]
 mod tests {
-    /// Saved state keeps the retired `time_marker` member as `false` in its
-    /// old place, so an older build still reads it, and a saved `true` from
-    /// an older build reads back.
+    /// Saved features read and write as in the builds before the time
+    /// markers went: the `prepend` declaration keeps the member they saved
+    /// as `time_marker`, with the same value for each preset.
     #[test]
-    fn saved_features_keep_the_retired_time_marker_member() {
-        let head = super::features("head").unwrap();
-        let saved = serde_json::to_string(&head).unwrap();
-        assert_eq!(
-            saved,
-            r#"{"summarizer":true,"keep_first_message":false,"ctx_keep":false,"auto_memory":true,"time_marker":false,"caveman":true}"#
-        );
-        let older = saved.replace(r#""time_marker":false"#, r#""time_marker":true"#);
-        assert_eq!(
-            serde_json::from_str::<super::Features>(&older).unwrap(),
-            head
-        );
-        let without = saved.replace(r#""time_marker":false,"#, "");
-        assert_eq!(
-            serde_json::from_str::<super::Features>(&without).unwrap(),
-            head
-        );
+    fn saved_features_are_unchanged_from_the_previous_build() {
+        for (preset, saved) in [
+            (
+                "head",
+                r#"{"summarizer":true,"keep_first_message":false,"ctx_keep":false,"auto_memory":true,"time_marker":true,"caveman":true}"#,
+            ),
+            (
+                "worker",
+                r#"{"summarizer":false,"keep_first_message":true,"ctx_keep":true,"auto_memory":false,"time_marker":true,"caveman":false}"#,
+            ),
+            (
+                "reader",
+                r#"{"summarizer":false,"keep_first_message":true,"ctx_keep":true,"auto_memory":false,"time_marker":false,"caveman":false}"#,
+            ),
+        ] {
+            let features = super::features(preset).unwrap();
+            assert_eq!(serde_json::to_string(&features).unwrap(), saved, "{preset}");
+            assert_eq!(
+                serde_json::from_str::<super::Features>(saved).unwrap(),
+                features,
+                "{preset}"
+            );
+        }
     }
 
     /// Every gate reads a preset's [`super::Features`], never the preset's
