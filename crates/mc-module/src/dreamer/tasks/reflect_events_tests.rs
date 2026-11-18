@@ -956,3 +956,42 @@ fn an_accepted_reply_needs_a_complete_list() {
     assert_eq!((applied.proposed, applied.applied), (1, 1));
     assert_eq!(store.watermark(), Some(json!({"event": 6})));
 }
+
+/// A learning is captured for the user's other computers, as a memory or
+/// as an observation, one outbox row each, named as the dreamer's when the
+/// engine names it ([`crate::replica`]).
+#[test]
+fn a_learning_queues_one_outbox_row_for_what_it_writes() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    for (kind, category, text, expected) in [
+        (
+            "memory",
+            "CONSTRAINTS",
+            "Plan for the host to restart the runner whenever its config changes.",
+            "memory:",
+        ),
+        (
+            "observation",
+            "communication",
+            "Wants a host restart announced before it happens.",
+            "observation:",
+        ),
+    ] {
+        let store = fixture();
+        let batch = store.plan().remove(0);
+        let before = store.db.with_connection(|conn| {
+            mark_sent(conn);
+            state(conn)
+        });
+        let written = store.write(
+            &batch,
+            &learnings(&[learning(kind, category, "e4,e5", text)]),
+        );
+        assert_eq!(written.applied.applied, 1);
+        let changed = store
+            .db
+            .with_connection(|conn| assert_changes_captured(conn, &before));
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert!(changed[0].starts_with(expected), "{changed:?}");
+    }
+}

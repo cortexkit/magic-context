@@ -566,3 +566,55 @@ fn an_updated_primer_keeps_the_provenance_of_a_pruned_source() {
         );
     });
 }
+
+/// A promotion is captured for the user's other computers: the new primer
+/// and the one whose support it recounted are each queued once
+/// ([`crate::replica`]).
+#[test]
+fn promotion_queues_one_outbox_row_per_primer_it_writes() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let (_dir, db) = store();
+    let now = JAN_1 + 30 * DAY;
+    db.with_connection(|conn| {
+        for (id, days, question) in [
+            (1, 0, "How do leases expire"),
+            (2, 8, "How do the leases expire"),
+        ] {
+            insert_candidate(
+                conn,
+                &Candidate {
+                    question: question.into(),
+                    normalized: "how do leases expire".into(),
+                    embedding: None,
+                    model: None,
+                    source_time: JAN_1 + days * DAY,
+                    ..candidate(id)
+                },
+            );
+        }
+        insert_candidate(
+            conn,
+            &Candidate {
+                source_time: JAN_1 + 2 * DAY,
+                ..candidate(4)
+            },
+        );
+        insert_candidate(
+            conn,
+            &Candidate {
+                source_time: JAN_1 + 20 * DAY,
+                embedding: Some(at(0.95)),
+                ..candidate(5)
+            },
+        );
+        insert_primer(conn, &primer(1, &[4]), "active");
+        mark_sent(conn);
+        let before = state(conn);
+        let done = promote(conn, PROJECT, now).unwrap();
+        assert_eq!((done.promoted, done.updated), (1, 1));
+        assert_eq!(
+            assert_changes_captured(conn, &before),
+            ["primer:1", "primer:2"]
+        );
+    });
+}

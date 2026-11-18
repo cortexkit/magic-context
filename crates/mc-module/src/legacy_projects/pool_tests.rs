@@ -550,3 +550,21 @@ fn a_copy_merges_into_rows_keyed_by_the_project_the_second_project_already_has()
         }
     });
 }
+
+/// The legacy move is captured for the user's other computers: each memory
+/// it moves to the project's id is queued once, its revision raised once
+/// ([`crate::replica`]).
+#[test]
+fn a_move_queues_one_outbox_row_per_moved_memory() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let (_dir, db) = store();
+    db.with_connection(|conn| {
+        let (live, old) = legacy_project(conn);
+        mark_sent(conn);
+        let before = state(conn);
+        move_all(conn, "pj-a", 2);
+        let mut expected = vec![format!("memory:{live}"), format!("memory:{old}")];
+        expected.sort();
+        assert_eq!(assert_changes_captured(conn, &before), expected);
+    });
+}

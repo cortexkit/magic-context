@@ -501,14 +501,17 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
             }
         };
         if let Some(target) = &target {
-            tx.execute(
-                "INSERT OR IGNORE INTO memory_conflict_links(left_id, right_id, decision_key) VALUES (?1, ?2, ?3)",
-                params![memory_id.min(target.id), memory_id.max(target.id), admission.key],
-            )?;
             // The relationship changes both memories, so decisions read before it go stale.
+            // The revision rises before the link is written, so the change is
+            // captured for the user's other computers under that one new
+            // revision ([`crate::replica`]).
             tx.execute(
                 "UPDATE memories SET revision = revision + 1 WHERE id = ?1",
                 params![target.id],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_conflict_links(left_id, right_id, decision_key) VALUES (?1, ?2, ?3)",
+                params![memory_id.min(target.id), memory_id.max(target.id), admission.key],
             )?;
         }
         let mut receipt = Receipt::new(
@@ -819,29 +822,36 @@ pub fn commit_revision(
         }
     }
     for source in &current {
+        // Each memory's revision rises before the rest of its change, so the
+        // whole change is captured for the user's other computers under that
+        // one new revision ([`crate::replica`]).
         if source.id == survivor_id {
+            tx.execute(
+                "UPDATE memories SET revision = revision + 1 WHERE id = ?1",
+                params![source.id],
+            )?;
             update_content(
                 &tx,
                 source.id,
                 &decision.final_text,
                 &normalized_hash(&decision.final_text),
             )?;
-            tx.execute(
-                "UPDATE memories SET revision = revision + 1 WHERE id = ?1",
-                params![source.id],
-            )?;
             if let Some(date) = &decision.expires {
                 set_end_date(&tx, source.id, date)?;
             }
         } else {
             let row = get_memory(&tx, source.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            tx.execute(
+                "UPDATE memories SET revision = revision + 1 WHERE id = ?1",
+                params![source.id],
+            )?;
             archive(&tx, &row, Some(&decision.action))?;
             tx.execute(
                 "DELETE FROM memory_embeddings WHERE memory_id = ?1",
                 params![source.id],
             )?;
             tx.execute(
-                "UPDATE memories SET revision = revision + 1, superseded_by_memory_id = ?2 WHERE id = ?1",
+                "UPDATE memories SET superseded_by_memory_id = ?2 WHERE id = ?1",
                 params![source.id, survivor_id],
             )?;
             tx.execute(

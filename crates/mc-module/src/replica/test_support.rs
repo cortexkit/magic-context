@@ -223,3 +223,213 @@ pub(crate) fn memory(computer: &Computer, owner: &str, content: &str) -> i64 {
         conn.last_insert_rowid()
     })
 }
+
+/// Treat every replicated row in the store as sent: give each the global id
+/// it would be sent under and empty the outbox. A writer's change of such a
+/// row then raises its revision and queues it, as it would on a computer
+/// that follows the hub.
+pub(crate) fn mark_sent(conn: &rusqlite::Connection) {
+    for table in super::schema::TABLES {
+        let letter = match table.kind {
+            "observation" => "o",
+            "primer" => "p",
+            _ => "m",
+        };
+        conn.execute(
+            &format!(
+                "UPDATE {} SET global_id = 'sent.{letter}' || id WHERE global_id IS NULL",
+                table.name
+            ),
+            [],
+        )
+        .unwrap();
+    }
+    conn.execute("DELETE FROM replica_outbox", []).unwrap();
+}
+
+/// Each replicated row's revision, keyed `kind:id`.
+pub(crate) fn revisions(conn: &rusqlite::Connection) -> std::collections::BTreeMap<String, i64> {
+    let mut found = std::collections::BTreeMap::new();
+    for table in super::schema::TABLES {
+        let rows: Vec<(i64, i64)> = conn
+            .prepare(&format!("SELECT id, revision FROM {}", table.name))
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for (id, revision) in rows {
+            found.insert(format!("{}:{id}", table.kind), revision);
+        }
+    }
+    found
+}
+
+/// The outbox, one `kind:id change` line per row, in order.
+pub(crate) fn queued(conn: &rusqlite::Connection) -> Vec<String> {
+    conn.prepare("SELECT kind || ':' || local_id || ' ' || change FROM replica_outbox ORDER BY kind, local_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// The writer under test, run after [`mark_sent`] with `before` the
+/// revisions then, changed exactly the rows `expected` names (`kind:id
+/// change`), each once: one outbox row each, and each existing row's
+/// revision one higher than before.
+pub(crate) fn assert_captured(
+    conn: &rusqlite::Connection,
+    before: &std::collections::BTreeMap<String, i64>,
+    expected: &[&str],
+) {
+    let mut expected: Vec<String> = expected.iter().map(|line| (*line).to_owned()).collect();
+    expected.sort();
+    let mut found = queued(conn);
+    found.sort();
+    assert_eq!(found, expected, "the outbox holds one row per changed row");
+    let after = revisions(conn);
+    for line in &expected {
+        let row = line.split(' ').next().unwrap();
+        let change = line.split(' ').nth(1).unwrap();
+        let outbox: i64 = conn
+            .query_row(
+                "SELECT revision FROM replica_outbox WHERE kind || ':' || local_id = ?1",
+                [row],
+                |found| found.get(0),
+            )
+            .unwrap();
+        match (before.get(row), after.get(row)) {
+            (Some(old), Some(new)) => {
+                assert_eq!(*new, old + 1, "{row}: one change raises the revision once");
+                assert_eq!(outbox, *new, "{row}: the outbox names the new revision");
+            }
+            (None, Some(new)) => assert_eq!(outbox, *new, "{row}: a new row"),
+            (_, None) => assert_eq!(change, "delete", "{row}: only a delete leaves no row"),
+        }
+    }
+    for (row, old) in before {
+        if !expected
+            .iter()
+            .any(|line| line.split(' ').next() == Some(row.as_str()))
+        {
+            assert_eq!(after.get(row), Some(old), "{row} did not change");
+        }
+    }
+}
+
+/// Every replicated row's revision and replicated state, keyed `kind:id`:
+/// its replicated columns, and for a memory the child rows its snapshot
+/// carries. Read straight from the tables, not through the capture, so a
+/// writer test can tell which rows really changed.
+pub(crate) fn state(
+    conn: &rusqlite::Connection,
+) -> std::collections::BTreeMap<String, (i64, String)> {
+    let mut found = std::collections::BTreeMap::new();
+    for table in super::schema::TABLES {
+        let ids: Vec<i64> = conn
+            .prepare(&format!("SELECT id FROM {}", table.name))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for id in ids {
+            let mut values = super::snapshot::columns(conn, table, id).unwrap().unwrap();
+            if let Some(metadata) = values.get("metadata_json").cloned() {
+                values.insert(
+                    "metadata_json".into(),
+                    super::snapshot::shared_metadata(&metadata),
+                );
+            }
+            if table.kind == "memory" {
+                for child in &super::schema::CHILDREN {
+                    let rows: Vec<String> = conn
+                        .prepare(&format!(
+                            "SELECT {} FROM {} WHERE {} = ?1 ORDER BY 1",
+                            child
+                                .replicated
+                                .iter()
+                                .map(|column| format!("quote({column})"))
+                                .collect::<Vec<_>>()
+                                .join(" || '|' || "),
+                            child.name,
+                            child.owner
+                        ))
+                        .unwrap()
+                        .query_map([id], |row| row.get(0))
+                        .unwrap()
+                        .collect::<rusqlite::Result<_>>()
+                        .unwrap();
+                    values.insert(child.name.to_owned(), serde_json::json!(rows));
+                }
+            }
+            if table.kind == "memory" {
+                let level = values["level"].as_str().unwrap_or_default();
+                if level == "agent" {
+                    continue;
+                }
+            }
+            let revision: i64 = conn
+                .query_row(
+                    &format!("SELECT revision FROM {} WHERE id = ?1", table.name),
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            found.insert(
+                format!("{}:{id}", table.kind),
+                (revision, serde_json::Value::Object(values).to_string()),
+            );
+        }
+    }
+    found
+}
+
+/// The writer under test, run after [`mark_sent`] with `before` the
+/// [`state`] then, queued exactly the rows whose replicated state it
+/// changed, one outbox row each, and raised each changed row's revision
+/// once. Returns the changed rows, `kind:id`.
+pub(crate) fn assert_changes_captured(
+    conn: &rusqlite::Connection,
+    before: &std::collections::BTreeMap<String, (i64, String)>,
+) -> Vec<String> {
+    let after = state(conn);
+    let mut changed: Vec<String> = after
+        .iter()
+        .filter(|(row, (_, values))| before.get(*row).map(|(_, old)| old) != Some(values))
+        .map(|(row, _)| row.clone())
+        .collect();
+    changed.extend(
+        before
+            .keys()
+            .filter(|row| !after.contains_key(*row))
+            .cloned(),
+    );
+    changed.sort();
+    let mut queued: Vec<String> = queued(conn)
+        .iter()
+        .map(|line| line.split(' ').next().unwrap().to_owned())
+        .collect();
+    queued.sort();
+    assert_eq!(
+        queued, changed,
+        "one outbox row for each row whose replicated state changed"
+    );
+    for row in &changed {
+        if let (Some((old, _)), Some((new, _))) = (before.get(row), after.get(row)) {
+            assert_eq!(*new, old + 1, "{row}: one change raises the revision once");
+        }
+    }
+    for (row, (old, _)) in before {
+        if !changed.contains(row) {
+            assert_eq!(
+                after.get(row).map(|(revision, _)| *revision),
+                Some(*old),
+                "{row}"
+            );
+        }
+    }
+    changed
+}

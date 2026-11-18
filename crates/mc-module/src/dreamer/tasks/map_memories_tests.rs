@@ -1313,3 +1313,30 @@ fn a_run_from_a_worktree_maps_to_files_the_main_checkouts_last_commit_holds() {
     );
     assert_eq!(store.mapped(1), [mapped("src/view.rs", MAPPER)]);
 }
+
+/// A mapping is captured for the user's other computers: the file rows are
+/// a memory's own, so each memory the reply maps or remaps is queued once,
+/// its revision raised once ([`crate::replica`]).
+#[test]
+fn applying_queues_one_outbox_row_per_mapped_memory() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let (store, batch) = apply_store();
+    store.map(5, &[mapped("", MAPPER)]);
+    let before = store.db.with_connection(|conn| {
+        mark_sent(conn);
+        state(conn)
+    });
+    store.apply(
+        &batch,
+        &manifest(&[
+            (1, "files=\"src/view.rs,src/head.rs\""),
+            (2, "independent=\"true\""),
+            (5, "files=\"web/app.tsx\""),
+        ]),
+        41,
+    );
+    let changed = store
+        .db
+        .with_connection(|conn| assert_changes_captured(conn, &before));
+    assert_eq!(changed, ["memory:1", "memory:2", "memory:5"]);
+}

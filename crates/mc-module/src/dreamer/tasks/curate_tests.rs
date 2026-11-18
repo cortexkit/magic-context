@@ -1872,3 +1872,38 @@ fn a_split_part_and_a_merge_survivor_carry_the_line_their_sources_share() {
     let survivor: i64 = store.value("SELECT MAX(id) FROM memories");
     assert_eq!(line_of(&store, survivor), None);
 }
+
+/// Curate's writes are captured for the user's other computers: a shorten,
+/// an archive and a merge each queue one outbox row per memory they change,
+/// and raise each memory's revision once ([`crate::replica`]).
+#[test]
+fn a_shorten_an_archive_and_a_merge_queue_one_outbox_row_per_memory() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    for (changes, expected) in [
+        (
+            "<shorten id=\"3\">Releases need two reviewers and a green CI run of 45 minutes.</shorten>",
+            vec!["memory:3"],
+        ),
+        (
+            "<archive id=\"5\" reason=\"one-off\" why=\"a room id and a date\"/>",
+            vec!["memory:5"],
+        ),
+        (
+            "<merge ids=\"1,2\">Run `cargo fmt --all` in crates/mc-module before every commit.</merge>",
+            vec!["memory:1", "memory:2", "memory:21"],
+        ),
+    ] {
+        let store = fixture();
+        let batch = store.rules();
+        let before = store.db.with_connection(|conn| {
+            mark_sent(conn);
+            state(conn)
+        });
+        let applied = store.apply(&batch, &list(changes), RUN);
+        assert_eq!(applied.applied, 1, "{changes}: {applied:?}");
+        let changed = store
+            .db
+            .with_connection(|conn| assert_changes_captured(conn, &before));
+        assert_eq!(changed, expected, "{changes}");
+    }
+}

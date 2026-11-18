@@ -1602,3 +1602,31 @@ fn a_memory_the_person_wrote_or_edited_is_never_updated_or_archived() {
     assert_eq!(store.stored(6).5, "active");
     assert_eq!(store.stored(3).4, "Runs tests on a build server");
 }
+
+/// The review's writes are captured for the user's other computers: its
+/// promotion, its changes to memories and the observations it consumes are
+/// each queued once, their revisions raised once ([`crate::replica`]).
+#[test]
+fn applying_queues_one_outbox_row_per_memory_and_observation_it_changes() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let store = fixture();
+    let batch = store.batch();
+    let before = store.db.with_connection(|conn| {
+        mark_sent(conn);
+        state(conn)
+    });
+    let applied = store.apply(&batch, FULL_REPLY, 7);
+    assert_eq!(applied.applied, 7, "{applied:?}");
+    let changed = store
+        .db
+        .with_connection(|conn| assert_changes_captured(conn, &before));
+    let promoted = *store.memory_ids().last().unwrap();
+    assert!(
+        changed.contains(&format!("memory:{promoted}")),
+        "{changed:?}"
+    );
+    assert!(
+        changed.iter().any(|row| row.starts_with("observation:")),
+        "{changed:?}"
+    );
+}

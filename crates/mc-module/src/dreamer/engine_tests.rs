@@ -898,3 +898,82 @@ async fn a_started_run_without_a_reader_ends_as_skipped_not_failed() {
     assert!(client.sends.lock().unwrap().is_empty());
     assert_eq!(locks(&db), 0);
 }
+
+/// A batch that saves one project memory.
+struct RememberingBatch;
+
+impl run::TaskInput for RememberingBatch {
+    fn system(&self) -> &str {
+        "system"
+    }
+    fn prompt(&self, _: Window, _: u64) -> Option<String> {
+        Some("batch".into())
+    }
+    fn accepts(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl Batch for RememberingBatch {
+    fn apply(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        _: &TaskReply,
+        _: i64,
+    ) -> Result<Applied, String> {
+        tx.execute(
+            "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash,
+                 first_seen_at, created_at, updated_at, last_seen_at, source_type)
+             VALUES ('project', ?1, 'swe:naming', 'NAMING', 'A dreamed rule.', 'h', 1, 1, 1, 1, 'dreamer')",
+            params![PROJECT],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(Applied {
+            proposed: 1,
+            applied: 1,
+            dropped: Vec::new(),
+        })
+    }
+}
+
+/// What a dreamer run applies is captured as the dreamer's, with the run's
+/// id, for the user's other computers; the lease epoch stays empty until
+/// the dreamer lease exists. The naming ends with the run's transaction.
+#[test]
+fn a_batch_the_dreamer_applies_names_its_run_in_the_outbox() {
+    let (_dir, db) = store();
+    let locks = [OwnerKey::project(PROJECT)];
+    db.with_connection(|conn| {
+        store::lock(
+            conn,
+            &locks[0],
+            "this",
+            "swe:curate",
+            now_ms(),
+            now_ms() + 60_000,
+        )
+    })
+    .unwrap();
+    let reply = TaskReply {
+        text: "ok".into(),
+        model: cortexkit_role_compaction::setup::ModelRef::new("p", "a"),
+        runner: "r".into(),
+        child: "c".into(),
+        usage: None,
+        steps: None,
+    };
+    let applied = super::apply(&db, &locks, "this", &RememberingBatch, &reply, 9).unwrap();
+    assert!(applied.is_some());
+    let (named, left): (String, i64) = db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT actor || ' ' || run_id || ' ' || COALESCE(epoch, '-'),
+                        (SELECT COUNT(*) FROM replica_writer)
+                   FROM replica_outbox",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((named.as_str(), left), ("dreamer 9 -", 0));
+}

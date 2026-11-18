@@ -643,3 +643,33 @@ async fn account_wait_turn_two_paused_for_an_account_revokes_its_stage() {
     assert_eq!(wait.send, SendKind::TurnTwo);
     assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
 }
+
+/// The second turn's provisional scores are captured for the user's other
+/// computers: one outbox row for each memory a score landed on
+/// ([`crate::replica`]).
+#[test]
+fn provisional_scores_queue_one_outbox_row_per_scored_memory() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let (_dir, db) = store_with_candidates();
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash,
+                 first_seen_at, created_at, updated_at, last_seen_at)
+             VALUES ('project', 'project', 'swe:naming', 'NAMING', 'Crates are named mc-*.', 'h1', 1, 1, 1, 1),
+                    ('project', 'project', 'swe:naming', 'NAMING', 'Tests sit next to code.', 'h2', 1, 1, 1, 1);
+             INSERT INTO memory_classification_items
+                 (project_path, memory_id, saved_revision, source_session_id, tool_call_part_id, save_ordinal)
+             VALUES ('project', 1, 1, 'head', 'part-1', 1), ('project', 2, 1, 'head', 'part-2', 2);",
+        )
+        .unwrap();
+        mark_sent(conn);
+        let before = state(conn);
+        let scores = [Score {
+            item: 1,
+            importance: 70,
+            proposed_class: "durable".into(),
+        }];
+        assert_eq!(record_scores(conn, &[1, 2], &scores).unwrap(), 1);
+        assert_eq!(assert_changes_captured(conn, &before), ["memory:1"]);
+    });
+}

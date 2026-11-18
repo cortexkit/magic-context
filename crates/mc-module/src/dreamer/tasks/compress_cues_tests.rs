@@ -1061,3 +1061,31 @@ fn a_cue_leaves_a_second_turn_edit_read_before_it_applicable() {
     assert_eq!((cue, hash, revision), (None, None, 2));
     assert_eq!(ids(&store.batches()[0]), [1]);
 }
+
+/// A cue is captured for the user's other computers: one outbox row for
+/// each memory that got one, its revision raised once ([`crate::replica`]).
+#[test]
+fn applying_queues_one_outbox_row_per_cued_memory() {
+    use crate::replica::test_support::{assert_captured, mark_sent, revisions};
+    let store = store(&[row(1), row(2), row(3)]);
+    let batch = &store.batches()[0];
+    let before = store.db.with_connection(|conn| {
+        mark_sent(conn);
+        revisions(conn)
+    });
+    store.apply(
+        batch,
+        &manifest(&[(1, "rule one"), (2, "rule two"), (3, "rule three")]),
+    );
+    store.db.with_connection(|conn| {
+        assert_captured(
+            conn,
+            &before,
+            &[
+                "memory:1 metadata",
+                "memory:2 metadata",
+                "memory:3 metadata",
+            ],
+        )
+    });
+}

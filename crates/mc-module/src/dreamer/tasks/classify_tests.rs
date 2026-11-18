@@ -1150,3 +1150,32 @@ fn a_classification_makes_a_second_turn_edit_read_before_it_stale() {
     assert_eq!(fresh.state, "applied");
     assert_eq!(content(), "Rule 1, revised.");
 }
+
+/// A classification is captured for the user's other computers: one outbox
+/// row for each memory it changed, every memory it classified included, and
+/// each memory's revision raised once ([`crate::replica`]).
+#[test]
+fn applying_queues_one_outbox_row_per_classified_memory() {
+    use crate::replica::test_support::{assert_captured, mark_sent, revisions};
+    let store = apply_pool();
+    let batch = &store.batches()[0];
+    let mut entries = vec![
+        (
+            1,
+            r#"importance="90" scope="project" shareable="false" safety_critical="true""#,
+        ),
+        (3, r#"importance="20" scope="project" shareable="false""#),
+    ];
+    entries.push((2, r#"importance="50" scope="project" shareable="false""#));
+    entries.extend(confirmed(4));
+    let before = store.db.with_connection(|conn| {
+        mark_sent(conn);
+        revisions(conn)
+    });
+    store.apply(batch, &manifest(&entries), 7);
+    let expected: Vec<String> = (1..=10).map(|id| format!("memory:{id} metadata")).collect();
+    let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
+    store
+        .db
+        .with_connection(|conn| assert_captured(conn, &before, &expected));
+}

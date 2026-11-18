@@ -640,3 +640,29 @@ fn a_memory_changed_after_the_batch_read_it_is_not_moved() {
         assert_eq!(store.placed(id).0, "project");
     }
 }
+
+/// A lift is captured for the user's other computers: one outbox row for
+/// the memory it moved to the workspace, its revision raised once
+/// ([`crate::replica`]).
+#[test]
+fn a_lift_queues_one_outbox_row_for_the_moved_memory() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let store = store(&[row(1), row(2)]);
+    let (_, batches) = store.plan(&three());
+    let before = store.db.with_connection(|conn| {
+        mark_sent(conn);
+        state(conn)
+    });
+    let text = manifest(&[
+        (
+            1,
+            "level=\"workspace\" reason=\"Every project is released by the same pipeline.\"",
+        ),
+        (2, "level=\"project\""),
+    ]);
+    store.apply(&batches[0], &text, 7).unwrap();
+    let changed = store
+        .db
+        .with_connection(|conn| assert_changes_captured(conn, &before));
+    assert_eq!(changed, ["memory:1"]);
+}

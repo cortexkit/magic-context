@@ -674,3 +674,31 @@ fn undoing_a_verify_run_puts_back_its_rows_and_the_mappings_it_replaced() {
     assert!(fixture.mapping(3).is_empty());
     assert_eq!(fixture.mapping(4), ["src/live.rs"]);
 }
+
+/// Verify's writes are captured for the user's other computers: a
+/// confirmation, a skip, an update and an archive each queue one outbox row
+/// for the memory they touch, its revision raised once
+/// ([`crate::replica`]).
+#[test]
+fn each_verdict_queues_one_outbox_row_per_memory() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    for reply in [
+        r#"<verified id="1" files="src/live.rs" cites="src/live.rs:1-1"/>
+<skip id="2" reason="code can't decide it"/>"#,
+        r#"<update id="1" files="src/live.rs">`live_function` in src/live.rs takes no arguments and returns unit.</update>
+<archive id="2" reason="contradicted"/>"#,
+    ] {
+        let fixture = fixture();
+        let batch = plan_one(&fixture);
+        let before = fixture.db.with_connection(|conn| {
+            mark_sent(conn);
+            state(conn)
+        });
+        let applied = fixture.apply(&batch, &manifest(reply));
+        assert_eq!(applied.applied, 2, "{reply}: {applied:?}");
+        let changed = fixture
+            .db
+            .with_connection(|conn| assert_changes_captured(conn, &before));
+        assert_eq!(changed, ["memory:1", "memory:2"], "{reply}");
+    }
+}

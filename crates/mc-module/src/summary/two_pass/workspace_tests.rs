@@ -470,3 +470,72 @@ fn a_revised_workspace_memory_stays_at_the_workspace() {
         )
     );
 }
+
+/// A fact the second turn admits is captured for the user's other
+/// computers: one outbox row for the new memory ([`crate::replica`]).
+#[tokio::test]
+async fn an_admitted_memory_is_queued_once() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let (_dir, db, _, _) = store("ws-capture");
+    let client = client(
+        Some(entorhinal("ws-capture", &["magic-context", "subc"])),
+        Some(reply(json!({"action": "new", "level": "workspace"}))),
+    );
+    let before = db.with_connection(|conn| {
+        mark_sent(conn);
+        state(conn)
+    });
+    run(&client, &db, &job(Some(authority(Some("ws-capture"))))).await;
+    let id = fact(&db).2.unwrap();
+    let changed = db.with_connection(|conn| assert_changes_captured(conn, &before));
+    assert_eq!(changed, [format!("memory:{id}")]);
+}
+
+/// The second turn's revisions are captured: an edit queues the memory
+/// once, and a replacement queues the memory it replaces and its successor
+/// once each, each sent memory's revision raised once ([`crate::replica`]).
+#[test]
+fn a_revision_by_the_second_turn_queues_each_memory_it_writes_once() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let (_dir, db, _, shared) = store("ws-revise");
+    let revision = |key: &str, action: &str, read: i64| Revision {
+        key: key.into(),
+        action: action.into(),
+        project: PROJECT.into(),
+        workspace: Some("ws-revise".into()),
+        expected: vec![(shared, read)],
+        survivor: shared,
+        final_text: format!("Releases need two reviewers, revised by {key}."),
+        changes: Vec::new(),
+        added: Vec::new(),
+        expires: None,
+    };
+    let plan = gates::Plan {
+        checks: Vec::new(),
+        kept: Vec::new(),
+        spans: Vec::new(),
+    };
+    let authority = authority(Some("ws-revise"));
+    let commit = |revision: &Revision| {
+        db.with_connection(|conn| {
+            let before = {
+                mark_sent(conn);
+                state(conn)
+            };
+            let outcome =
+                applier::commit_revision(conn, revision, &plan, 1, None, Some(&authority), None)
+                    .unwrap();
+            assert_eq!(outcome.state, "applied", "{}", revision.key);
+            (outcome.memory_id, assert_changes_captured(conn, &before))
+        })
+    };
+    let (_, edited) = commit(&revision("edit", "edit", 1));
+    assert_eq!(edited, [format!("memory:{shared}")]);
+    let (successor, replaced) = commit(&revision("replace", "replaces", 2));
+    let mut expected = vec![
+        format!("memory:{shared}"),
+        format!("memory:{}", successor.unwrap()),
+    ];
+    expected.sort();
+    assert_eq!(replaced, expected);
+}

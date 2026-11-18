@@ -226,7 +226,9 @@ fn writer(fallback: &str) -> String {
 
 /// The statement that records a change of row `id` at `revision` in the
 /// outbox. A row keeps one unpublished outbox row: a later change replaces
-/// it, keeping the base revision and `create` while nothing of it was sent.
+/// it, keeping the base revision and `create` while nothing of it was sent,
+/// and a plain metadata change never hides the more telling kind of an
+/// earlier change it joins.
 fn queue(kind: &str, id: &str, revision: &str, base: &str, change: &str, actor: &str) -> String {
     format!(
         "INSERT INTO replica_outbox
@@ -237,7 +239,10 @@ fn queue(kind: &str, id: &str, revision: &str, base: &str, change: &str, actor: 
                  THEN replica_outbox.base_revision ELSE excluded.base_revision END,
              change = CASE
                  WHEN replica_outbox.state IN {UNSENT} AND replica_outbox.change = 'create'
-                 THEN 'create' ELSE excluded.change END,
+                 THEN 'create'
+                 WHEN replica_outbox.state IN {UNSENT} AND excluded.change = 'metadata'
+                 THEN replica_outbox.change
+                 ELSE excluded.change END,
              revision = excluded.revision,
              created_at = excluded.created_at,
              state = 'pending',
@@ -266,13 +271,34 @@ fn raise(table: &Table, id: &str, condition: &str) -> String {
 }
 
 /// `NEW.a IS NOT OLD.a OR …` over `columns`: an update that rewrites a
-/// value unchanged changes nothing to send.
+/// value unchanged changes nothing to send. A memory's `metadata_json` is
+/// compared without the keys that stay on this computer, so a change to
+/// one of those alone sends nothing either.
 fn any_changed(columns: &[&str]) -> String {
     columns
         .iter()
-        .map(|column| format!("NEW.{column} IS NOT OLD.{column}"))
+        .map(|column| match *column {
+            "metadata_json" => format!(
+                "{} IS NOT {}",
+                shared_metadata("NEW.metadata_json"),
+                shared_metadata("OLD.metadata_json")
+            ),
+            _ => format!("NEW.{column} IS NOT OLD.{column}"),
+        })
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+/// `value` without the metadata keys that stay on this computer, in SQL.
+/// Text that isn't valid JSON is compared as it is, since `json_remove`
+/// would fail the writer's statement on it.
+fn shared_metadata(value: &str) -> String {
+    let paths = super::snapshot::LOCAL_METADATA_KEYS
+        .iter()
+        .map(|key| format!("'$.{key}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("(CASE WHEN json_valid({value}) THEN json_remove({value}, {paths}) ELSE {value} END)")
 }
 
 /// The change kind of an update, for the journal and the apps; applying
@@ -530,6 +556,20 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
          );
          CREATE INDEX idx_replica_pending_links_target
            ON replica_pending_links(target_global_id);
+
+         -- The primers' search index is kept by an update trigger that fired
+         -- on every column. The capture trigger raises a primer's revision in
+         -- a nested update, which would make it re-index the row while the
+         -- outer update's own re-index is still to come, and leave the index
+         -- out of step with the table. It now fires only for the columns the
+         -- index holds.
+         DROP TRIGGER IF EXISTS primers_au;
+         CREATE TRIGGER primers_au AFTER UPDATE OF question, answer, project_path ON primers BEGIN
+           INSERT INTO primers_fts(primers_fts, rowid, question, answer, project_path)
+           VALUES ('delete', old.id, old.question, old.answer, old.project_path);
+           INSERT INTO primers_fts(rowid, question, answer, project_path)
+           VALUES (new.id, new.question, new.answer, new.project_path);
+         END;
 
          -- The Engram memory sync's tables; the hub replaces it.
          DROP TABLE IF EXISTS memory_ops;

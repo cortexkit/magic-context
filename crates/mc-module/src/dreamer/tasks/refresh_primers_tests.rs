@@ -488,3 +488,31 @@ fn a_run_with_nothing_to_refresh_still_promotes_and_sends_nothing() {
         .unwrap();
     assert_eq!(primers, 1);
 }
+
+/// A refreshed answer is captured for the user's other computers: one
+/// outbox row for the primer, its revision raised once
+/// ([`crate::replica`]).
+#[test]
+fn a_refreshed_answer_queues_one_outbox_row_for_the_primer() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let store = store();
+    store
+        .db
+        .with_connection(|conn| insert_primer(conn, &primer(1), "active"));
+    let batch = RefreshBatch {
+        primer: primer(1),
+        system: String::new(),
+        message: String::new(),
+        allowed: true,
+    };
+    let before = store.db.with_connection(|conn| {
+        mark_sent(conn);
+        state(conn)
+    });
+    let applied = store.write(&batch, "It works differently now.", Some(4), 900);
+    assert_eq!(applied.applied, 1);
+    let changed = store
+        .db
+        .with_connection(|conn| assert_changes_captured(conn, &before));
+    assert_eq!(changed, ["primer:1"]);
+}

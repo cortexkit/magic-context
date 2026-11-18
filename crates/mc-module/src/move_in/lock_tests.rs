@@ -500,3 +500,27 @@ fn pi_resume_keeps_original_alignment_after_summaries_commit() {
         .unwrap();
     assert_eq!(ranges, [(1, 2), (3, 5), (6, 8)]);
 }
+
+/// Moving a session in changes only what belongs to this computer (session
+/// keys, message ordinals, provenance), so nothing is queued for the user's
+/// other computers ([`crate::replica`]).
+#[test]
+fn a_move_in_queues_nothing_to_send() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let dir = tempfile::tempdir().unwrap();
+    // The fixture writes a memory, an observation and a primer of the
+    // moving session at every hundredth message.
+    let (db, _) = fixture(&dir.path().join("context.db"), 200, 2);
+    let before = db.with_connection(|conn| {
+        mark_sent(conn);
+        state(conn)
+    });
+    for kind in ["memory:", "observation:", "primer:"] {
+        assert!(before.keys().any(|row| row.starts_with(kind)), "{kind}");
+    }
+    drop(db);
+    run(dir.path(), &request(200)).unwrap();
+    let db = ContextDb::open(&dir.path().join("context.db")).unwrap();
+    let changed = db.with_connection(|conn| assert_changes_captured(conn, &before));
+    assert!(changed.is_empty(), "{changed:?}");
+}
