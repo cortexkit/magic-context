@@ -596,7 +596,20 @@ export function schedulePiTransformDecisionResolve(args: {
     db: Database;
     sessionId: string;
     branchEntries: readonly unknown[] | null;
+    /** The resolving pass's guard while it reads the branch: it must still be current. */
     assertCurrentPass?: () => void;
+    /**
+     * The resolving pass's guard when the queued write runs; defaults to
+     * `assertCurrentPass`. The write runs on a 0 ms timer, and Bun runs I/O
+     * callbacks before due timers, so by then the resolving pass may have
+     * finished, its request been answered and its run ended. A guard that
+     * requires the pass to still be running would drop the row of every pass
+     * whose next turn ends that quickly, and nothing else can write it: the
+     * pending decision is removed when the write is queued. Pi passes its
+     * decision-publication guard here: a completed resolving pass keeps the
+     * write, while a superseded, refused or cancelled one still discards it.
+     */
+    assertQueuedWrite?: () => void;
 }): boolean {
     const pending = pendingPiDecisionBySession.get(args.sessionId);
     if (!pending) return false;
@@ -618,13 +631,14 @@ export function schedulePiTransformDecisionResolve(args: {
 
     pendingPiDecisionBySession.delete(args.sessionId);
     const token = addScheduledWriteToken(args.sessionId);
+    const assertQueuedWrite = args.assertQueuedWrite ?? args.assertCurrentPass;
     inRootAsyncContext(() =>
         setTimeout(() => {
             try {
                 if (!hasScheduledWriteToken(args.sessionId, token)) return;
                 try {
                     pending.publicationGuard?.();
-                    args.assertCurrentPass?.();
+                    assertQueuedWrite?.();
                 } catch {
                     sessionLog(
                         args.sessionId,
