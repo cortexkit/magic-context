@@ -1022,13 +1022,20 @@ const DEFINITION_ASSETS = [
 ];
 
 /**
+ * Assets no catalog or guidance answer serves, so no model sees their bytes:
+ * the settings schema ck-mc declares to the daemon (`managed-settings`).
+ */
+const NON_CATALOG_ASSETS = ["settings-schema.json"];
+
+/**
  * Fail when the module ships a guidance asset `text_revision` does not cover:
- * every file in the assets directory is part of the definition, or a
- * guidance.get asset equal to a definition text rendered at the example config.
+ * every file in the assets directory is part of the definition, a
+ * guidance.get asset equal to a definition text rendered at the example
+ * config, or one of the assets no answer serves.
  */
 function checkTextRevisionCoversAssets(): void {
 	for (const file of readdirSync(ASSETS)) {
-		if (DEFINITION_ASSETS.includes(file)) continue;
+		if (DEFINITION_ASSETS.includes(file) || NON_CATALOG_ASSETS.includes(file)) continue;
 		const text = LEGACY_GUIDANCE_ASSETS[file];
 		if (text === undefined) {
 			throw new Error(

@@ -15,6 +15,14 @@ notice-cost-timing = ["nix/resource", "nix/time"]
 # them, whatever MAGIC_CONTEXT_AGENT_DATA says; moves the journal already
 # records are enforced either way (see `agent_data::switch`).
 agent-data = []
+# Take the user's settings from the daemon's managed settings (subc's config
+# gate): declare `assets/settings-schema.json`, rewrite a 0.49-shaped user file
+# once before connecting, and read every setting from the view the daemon
+# delivers. Off, ck-mc reads its two files exactly as before and declares
+# nothing. No build turns it on yet: it waits until the daemon supports
+# converting old settings files, and then turns on in one build together with
+# ck-mc's own conversion.
+managed-settings = []
 # Opt-in heap attribution for the `heap_profile` test (allocation sites with
 # backtraces). Only that test target requires it; no build of ck-mc turns it on.
 heap-profile = ["dep:dhat"]

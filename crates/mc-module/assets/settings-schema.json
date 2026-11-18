@@ -1,0 +1,1367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Magic Context (ck-mc) user settings",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "x-ck-apply": "live",
+  "x-ck-layers": [
+    "user"
+  ],
+  "properties": {
+    "execute_threshold_percentage": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "additionalProperties": false,
+      "patternProperties": {
+        "^(default|[^\\s/]+(/\\S+)?)$": {
+          "type": "number",
+          "default": 65,
+          "minimum": 20,
+          "maximum": 90,
+          "description": "The execute threshold for the models this key names, 20 to 90 percent.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "default": {
+        "default": 65
+      },
+      "description": "Context usage, as a percentage of the usable window, at which a pass executes: `default` for every model, plus entries for provider/model or model keys.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "execute_threshold_tokens": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "additionalProperties": false,
+      "patternProperties": {
+        "^(default|[^\\s/]+(/\\S+)?)$": {
+          "type": "integer",
+          "default": 5000,
+          "minimum": 5000,
+          "maximum": 2000000,
+          "description": "The execute threshold in tokens, 5,000 to 2,000,000.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "default": {},
+      "description": "Execute thresholds in tokens for the models a key names; one that applies wins over every percentage.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "keep_reasoning_tokens": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "additionalProperties": false,
+      "patternProperties": {
+        "^(default|[^\\s/]+(/\\S+)?)$": {
+          "type": "integer",
+          "default": 10000,
+          "minimum": 0,
+          "maximum": 1000000,
+          "description": "Reasoning tokens kept, 0 to 1,000,000.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "default": {
+        "default": 10000
+      },
+      "description": "Reasoning tokens the newest assistant messages keep: `default`, provider/* and model keys.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "protected_tokens": {
+      "oneOf": [
+        {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "default": "auto",
+              "const": "auto",
+              "description": "Selects a size derived from the usable window.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          },
+          "description": "a size derived from the usable window",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "required": [
+            "kind",
+            "tokens"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "default": "tokens",
+              "const": "tokens",
+              "description": "Selects a fixed number of tokens.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "tokens": {
+              "type": "integer",
+              "minimum": 4000,
+              "maximum": 1000000,
+              "description": "Tokens left alone, 4,000 to 1,000,000.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ],
+              "x-ck-required": true
+            }
+          },
+          "description": "a fixed number of tokens",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      ],
+      "description": "Tokens of the newest tool output the routine heuristics leave alone. Absent means auto: a size derived from the usable window.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "protected_tools": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "additionalProperties": false,
+      "patternProperties": {
+        "^\\S+$": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 0,
+          "description": "How many of the tool's newest results are kept.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "default": {},
+      "description": "Tools whose newest results are never dropped automatically, by tool name, with how many results each keeps; added to the built-in todowrite (1) and ctx_reduce (3).",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "history_budget_percentage": {
+      "type": "number",
+      "default": 0.15,
+      "minimum": 0.05,
+      "maximum": 0.5,
+      "description": "The history head's budget, as a share of the window up to the execute threshold, 0.05 to 0.5.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "memory": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Project memories, primers and their search.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "auto_promote": {
+          "type": "boolean",
+          "default": true,
+          "description": "Facts a summary finds become project memories.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "injection_budget_tokens": {
+          "type": "number",
+          "default": 4000,
+          "minimum": 500,
+          "maximum": 20000,
+          "description": "Project memories shown in the history head, in tokens, 500 to 20,000.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "auto_search": {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Add a memory hint to a person's message when a search finds something related.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "score_threshold": {
+              "type": "number",
+              "default": 0.6,
+              "minimum": 0.3,
+              "maximum": 0.95,
+              "description": "The relevance a fragment needs to appear in the hint, 0.3 to 0.95.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "min_prompt_chars": {
+              "type": "number",
+              "default": 20,
+              "minimum": 5,
+              "maximum": 500,
+              "description": "Shorter messages get no hint, 5 to 500 characters.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          },
+          "description": "Memory hints on a person's message.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "git_commit_indexing": {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Index the project's commits for search.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "since_days": {
+              "type": "number",
+              "default": 365,
+              "minimum": 7,
+              "maximum": 3650,
+              "description": "How far back commits are indexed, 7 to 3,650 days.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "max_commits": {
+              "type": "number",
+              "default": 2000,
+              "minimum": 100,
+              "maximum": 20000,
+              "description": "Commits kept per project, oldest evicted first, 100 to 20,000.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          },
+          "description": "Commit search.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "Project memories.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "mural": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "The history head carries an image of the project memories its memory budget left out, on models that read images.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "The memory mural.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "commit_cluster_trigger": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "The summarizer runs, at any usage, once enough stretches of work ended in commits.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "min_clusters": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "description": "How many such stretches, at least 1.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "Summaries triggered by finished work.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "caveman_text_compression": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Compress older long text, for sessions with a summarizer.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "min_chars": {
+          "type": "integer",
+          "default": 500,
+          "minimum": 100,
+          "maximum": 10000,
+          "description": "Shorter text stays as it is, 100 to 10,000 characters.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "Older long text compressed by age.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "language": {
+      "type": "string",
+      "default": "",
+      "description": "The language the summarizer writes its prose in, as a language code; empty writes English.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "keep_subagents": {
+      "type": "boolean",
+      "default": false,
+      "description": "Keep a summary's child sessions for inspection instead of deleting them once their hold ends.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "compaction": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Magic Context manages the context window. Off, it keeps only its knowledge layer.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "Context management.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "clock_note": {
+      "type": "string",
+      "default": "30m",
+      "pattern": "^(off|[1-9][0-9]*[mh])$",
+      "description": "How often an agent is told the time: \"off\", or a whole number of minutes or hours such as \"30m\" or \"1h\".",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "prompt_surface": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "default": {
+          "type": "string",
+          "default": "full",
+          "enum": [
+            "full",
+            "light"
+          ],
+          "description": "The wording every model gets unless a model key says otherwise.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "models": {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "additionalProperties": false,
+          "patternProperties": {
+            "^(default|[^\\s/]+(/\\S+)?)$": {
+              "type": "string",
+              "default": "full",
+              "enum": [
+                "full",
+                "light"
+              ],
+              "description": "The wording for these models.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          },
+          "default": {},
+          "description": "The wording for the models a provider/model or model key names.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "tool_descriptions": {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "additionalProperties": false,
+          "patternProperties": {
+            "^(ctx_reduce|ctx_expand|ctx_note|ctx_memory|ctx_search|ctx_keep)$": {
+              "type": "string",
+              "default": "",
+              "description": "The tool's description; empty keeps the built-in one.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          },
+          "default": {},
+          "description": "Replacement descriptions for Magic Context's tools, by tool name.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "guidance_override_path": {
+          "type": "string",
+          "default": "",
+          "description": "A file that replaces the built-in guidance section, relative to this settings file; it must hold exactly one \"## Magic Context\" heading. Empty keeps the built-in guidance.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "guidance_override_text": {
+          "type": "string",
+          "default": "",
+          "description": "Text that replaces the built-in guidance section when no override file is named; empty keeps the built-in guidance.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "What the model is told about Magic Context.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "embedding": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "default": "synapse",
+          "enum": [
+            "synapse",
+            "openai-compatible",
+            "off"
+          ],
+          "description": "Who embeds text: a Synapse module, an OpenAI-compatible endpoint, or off (search by words only).",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "module": {
+          "type": "string",
+          "default": "synapse",
+          "description": "The Synapse module embedding calls: a module id such as \"synapse\", or fed:<fingerprint>:<module id> for a module another paired computer serves.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "The OpenAI-compatible endpoint's base URL.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "default": "",
+          "description": "The embedding model; empty uses the provider's default.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "api_key": {
+          "oneOf": [
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "none",
+                  "const": "none",
+                  "description": "Selects no API key.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "no API key",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind",
+                "key"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "vault",
+                  "const": "vault",
+                  "description": "Selects a key read from the CortexKit vault.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                },
+                "key": {
+                  "type": "object",
+                  "x-ck-kind": "credential_ref",
+                  "description": "The vault credential holding the key.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ],
+                  "x-ck-required": true
+                }
+              },
+              "description": "a key read from the CortexKit vault",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          ],
+          "description": "The API key the embedding endpoint sends, as a CortexKit vault credential. Absent means no key. A key is never written here as text: store it in the vault and name it here.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "input_type": {
+          "type": "string",
+          "default": "",
+          "description": "The endpoint's input_type for documents; empty sends none.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "query_input_type": {
+          "type": "string",
+          "default": "",
+          "description": "The endpoint's input_type for queries; empty sends none.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "query_instruction": {
+          "oneOf": [
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "auto",
+                  "const": "auto",
+                  "description": "Selects the wording the model family calls for.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "the wording the model family calls for",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "none",
+                  "const": "none",
+                  "description": "Selects no text at all.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "no text at all",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind",
+                "text"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "text",
+                  "const": "text",
+                  "description": "Selects the text given here.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "description": "The query instruction text, used as written.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ],
+                  "x-ck-required": true
+                }
+              },
+              "description": "the text given here",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          ],
+          "description": "The query instruction. Absent means auto: the wording the model family calls for.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "document_prefix": {
+          "oneOf": [
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "auto",
+                  "const": "auto",
+                  "description": "Selects the prefix the model family calls for (empty text for none).",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "the prefix the model family calls for (empty text for none)",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind",
+                "text"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "text",
+                  "const": "text",
+                  "description": "Selects the text given here.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "description": "The document prefix text, used as written.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ],
+                  "x-ck-required": true
+                }
+              },
+              "description": "the text given here",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          ],
+          "description": "The document prefix. Absent means auto: the prefix the model family calls for (empty text for none).",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "truncate": {
+          "type": "string",
+          "default": "",
+          "description": "The endpoint's truncate setting; empty sends none.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "dimensions": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 8192,
+          "description": "The vector width to ask for, 1 to 8,192; 0 keeps the model's own.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "max_input_tokens": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "description": "The most tokens one input may hold; 0 uses the provider's limit.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "Embeddings for search by meaning.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "rerank": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Rerank explicit prose searches.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "provider": {
+          "type": "string",
+          "default": "synapse",
+          "enum": [
+            "synapse",
+            "remote"
+          ],
+          "description": "Who reranks: a Synapse module, or a hosted /rerank endpoint.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "module": {
+          "type": "string",
+          "default": "synapse",
+          "description": "The Synapse module reranking calls: a module id such as \"synapse\", or fed:<fingerprint>:<module id> for a module another paired computer serves.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "The hosted reranker's base URL.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "default": "",
+          "description": "The hosted reranker's model.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "api_key": {
+          "oneOf": [
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "none",
+                  "const": "none",
+                  "description": "Selects no API key.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "no API key",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind",
+                "key"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "vault",
+                  "const": "vault",
+                  "description": "Selects a key read from the CortexKit vault.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                },
+                "key": {
+                  "type": "object",
+                  "x-ck-kind": "credential_ref",
+                  "description": "The vault credential holding the key.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ],
+                  "x-ck-required": true
+                }
+              },
+              "description": "a key read from the CortexKit vault",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          ],
+          "description": "The API key the hosted reranker sends, as a CortexKit vault credential. Absent means no key. A key is never written here as text: store it in the vault and name it here.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "default": 1500,
+          "minimum": 50,
+          "maximum": 15000,
+          "description": "How long the hosted reranker may take, 50 to 15,000 ms.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "top_n": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "The most candidates sent, 1 to 20.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "Reranking an explicit prose search's best candidates.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    },
+    "dreamer": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the dreamer's tasks.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "max_tokens": {
+          "type": "integer",
+          "default": 20000000,
+          "minimum": 1,
+          "description": "The most input and output tokens one task run may spend.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "projects": {
+          "oneOf": [
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "all",
+                  "const": "all",
+                  "description": "Selects every project with a session.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "every project with a session",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": [
+                "kind",
+                "projects"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "default": "listed",
+                  "const": "listed",
+                  "description": "Selects only the projects listed.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                },
+                "projects": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "default": "",
+                    "description": "A project id.",
+                    "x-ck-apply": "live",
+                    "x-ck-layers": [
+                      "user"
+                    ]
+                  },
+                  "description": "The project ids.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ],
+                  "x-ck-required": true
+                }
+              },
+              "description": "only the projects listed",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          ],
+          "description": "The projects the dreamer runs for. Absent means every project with a session.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
+        "tasks": {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "properties": {
+            "classify-memories": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 6 * * *",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The classify-memories task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "compress-cues": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 4 * * *",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The compress-cues task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "curate": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 4 * * 0",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The curate task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "curate-workspace": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 4 * * 0",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The curate-workspace task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "lift-workspace": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The lift-workspace task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "maintain-docs": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "30 5 * * *",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The maintain-docs task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "map-memories": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 2 * * *",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The map-memories task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "reflect-events": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 5 * * *",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The reflect-events task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "refresh-primers": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 3 * * *",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The refresh-primers task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "review-user-memories": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 3 * * *",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The review-user-memories task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "verify": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 3 * * *",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The verify task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            },
+            "verify-broad": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "default": "0 4 * * 0",
+                  "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
+                  "x-ck-apply": "live",
+                  "x-ck-layers": [
+                    "user"
+                  ]
+                }
+              },
+              "description": "The verify-broad task.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          },
+          "description": "Each task's schedule.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "The dreamer's scheduled background tasks.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user"
+      ]
+    }
+  }
+}

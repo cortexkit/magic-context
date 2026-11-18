@@ -2031,6 +2031,56 @@ fn refusal(error: ModuleError) -> Refusal {
 
 #[async_trait]
 impl ModuleHandler for Handler {
+    /// With managed settings, ck-mc declares its user settings to the
+    /// daemon ([`crate::config::managed`]); otherwise it declares nothing
+    /// and reads its files.
+    #[cfg(feature = "managed-settings")]
+    fn config_declaration(&self) -> Option<subc_client_rs::config::ConfigDeclareRequest> {
+        self.module.config().loader()?.config_declaration()
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn config_review(
+        &self,
+        request: subc_client_rs::config::ConfigReviewRequest,
+    ) -> subc_client_rs::config::ConfigReviewReply {
+        match self.module.config().loader() {
+            Some(loader) => loader.config_review(&request),
+            None => subc_client_rs::config::ConfigReviewReply::new(
+                vec![],
+                vec![subc_client_rs::config::ConfigReviewRefusal::new(
+                    "value_invalid",
+                    vec![],
+                    vec!["this ck-mc runs on fixed settings".into()],
+                )],
+            ),
+        }
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn config_apply(
+        &self,
+        view: subc_client_rs::config::ConfigView,
+    ) -> Result<(), Vec<String>> {
+        match self.module.config().loader() {
+            Some(loader) => loader.config_apply(&view),
+            None => Err(vec!["this ck-mc runs on fixed settings".into()]),
+        }
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn config_files(&self) {
+        if let Some(loader) = self.module.config().loader() {
+            loader.config_files();
+        }
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn on_config_state(&self, state: subc_client_rs::config::ConfigState) {
+        if let Some(loader) = self.module.config().loader() {
+            loader.on_config_state(&state);
+        }
+    }
     /// Record who opened the route and for which session. Only a module the
     /// daemon attests can open one: the runner's identity is the attested
     /// module, the session is the route's bind identity, and the project is
