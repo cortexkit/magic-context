@@ -188,6 +188,6 @@ describe("Pi compaction marker kept entry", () => {
 	it("falls back to the stored ordinal for a boundary the branch does not hold", () => {
 		expect(
 			resolvePiMarkerKeptEntry([user("u1", "a"), reply("a1", "b")], "gone"),
-		).toEqual({ kind: "boundary-not-on-branch" });
+		).toEqual({ kind: "missing" });
 	});
 });

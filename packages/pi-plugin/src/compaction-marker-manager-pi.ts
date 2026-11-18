@@ -255,7 +255,7 @@ export function applyDeferredPiCompactionMarker(
 		let placedByCut = false;
 		const kept = resolvePiMarkerKeptEntry(branchEntries, pending.endMessageId);
 		if (
-			kept.kind !== "boundary-not-on-branch" &&
+			kept.kind !== "missing" &&
 			!isPiOrdinalAlignmentUnanchored(
 				resolvePiOrdinalAlignment(deps.db, sessionId, branchEntries),
 			)

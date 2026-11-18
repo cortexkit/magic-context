@@ -130,7 +130,7 @@ export function firstMessageKeptByPiHistoryCut(
 export type PiMarkerKeptEntry =
 	| { kind: "resolved"; entryId: string }
 	| { kind: "waiting" }
-	| { kind: "boundary-not-on-branch" };
+	| { kind: "missing" };
 
 /**
  * The entry a Pi compaction marker keeps first for a summary ending at
@@ -143,8 +143,8 @@ export type PiMarkerKeptEntry =
  *
  * A folded tool-result boundary (`synth-user-<id>`) is the result entry `<id>`,
  * as the cut reads it. `waiting`: no message follows the boundary yet, or the
- * cut keeps none. `boundary-not-on-branch`: the boundary id is not on this
- * branch, and the caller places the marker by stored ordinal as before.
+ * cut keeps none. `missing`: the boundary message is not on this branch, and
+ * the caller places the marker by stored ordinal as before.
  */
 export function resolvePiMarkerKeptEntry(
 	branchEntries: readonly unknown[],
@@ -153,7 +153,7 @@ export function resolvePiMarkerKeptEntry(
 	const boundaryId = endMessageId.startsWith(SYNTH_USER_ID_PREFIX)
 		? endMessageId.slice(SYNTH_USER_ID_PREFIX.length)
 		: endMessageId;
-	if (boundaryId.length === 0) return { kind: "boundary-not-on-branch" };
+	if (boundaryId.length === 0) return { kind: "missing" };
 	const messages: unknown[] = [];
 	const ids: string[] = [];
 	for (const raw of branchEntries) {
@@ -174,7 +174,7 @@ export function resolvePiMarkerKeptEntry(
 		ids.push(entry.id);
 	}
 	const cutoffIndex = ids.indexOf(boundaryId);
-	if (cutoffIndex < 0) return { kind: "boundary-not-on-branch" };
+	if (cutoffIndex < 0) return { kind: "missing" };
 	// With nothing after the boundary yet, the cut cannot tell whether the turn
 	// it ends in is closed: it keeps that turn's prompt now, and drops it once
 	// the next prompt arrives. Wait for the next message, as the marker always
