@@ -1,7 +1,8 @@
-//! Witnesses of defects an independent review found in the replica engine
-//! (`.cortexkit/internal-docs/audits/shared-memories-review.md`). Each test
-//! describes how the replica engine must behave and checks that it does;
-//! each failed before the fixes that report led to.
+//! Replication cases that are easy to get wrong: a delete meeting an earlier
+//! change from another computer, a store busy for a moment, a store made anew
+//! or restored from a copy, a sighting that changes nothing, the same fact
+//! written on two computers, and evidence kept across a revision. Each test
+//! describes the case and checks how the replica engine must behave.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
