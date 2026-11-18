@@ -209,7 +209,10 @@ impl Computer {
             "INSERT INTO memories (level, owner_id, category, origin_category, content,
                  normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
              VALUES ('project', 'pj-a', 'swe:architecture', 'ARCHITECTURE', ?1, ?2, 1, 1, 1, 1)",
-            &[&content, &mc_module::memory_writes::normalized_hash(content)],
+            &[
+                &content,
+                &mc_module::memory_writes::normalized_hash(content),
+            ],
         );
     }
 
@@ -279,7 +282,10 @@ async fn two_stores_share_a_create_an_edit_and_a_delete_and_go_on_after_a_restar
     let b = Computer::new(&server, 2).await;
 
     a.remember("The parser rejects empty input.");
-    exchange([&a, &b], || b.contents() == ["The parser rejects empty input."]).await;
+    exchange([&a, &b], || {
+        b.contents() == ["The parser rejects empty input."]
+    })
+    .await;
 
     b.edit(
         "The parser rejects empty input.",

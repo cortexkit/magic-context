@@ -7,9 +7,11 @@
 //!   ck-bus for a connection to the hub (`HubClient::connect`, a credential
 //!   from `ckbus.hub_credential` that the bus client renews). While ck-bus
 //!   answers that the hub is unavailable (no hub link, or the vault's
-//!   federation signer isn't there yet), that magic-context isn't granted
-//!   the hub, or the connection fails, nothing is sent: the outbox keeps
-//!   every change, and the task asks again after [`retry_after`].
+//!   federation signer, the key that signs credentials for the user's
+//!   federation account on the hub, isn't there yet), that magic-context
+//!   isn't granted the hub, or the connection fails, nothing is sent: the
+//!   outbox keeps every change, and the task asks again after
+//!   [`retry_after`].
 //! - runs the engine's rounds ([`Replica::round`]: join, follow, publish)
 //!   over [`NatsHub`] on that connection. Each connection gets a new engine,
 //!   which reads the stream to its end before it sends anything, and a new
@@ -53,9 +55,9 @@ pub const IDLE: Duration = Duration::from_secs(30);
 pub const RETRY_FIRST: Duration = Duration::from_secs(5);
 
 /// The longest wait between asks. What else keeps the hub away (no hub
-/// link yet, the vault's federation signer missing, the grant missing)
-/// changes when the person pairs a computer or ck-bus is updated, so five
-/// minutes is soon enough, and each ask is one call to ck-bus.
+/// link yet, no signer in the vault for hub credentials yet, the grant
+/// missing) changes when the person pairs a computer or ck-bus is updated,
+/// so five minutes is soon enough, and each ask is one call to ck-bus.
 pub const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// The first wait after a failed round, and the longest.
@@ -156,7 +158,9 @@ struct HubLink(cortexkit_bus_client::HubClient);
 
 impl Link for HubLink {
     fn stream(&self) -> Result<Arc<dyn HubStream>, Refusal> {
-        Ok(Arc::new(JetStream::new(self.0.jetstream().map_err(refusal)?)))
+        Ok(Arc::new(JetStream::new(
+            self.0.jetstream().map_err(refusal)?,
+        )))
     }
 
     fn changes(&self) -> watch::Receiver<u64> {
@@ -410,7 +414,9 @@ impl Live {
                 }
                 Ended::Closed => {
                     return Some(link.stream().err().unwrap_or_else(|| {
-                        Refusal::Failed("the hub connection's credential maintenance stopped".into())
+                        Refusal::Failed(
+                            "the hub connection's credential maintenance stopped".into(),
+                        )
                     }))
                 }
             }

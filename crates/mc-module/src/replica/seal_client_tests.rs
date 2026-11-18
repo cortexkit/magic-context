@@ -5,8 +5,8 @@
 //! vault.
 
 use cortexkit_claustrum_client::{
-    decode_fleet_epoch_open_batch_reply, decode_fleet_epoch_seal_batch_reply,
-    CredentialErrorClass, CredentialResolverError,
+    decode_fleet_epoch_open_batch_reply, decode_fleet_epoch_seal_batch_reply, CredentialErrorClass,
+    CredentialResolverError,
 };
 use serde_json::{json, Value};
 
@@ -114,8 +114,8 @@ fn an_envelope_that_can_never_open_is_refused_without_the_vault() {
     );
     // Fewer or more answers than items sent is a broken reply.
     assert!(merge(&bytes, Vec::new()).is_err());
-    let twice = decode_fleet_epoch_open_batch_reply(&frame(&cases["batch"]["open_response"]))
-        .unwrap();
+    let twice =
+        decode_fleet_epoch_open_batch_reply(&frame(&cases["batch"]["open_response"])).unwrap();
     assert!(merge(&bytes, twice).is_err());
 }
 

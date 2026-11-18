@@ -261,7 +261,10 @@ fn a_full_stream_is_known_by_the_servers_error_code() {
     assert!(full(&refusal(10077, "maximum bytes exceeded")));
     assert!(full(&refusal(10077, "maximum messages exceeded")));
     assert!(full(&refusal(10023, "insufficient resources")));
-    assert!(full(&refusal(10002, "resource limits exceeded for account")));
+    assert!(full(&refusal(
+        10002,
+        "resource limits exceeded for account"
+    )));
     // The same store error for a disk that failed is not a full stream.
     assert!(!full(&refusal(10077, "error writing to file")));
     assert!(!full(&refusal(10071, "wrong last sequence: 3")));
@@ -272,7 +275,11 @@ async fn the_consumer_starts_after_the_stored_position_and_serves_read_after_rea
     let script = Script::new();
     script.consumer(
         3,
-        vec![now(message(5, 1, 2)), now(message(6, 2, 1)), now(message(7, 3, 0))],
+        vec![
+            now(message(5, 1, 2)),
+            now(message(6, 2, 1)),
+            now(message(7, 3, 0)),
+        ],
     );
     let hub = script.hub();
     assert_eq!(seqs(&hub.fetch(4, 2).await.unwrap()), vec![5, 6]);
@@ -289,7 +296,11 @@ async fn a_read_from_another_position_makes_the_consumer_again_from_there() {
     let script = Script::new();
     script.consumer(
         3,
-        vec![now(message(1, 1, 2)), now(message(2, 2, 1)), now(message(3, 3, 0))],
+        vec![
+            now(message(1, 1, 2)),
+            now(message(2, 2, 1)),
+            now(message(3, 3, 0)),
+        ],
     );
     script.consumer(2, vec![now(message(2, 1, 1)), now(message(3, 2, 0))]);
     let hub = script.hub();
@@ -321,7 +332,10 @@ async fn a_heartbeat_naming_a_delivery_that_never_arrived_fails_the_read() {
     let hub = script.hub();
     assert_eq!(seqs(&hub.fetch(0, 10).await.unwrap()), vec![1]);
     let error = hub.fetch(0, 10).await.unwrap_err();
-    assert!(error.0.contains("sent 2 deliveries and 1 arrived"), "{error}");
+    assert!(
+        error.0.contains("sent 2 deliveries and 1 arrived"),
+        "{error}"
+    );
     assert_eq!(script.follows(), vec![1, 1]);
 }
 
@@ -426,9 +440,7 @@ async fn a_failed_consumer_or_a_failed_lookup_fails_the_read() {
     let hub = NatsHub::new(Arc::new(Refusing));
     assert_eq!(
         hub.fetch(0, 10).await,
-        Err(HubError(
-            "making the memory consumer: no responders".into()
-        ))
+        Err(HubError("making the memory consumer: no responders".into()))
     );
     assert_eq!(
         hub.last_seq().await,
@@ -453,7 +465,10 @@ async fn a_read_waits_longer_while_the_stream_holds_undelivered_messages() {
     script.consumer(1, late());
     let start = Instant::now();
     assert_eq!(seqs(&script.hub().fetch(0, 10).await.unwrap()), vec![1]);
-    assert_eq!(start.elapsed(), PENDING_WAIT - Duration::from_secs(1) + NEXT_WAIT);
+    assert_eq!(
+        start.elapsed(),
+        PENDING_WAIT - Duration::from_secs(1) + NEXT_WAIT
+    );
 
     let script = Script::new();
     script.consumer(0, late());

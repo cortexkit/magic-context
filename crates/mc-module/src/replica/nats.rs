@@ -550,13 +550,13 @@ impl Delivery for Subscription {
             ));
         }
         if self.client.connection_state() != async_nats::connection::State::Connected {
-            return Err(Fault::Failed("the connection to the hub is down".to_owned()));
+            return Err(Fault::Failed(
+                "the connection to the hub is down".to_owned(),
+            ));
         }
         match tokio::time::timeout(wait, self.subscriber.next()).await {
             Err(_) => Ok(None),
-            Ok(None) => Err(Fault::Failed(
-                "the connection to the hub closed".to_owned(),
-            )),
+            Ok(None) => Err(Fault::Failed("the connection to the hub closed".to_owned())),
             Ok(Some(message)) => delivered(&self.context, message).map(Some),
         }
     }

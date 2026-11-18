@@ -350,7 +350,10 @@ fn sent(db: &ContextDb) -> bool {
 async fn until(what: impl Fn() -> bool) {
     let start = Instant::now();
     while !what() {
-        assert!(start.elapsed() < Duration::from_secs(3600), "never happened");
+        assert!(
+            start.elapsed() < Duration::from_secs(3600),
+            "never happened"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -412,7 +415,11 @@ async fn while_the_hub_is_unavailable_nothing_is_sent_and_the_wait_is_logged_onc
         "five seconds, doubling"
     );
     assert!(
-        fake.asked.lock().unwrap().iter().all(|(_, stored)| *stored == 0),
+        fake.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, stored)| *stored == 0),
         "nothing was sent before the hub was there"
     );
     until(|| server.messages() == 1).await;
@@ -529,12 +536,7 @@ async fn a_full_stream_is_logged_once_and_its_end_once() {
     until(|| server.messages() == 1).await;
     until(|| sent(&db)).await;
     task.stop().await;
-    assert_eq!(
-        log.count(super::nats::STREAM_FULL),
-        1,
-        "{}",
-        log.text()
-    );
+    assert_eq!(log.count(super::nats::STREAM_FULL), 1, "{}", log.text());
     assert_eq!(log.count("rounds succeed again"), 1, "{}", log.text());
 }
 
