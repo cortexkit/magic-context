@@ -1,8 +1,18 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import { cleanupTestTempDir, createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { gaDatabasePath } from "../../../plugin/src/v2/store-reader";
-import { readPluginLog, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import {
+	inspectOpenFiles,
+	isolation,
+	readPluginLog,
+	spawnOpencode2,
+	waitForPluginActive,
+} from "../../src/opencode2-runner/spawn";
 
 /**
  * With Magic Context's compaction off, the host's own compaction must run for a
@@ -107,3 +117,158 @@ test("with compaction off, the host's own compaction of a user session succeeds 
 		await host.stop();
 	}
 }, 180_000);
+
+/**
+ * With Magic Context's compaction off and the host's automatic compaction on,
+ * the request after the host's checkpoint is the checkpoint plus the tail the
+ * host kept, so it is far smaller than the request before it and the host does
+ * not compact again. Magic Context used to put back every stored message from
+ * before the checkpoint, so the request never shrank and the host compacted
+ * again on every following step.
+ *
+ * The mock reports each request's input tokens from its size, as a real
+ * provider would, so the host's usage reading follows what was actually sent.
+ */
+const CHECKPOINT_WINDOW = 40_000;
+const BALLAST =
+	"The service retries each failed upload with exponential backoff, records the attempt in the audit table, and moves on to the next queued item. ";
+// About 1.5k tokens per turn, so the host's checkpoint summarizes many turns and
+// keeps only the newest few.
+const ballastTurn = (turn: number) => `checkpoint-scenario turn ${turn}: ${BALLAST.repeat(40)}`;
+const turnMarkers = (text: string) =>
+	[...new Set([...text.matchAll(/checkpoint-scenario turn (\d+):/g)].map((match) => Number(match[1])))];
+
+test("with compaction off, the host's checkpoint shrinks the next request and compaction does not repeat (issue 944)", async () => {
+	const namespace = join(tmpdir(), "magic-context");
+	mkdirSync(namespace, { recursive: true });
+	const fixture = isolation(createTestTempDirFromPath(join(namespace, "issue-944-")));
+	const host = await spawnOpencode2({
+		existingIsolation: fixture,
+		modelContextLimit: CHECKPOINT_WINDOW,
+		modelOutputLimit: 1_024,
+		// The reported configuration: automatic compaction with a fifth of the
+		// window kept free, written as the token count every host version accepts.
+		compactionConfig: { auto: true, buffer: CHECKPOINT_WINDOW / 5, keep: { tokens: 1_024 } },
+		magicContextConfig: {
+			compaction: { enabled: false },
+			memory: { enabled: false },
+			historian: { disable: true },
+			dreamer: { disable: true },
+		},
+	});
+	try {
+		const client = OpenCode.make({
+			baseUrl: host.url,
+			headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
+		});
+		const session = await client.session.create({
+			title: "compaction off checkpoint",
+			location: { directory: host.cwd },
+			model: { providerID: "openai", id: "mock-model" },
+		});
+		await waitForPluginActive(client, host.cwd);
+		host.mock.addMatcher((body) => {
+			const text = JSON.stringify(body);
+			return {
+				text: text.includes(TEMPLATE_PROMPT) ? SUMMARY : "noted",
+				usage: { input_tokens: Math.ceil(text.length / 4), output_tokens: 10 },
+			};
+		});
+		const compactions = () => {
+			const db = new Database(gaDatabasePath(host.env.XDG_DATA_HOME as string, "latest", host.env), {
+				readonly: true,
+			});
+			try {
+				return (
+					db
+						.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'compaction' ORDER BY seq")
+						.all(session.id) as Array<{ data: string }>
+				).map((row) => JSON.parse(row.data) as Record<string, unknown>);
+			} finally {
+				db.close();
+			}
+		};
+		type Turn = {
+			turn: string;
+			/** Completed host compactions once the turn ended. */
+			compactions: number;
+			timedOut: boolean;
+			requests: Array<{ bytes: number; summary: boolean; checkpoint: boolean; markers: number[] }>;
+		};
+		const turns: Turn[] = [];
+		const turn = async (label: string, text: string) => {
+			const before = host.mock.requests().length;
+			await client.session.prompt({ sessionID: session.id, text });
+			let timedOut = false;
+			try {
+				await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(90_000) });
+			} catch {
+				// Recorded rather than thrown, so the report below still shows what was sent.
+				timedOut = true;
+			}
+			turns.push({
+				turn: label,
+				compactions: compactions().filter((row) => row.status === "completed").length,
+				timedOut,
+				requests: host.mock
+					.requests()
+					.slice(before)
+					.map((request) => {
+						const body = JSON.stringify(request.body);
+						return {
+							bytes: body.length,
+							summary: body.includes(TEMPLATE_PROMPT),
+							// The host's checkpoint carries the summary the mock wrote.
+							checkpoint: !body.includes(TEMPLATE_PROMPT) && body.includes("keep the fixture conversation going"),
+							markers: turnMarkers(body),
+						};
+					}),
+			});
+		};
+		for (let big = 1; big <= 30 && !turns.at(-1)?.compactions; big++) await turn(`turn ${big}`, ballastTurn(big));
+		for (let followUp = 1; followUp <= 3; followUp++)
+			await turn(`follow-up ${followUp}`, `checkpoint-scenario follow-up ${followUp}: what is next?`);
+
+		const openDatabases = inspectOpenFiles(host.pid!, host.root, host.env).filter((path) =>
+			/\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path),
+		);
+		console.log(
+			`[issue-944] host=${process.env.MC_E2E_OPENCODE2_CLI ?? "pinned"} root=${host.root} openDatabases=${JSON.stringify([...new Set(openDatabases)])}`,
+		);
+		for (const entry of turns) console.log(`[issue-944] ${JSON.stringify(entry)}`);
+		const root = realpathSync(host.root);
+		for (const path of openDatabases) expect(path.startsWith(`${root}/`)).toBe(true);
+
+		// The turn the host compacted in, and the turns before and after it.
+		const compacted = turns.findIndex((entry) => entry.compactions > 0);
+		expect(compacted).toBeGreaterThan(0);
+		const main = (entries: Turn[]) => entries.flatMap((entry) => entry.requests.filter((request) => !request.summary));
+		const before = main(turns.slice(0, compacted)).at(-1)!;
+		const after = main(turns.slice(compacted));
+		const summarized = new Set(
+			turns.flatMap((entry) => entry.requests.filter((request) => request.summary)).flatMap((request) => request.markers),
+		);
+		console.log(
+			`[issue-944] summarized turns=${JSON.stringify([...summarized])} last request before the checkpoint=${before.bytes}B (~${Math.ceil(before.bytes / 4)} tokens) requests after=${JSON.stringify(after.map((request) => request.bytes))}B compactions=${turns.at(-1)!.compactions}`,
+		);
+		expect(summarized.size).toBeGreaterThan(0);
+		expect(after.length).toBeGreaterThanOrEqual(3);
+		for (const request of after) {
+			// The host's checkpoint is served, and nothing it summarized comes back.
+			expect(request.checkpoint).toBe(true);
+			expect(request.markers.filter((marker) => summarized.has(marker))).toEqual([]);
+			// So the request shrinks well below the one that triggered compaction...
+			expect(request.bytes).toBeLessThan(before.bytes * 0.75);
+		}
+		// ...and the host does not compact again.
+		expect(turns.every((entry) => !entry.timedOut)).toBe(true);
+		expect(turns.at(-1)!.compactions).toBe(1);
+		expect(compactions().filter((row) => row.status !== "completed")).toEqual([]);
+	} catch (error) {
+		console.error(host.stderr().slice(-20_000), readPluginLog(host.env).slice(-20_000));
+		throw error;
+	} finally {
+		await host.stop();
+		if (process.env.MC_E2E_KEEP !== "1") cleanupTestTempDir(fixture.root);
+	}
+}, 900_000);

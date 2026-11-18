@@ -322,6 +322,12 @@ export interface OpenCode2SpawnOptions {
 	/** models.dev catalogue copied into the throwaway host cache before boot. */
 	modelsCatalog?: string;
 	compactionAuto?: boolean;
+	/**
+	 * The host's own compaction settings (`compaction` in opencode.json), in place of
+	 * the default `{ auto, buffer: 1024, keep: { tokens: 1024 } }`, for a scenario that
+	 * needs its own buffer or keep budget.
+	 */
+	compactionConfig?: Record<string, unknown>;
 	existingIsolation?: OpenCode2Isolation;
 	existingMock?: { mock: MockProvider; baseURL: string };
 	/**
@@ -438,7 +444,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 					schemaGuard,
 				],
 				model: `${providerID}/${defaultModelID}`,
-				compaction: { auto: options.compactionAuto ?? true, buffer: 1024, keep: { tokens: 1024 } },
+				compaction: options.compactionConfig ?? { auto: options.compactionAuto ?? true, buffer: 1024, keep: { tokens: 1024 } },
 				providers: {
 					[providerID]: {
 						settings: openCode2ProviderSettings(options, provider.baseURL),
