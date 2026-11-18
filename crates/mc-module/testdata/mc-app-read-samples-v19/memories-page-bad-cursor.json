@@ -1,0 +1,18 @@
+{
+  "name": "memories-page-bad-cursor",
+  "request": {
+    "method": "memories.page",
+    "params": {
+      "cursor": "mcc1.WyJtZW1vcmllcy5wYWdlIiwiZjVlOGI1NjUxZTQyMTU5NSIsWyJzd2U6Y29uc3RyYWludHMiLDgwLDE3MDAwMDM2OTAwMDAsM11d",
+      "level": "project",
+      "owner": "pj-sample",
+      "status": "archived"
+    }
+  },
+  "response": {
+    "error": {
+      "code": "bad_cursor",
+      "message": "The cursor is not one this read made with these filters."
+    }
+  }
+}

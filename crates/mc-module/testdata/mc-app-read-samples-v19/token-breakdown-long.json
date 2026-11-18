@@ -1,0 +1,1694 @@
+{
+  "name": "token-breakdown-long",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "token_breakdown",
+      "session": {
+        "harness": "broca",
+        "runner": "broca",
+        "session": "s-long"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "session_data.read",
+      "row": {
+        "as_of": {
+          "at_ms": 1794677676708,
+          "step_ref": "g528e980a6c8f8897.68840"
+        },
+        "context_window": {
+          "source": "usage",
+          "tokens": 872000
+        },
+        "estimation_source": "runner",
+        "items": [
+          {
+            "item": "system_prompt",
+            "source": "runner",
+            "tokens": 16539
+          },
+          {
+            "item": "tool_definitions",
+            "source": "runner",
+            "tokens": 45409
+          },
+          {
+            "item": "notes",
+            "source": "runner",
+            "tokens": 0
+          },
+          {
+            "item": "memory",
+            "source": "counted",
+            "tokens": 12242
+          },
+          {
+            "item": "project_docs",
+            "source": "counted",
+            "tokens": 1641
+          },
+          {
+            "item": "user_profile",
+            "source": "counted",
+            "tokens": 3963
+          },
+          {
+            "compartment_id": "0",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 72
+          },
+          {
+            "compartment_id": "1",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 131
+          },
+          {
+            "compartment_id": "2",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 117
+          },
+          {
+            "compartment_id": "3",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 120
+          },
+          {
+            "compartment_id": "4",
+            "item": "summary",
+            "source": "counted",
+            "tier": 4,
+            "tokens": 59
+          },
+          {
+            "compartment_id": "5",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 186
+          },
+          {
+            "compartment_id": "6",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 174
+          },
+          {
+            "compartment_id": "7",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 126
+          },
+          {
+            "compartment_id": "8",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 121
+          },
+          {
+            "compartment_id": "9",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 139
+          },
+          {
+            "compartment_id": "10",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 155
+          },
+          {
+            "compartment_id": "11",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 62
+          },
+          {
+            "compartment_id": "12",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 119
+          },
+          {
+            "compartment_id": "13",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 78
+          },
+          {
+            "compartment_id": "14",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 102
+          },
+          {
+            "compartment_id": "15",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 141
+          },
+          {
+            "compartment_id": "16",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 173
+          },
+          {
+            "compartment_id": "17",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 150
+          },
+          {
+            "compartment_id": "18",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 187
+          },
+          {
+            "compartment_id": "19",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 126
+          },
+          {
+            "compartment_id": "20",
+            "item": "summary",
+            "source": "counted",
+            "tier": 4,
+            "tokens": 45
+          },
+          {
+            "compartment_id": "21",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 360
+          },
+          {
+            "compartment_id": "22",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 190
+          },
+          {
+            "compartment_id": "23",
+            "item": "summary",
+            "source": "counted",
+            "tier": 4,
+            "tokens": 56
+          },
+          {
+            "compartment_id": "24",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 108
+          },
+          {
+            "compartment_id": "25",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 178
+          },
+          {
+            "compartment_id": "26",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 60
+          },
+          {
+            "compartment_id": "27",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 262
+          },
+          {
+            "compartment_id": "28",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 132
+          },
+          {
+            "compartment_id": "29",
+            "item": "summary",
+            "source": "counted",
+            "tier": 4,
+            "tokens": 44
+          },
+          {
+            "compartment_id": "30",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 144
+          },
+          {
+            "compartment_id": "31",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 69
+          },
+          {
+            "compartment_id": "32",
+            "item": "summary",
+            "source": "counted",
+            "tier": 4,
+            "tokens": 57
+          },
+          {
+            "compartment_id": "33",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 128
+          },
+          {
+            "compartment_id": "34",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 114
+          },
+          {
+            "compartment_id": "35",
+            "item": "summary",
+            "source": "counted",
+            "tier": 4,
+            "tokens": 25
+          },
+          {
+            "compartment_id": "36",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 191
+          },
+          {
+            "compartment_id": "37",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 98
+          },
+          {
+            "compartment_id": "38",
+            "item": "summary",
+            "source": "counted",
+            "tier": 4,
+            "tokens": 60
+          },
+          {
+            "compartment_id": "39",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 76
+          },
+          {
+            "compartment_id": "40",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 110
+          },
+          {
+            "compartment_id": "41",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 90
+          },
+          {
+            "compartment_id": "42",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 66
+          },
+          {
+            "compartment_id": "43",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 49
+          },
+          {
+            "compartment_id": "44",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 105
+          },
+          {
+            "compartment_id": "45",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 71
+          },
+          {
+            "compartment_id": "46",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 165
+          },
+          {
+            "compartment_id": "47",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 91
+          },
+          {
+            "compartment_id": "48",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 223
+          },
+          {
+            "compartment_id": "49",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 153
+          },
+          {
+            "compartment_id": "50",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 153
+          },
+          {
+            "compartment_id": "51",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 127
+          },
+          {
+            "compartment_id": "52",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 101
+          },
+          {
+            "compartment_id": "53",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 159
+          },
+          {
+            "compartment_id": "54",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 104
+          },
+          {
+            "compartment_id": "55",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 92
+          },
+          {
+            "compartment_id": "56",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 212
+          },
+          {
+            "compartment_id": "57",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 175
+          },
+          {
+            "compartment_id": "58",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 216
+          },
+          {
+            "compartment_id": "59",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 87
+          },
+          {
+            "compartment_id": "60",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 338
+          },
+          {
+            "compartment_id": "61",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 154
+          },
+          {
+            "compartment_id": "62",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 245
+          },
+          {
+            "compartment_id": "63",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 130
+          },
+          {
+            "compartment_id": "64",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 211
+          },
+          {
+            "compartment_id": "65",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 693
+          },
+          {
+            "compartment_id": "66",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 160
+          },
+          {
+            "compartment_id": "67",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 118
+          },
+          {
+            "compartment_id": "68",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 171
+          },
+          {
+            "compartment_id": "69",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 162
+          },
+          {
+            "compartment_id": "70",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 146
+          },
+          {
+            "compartment_id": "71",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 141
+          },
+          {
+            "compartment_id": "72",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 164
+          },
+          {
+            "compartment_id": "73",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 1179
+          },
+          {
+            "compartment_id": "74",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 102
+          },
+          {
+            "compartment_id": "75",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 95
+          },
+          {
+            "compartment_id": "76",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 180
+          },
+          {
+            "compartment_id": "77",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 63
+          },
+          {
+            "compartment_id": "78",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 91
+          },
+          {
+            "compartment_id": "79",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 228
+          },
+          {
+            "compartment_id": "80",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 227
+          },
+          {
+            "compartment_id": "81",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 137
+          },
+          {
+            "compartment_id": "82",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 155
+          },
+          {
+            "compartment_id": "83",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 253
+          },
+          {
+            "compartment_id": "84",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 352
+          },
+          {
+            "compartment_id": "85",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 760
+          },
+          {
+            "compartment_id": "86",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 181
+          },
+          {
+            "compartment_id": "87",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 254
+          },
+          {
+            "compartment_id": "88",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 225
+          },
+          {
+            "compartment_id": "89",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 151
+          },
+          {
+            "compartment_id": "90",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 189
+          },
+          {
+            "compartment_id": "91",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 247
+          },
+          {
+            "compartment_id": "92",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 204
+          },
+          {
+            "compartment_id": "93",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 136
+          },
+          {
+            "compartment_id": "94",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 148
+          },
+          {
+            "compartment_id": "95",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 150
+          },
+          {
+            "compartment_id": "96",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 506
+          },
+          {
+            "compartment_id": "97",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 205
+          },
+          {
+            "compartment_id": "98",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 597
+          },
+          {
+            "compartment_id": "99",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 568
+          },
+          {
+            "compartment_id": "100",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 67
+          },
+          {
+            "compartment_id": "101",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 138
+          },
+          {
+            "compartment_id": "102",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 588
+          },
+          {
+            "compartment_id": "103",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 479
+          },
+          {
+            "compartment_id": "104",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 76
+          },
+          {
+            "compartment_id": "105",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 52
+          },
+          {
+            "compartment_id": "106",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 129
+          },
+          {
+            "compartment_id": "107",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 160
+          },
+          {
+            "compartment_id": "108",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 357
+          },
+          {
+            "compartment_id": "109",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 89
+          },
+          {
+            "compartment_id": "110",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 141
+          },
+          {
+            "compartment_id": "111",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 259
+          },
+          {
+            "compartment_id": "112",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 493
+          },
+          {
+            "compartment_id": "113",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 116
+          },
+          {
+            "compartment_id": "114",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 117
+          },
+          {
+            "compartment_id": "115",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 99
+          },
+          {
+            "compartment_id": "116",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 142
+          },
+          {
+            "compartment_id": "117",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 124
+          },
+          {
+            "compartment_id": "118",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 316
+          },
+          {
+            "compartment_id": "119",
+            "item": "summary",
+            "source": "counted",
+            "tier": 3,
+            "tokens": 59
+          },
+          {
+            "compartment_id": "120",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 351
+          },
+          {
+            "compartment_id": "121",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 113
+          },
+          {
+            "compartment_id": "122",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 101
+          },
+          {
+            "compartment_id": "123",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 150
+          },
+          {
+            "compartment_id": "124",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 120
+          },
+          {
+            "compartment_id": "125",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 174
+          },
+          {
+            "compartment_id": "126",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 135
+          },
+          {
+            "compartment_id": "127",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 290
+          },
+          {
+            "compartment_id": "128",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 90
+          },
+          {
+            "compartment_id": "129",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 99
+          },
+          {
+            "compartment_id": "130",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 106
+          },
+          {
+            "compartment_id": "131",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 95
+          },
+          {
+            "compartment_id": "132",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 161
+          },
+          {
+            "compartment_id": "133",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 239
+          },
+          {
+            "compartment_id": "134",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 126
+          },
+          {
+            "compartment_id": "135",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 701
+          },
+          {
+            "compartment_id": "136",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 269
+          },
+          {
+            "compartment_id": "137",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 301
+          },
+          {
+            "compartment_id": "138",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 444
+          },
+          {
+            "compartment_id": "139",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 618
+          },
+          {
+            "compartment_id": "140",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 627
+          },
+          {
+            "compartment_id": "141",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 123
+          },
+          {
+            "compartment_id": "142",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 291
+          },
+          {
+            "compartment_id": "143",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 254
+          },
+          {
+            "compartment_id": "144",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 531
+          },
+          {
+            "compartment_id": "145",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 154
+          },
+          {
+            "compartment_id": "146",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 166
+          },
+          {
+            "compartment_id": "147",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 117
+          },
+          {
+            "compartment_id": "148",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 212
+          },
+          {
+            "compartment_id": "149",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 427
+          },
+          {
+            "compartment_id": "150",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 504
+          },
+          {
+            "compartment_id": "151",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 500
+          },
+          {
+            "compartment_id": "152",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 163
+          },
+          {
+            "compartment_id": "153",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 337
+          },
+          {
+            "compartment_id": "154",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 113
+          },
+          {
+            "compartment_id": "155",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 495
+          },
+          {
+            "compartment_id": "156",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 145
+          },
+          {
+            "compartment_id": "157",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 135
+          },
+          {
+            "compartment_id": "158",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 298
+          },
+          {
+            "compartment_id": "159",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 517
+          },
+          {
+            "compartment_id": "160",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 983
+          },
+          {
+            "compartment_id": "161",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 403
+          },
+          {
+            "compartment_id": "162",
+            "item": "summary",
+            "source": "counted",
+            "tier": 2,
+            "tokens": 103
+          },
+          {
+            "compartment_id": "163",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 228
+          },
+          {
+            "compartment_id": "164",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 149
+          },
+          {
+            "compartment_id": "165",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 420
+          },
+          {
+            "compartment_id": "166",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 425
+          },
+          {
+            "compartment_id": "167",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 220
+          },
+          {
+            "compartment_id": "168",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 242
+          },
+          {
+            "compartment_id": "169",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 365
+          },
+          {
+            "compartment_id": "170",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 449
+          },
+          {
+            "compartment_id": "171",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 179
+          },
+          {
+            "compartment_id": "172",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 425
+          },
+          {
+            "compartment_id": "173",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 172
+          },
+          {
+            "compartment_id": "174",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 133
+          },
+          {
+            "compartment_id": "175",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 188
+          },
+          {
+            "compartment_id": "176",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 259
+          },
+          {
+            "compartment_id": "177",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 232
+          },
+          {
+            "compartment_id": "178",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 272
+          },
+          {
+            "compartment_id": "179",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 503
+          },
+          {
+            "compartment_id": "180",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 358
+          },
+          {
+            "compartment_id": "181",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 510
+          },
+          {
+            "compartment_id": "182",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 547
+          },
+          {
+            "compartment_id": "183",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 664
+          },
+          {
+            "compartment_id": "184",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 345
+          },
+          {
+            "compartment_id": "185",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 642
+          },
+          {
+            "compartment_id": "186",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 454
+          },
+          {
+            "compartment_id": "187",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 497
+          },
+          {
+            "compartment_id": "188",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 548
+          },
+          {
+            "compartment_id": "189",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 251
+          },
+          {
+            "compartment_id": "190",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 208
+          },
+          {
+            "compartment_id": "191",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 206
+          },
+          {
+            "compartment_id": "192",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 491
+          },
+          {
+            "compartment_id": "193",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 356
+          },
+          {
+            "compartment_id": "194",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 572
+          },
+          {
+            "compartment_id": "195",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 338
+          },
+          {
+            "compartment_id": "196",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 1218
+          },
+          {
+            "compartment_id": "197",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 682
+          },
+          {
+            "compartment_id": "198",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 713
+          },
+          {
+            "compartment_id": "199",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 985
+          },
+          {
+            "compartment_id": "200",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 251
+          },
+          {
+            "compartment_id": "201",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 189
+          },
+          {
+            "compartment_id": "202",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 207
+          },
+          {
+            "compartment_id": "203",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 222
+          },
+          {
+            "compartment_id": "204",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 178
+          },
+          {
+            "compartment_id": "205",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 914
+          },
+          {
+            "compartment_id": "206",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 152
+          },
+          {
+            "compartment_id": "207",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 343
+          },
+          {
+            "compartment_id": "208",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 230
+          },
+          {
+            "compartment_id": "209",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 215
+          },
+          {
+            "compartment_id": "210",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 349
+          },
+          {
+            "compartment_id": "211",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 599
+          },
+          {
+            "compartment_id": "212",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 275
+          },
+          {
+            "compartment_id": "213",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 397
+          },
+          {
+            "compartment_id": "214",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 457
+          },
+          {
+            "compartment_id": "215",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 646
+          },
+          {
+            "compartment_id": "216",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 280
+          },
+          {
+            "compartment_id": "217",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 701
+          },
+          {
+            "compartment_id": "218",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 405
+          },
+          {
+            "compartment_id": "219",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 198
+          },
+          {
+            "compartment_id": "220",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 540
+          },
+          {
+            "compartment_id": "221",
+            "item": "summary",
+            "source": "counted",
+            "tier": 1,
+            "tokens": 258
+          }
+        ],
+        "last_user_message_in_history_raw": false,
+        "managed": {
+          "value": true
+        },
+        "parts": [
+          {
+            "estimate": false,
+            "part": "system_prompt",
+            "tokens": 16539
+          },
+          {
+            "estimate": true,
+            "part": "tool_definitions",
+            "tokens": 45409
+          },
+          {
+            "count": 97,
+            "estimate": false,
+            "part": "memory",
+            "tokens": 12242
+          },
+          {
+            "estimate": false,
+            "part": "project_docs",
+            "tokens": 1641
+          },
+          {
+            "estimate": false,
+            "part": "user_profile",
+            "tokens": 3963
+          },
+          {
+            "estimate": false,
+            "part": "history_summaries",
+            "tokens": 57902
+          },
+          {
+            "estimate": false,
+            "part": "history_raw",
+            "tokens": 27348
+          },
+          {
+            "estimate": true,
+            "part": "tool_calls_results",
+            "tokens": 201721
+          },
+          {
+            "estimate": false,
+            "part": "reasoning",
+            "tokens": 25030
+          },
+          {
+            "estimate": false,
+            "part": "last_user_message",
+            "tokens": 0
+          },
+          {
+            "estimate": false,
+            "part": "user_messages",
+            "tokens": 0
+          },
+          {
+            "estimate": false,
+            "part": "notices",
+            "tokens": 191335
+          },
+          {
+            "estimate": false,
+            "part": "notes",
+            "tokens": 0
+          }
+        ],
+        "total": {
+          "source": "provider",
+          "tokens": 597917
+        },
+        "unattributed": 14787
+      }
+    }
+  }
+}

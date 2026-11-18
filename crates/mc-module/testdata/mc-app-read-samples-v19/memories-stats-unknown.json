@@ -1,0 +1,16 @@
+{
+  "name": "memories-stats-unknown",
+  "request": {
+    "method": "memories.stats",
+    "params": {
+      "level": "project",
+      "owner": "pj-unknown"
+    }
+  },
+  "response": {
+    "error": {
+      "code": "project_unknown",
+      "message": "No session of this project has been set up with Magic Context."
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "head-suspended",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of": {
+        "applied": true,
+        "at_ms": 30,
+        "step_ref": "m3",
+        "view": 7
+      },
+      "managed": false,
+      "messages": []
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "dreamer-status-unknown",
+  "request": {
+    "method": "dreamer.status",
+    "params": {
+      "project": "pj-unknown"
+    }
+  },
+  "response": {
+    "error": {
+      "code": "project_unknown",
+      "message": "No session of this project has been set up with Magic Context."
+    }
+  }
+}

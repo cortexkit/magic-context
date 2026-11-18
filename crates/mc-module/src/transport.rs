@@ -97,19 +97,10 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
             service_id: crate::app_read::ROLE.0.into(),
             transport: subc_protocol::manifest::InternalTransport::Bulk,
             agent_facing: false,
-            operations: [
-                "session_data.read",
-                "context.watch",
-                "context.states",
-                "context.head",
-                "context.head_section",
-                "context.compartment",
-                "context.cache_why",
-                "context.search",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
+            operations: management_app_methods()
+                .chain(std::iter::once(crate::app_read::docs::METHOD))
+                .map(str::to_owned)
+                .collect(),
         },
     ];
     if agent_data {
@@ -123,21 +114,24 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
                 .collect(),
         });
     }
-    // The phone reaches ck-mc through Callosum, which relays only
-    // management-surface operations, so the reads it uses are also
-    // declared there, as queries.
+    // Callosum relays only management operations, so the reads used by
+    // remote apps are also declared here as queries. The caller's allowlist
+    // is enforced at dispatch, not by the manifest.
     // Basal's flows read docs proposals over the management surface, so the
     // flow operations are declared there too, as queries. Astrocyte reads
     // the attribution facts there ([`crate::attribution::read`]).
     provides.push(ProviderRole::ManagementSurface {
-        operations: MANAGEMENT_APP_METHODS
-            .iter()
-            .chain(cortexkit_role_user_commands::MODULE_OPS.iter())
-            .chain(crate::docs_proposals::flow::FLOW_ROUTE_METHODS.iter())
-            .chain(std::iter::once(&crate::attribution::read::METHOD))
+        operations: management_app_methods()
+            .chain(cortexkit_role_user_commands::MODULE_OPS.iter().copied())
+            .chain(
+                crate::docs_proposals::flow::FLOW_ROUTE_METHODS
+                    .iter()
+                    .copied(),
+            )
+            .chain(std::iter::once(crate::attribution::read::METHOD))
             .map(|method| subc_protocol::manifest::ManagementOperation {
-                name: (*method).into(),
-                kind: if *method == "commands.run" {
+                name: method.into(),
+                kind: if method == "commands.run" {
                     subc_protocol::manifest::ManagementOperationKind::Mutate
                 } else {
                     subc_protocol::manifest::ManagementOperationKind::Query
@@ -1257,21 +1251,36 @@ fn handler_slots(pools: &[subc_client_rs::RequestPoolSnapshot]) -> String {
 struct AppCaller {
     principal: Principal,
     harness: String,
-    /// Whether the route is ck-mc's management surface, which serves only
-    /// [`MANAGEMENT_APP_METHODS`].
+    /// Direct callers have access to more reads on the internal service.
     management: bool,
 }
 
 impl AppCaller {
     fn allowed(&self) -> bool {
-        match &self.principal {
-            Principal::Direct => crate::app_read::DEVELOPMENT_ADMITS_DIRECT,
-            Principal::Reserved { module_id } => {
-                module_id == "callosum" && self.harness.starts_with("fed-phone:")
-            }
-            _ => false,
+        if matches!(self.principal, Principal::Direct) {
+            crate::app_read::DEVELOPMENT_ADMITS_DIRECT
+        } else {
+            self.relayed_as("fed-phone:") || self.relayed_as("fed-app:")
         }
     }
+
+    fn relayed_as(&self, prefix: &str) -> bool {
+        matches!(&self.principal, Principal::Reserved { module_id } if module_id == "callosum")
+            && self.harness.starts_with(prefix)
+    }
+
+    fn allows_method(&self, method: &str) -> bool {
+        // Called after admission. Naming the internal service does not widen
+        // the reads available to a Callosum caller.
+        if matches!(self.principal, Principal::Direct) && !self.management {
+            true
+        } else if self.relayed_as("fed-app:") {
+            management_app_methods().any(|candidate| candidate == method)
+        } else {
+            PHONE_APP_METHODS.contains(&method)
+        }
+    }
+
     fn quota(&self) -> String {
         if matches!(self.principal, Principal::Direct) {
             "direct".into()
@@ -1281,15 +1290,41 @@ impl AppCaller {
     }
 }
 
-/// The app reads ck-mc's management surface serves: the ones the phone uses,
-/// as Callosum relays only management operations. The desktop reaches every
-/// read on the internal app-read service.
-const MANAGEMENT_APP_METHODS: &[&str] = &[
+const PHONE_APP_METHODS: &[&str] = &[
     "session_data.read",
     "context.cache_why",
     "context.search",
     "context.watch",
 ];
+
+const DESKTOP_ONLY_RELAYED_APP_METHODS: &[&str] = &[
+    "context.states",
+    "context.head",
+    "context.head_section",
+    "context.compartment",
+    "memories.stats",
+    "memories.page",
+    "memories.get",
+    "observations.page",
+    "facts.page",
+    "dreamer.status",
+    "dreamer.runs",
+    "dreamer.run",
+    "sessions.page",
+    "notes.page",
+];
+
+fn management_app_methods() -> impl Iterator<Item = &'static str> {
+    PHONE_APP_METHODS
+        .iter()
+        .chain(DESKTOP_ONLY_RELAYED_APP_METHODS)
+        .copied()
+}
+
+enum AppAnswer {
+    Read(Vec<u8>),
+    Watch(crate::app_read::Subscription),
+}
 
 /// Whether a route is opened to the `agent-data` service: by its target or
 /// by the role it declares.
@@ -1532,6 +1567,24 @@ impl Handler {
         body: &[u8],
         caller: AppCaller,
     ) -> Result<HandlerOutcome, Refusal> {
+        let mut subscription = match self.app_dispatch(body, &caller).await? {
+            AppAnswer::Read(bytes) => return Ok(HandlerOutcome::Response(bytes)),
+            AppAnswer::Watch(subscription) => subscription,
+        };
+        loop {
+            let notice = tokio::select! {
+                _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
+                value = subscription.recv() => match value? { Some(value) => value, None => return Ok(HandlerOutcome::Streamed) },
+            };
+            let bytes = crate::app_read::reply_bytes("context.watch", notice)?;
+            tokio::select! {
+                _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
+                result = ctx.emit(bytes) => if result.is_err() { return Ok(HandlerOutcome::Streamed); },
+            }
+        }
+    }
+
+    async fn app_dispatch(&self, body: &[u8], caller: &AppCaller) -> Result<AppAnswer, Refusal> {
         if !caller.allowed() {
             return Err(Refusal::new(
                 "not_permitted",
@@ -1550,31 +1603,22 @@ impl Handler {
             serde_json::from_slice(body).map_err(|_| crate::app_read::invalid("request"))?;
         let envelope = crate::app_read::object(&value, &["method", "params"])?;
         let method = crate::app_read::string(envelope, "method")?;
-        if caller.management && !MANAGEMENT_APP_METHODS.contains(&method) {
-            return Err(Refusal::new(
-                "unknown_method",
-                format!("{method} isn't served on ck-mc's management surface."),
-                None,
-            ));
+        if !caller.allows_method(method) {
+            let message = if caller.management {
+                format!("{method} isn't served on ck-mc's management surface.")
+            } else {
+                format!("{method} isn't served for this app caller.")
+            };
+            return Err(Refusal::new("unknown_method", message, None));
         }
         let params = envelope.get("params").cloned().unwrap_or(Value::Null);
         if method == "context.watch" {
-            let mut subscription = self.module.app_watch(caller.quota(), params).await?;
-            loop {
-                let notice = tokio::select! {
-                    _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
-                    value = subscription.recv() => match value? { Some(value) => value, None => return Ok(HandlerOutcome::Streamed) },
-                };
-                let bytes = crate::app_read::reply_bytes(method, notice)?;
-                tokio::select! {
-                    _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
-                    result = ctx.emit(bytes) => if result.is_err() { return Ok(HandlerOutcome::Streamed); },
-                }
-            }
+            let subscription = self.module.app_watch(caller.quota(), params).await?;
+            return Ok(AppAnswer::Watch(subscription));
         }
         let value = self.module.app_request(method, params).await?;
         let bytes = crate::app_read::reply_bytes(method, value)?;
-        Ok(HandlerOutcome::Response(bytes))
+        Ok(AppAnswer::Read(bytes))
     }
 
     /// An op on a route ck-mc bound, received at `Instant::now()`.
@@ -2043,7 +2087,7 @@ impl ModuleHandler for Handler {
                 // it reads ck-mc's step-transform declaration over ck-mc's own
                 // management surface (step-transform-provider/v2 allows a
                 // declaration on a module route). An attested module that is
-                // not a phone gets that discovery only: `role.describe` and
+                // not admitted as an app gets discovery only: `role.describe` and
                 // `transform.declare`, never a hook or an app read.
                 Err(_) if module_discovery(request) => {
                     self.bound.lock().expect("bound routes").insert(
@@ -2505,6 +2549,10 @@ mod agent_surface_tests {
 }
 
 #[cfg(test)]
+#[path = "transport_app_relay_tests.rs"]
+mod app_relay_tests;
+
+#[cfg(test)]
 mod app_read_tests {
     use super::*;
 
@@ -2564,7 +2612,7 @@ mod app_read_tests {
     }
 
     #[test]
-    fn app_read_development_direct_and_attested_phone_are_the_only_admissions() {
+    fn app_read_admits_development_direct_and_attested_apps_only() {
         let mut request = request();
         let direct = app_admission(&request).unwrap();
         assert!(direct.allowed());
@@ -2572,29 +2620,33 @@ mod app_read_tests {
         request.principal = Some(Principal::Reserved {
             module_id: "callosum".into(),
         });
-        request.identity = BindIdentity::new("fed-phone:device-a", "app");
-        let phone = app_admission(&request).unwrap();
-        assert!(phone.allowed());
-        assert_eq!(phone.quota(), "fed-phone:device-a");
-        request.identity = BindIdentity::new("other", "app");
-        assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
-        request.identity = BindIdentity::new("fed-phone:device-a", "app");
-        for principal in [
-            None,
-            Some(Principal::Unverified),
-            Some(Principal::Reserved {
-                module_id: "untrusted-module".into(),
-            }),
-        ] {
-            request.principal = principal;
+        for harness in ["other", "", "fed-worker:device-a", "fed-app"] {
+            request.identity = BindIdentity::new(harness, "app");
             assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+        }
+        for harness in ["fed-phone:device-a", "fed-app:device-a"] {
+            request.principal = Some(Principal::Reserved {
+                module_id: "callosum".into(),
+            });
+            request.identity = BindIdentity::new(harness, "app");
+            let caller = app_admission(&request).unwrap();
+            assert!(caller.allowed());
+            assert_eq!(caller.quota(), harness);
+            for principal in [
+                None,
+                Some(Principal::Unverified),
+                Some(Principal::Reserved {
+                    module_id: "untrusted-module".into(),
+                }),
+            ] {
+                request.principal = principal;
+                assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+            }
         }
     }
 
     /// The phone's reads come through Callosum, which relays only management
-    /// operations: ck-mc's own management surface admits the same callers as
-    /// the app-read service, and a management route is marked so it serves
-    /// only the phone's methods.
+    /// operations: ck-mc's own unscoped management surface is an app route.
     #[test]
     fn app_read_admits_ck_mcs_own_management_surface_for_the_phone() {
         let mut request = request();
@@ -2619,7 +2671,7 @@ mod app_read_tests {
     }
 
     #[test]
-    fn the_manifest_declares_the_phones_reads_as_management_queries() {
+    fn the_manifest_declares_relayed_app_reads_as_management_queries() {
         let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
         let surface = manifest["provides"]
             .as_array()
@@ -2648,12 +2700,26 @@ mod app_read_tests {
                 ("commands.preview".into(), "query".into()),
                 ("commands.run".into(), "mutate".into()),
                 ("context.cache_why".into(), "query".into()),
+                ("context.compartment".into(), "query".into()),
+                ("context.head".into(), "query".into()),
+                ("context.head_section".into(), "query".into()),
                 ("context.search".into(), "query".into()),
+                ("context.states".into(), "query".into()),
                 ("context.watch".into(), "query".into()),
                 // The two reads a Basal flow may call (docs proposals).
                 ("docs_proposals.state".into(), "query".into()),
+                ("dreamer.run".into(), "query".into()),
+                ("dreamer.runs".into(), "query".into()),
+                ("dreamer.status".into(), "query".into()),
                 ("events_get".into(), "query".into()),
+                ("facts.page".into(), "query".into()),
+                ("memories.get".into(), "query".into()),
+                ("memories.page".into(), "query".into()),
+                ("memories.stats".into(), "query".into()),
+                ("notes.page".into(), "query".into()),
+                ("observations.page".into(), "query".into()),
                 ("session_data.read".into(), "query".into()),
+                ("sessions.page".into(), "query".into()),
             ]
         );
     }

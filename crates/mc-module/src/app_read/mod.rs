@@ -1348,7 +1348,7 @@ mod tests;
 mod lazy_tests;
 
 #[cfg(test)]
-mod fixture_tests;
+pub(crate) mod fixture_tests;
 
 #[cfg(test)]
 mod memories_tests;

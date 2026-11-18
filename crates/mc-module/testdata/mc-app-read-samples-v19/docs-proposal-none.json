@@ -1,0 +1,17 @@
+{
+  "name": "docs-proposal-none",
+  "request": {
+    "method": "dreamer.docs_proposal",
+    "params": {
+      "project": "pj-empty"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "dreamer.docs_proposal",
+      "proposal": null,
+      "schema": 1
+    }
+  }
+}
