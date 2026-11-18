@@ -44,6 +44,8 @@ mod capture_tests;
 #[cfg(test)]
 mod exchange_tests;
 #[cfg(test)]
+mod review_witness_tests;
+#[cfg(test)]
 mod samples_tests;
 #[cfg(test)]
 mod schema_tests;
