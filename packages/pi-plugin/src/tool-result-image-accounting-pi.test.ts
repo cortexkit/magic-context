@@ -173,7 +173,8 @@ describe("Pi tool results that carry images", () => {
 			const entryIds = Array.from({ length: outputs * 2 }, (_, i) => `e${i}`);
 			tagPass(db, tagger, sessionId, makeMessages, entryIds, false);
 
-			// The Pi session in the report protected 49,152 tokens of tool output.
+			// A 49,152-token protection floor, as on the affected Pi session where
+			// the protected tail covered every image output.
 			const window = getProtectionWindowForSession(db, sessionId, 49_152);
 			let newest = 0;
 			let mass = 0;
@@ -185,7 +186,9 @@ describe("Pi tool results that carry images", () => {
 			// About 40 outputs of one image each fill the budget; older ones may go.
 			expect(newest).toBeLessThan(outputs);
 			expect(window.status.protectedCount).toBe(newest);
-			expect(window.cutoff).toBeGreaterThan(toolRows(db, sessionId)[0]?.tag_number ?? 0);
+			expect(window.cutoff).toBeGreaterThan(
+				toolRows(db, sessionId)[0]?.tag_number ?? 0,
+			);
 		} finally {
 			closeQuietly(db);
 		}

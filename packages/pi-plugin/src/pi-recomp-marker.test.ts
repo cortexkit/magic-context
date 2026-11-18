@@ -8,7 +8,10 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { applyDeferredPiCompactionMarker } from "./compaction-marker-manager-pi";
-import { queueAndApplyPiRecompMarker, stagePiRecompMarker } from "./pi-recomp-marker";
+import {
+	queueAndApplyPiRecompMarker,
+	stagePiRecompMarker,
+} from "./pi-recomp-marker";
 import { iterateEntriesToRawMessageRange } from "./read-session-pi";
 import { createTestDb } from "./test-utils.test";
 

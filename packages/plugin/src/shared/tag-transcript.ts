@@ -864,7 +864,12 @@ function applyImageResultAccounting(args: {
     for (const block of aggregate.resultTexts) {
         textTokens = Math.max(
             textTokens,
-            getCachedToolPartTokenCount(block.part, block.text, args.tokenCache, block.tokenCacheKey),
+            getCachedToolPartTokenCount(
+                block.part,
+                block.text,
+                args.tokenCache,
+                block.tokenCacheKey,
+            ),
         );
     }
     if (args.timing) args.timing.tokenCounting += performance.now() - tokenStart;

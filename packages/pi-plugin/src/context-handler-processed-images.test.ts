@@ -7,6 +7,7 @@ import {
 	updateSessionMeta,
 	updateTagStatus,
 } from "@magic-context/core/features/magic-context/storage";
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	clearContextHandlerSession,
@@ -31,10 +32,18 @@ const image = () => ({
 	data: "a".repeat(240),
 });
 const marker = { type: "text", text: "[image stripped]" };
-const protectionPayload = Array.from(
-	{ length: 3000 },
-	(_, i) => `token_${i} `,
-).join("");
+// Three later tool results of this size fill the 4,000-token protected window,
+// so the older images fall outside it. They are kept small enough, and out of
+// the tool inputs, that the image tool output stays short of the age sweep's
+// distance (three newer user turns or a quarter of the usable window): an image
+// output now counts its image, so a far-behind one would be reclaimed whole
+// before the processed-image strip this file covers could reach it.
+const protectionPayload = (() => {
+	let payload = "";
+	for (let i = 0; estimateTokens(payload) < 1_600; i++)
+		payload += `token_${i} `;
+	return payload;
+})();
 
 function fixture(api = "openai-completions") {
 	const db = createTestDb();
@@ -63,12 +72,7 @@ function fixture(api = "openai-completions") {
 		assistantMessage("answered newer image", 6),
 		// Later tool inputs and results move old images outside the protected token window.
 		...Array.from({ length: 3 }, (_, i) => [
-			assistantToolCall(
-				`later-${i}`,
-				"screenshot",
-				{ page: i, payload: protectionPayload },
-				10 + i * 2,
-			),
+			assistantToolCall(`later-${i}`, "screenshot", { page: i }, 10 + i * 2),
 			toolResultMessage(`later-${i}`, protectionPayload, 11 + i * 2),
 		]).flat(),
 		userMessage([image()], 7),
