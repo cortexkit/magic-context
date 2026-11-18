@@ -35,14 +35,17 @@
 //! ([`box_id`]); it names the writer of each message, and without one
 //! nothing publishes and the outbox waits.
 //!
-//! This module is the engine. The live hub connection (JetStream on the
-//! hub's domain, the durable consumer named for the box id) implements
-//! [`hub::Hub`] and runs [`Replica::run`] once ck-bus grants modules the
-//! hub; until then a computer runs as before, its outbox kept to one row
-//! per changed row.
+//! This module is the engine. The live hub ([`nats`]) implements
+//! [`hub::Hub`] over JetStream in the hub's domain, and the replica task
+//! ([`live`]) runs the engine's rounds on it in production, in a build with
+//! the `memory-replica` feature ([`FEATURE`]). Without the feature, or
+//! while ck-bus can't give ck-mc the hub, a computer runs as before, its
+//! outbox kept to one row per changed row.
 
 pub mod apply;
 pub mod hub;
+pub mod live;
+pub mod nats;
 pub mod publish;
 pub mod schema;
 pub mod seal;
@@ -54,23 +57,50 @@ mod capture_tests;
 #[cfg(test)]
 mod exchange_tests;
 #[cfg(test)]
+mod live_tests;
+#[cfg(test)]
+mod nats_tests;
+#[cfg(test)]
 mod review_witness_tests;
 #[cfg(test)]
 mod samples_tests;
 #[cfg(test)]
 mod schema_tests;
 #[cfg(test)]
+mod seal_client_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::context_db::ContextDb;
 use hub::Hub;
 use seal::Sealer;
+
+/// Whether this build shares memories with the user's other computers: the
+/// `memory-replica` Cargo feature, off by default, as the `agent-data`
+/// feature is for moves ([`crate::agent_data::FEATURE`]). Without it ck-mc
+/// never starts the replica task and never contacts the hub, whatever its
+/// environment says; the capture triggers still record every change in the
+/// outbox. Switching sharing on is the owner's step, made by building with
+/// the feature.
+pub const FEATURE: bool = cfg!(feature = "memory-replica");
+
+/// [`FEATURE`], said in the log at start, so an operator can see why
+/// memories are or aren't shared.
+pub fn switch_from_build() -> bool {
+    if FEATURE {
+        tracing::info!(
+            "ck-mc: shared memories are on: this build follows and publishes the hub's memory stream"
+        );
+    } else {
+        tracing::info!("ck-mc: shared memories are off: this build was made without the memory-replica feature, so it never contacts the hub; changes wait in the outbox");
+    }
+    FEATURE
+}
 
 /// The replicated table of `kind`.
 pub(crate) fn table(kind: &str) -> &'static schema::Table {
@@ -117,9 +147,6 @@ pub(crate) fn unname_writer(tx: &Connection) -> rusqlite::Result<()> {
 
 /// How many messages one round reads or sends.
 pub const BATCH: usize = seal::MAX_BATCH;
-
-/// How long the engine waits between rounds when there is nothing to do.
-const IDLE: Duration = Duration::from_secs(30);
 
 /// The engine of one computer: its store, the hub's stream, the vault's
 /// sealing, and its box id.
@@ -229,37 +256,14 @@ impl Replica {
             .map_err(|error| error.to_string())
     }
 
-    /// Follow and publish until `stop` is notified: join first, then read
-    /// what arrived and send what changed, waiting `IDLE` (or a `wake`)
-    /// between rounds that found nothing. A failed round is logged once per
-    /// distinct reason and tried again on the next.
-    pub async fn run(self, wake: Arc<tokio::sync::Notify>) {
-        let mut reported: Option<String> = None;
-        loop {
-            let round = async {
-                self.join().await?;
-                let arrived = self.follow().await?;
-                let sent = self.publish().await?;
-                Ok::<_, String>(arrived + sent.sent)
-            }
-            .await;
-            let busy = match round {
-                Ok(done) => {
-                    reported = None;
-                    done > 0
-                }
-                Err(error) => {
-                    if reported.as_deref() != Some(error.as_str()) {
-                        tracing::warn!("ck-mc: replica: {error}");
-                        reported = Some(error);
-                    }
-                    false
-                }
-            };
-            if !busy {
-                let _ = tokio::time::timeout(IDLE, wake.notified()).await;
-            }
-        }
+    /// One round: join (once), read what arrived, send what changed.
+    /// Returns how many messages it read and sent. The replica task
+    /// ([`live`]) runs rounds while the hub is reachable.
+    pub async fn round(&self) -> Result<usize, String> {
+        self.join().await?;
+        let arrived = self.follow().await?;
+        let sent = self.publish().await?;
+        Ok(arrived + sent.sent)
     }
 }
 

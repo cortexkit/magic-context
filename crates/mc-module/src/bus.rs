@@ -755,6 +755,15 @@ impl SessionFactory for ProductionSessions {
     }
 }
 
+/// The box id a bus account `box_<box id>` names.
+pub(crate) fn box_of_account(account: &str) -> Result<String, String> {
+    account
+        .strip_prefix("box_")
+        .and_then(|id| cortexkit_bus_naming::federation::BoxId::parse(id).ok())
+        .map(|id| id.as_str().to_owned())
+        .ok_or_else(|| format!("the bus account {account} names no box"))
+}
+
 /// The module's one connection to the bus, shared by everything that
 /// publishes, watches or reads: the docs-proposal notices ([`DocsNotices`]),
 /// the memory wakes ([`crate::memory_changed`]), the watch on Entorhinal's
@@ -845,6 +854,15 @@ impl Bus {
     /// watch on it ended, so its connection may be gone.
     pub(crate) async fn discard(&self) {
         *self.session.lock().await = None;
+    }
+
+    /// This computer's box id, as ck-bus names it in the module's bus
+    /// account (`box_<box id>`); modules never derive it themselves. It
+    /// names this computer as the writer of the memories it shares
+    /// ([`crate::replica`]).
+    pub(crate) async fn box_id(&self) -> Result<String, String> {
+        let session = self.session().await?;
+        box_of_account(session.account.account())
     }
 
     /// Drop the session after the run-end reader found its connection lost,

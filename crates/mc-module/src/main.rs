@@ -106,6 +106,9 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     let child_scopes = Arc::new(ChildScopes::new(module_id.clone()));
     let client = SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes));
     let run_end_waits = client.run_end_waits();
+    // The replica task reaches ck-bus and the vault over the same
+    // connection to the daemon.
+    let replica_consumer = client.shared_consumer();
     // API keys the user's file names as `{vault:<credential id>}` are read
     // from the vault over the client's own connection to the daemon.
     let vault = mc_module::vault::Vault::new(Arc::new(mc_module::vault::Claustrum::over(
@@ -146,6 +149,9 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     // fact goes out on the bus for Astrocyte.
     module.publish_attribution_with(mc_module::bus::AttributionEvents::over(Arc::clone(&bus)));
     module.spawn_memory_wakes(Arc::clone(&bus));
+    // Memories travel to the user's other computers through the hub, in a
+    // build with the memory-replica feature; the box id comes from the bus.
+    let replica = module.spawn_replica(replica_consumer, Arc::clone(&bus));
     mc_module::bus::spawn_run_end_reader(Arc::clone(&bus), run_end_waits);
     module.spawn_dreamer();
     module.spawn_legacy_projects();
@@ -154,6 +160,9 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     // its sessions are refused until it is.
     module.spawn_move_recovery();
     let result = serve.await;
+    if let Some(replica) = replica {
+        replica.stop().await;
+    }
     module.flush_app_snapshots().await;
     result?;
     Ok(())

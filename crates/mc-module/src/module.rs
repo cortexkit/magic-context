@@ -1047,6 +1047,20 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         tokio::spawn(crate::memory_changed::run(publisher, db, wakes));
     }
 
+    /// Share memories with the user's other computers through the hub, in
+    /// a build with the `memory-replica` feature ([`crate::replica::live`]):
+    /// the hub connection comes from ck-bus over `consumer`, and the box id
+    /// from `bus`. `None` in a build without the feature, or without
+    /// `context.db`; stop the task with the module.
+    pub fn spawn_replica(
+        &self,
+        consumer: crate::transport::SharedConsumer,
+        bus: Arc<crate::bus::Bus>,
+    ) -> Option<crate::replica::live::ReplicaTask> {
+        let db = self.inner.db.clone()?;
+        crate::replica::live::start(db, consumer, bus)
+    }
+
     /// Follow Entorhinal's change markers on `bus`
     /// ([`crate::entorhinal_changes`]): each change reads every live
     /// session's workspace again and wakes a legacy project round.

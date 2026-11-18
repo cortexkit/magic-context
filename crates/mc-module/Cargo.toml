@@ -15,6 +15,11 @@ notice-cost-timing = ["nix/resource", "nix/time"]
 # them, whatever MAGIC_CONTEXT_AGENT_DATA says; moves the journal already
 # records are enforced either way (see `agent_data::switch`).
 agent-data = []
+# Share memories with the user's other computers through the hub's memory
+# stream (`replica::live`). Off, ck-mc never starts the replica task and never
+# contacts the hub; the store still records each change in its outbox, to be
+# sent once a build with the feature runs (see `replica::FEATURE`).
+memory-replica = []
 # Opt-in heap attribution for the `heap_profile` test (allocation sites with
 # backtraces). Only that test target requires it; no build of ck-mc turns it on.
 heap-profile = ["dep:dhat"]
@@ -77,13 +82,15 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # NATS credential from ck-bus, a JetStream publish, the fleet's subject names.
 cortexkit-bus-nats = "=0.4.0"
 cortexkit-bus-trait = "=0.3.1"
-cortexkit-bus-naming = "=0.5.2"
+cortexkit-bus-naming = "=0.5.4"
 # The computer's box id (`BusClient::box_id`), which names every memory this
 # computer shares with the user's other computers (`replica/`).
-cortexkit-bus-client = "=0.1.7"
+cortexkit-bus-client = "=0.1.8"
 # API keys the user names as `{vault:<credential id>}` are read from the
-# CortexKit vault over ck-mc's own SDK consumer (`vault.rs`).
-cortexkit-claustrum-client = "=0.12.0"
+# CortexKit vault over ck-mc's own SDK consumer (`vault.rs`), and shared
+# memories are sealed and opened under the fleet epoch key with its typed
+# fleet epoch calls (`replica/seal.rs`).
+cortexkit-claustrum-client = "=0.14.0"
 # The run-end reader (`run_ends.rs`) binds its durable and pulls its events
 # with async-nats directly: cortexkit-bus-nats binds a module's cursor only to
 # the durable `m_{module}`.

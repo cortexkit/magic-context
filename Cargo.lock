@@ -476,15 +476,15 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-bus-client"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd5170c5e54a8c17bb90b7b53aeca0c862ea497956fabdbb7477780a51378fd5"
+checksum = "afe8e269de2876a651756b755a4140607a250ad1f375be096bf1cd9191d5032e"
 dependencies = [
  "async-nats",
  "async-trait",
  "base64 0.22.1",
  "bytes",
- "cortexkit-bus-naming 0.5.2",
+ "cortexkit-bus-naming 0.5.4",
  "cortexkit-bus-nats 0.5.4",
  "cortexkit-bus-trait",
  "futures-util",
@@ -517,9 +517,9 @@ checksum = "059309f7503eba557d5c1bcf1dfcf59f8fa978516ed0827cf79ecb62ff7fc07a"
 
 [[package]]
 name = "cortexkit-bus-naming"
-version = "0.5.2"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36813e61ec2791a1fda9a4597112d3893ca543a775b4abd346d295c57873ce9e"
+checksum = "0fa062a586449c8841f851bf042483b9a3347d8222c38c06f807f5eb243e9ce0"
 
 [[package]]
 name = "cortexkit-bus-nats"
@@ -545,7 +545,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "bytes",
- "cortexkit-bus-naming 0.5.2",
+ "cortexkit-bus-naming 0.5.4",
  "cortexkit-bus-trait",
  "futures-util",
  "tokio",
@@ -564,9 +564,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-claustrum-client"
-version = "0.12.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64c7b3e66605237d6dfd8cf230cf1db8505676bf4e7ec809cfffd12fc0a17aac"
+checksum = "ec3e50ba2036a11bd2a09d0c859de29788a7599b10165ace58ccad3f15e2b115"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -577,6 +577,7 @@ dependencies = [
  "subc-protocol",
  "subc-transport",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -756,7 +757,7 @@ version = "0.15.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22919ed36ffc8e253eb3bcc576a02eca9669cf58841f47544de4ee9f2a7c97e8"
 dependencies = [
- "cortexkit-bus-naming 0.5.2",
+ "cortexkit-bus-naming 0.5.4",
  "cortexkit-role-tool-display",
  "serde",
  "serde_jcs",
@@ -1655,7 +1656,7 @@ dependencies = [
  "cortexkit-agent-identity",
  "cortexkit-bus-client",
  "cortexkit-bus-inmemory",
- "cortexkit-bus-naming 0.5.2",
+ "cortexkit-bus-naming 0.5.4",
  "cortexkit-bus-nats 0.4.0",
  "cortexkit-bus-trait",
  "cortexkit-claustrum-client",
@@ -3966,6 +3967,21 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+dependencies = [
+ "serde",
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"

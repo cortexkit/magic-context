@@ -2,8 +2,8 @@
 //!
 //! The live stream is a JetStream stream on the hub, in its own domain,
 //! that every computer of the user publishes to on
-//! `ck.fleet.memory.<kind>.<owner>` and follows with one durable consumer
-//! named for its box id, from the start. The engine needs four things from
+//! `ck.fleet.memory.<kind>.<owner>` and reads in stream order from the
+//! position it stored ([`super::nats`]). The engine needs four things from
 //! it, which this trait names, so the engine can be tested against
 //! [`InMemoryHub`] and wired to the live stream on its own:
 //! - a publish whose acknowledgement names the stored sequence, and which
@@ -12,7 +12,9 @@
 //! - the stored messages after a sequence, in stream order;
 //! - the stream's last sequence, which tells a joining computer when it has
 //!   read everyone else's history;
-//! - an acknowledgement of each message once it is applied.
+//! - an acknowledgement of each message once it is applied, for a stream
+//!   that wants one (the live stream doesn't: the stored position is the
+//!   acknowledgement).
 
 use async_trait::async_trait;
 

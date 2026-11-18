@@ -11,31 +11,34 @@
 //! `{error: {code, class}}` per item. Bytes are unpadded base64url; a batch
 //! holds 1 to 256 items.
 //!
+//! [`Claustrum`] makes those calls with the claustrum client's typed fleet
+//! epoch methods, over ck-mc's own SDK consumer. Each call is one attempt,
+//! with no retry inside the client: a seal sent twice would give a second
+//! ciphertext, and the engine seals again on its next round anyway. The
+//! functions that build and read the wire shape by hand
+//! ([`seal_batch_params`], [`parse_seal_reply`], [`open_batch_params`],
+//! [`parse_open_reply`]) state the same contract, and the tests check them
+//! against the vault's published samples.
+//!
 //! Plaintext is memory content: it is held in buffers wiped when dropped,
-//! and no error, log line or `Debug` output carries it. The request and
-//! reply of a vault call hold it as base64 text, which is wiped once read
-//! ([`wipe_plaintexts`]); the request bytes handed to the SDK are its own
-//! from then on, and are not wiped.
+//! and no error, log line or `Debug` output carries it. The client keeps it
+//! in its own wiped buffers on the way to the vault and back; the copies
+//! inside the SDK's request bodies and frames are the SDK's.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
+use cortexkit_claustrum_client::{
+    ClaustrumCredentialResolver, CredentialErrorClass, CredentialResolverError,
+    FleetEpochOpenRequest, FleetEpochOpenResult, FleetEpochSeal, FleetEpochSealRequest, Secret,
+};
 use serde_json::{json, Value};
-use subc_client_rs::CallOptions;
-use subc_protocol::{BindIdentity, RouteTarget};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::wire::{decode, encode};
 
 /// The most items one batch call may carry.
 pub const MAX_BATCH: usize = 256;
-
-/// How long one vault call may take.
-const VAULT_CALL_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The vault's module id.
-const VAULT_MODULE: &str = "claustrum";
 
 /// One message to seal.
 pub struct SealInput {
@@ -144,9 +147,9 @@ pub fn open_batch_params(items: &[OpenInput]) -> Value {
     })
 }
 
-/// Overwrite every `plaintext` text in a vault request or reply, once it
-/// is no longer needed.
-pub(crate) fn wipe_plaintexts(value: &mut Value) {
+/// Overwrite every `plaintext` text in a vault request or reply built or
+/// read with the functions above, once it is no longer needed.
+pub fn wipe_plaintexts(value: &mut Value) {
     match value {
         Value::Object(members) => {
             for (key, member) in members.iter_mut() {
@@ -159,30 +162,6 @@ pub(crate) fn wipe_plaintexts(value: &mut Value) {
         Value::Array(items) => items.iter_mut().for_each(wipe_plaintexts),
         _ => {}
     }
-}
-
-/// A writer that only counts, to size a buffer before writing into it.
-struct Counted(usize);
-
-impl std::io::Write for Counted {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// `value` as JSON bytes, written into a buffer of its exact size, so no
-/// growing buffer leaves an unwiped earlier copy behind.
-fn sized_json(value: &Value) -> Result<Zeroizing<Vec<u8>>, SealError> {
-    let encode = |_| SealError::permanent("vault_request_encode");
-    let mut counted = Counted(0);
-    serde_json::to_writer(&mut counted, value).map_err(encode)?;
-    let mut bytes = Zeroizing::new(Vec::with_capacity(counted.0));
-    serde_json::to_writer(&mut *bytes, value).map_err(encode)?;
-    Ok(bytes)
 }
 
 /// The refusal a whole-call error body carries, if `value` is one.
@@ -266,63 +245,177 @@ pub fn parse_open_reply(value: &Value, expected: usize) -> Result<Vec<Opened>, S
         .collect()
 }
 
-/// The vault, called on its management surface over ck-mc's own SDK
-/// consumer.
+/// The vault, called with the claustrum client's typed fleet epoch calls
+/// over ck-mc's own SDK consumer.
 pub struct Claustrum {
     consumer: crate::transport::SharedConsumer,
+    resolver: tokio::sync::OnceCell<ClaustrumCredentialResolver>,
 }
 
 impl Claustrum {
     pub fn over(consumer: crate::transport::SharedConsumer) -> Arc<Self> {
-        Arc::new(Self { consumer })
+        Arc::new(Self {
+            consumer,
+            resolver: tokio::sync::OnceCell::new(),
+        })
     }
 
-    async fn call(&self, method: &str, params: Value) -> Result<Value, SealError> {
-        let consumer = self
-            .consumer
-            .get()
+    /// The client, made on first use over the shared consumer.
+    async fn resolver(&self) -> Result<&ClaustrumCredentialResolver, SealError> {
+        self.resolver
+            .get_or_try_init(|| async {
+                let consumer = self
+                    .consumer
+                    .get()
+                    .await
+                    .map_err(|_| SealError::transient("vault_connect"))?;
+                Ok(ClaustrumCredentialResolver::with_consumer(Arc::clone(
+                    consumer,
+                )))
+            })
             .await
-            .map_err(|_| SealError::transient("vault_connect"))?;
-        // The request holds plaintext: its text is wiped once written, and
-        // its bytes go to the SDK, which owns them from then on.
-        let mut request = json!({"method": method, "params": params});
-        let body = sized_json(&request);
-        wipe_plaintexts(&mut request);
-        let mut body = body?;
-        let reply = consumer
-            .call(
-                RouteTarget::ManagementSurface {
-                    module_id: VAULT_MODULE.into(),
-                },
-                BindIdentity::new(crate::MODULE_ID, "replica"),
-                std::mem::take(&mut *body),
-                CallOptions {
-                    timeout: VAULT_CALL_TIMEOUT,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|error| SealError::transient(error.code().unwrap_or("vault_call")))?;
-        let reply = Zeroizing::new(reply);
-        serde_json::from_slice(&reply).map_err(|_| SealError::permanent("vault_reply_invalid"))
     }
+}
+
+/// A whole call's failure: transient when the vault couldn't be reached or
+/// answered that it may work later.
+pub(crate) fn call_error(error: &CredentialResolverError) -> SealError {
+    SealError {
+        code: error.code().to_owned(),
+        transient: error.retryable() || error.is_transport(),
+    }
+}
+
+/// A seal as the envelope carries it, its bytes in unpadded base64url.
+pub(crate) fn sealed(seal: FleetEpochSeal) -> Sealed {
+    Sealed {
+        epoch: u64::from(seal.epoch),
+        nonce: encode(&seal.nonce),
+        ciphertext: encode(&seal.ciphertext),
+    }
+}
+
+/// The bytes the vault opens for one envelope.
+pub(crate) struct OpenBytes {
+    epoch: u32,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+/// `item`'s bytes, or `None` when its envelope can't hold anything the
+/// vault sealed: a nonce or ciphertext that isn't unpadded base64url, or
+/// an epoch beyond the vault's numbering.
+pub(crate) fn open_bytes(item: &OpenInput) -> Option<OpenBytes> {
+    Some(OpenBytes {
+        epoch: u32::try_from(item.epoch).ok()?,
+        nonce: decode(&item.nonce).ok()?,
+        ciphertext: decode(&item.ciphertext).ok()?,
+    })
+}
+
+/// The refusal of an envelope that can never open ([`open_bytes`]),
+/// decided without asking the vault.
+pub(crate) const ENVELOPE_INVALID: &str = "fleet_epoch_envelope_invalid";
+
+/// The vault's class of a refusal, as [`Opened::Refused`] names it.
+fn class_name(class: CredentialErrorClass) -> &'static str {
+    match class {
+        CredentialErrorClass::Permanent => "permanent",
+        CredentialErrorClass::Transient => "transient",
+        other => other.classifier_code(),
+    }
+}
+
+/// Each item's outcome, in order: refused here when it had no bytes to
+/// send, otherwise the vault's answer, the answers being in the order the
+/// items with bytes were sent.
+pub(crate) fn merge(
+    bytes: &[Option<OpenBytes>],
+    answers: Vec<FleetEpochOpenResult>,
+) -> Result<Vec<Opened>, SealError> {
+    let mut answers = answers.into_iter();
+    let opened = bytes
+        .iter()
+        .map(|bytes| {
+            if bytes.is_none() {
+                return Ok(Opened::Refused {
+                    code: ENVELOPE_INVALID.to_owned(),
+                    class: "permanent".to_owned(),
+                });
+            }
+            match answers.next() {
+                Some(Ok(plaintext)) => Ok(Opened::Plaintext(Zeroizing::new(
+                    plaintext.expose().clone(),
+                ))),
+                Some(Err(refusal)) => Ok(Opened::Refused {
+                    code: refusal.code().to_owned(),
+                    class: class_name(refusal.class).to_owned(),
+                }),
+                None => Err(SealError::permanent("vault_reply_count")),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if answers.next().is_some() {
+        return Err(SealError::permanent("vault_reply_count"));
+    }
+    Ok(opened)
 }
 
 #[async_trait]
 impl Sealer for Claustrum {
     async fn seal_batch(&self, items: &[SealInput]) -> Result<Vec<Sealed>, SealError> {
-        let reply = self
-            .call("fleet.epoch_seal_batch", seal_batch_params(items))
-            .await?;
-        parse_seal_reply(&reply, items.len())
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Each plaintext in a buffer of the client's, wiped when dropped.
+        let plaintexts: Vec<Secret<Vec<u8>>> = items
+            .iter()
+            .map(|item| Secret::new(item.plaintext.to_vec()))
+            .collect();
+        let requests: Vec<FleetEpochSealRequest<'_>> = items
+            .iter()
+            .zip(&plaintexts)
+            .map(|(item, plaintext)| FleetEpochSealRequest {
+                aad: &item.aad,
+                plaintext,
+            })
+            .collect();
+        let seals = self
+            .resolver()
+            .await?
+            .fleet_epoch_seal_batch(&requests)
+            .await
+            .map_err(|error| call_error(&error))?;
+        if seals.len() != items.len() {
+            return Err(SealError::permanent("vault_reply_count"));
+        }
+        Ok(seals.into_iter().map(sealed).collect())
     }
 
     async fn open_batch(&self, items: &[OpenInput]) -> Result<Vec<Opened>, SealError> {
-        let mut reply = self
-            .call("fleet.epoch_open_batch", open_batch_params(items))
-            .await?;
-        let opened = parse_open_reply(&reply, items.len());
-        wipe_plaintexts(&mut reply);
-        opened
+        let bytes: Vec<Option<OpenBytes>> = items.iter().map(open_bytes).collect();
+        let requests: Vec<FleetEpochOpenRequest<'_>> = items
+            .iter()
+            .zip(&bytes)
+            .filter_map(|(item, bytes)| {
+                let bytes = bytes.as_ref()?;
+                Some(FleetEpochOpenRequest {
+                    epoch: bytes.epoch,
+                    nonce: &bytes.nonce,
+                    ciphertext: &bytes.ciphertext,
+                    aad: &item.aad,
+                })
+            })
+            .collect();
+        let answers = if requests.is_empty() {
+            Vec::new()
+        } else {
+            self.resolver()
+                .await?
+                .fleet_epoch_open_batch(&requests)
+                .await
+                .map_err(|error| call_error(&error))?
+        };
+        merge(&bytes, answers)
     }
 }

@@ -266,6 +266,11 @@ pub struct ContextDb {
     /// the module that publishes those events; a store without one wakes no
     /// one, and its facts wait for the dreamer's minute tick.
     attribution_wake: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    /// Signalled with every memory change a writer reports, so the replica
+    /// task sends it to the user's other computers without waiting for its
+    /// next timed round ([`crate::replica::live`]). Set once by that task;
+    /// a store without one wakes no one.
+    replica_wake: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     /// Read-only connections for searches, opened when first needed.
     readers: readers::Readers,
     #[cfg(feature = "context-db-timing")]
@@ -437,6 +442,7 @@ impl ContextDb {
             notifier: std::sync::OnceLock::new(),
             memory_wakes: std::sync::OnceLock::new(),
             attribution_wake: std::sync::OnceLock::new(),
+            replica_wake: std::sync::OnceLock::new(),
             readers: readers::Readers::default(),
             #[cfg(feature = "context-db-timing")]
             timing,
@@ -533,14 +539,26 @@ impl ContextDb {
         }
     }
 
+    /// Signal `wake` with every memory change a writer reports from now on.
+    /// Only the first call takes effect.
+    pub(crate) fn wake_replica_on_memory_changes(&self, wake: Arc<tokio::sync::Notify>) {
+        let _ = self.replica_wake.set(wake);
+    }
+
     /// Report a committed change to rows the app reads show. Call it after
     /// the transaction commits, so a reload reads the change. A change to an
-    /// owner's memories also wakes other modules over the bus.
+    /// owner's memories also wakes other modules over the bus, and the
+    /// replica task.
     pub(crate) fn changed(&self, change: crate::app_read::Change) {
         if let (crate::app_read::Change::Memories { level, owner }, Some(wakes)) =
             (&change, self.memory_wakes.get())
         {
             wakes.signal(level, owner);
+        }
+        if let (crate::app_read::Change::Memories { .. }, Some(wake)) =
+            (&change, self.replica_wake.get())
+        {
+            wake.notify_one();
         }
         if let Some(notifier) = self.notifier.get() {
             notifier.changed(change);
