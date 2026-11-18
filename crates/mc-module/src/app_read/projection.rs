@@ -575,12 +575,12 @@ mod tests {
         }
 
         /// A session of its own whose one assistant message made two tool
-        /// calls: the agent stamped the `read` call with `ctx_reduce` and
-        /// kept the `grep` call. The phone's `context.states` samples read
-        /// it to show a stamped and an unstamped tool call with their token
-        /// counts. The shared sample session above has no stamped tool call,
-        /// and adding one there would change every sample already read from
-        /// it.
+        /// calls: the agent stamped the `read` call with `ctx_reduce`, which
+        /// queues it to be dropped, and kept the `grep` call. The phone's
+        /// `context.states` samples read it to show a stamped and an
+        /// unstamped tool call with their token counts. The shared sample
+        /// session above has no stamped tool call, and adding one there
+        /// would change every sample already read from it.
         pub(crate) fn app_sample_tool_calls_snapshot() -> Snapshot {
             use cortexkit_role_compaction::{
                 part::Part,

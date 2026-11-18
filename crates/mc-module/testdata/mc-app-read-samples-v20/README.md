@@ -25,17 +25,17 @@ JSON sample is copied byte for byte. v20 adds two phone exchanges, each
 showing the bound `route` separately from the wire `request` and `response`:
 
 - `fed-phone-context-states.json` asks for one assistant message with two
-  tool calls. The agent stamped the `read` call with `ctx_reduce` and kept the
-  `grep` call. In `items`, each call has its `tokens` and its `state`
-  (`stamped` and `live`); `stamped_parts` adds the stamped call's size and the
-  time it was stamped.
+  tool calls. The agent stamped the `read` call with `ctx_reduce`, which
+  queues it to be dropped, and kept the `grep` call. In `items`, each call
+  has its `tokens` and its `state` (`stamped` and `live`); `stamped_parts`
+  adds the stamped call's size and the time it was stamped.
 - `fed-phone-context-states-unchanged.json` sends the first reply's `version`
   back as `if_version` and gets `state: "unchanged"` with no rows.
 
 Ask by message id: `message_ids` takes at most 100 ids per read, and the
 reply has one row per id in the order asked, with an `outside` row for a
-message ck-mc holds no row of. Match each item to the part on screen by
-`part_ref.part_key`.
+message the ck-mc module holds no row of. Match each item to the part on
+screen by `part_ref.part_key`.
 
 The message comes from a sample session of its own (`s-tools`), because the
 shared sample session has no stamped tool call and changing it would change
