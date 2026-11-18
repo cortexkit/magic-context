@@ -63,6 +63,8 @@ mod live_tests;
 #[cfg(test)]
 mod nats_tests;
 #[cfg(test)]
+mod review_witness_2_tests;
+#[cfg(test)]
 mod review_witness_tests;
 #[cfg(test)]
 mod samples_tests;
