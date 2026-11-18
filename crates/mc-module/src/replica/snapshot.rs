@@ -154,7 +154,7 @@ pub(crate) fn link_target(
     if let Some(global) = global {
         return Ok(Some(global));
     }
-    let global = super::wire::global_id(box_id, id);
+    let global = super::wire::global_id(box_id, MEMORIES.kind, id);
     assign(conn, MEMORIES.kind, id, &global)?;
     conn.execute(
         "INSERT OR IGNORE INTO replica_outbox

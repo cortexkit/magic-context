@@ -22,9 +22,11 @@ const README: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1/R
 const CASES: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1/cases.json");
 const SUMS: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1/SHA256SUMS");
 
-/// The memory change the samples seal: memory 42 of box
-/// `0123456789abcdef0123456789abcdef`, a project memory of `pj-example`.
-const BOX: &str = "0123456789abcdef0123456789abcdef";
+/// The memory change the samples seal: a project memory of `pj-example`
+/// under the global id `0123456789abcdef0123456789abcdef.42`. The samples
+/// predate the table letter ck-mc's global ids carry (`.m42`); the
+/// additional data binds whatever id it is given, unchanged.
+const GLOBAL: &str = "0123456789abcdef0123456789abcdef.42";
 
 fn cases() -> Value {
     serde_json::from_str(CASES).unwrap()
@@ -74,7 +76,7 @@ fn the_copied_samples_are_the_tagged_ones() {
 #[test]
 fn the_additional_data_ck_mc_builds_is_the_samples_byte_for_byte() {
     let cases = cases();
-    let global = wire::global_id(BOX, 42);
+    let global = GLOBAL.to_owned();
     let subject = wire::subject("memory", Some("project"), "pj-example").unwrap();
     assert_eq!(subject, "ck.fleet.memory.project.pj-example");
     assert_eq!(
@@ -180,7 +182,7 @@ async fn the_samples_open_under_the_vaults_rules_and_only_in_their_domain() {
 #[tokio::test]
 async fn a_message_ck_mc_seals_opens_under_the_samples_rules() {
     let sealer = TestSealer::new(key(), 1);
-    let global = wire::global_id(BOX, 42);
+    let global = GLOBAL.to_owned();
     let subject = wire::subject("memory", Some("project"), "pj-example").unwrap();
     let aad = wire::aad(&global, 5, &subject);
     let sealed = sealer

@@ -33,7 +33,7 @@ async fn a_memory_reaches_the_other_computer_and_its_arrival_is_never_sent_again
     a.sync().await;
     b.sync().await;
     assert_eq!(contents(&b), ["The parser rejects empty input."]);
-    let global = wire::global_id(&box_of(1), id);
+    let global = wire::global_id(&box_of(1), "memory", id);
     assert_eq!(
         b.value::<String>("SELECT global_id FROM memories"),
         global,
@@ -152,7 +152,7 @@ async fn the_same_fact_written_on_two_computers_links_instead_of_duplicating() {
     a.follow_all().await;
     assert_eq!(b.value::<i64>("SELECT COUNT(*) FROM memories"), 1);
     assert_eq!(a.value::<i64>("SELECT COUNT(*) FROM memories"), 1);
-    let global = wire::global_id(&box_of(1), first);
+    let global = wire::global_id(&box_of(1), "memory", first);
     assert_eq!(
         b.value::<i64>(&format!(
             "SELECT local_id FROM replica_ids WHERE global_id = '{global}'"
@@ -191,7 +191,7 @@ async fn a_link_to_a_memory_not_seen_yet_waits_and_resolves_when_it_arrives() {
         .message_id
         .as_deref()
         .unwrap()
-        .starts_with(&wire::global_id(&box_of(1), survivor)));
+        .starts_with(&wire::global_id(&box_of(1), "memory", survivor)));
     // B reads the survivor alone first: its links wait.
     let only_first = InMemoryHub::new();
     only_first.inject(
@@ -409,7 +409,7 @@ async fn several_changes_before_a_send_go_out_as_one_message_with_the_newest_sta
     assert_eq!(hub.messages().len(), 2);
     assert_eq!(
         hub.messages()[1].message_id.as_deref(),
-        Some(format!("{}@2", wire::global_id(&box_of(1), 1)).as_str())
+        Some(format!("{}@2", wire::global_id(&box_of(1), "memory", 1)).as_str())
     );
     b.sync().await;
     assert_eq!(contents(&b), ["Version three."]);
@@ -452,6 +452,48 @@ async fn an_owner_outside_the_subject_lexicon_waits_until_the_owner_changes() {
 }
 
 #[tokio::test]
+async fn a_memory_an_observation_and_a_primer_with_one_local_id_all_arrive() {
+    let hub = InMemoryHub::new();
+    let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
+    a.execute(
+        "INSERT INTO memory_observations (content, session_id, created_at) VALUES ('Likes tea.', 's', 1);
+         INSERT INTO primers (project_path, question, answer, created_at, updated_at)
+             VALUES ('pj-a', 'How is it built?', 'With cargo.', 1, 1);",
+    );
+    let id = memory(&a, "pj-a", "Builds use cargo.");
+    assert_eq!(
+        (
+            id,
+            a.value::<i64>("SELECT id FROM memory_observations"),
+            a.value::<i64>("SELECT id FROM primers")
+        ),
+        (1, 1, 1)
+    );
+    a.sync().await;
+    b.sync().await;
+    let ids: Vec<String> = hub
+        .messages()
+        .iter()
+        .map(|message| message.message_id.clone().unwrap())
+        .collect();
+    let boxed = box_of(1);
+    assert_eq!(
+        ids,
+        [
+            format!("{boxed}.o1@1"),
+            format!("{boxed}.p1@1"),
+            format!("{boxed}.m1@1")
+        ]
+    );
+    assert_eq!(contents(&b), ["Builds use cargo."]);
+    assert_eq!(
+        b.value::<i64>("SELECT COUNT(*) FROM memory_observations"),
+        1
+    );
+    assert_eq!(b.value::<i64>("SELECT COUNT(*) FROM primers"), 1);
+}
+
+#[tokio::test]
 async fn observations_and_primers_travel_and_local_columns_stay() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
@@ -465,6 +507,17 @@ async fn observations_and_primers_travel_and_local_columns_stay() {
     );
     a.sync().await;
     b.sync().await;
+    assert_eq!(
+        b.texts("SELECT reason FROM replica_rejects"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        b.texts("SELECT kind || ':' || global_id FROM replica_ids ORDER BY kind"),
+        [
+            format!("observation:{}.o1", box_of(1)),
+            format!("primer:{}.p1", box_of(1))
+        ]
+    );
     assert_eq!(
         b.value::<String>(
             "SELECT content || '|' || session_id || '|' || COALESCE(source_start_ordinal, 'none') || '|' || project_id

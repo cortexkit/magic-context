@@ -206,7 +206,7 @@ fn claim(
             let global = match current.global_id {
                 Some(global) => global,
                 None => {
-                    let global = wire::global_id(box_id, local_id);
+                    let global = wire::global_id(box_id, &kind, local_id);
                     snapshot::assign(&tx, &kind, local_id, &global)?;
                     global
                 }

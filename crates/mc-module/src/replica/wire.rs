@@ -24,9 +24,20 @@ pub const AAD_VERSION: &str = "ck-memory/v1";
 /// takes messages of at most 64 KiB.
 pub const MAX_ENVELOPE_BYTES: usize = 60 * 1024;
 
-/// The global id of this computer's row `local_id`: `<box id>.<local id>`.
-pub fn global_id(box_id: &str, local_id: i64) -> String {
-    format!("{box_id}.{local_id}")
+/// The global id of this computer's row `local_id` of `kind`:
+/// `<box id>.<table letter><local id>`, the letter `m` for a memory, `o` for
+/// an observation and `p` for a primer (`<box>.m42`). Local ids are unique
+/// only within their own table, and the hub's one memory stream deduplicates
+/// by message id (`<global id>@<revision>`) across every kind, so without
+/// the letter observation 1 and primer 1 would be the same message and one
+/// of them would never arrive.
+pub fn global_id(box_id: &str, kind: &str, local_id: i64) -> String {
+    let letter = match kind {
+        "observation" => 'o',
+        "primer" => 'p',
+        _ => 'm',
+    };
+    format!("{box_id}.{letter}{local_id}")
 }
 
 /// The JetStream message id, `<global id>@<revision>`. A publish sent again
