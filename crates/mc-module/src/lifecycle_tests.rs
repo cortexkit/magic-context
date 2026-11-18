@@ -72,6 +72,9 @@ mod head_bytes_tests;
 #[path = "head_dates_tests.rs"]
 mod head_dates_tests;
 
+#[path = "head_dates_review_tests.rs"]
+mod head_dates_review_tests;
+
 #[path = "summary_sharing_tests.rs"]
 mod summary_sharing_tests;
 
