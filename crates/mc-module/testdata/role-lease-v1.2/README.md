@@ -16,15 +16,23 @@ handler; an empty `StreamEnd` body is shown as `null`.
   extends its acting window, so it stops acting at the deadline even though the
   stream is still open. The final `StreamEnd` is the test closing the watch,
   not an expiry signal to wait for.
-- `handback.json`: `handback: true` on a holder's notice means another computer
-  has asked to take the role; finish in-flight work and close the watch. Ack the
-  notice as usual.
+- `handback.json`: `handback: true` means the preferred computer asked for the
+  role. Ack the notice as usual. Finish any in-flight act, then call
+  `role.lease.yield {role, gen}` on the watch's route. Keep the watch open.
+- `yield-transferred.json`: `yielded: true` means the next generation was
+  written directly to the preferred computer. Stop acting at once even if
+  the old deadline has not passed.
+- `yield-withdrawn.json`: `yielded: false` means the offer was withdrawn. The
+  module keeps holding, and the watch sends `handback: false` with a new
+  acting deadline. The module must still observe its acting deadline.
+  Do not start a new act while a yield is pending. If the reply is lost or the
+  write is unsettled, wait for a fresh holding notice before acting again.
 - `ack.json`: acknowledge every notice, even `holding: false`, within 5 seconds
   using `role.lease.ack {role, seq}` on the same bound route as the watch. A
   second route with the same principal cannot ack, as marked by the fixture's
   `differentRoute` annotation. Explicit release also requires the original route.
 - `refusals.json`: an empty name part, a role assigned to a different module,
-  a Direct caller and a flow-scoped caller (marked `flowScoped`) are refused.
+  a Direct caller (a local process the daemon admits without a module identity, such as a terminal command) and a flow-scoped caller (marked `flowScoped`) are refused.
 - `sharing-disabled.json`: both admitted consumers get generation 1 locally,
   including a fresh notice at the 20-second renewal.
 - `engram-sharing.json`: Plexus follows the Engram claim's epoch and stops
@@ -70,6 +78,7 @@ From the repository root:
 ```sh
 ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_role_lease_v1_records_match_published_files -- --nocapture
 ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_role_lease_v1_non_hub_records_match_published_files -- --nocapture
+ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_role_lease_v1_yield_records_match_published_files -- --nocapture
 ```
 
 Without `ENTO_WRITE_SERVED_VECTORS` the drift test byte-compares the served
