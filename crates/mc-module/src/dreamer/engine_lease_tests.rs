@@ -347,12 +347,13 @@ async fn a_role_another_computer_holds_skips_the_run_and_is_not_asked_again() {
     assert_eq!(runs(&db), 0);
 }
 
-/// Nothing renews the window (`lapsed.json`, the watch left open): once
-/// its deadline, less the margin, has passed, the run stops before its next
-/// batch, keeping what it applied.
+/// Nothing renews the window (`lapsed.json`, the watch left open), and it
+/// closes while the first batch's answer is being written: the check right
+/// before the batch commits finds it closed, so the batch is discarded,
+/// nothing of it is sent to the other computers, and the run stops.
 #[cfg(feature = "memory-replica")]
 #[tokio::test]
-async fn a_lapsed_window_stops_the_run_before_its_next_batch() {
+async fn a_window_that_closes_before_a_batch_commits_discards_the_batch_and_stops_the_run() {
     let (_dir, db) = store();
     let leases = SampleLeases::new();
     leases.default_script(steps("lapsed.json", "dreamer.workspace_02"));
@@ -370,11 +371,19 @@ async fn a_lapsed_window_stops_the_run_before_its_next_batch() {
         error.as_deref(),
         Some(
             "the dreamer.pj-lease acting window ends at 145000 ms on the monotonic clock, \
-             less than 10000 ms after now (140000 ms); 2 of 3 batches left unsent"
+             less than 10000 ms after now (140000 ms); the batch's answer was discarded; \
+             2 of 3 batches left unsent"
         )
     );
     assert_eq!(journaled, Some(json!({ROLE: 4})));
-    assert_eq!(epochs(&db), ["project batch 0: 4"]);
+    assert!(epochs(&db).is_empty(), "the discarded batch wrote nothing");
+    assert_eq!(
+        db.with_connection(|conn| conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row
+                .get::<_, i64>(0)))
+            .unwrap(),
+        0
+    );
     assert_eq!(schedule(&db).0.as_deref(), Some("failed"));
     // The watch was open until the run itself closed it.
     assert_eq!(leases.log().closed, [ROLE]);

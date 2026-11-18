@@ -928,3 +928,83 @@ async fn a_computer_joining_late_ends_with_the_same_live_rows() {
         ]
     );
 }
+
+/// A store that holds another store's id (a copy whose box id didn't tell
+/// it apart) and reads a message sent under that id by another computer,
+/// a message it doesn't know, takes a new store id before it sends
+/// anything: whichever computer sent the message.
+#[tokio::test]
+async fn a_message_under_this_stores_id_from_another_computer_gives_it_a_new_store_id() {
+    let hub = InMemoryHub::new();
+    let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
+    a.sync().await;
+    b.sync().await;
+    let taken = a.store_id();
+    b.execute(&format!(
+        "UPDATE replica_state SET store_id = '{taken}' WHERE id = 1"
+    ));
+    memory(&a, "pj-a", "Written on A under its store id.");
+    a.publish_all().await;
+    b.follow_all().await;
+    assert_ne!(b.store_id(), taken, "B no longer forms A's global ids");
+    memory(&b, "pj-a", "Written on B afterwards.");
+    b.sync().await;
+    a.follow_all().await;
+    assert_eq!(a.live(), b.live());
+    assert_eq!(a.live().len(), 2);
+}
+
+/// The hub's stream is made anew with the same creation time but fewer
+/// messages than the position a computer stored: it is still a stream made
+/// anew, read from its start, and the computer sends every row it holds
+/// again, so computers that join the new stream get them.
+#[tokio::test]
+async fn a_stream_shorter_than_the_stored_position_is_read_from_its_start_and_every_row_sent_again()
+{
+    let old = InMemoryHub::named("the same creation time");
+    let a = Computer::new(&old, 1);
+    for text in ["First memory on A.", "Second memory on A."] {
+        memory(&a, "pj-a", text);
+    }
+    a.sync().await;
+    assert_eq!(a.replica.position().unwrap(), 2);
+
+    let new = InMemoryHub::named("the same creation time");
+    let c = Computer::new(&new, 3);
+    memory(&c, "pj-a", "Written on C on the new stream.");
+    c.sync().await;
+    let a = Computer::open(&new, 1, a.copy());
+    a.sync().await;
+    c.follow_all().await;
+    let all = [
+        "First memory on A.",
+        "Second memory on A.",
+        "Written on C on the new stream.",
+    ];
+    assert_eq!(a.live(), all);
+    assert_eq!(c.live(), all, "A's rows reached the new stream");
+    assert!(outbox(&a).is_empty());
+}
+
+/// A round stops publishing at its first unconfirmed send: with a hub that
+/// takes the connection but doesn't answer, one round never waits once per
+/// row. The rows wait as `sending`, and the next round sends each once.
+#[tokio::test]
+async fn a_round_stops_publishing_at_its_first_unconfirmed_send() {
+    let hub = InMemoryHub::new();
+    let a = Computer::new(&hub, 1);
+    a.replica.join().await.unwrap();
+    for text in ["One.", "Two.", "Three."] {
+        memory(&a, "pj-a", text);
+    }
+    hub.refuse_next(1);
+    assert!(a.replica.publish().await.is_err());
+    assert_eq!(hub.publish_calls(), 1, "nothing more was tried this round");
+    assert_eq!(
+        outbox(&a),
+        ["memory:1:sending", "memory:2:sending", "memory:3:sending"]
+    );
+    a.publish_all().await;
+    assert_eq!(hub.messages().len(), 3);
+    assert_eq!(hub.publish_calls(), 4);
+}

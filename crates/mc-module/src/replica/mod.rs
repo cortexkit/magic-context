@@ -56,6 +56,8 @@ pub mod wire;
 #[cfg(test)]
 mod capture_tests;
 #[cfg(test)]
+mod epochs_tests;
+#[cfg(test)]
 mod exchange_tests;
 #[cfg(test)]
 mod fence_tests;

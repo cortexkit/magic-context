@@ -17,7 +17,7 @@ use super::live::{
     retry_after, round_retry, Connect, Link, Live, Refusal, ReplicaTask, IDLE, RETRY_MAX,
 };
 use super::nats::{Delivered, Delivery, Fault, Following, HubStream, NatsHub, HEARTBEAT};
-use super::test_support::{box_of, TestSealer, KEY};
+use super::test_support::{box_of, TestSealer, Vault, KEY};
 use super::Replica;
 use crate::context_db::ContextDb;
 
@@ -571,4 +571,47 @@ async fn stopping_ends_the_task_and_removes_the_consumer() {
     tokio::time::sleep(IDLE * 10).await;
     assert_eq!(server.follows(), [1], "a stopped task reads no more");
     assert_eq!(fake.asks(), 1);
+}
+
+/// A message held because this computer's vault doesn't hold its epoch yet
+/// is read again as soon as Entorhinal's fleet epoch marker changes, not
+/// only after the growing pause between failed rounds.
+#[tokio::test(start_paused = true)]
+async fn a_held_message_is_read_again_when_the_epoch_marker_changes() {
+    let server = Server::new();
+    let (b, _b_dir) = store();
+    remember(&b, "Sealed under epoch two.");
+    let other = Replica::new(
+        Arc::clone(&b),
+        Arc::new(NatsHub::new(server.other_stream())),
+        Vault::new(&[2], ("fleet_epoch_unavailable", "transient")),
+        box_of(2),
+    );
+    while other.round().await.unwrap() > 0 {}
+    assert_eq!(server.messages(), 1);
+    let fake = Fake::new(&server, Vec::new());
+    let (a, _a_dir) = store();
+    let vault = Vault::new(&[1], ("fleet_epoch_unavailable", "transient"));
+    let epoch_wake = Arc::new(Notify::new());
+    let task = ReplicaTask::spawn(Live {
+        connect: Arc::clone(&fake) as Arc<dyn Connect>,
+        db: Arc::clone(&a),
+        sealer: Arc::clone(&vault) as _,
+        epochs: Arc::new(super::epochs::UnknownEpochs),
+        wake: Arc::new(Notify::new()),
+        epoch_wake: Arc::clone(&epoch_wake),
+    });
+    // Four failed rounds: the next would wait sixteen seconds.
+    until(|| vault.opens.load(Ordering::SeqCst) >= 4).await;
+    assert_eq!(memories(&a), 0, "the held message is not applied");
+    vault.receive(2);
+    let marked = Instant::now();
+    epoch_wake.notify_one();
+    until(|| memories(&a) == 1).await;
+    assert!(
+        marked.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        marked.elapsed()
+    );
+    task.stop().await;
 }

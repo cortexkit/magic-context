@@ -115,22 +115,28 @@ fn migration_112_adds_replication_drops_the_engram_sync_and_keeps_every_row() {
         .map(|(kind, name)| format!("{kind} {name}"))
         .collect();
     let mut expected = vec![
+        "index idx_memories_fact",
         "index idx_memories_global_id",
         "index idx_memory_observations_global_id",
         "index idx_message_fts_rowid_map_fts_rowid",
         "index idx_primers_global_id",
         "index idx_replica_derived_survivor",
         "index idx_replica_ids_local",
+        "index idx_replica_outbox_global",
+        "index idx_replica_outbox_local",
         "index idx_replica_outbox_row",
         "index idx_replica_outbox_state",
         "index idx_replica_pending_links_target",
         "table replica_applying",
         "table replica_derived",
+        "table replica_epochs",
         "table replica_fences",
         "table replica_ids",
         "table replica_outbox",
+        "table replica_passed",
         "table replica_pending_links",
         "table replica_rejects",
+        "table replica_restore",
         "table replica_state",
         "table replica_writer",
     ];
@@ -176,14 +182,22 @@ fn migration_112_adds_replication_drops_the_engram_sync_and_keeps_every_row() {
         )
         .unwrap();
     assert_eq!(fresh, (2, 1, 1));
-    let state: (i64, Option<String>, Option<i64>, String) = conn
+    let state: (i64, Option<String>, Option<i64>, String, Option<String>) = conn
         .query_row(
-            "SELECT stream_seq, box_id, joined_at, store_id FROM replica_state",
+            "SELECT stream_seq, box_id, joined_at, store_id, stream_created FROM replica_state",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .unwrap();
-    assert_eq!((state.0, state.1, state.2), (0, None, None));
+    assert_eq!((state.0, state.1, state.2, state.4), (0, None, None, None));
     assert!(
         state.3.len() == 32
             && state

@@ -616,3 +616,34 @@ async fn a_full_stream_keeps_the_outbox_row_waiting_until_it_has_room() {
     assert_eq!(published.len(), 2);
     assert_eq!(published[0], published[1], "sent again under the same id");
 }
+
+/// A message read again by its sequence comes from a direct get on the
+/// stream; a sequence the stream no longer holds answers none, and the
+/// consumer is left as it was.
+#[tokio::test(start_paused = true)]
+async fn a_message_is_read_again_by_its_sequence_with_a_direct_get() {
+    let script = Script::new();
+    let stored = HubMessage {
+        seq: 7,
+        subject: "ck.fleet.memory.project.pj-a".into(),
+        message_id: Some("s.m1@2/s".into()),
+        payload: b"sealed".to_vec(),
+    };
+    script.stored.lock().unwrap().insert(7, stored.clone());
+    let hub = script.hub();
+    assert_eq!(hub.get(7).await, Ok(Some(stored)));
+    assert_eq!(hub.get(8).await, Ok(None));
+    assert_eq!(script.calls.lock().unwrap().gets, [7, 8]);
+    assert!(script.follows().is_empty(), "no consumer was made");
+}
+
+/// The stream's creation time comes with its last sequence, so the engine
+/// can tell a stream made anew from the one its position belongs to.
+#[tokio::test(start_paused = true)]
+async fn the_streams_information_carries_its_creation_time() {
+    let script = Script::new();
+    *script.last.lock().unwrap() = Ok(3);
+    let info = script.hub().info().await.unwrap();
+    assert_eq!(info.last_seq, 3);
+    assert_eq!(info.created, "2025-11-18 09:00:00.0 +00:00:00");
+}

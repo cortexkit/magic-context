@@ -488,3 +488,115 @@ fn held(conn: &rusqlite::Connection, row: &str, revision: i64) -> bool {
     )
     .unwrap()
 }
+
+/// A vault holding some fleet epochs, each under the test key: it opens an
+/// item of an epoch it holds as the vault does, and refuses an item of an
+/// epoch it doesn't hold with the code and class given, as the vault's
+/// build answers one. It can also refuse a whole call, or answer `corrupt`
+/// for an epoch whose key copy is damaged.
+pub(crate) struct Vault {
+    held: std::sync::Mutex<Vec<u64>>,
+    missing: (&'static str, &'static str),
+    corrupt: std::sync::Mutex<Vec<u64>>,
+    refuse_call: std::sync::Mutex<Option<&'static str>>,
+    /// How many open calls reached it.
+    pub(crate) opens: std::sync::atomic::AtomicUsize,
+}
+
+impl Vault {
+    pub(crate) fn new(held: &[u64], missing: (&'static str, &'static str)) -> Arc<Self> {
+        Arc::new(Self {
+            held: std::sync::Mutex::new(held.to_vec()),
+            missing,
+            corrupt: std::sync::Mutex::default(),
+            refuse_call: std::sync::Mutex::default(),
+            opens: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    /// The vault receives epoch `epoch`.
+    pub(crate) fn receive(&self, epoch: u64) {
+        self.held.lock().unwrap().push(epoch);
+    }
+
+    /// The vault's copy of `epoch`'s key is damaged.
+    pub(crate) fn damage(&self, epoch: u64) {
+        self.corrupt.lock().unwrap().push(epoch);
+    }
+
+    /// The next whole call is refused with `code`.
+    pub(crate) fn refuse_next_call(&self, code: &'static str) {
+        *self.refuse_call.lock().unwrap() = Some(code);
+    }
+}
+
+#[async_trait]
+impl Sealer for Vault {
+    async fn seal_batch(&self, items: &[SealInput]) -> Result<Vec<Sealed>, SealError> {
+        let epoch = self.held.lock().unwrap().iter().copied().max().unwrap_or(1);
+        TestSealer::with_domain(KEY, epoch, MAGIC_CONTEXT_DOMAIN)
+            .seal_batch(items)
+            .await
+    }
+
+    async fn open_batch(&self, items: &[OpenInput]) -> Result<Vec<Opened>, SealError> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        if let Some(code) = self.refuse_call.lock().unwrap().take() {
+            return Err(SealError {
+                code: code.to_owned(),
+                transient: false,
+            });
+        }
+        let held = self.held.lock().unwrap().clone();
+        let corrupt = self.corrupt.lock().unwrap().clone();
+        Ok(items
+            .iter()
+            .map(|item| {
+                if corrupt.contains(&item.epoch) {
+                    Opened::Refused {
+                        code: "corrupt".into(),
+                        class: "permanent".into(),
+                    }
+                } else if held.contains(&item.epoch) {
+                    TestSealer::with_domain(KEY, item.epoch, MAGIC_CONTEXT_DOMAIN).open_one(item)
+                } else {
+                    Opened::Refused {
+                        code: self.missing.0.into(),
+                        class: self.missing.1.into(),
+                    }
+                }
+            })
+            .collect())
+    }
+}
+
+/// The hub's epoch record as a test sets it.
+#[derive(Default)]
+pub(crate) struct Epochs(pub(crate) std::sync::Mutex<super::epochs::EpochStatus>);
+
+#[async_trait]
+impl super::epochs::FleetEpochs for Epochs {
+    async fn status(&self) -> super::epochs::EpochStatus {
+        *self.0.lock().unwrap()
+    }
+}
+
+impl Computer {
+    /// This computer's engine sealing and opening through `sealer`, and
+    /// reading the epoch record from `epochs`.
+    pub(crate) fn with_vault(
+        &mut self,
+        hub: &Arc<InMemoryHub>,
+        n: u8,
+        sealer: Arc<dyn Sealer>,
+        epochs: Arc<dyn super::epochs::FleetEpochs>,
+    ) {
+        self.replica = Replica::new(
+            Arc::clone(&self.db),
+            Arc::clone(hub) as Arc<dyn super::hub::Hub>,
+            sealer,
+            box_of(n),
+        )
+        .with_epochs(epochs);
+    }
+}
