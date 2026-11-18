@@ -592,6 +592,16 @@ export class PiTestHarness implements PiHostHarness {
     throw new Error(`Pi extension command /${command} did not settle`);
   }
 
+  /**
+   * Run an extension command while a turn is under way, without waiting for
+   * the host to go idle. Pi runs an extension command at once even while a
+   * reply streams; this returns once the host acknowledged the command.
+   */
+  async invokeExtensionCommandDuringTurn(command: string): Promise<void> {
+    const response = await this.rpc.sendCommand("prompt", { message: `/${command}` });
+    requireSuccessfulResponse(response);
+  }
+
   async newSession(): Promise<void> {
     const response = await this.rpc.sendCommand<{ cancelled?: boolean }>("new_session");
     const data = requireSuccessfulResponse(response);

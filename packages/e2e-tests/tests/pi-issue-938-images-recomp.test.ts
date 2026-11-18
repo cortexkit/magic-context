@@ -466,4 +466,169 @@ export default function (pi) {
             })}`,
         );
     }, 900_000);
+
+    it("/ctx-recomp run while a reply streams keeps that turn's prompt in the request and on the host", async () => {
+        const fixture = createE2ETempDir("issue-938-mid-turn-");
+        const extension = writeImageToolExtension(fixture, 2);
+        const h = await PiTestHarness.create({
+            host,
+            imageInput: true,
+            extensionsBeforeMagicContext: [extension],
+            magicContextConfig: {
+                execute_threshold_percentage: 95,
+                dreamer: { disable: true },
+                compressor: { enabled: false },
+            },
+        });
+        harness = h;
+
+        h.mock.addMatcher((body) => {
+            if (!isHistorianRequest(body)) return null;
+            const range = findHistorianOrdinalRange(body) ?? { start: 1, end: 1 };
+            return {
+                text: buildMockHistorianPayload({
+                    start: range.start,
+                    end: range.end,
+                    title: "REBUILT_MID_TURN_938",
+                    body: "Generated storyboard frames on request.",
+                }),
+                usage: { input_tokens: 500, output_tokens: 200, cache_creation_input_tokens: 500 },
+            };
+        });
+        let pending: Array<(body: Record<string, unknown>) => ReturnType<typeof toolUse>> = [];
+        // The reply after the live turn's tool result is held this long, so the
+        // command below runs while the turn is under way.
+        let holdNextReplyMs = 0;
+        h.mock.addMatcher((body) => {
+            if (!isMainRequest(body)) return null;
+            const next = pending.shift();
+            if (next) return next(body);
+            const delayMs = holdNextReplyMs;
+            holdNextReplyMs = 0;
+            return { text: "Done.", usage: usageFor(body), delayMs };
+        });
+        const usage = { input_tokens: 1_000, output_tokens: 20 };
+        const mainBodies = () =>
+            h
+                .mock.requests()
+                .filter((request) => isMainRequest(request.body))
+                .map((request) => request.body);
+
+        const sessionId = await h.createSession();
+        pending = [(body) => toolUse(body, "generate_image", { index: 0 }, usage)];
+        await h.sendPrompt(sessionId, "EARLY_TURN_938: draw frame zero", { timeoutMs: 300_000 });
+        await h.waitForMockQuiescence({ label: "early turn" });
+
+        pending = [(body) => toolUse(body, "generate_image", { index: 1 }, usage)];
+        holdNextReplyMs = 30_000;
+        const liveTurn = h.sendPrompt(sessionId, "LIVE_PROMPT_938: draw frame one", { timeoutMs: 300_000 });
+        // The live turn's second request (after its tool result) is being held.
+        await h.waitFor(
+            () =>
+                mainBodies().filter((body) => JSON.stringify(body.messages).includes("LIVE_PROMPT_938")).length >= 2,
+            { timeoutMs: 120_000, label: "live turn reaches its held reply" },
+        );
+        await h.invokeExtensionCommandDuringTurn("ctx-recomp");
+        await h.invokeExtensionCommandDuringTurn("ctx-recomp");
+        const rebuilt = await h.waitFor(
+            () => {
+                const row = h
+                    .contextDb()
+                    .prepare(
+                        "SELECT end_message, end_message_id, title FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+                    )
+                    .get(sessionId) as { end_message: number; end_message_id: string; title: string } | null;
+                return row?.title === "REBUILT_MID_TURN_938" ? row : null;
+            },
+            { timeoutMs: 180_000, label: "mid-turn recomp publishes" },
+        );
+        // The recomp read the branch during the turn: its newest summary ends on
+        // the live turn's folded tool result, inside that turn.
+        expect(rebuilt.end_message_id.startsWith("synth-user-")).toBe(true);
+        await liveTurn;
+        await h.waitForMockQuiescence({ label: "live turn" });
+
+        await h.invokeExtensionCommand("ctx-flush");
+        await h.sendPrompt(sessionId, "AFTER_MID_TURN_ONE_938: answer", { timeoutMs: 300_000 });
+        await h.waitForMockQuiescence({ label: "first prompt after the recomp" });
+        expect(await h.hasNativeCompactionMarker(rebuilt.end_message)).toBe(true);
+        expect(getPendingPiCompactionMarkerState(h.contextDb() as never, sessionId)).toBeNull();
+        const sessionFile = (await h.getState()).sessionFile;
+        if (!sessionFile) throw new Error("no session file");
+        const journal = readFileSync(sessionFile, "utf8")
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as { type?: string; id?: string; firstKeptEntryId?: string; message?: unknown });
+        const livePrompt = journal.find(
+            (entry) => entry.type === "message" && JSON.stringify(entry.message).includes("LIVE_PROMPT_938"),
+        );
+        const marker = journal.filter((entry) => entry.type === "compaction").at(-1);
+        // The marker starts at the live turn's prompt, the message the request's
+        // history cut keeps for a summary that ends inside that turn.
+        expect(marker?.firstKeptEntryId).toBe(livePrompt?.id);
+        // The request keeps that prompt's message. The recomp queued drops for
+        // every message it summarized, the prompt included, so its text may be
+        // served as its drop placeholder.
+        const promptTag = (
+            h
+                .contextDb()
+                .prepare(
+                    "SELECT tag_number FROM tags WHERE session_id = ? AND message_id LIKE ? AND type = 'message' ORDER BY tag_number LIMIT 1",
+                )
+                .get(sessionId, `${livePrompt?.id ?? ""}%`) as { tag_number: number } | null
+        )?.tag_number;
+        if (promptTag === undefined) throw new Error("the live prompt has no tag");
+        const servesPrompt = (body: Record<string, unknown>) => {
+            const text = JSON.stringify(body.messages);
+            return text.includes(`[dropped §${promptTag}§]`) || text.includes(`§${promptTag}§ LIVE_PROMPT_938`);
+        };
+        const first = mainBodies().at(-1)!;
+        expect(servesPrompt(first)).toBe(true);
+        expect(JSON.stringify(first.messages)).toContain("REBUILT_MID_TURN_938");
+        expect(JSON.stringify(first.messages)).not.toContain("EARLY_TURN_938");
+
+        // The next request, the first built from the branch the marker trimmed,
+        // only appends to the one before it.
+        await h.sendPrompt(sessionId, "AFTER_MID_TURN_TWO_938: answer", { timeoutMs: 300_000 });
+        await h.waitForMockQuiescence({ label: "second prompt after the recomp" });
+        const second = mainBodies().at(-1)!;
+        const firstMessages = withoutCacheControl(first.messages) as unknown[];
+        const secondMessages = withoutCacheControl(second.messages) as unknown[];
+        expect(servesPrompt(second)).toBe(true);
+        expect(secondMessages.length).toBeGreaterThan(firstMessages.length);
+        expect(secondMessages.slice(0, firstMessages.length)).toEqual(firstMessages);
+
+        // Rebuilt from the journal, the host keeps the live prompt and hides the
+        // summarized turn before it.
+        await h.restart();
+        const hostMessages = JSON.stringify(await h.getMessages());
+        expect(hostMessages).toContain("LIVE_PROMPT_938");
+        expect(hostMessages).not.toContain("EARLY_TURN_938");
+
+        console.log(
+            `ISSUE938_MID_TURN_PROOF ${JSON.stringify({
+                host,
+                version: hostVersion(host),
+                pid: h.hostPid,
+                rebuilt,
+                livePromptEntry: livePrompt?.id,
+                livePromptTag: promptTag,
+                markerFirstKept: marker?.firstKeptEntryId,
+                firstRequestMessages: firstMessages.length,
+                secondRequestMessages: secondMessages.length,
+                root: h.env.baseDir,
+            })}`,
+        );
+    }, 900_000);
 });
+
+/** A provider request's messages without the cache breakpoints, which move to the newest message. */
+function withoutCacheControl(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(withoutCacheControl);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+            .filter(([key]) => key !== "cache_control")
+            .map(([key, item]) => [key, withoutCacheControl(item)]),
+    );
+}
