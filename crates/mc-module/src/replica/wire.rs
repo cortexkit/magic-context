@@ -27,12 +27,13 @@ pub const MAX_ENVELOPE_BYTES: usize = 60 * 1024;
 /// The global id of this store's row `local_id` of `kind`:
 /// `<store id>.<table letter><local id>`, the letter `m` for a memory, `o`
 /// for an observation and `p` for a primer (`<store>.m42`). The store id is
-/// random and made once per `context.db` ([`super::store_id`]), so a store
-/// made anew on the same computer never forms an id an earlier store sent.
-/// Local ids are unique only within their own table, and the hub's one
-/// memory stream deduplicates by message id (`<global id>@<revision>`)
-/// across every kind, so without the letter observation 1 and primer 1
-/// would be the same message and one of them would never arrive.
+/// random and made anew when the store first joins the stream
+/// ([`super::store_id`]), so a store made anew on the same computer never
+/// forms an id an earlier store sent. Local ids are unique only within
+/// their own table, and the hub's one memory stream deduplicates by
+/// message id ([`message_id`]) across every kind, so without the letter
+/// observation 1 and primer 1 would be the same message and one of them
+/// would never arrive.
 pub fn global_id(store_id: &str, kind: &str, local_id: i64) -> String {
     let letter = match kind {
         "observation" => 'o',

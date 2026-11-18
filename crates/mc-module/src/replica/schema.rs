@@ -9,10 +9,13 @@
 //! own state (read counters, sessions, embeddings) and never leave it.
 //!
 //! Capture happens in the store, so no writer has to remember it: triggers
-//! on each replicated table write one `replica_outbox` row per changed row
-//! and raise the row's `revision`. Several changes to a row before it is
-//! published share one outbox row and one revision, since only the newest
-//! state is ever sent.
+//! on each replicated table write a `replica_outbox` row per changed row
+//! and raise the row's `revision`, once per change whatever the state of
+//! the row's earlier outbox rows. Several changes to a row before it is
+//! sent share one outbox row and one revision, since the newest state is
+//! sent, until the outbox row is frozen: claimed to be sent, or fixed by a
+//! dreamer's change list ([`super::name_writer`]). A change after that is
+//! an outbox row of its own at the next revision.
 
 use rusqlite::Transaction;
 
@@ -266,8 +269,9 @@ pub(crate) fn row_role(table: &Table, row: &str) -> String {
 }
 
 /// The statement that records a change of row `id` at `revision` in the
-/// outbox, when `condition` holds. A row keeps one unpublished outbox row:
-/// a later change replaces it, keeping the base revision and `create` while
+/// outbox, when `condition` holds. A row keeps at most one outbox row that
+/// a later change joins ([`COALESCING`]): the change replaces it, keeping
+/// the base revision and `create` while
 /// nothing of it was sent, and a plain metadata change never hides the more
 /// telling kind of an earlier change it joins. A `raised` row becomes a
 /// change to send. `role` is the changed row's dreamer role ([`row_role`]).
@@ -310,8 +314,8 @@ fn queue(
 /// The outbox row of a memory revision a writer raised with no replicated
 /// column changed, held as `raised`: never sent by itself, never counted as
 /// a change of this computer's that holds back an arrival, and the revision
-/// a later change of the row is sent at. An unpublished row it meets keeps
-/// its state, and takes the new revision while that row is still unsent.
+/// a later change of the row is sent at. An outbox row a change would join
+/// keeps its state, and takes the new revision.
 fn hold(id: &str, revision: &str, base: &str) -> String {
     format!(
         "INSERT INTO replica_outbox

@@ -35,9 +35,12 @@
 //! acting window is still at least [`lease::MARGIN_MS`] ahead and records
 //! the generation it acts under in its journal, which refuses one older
 //! than it has seen; what the batch applies carries that generation to the
-//! user's other computers. A run that lost its role stops before its next
-//! batch (`lease_lost`); one asked for its role finishes the batch in
-//! flight and stops (`handed_back`). The watch closes when the run ends.
+//! user's other computers. The model's answer can take longer than the
+//! window left, so the run checks the window again, with the same margin,
+//! right before it commits the batch, and discards the batch when it has
+//! closed. A run that lost its role stops before its next batch
+//! (`lease_lost`); one asked for its role finishes the batch in flight and
+//! stops (`handed_back`). The watch closes when the run ends.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;

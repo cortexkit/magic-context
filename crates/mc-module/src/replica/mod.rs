@@ -5,35 +5,39 @@
 //! and global memories, observations and primers) travel between them
 //! through one stream on the user's hub, `HUB_MEMORY` ([`hub`]):
 //! - **Capture** happens in the store ([`schema`]): triggers on each
-//!   replicated table write one `replica_outbox` row per changed row and
-//!   raise its revision, whichever of the many writers changed it.
+//!   replicated table write an outbox row for each changed row and raise
+//!   its revision once per change, whichever of the many writers changed it.
 //! - **Publish** ([`publish`]) drains the outbox in batches. Each message is
 //!   a full snapshot of the row ([`snapshot`]), sealed by the vault under
 //!   the fleet epoch key ([`seal`]), and sent with the message id
-//!   `<global id>@<revision>`, so a retry is stored once ([`wire`]).
+//!   `<global id>@<revision>/<store id>`, so a retry is stored once and two
+//!   computers' changes at one revision are both stored ([`wire`]).
 //! - **Follow** ([`apply`]) reads the stream in order, opens each message
 //!   and applies it in one transaction that stores the stream position.
-//!   Stream order decides between computers: every computer applies the
-//!   same messages in the same order. An apply writes no outbox row.
+//!   The stream's order decides between computers, the same on every one:
+//!   of a row's messages, the highest revision, and of equal ones the later
+//!   message. A message this computer's vault can't open yet holds the
+//!   stream until it can ([`epochs`]). An apply writes no outbox row.
 //! - **Join** ([`Replica::join`]): the first time a computer follows the
 //!   stream it applies everyone else's history, then publishes every row of
 //!   its own that has no global id yet.
 //! - **Catch up** ([`Replica::catch_up`]): after every start, the engine
-//!   reads the stream to its end before it sends anything.
+//!   reads the stream to its end before it sends anything, from the start
+//!   of a stream made anew since it last read.
 //!
 //! A row's global id is `<store id>.<table letter><local id>` of the store
 //! that first published it ([`wire::global_id`]), given when the row is
 //! first sent; the local id agents see keeps naming the same row on each
-//! computer. The store id is 32 random hex characters made once per
-//! `context.db` and kept in `replica_state`, so a store made anew never
-//! reuses an id an earlier store of the same computer sent. A store that
-//! may have been copied or restored takes a new store id before it sends
-//! again ([`Replica::catch_up`], [`apply`]): when it runs on another
-//! computer than the one it last ran on, or when the stream holds a message
-//! it sent that it doesn't know, which a later state of the store sent. The
-//! box id is the computer's machine id, read from the bus client
-//! ([`box_id`]); it names the writer of each message, and without one
-//! nothing publishes and the outbox waits.
+//! computer. The store id is 32 random hex characters kept in
+//! `replica_state`, made anew when the store first joins the stream, so
+//! neither a store made anew nor a copy of a store that never joined reuses
+//! an id another store sent. A store that may have been copied or restored
+//! takes a new store id before it sends again ([`Replica::catch_up`],
+//! [`apply`]): when it runs on another computer than the one it last ran
+//! on, or when the stream holds a message sent under its store id that it
+//! doesn't know, whichever computer sent it. The box id is the computer's
+//! machine id, read from the bus client ([`box_id`]); it names the writer
+//! of each message, and without one nothing publishes and the outbox waits.
 //!
 //! This module is the engine. The live hub ([`nats`]) implements
 //! [`hub::Hub`] over JetStream in the hub's domain, and the replica task
