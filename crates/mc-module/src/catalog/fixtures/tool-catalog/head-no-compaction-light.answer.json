@@ -1,6 +1,6 @@
 {
-  "generation": "08c1ea3de678e773dcb4e2562bb56428bb97c14a1d268b7aa0d2391e0bfec4d3",
-  "catalog_digest": "08c1ea3de678e773dcb4e2562bb56428bb97c14a1d268b7aa0d2391e0bfec4d3",
+  "generation": "ecf63dc8845a4481dd2bd08dc9bc25e7220ce80474fdeb357379ff6697dfb999",
+  "catalog_digest": "ecf63dc8845a4481dd2bd08dc9bc25e7220ce80474fdeb357379ff6697dfb999",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -192,7 +192,8 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "read_only": true
     }
   ],
   "system_text": {

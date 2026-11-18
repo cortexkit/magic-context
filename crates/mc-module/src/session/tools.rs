@@ -12,22 +12,46 @@ impl Session {
         input: &Value,
     ) -> Result<String, String> {
         let mut timing = crate::tool_timing::ToolTiming::new(std::time::Instant::now());
-        self.tool_timed(client, settings, name, input, &mut timing)
+        self.tool_timed(client, settings, name, input, false, &mut timing)
+            .await
+    }
+
+    /// [`Session::tool`] for a call carrying the tool-provider role's
+    /// `fork_id`: a quick question a runner forked off this session.
+    #[cfg(test)]
+    pub async fn tool_on_fork<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        name: &str,
+        input: &Value,
+    ) -> Result<String, String> {
+        let mut timing = crate::tool_timing::ToolTiming::new(std::time::Instant::now());
+        self.tool_timed(client, settings, name, input, true, &mut timing)
             .await
     }
 
     /// [`Session::tool`], stamping in `timing` the end of each step a
     /// `ctx_search` or `ctx_memory` call takes, for a slow call's log line
     /// ([`crate::tool_timing`]).
+    ///
+    /// `fork` is set for a call carrying the role's `fork_id`: a quick
+    /// question a runner forked off this session. Only the tools the catalog
+    /// marks read-only get one (the transport refuses the others), and such
+    /// a call changes nothing the person, this session or another session
+    /// can observe: `ctx_search` counts no memory retrieval. `ctx_expand`
+    /// writes nothing but the cache of tag numbers the runner refused, which
+    /// changes no answer (see the `ctx_expand` arm).
     pub async fn tool_timed<C: RunnerClient>(
         &mut self,
         client: &C,
         settings: &Settings,
         name: &str,
         input: &Value,
+        fork: bool,
         timing: &mut crate::tool_timing::ToolTiming,
     ) -> Result<String, String> {
-        self.tool_unbounded(client, settings, name, input, timing)
+        self.tool_unbounded(client, settings, name, input, fork, timing)
             .await
             .map(crate::tool_output::bounded)
             .map_err(crate::tool_output::bounded)
@@ -39,6 +63,7 @@ impl Session {
         settings: &Settings,
         name: &str,
         input: &Value,
+        fork: bool,
         timing: &mut crate::tool_timing::ToolTiming,
     ) -> Result<String, String> {
         if !self.tools_only && !self.index_ready && matches!(name, "ctx_reduce" | "ctx_keep") {
@@ -149,7 +174,7 @@ impl Session {
                     }
                     _ => None,
                 };
-                self.search_reranked(client, settings, db, scope, embedded, input, timing)
+                self.search_reranked(client, settings, db, scope, embedded, input, fork, timing)
                     .await
             }
             "ctx_note" => {
@@ -180,6 +205,12 @@ impl Session {
                     .last()
                     .and_then(|summary| u64::try_from(summary.end_message).ok());
                 let summarized = self.summaries_cover_numbers();
+                // A fork's call records refused tag numbers too. The runner's
+                // `numbers_unknown` refusal is permanent for the session, so the
+                // set only caches its answer: `ctx_expand` and `ctx_reduce` give
+                // the same refusal for those tags with or without the record,
+                // and keeping it honours the compaction contract's rule that
+                // ck-mc never asks the runner for those tags again.
                 crate::expand::run(
                     client,
                     &self.key,
@@ -201,7 +232,8 @@ impl Session {
     /// An explicit `ctx_search`, reranked when its query reads as prose and a
     /// reranker is configured (see [`crate::search::rerank`]). The store is
     /// not held while the reranker scores, and any failure keeps the ordinary
-    /// ranking. Each step's end is stamped in `timing`.
+    /// ranking. Each step's end is stamped in `timing`. A call on a fork
+    /// (`fork`) answers the same but counts no memory retrieval.
     #[allow(clippy::too_many_arguments)]
     async fn search_reranked<C: RunnerClient>(
         &self,
@@ -211,6 +243,7 @@ impl Session {
         scope: Arc<crate::search::OwnedScope>,
         embedded: Option<(Vec<f32>, String, String)>,
         input: &Value,
+        fork: bool,
         timing: &mut crate::tool_timing::ToolTiming,
     ) -> Result<String, String> {
         use crate::search::rerank::{self, Reranker, Skipped};
@@ -318,18 +351,28 @@ impl Session {
             }
         }
         timing.results(prepared.results());
-        let (mut answer, stamps) = on_blocking_thread(move || {
-            // The shared connection may be held by another call; the stamp
-            // inside separates waiting for it from the reply's own work.
-            db.with_connection(|conn| {
-                let mut stamps = crate::tool_timing::Stamps::default();
-                stamps.mark("write_wait");
-                let answer = crate::search::finish(conn, &scope.scope(None), prepared);
-                stamps.mark("finish");
-                (answer, stamps)
+        // Counting retrievals is the reply's one write, and it feeds memory
+        // ranking and the dreamer's memory curation; a fork's reply skips it,
+        // and so never waits for the shared connection either.
+        let (mut answer, stamps) = if fork {
+            let answer = crate::search::reply(&scope.scope(None), prepared);
+            let mut stamps = crate::tool_timing::Stamps::default();
+            stamps.mark("finish");
+            (answer, stamps)
+        } else {
+            on_blocking_thread(move || {
+                // The shared connection may be held by another call; the stamp
+                // inside separates waiting for it from the reply's own work.
+                db.with_connection(|conn| {
+                    let mut stamps = crate::tool_timing::Stamps::default();
+                    stamps.mark("write_wait");
+                    let answer = crate::search::finish(conn, &scope.scope(None), prepared);
+                    stamps.mark("finish");
+                    (answer, stamps)
+                })
             })
-        })
-        .await;
+            .await
+        };
         timing.append(&stamps);
         if let Some(line) = skipped_note {
             answer.push('\n');

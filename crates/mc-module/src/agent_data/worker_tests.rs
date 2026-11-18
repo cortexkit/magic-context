@@ -238,6 +238,7 @@ async fn a_frozen_worker_holds_setup_and_notices_in_order_and_runs_them_when_let
                 route: f.route.clone(),
                 name: "ctx_note".into(),
                 input: json!({"action": "read"}),
+                fork: false,
                 reply: tool,
                 timing: Box::new(crate::tool_timing::ToolTiming::new(
                     std::time::Instant::now(),

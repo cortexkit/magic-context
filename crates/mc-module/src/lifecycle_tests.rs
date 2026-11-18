@@ -129,6 +129,9 @@ mod render_failed_contract_tests;
 #[path = "numbers_unknown_contract_tests.rs"]
 mod numbers_unknown_contract_tests;
 
+#[path = "fork_call_tests.rs"]
+mod fork_call_tests;
+
 #[path = "apply_view_lost_answer_tests.rs"]
 mod apply_view_lost_answer_tests;
 

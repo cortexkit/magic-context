@@ -40,6 +40,43 @@ fn surface_workers_and_readers_offer_keep_with_string_tags_and_note() {
     }
 }
 
+/// A runner offers a forked quick question only the tools marked read-only,
+/// and ck-mc honours a fork call's no-observable-change rule only in
+/// `ctx_search` and `ctx_expand`. The writing tools must stay unmarked, and
+/// the mark is sent only as `true`.
+#[test]
+fn the_catalog_marks_exactly_ctx_search_and_ctx_expand_read_only() {
+    let marked: Vec<&str> = tool_catalog::definition()
+        .tools
+        .iter()
+        .filter(|tool| tool.read_only)
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(marked, ["ctx_expand", "ctx_search"]);
+    for preset in ["head", "worker", "reader"] {
+        let answer = tool_catalog::catalog_answer(
+            &json!({"preset": preset, "params": {"compacting": true}}),
+            &example_catalog_config(),
+        )
+        .unwrap();
+        let tools = answer["tools"].as_array().unwrap();
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            if matches!(name, "ctx_search" | "ctx_expand") {
+                assert_eq!(tool["read_only"], json!(true), "{preset}: {name}");
+            } else {
+                assert!(tool.get("read_only").is_none(), "{preset}: {name}");
+            }
+        }
+        for name in ["ctx_search", "ctx_expand"] {
+            assert!(
+                tools.iter().any(|tool| tool["name"] == name),
+                "{preset} offers {name}"
+            );
+        }
+    }
+}
+
 /// The reply-language directive the generator's matrix was rendered with:
 /// the language's name from the plugin's own table, as the plugin words it.
 fn language_directive(language: &str) -> Option<String> {

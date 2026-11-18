@@ -143,6 +143,10 @@ enum Job {
         route: Route,
         name: String,
         input: Value,
+        /// The call carries the tool-provider role's `fork_id`: a quick
+        /// question a runner forked off the session, which must change
+        /// nothing anyone can observe ([`Session::tool_timed`]).
+        fork: bool,
         reply: oneshot::Sender<Result<String, ModuleError>>,
         /// The call's stamps from its arrival on, logged when it is slow.
         /// Boxed: the stamps are much larger than any other job's fields.
@@ -829,7 +833,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         name: &str,
         input: Value,
     ) -> Result<String, ModuleError> {
-        self.tool_at(route, name, input, std::time::Instant::now())
+        self.tool_at(route, name, input, false, std::time::Instant::now())
             .await
     }
 
@@ -837,12 +841,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// `ctx_search` or `ctx_memory` call that took
     /// [`crate::tool_timing::SLOW`] or longer from then is logged with the
     /// time each of its steps took, the wait for the session's worker
-    /// included ([`crate::tool_timing`]).
+    /// included ([`crate::tool_timing`]). `fork` marks a call carrying the
+    /// tool-provider role's `fork_id`, which the transport admits only for
+    /// the tools the catalog marks read-only.
     pub async fn tool_at(
         &self,
         route: &Route,
         name: &str,
         input: Value,
+        fork: bool,
         arrived: std::time::Instant,
     ) -> Result<String, ModuleError> {
         self.admit(&route.session)?;
@@ -861,6 +868,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     route: route.clone(),
                     name: name.to_owned(),
                     input,
+                    fork,
                     reply,
                     timing,
                 })
@@ -1920,6 +1928,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         route,
                         name,
                         input,
+                        fork,
                         reply,
                         mut timing,
                     } => {
@@ -1963,6 +1972,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                     &settings,
                                     &name,
                                     &input,
+                                    fork,
                                     &mut timing,
                                 )
                                 .await

@@ -1093,13 +1093,8 @@ pub fn prepare_stamped(
 
 /// Count the memories the reply returns as retrieved, and write the reply.
 pub fn finish(conn: &mut Connection, scope: &Scope, prepared: Prepared) -> String {
-    let Prepared {
-        query,
-        hits,
-        diagnostics,
-        ..
-    } = prepared;
-    let returned: Vec<i64> = hits
+    let returned: Vec<i64> = prepared
+        .hits
         .iter()
         .filter_map(|hit| match hit {
             Hit::Memory(memory) => Some(memory.id),
@@ -1112,6 +1107,19 @@ pub fn finish(conn: &mut Connection, scope: &Scope, prepared: Prepared) -> Strin
             scope.session
         );
     }
+    reply(scope, prepared)
+}
+
+/// Write the reply without counting any retrieval, for a call that must
+/// leave memories as it found them: retrieval counts feed memory ranking and
+/// the dreamer's memory curation, so a call on a fork of a session counts none.
+pub fn reply(scope: &Scope, prepared: Prepared) -> String {
+    let Prepared {
+        query,
+        hits,
+        diagnostics,
+        ..
+    } = prepared;
     format_results(&query, &hits, scope.session, &diagnostics)
 }
 

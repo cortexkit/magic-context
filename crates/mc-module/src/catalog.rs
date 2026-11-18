@@ -85,6 +85,13 @@ pub(crate) struct ToolDefinition {
     pub semantics: u64,
     /// Served under `scope: read`: the tool writes no project data.
     pub read_scope: bool,
+    /// Marked `read_only` in the catalog: a call carrying the role's
+    /// `fork_id` (a quick question a runner forks off a head) runs and
+    /// changes nothing the person, the head or another session can observe.
+    /// Only a tool whose call path honours that may carry the mark; the
+    /// transport refuses a fork call to any other tool.
+    #[serde(default)]
+    pub read_only: bool,
     /// The argument schema without descriptions.
     pub structure: Value,
 }
@@ -1019,7 +1026,7 @@ fn catalog_tool(
     } else {
         description.to_string()
     };
-    Ok(json!({
+    let mut entry = json!({
         "name": tool.name,
         "schema_digest": schema_digest,
         "semantics": tool.semantics,
@@ -1027,7 +1034,12 @@ fn catalog_tool(
         "capabilities": tool.capabilities,
         "description": description,
         "input_schema": schema,
-    }))
+    });
+    // The role sends the mark only as `true`; an unmarked tool omits it.
+    if tool.read_only {
+        entry["read_only"] = Value::Bool(true);
+    }
+    Ok(entry)
 }
 
 fn guidance_text(

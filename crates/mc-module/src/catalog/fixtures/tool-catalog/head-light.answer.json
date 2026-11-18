@@ -1,6 +1,6 @@
 {
-  "generation": "3e874184550edaf652d30f4475c6526be31dd18e43fbdd74377bd7f3a8bac063",
-  "catalog_digest": "3e874184550edaf652d30f4475c6526be31dd18e43fbdd74377bd7f3a8bac063",
+  "generation": "bbb32d562e1264b9865289c783827121462421c8b4c31c00cbfb1215ad413f50",
+  "catalog_digest": "bbb32d562e1264b9865289c783827121462421c8b4c31c00cbfb1215ad413f50",
   "composition_digest": "c7dd640f65180d13af85feec11f66b90b7a184ef351485c4e68c7b974be5cb1c",
   "tools": [
     {
@@ -73,7 +73,8 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "read_only": true
     },
     {
       "name": "ctx_note",
@@ -264,7 +265,8 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "read_only": true
     }
   ],
   "user_commands": [

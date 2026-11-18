@@ -1,6 +1,6 @@
 {
-  "generation": "b67b93ac0769b26a2879db31d38075d9a968f927546c83ca4f058c137c73a780",
-  "catalog_digest": "b67b93ac0769b26a2879db31d38075d9a968f927546c83ca4f058c137c73a780",
+  "generation": "0e10ffb597c6de5d6b6d00d4c095cb08c8dd74d7146a21f3f69384c233963d7c",
+  "catalog_digest": "0e10ffb597c6de5d6b6d00d4c095cb08c8dd74d7146a21f3f69384c233963d7c",
   "composition_digest": "50cb8e9ddb0c594b308f0dfb68ef876588657336206e30746c5b3667b20e188f",
   "tools": [
     {
@@ -73,7 +73,8 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "read_only": true
     },
     {
       "name": "ctx_search",
@@ -122,7 +123,8 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "read_only": true
     },
     {
       "name": "ctx_keep",

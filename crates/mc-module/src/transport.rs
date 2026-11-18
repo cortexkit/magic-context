@@ -1762,9 +1762,16 @@ impl Handler {
                 ));
             }
         }
+        // A quick question a runner forks off the head carries the role's
+        // `fork_id`. Only a tool the catalog marks read-only runs on a fork,
+        // and it then changes nothing the person, the head or another session
+        // can observe; a malformed marker, or a marker on any other tool, is
+        // refused before anything runs. No ck-mc tool ever asks the person,
+        // so no fork call is refused for needing approval.
+        let fork = fork_call(body, &call.name)?;
         let (text, is_error) = match self
             .module
-            .tool_at(route, &call.name, call.arguments, arrived)
+            .tool_at(route, &call.name, call.arguments, fork, arrived)
             .await
         {
             Ok(output) => (output, false),
@@ -1927,6 +1934,22 @@ fn now_ms() -> u64 {
 fn tool_call(body: &[u8]) -> Result<ToolCallRequest, Refusal> {
     serde_json::from_slice(body)
         .map_err(|error| Refusal::invalid_params("", format!("not a tool call: {error}")))
+}
+
+/// Whether a call to `tool` carries a well-formed `fork_id`, refusing a
+/// malformed one and a marked call to a tool the catalog does not mark
+/// read-only.
+fn fork_call(body: &[u8], tool: &str) -> Result<bool, Refusal> {
+    use cortexkit_role_tool_provider::call;
+    let body: Value = serde_json::from_slice(body)
+        .map_err(|error| Refusal::invalid_params("", format!("not a tool call: {error}")))?;
+    let refused =
+        |error: subc_protocol::ErrorBody| Refusal::new(&error.code, error.message, error.detail);
+    let read_only = crate::catalog::definition()
+        .tool(tool)
+        .is_some_and(|definition| definition.read_only);
+    call::check_fork_call(&body, tool, read_only, false).map_err(refused)?;
+    Ok(call::fork_id(&body).map_err(refused)?.is_some())
 }
 
 fn to_value<T: Serialize>(result: Result<T, ModuleError>) -> Result<Value, ModuleError> {
@@ -2539,6 +2562,80 @@ mod agent_surface_tests {
                 .unwrap();
         let refused = handler.tool(&route, &call(&stale)).await.err().unwrap();
         assert_eq!(refused.code, "tool_schema_changed");
+    }
+
+    /// A forked quick question may call only the tools the catalog marks
+    /// read-only: a fork call to any other tool is refused by name before it
+    /// runs, and so is a malformed marker.
+    #[tokio::test]
+    async fn a_fork_call_runs_only_a_read_only_tool() {
+        let handler = Handler::new(Module::new(
+            SubcRunnerClient::new(
+                std::env::temp_dir().join("ck-mc-fork-unused"),
+                Arc::new(ChildScopes::new("test-fork")),
+            ),
+            crate::config::Config::from(crate::pass::Settings::default()),
+            None,
+            None,
+        ));
+        let route = Route {
+            session: SessionRef::new("runner", "test", "fork"),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        };
+        let call = |name: &str, arguments: Value, fork_id: Value| {
+            serde_json::to_vec(&json!({
+                "name": name,
+                "arguments": arguments,
+                "fork_id": fork_id,
+            }))
+            .unwrap()
+        };
+        for (name, arguments) in [
+            ("ctx_note", json!({"action": "read"})),
+            ("ctx_memory", json!({"action": "list"})),
+            ("ctx_reduce", json!({"drop": "1"})),
+            ("ctx_keep", json!({"tags": "1", "note": "n"})),
+        ] {
+            let refused = handler
+                .tool(&route, &call(name, arguments, json!("fork-1")))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(refused.code, "fork_call_refused", "{name}");
+            assert_eq!(
+                refused.detail,
+                Some(json!({"tool": name, "reason": "not_read_only"})),
+                "{name}"
+            );
+        }
+        for malformed in [json!("not valid"), json!(null), json!(7)] {
+            let refused = handler
+                .tool(
+                    &route,
+                    &call("ctx_search", json!({"query": "q"}), malformed.clone()),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(refused.code, "invalid_request", "{malformed}");
+            assert_eq!(refused.detail.unwrap()["field"], "fork_id", "{malformed}");
+        }
+        // A marked tool runs: with no context store, ctx_search answers its
+        // own tool error rather than a refusal.
+        let answer = handler
+            .tool(
+                &route,
+                &call("ctx_search", json!({"query": "q"}), json!("fork-1")),
+            )
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&answer).unwrap();
+        assert_eq!(result["isError"], json!(true), "{result}");
+        assert!(result
+            .to_string()
+            .contains("ctx_search needs the context store"));
     }
 
     #[test]

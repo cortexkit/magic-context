@@ -1,12 +1,13 @@
 //! The published kit runs against real bound Handler dispatch, in-process.
-//! With kit 0.15.8, every preset runs these 21 cases:
+//! With kit 0.15.13, every preset runs these 23 cases:
 //! user_commands_catalog; role_describe_{shape,cacheable};
 //! catalog_{schemas_flat,schemas_portable,reply_valid,modes_valid,
 //! emits_events_boolean,schema_digest_stable,digest_only,
-//! unknown_preset_refused,listed_presets_served};
+//! unknown_preset_refused,listed_presets_served,notice_templates};
 //! system_text_{digests_match_text,preflight_digest_stable,facts_legacy_omitted};
 //! terminal_frame_on_{success,refusal}; call_key_{malformed_refused,
-//! well_formed_accepted}; schema_pin_{current_accepted,malformed_refused}.
+//! well_formed_accepted}; schema_pin_{current_accepted,malformed_refused};
+//! fork_calls_honour_marker.
 //!
 //! The 45 skipped cases are: every reply_custody_* (12); user_commands_{
 //! reply,repeat,codemode_refused,flow_refused,accepted_late};
@@ -47,6 +48,9 @@ struct Subject {
 struct Instance {
     handler: Arc<Handler>,
     next_channel: AtomicU16,
+    /// The instance's `context.db`, read on a connection of its own for the
+    /// fork probe's observable state.
+    db: std::path::PathBuf,
 }
 
 struct TestRoute {
@@ -65,8 +69,9 @@ impl Harness for Subject {
 
     async fn spawn(&self, state_root: &Path) -> Result<Instance, HarnessError> {
         std::fs::create_dir_all(state_root).map_err(|e| HarnessError::new(e.to_string()))?;
-        let db = crate::context_db::ContextDb::create_for_tests(&state_root.join("context.db"))
-            .map_err(HarnessError::new)?;
+        let path = state_root.join("context.db");
+        let db =
+            crate::context_db::ContextDb::create_for_tests(&path).map_err(HarnessError::new)?;
         let client = SubcRunnerClient::new(
             state_root.join("unused-connection-file"),
             Arc::new(ChildScopes::new("ck-mc-test")),
@@ -79,6 +84,7 @@ impl Harness for Subject {
                 None,
             ))),
             next_channel: AtomicU16::new(1),
+            db: path,
         })
     }
 
@@ -202,6 +208,59 @@ impl ToolProviderSubject for Subject {
     fn slow_call(&self) -> Option<CallSpec> {
         None
     }
+    /// One probe for each tool the catalog marks read-only. The bound route
+    /// names a session with no Setup, so `ctx_expand` answers its tools-only
+    /// refusal; the session-level tests cover a compacted session.
+    fn fork_calls(&self) -> Vec<CallSpec> {
+        vec![
+            ("ctx_search".into(), json!({"query": "conformance"})),
+            ("ctx_expand".into(), json!({"tag": 1})),
+        ]
+    }
+    /// Every row of every table in the instance's `context.db`: the apps,
+    /// the head and every other session read that store, so all of it is
+    /// observable. ck-mc never asks the person for approval, so there is no
+    /// approval activity to add.
+    async fn fork_observable_state(&self, instance: &Instance) -> Result<Value, HarnessError> {
+        let error = |e: rusqlite::Error| HarnessError::new(e.to_string());
+        let conn = rusqlite::Connection::open_with_flags(
+            &instance.db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(error)?;
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                  ORDER BY name",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()
+            })
+            .map_err(error)?;
+        let mut state = serde_json::Map::new();
+        for table in tables {
+            let rows: Vec<Value> = conn
+                .prepare(&format!("SELECT * FROM \"{table}\""))
+                .and_then(|mut statement| {
+                    let columns = statement.column_count();
+                    statement
+                        .query_map([], |row| {
+                            (0..columns)
+                                .map(|at| {
+                                    row.get::<_, rusqlite::types::Value>(at)
+                                        .map(|value| json!(format!("{value:?}")))
+                                })
+                                .collect::<rusqlite::Result<Value>>()
+                        })?
+                        .collect::<rusqlite::Result<_>>()
+                })
+                .map_err(error)?;
+            state.insert(table, Value::Array(rows));
+        }
+        Ok(Value::Object(state))
+    }
     fn disabled_tool(&self) -> Option<String> {
         None
     }
@@ -257,6 +316,9 @@ async fn check(preset: &'static str, compacting: bool) {
         "call_key_well_formed_accepted",
         "schema_pin_current_accepted",
         "schema_pin_malformed_refused",
+        // Every preset's catalog marks ctx_search read-only, and the head's
+        // and the subagents' also mark ctx_expand.
+        "fork_calls_honour_marker",
     ];
     for case in CASES {
         let outcome = report.outcome(case.name);

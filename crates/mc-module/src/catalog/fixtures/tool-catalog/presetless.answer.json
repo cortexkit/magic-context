@@ -1,6 +1,6 @@
 {
-  "generation": "b3dc03c735f7b759eb75f963b93bab158f35105f21fc1750ca20b5ed6a36062a",
-  "catalog_digest": "b3dc03c735f7b759eb75f963b93bab158f35105f21fc1750ca20b5ed6a36062a",
+  "generation": "fc8cccbaa4464b596af031086cc235c663fb12637f4445ca1c3ef1cb8eada6a3",
+  "catalog_digest": "fc8cccbaa4464b596af031086cc235c663fb12637f4445ca1c3ef1cb8eada6a3",
   "presets": [
     "head",
     "worker",
@@ -197,7 +197,8 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "read_only": true
     }
   ]
 }

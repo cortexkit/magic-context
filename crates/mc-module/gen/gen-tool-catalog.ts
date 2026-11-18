@@ -197,6 +197,12 @@ interface ToolDefinition {
 	 * notes). Stamping with ctx_reduce only changes what this session's model sees.
 	 */
 	read_scope: boolean;
+	/**
+	 * Marked `read_only` in the catalog: a fork call (one carrying the role's
+	 * `fork_id`) to the tool changes nothing anyone can observe. Absent means
+	 * unmarked, and the catalog then omits the member.
+	 */
+	read_only?: boolean;
 	/** The argument schema without descriptions; property order never affects a digest. */
 	structure: JsonObject;
 }
@@ -880,6 +886,8 @@ function catalogTools(
 			capabilities: definition.capabilities,
 			description,
 			input_schema: schema,
+			// The role sends the mark only as `true`; an unmarked tool omits it.
+			...(definition.read_only === true ? { read_only: true } : {}),
 		};
 	});
 }

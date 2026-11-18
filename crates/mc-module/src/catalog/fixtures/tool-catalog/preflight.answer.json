@@ -1,6 +1,6 @@
 {
-  "generation": "bbf0fc63b5ff0ecbf7ade287f3a7768b9b4980d077e02a12ba1dedecd651c1e8",
-  "catalog_digest": "bbf0fc63b5ff0ecbf7ade287f3a7768b9b4980d077e02a12ba1dedecd651c1e8",
+  "generation": "40daa5ba6fcde35dedbacc80500860654443fdad08837383d6cf0b14a8079321",
+  "catalog_digest": "40daa5ba6fcde35dedbacc80500860654443fdad08837383d6cf0b14a8079321",
   "tools": [
     {
       "name": "ctx_note",
@@ -191,7 +191,8 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "read_only": true
     }
   ]
 }

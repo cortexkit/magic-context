@@ -49,6 +49,7 @@
       ],
       "semantics": 1,
       "read_scope": true,
+      "read_only": true,
       "structure": {
         "type": "object",
         "properties": {
@@ -216,6 +217,7 @@
       ],
       "semantics": 1,
       "read_scope": true,
+      "read_only": true,
       "structure": {
         "type": "object",
         "properties": {
