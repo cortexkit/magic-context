@@ -3160,6 +3160,14 @@
             "rationale": "Opt-in probe on real OpenCode 1 and 2 hosts that an ordinary session never exposes the Zen hidden summarizer variants (system prompt, Task tool, agent lists). Set MC_PRIMARY_PROBE_ROOT, MC_PRIMARY_BASE_PLUGIN, MC_PRIMARY_OC1 and MC_PRIMARY_OC2; without them the host tests skip and the carrier-leak guard tests run as plain unit tests.",
             "contract_refs": ["ZEN-PRIMARY-SURFACE"],
             "hosts": ["opencode", "opencode2"]
+        },
+        {
+            "path": "tests/pi-issue-938-images-recomp.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Issue 938 on real Pi and OMP hosts: an extension tool returns images; their tags count each image at the per-image cost, the protected tail ends inside the image outputs, and queued drops on old images land past the execute threshold and leave the request. A full /ctx-recomp over a pending marker that ended on a folded tool result stages and applies the marker for the rebuilt history, so the request is cut and the restarted host no longer loads summarized messages. Mock provider only, throwaway roots.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["pi", "omp"]
         }
     ]
 }

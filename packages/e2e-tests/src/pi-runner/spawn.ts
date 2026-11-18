@@ -134,6 +134,12 @@ export interface PiRunnerOptions {
   modelsCatalog?: string;
   /** Extra host CLI arguments, placed before the model selection (for example OMP's `--plan-yolo`). */
   hostArgs?: string[];
+  /**
+   * Declare the session model as accepting images. OMP's mock model is
+   * text-only by default, and OMP turns image tool output into a text
+   * description for a text-only model.
+   */
+  imageInput?: boolean;
   /** Compatibility option from the old spawn-per-turn runner. RPC sessions persist naturally. */
   continueSession?: boolean;
 }
@@ -229,7 +235,7 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
               {
                 id: "mock-model",
                 name: "Mock Model",
-                input: ["text"],
+                input: opts.imageInput ? ["text", "image"] : ["text"],
                 contextWindow: opts.modelContextLimit ?? 200000,
                 maxTokens: 8192,
                 reasoning: false,

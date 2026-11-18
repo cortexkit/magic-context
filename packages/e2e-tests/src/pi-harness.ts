@@ -49,6 +49,8 @@ export interface PiTestHarnessOptions {
   modelsCatalog?: string;
   /** Extra host CLI arguments, placed before the model selection (for example OMP's `--plan-yolo`). */
   hostArgs?: string[];
+  /** Declare the session model as accepting images (see PiRunnerOptions.imageInput). */
+  imageInput?: boolean;
 }
 
 const DEFAULT_MOCK_RESPONSE: MockResponse = {
@@ -256,6 +258,7 @@ export class PiTestHarness implements PiHostHarness {
       historianModel: options.historianModel,
       modelsCatalog: options.modelsCatalog,
       hostArgs: options.hostArgs,
+      imageInput: options.imageInput,
     });
 
     try {
