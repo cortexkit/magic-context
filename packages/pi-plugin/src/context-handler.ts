@@ -313,6 +313,7 @@ import {
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
 	buildPersistedDropTargets,
+	isUntaggedAssistantText,
 	TEXT_TAG_IDENTITY_MARKER,
 	tagTranscript,
 } from "@magic-context/core/shared/tag-transcript";
@@ -1077,6 +1078,12 @@ const piFallbackIndexesBySession = new Map<
 	}
 >();
 
+/**
+ * Pi tags with tag-only assistant literals kept inert, and the text identity
+ * check must skip the same untagged parts, so both read this one setting.
+ */
+const PI_PRESERVE_TAG_ONLY_ASSISTANT_TEXT = true;
+
 interface PiTextIdentityPlan {
 	driftedMessageIds: Set<string>;
 	legacyReminderTagNumbers: Set<number>;
@@ -1093,20 +1100,34 @@ function buildPiTextIdentityPlan(
 	reuseCandidates: ReadonlySet<string> = new Set(),
 ): PiTextIdentityPlan {
 	const currentSourcesByMessageId = new Map<string, string[]>();
+	// Text ordinals that tagTranscript leaves untagged, so no stored `:pN` row
+	// is expected there. Gemini, for one, streams an empty text block after a
+	// function call; without this, a reply with visible text and that trailing
+	// blank counted as drifted on every later pass and had its tag renumbered.
+	const untaggedOrdinalsByMessageId = new Map<string, Set<number>>();
 	for (const message of transcript.messages) {
 		const messageId = message.info.id;
 		if (messageId === undefined) continue;
-		currentSourcesByMessageId.set(
-			messageId,
+		const sources: string[] = [];
+		let untagged: Set<number> | undefined;
+		for (const part of message.parts) {
+			if (part.kind !== "text") continue;
+			const text = part.getText() ?? "";
+			if (
+				isUntaggedAssistantText(
+					message.info.role,
+					text,
+					PI_PRESERVE_TAG_ONLY_ASSISTANT_TEXT,
+				)
+			)
+				(untagged ??= new Set()).add(sources.length);
 			// Temporal gap markers are derived from the current projection. They are
 			// not part of the stored message identity and can disappear when a newly
 			// applied compaction boundary promotes a user message to the wire head.
-			message.parts
-				.filter((part) => part.kind === "text")
-				.map((part) =>
-					withoutPiLeadingTemporalMarker(stripTagPrefix(part.getText() ?? "")),
-				),
-		);
+			sources.push(withoutPiLeadingTemporalMarker(stripTagPrefix(text)));
+		}
+		currentSourcesByMessageId.set(messageId, sources);
+		if (untagged) untaggedOrdinalsByMessageId.set(messageId, untagged);
 	}
 
 	const legacyRowsByMessageId = new Map<
@@ -1163,14 +1184,26 @@ function buildPiTextIdentityPlan(
 		}
 		if (legacyRows.length === 0) continue;
 		legacyRows.sort((left, right) => left.ordinal - right.ordinal);
+		// The stored rows must line up with the current text parts: one row per
+		// ordinal, none past the last part, and a row for every part except one
+		// tagTranscript leaves untagged. A part that is untagged now but has a
+		// row is still compared below, like any other.
+		const untagged = untaggedOrdinalsByMessageId.get(messageId);
+		const rowOrdinals = new Set(legacyRows.map((row) => row.ordinal));
+		const vectorAligned =
+			rowOrdinals.size === legacyRows.length &&
+			legacyRows.every((row) => row.ordinal < currentSources.length) &&
+			currentSources.every(
+				(_, ordinal) =>
+					rowOrdinals.has(ordinal) || untagged?.has(ordinal) === true,
+			);
 		const vectorMatches =
-			legacyRows.length === currentSources.length &&
-			legacyRows.every((row, index) => {
-				if (row.ordinal !== index) return false;
+			vectorAligned &&
+			legacyRows.every((row) => {
 				const stored = withoutPiLeadingTemporalMarker(
 					sourceCache.get(row.tagId) ?? "",
 				);
-				const current = currentSources[index] ?? "";
+				const current = currentSources[row.ordinal] ?? "";
 				if (stored === current) return true;
 				// Older Pi cleanup persisted the stripped reminder body as source.
 				// Treat that exact projection as the same text identity so deployment
@@ -10881,7 +10914,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				{
 					skipPrefixInjection: !ctxReduceCallable,
 					// A tag-only literal retained at save time stays inert after a provider switch.
-					preserveTagOnlyAssistantText: true,
+					preserveTagOnlyAssistantText: PI_PRESERVE_TAG_ONLY_ASSISTANT_TEXT,
 					entryFingerprintByMessageId,
 					reuseMessageIds: textIdentityPlan.reusableMessageIds,
 					reuseTextMessageIds: textIdentityPlan.reusableTextMessageIds,

@@ -1043,18 +1043,41 @@ interface TagTextPartArgs {
     textTokenCache?: Map<string, { text: string; tokenCount: number }>;
 }
 
+/**
+ * Whether tagTranscript leaves this text part untagged. Pi and OMP can expose
+ * provider framing as assistant text blocks (Gemini, for one, streams an empty
+ * text block after a function call). Treat a previously prefixed blank as blank
+ * too, so MC never turns inert framing into a tag-bearing part that later strip
+ * logic could mistake for content. With `preserveTagOnlyAssistantText`, an
+ * assistant text that is nothing but tag notation stays untagged as well.
+ *
+ * Such a part still takes up a text ordinal but never gets a stored `:pN` row.
+ * Any check that compares stored rows with the current text parts must skip
+ * exactly these parts, so it calls this same function.
+ */
+export function isUntaggedAssistantText(
+    role: string,
+    text: string,
+    preserveTagOnlyAssistantText: boolean | undefined,
+): boolean {
+    return (
+        role === "assistant" &&
+        (stripWellFormedLeadingTagPrefix(text).trim().length === 0 ||
+            (preserveTagOnlyAssistantText === true &&
+                text.includes("§") &&
+                stripPersistedAssistantText(text).length === 0))
+    );
+}
+
 function tagTextPart(args: TagTextPartArgs): void {
     const identityStart = args.timing ? performance.now() : 0;
     const text = args.part.getText() ?? "";
-    // Pi and OMP can expose provider framing as assistant text blocks. Treat a
-    // previously prefixed blank as blank too, so MC never turns inert framing
-    // into a tag-bearing part that later strip logic could mistake for content.
     if (
-        args.message.info.role === "assistant" &&
-        (stripWellFormedLeadingTagPrefix(text).trim().length === 0 ||
-            (args.preserveTagOnlyAssistantText &&
-                text.includes("§") &&
-                stripPersistedAssistantText(text).length === 0))
+        isUntaggedAssistantText(
+            args.message.info.role,
+            text,
+            args.preserveTagOnlyAssistantText,
+        )
     ) {
         if (args.timing) args.timing.identity += performance.now() - identityStart;
         return;
