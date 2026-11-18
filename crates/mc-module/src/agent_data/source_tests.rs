@@ -1209,8 +1209,8 @@ async fn exported(f: &Fixture, cut: &str, session: &str) {
 
 /// A release that sends no `holderBox` names no computer: its tombstone
 /// records the `holder` alone, and the session is refused `session_moved`
-/// with an empty detail. No refusal names the `holder`, a backup author id
-/// rather than an address.
+/// with an empty detail. No refusal names the `holder`, which is an
+/// identifier the release carries, not an address.
 #[tokio::test]
 async fn a_release_without_a_holder_box_names_no_computer() {
     let f = Fixture::new();

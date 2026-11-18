@@ -245,8 +245,9 @@ impl MovingState {
 #[serde(deny_unknown_fields)]
 pub struct Released {
     pub cut: String,
-    /// The `holder` the release named: the new holder's backup author id.
-    /// It is not an address, so no refusal or log line names it.
+    /// The `holder` the release named: an identifier of the receiving
+    /// computer's backup author, recorded as the release gave it. It is not
+    /// an address, so no refusal or log line names it.
     pub holder: String,
     /// The `holderBox` the release named: the permanent box id of the
     /// computer that holds the session now. Absent when the driver sent
