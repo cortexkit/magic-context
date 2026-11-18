@@ -2,9 +2,10 @@
 //! means for the stream.
 //!
 //! A message is sealed under the fleet epoch current on the computer that
-//! sent it. A computer whose vault doesn't hold that epoch yet (a newly
-//! paired one, or one the hub's wrap of a new epoch hasn't reached) can't
-//! open it now but will later, so such a message is never skipped for good:
+//! sent it. A computer whose vault doesn't hold that epoch's key yet (a
+//! newly paired one, or one the new epoch's key, which the hub hands each
+//! paired computer wrapped for its vault, hasn't reached yet) can't open it
+//! now but will later, so such a message is never skipped for good:
 //! the engine holds its position before it and reads it again
 //! ([`super::apply`]). Only a message the vault can never open is skipped.
 //!
@@ -147,8 +148,8 @@ pub const OPEN_FAILED: &str = "fleet_epoch_open_failed";
 ///   brings the retry once it catches up.
 /// - `fleet_epoch_open_failed` is skipped for good for an epoch the vault
 ///   holds (at or below `highest_held`): the key is there and still doesn't
-///   open the message. For an epoch above it, the epoch's wrap hasn't
-///   arrived, so it is held. While `highest_held` is unknown, only an epoch
+///   open the message. For an epoch above it, the vault hasn't received
+///   that epoch's key yet, so it is held. While `highest_held` is unknown, only an epoch
 ///   this computer has opened before counts as held by the vault.
 /// - `corrupt` is the vault's own copy of the key damaged, not the
 ///   message: held, and alerted.
@@ -181,7 +182,7 @@ pub fn unopened(
         }
         return Unopened::Hold {
             why: format!(
-                "the vault answered {code} for epoch {epoch}, which this computer's vault doesn't hold yet; it is read again when the epoch arrives"
+                "the vault answered {code} for epoch {epoch}, whose key this computer's vault doesn't hold yet; it is read again when the key arrives"
             ),
             alert: false,
         };

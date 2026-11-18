@@ -491,9 +491,10 @@ fn held(conn: &rusqlite::Connection, row: &str, revision: i64) -> bool {
 
 /// A vault holding some fleet epochs, each under the test key: it opens an
 /// item of an epoch it holds as the vault does, and refuses an item of an
-/// epoch it doesn't hold with the code and class given, as the vault's
-/// build answers one. It can also refuse a whole call, or answer `corrupt`
-/// for an epoch whose key copy is damaged.
+/// epoch it doesn't hold with the code and class it was made with (the
+/// vault before its update answers `fleet_epoch_open_failed`, the updated
+/// one `fleet_epoch_unavailable`). It can also refuse a whole call, or
+/// answer `corrupt` for an epoch whose key copy is damaged.
 pub(crate) struct Vault {
     held: std::sync::Mutex<Vec<u64>>,
     missing: (&'static str, &'static str),

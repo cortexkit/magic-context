@@ -1,5 +1,5 @@
-//! Replication cases the second review found the engine got wrong. Each
-//! test describes the case and checks how the engine must behave.
+//! More replication cases that are easy to get wrong. Each test describes
+//! the case and checks how the engine must behave.
 //!
 //! - A store copied to another computer before it first joined the stream.
 //! - A person's delete whose message id another computer's change of the

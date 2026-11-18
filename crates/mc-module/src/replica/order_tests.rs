@@ -51,8 +51,8 @@ fn count(computer: &Computer, table: &str) -> i64 {
 }
 
 /// Raise the one memory's revision `times` times with nothing replicated
-/// changed, as the summarizer's sightings do, so this computer's next
-/// change goes out at a higher revision than another computer's.
+/// changed, as a writer that sees a fact again does, so this computer's
+/// next change goes out at a higher revision than another computer's.
 fn raise(computer: &Computer, times: usize) {
     for _ in 0..times {
         computer.execute("UPDATE memories SET revision = revision + 1");

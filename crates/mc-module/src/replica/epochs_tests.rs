@@ -41,7 +41,7 @@ fn an_open_failure_is_final_only_for_an_epoch_the_vault_holds() {
     assert_eq!(
         decide(OPEN_FAILED, "permanent", 4, true, status(Some(4), Some(3))),
         Some(false),
-        "above the highest held: the epoch's wrap hasn't arrived"
+        "above the highest held: the epoch's key hasn't reached this vault"
     );
     // Without it, an epoch this computer opened before counts as held.
     assert_eq!(
