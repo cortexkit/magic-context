@@ -114,7 +114,8 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
         .newer_days
         .as_ref()
         .unwrap()[&5]
-        .clone()
+        .days()
+        .cloned()
         .expect("summary 5's messages have times");
     let mut five = crate::summary::render::DecayRenderCompartment::from(&five);
     five.start_date = Some(days.start);
@@ -131,11 +132,14 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
 
     // A fold renders m[0] again: summaries the session no longer holds come
     // from context.db as it is now, the ones m[1] showed as it showed them.
+    // The cut let their messages go and this session saves no times, so the
+    // days come from what m[1] showed, and only its summaries keep them.
     session.fold_due = true;
     build(&mut session, &settings).expect("a fold");
     let m0 = shown(&session, head::M0_ID);
     assert!(m0.contains("## 1-4 · Edited title 1"), "{m0}");
-    assert!(m0.contains("## 13-16 · Work 4"), "{m0}");
+    assert!(m0.contains("## 13-16 · 1970-01-01 · Work 4"), "{m0}");
+    assert!(m0.contains("## 17-20 · 1970-01-01 · Work 5"), "{m0}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -177,7 +181,7 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
     );
     build(&mut session, &settings).expect("the fold lands");
     assert!(!session.fold_due);
-    assert!(shown(&session, head::M0_ID).contains("## 13-16 · Work 4"));
+    assert!(shown(&session, head::M0_ID).contains("## 13-16 · 1970-01-01 · Work 4"));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -287,21 +291,42 @@ fn a_restore_keeps_one_copy_of_the_head_text() {
 
 /// How long a fold takes to read the text of 3,700 summaries back from
 /// `context.db`, about as many as the largest head measured holds, with
-/// tiers of the measured average sizes. It prints the times; run it with
-/// `--release --ignored --nocapture` for numbers worth comparing.
+/// tiers of the measured average sizes, and to find the days of their
+/// headings: the first half of the messages' times from the times saved in
+/// `mode3.db`, the rest from the message search index. It prints the times;
+/// run it with `--release --ignored --nocapture` for numbers worth
+/// comparing.
 #[test]
 #[ignore = "a measurement; run it explicitly"]
 fn a_fold_reads_3700_summaries_back() {
     const SUMMARIES: i64 = 3_700;
+    const HOUR: i64 = 3_600_000;
     let dir = scratch("held-summaries-3700");
     let (mut session, _, _, _, settings) = fixture();
     let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     session.db = Some(Arc::new(db));
     session.features.summarizer = true;
+    let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
+    let saved: Vec<crate::app_read::IndexRow> = (1..=SUMMARIES * 2)
+        .map(|n| crate::app_read::IndexRow {
+            mid: format!("m{n}"),
+            ordinal: n as u64,
+            at_ms: (1_772_323_200_000 + n * HOUR) as u64,
+        })
+        .collect();
+    store.save_app_index(&session.key, &saved, None).unwrap();
+    session.store = Some(Arc::new(store));
     let words =
         "Traced the notice through the summary due check and kept the cached prefix stable. ";
     session.db.as_ref().unwrap().with_connection(|conn| {
         let tx = conn.transaction().unwrap();
+        for n in SUMMARIES * 2 + 1..=SUMMARIES * 4 {
+            tx.execute(
+                "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms) VALUES ('s1', ?1, ?1, ?2)",
+                rusqlite::params![n, 1_772_323_200_000 + n * HOUR],
+            )
+            .unwrap();
+        }
         for sequence in 1..=SUMMARIES {
             let (start, end) = (sequence * 4 - 3, sequence * 4);
             let p1 = format!("{sequence}: {}", words.repeat(28));
@@ -340,6 +365,10 @@ fn a_fold_reads_3700_summaries_back() {
     let base = session.next_baseline.clone().expect("the fold renders");
     assert_eq!(base.through_sequence, SUMMARIES);
     assert_eq!(base.m0, from_memory, "text read back renders the same m[0]");
+    assert!(
+        base.m0.contains("## 14797-14800 · 2027-11-07 · Work 3700 "),
+        "the newest summary's days are found"
+    );
 
     let median = |mut runs: Vec<std::time::Duration>| {
         runs.sort();
@@ -367,9 +396,21 @@ fn a_fold_reads_3700_summaries_back() {
             })
             .collect(),
     );
+    let mut rows = session.summary_rows().unwrap();
+    let dates = median(
+        (0..7)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                session.date_summaries(&mut rows, None);
+                started.elapsed()
+            })
+            .collect(),
+    );
+    assert!(rows.iter().all(|row| row.start_date.is_some()));
     println!(
-        "FOLD_LOAD summaries={SUMMARIES} load_median_ms={:.1} fold_median_ms={:.1} first_released_fold_ms={:.1}",
+        "FOLD_LOAD summaries={SUMMARIES} load_median_ms={:.1} dates_median_ms={:.1} fold_median_ms={:.1} first_released_fold_ms={:.1}",
         loads.as_secs_f64() * 1e3,
+        dates.as_secs_f64() * 1e3,
         folds.as_secs_f64() * 1e3,
         first_fold.as_secs_f64() * 1e3,
     );

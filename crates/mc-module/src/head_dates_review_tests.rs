@@ -1,6 +1,5 @@
 //! Review witnesses for the dated summary headings of the history head.
-//! Each test states the rule it checks and fails on the build it was written
-//! against; the reason on its `#[ignore]` says what is wrong.
+//! Each test states the rule it checks.
 
 use super::head_bytes_tests::execute;
 use super::*;
@@ -87,18 +86,18 @@ fn shown(session: &Session, id: &str) -> String {
 }
 
 /// Rule: a summary's heading shows the days its own first and last message
-/// were written. `m[1]` keeps the days it recorded for a summary by sequence
-/// number alone (`Baseline::newer_days`). A revert forgets the summaries
-/// from the reverted message on, and the summarizer numbers the next one
-/// after the last left, so the new branch's first summary takes the number
-/// the forgotten one had. When no rebuild that drops the forgotten summary
-/// from `m[1]` lands in between, the new summary inherits the forgotten
-/// one's days. Here that rebuild's view is undelivered: the runner asked
-/// for a view on a request (a ride) and ck-mc's answer missed the request's
-/// deadline (`ride_undelivered`), so the session goes back to the baseline
-/// that still records summary 4's old days.
+/// were written. `m[1]` keeps the days it recorded for each summary it shows
+/// (`Baseline::newer_days`), under the summary's sequence number. A revert
+/// forgets the summaries from the reverted message on, and the summarizer
+/// numbers the next one after the last left, so the new branch's first
+/// summary takes the number the forgotten one had. When no rebuild that
+/// drops the forgotten summary from `m[1]` lands in between, the baseline
+/// still holds the forgotten one's days under that number, and the new
+/// summary must not inherit them. Here that rebuild's view is undelivered:
+/// the runner asked for a view on a request (a ride) and ck-mc's answer
+/// missed the request's deadline (`ride_undelivered`), so the session goes
+/// back to the baseline that still records summary 4's old days.
 #[test]
-#[ignore = "witness: m[1] heads a summary written at a reverted sequence with the reverted summary's days"]
 fn a_summary_written_again_at_a_reverted_sequence_shows_its_own_days() {
     let dir = scratch("head-dates-review-reverted");
     let (mut session, settings) = timed_head(&dir);

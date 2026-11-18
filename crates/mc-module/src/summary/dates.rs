@@ -8,7 +8,7 @@
 //! ([`search_times`]), which also holds the standalone plugin's times for a
 //! session moved from it. A summary with either time unknown shows no date.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use rusqlite::{params, Connection};
 
@@ -24,39 +24,61 @@ pub(crate) fn utc_day(ms: u64) -> Option<String> {
 }
 
 /// When each of `boundaries` (a message's number and id) was written,
-/// from the message search index in `context.db`: the time stored with
-/// each message the index holds text for, by number. The standalone plugin
-/// writes the same rows, from the host's own message times, so a session
-/// moved from it finds its older messages' times here. A row is passed over
-/// when the index records a different message at that number; an empty id
-/// is matched by number alone. Keyed by message number; a time unknown, 0
-/// or unreadable is left out.
+/// from the message search index in `context.db`, in one query: the time
+/// stored with each message the index holds text for, by number. The
+/// standalone plugin writes the same rows, from the host's own message
+/// times, so a session moved from it finds its older messages' times here.
+/// A row is passed over when the index records a different message at that
+/// number; an empty id is matched by number alone. Keyed by number and id;
+/// a time unknown or 0 is left out, as is every time when the read fails.
 pub(crate) fn search_times(
     conn: &Connection,
     harness: &str,
     session: &str,
     boundaries: &[(i64, &str)],
-) -> HashMap<i64, u64> {
-    let Ok(mut statement) = conn.prepare_cached(
-        "SELECT map.message_time_ms FROM message_fts_rowid_map map
-          WHERE map.session_id = ?1 AND map.message_ordinal = ?2
-            AND NOT EXISTS (
-                SELECT 1 FROM message_history_source src
-                 WHERE src.session_id = map.session_id
-                   AND src.message_ordinal = map.message_ordinal
-                   AND src.harness = ?3
-                   AND ?4 <> '' AND src.message_id <> ?4)",
-    ) else {
+) -> HashMap<(i64, String), u64> {
+    if boundaries.is_empty() {
+        return HashMap::new();
+    }
+    let numbers: BTreeSet<i64> = boundaries.iter().map(|(number, _)| *number).collect();
+    let Ok(wanted) = serde_json::to_string(&numbers) else {
         return HashMap::new();
     };
+    // Each number's time, and the ids the index records at it.
+    let mut found: HashMap<i64, (Option<i64>, Vec<String>)> = HashMap::new();
+    let read = |found: &mut HashMap<i64, (Option<i64>, Vec<String>)>| -> rusqlite::Result<()> {
+        let mut statement = conn.prepare_cached(
+            "SELECT map.message_ordinal, map.message_time_ms, src.message_id
+               FROM message_fts_rowid_map map
+               LEFT JOIN message_history_source src
+                 ON src.session_id = map.session_id
+                AND src.message_ordinal = map.message_ordinal
+                AND src.harness = ?3
+              WHERE map.session_id = ?1
+                AND map.message_ordinal IN (SELECT value FROM json_each(?2))",
+        )?;
+        let mut rows = statement.query(params![session, wanted, harness])?;
+        while let Some(row) = rows.next()? {
+            let entry = found.entry(row.get(0)?).or_default();
+            entry.0 = row.get(1)?;
+            if let Some(mid) = row.get::<_, Option<String>>(2)? {
+                entry.1.push(mid);
+            }
+        }
+        Ok(())
+    };
+    if read(&mut found).is_err() {
+        return HashMap::new();
+    }
     boundaries
         .iter()
         .filter_map(|(number, mid)| {
-            let at: Option<i64> = statement
-                .query_row(params![session, number, harness, mid], |row| row.get(0))
-                .ok()?;
-            let at = u64::try_from(at?).ok().filter(|at| *at > 0)?;
-            Some((*number, at))
+            let (at, recorded) = found.get(number)?;
+            if !mid.is_empty() && recorded.iter().any(|other| other != mid) {
+                return None;
+            }
+            let at = u64::try_from((*at)?).ok().filter(|at| *at > 0)?;
+            Some(((*number, (*mid).to_owned()), at))
         })
         .collect()
 }
@@ -100,11 +122,14 @@ mod tests {
                 (6, ""),
             ],
         );
-        assert_eq!(times, HashMap::from([(1, 1_772_668_800_000)]));
+        assert_eq!(
+            times,
+            HashMap::from([((1, "m1".to_owned()), 1_772_668_800_000)])
+        );
         // An empty id is matched by number alone.
         assert_eq!(
             search_times(&conn, "mock", "s", &[(2, "")]),
-            HashMap::from([(2, 1_772_755_200_000)])
+            HashMap::from([((2, String::new()), 1_772_755_200_000)])
         );
     }
 }

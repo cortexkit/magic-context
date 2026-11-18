@@ -154,19 +154,84 @@ pub struct Baseline {
     #[serde(default)]
     pub memory_format: u32,
     /// The days `m[1]` heads each summary it shows with, by summary
-    /// sequence: `None` for a summary it shows without a date. `m[1]` is
-    /// rendered again on every view build, but a summary's days are looked
-    /// up only when `m[1]` first shows it ([`newer_days_due`]), and kept
-    /// here from then on, so its heading keeps its bytes until the next
-    /// fold, whatever a later lookup would find. `None` in a baseline saved
-    /// before headings carried dates: its `m[1]` keeps showing its
+    /// sequence, with the summary they belong to. `m[1]` is rendered again
+    /// on every view build, but a summary's days are looked up only when
+    /// `m[1]` first shows it ([`newer_days_due`]), and kept here from then
+    /// on, so its heading keeps its bytes until the next fold, whatever a
+    /// later lookup would find. A fold falls back on them for a summary
+    /// whose messages' times it can no longer find. `None` in a baseline
+    /// saved before headings carried dates: its `m[1]` keeps showing its
     /// summaries without dates until the summaries it shows change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub newer_days: Option<NewerDays>,
 }
 
 /// [`Baseline::newer_days`].
-pub type NewerDays = BTreeMap<i64, Option<SummaryDays>>;
+pub type NewerDays = BTreeMap<i64, ShownDays>;
+
+/// The days `m[1]` heads one summary with (`None` for no date), and which
+/// summary that is. A revert forgets summaries, and the summarizer numbers
+/// the next one after the last left, so a later summary can take a
+/// forgotten one's sequence: it is another summary, whose days are looked
+/// up afresh.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ShownDays {
+    /// The days of the summary over the messages `of` names.
+    Of {
+        of: SummaryBounds,
+        days: Option<SummaryDays>,
+    },
+    /// Saved before entries named their summary (the plain days, or `null`
+    /// for none). It stands for whichever summary has its sequence, so the
+    /// heading it was saved for keeps its bytes.
+    Unnamed(Option<SummaryDays>),
+}
+
+/// The first and last message a summary covers, by number and id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryBounds {
+    pub start: i64,
+    pub end: i64,
+    pub start_id: String,
+    pub end_id: String,
+}
+
+impl ShownDays {
+    /// An entry for `summary`, with the days its row carries.
+    fn recorded(summary: &StoredCompartment) -> Self {
+        Self::Of {
+            of: SummaryBounds {
+                start: summary.start_message,
+                end: summary.end_message,
+                start_id: summary.start_message_id.clone(),
+                end_id: summary.end_message_id.clone(),
+            },
+            days: SummaryDays::of(summary),
+        }
+    }
+
+    /// Whether this is `summary`'s entry: one that names the same first and
+    /// last message, or one that names none.
+    pub fn belongs_to(&self, summary: &StoredCompartment) -> bool {
+        match self {
+            Self::Of { of, .. } => {
+                of.start == summary.start_message
+                    && of.end == summary.end_message
+                    && of.start_id == summary.start_message_id
+                    && of.end_id == summary.end_message_id
+            }
+            Self::Unnamed(_) => true,
+        }
+    }
+
+    /// The days, when the summary has a date.
+    pub fn days(&self) -> Option<&SummaryDays> {
+        match self {
+            Self::Of { days, .. } | Self::Unnamed(days) => days.as_ref(),
+        }
+    }
+}
 
 /// The days a summary's first and last message were written, as
 /// `YYYY-MM-DD` in UTC.
@@ -713,11 +778,13 @@ fn newer_shown<'a, S: std::borrow::Borrow<StoredCompartment>>(
 }
 
 /// Whether `m[1]` for `baseline` and `summaries` heads a summary with days
-/// the baseline doesn't record yet: then [`newer_summaries`] takes that
-/// summary's days from `summaries`, and a caller looks them up first. A
-/// summary `m[1]` already shows keeps the days the baseline records, so a
+/// the baseline doesn't record for it yet: then [`newer_summaries`] takes
+/// that summary's days from `summaries`, and a caller looks them up first.
+/// A summary `m[1]` already shows keeps the days the baseline records, so a
 /// rebuild for any other reason leaves `m[1]`'s summary block byte for byte
-/// as served.
+/// as served. A recorded entry that names other messages than the summary
+/// at its sequence belonged to a summary a revert forgot: that summary's
+/// heading changes anyway.
 ///
 /// A baseline from before dates records none. Its `m[1]` keeps its
 /// summaries undated until the summaries it shows change; its attribution
@@ -729,9 +796,11 @@ pub fn newer_days_due<S: std::borrow::Borrow<StoredCompartment>>(
     summaries: &[S],
 ) -> bool {
     match &baseline.newer_days {
-        Some(days) => {
-            newer_shown(baseline, summaries).any(|summary| !days.contains_key(&summary.sequence))
-        }
+        Some(days) => newer_shown(baseline, summaries).any(|summary| {
+            !days
+                .get(&summary.sequence)
+                .is_some_and(|days| days.belongs_to(summary))
+        }),
         None if baseline.summary_items.is_empty() => false,
         None => {
             let served: BTreeSet<i64> = baseline
@@ -765,8 +834,8 @@ pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
             newer_shown(baseline, summaries)
                 .map(|summary| {
                     let days = match recorded.get(&summary.sequence) {
-                        Some(days) => days.clone(),
-                        None => SummaryDays::of(summary),
+                        Some(days) if days.belongs_to(summary) => days.clone(),
+                        _ => ShownDays::recorded(summary),
                     };
                     (summary.sequence, days)
                 })
@@ -774,7 +843,7 @@ pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
         ),
         None if due => Some(
             newer_shown(baseline, summaries)
-                .map(|summary| (summary.sequence, SummaryDays::of(summary)))
+                .map(|summary| (summary.sequence, ShownDays::recorded(summary)))
                 .collect(),
         ),
         None => None,
@@ -786,7 +855,7 @@ pub fn newer_summaries<S: std::borrow::Borrow<StoredCompartment>>(
         let shown = days
             .as_ref()
             .and_then(|days| days.get(&summary.sequence))
-            .and_then(Option::as_ref);
+            .and_then(ShownDays::days);
         rendered.start_date = shown.map(|days| days.start.clone());
         rendered.end_date = shown.map(|days| days.end.clone());
         let text = render_compartment_at_tier(&rendered, 1);
@@ -1229,6 +1298,53 @@ mod tests {
         assert!(!newer_days_due(&unattributed, &both));
         let (m1, _, _) = delta(&unattributed, &inputs(&both, &[]));
         assert!(m1.contains("## 9-12 · Part 3"), "{m1}");
+    }
+
+    /// A recorded entry names the summary it was found for, and `m[1]` uses
+    /// it only for that summary: one written again at the same sequence
+    /// after a revert gets its own days. Entries saved before they named
+    /// their summary (the days alone, or `null`) load as standing for any
+    /// summary at their sequence, and save again as the same JSON.
+    #[test]
+    fn recorded_days_belong_to_the_summary_they_name() {
+        let saved = r#"{"2":{"start":"2026-03-02","end":"2026-03-03"},"3":null}"#;
+        let unnamed: NewerDays = serde_json::from_str(saved).unwrap();
+        assert!(matches!(&unnamed[&2], ShownDays::Unnamed(Some(_))));
+        assert_eq!(unnamed[&3], ShownDays::Unnamed(None));
+        assert_eq!(serde_json::to_string(&unnamed).unwrap(), saved);
+
+        let with_days = |mut row: StoredCompartment, prefix: &str, days: (&str, &str)| {
+            row.start_message_id = format!("{prefix}{}", row.start_message);
+            row.end_message_id = format!("{prefix}{}", row.end_message);
+            row.start_date = Some(days.0.to_owned());
+            row.end_date = Some(days.1.to_owned());
+            row
+        };
+        let forgotten = with_days(summary(2, 5, 8), "m", ("2026-03-02", "2026-03-03"));
+        let again = with_days(summary(2, 5, 8), "r", ("2026-04-20", "2026-04-21"));
+        let named = ShownDays::recorded(&forgotten);
+        let json = serde_json::to_string(&named).unwrap();
+        assert_eq!(serde_json::from_str::<ShownDays>(&json).unwrap(), named);
+        assert!(named.belongs_to(&forgotten) && !named.belongs_to(&again));
+        assert!(unnamed[&2].belongs_to(&again));
+
+        let first = [summary(1, 1, 4), forgotten];
+        let base = fold(&inputs(&first[..1], &[]), None);
+        let (m1, shown, _) = delta(&base, &inputs(&first, &[]));
+        assert!(m1.contains("## 5-8 · 2026-03-02→03 · Part 2"), "{m1}");
+        assert_eq!(shown.newer_days.as_ref().unwrap()[&2], named);
+        let reverted = [summary(1, 1, 4), again];
+        assert!(newer_days_due(&shown, &reverted));
+        let (m1, _, _) = delta(&shown, &inputs(&reverted, &[]));
+        assert!(m1.contains("## 5-8 · 2026-04-20→21 · Part 2"), "{m1}");
+        // An entry saved unnamed keeps the heading it was saved for.
+        let saved_before = Baseline {
+            newer_days: Some(unnamed),
+            ..shown
+        };
+        assert!(!newer_days_due(&saved_before, &reverted));
+        let (m1, _, _) = delta(&saved_before, &inputs(&reverted, &[]));
+        assert!(m1.contains("## 5-8 · 2026-03-02→03 · Part 2"), "{m1}");
     }
 
     #[test]

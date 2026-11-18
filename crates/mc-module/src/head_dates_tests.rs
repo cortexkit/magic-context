@@ -211,3 +211,59 @@ fn a_summary_with_an_unknown_time_shows_no_date() {
     assert!(m0.contains("## 9-12 · 2026-03-03→04 · Work 3"), "{m0}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// When a fold can no longer find a summary's times anywhere, it heads the
+/// summary with the days `m[1]` showed for it, so they don't disappear from
+/// `m[0]`; but only when `m[1]`'s entry names the same messages as the
+/// summary at that sequence now.
+#[test]
+fn a_fold_keeps_the_days_m1_showed_for_the_same_summary() {
+    let lose_times = |session: &mut Session| {
+        let base = session.index.base();
+        session.index = crate::index::Index::starting_at(base);
+        session.index.extend(
+            (base..=60)
+                .map(|n| text(n, &format!("m{n}")))
+                .map(|mut entry| {
+                    entry.written_at = 0;
+                    entry
+                }),
+        );
+        session.store = None;
+    };
+    let dir = scratch("head-dates-fold-fallback");
+    let (mut session, settings) = timed_head(&dir, time_of);
+    build(&mut session, &settings).unwrap();
+    publish(&mut session, 4);
+    build(&mut session, &settings).unwrap();
+    assert!(shown(&session, head::M1_ID).contains("## 13-16 · 2026-03-05→06 · Work 4"));
+    lose_times(&mut session);
+    session.fold_due = true;
+    build(&mut session, &settings).unwrap();
+    let m0 = shown(&session, head::M0_ID);
+    assert!(m0.contains("## 13-16 · 2026-03-05→06 · Work 4"), "{m0}");
+    assert!(
+        m0.contains("## 1-4 · Work 1"),
+        "only m[1] recorded days: {m0}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+
+    // The same, but `m[1]`'s entry for sequence 4 named other messages.
+    let dir = scratch("head-dates-fold-fallback-other");
+    let (mut session, settings) = timed_head(&dir, time_of);
+    build(&mut session, &settings).unwrap();
+    publish(&mut session, 4);
+    build(&mut session, &settings).unwrap();
+    let mut baseline = session.baseline.as_deref().unwrap().clone();
+    match baseline.newer_days.as_mut().unwrap().get_mut(&4).unwrap() {
+        head::ShownDays::Of { of, .. } => of.start_id = "r13".into(),
+        unnamed => panic!("m[1] records which summary it dated: {unnamed:?}"),
+    }
+    session.baseline = Some(Arc::new(baseline));
+    lose_times(&mut session);
+    session.fold_due = true;
+    build(&mut session, &settings).unwrap();
+    let m0 = shown(&session, head::M0_ID);
+    assert!(m0.contains("## 13-16 · Work 4"), "{m0}");
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -947,30 +947,34 @@ impl Store {
 
     /// When each of the messages `mids` was written, in milliseconds since
     /// the Unix epoch, as the session saved it for the apps when its index
-    /// let the message go. A message with no saved time, or a saved time of
-    /// 0, is left out.
+    /// let the message go. One query for all of them. A message with no
+    /// saved time, or a saved time of 0, is left out, as is every message
+    /// when the read fails.
     pub(crate) fn message_times(
         &self,
         key: &SessionRef,
         mids: &[&str],
     ) -> std::collections::HashMap<String, u64> {
-        let connection = self.lock();
-        let Ok(mut statement) = connection.prepare_cached(
-            "SELECT at_ms FROM app_read_message_index
-              WHERE runner = ?1 AND harness = ?2 AND session = ?3 AND message_id = ?4",
-        ) else {
+        if mids.is_empty() {
+            return Default::default();
+        }
+        let Ok(wanted) = serde_json::to_string(mids) else {
             return Default::default();
         };
-        mids.iter()
-            .filter_map(|mid| {
-                let at: u64 = statement
-                    .query_row(params![key.runner, key.harness, key.session, mid], |row| {
-                        row.get(0)
-                    })
-                    .ok()?;
-                (at > 0).then(|| ((*mid).to_owned(), at))
-            })
-            .collect()
+        let connection = self.lock();
+        let read = || -> rusqlite::Result<std::collections::HashMap<String, u64>> {
+            let mut statement = connection.prepare_cached(
+                "SELECT message_id, at_ms FROM app_read_message_index
+                  WHERE runner = ?1 AND harness = ?2 AND session = ?3
+                    AND message_id IN (SELECT value FROM json_each(?4))",
+            )?;
+            let rows = statement.query_map(
+                params![key.runner, key.harness, key.session, wanted],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+            )?;
+            rows.filter(|row| !matches!(row, Ok((_, 0)))).collect()
+        };
+        read().unwrap_or_default()
     }
 
     pub(crate) fn save_app_index(

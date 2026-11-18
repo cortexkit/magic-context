@@ -231,7 +231,8 @@ fn scenario(run: &mut Run) {
         .newer_days
         .as_ref()
         .unwrap()[&4]
-        .clone()
+        .days()
+        .cloned()
         .expect("summary 4's messages have times");
     let mut rendered = crate::summary::render::DecayRenderCompartment::from(newer);
     rendered.start_date = Some(days.start);
