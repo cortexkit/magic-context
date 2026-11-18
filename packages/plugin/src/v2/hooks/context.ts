@@ -2780,7 +2780,6 @@ export async function registerContext(context: V2Context) {
                 draft.messages.splice(0, draft.messages.length, ...replayed.messages);
             if (replayHead) applyCheckpointHead(draft, replayHead);
         };
-        let postFold = false;
         try {
             // Check writer admission before best-effort setup writers can each spend
             // their own busy timeout. No transform callback runs in this transaction.
@@ -2991,8 +2990,9 @@ export async function registerContext(context: V2Context) {
                 const localCut = cut && isLocalCheckpoint(cut) ? cut : undefined;
                 const incoming =
                     localCut && draft.messages.find((message) => message.id === localCut.id);
-                postFold = cut !== undefined;
-                if (localCut && !incoming)
+                // With compaction off nothing is restored after a host checkpoint,
+                // so the draft needs no checkpoint to restore against.
+                if (!compactionOff && localCut && !incoming)
                     throw new Error("The host checkpoint disappeared from the context draft");
                 checkpointAtEntry = incoming || null;
                 if (localCut && nativeFoldReplay) {
@@ -3184,8 +3184,10 @@ export async function registerContext(context: V2Context) {
             // of the conversation, and the module would be handed the whole history
             // again — the cost the fold exists to remove. On a turn it did compact,
             // the boundary message is already gone from the array and this is a
-            // no-op. Both happen in an ordinary session.
-            if (rustModeModuleClient && db) {
+            // no-op. Both happen in an ordinary session. With compaction off no
+            // boundary is recorded, so one left over from before the switch must
+            // not cut the host's array: the host's own messages go out unchanged.
+            if (rustModeModuleClient && db && !compactionOff) {
                 const dropped = trimToRecordedBoundary(db, draft.sessionID, draft.messages);
                 if (dropped > 0)
                     sessionLog(
@@ -3455,19 +3457,13 @@ export async function registerContext(context: V2Context) {
                     });
                 }
                 log("[magic-context] compaction-off: fail-closed inert, passing through", error);
-            } else if (postFold) {
-                await refuseBeforeProvider(
-                    context.session,
-                    draft.sessionID,
-                    "post-fold-restore",
-                    error,
-                );
-                throw new V2ContextRefusal(
-                    "Magic Context could not restore the unarchived host history.",
-                    { cause: error },
-                );
             } else {
-                // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
+                // Only compaction-off reaches here: with compaction on every
+                // other error became a refusal above. Magic Context restores
+                // nothing in this mode, even after a host checkpoint, so the
+                // host's own request is the one to send. Another
+                // plugin can also poison the shared draft; do not fail an
+                // otherwise viable turn.
                 log("[magic-context] v2 context unavailable", error);
             }
         }
