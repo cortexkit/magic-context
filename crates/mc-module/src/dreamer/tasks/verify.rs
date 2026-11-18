@@ -97,8 +97,9 @@ const DIFF_FRAME: &str = "dreamer/verify.input.with-diff";
 /// At most this many memories go in one message checked by reading code:
 /// one. Each step of a child run resends every file read so far, so the
 /// memories of one batch paid for each other's reads on every later step;
-/// alone, a memory's run carries only its own reads, while the system text,
-/// tools and task frame every run shares stay cached.
+/// alone, a memory's run carries only its own reads, while what every run
+/// shares (the system text, the tool definitions and the task's fixed
+/// instructions) stays cached.
 pub(crate) const READ_BATCH_SIZE: usize = 1;
 /// At most this many memories go in one message shown a diff. Such a
 /// message starts with the diff in hand and rarely reads much, so one run

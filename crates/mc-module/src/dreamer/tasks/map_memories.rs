@@ -70,8 +70,8 @@ pub(crate) const OPERATION: &str = "map";
 /// At most this many memories go in one message: one. Each step of a child
 /// run resends every file read so far, so the memories of one batch paid for
 /// each other's reads on every later step; alone, a memory's run carries only
-/// its own reads, while the system text, tools and task frame every run
-/// shares stay cached. Verify's batches checked by reading hold the same
+/// its own reads, while what every run shares (the system text, the tool
+/// definitions and the task's fixed instructions) stays cached. Verify's batches checked by reading hold the same
 /// number ([`super::verify::READ_BATCH_SIZE`]).
 pub(crate) const BATCH_SIZE: usize = 1;
 /// What a child whose run reached [`STEP_CAP`] is sent, once; its reply's
