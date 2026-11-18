@@ -7,17 +7,21 @@ import {
 	schedulePiTransformDecisionResolve,
 } from "@magic-context/core/features/magic-context/transform-decision-log";
 import { createTestTempDir } from "../../plugin/src/shared/test-temp-dir";
-import { clearPiContextReceipt, registerPiGuardedContext } from "./pi-context-refusal";
+import {
+	clearPiContextReceipt,
+	registerPiGuardedContext,
+} from "./pi-context-refusal";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { assistantMessage, fakeContext, userMessage } from "./test-utils.test";
 
-// A busting pass's transform_decisions row is written late: the next context
-// pass finds the assistant that answered it and queues the write on a 0 ms
-// timer. Bun runs I/O callbacks before due timers, so with a fast provider the
-// next pass's request can be answered and its run can end before that timer
-// fires. Seen on a real Oh My Pi CI host: the `/ctx-flush` rebuild's row was
-// discarded as "queued Pi transform decision" 2 ms after the next run's
-// agent_end, and it was never written.
+// A context pass that rewrote already-served message bytes (a cache bust; here
+// `/ctx-flush` landing a queued drop) records its transform_decisions row
+// late: the next context pass finds the assistant that answered it and queues
+// the write on a 0 ms timer. Bun runs I/O callbacks before due timers, so with
+// a fast provider the next pass's request can be answered and its run can end
+// before that timer fires. Seen on a real Oh My Pi CI host: the `/ctx-flush`
+// rebuild's row was discarded as "queued Pi transform decision" 2 ms after the
+// next run's agent_end, and it was never written.
 
 const SESSION = "ses-pi-decision-after-agent-end";
 const flushDecision = {
@@ -116,7 +120,9 @@ function guardedHost(
 		queued,
 		release: () => release(),
 		context: (messages: unknown[]) =>
-			emit("context", { messages: structuredClone(messages) }) as Promise<unknown>,
+			emit("context", {
+				messages: structuredClone(messages),
+			}) as Promise<unknown>,
 		dispatch: (messages: unknown[]) =>
 			emit("before_provider_request", {
 				payload: { messages: structuredClone(messages) },
@@ -152,7 +158,10 @@ const flushAnswer = assistantMessage("after the flush", 20);
 const next = userMessage("warm after the flush", 30);
 const nextInput = [before, prompt, flushAnswer, next];
 
-/** The flush run: its pass busts and stages the row for the answer it gets. */
+/**
+ * The flush run: its pass rewrites served bytes and stages the decision row for
+ * the assistant that answers its request.
+ */
 async function runFlushTurn(
 	host: ReturnType<typeof guardedHost>,
 	branch: BranchEntry[],
@@ -169,7 +178,7 @@ const startBranch = (): BranchEntry[] => [
 	{ type: "message", id: "u-flush", message: prompt },
 ];
 
-test("a busting pass keeps its decision row when the next run ends before the queued write runs", async () => {
+test("a cache-busting pass keeps its decision row when the next run ends before the queued write runs", async () => {
 	await withDecisionRows("mc-pi-decision-agent-end-", async (db, written) => {
 		const branch = startBranch();
 		const host = guardedHost(db, branch);
