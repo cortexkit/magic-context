@@ -634,7 +634,10 @@ export function schedulePiTransformDecisionResolve(args: {
                 assertQueuedWrite?.();
             } catch {
                 deleteScheduledWriteToken(args.sessionId, token);
-                sessionLog(args.sessionId, "DISCARDED CONTEXT RESULT: queued Pi transform decision");
+                sessionLog(
+                    args.sessionId,
+                    "DISCARDED CONTEXT RESULT: queued Pi transform decision",
+                );
                 return;
             }
             writeQueuedTransformDecision(dbPath, token, {
