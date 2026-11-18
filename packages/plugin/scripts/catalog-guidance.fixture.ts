@@ -13,7 +13,8 @@ const texts = JSON.parse(
 ).texts as Record<string, string>;
 
 /**
- * The item the Rust catalog adds to the desk's list of records: the clock note
+ * The item the Rust catalog adds to the guidance's list of records (the markings Magic Context
+ * puts in the context): the clock note
  * that only the Rust module sends. This plugin's guidance has no such item.
  */
 export const CLOCK_NOTE_RECORD = texts.clock_note_record ?? "";

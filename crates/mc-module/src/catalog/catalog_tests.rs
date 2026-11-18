@@ -886,7 +886,7 @@ fn legacy_render(name: &str, flags: &TextFlags, values: &BTreeMap<&str, String>)
 
 /// What a legacy text renders as now. The frozen sources still carry the
 /// time markers; the current texts are those sources with the markers on,
-/// the clock note named in the marker's place in the desk's list of records,
+/// the clock note named in the marker's place in the head guidance's list of records (the markings Magic Context puts in the context),
 /// and "and use the time" gone.
 fn legacy_render_now(name: &str, flags: &TextFlags, values: &BTreeMap<&str, String>) -> String {
     let record = &tool_catalog::definition().texts["clock_note_record"];
@@ -1089,7 +1089,7 @@ fn a_user_override_replaces_head_text_with_or_without_compaction() {
     };
     let primary = text_for("head", true, &config);
     assert!(primary.starts_with("My own section."), "{primary}");
-    // The config-free clauses (here the desk's markings, naming the clock
+    // The config-free clauses (here the paragraph listing Magic Context's markings, naming the clock
     // note) still follow the user's section.
     assert!(primary.contains("`Now: <UTC time>`"), "{primary}");
     assert!(!primary.contains("<!-- +Xm -->"), "{primary}");

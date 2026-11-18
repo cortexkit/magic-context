@@ -5,7 +5,8 @@ const MINUTE: u64 = 60_000;
 
 #[test]
 fn the_note_renders_as_the_runner_renders_a_utc_minute() {
-    // The contract's own sample: 1795042320 seconds is Wed 18 Nov 22:52Z.
+    // The llm-runner contract's datetime-slot sample (cortexkit-role-llm-runner
+    // 0.8.62): 1795042320 seconds is Wed 18 Nov 22:52Z.
     let rendered = render(&[template()], &note(1_795_042_320_999), |_| None).unwrap();
     assert_eq!(rendered, "Now: Wed 18 Nov 22:52Z");
     // Day, hour and minute are zero-padded; seconds are dropped.
@@ -164,7 +165,8 @@ fn samples_v1() {
     use sha2::Digest;
 
     let pretty = |value: &Value| format!("{}\n", serde_json::to_string_pretty(value).unwrap());
-    // 2026-11-18T22:52:00Z, as the contract's own clock-notice sample.
+    // 2026-11-18T22:52:00Z, the time in the llm-runner contract's datetime-slot
+    // sample (cortexkit-role-llm-runner 0.8.62).
     let now_ms = 1_795_042_320_000;
     let send = |name: &str, turn_system: bool| {
         let request = SendRequest::template(

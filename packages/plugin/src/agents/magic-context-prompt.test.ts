@@ -491,7 +491,8 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
 /**
  * The Rust catalog consumes this matrix too, independently checking the rendered bytes.
  * The Rust module has no time markers, so it is compared with this guidance without
- * them; it adds the clock note, which only it sends, to the desk's list of records.
+ * them; it adds the clock note, which only it sends, to the guidance's list of
+ * records (the markings Magic Context puts in the context).
  */
 describe("buildMagicContextSection — Rust catalog guidance parity", () => {
     const matrix = JSON.parse(

@@ -516,8 +516,9 @@ function withoutOnce(text: string, part: string, what: string): string {
 }
 
 /**
- * A head's desk names the clock note among the records, a note only the
- * module sends; the plugin's text has no such item.
+ * A head's guidance names the clock note in its list of records (the
+ * markings Magic Context puts in the context), a note only the module
+ * sends; the plugin's text has no such item.
  */
 function withoutClockNote(text: string): string {
 	const record = DEFINITION.texts.clock_note_record;
@@ -526,7 +527,7 @@ function withoutClockNote(text: string): string {
 }
 
 /**
- * A user's override is followed by the desk's markings paragraph, which the
+ * A user's override is followed by the paragraph listing Magic Context's markings, which the
  * plugin adds only with its time markers on.
  */
 function withoutOverrideMarkings(text: string, inputs: TextInputs): string {

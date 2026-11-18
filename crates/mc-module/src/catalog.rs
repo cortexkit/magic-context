@@ -1080,7 +1080,7 @@ fn guidance_text(
         Preset::Worker | Preset::Reader => format!("worker/{surface}"),
         Preset::Head => match &config.guidance_override {
             // A user's override replaces the whole primary section; the
-            // runtime clauses (the desk's markings, caveman, language)
+            // runtime clauses (the paragraph listing Magic Context's markings, caveman, language)
             // still follow it.
             Some(text) => {
                 values.insert(

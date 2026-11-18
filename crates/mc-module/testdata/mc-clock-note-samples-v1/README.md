@@ -55,4 +55,5 @@ template (`invalid_params {field: "plan.senders"}`), so core must leave the
 clock template out of such a runner's plan. When a session's plan lacks the
 template anyway, its runner refuses the note with
 `invalid_params {field: "template"}`; ck-mc then sends that session no clock
-note until its next Setup.
+note until its next Setup (the runner's `compaction.setup` call for the session,
+made when the runner starts serving it, for example after a restart).

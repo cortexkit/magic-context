@@ -25,7 +25,7 @@ impl Session {
             self.log_foreign("notice", &notice.conditions);
             return None;
         };
-        // Not newer than the last notice handled since Setup (compaction contract N5). Setup sets
+        // Not newer than the last notice handled since Setup. Setup sets
         // the count to 0 and a runner's first notice after it is 1, so this
         // also ignores a notice numbered 0.
         if notice.seq <= self.seq || self.suspended {
