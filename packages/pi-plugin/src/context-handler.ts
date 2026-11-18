@@ -1109,7 +1109,7 @@ function buildPiTextIdentityPlan(
 		const messageId = message.info.id;
 		if (messageId === undefined) continue;
 		const sources: string[] = [];
-		let untagged: Set<number> | undefined;
+		const untagged = new Set<number>();
 		for (const part of message.parts) {
 			if (part.kind !== "text") continue;
 			const text = part.getText() ?? "";
@@ -1120,14 +1120,14 @@ function buildPiTextIdentityPlan(
 					PI_PRESERVE_TAG_ONLY_ASSISTANT_TEXT,
 				)
 			)
-				(untagged ??= new Set()).add(sources.length);
+				untagged.add(sources.length);
 			// Temporal gap markers are derived from the current projection. They are
 			// not part of the stored message identity and can disappear when a newly
 			// applied compaction boundary promotes a user message to the wire head.
 			sources.push(withoutPiLeadingTemporalMarker(stripTagPrefix(text)));
 		}
 		currentSourcesByMessageId.set(messageId, sources);
-		if (untagged) untaggedOrdinalsByMessageId.set(messageId, untagged);
+		if (untagged.size > 0) untaggedOrdinalsByMessageId.set(messageId, untagged);
 	}
 
 	const legacyRowsByMessageId = new Map<

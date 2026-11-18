@@ -1044,12 +1044,13 @@ interface TagTextPartArgs {
 }
 
 /**
- * Whether tagTranscript leaves this text part untagged. Pi and OMP can expose
- * provider framing as assistant text blocks (Gemini, for one, streams an empty
- * text block after a function call). Treat a previously prefixed blank as blank
- * too, so MC never turns inert framing into a tag-bearing part that later strip
- * logic could mistake for content. With `preserveTagOnlyAssistantText`, an
- * assistant text that is nothing but tag notation stays untagged as well.
+ * Whether tagTranscript leaves this text part untagged. Pi and Oh My Pi can
+ * expose provider framing as assistant text blocks (Gemini, for one, streams an
+ * empty text block after a function call). Treat a previously prefixed blank as
+ * blank too, so Magic Context never turns inert framing into a tag-bearing part
+ * that later strip logic could mistake for content. With
+ * `preserveTagOnlyAssistantText`, an assistant text that is nothing but tag
+ * notation stays untagged as well.
  *
  * Such a part still takes up a text ordinal but never gets a stored `:pN` row.
  * Any check that compares stored rows with the current text parts must skip

@@ -73,7 +73,12 @@ const geminiReply = (text: string, callId: string, timestamp: number) =>
 		stopReason: "toolUse",
 		content: [
 			{ type: "text", text },
-			{ type: "toolCall", id: callId, name: "read", arguments: { path: callId } },
+			{
+				type: "toolCall",
+				id: callId,
+				name: "read",
+				arguments: { path: callId },
+			},
 			{ type: "text", text: "" },
 		],
 	});
