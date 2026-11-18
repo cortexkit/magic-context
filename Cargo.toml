@@ -43,7 +43,7 @@ cortexkit-tokens = "0.2"
 # 0.12) reads credentials over the module's own SDK consumer, and takes that
 # release's `SubcConsumer`; 0.41 in turn needs control 0.41 and protocol
 # 0.37.2.
-subc-protocol = "=0.37.2"
+subc-protocol = "=0.37.4"
 subc-control = "=0.41.0"
 subc-transport = "=0.18.0"
 subc-client-rs = "=0.41.1"

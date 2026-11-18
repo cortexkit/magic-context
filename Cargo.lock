@@ -2627,9 +2627,9 @@ dependencies = [
 
 [[package]]
 name = "subc-config"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "701a3c1b6e06ed0fcec46bb155b09ed194c9d4871aefade0447eb67eebd6c324"
+checksum = "b7f5bd0130cdf088277a309ee2786940a04bd37af17f7a95b5b21e62b75c2f67"
 dependencies = [
  "regex",
  "ryu",
@@ -2736,9 +2736,9 @@ dependencies = [
 
 [[package]]
 name = "subc-protocol"
-version = "0.37.2"
+version = "0.37.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6358a80bda1927e234a7d3c8750e2c7e67913af5355eaa971bb97ad012df2b57"
+checksum = "8223340be699cb9e743edb3cfa3e45889d2cd1bfce5892c627e666f40e923933"
 dependencies = [
  "base64 0.22.1",
  "serde",
