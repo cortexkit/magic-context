@@ -15,10 +15,9 @@
 //! epoch methods, over ck-mc's own SDK consumer. Each call is one attempt,
 //! with no retry inside the client: a seal sent twice would give a second
 //! ciphertext, and the engine seals again on its next round anyway. The
-//! functions that build and read the wire shape by hand
-//! ([`seal_batch_params`], [`parse_seal_reply`], [`open_batch_params`],
-//! [`parse_open_reply`]) state the same contract, and the tests check them
-//! against the vault's published samples.
+//! tests also build and read the wire shape by hand (the functions marked
+//! for tests below), to check it against the vault's published samples;
+//! ck-mc itself never does.
 //!
 //! Plaintext is memory content: it is held in buffers wiped when dropped,
 //! and no error, log line or `Debug` output carries it. The client keeps it
@@ -32,8 +31,11 @@ use cortexkit_claustrum_client::{
     ClaustrumCredentialResolver, CredentialErrorClass, CredentialResolverError,
     FleetEpochOpenRequest, FleetEpochOpenResult, FleetEpochSeal, FleetEpochSealRequest, Secret,
 };
+#[cfg(test)]
 use serde_json::{json, Value};
-use zeroize::{Zeroize, Zeroizing};
+#[cfg(test)]
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use super::wire::{decode, encode};
 
@@ -122,8 +124,9 @@ pub trait Sealer: Send + Sync {
     async fn open_batch(&self, items: &[OpenInput]) -> Result<Vec<Opened>, SealError>;
 }
 
-/// `fleet.epoch_seal_batch`'s parameters.
-pub fn seal_batch_params(items: &[SealInput]) -> Value {
+/// `fleet.epoch_seal_batch`'s parameters, built by hand.
+#[cfg(test)]
+pub(crate) fn seal_batch_params(items: &[SealInput]) -> Value {
     json!({
         "items": items
             .iter()
@@ -132,8 +135,9 @@ pub fn seal_batch_params(items: &[SealInput]) -> Value {
     })
 }
 
-/// `fleet.epoch_open_batch`'s parameters.
-pub fn open_batch_params(items: &[OpenInput]) -> Value {
+/// `fleet.epoch_open_batch`'s parameters, built by hand.
+#[cfg(test)]
+pub(crate) fn open_batch_params(items: &[OpenInput]) -> Value {
     json!({
         "items": items
             .iter()
@@ -149,7 +153,8 @@ pub fn open_batch_params(items: &[OpenInput]) -> Value {
 
 /// Overwrite every `plaintext` text in a vault request or reply built or
 /// read with the functions above, once it is no longer needed.
-pub fn wipe_plaintexts(value: &mut Value) {
+#[cfg(test)]
+pub(crate) fn wipe_plaintexts(value: &mut Value) {
     match value {
         Value::Object(members) => {
             for (key, member) in members.iter_mut() {
@@ -165,6 +170,7 @@ pub fn wipe_plaintexts(value: &mut Value) {
 }
 
 /// The refusal a whole-call error body carries, if `value` is one.
+#[cfg(test)]
 fn refusal(value: &Value) -> Option<SealError> {
     let error = value.get("error")?;
     let code = error
@@ -177,6 +183,7 @@ fn refusal(value: &Value) -> Option<SealError> {
 }
 
 /// The items of a batch reply, which must hold one per request item.
+#[cfg(test)]
 fn reply_items(value: &Value, expected: usize) -> Result<&Vec<Value>, SealError> {
     let result = value.get("result").unwrap_or(value);
     if let Some(error) = refusal(result) {
@@ -192,8 +199,9 @@ fn reply_items(value: &Value, expected: usize) -> Result<&Vec<Value>, SealError>
     Ok(items)
 }
 
-/// Read `fleet.epoch_seal_batch`'s reply for `expected` items.
-pub fn parse_seal_reply(value: &Value, expected: usize) -> Result<Vec<Sealed>, SealError> {
+/// Read `fleet.epoch_seal_batch`'s reply for `expected` items by hand.
+#[cfg(test)]
+pub(crate) fn parse_seal_reply(value: &Value, expected: usize) -> Result<Vec<Sealed>, SealError> {
     reply_items(value, expected)?
         .iter()
         .map(|item| {
@@ -215,8 +223,9 @@ pub fn parse_seal_reply(value: &Value, expected: usize) -> Result<Vec<Sealed>, S
         .collect()
 }
 
-/// Read `fleet.epoch_open_batch`'s reply for `expected` items.
-pub fn parse_open_reply(value: &Value, expected: usize) -> Result<Vec<Opened>, SealError> {
+/// Read `fleet.epoch_open_batch`'s reply for `expected` items by hand.
+#[cfg(test)]
+pub(crate) fn parse_open_reply(value: &Value, expected: usize) -> Result<Vec<Opened>, SealError> {
     reply_items(value, expected)?
         .iter()
         .map(|item| {
