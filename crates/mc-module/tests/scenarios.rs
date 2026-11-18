@@ -3799,7 +3799,7 @@ fn user_texts(host: &Host) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_persons_message_gets_the_time_since_the_last_one_and_a_hint_of_related_memory() {
+async fn a_persons_message_after_a_gap_gets_a_hint_of_related_memory_and_no_time_marker() {
     let dir = scratch("pre-user");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     {
@@ -3835,14 +3835,14 @@ async fn a_persons_message_gets_the_time_since_the_last_one_and_a_hint_of_relate
     assert_clean(&runner);
     let texts = user_texts(runner.host());
     assert_eq!(texts.len(), 3, "{texts:?}");
-    // The first message follows nothing, and the third follows quickly.
+    // Every message is stored as written: ck-mc adds no time marker.
     assert_eq!(texts[0], "Start.");
     assert_eq!(texts[2], "ok");
     // The second comes six minutes after the reply before it, and a commit
-    // matches it.
+    // matches it: it gets the hint after it and nothing in front.
     assert_eq!(
         texts[1],
-        "<!-- +6m -->\nFix zebra parser crash on empty input\n\n<ctx-search-hint>\n\
+        "Fix zebra parser crash on empty input\n\n<ctx-search-hint>\n\
          Your memory may contain 1 related fragment:\n\
          - commit aaaaaaa today: Fix zebra parser crash on empty input\n\
          If the fragments above seem relevant to the current request, you may run ctx_search to retrieve full context. Otherwise ignore.\n\
