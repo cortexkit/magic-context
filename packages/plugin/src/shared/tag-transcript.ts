@@ -1072,13 +1072,7 @@ export function isUntaggedAssistantText(
 function tagTextPart(args: TagTextPartArgs): void {
     const identityStart = args.timing ? performance.now() : 0;
     const text = args.part.getText() ?? "";
-    if (
-        isUntaggedAssistantText(
-            args.message.info.role,
-            text,
-            args.preserveTagOnlyAssistantText,
-        )
-    ) {
+    if (isUntaggedAssistantText(args.message.info.role, text, args.preserveTagOnlyAssistantText)) {
         if (args.timing) args.timing.identity += performance.now() - identityStart;
         return;
     }

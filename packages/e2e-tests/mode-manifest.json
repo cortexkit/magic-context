@@ -67,6 +67,14 @@
             "hosts": ["omp", "pi"]
         },
         {
+            "path": "tests/issue-948-blank-assistant-text.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real Pi and OMP sessions whose mock provider streams each tool-calling reply as visible text, the call and a trailing empty text block (Gemini's stream shape): every request only appends to the previous one, each reply keeps its first tag number and no content-derived text identity is stored. Pi hands Magic Context the empty block; OMP removes it before its context handlers on this Anthropic wire, so the OMP lane is a control. Host PID lsof proves throwaway-store containment.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["omp", "pi"]
+        },
+        {
             "path": "tests/opencode2/native-fold-hidden-edit.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
