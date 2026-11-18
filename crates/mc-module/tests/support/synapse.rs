@@ -39,11 +39,15 @@ impl RunnerClient for CountedTransport {
     async fn synapse_call(
         &self,
         session: &SessionRef,
+        module: &str,
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let result = self.inner.synapse_call(session, method, params).await;
+        let result = self
+            .inner
+            .synapse_call(session, module, method, params)
+            .await;
         if let Err(reason) = &result {
             self.refusals.lock().unwrap().push(reason.clone());
         }
@@ -112,7 +116,7 @@ async fn unknown_synapse_route_is_remembered_across_search_sessions() {
         .tool(&client, &settings, "ctx_search", &input)
         .await
         .unwrap();
-    settings.rerank = mc_module::search::rerank::Reranker::Synapse;
+    settings.rerank = mc_module::search::rerank::Reranker::local_synapse();
     let started = Instant::now();
     let answer = first
         .tool(&client, &settings, "ctx_search", &input)

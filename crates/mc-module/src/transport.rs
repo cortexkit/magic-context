@@ -840,10 +840,13 @@ impl RunnerClient for SubcRunnerClient {
 
     /// Synapse admits any principal on its management surface and reads no
     /// project from the bind, so the route is opened unscoped, bound to the
-    /// `magic-context` harness and the session the search is for.
+    /// `magic-context` harness and the session the search is for. `module`
+    /// is the local `synapse` or a remote one Callosum re-exports
+    /// (`fed:<fingerprint>:synapse`); only that module is called.
     async fn synapse_call(
         &self,
         session: &SessionRef,
+        module: &str,
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
@@ -854,7 +857,7 @@ impl RunnerClient for SubcRunnerClient {
         let reply = consumer
             .call(
                 RouteTarget::ManagementSurface {
-                    module_id: "synapse".to_owned(),
+                    module_id: module.to_owned(),
                 },
                 BindIdentity::new("magic-context", session.session.clone()),
                 wire::encode(method, &params),

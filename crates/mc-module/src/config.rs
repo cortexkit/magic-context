@@ -19,7 +19,9 @@
 //!   environment and files nor make ck-mc fetch a vault credential and send
 //!   it to the endpoint;
 //! - where text is embedded (provider, endpoint, query wording) is the user's
-//!   choice alone.
+//!   choice alone, and so is where a search is reranked (`rerank.*`, the
+//!   Synapse module `rerank.module` names included); a project may only
+//!   turn reranking off.
 //!
 //! Each file is re-read when its modification time changes, so an edit
 //! applies from the session's next pass without a restart.
@@ -323,8 +325,9 @@ impl Loader {
 }
 
 /// What a file's settings call for in the log: an obsolete key that is
-/// ignored, and a `clock_note` that can't be used. `user` is whether this
-/// is the user's file, the only one `clock_note` is read from.
+/// ignored, a `clock_note` that can't be used, and a `rerank.module` that
+/// names no module ck-mc may call. `user` is whether this is the user's
+/// file, the only one `clock_note` and `rerank.module` are read from.
 fn setting_notes(value: &Value, user: bool) -> Vec<String> {
     let mut notes = Vec::new();
     if value.get("temporal_awareness").is_some() {
@@ -339,6 +342,9 @@ fn setting_notes(value: &Value, user: bool) -> Vec<String> {
         } else if let Err(error) = crate::clock_note::parse_interval(clock_note) {
             notes.push(format!("{error}; the default of 30m applies"));
         }
+    }
+    if user {
+        notes.extend(crate::search::rerank::module_note(value));
     }
     notes
 }

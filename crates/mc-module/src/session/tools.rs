@@ -254,18 +254,18 @@ impl Session {
             .trim();
         let prose = settings.rerank != Reranker::Off && rerank::is_prose_query(query);
         // Synapse's model is pinned before any lane is read, so a missing
-        // Synapse costs no extra retrieval.
+        // Synapse costs no extra retrieval. Only the module the settings name
+        // is asked, here and for the scores.
         let mut pinned = None;
-        if prose && settings.rerank == Reranker::Synapse {
-            match rerank::pin_synapse(client.synapse_call(
-                &self.key,
-                "models.list",
-                serde_json::json!({}),
-            ))
+        if let (true, Reranker::Synapse(module)) = (prose, &settings.rerank) {
+            match rerank::pin_synapse(
+                module,
+                client.synapse_call(&self.key, module, "models.list", serde_json::json!({})),
+            )
             .await
             {
                 Ok(pin) => pinned = Some(pin),
-                Err(Skipped(reason)) => rerank::log_fallback(&reason),
+                Err(Skipped(reason)) => rerank::synapse_fell_back(module, &reason),
             }
             timing.mark_detail(
                 "pin",
@@ -277,7 +277,7 @@ impl Session {
             );
         }
         let pool = match (&settings.rerank, &pinned) {
-            (Reranker::Synapse, Some(_)) => Some(rerank::POOL),
+            (Reranker::Synapse(_), Some(_)) => Some(rerank::POOL),
             (Reranker::Remote(remote), _) if prose => Some(remote.top_n),
             _ => None,
         };
@@ -308,9 +308,10 @@ impl Session {
         if !prepared.candidates().is_empty() {
             let texts = prepared.candidates().to_vec();
             let scored = match (&settings.rerank, &pinned) {
-                (Reranker::Synapse, Some(pin)) => client
+                (Reranker::Synapse(module), Some(pin)) => client
                     .synapse_call(
                         &self.key,
+                        module,
                         "rerank.score",
                         rerank::score_request(pin, prepared.query(), &texts),
                     )
@@ -325,26 +326,32 @@ impl Session {
             timing.mark_detail(
                 "rerank",
                 match (&settings.rerank, scored.is_ok()) {
-                    (Reranker::Synapse, true) => "synapse,scored",
-                    (Reranker::Synapse, false) => "synapse,fallback",
+                    (Reranker::Synapse(_), true) => "synapse,scored",
+                    (Reranker::Synapse(_), false) => "synapse,fallback",
                     (Reranker::Remote(_), true) => "remote,scored",
                     (Reranker::Remote(_), false) => "remote,fallback",
                     (Reranker::Off, _) => "fallback",
                 },
             );
-            match scored {
-                Ok(scores) => prepared.reorder(&scores),
-                Err(Skipped(reason)) => {
-                    rerank::log_fallback(&reason);
+            match (scored, &settings.rerank) {
+                (Ok(scores), reranker) => {
+                    if let Reranker::Synapse(module) = reranker {
+                        rerank::synapse_scored(module);
+                    }
+                    prepared.reorder(&scores);
+                }
+                (Err(Skipped(reason)), Reranker::Synapse(module)) => {
+                    rerank::synapse_fell_back(module, &reason);
                     // A Synapse that refused the scores is asked for its
                     // model again on the next search, in case the pin is
                     // what it refused.
-                    if settings.rerank == Reranker::Synapse {
-                        rerank::forget_synapse_pin();
-                    }
+                    rerank::forget_synapse_pin(module);
+                }
+                (Err(Skipped(reason)), reranker) => {
+                    rerank::log_fallback(&reason);
                     // Only a hosted reranker's skip is shown to the model, as
                     // the plugin does.
-                    if matches!(settings.rerank, Reranker::Remote(_)) {
+                    if matches!(reranker, Reranker::Remote(_)) {
                         skipped_note = Some(rerank::skipped_line(&reason));
                     }
                 }

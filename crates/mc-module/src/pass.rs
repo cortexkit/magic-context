@@ -142,7 +142,7 @@ impl Default for Settings {
             git_max_commits: 2000,
             auto_promote: true,
             embedding: None,
-            rerank: crate::search::rerank::Reranker::Synapse,
+            rerank: crate::search::rerank::Reranker::local_synapse(),
             clock_note: Some(crate::clock_note::DEFAULT_INTERVAL_MS),
             mural_enabled: false,
             auto_search: AutoSearch::default(),
