@@ -178,6 +178,11 @@ impl RunnerClient for Client {
     fn runner_setup(&self, runner: &str) {
         self.capabilities.forget(runner);
     }
+    /// Entorhinal as a single computer answers: every dreamer role granted
+    /// at once.
+    fn role_leases(&self) -> std::sync::Arc<dyn crate::dreamer::lease::RoleLeases> {
+        crate::dreamer::lease_double::SampleLeases::granting()
+    }
     async fn notice_keep(&self, session: &SessionRef) -> bool {
         self.capabilities
             .notice_keep(&session.runner, 1, async {

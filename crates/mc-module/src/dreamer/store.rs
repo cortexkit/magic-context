@@ -1,6 +1,8 @@
 //! The dreamer's own rows in `context.db` (migration 107): each owner's
 //! task schedules, the lock an owner's writer holds, and one record per
-//! task run.
+//! task run. Since migration 112 a run's record also names the role leases
+//! its latest batch was sent under, with their generations, which is the
+//! journal a run's lease fencing checks ([`journal_leases`]).
 //!
 //! An owner is a `(level, owner_id)` pair, the same pair memories are kept
 //! under, so a task scheduled for a project and the memories it changes name
@@ -413,9 +415,13 @@ pub fn lock_holder(
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunEnd {
     /// `applied`, `nothing_to_do`, `waiting`, `failed`, `budget_stopped`,
-    /// `lock_lost`, or `skipped` for a run the person started that could not
-    /// run on this stack (a task that reads code, and no tool provider to
-    /// read it with).
+    /// `lock_lost`, `lease_lost` (its role's lease lapsed, was withdrawn,
+    /// or is older than one the journal has seen, before a batch),
+    /// `handed_back` (another computer asked for its role, so it started no
+    /// batch after the one in flight), or `skipped` for a run the person
+    /// started that could not run on this stack (a task that reads code,
+    /// and no tool provider to read it with) or whose role this computer
+    /// does not hold.
     pub outcome: String,
     pub failure_class: Option<String>,
     pub error: Option<String>,
@@ -462,6 +468,49 @@ pub fn close_interrupted(conn: &Connection, now: i64) -> rusqlite::Result<usize>
     )
 }
 
+/// The newest generation of `role`'s lease any run in the journal held
+/// ([`journal_leases`]); `None` when none held one.
+pub fn highest_gen(conn: &Connection, role: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT MAX(held.value) FROM dream_task_runs, json_each(dream_task_runs.leases_json) AS held
+          WHERE dream_task_runs.leases_json IS NOT NULL AND held.key = ?1",
+        [role],
+        |row| row.get(0),
+    )
+}
+
+/// Record in run `run`'s row that its next batch is sent under `gens`, the
+/// generation of each role lease it holds, unless the journal has seen a
+/// newer generation of one of them: `Ok(Err)` then says which, and nothing
+/// is recorded. A computer that lost a role to another and got it back
+/// holds a newer generation, so an older one means a lease this run should
+/// no longer act under. The check and the record share one transaction, so
+/// two processes can't both pass it with different generations.
+pub fn journal_leases(
+    conn: &mut Connection,
+    run: i64,
+    gens: &[(String, i64)],
+) -> rusqlite::Result<Result<(), String>> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for (role, gen) in gens {
+        if let Some(highest) = highest_gen(&tx, role)?.filter(|highest| gen < highest) {
+            return Ok(Err(format!(
+                "the journal has seen generation {highest} of {role}, newer than this run's {gen}"
+            )));
+        }
+    }
+    let held: serde_json::Map<String, Value> = gens
+        .iter()
+        .map(|(role, gen)| (role.clone(), Value::from(*gen)))
+        .collect();
+    tx.execute(
+        "UPDATE dream_task_runs SET leases_json = ?2 WHERE id = ?1",
+        params![run, Value::Object(held).to_string()],
+    )?;
+    tx.commit()?;
+    Ok(Ok(()))
+}
+
 /// What an owner's row records for a task that runs once per project and
 /// workspace instead of on a schedule ([`super::task::Task::once`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -476,12 +525,13 @@ pub struct OnceRecord {
 }
 
 /// Whether a run of `kind` for `owner` has ended without failing: applied,
-/// found nothing to do, stopped at its budget, or skipped.
+/// found nothing to do, stopped at its budget, handed its role back to
+/// another computer, or skipped.
 pub fn has_run(conn: &Connection, owner: &OwnerKey, kind: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM dream_task_runs
                          WHERE level = ?1 AND owner_id = ?2 AND kind = ?3
-                           AND outcome IN ('applied', 'nothing_to_do', 'budget_stopped', 'skipped'))",
+                           AND outcome IN ('applied', 'nothing_to_do', 'budget_stopped', 'handed_back', 'skipped'))",
         rusqlite::params![owner.level, owner.owner_id, kind],
         |row| row.get(0),
     )

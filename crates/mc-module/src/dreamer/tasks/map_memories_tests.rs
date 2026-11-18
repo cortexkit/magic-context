@@ -968,7 +968,10 @@ impl Ran {
 async fn through_engine(store: Store, ends: &[Ends], settings: &Settings) -> Ran {
     let Store { _dir, db, repo } = store;
     let db = Arc::new(db);
-    let engine = Arc::new(Engine::new("this", vec![Box::new(MapMemories)]));
+    let engine = Arc::new(
+        Engine::new("this", vec![Box::new(MapMemories)])
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     let profile = Arc::new(prompt_profile(None).unwrap());
     // Canonical, as git names the main checkout (macOS keeps temp folders
     // under /private/var behind a /var link).

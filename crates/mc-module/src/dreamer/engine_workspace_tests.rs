@@ -62,7 +62,10 @@ fn engine(
     workspace: &str,
     projects: &[&str],
 ) -> Arc<Engine> {
-    let engine = Arc::new(Engine::new("this", tasks));
+    let engine = Arc::new(
+        Engine::new("this", tasks)
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     for name in projects {
         see(&engine, db, workspace, name);
     }
@@ -606,7 +609,10 @@ async fn the_workspace_curate_is_due_half_an_hour_after_the_last_lift_that_moved
         ],
     );
     let tasks: Vec<Box<dyn Task>> = vec![Box::new(LiftWorkspace), Box::new(CurateWorkspace)];
-    let engine = Arc::new(Engine::new("this", tasks));
+    let engine = Arc::new(
+        Engine::new("this", tasks)
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     let owner = OwnerKey::workspace(workspace);
     let curate = |db: &ContextDb| due_at(db, &owner, "swe:curate-workspace");
 

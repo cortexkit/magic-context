@@ -79,7 +79,10 @@ fn client(entorhinal: Option<Value>, ends: &[Ends]) -> Arc<Client> {
 /// An engine that runs only the lift, having seen the test project in
 /// `workspace` with `profile`.
 fn engine(db: &ContextDb, profile: Arc<Profile>, workspace: &str) -> Arc<Engine> {
-    let engine = Arc::new(Engine::new("this", vec![Box::new(LiftWorkspace)]));
+    let engine = Arc::new(
+        Engine::new("this", vec![Box::new(LiftWorkspace)])
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     engine.see_project(db, PROJECT, FOLDER, profile, &Settings::default(), 1);
     engine.see_workspace(PROJECT, Some(workspace));
     engine
@@ -143,7 +146,10 @@ async fn a_round_with_the_bundled_profile_lifts_a_shared_workspace_once() {
     // Every task the module runs, the bundled profile as it ships, and a
     // workspace Entorhinal lists with two projects. The scheduled tasks'
     // first slots are still to come.
-    let engine = Arc::new(Engine::new("this", crate::dreamer::tasks()));
+    let engine = Arc::new(
+        Engine::new("this", crate::dreamer::tasks())
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     engine.see_project(
         &db,
         PROJECT,
@@ -327,7 +333,10 @@ fn a_lift_is_never_given_a_schedule_whatever_the_settings_say() {
     settings
         .schedules
         .insert("lift-workspace".into(), "0 3 * * *".into());
-    let engine = Arc::new(Engine::new("this", vec![Box::new(LiftWorkspace)]));
+    let engine = Arc::new(
+        Engine::new("this", vec![Box::new(LiftWorkspace)])
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     engine.see_project(&db, PROJECT, FOLDER, profile(true), &settings, 1);
     assert!(schedules(&db).is_empty());
 }

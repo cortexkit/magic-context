@@ -54,6 +54,8 @@ mod capture_tests;
 #[cfg(test)]
 mod exchange_tests;
 #[cfg(test)]
+mod fence_tests;
+#[cfg(test)]
 mod review_witness_tests;
 #[cfg(test)]
 mod samples_tests;
@@ -90,21 +92,31 @@ pub fn box_id(client: &cortexkit_bus_client::BusClient) -> Option<String> {
 /// Name the writer of the changes `tx` makes from here until
 /// [`unname_writer`], so their outbox rows say who made them. Only the
 /// dreamer's change lists name themselves: every other change is recorded
-/// as its row's source type (a create) or `ck-mc`. `epoch` is the epoch of
-/// the dreamer lease the run held. Once that lease exists, a receiver will
-/// skip a dreamer change whose epoch is older than the newest lease epoch it
-/// knows for that owner; until then the epoch is null.
+/// as its row's source type (a create) or `ck-mc`. `epochs` are the
+/// generations of the dreamer leases the run holds, by role
+/// ([`crate::dreamer::lease::role`]). Each captured change carries the
+/// epoch of its own row's role ([`schema`]), and none when the run doesn't
+/// hold that role; a receiver skips a dreamer change whose epoch is older
+/// than that role's fence ([`apply`]).
 pub(crate) fn name_writer(
     tx: &Connection,
     actor: &str,
     run_id: Option<i64>,
-    epoch: Option<i64>,
+    epochs: &[(String, i64)],
 ) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM replica_writer", [])?;
-    tx.execute(
-        "INSERT INTO replica_writer (actor, run_id, epoch) VALUES (?1, ?2, ?3)",
-        params![actor, run_id, epoch],
-    )?;
+    if epochs.is_empty() {
+        tx.execute(
+            "INSERT INTO replica_writer (actor, run_id) VALUES (?1, ?2)",
+            params![actor, run_id],
+        )?;
+    }
+    for (role, epoch) in epochs {
+        tx.execute(
+            "INSERT INTO replica_writer (actor, run_id, role, epoch) VALUES (?1, ?2, ?3, ?4)",
+            params![actor, run_id, role, epoch],
+        )?;
+    }
     Ok(())
 }
 

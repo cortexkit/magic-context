@@ -245,7 +245,7 @@ fn outbox_rows_name_the_writer_that_named_itself_and_fall_back_otherwise() {
         mark_sent(conn);
         tool(conn, json!({"action": "update", "ids": [1], "content": "Call it the history head."}));
         let tx = conn.transaction().unwrap();
-        super::name_writer(&tx, "dreamer", Some(41), None).unwrap();
+        super::name_writer(&tx, "dreamer", Some(41), &[]).unwrap();
         tx.execute_batch(
             "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash,
                  first_seen_at, created_at, updated_at, last_seen_at, source_type)
@@ -275,5 +275,47 @@ fn outbox_rows_name_the_writer_that_named_itself_and_fall_back_otherwise() {
             .query_row("SELECT actor FROM replica_outbox WHERE local_id = 3", [], |row| row.get(0))
             .unwrap();
         assert_eq!(actor, "agent");
+    });
+}
+
+/// A dreamer run that holds several roles (the lift holds its workspace's
+/// and its project's) names each with its generation, and each captured
+/// change carries the generation of its own row's role: a row moved from
+/// the project to the workspace carries the workspace's. A row of a role
+/// the run doesn't hold, such as an observation a project's run records,
+/// carries none.
+#[test]
+fn each_dreamer_change_carries_the_generation_of_its_own_rows_role() {
+    let (_dir, db) = store();
+    db.with_connection(|conn| {
+        let tx = conn.transaction().unwrap();
+        let epochs = [("dreamer.ws-a".to_owned(), 5), ("dreamer.pj-a".to_owned(), 3)];
+        super::name_writer(&tx, "dreamer", Some(7), &epochs).unwrap();
+        tx.execute_batch(
+            "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash,
+                 first_seen_at, created_at, updated_at, last_seen_at, source_type)
+             VALUES ('project', 'pj-a', 'swe:naming', 'NAMING', 'Stays here.', 'h1', 1, 1, 1, 1, 'dreamer'),
+                    ('project', 'pj-a', 'swe:naming', 'NAMING', 'Moves up.', 'h2', 1, 1, 1, 1, 'dreamer'),
+                    ('global', 'self', 'swe:naming', 'NAMING', 'The person''s.', 'h3', 1, 1, 1, 1, 'dreamer');
+             UPDATE memories SET level = 'workspace', owner_id = 'ws-a' WHERE content = 'Moves up.';
+             INSERT INTO memory_observations (content, session_id, created_at) VALUES ('Likes tea.', 's1', 1);",
+        )
+        .unwrap();
+        super::unname_writer(&tx).unwrap();
+        tx.commit().unwrap();
+        let epochs: Vec<String> = conn
+            .prepare(
+                "SELECT kind || ' ' || local_id || ' ' || COALESCE(epoch, '-')
+                   FROM replica_outbox ORDER BY kind, local_id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            epochs,
+            ["memory 1 3", "memory 2 5", "memory 3 -", "observation 1 -"]
+        );
     });
 }

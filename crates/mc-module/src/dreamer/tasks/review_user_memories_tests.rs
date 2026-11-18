@@ -1262,7 +1262,10 @@ async fn a_due_review_runs_once_for_the_machine_through_the_engine() {
 
     let Store { _dir, db } = fixture();
     let db = Arc::new(db);
-    let engine = Arc::new(Engine::new("this", crate::dreamer::tasks()));
+    let engine = Arc::new(
+        Engine::new("this", crate::dreamer::tasks())
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     let profile = Arc::new(prompt_profile(None).unwrap());
     let settings = Settings::default();
     // Two projects declare the review; the person gets one schedule for it,

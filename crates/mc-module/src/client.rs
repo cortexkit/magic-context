@@ -259,6 +259,13 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Option<Result<Vec<u8>, EntorhinalRefusal>>> + Send {
         async { None }
     }
+    /// Where the dreamer opens its role lease watches
+    /// ([`crate::dreamer::lease`]): on this module's own route to
+    /// Entorhinal's management surface. Without Entorhinal no watch opens,
+    /// so no dreamer run starts, which is the default here.
+    fn role_leases(&self) -> std::sync::Arc<dyn crate::dreamer::lease::RoleLeases> {
+        std::sync::Arc::new(crate::dreamer::lease::NoEntorhinal)
+    }
     /// The ids of the modules that would answer a route for `capability`
     /// now: in the daemon's catalog with the claim, ready, and verified by
     /// their launch nonce ([`crate::agent_data::service::ready_participants`]),

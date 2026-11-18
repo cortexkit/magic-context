@@ -94,10 +94,12 @@ async-trait = "0.1"
 zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["fs"] }
+# `time`: the monotonic clock a dreamer run reads its role lease's acting
+# window on (`dreamer::lease::monotonic_ms`).
+nix = { version = "0.31.3", features = ["fs", "time"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
 cortexkit-role-tool-provider-conformance = "=0.15.13"
