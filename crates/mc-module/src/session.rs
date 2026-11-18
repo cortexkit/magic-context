@@ -293,6 +293,9 @@ pub struct Session {
     lost_view_offer: Option<LostViewOffer>,
     /// The `ctx_reduce` reminders' cadence.
     nudges: crate::nudges::State,
+    /// When the session last got a clock note, and whether its plan refused
+    /// one ([`crate::clock_note`]).
+    clock_note: crate::clock_note::State,
     /// The ordinal of the last message the applied view cuts. The index
     /// starts there: what comes before is replaced by summaries.
     cut: Option<u64>,
@@ -789,9 +792,9 @@ impl QuietCarry {
 
     /// [`Session::pre_user`] on the freed session, which answers it as the
     /// resumed one would, so a person's message need not wait for a resume.
-    /// Its time marker counts from the newest entry, and its memory search
-    /// stops at the newest summary or, before the first, hides what the
-    /// transcript and the view show ([`Session::search_scope`]): all kept.
+    /// Its memory search stops at the newest summary or, before the first,
+    /// hides what the transcript and the view show
+    /// ([`Session::search_scope`]): all kept.
     pub(crate) async fn pre_user(
         &self,
         settings: &Settings,
@@ -1229,6 +1232,7 @@ mod signed_floor;
 #[path = "statement_order.rs"]
 mod statement_order;
 
+mod clock_note;
 mod history_head;
 mod lifecycle;
 mod notices;

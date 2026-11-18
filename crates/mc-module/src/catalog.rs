@@ -299,7 +299,6 @@ pub struct CatalogConfig {
     pub compaction_enabled: bool,
     pub memory_enabled: bool,
     pub dreamer_runnable: bool,
-    pub temporal_awareness: bool,
     pub caveman_text_compression: bool,
     pub language: Option<String>,
     pub surface_default: Surface,
@@ -324,7 +323,6 @@ impl CatalogConfig {
             "compaction_enabled": self.compaction_enabled,
             "memory_enabled": self.memory_enabled,
             "dreamer_runnable": self.dreamer_runnable,
-            "temporal_awareness": self.temporal_awareness,
             "caveman_text_compression": self.caveman_text_compression,
             "language": self.language,
             "prompt_surface": {"default": self.surface_default.as_str(), "models": models},
@@ -1067,7 +1065,6 @@ fn guidance_text(
     let flags = TextFlags {
         memory: config.memory_enabled && own.contains("ctx_memory"),
         dreamer: config.dreamer_runnable && config.smart_notes_enabled,
-        temporal: config.temporal_awareness,
         caveman: config.caveman_text_compression,
         language: !directive.is_empty(),
     };
@@ -1083,7 +1080,8 @@ fn guidance_text(
         Preset::Worker | Preset::Reader => format!("worker/{surface}"),
         Preset::Head => match &config.guidance_override {
             // A user's override replaces the whole primary section; the
-            // runtime clauses (temporal, caveman, language) still follow it.
+            // runtime clauses (the desk's markings, caveman, language)
+            // still follow it.
             Some(text) => {
                 values.insert(
                     "override",
@@ -1135,7 +1133,6 @@ pub(crate) fn text_revision() -> Result<String, CatalogError> {
 pub(crate) struct TextFlags {
     pub memory: bool,
     pub dreamer: bool,
-    pub temporal: bool,
     pub caveman: bool,
     pub language: bool,
 }
@@ -1145,7 +1142,6 @@ impl TextFlags {
         json!({
             "memory": self.memory,
             "dreamer": self.dreamer,
-            "temporal": self.temporal,
             "caveman": self.caveman,
             "language": self.language,
         })
@@ -1175,7 +1171,6 @@ fn guidance_set() -> Result<&'static GuidanceSet, String> {
                     "module": {"type": "object", "properties": {
                         "memory": {"type": "boolean"},
                         "dreamer": {"type": "boolean"},
-                        "temporal": {"type": "boolean"},
                         "caveman": {"type": "boolean"},
                         "language": {"type": "boolean"}
                     }},

@@ -114,6 +114,11 @@ pub struct Durable {
     /// reminder nor forgets a grace.
     #[serde(default)]
     pub nudges: crate::nudges::State,
+    /// When the session last got a clock note, so a restart sends no extra
+    /// one, and whether its plan refused one. Left out of the saved text
+    /// until a note is sent or refused, so other sessions' rows don't change.
+    #[serde(default, skip_serializing_if = "crate::clock_note::State::is_empty")]
+    pub clock_note: crate::clock_note::State,
     /// The ordinal of the last message the applied view cuts, where reading
     /// the transcript starts again after a restart.
     #[serde(default)]

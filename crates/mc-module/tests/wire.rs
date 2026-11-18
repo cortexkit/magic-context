@@ -588,14 +588,14 @@ async fn wire_observations_are_opt_in_and_capture_real_calls() {
         .all(|child| child.elapsed_ms >= 0.0 && child.started_ms > 0.0));
 }
 
-/// The hook and reminder paths over the real wire: a person's message after
-/// a six-minute gap gets its time marker through `transform.hook` on the
-/// hook route, and once spent results pile up a `ctx_reduce` reminder goes
-/// out as a plan-template `session.send` on ck-mc's route to the runner and
-/// rides the next tool result.
+/// The reminder path over the real wire: once spent results pile up a
+/// `ctx_reduce` reminder goes out as a plan-template `session.send` on
+/// ck-mc's route to the runner and rides the next tool result. A person's
+/// message after a six-minute gap is stored as written: ck-mc adds no time
+/// marker to it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the daemon and mock runner binaries; run through scripts/wire-gate.sh"]
-async fn a_time_marker_and_a_reduce_reminder_reach_the_runner_over_the_real_wire() {
+async fn a_reduce_reminder_reaches_the_runner_and_a_message_after_a_gap_is_stored_as_written() {
     let stack = start_stack();
     let mut config = config("worker");
     // A large window: results pile up without reaching the execute
@@ -619,14 +619,7 @@ async fn a_time_marker_and_a_reduce_reminder_reach_the_runner_over_the_real_wire
     assert!(report.call_errors.is_empty(), "{:?}", report.call_errors);
     assert_eq!(report.user_texts.len(), 2, "{:?}", report.user_texts);
     assert_eq!(report.user_texts[0], "Survey the repository.");
-    // The hook carries the mock's simulated time. Notice fences keep its
-    // session worker caught up before the hook's best-effort reply budget starts.
-    assert!(
-        report.user_texts[1].starts_with("<!-- +")
-            && report.user_texts[1].ends_with("-->\nKeep going."),
-        "{:?}",
-        report.user_texts
-    );
+    assert_eq!(report.user_texts[1], "Keep going.");
     assert!(
         report
             .delivered_templates

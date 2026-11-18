@@ -80,7 +80,6 @@ fn example_catalog_config() -> CatalogConfig {
         compaction_enabled: config["compaction_enabled"].as_bool().unwrap(),
         memory_enabled: config["memory_enabled"].as_bool().unwrap(),
         dreamer_runnable: config["dreamer_runnable"].as_bool().unwrap(),
-        temporal_awareness: config["temporal_awareness"].as_bool().unwrap(),
         caveman_text_compression: config["caveman_text_compression"].as_bool().unwrap(),
         language: config["language"].as_str().map(str::to_string),
         surface_default: surface(&config["prompt_surface"]["default"]),
@@ -280,7 +279,6 @@ fn every_role_and_compaction_cell_serves_its_exact_tools_and_text() {
                             &TextFlags {
                                 memory: preset == "head",
                                 dreamer: true,
-                                temporal: true,
                                 ..TextFlags::default()
                             },
                             &BTreeMap::from([("language_directive", String::new())]),
@@ -608,13 +606,12 @@ fn every_guidance_text_matches_the_generators_matrix() {
     let override_sample = matrix["override_sample"].as_str().unwrap().to_string();
     let cases = matrix["cases"].as_array().unwrap();
     // Legacy plugin variants and catalog role variants, on both surfaces.
-    assert_eq!(cases.len(), 8 * 2 * 16 * 2);
+    assert_eq!(cases.len(), 8 * 2 * 8 * 2);
     for case in cases {
         let directive = case["language"].as_str().and_then(language_directive);
         let flags = TextFlags {
             memory: case["memory"].as_bool().unwrap(),
             dreamer: case["dreamer"].as_bool().unwrap(),
-            temporal: case["temporal"].as_bool().unwrap(),
             caveman: case["caveman"].as_bool().unwrap(),
             language: directive.is_some(),
         };
@@ -644,7 +641,7 @@ fn every_guidance_text_matches_the_generators_matrix() {
 
 #[test]
 fn persona_matches_legacy_bytes_for_every_template_and_switch_combination() {
-    for bits in 0..32 {
+    for bits in 0..16 {
         let flags = all_flags(bits);
         for override_text in [
             "My own section.",
@@ -657,10 +654,16 @@ fn persona_matches_legacy_bytes_for_every_template_and_switch_combination() {
                 ),
                 ("override", override_text.to_string()),
             ]);
-            for name in legacy_texts().keys() {
+            // The legacy sources' time-marker fragments have no current text:
+            // the clock note took their place.
+            let current = &tool_catalog::definition().texts;
+            for name in legacy_texts()
+                .keys()
+                .filter(|name| current.contains_key(*name))
+            {
                 assert_eq!(
                     tool_catalog::render_text(name, &flags, &values).unwrap(),
-                    legacy_render(name, &flags, &values),
+                    legacy_render_now(name, &flags, &values),
                     "{name}, switches={bits}, override={override_text:?}"
                 );
             }
@@ -672,9 +675,8 @@ fn all_flags(bits: u8) -> TextFlags {
     TextFlags {
         memory: bits & 1 != 0,
         dreamer: bits & 2 != 0,
-        temporal: bits & 4 != 0,
-        caveman: bits & 8 != 0,
-        language: bits & 16 != 0,
+        caveman: bits & 4 != 0,
+        language: bits & 8 != 0,
     }
 }
 
@@ -684,7 +686,7 @@ fn catalog_runner_fields_match_legacy_for_every_role_and_switch_combination() {
         for preset in ["head", "worker", "reader"] {
             for compacting in [false, true] {
                 for surface in ["full", "light"] {
-                    for bits in 0..32 {
+                    for bits in 0..16 {
                         for reduce in [false, true] {
                             for overridden in [false, true] {
                                 let flags = all_flags(bits);
@@ -692,7 +694,6 @@ fn catalog_runner_fields_match_legacy_for_every_role_and_switch_combination() {
                                 config.smart_notes_enabled = smart_notes_enabled;
                                 config.memory_enabled = flags.memory;
                                 config.dreamer_runnable = flags.dreamer;
-                                config.temporal_awareness = flags.temporal;
                                 config.caveman_text_compression = flags.caveman;
                                 config.language = flags.language.then(|| "tr".to_string());
                                 config.guidance_override =
@@ -740,7 +741,7 @@ fn catalog_runner_fields_match_legacy_for_every_role_and_switch_combination() {
                                 ]);
                                 let expected = name
                                     .map(|name| {
-                                        legacy_render(
+                                        legacy_render_now(
                                             &name,
                                             &TextFlags {
                                                 dreamer: flags.dreamer && smart_notes_enabled,
@@ -796,6 +797,7 @@ fn legacy_texts() -> &'static BTreeMap<String, String> {
 
 // Preserve the former renderer against frozen sources, not a conversion of the
 // new templates: a migration error must not change both sides of the comparison.
+// The frozen sources still carry the time-marker clauses; this renders them on.
 fn legacy_render(name: &str, flags: &TextFlags, values: &BTreeMap<&str, String>) -> String {
     let template = &legacy_texts()[name];
     let mut out = String::new();
@@ -823,7 +825,7 @@ fn legacy_render(name: &str, flags: &TextFlags, values: &BTreeMap<&str, String>)
                 let on = match flag {
                     "memory" => flags.memory,
                     "dreamer" => flags.dreamer,
-                    "temporal" => flags.temporal,
+                    "temporal" => true,
                     "caveman" => flags.caveman,
                     "language" => flags.language,
                     _ => panic!("unknown legacy flag {flag}"),
@@ -851,6 +853,21 @@ fn legacy_render(name: &str, flags: &TextFlags, values: &BTreeMap<&str, String>)
     }
     assert!(open.is_empty());
     out
+}
+
+/// What a legacy text renders as now. The frozen sources still carry the
+/// time markers; the current texts are those sources with the markers on,
+/// the clock note named in the marker's place in the desk's list of records,
+/// and "and use the time" gone.
+fn legacy_render_now(name: &str, flags: &TextFlags, values: &BTreeMap<&str, String>) -> String {
+    let record = &tool_catalog::definition().texts["clock_note_record"];
+    legacy_render(name, flags, values)
+        .replace(&legacy_texts()["temporal_markers"], record)
+        .replace(&legacy_texts()["temporal_markers_light"], record)
+        .replace(
+            " are records: read them and use the time,",
+            " are records: read them,",
+        )
 }
 
 #[test]
@@ -1043,9 +1060,10 @@ fn a_user_override_replaces_head_text_with_or_without_compaction() {
     };
     let primary = text_for("head", true, &config);
     assert!(primary.starts_with("My own section."), "{primary}");
-    // The config-driven clauses (here the temporal-marker line) still follow
-    // the user's section.
-    assert!(primary.contains("<!-- +Xm -->"), "{primary}");
+    // The config-free clauses (here the desk's markings, naming the clock
+    // note) still follow the user's section.
+    assert!(primary.contains("`Now: <UTC time>`"), "{primary}");
+    assert!(!primary.contains("<!-- +Xm -->"), "{primary}");
     // The user override affects head text with or without compaction; workers ignore it.
     let plain = example_catalog_config();
     assert!(text_for("head", false, &config).starts_with("My own section."));

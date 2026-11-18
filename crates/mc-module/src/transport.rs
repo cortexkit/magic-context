@@ -607,6 +607,23 @@ impl RunnerClient for SubcRunnerClient {
             .await
     }
 
+    async fn clock_note_delivery(
+        &self,
+        session: &SessionRef,
+    ) -> Option<Vec<cortexkit_role_llm_runner::delivery_order::Mode>> {
+        let epoch = match self.consumer().await {
+            Ok(consumer) => consumer.current_epoch(),
+            Err(_) => 0,
+        };
+        self.runner_capabilities
+            .clock_note_delivery(
+                &session.runner,
+                epoch,
+                self.call(session, LLM_RUNNER_ROLE, "role.describe", &json!({})),
+            )
+            .await
+    }
+
     async fn child_cache_policy(&self, child: &Child) -> bool {
         let epoch = match self.consumer().await {
             Ok(consumer) => consumer.current_epoch(),
@@ -1746,9 +1763,9 @@ impl Handler {
                 let session = route.session.clone();
                 let answer = match crate::pre_user::person_blocks(&call.subject) {
                     Some((blocks, at_ms)) => {
-                        // The runner's clock when it sends one, so the gap
-                        // since the previous message is measured on one
-                        // machine's clock; ck-mc's own otherwise.
+                        // The runner's clock when it sends one, so a
+                        // commit's age in the hint counts to when the
+                        // message was written; ck-mc's own otherwise.
                         let addition = self
                             .module
                             .pre_user(&session, &blocks.join("\n"), at_ms.unwrap_or_else(now_ms))
@@ -1813,15 +1830,11 @@ fn module_discovery(request: &RouteBindRequest) -> bool {
 }
 
 /// What ck-mc subscribes to for a preset: `pre_user` for presets that add a
-/// time marker or a memory hint, with ck-mc's budget, passing on any
-/// failure so a message is never held up. `None` for a preset ck-mc does not
-/// know.
+/// memory hint, with ck-mc's budget, passing on any failure so a message is
+/// never held up. `None` for a preset ck-mc does not know.
 fn declare(preset: &str) -> Option<Declaration> {
     let features = crate::preset::features(preset)?;
     let mut ops = Vec::new();
-    if features.time_marker {
-        ops.push(Op::Prepend);
-    }
     if features.auto_memory {
         ops.push(Op::Append);
     }
@@ -1835,29 +1848,18 @@ fn declare(preset: &str) -> Option<Declaration> {
     Some(Declaration::new(subscriptions))
 }
 
-/// The hook answer for an addition: the time marker before the first block,
-/// the hint after the last.
+/// The hook answer for an addition: the hint after the last block.
 fn hook_answer(addition: Addition, blocks: usize) -> HookAnswer {
     let last = u32::try_from(blocks.saturating_sub(1)).unwrap_or(u32::MAX);
-    let mut ops = Vec::new();
-    if let Some(text) = addition.prepend {
-        ops.push(Operation::Prepend {
-            block: 0,
-            text,
-            note: None,
-        });
-    }
-    if let Some(text) = addition.append {
-        ops.push(Operation::Append {
-            block: last,
-            text,
-            note: None,
-        });
-    }
-    if ops.is_empty() {
-        HookAnswer::Pass
-    } else {
-        HookAnswer::Ops { ops }
+    match addition.append {
+        Some(text) => HookAnswer::Ops {
+            ops: vec![Operation::Append {
+                block: last,
+                text,
+                note: None,
+            }],
+        },
+        None => HookAnswer::Pass,
     }
 }
 

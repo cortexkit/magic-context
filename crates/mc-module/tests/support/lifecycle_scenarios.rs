@@ -459,7 +459,7 @@ async fn lifecycle_pre_user_honors_its_budget_behind_a_stuck_job() {
     )
     .await
     .expect("pre_user missed its budget");
-    assert!(answer.prepend.is_none() && answer.append.is_none());
+    assert!(answer.append.is_none());
     assert!(start.elapsed() >= mc_module::module::PRE_USER_BUDGET);
 }
 

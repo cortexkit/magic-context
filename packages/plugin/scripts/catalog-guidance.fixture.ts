@@ -4,7 +4,6 @@ import { resolve } from "node:path";
 interface TextFlags {
     memory: boolean;
     dreamer: boolean;
-    temporal: boolean;
     caveman: boolean;
     language: boolean;
 }
@@ -12,6 +11,12 @@ interface TextFlags {
 const texts = JSON.parse(
     readFileSync(resolve(import.meta.dir, "../../../crates/mc-module/assets/tool_catalog_v1.json"), "utf8"),
 ).texts as Record<string, string>;
+
+/**
+ * The item the Rust catalog adds to the desk's list of records: the clock note
+ * that only the Rust module sends. This plugin's guidance has no such item.
+ */
+export const CLOCK_NOTE_RECORD = texts.clock_note_record ?? "";
 
 /**
  * Reference evaluator for the GuidanceSet syntax used by the catalog assets:
@@ -74,7 +79,7 @@ export function renderCatalogText(
 export function enabledCatalogGuidance(reduce: boolean, preset: "full" | "light"): string {
     return renderCatalogText(
         `head/${reduce ? "reduce" : "no_reduce"}/${preset}`,
-        { memory: true, dreamer: true, temporal: true, caveman: false, language: false },
+        { memory: true, dreamer: true, caveman: false, language: false },
         { language_directive: "" },
     );
 }

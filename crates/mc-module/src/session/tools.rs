@@ -392,9 +392,10 @@ impl Session {
         }
     }
 
-    /// The `pre_user` hook: what goes before and after a person's message as
-    /// the runner stores it. A message that is only reminders or notices is
-    /// not a person's, and gets nothing.
+    /// The `pre_user` hook: what goes after a person's message as the runner
+    /// stores it. A message that is only reminders or notices is not a
+    /// person's, and gets nothing. A commit's age in the hint counts to
+    /// `now_ms`.
     pub async fn pre_user(
         &self,
         settings: &Settings,
@@ -404,15 +405,6 @@ impl Session {
         let mut answer = crate::pre_user::Addition::default();
         if !crate::search::text::is_meaningful_user_text(text) {
             return answer;
-        }
-        if self.features.time_marker && settings.temporal_awareness {
-            // The gap runs from the newest message the session holds, the one
-            // this message follows, to now, when the message is written. A
-            // message the host finished counts from when it finished.
-            if let Some(previous) = self.index.entries().last() {
-                let since = previous.completed_at.unwrap_or(previous.written_at);
-                answer.prepend = crate::pre_user::time_marker(now_ms.saturating_sub(since));
-            }
         }
         let auto = &settings.auto_search;
         let prompt = crate::pre_user::prompt_text(text);

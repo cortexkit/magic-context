@@ -84,7 +84,7 @@ impl Session {
     /// restarted process reuse an id the runner already accepted.
     /// The namespace keeps new ids distinct from persisted runner keys that
     /// used notice numbers or view versions instead of a counter.
-    fn next_reminder_id(&mut self, kind: &str) -> Option<String> {
+    pub(super) fn next_reminder_id(&mut self, kind: &str) -> Option<String> {
         self.reminder_counter = self.reminder_counter.checked_add(1)?;
         if let Some(store) = &self.store {
             if let Err(error) = store.save(&self.key, &self.durable()) {

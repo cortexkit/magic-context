@@ -89,45 +89,6 @@ async fn quiet_review_an_over_limit_ride_after_a_free_gets_the_view_a_kept_sessi
     );
 }
 
-/// A person's message to a head that has no summary yet: the freed session
-/// can't answer `pre_user` from what it kept, so the hook waits for the
-/// transcript read, and past ck-mc's own budget ([`PRE_USER_BUDGET`]) the
-/// message is stored without the time marker a session never freed adds. A
-/// second freed session, whose read is instant, adds the marker.
-#[tokio::test(start_paused = true)]
-async fn quiet_review_pre_user_after_a_free_gets_the_time_marker_a_kept_session_gets() {
-    let kept = Fixture::new("head", true).await;
-    let fast = Fixture::new("head", false).await;
-    let freed = Fixture::new("head", false).await;
-    let all = [&kept, &fast, &freed];
-    for f in all {
-        f.wait_quiet_time().await;
-    }
-    assert!(!kept.quiet(), "a session with a run in flight was freed");
-    assert!(fast.quiet() && freed.quiet(), "the sessions went quiet");
-
-    tokio::time::resume();
-    *freed.client().read_delay.lock().unwrap() = Duration::from_secs(2);
-    let now = 30 * 60_000;
-    let mut answers = Vec::new();
-    for f in all {
-        answers.push(
-            f.module
-                .pre_user(f.key(), "Carry on with the parser fix", now)
-                .await,
-        );
-    }
-    assert!(
-        answers[0].prepend.is_some(),
-        "a session never freed marks the gap"
-    );
-    assert_eq!(
-        answers[0], answers[1],
-        "a freed session whose read is quick"
-    );
-    assert_eq!(answers[0], answers[2], "the freed session's pre_user");
-}
-
 /// The minute-long wait after a run-end event is for a worker that has no
 /// more work. When the parent writes to the worker again (its next run
 /// starts with `pre_user`), the session is in use, and a tool call that runs

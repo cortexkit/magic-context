@@ -158,6 +158,10 @@ pub fn templates() -> Vec<Template> {
             ("freed".to_owned(), integer(0)),
         ]),
     ));
+    // The clock note rides the same sender entry. Its datetime slot needs a
+    // runner declaring `template_datetime`; core leaves it out of the plans
+    // of runners that don't (see `crate::clock_note`).
+    templates.push(crate::clock_note::template());
     templates
 }
 
@@ -190,10 +194,15 @@ pub fn template_catalog() -> Vec<Value> {
     templates()
         .iter()
         .map(|template| {
+            let delivery = if template.id == crate::clock_note::TEMPLATE {
+                crate::clock_note::delivery(true)
+            } else {
+                delivery(&template.id, true)
+            };
             json!({
                 "id": template.id,
                 "digest": template_digest(template),
-                "delivery": delivery(&template.id, true),
+                "delivery": delivery,
             })
         })
         .collect()
@@ -545,9 +554,34 @@ mod tests {
         };
         cortexkit_role_llm_runner::delivery_order::check_plan(
             &plan,
-            &[cortexkit_role_llm_runner::capabilities::DELIVERY_ORDER],
+            &[
+                cortexkit_role_llm_runner::capabilities::DELIVERY_ORDER,
+                cortexkit_role_llm_runner::capabilities::TEMPLATE_DATETIME,
+            ],
         )
         .expect("the plan accepts ck-mc's sender entry");
+        // The clock note's datetime slot makes a runner without
+        // `template_datetime` refuse the whole entry, which is why core must
+        // leave that template out of such a runner's plan.
+        assert_eq!(
+            cortexkit_role_llm_runner::delivery_order::check_plan(
+                &plan,
+                &[cortexkit_role_llm_runner::capabilities::DELIVERY_ORDER],
+            ),
+            Err(cortexkit_role_llm_runner::delivery_order::PLAN_SENDERS_FIELD)
+        );
+        let mut without_clock = plan_sender();
+        without_clock
+            .templates
+            .retain(|template| template.id != crate::clock_note::TEMPLATE);
+        let Value::Object(filtered) = json!({"senders": [without_clock]}) else {
+            unreachable!("an object literal");
+        };
+        cortexkit_role_llm_runner::delivery_order::check_plan(
+            &filtered,
+            &[cortexkit_role_llm_runner::capabilities::DELIVERY_ORDER],
+        )
+        .expect("without the clock template the entry needs no datetime support");
         let ids: BTreeSet<_> = sender
             .templates
             .iter()

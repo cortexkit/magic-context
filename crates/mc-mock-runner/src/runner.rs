@@ -331,6 +331,9 @@ impl Report {
 struct State {
     notice_keep: bool,
     temperature: bool,
+    /// The runner declares `template_datetime`: it renders plan templates
+    /// with datetime slots, such as ck-mc's clock note.
+    template_datetime: bool,
     provider_entry_speaks_for: bool,
     /// The provider declared `compaction-signed-floor/v1`, so Setup and
     /// conditions name the signed floor.
@@ -622,6 +625,13 @@ impl Host {
         self.lock().temperature = declared;
     }
 
+    /// Declare `template_datetime`, as a runner that renders datetime slots
+    /// does. Without it a plan can't hold a datetime template, so a send
+    /// naming one is refused as naming no template of the plan.
+    pub fn declare_template_datetime(&self, declared: bool) {
+        self.lock().template_datetime = declared;
+    }
+
     pub fn describe(&self) -> Value {
         let state = self.lock();
         let mut capabilities = if state.notice_keep {
@@ -631,6 +641,9 @@ impl Host {
         };
         if state.temperature {
             capabilities.push(cortexkit_role_llm_runner::capabilities::TEMPERATURE);
+        }
+        if state.template_datetime {
+            capabilities.push(cortexkit_role_llm_runner::capabilities::TEMPLATE_DATETIME);
         }
         serde_json::json!({"capabilities": capabilities})
     }
@@ -741,6 +754,27 @@ impl Host {
             .map_err(|field| Refusal::invalid_params(field, "malformed delivery"))?
             .ok_or_else(|| Refusal::invalid_params("delivery", "a reminder names its modes"))?;
         if let Some(template) = &order.template {
+            // A plan composed for a runner without `template_datetime` holds
+            // no datetime template, so such a send names none of the plan's.
+            let datetime = state
+                .config
+                .templates
+                .iter()
+                .find(|declared| declared.id == template.id)
+                .is_some_and(|declared| {
+                    declared.slots.values().any(|slot| {
+                        matches!(
+                            slot,
+                            cortexkit_role_llm_runner::delivery_order::Slot::Datetime { .. }
+                        )
+                    })
+                });
+            if datetime && !state.template_datetime {
+                return Err(Refusal::invalid_params(
+                    "template",
+                    "the plan holds no such template",
+                ));
+            }
             // Refused at admission when it cannot render, as a runner does.
             render(&state.config.templates, template, &state.transcript)
                 .map_err(|problem| Refusal::invalid_params("template", format!("{problem:?}")))?;
@@ -911,6 +945,7 @@ impl<P: Provider> Runner<P> {
         let state = State {
             notice_keep: false,
             temperature: false,
+            template_datetime: false,
             provider_entry_speaks_for: false,
             provider_signed_floor: false,
             signed_floor: None,

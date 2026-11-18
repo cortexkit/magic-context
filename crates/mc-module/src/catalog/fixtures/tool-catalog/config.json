@@ -3,7 +3,6 @@
     "compaction_enabled": true,
     "memory_enabled": true,
     "dreamer_runnable": true,
-    "temporal_awareness": true,
     "caveman_text_compression": false,
     "language": null,
     "prompt_surface": {
@@ -16,5 +15,5 @@
     "tool_descriptions": {},
     "disabled_tools": []
   },
-  "text_revision": "a1eaa77ab3e776728a95bb854c3ce7b332d89cff4e5ad4b99954608976838097"
+  "text_revision": "f1ed5306df93f0436e84003c6047fd0de678588119caeb1f06c657894258dae1"
 }

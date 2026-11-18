@@ -117,6 +117,16 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn turn_system_cleared(&self, _session: &SessionRef) -> impl Future<Output = bool> + Send {
         async { false }
     }
+    /// The delivery order of a clock note for this session's runner, or
+    /// `None` when the runner does not render datetime templates and so gets
+    /// no note ([`crate::clock_note`]). Discovery failure sends none.
+    fn clock_note_delivery(
+        &self,
+        _session: &SessionRef,
+    ) -> impl Future<Output = Option<Vec<cortexkit_role_llm_runner::delivery_order::Mode>>> + Send
+    {
+        async { None }
+    }
     /// Whether the runner on this scoped child route accepts cache requests.
     /// An unknown or unavailable declaration leaves the runner's defaults in use.
     fn child_cache_policy(&self, _child: &Child) -> impl Future<Output = bool> + Send {

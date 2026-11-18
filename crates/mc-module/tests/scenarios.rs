@@ -35,6 +35,8 @@ use serde_json::{json, Value};
 mod agent_surface;
 #[path = "support/app_read.rs"]
 mod app_read;
+#[path = "scenarios/clock_note.rs"]
+mod clock_note;
 #[path = "support/lifecycle_scenarios.rs"]
 mod lifecycle_scenarios;
 #[path = "scenarios/one_summarizer.rs"]
@@ -205,6 +207,20 @@ impl RunnerClient for HostClient {
                             .unwrap_or_else(|_| json!({"capabilities": ["cache_policy"]})))
                     })
                     .map_err(ClientError::new)
+            })
+            .await
+    }
+
+    async fn clock_note_delivery(
+        &self,
+        session: &SessionRef,
+    ) -> Option<Vec<cortexkit_role_llm_runner::delivery_order::Mode>> {
+        self.runner_capabilities
+            .clock_note_delivery(&session.runner, 1, async {
+                Ok(self
+                    .host()
+                    .map(|host| host.describe())
+                    .unwrap_or_else(|_| json!({"capabilities": ["cache_policy"]})))
             })
             .await
     }
@@ -525,7 +541,7 @@ impl Provider for InProcess {
         }
         let answer = self.module().pre_user(&self.route.session, text, now).await;
         Ok(UserEdit {
-            prepend: answer.prepend,
+            prepend: None,
             append: answer.append,
         })
     }

@@ -107,6 +107,7 @@ impl Session {
             lost_view_offers: 0,
             lost_view_offer: None,
             nudges: crate::nudges::State::default(),
+            clock_note: crate::clock_note::State::default(),
             cut: None,
             pruned_turns: 0,
             tools_only: false,
@@ -308,6 +309,7 @@ impl Session {
             keep_requested: self.keep_requested,
             baseline: self.baseline.clone(),
             nudges: self.nudges.clone(),
+            clock_note: self.clock_note.clone(),
             cut: self.cut,
             pruned_turns: self.pruned_turns,
             caveman: self.caveman.clone(),
@@ -359,6 +361,7 @@ impl Session {
         self.keep_requested = durable.keep_requested;
         self.baseline = durable.baseline;
         self.nudges = durable.nudges;
+        self.clock_note = durable.clock_note;
         self.cut = durable.cut;
         self.pruned_turns = durable.pruned_turns;
         self.caveman = durable.caveman;
@@ -551,6 +554,10 @@ impl Session {
         self.preset = crate::catalog::Preset::parse(&request.preset).expect("validated preset");
         self.tools_only = false;
         self.suspended = false;
+        // A new Setup can follow a plan change or a runner restart, so a plan
+        // that refused the clock note may hold it now: the next due tool turn
+        // tries once more.
+        self.clock_note.refused = false;
         self.conditions = conditions_of(request);
         self.limits = crate::reads::Limits::from_setup(request.limits.as_ref());
         // Setup states the session as it is now: its epoch and stamp replace

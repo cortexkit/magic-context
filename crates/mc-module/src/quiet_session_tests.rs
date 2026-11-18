@@ -349,10 +349,6 @@ async fn quiet_a_freed_session_answers_its_next_jobs_as_one_never_freed() {
         answers.push((hint, views, f.saved(), reads));
     }
     assert!(!kept.quiet(), "a session with a run in flight was freed");
-    assert!(
-        answers[0].0.prepend.is_some(),
-        "the time marker counts the gap"
-    );
     assert_eq!(answers[0].0, answers[1].0, "pre_user");
     assert_eq!(answers[0].1, answers[1].1, "views handed over");
     assert_eq!(answers[0].2, answers[1].2, "saved state");

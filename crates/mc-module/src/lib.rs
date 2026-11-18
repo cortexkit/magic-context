@@ -56,6 +56,7 @@ pub mod caveman;
 pub mod child_scopes;
 mod chunk_embedding;
 pub mod client;
+pub mod clock_note;
 pub mod config;
 pub mod content_language;
 pub mod context_db;

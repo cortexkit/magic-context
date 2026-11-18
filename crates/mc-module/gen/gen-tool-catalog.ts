@@ -263,7 +263,6 @@ function toolDefinition(tool: ToolId): ToolDefinition {
 interface TextFlags {
 	memory: boolean;
 	dreamer: boolean;
-	temporal: boolean;
 	caveman: boolean;
 	language: boolean;
 }
@@ -282,7 +281,6 @@ export function renderText(
 interface TextInputs {
 	memory: boolean;
 	dreamer: boolean;
-	temporal: boolean;
 	caveman: boolean;
 	language: string | null;
 	surface: Surface;
@@ -304,7 +302,6 @@ function renderVariant(
 	const flags: TextFlags = {
 		memory: inputs.memory,
 		dreamer: inputs.dreamer,
-		temporal: inputs.temporal,
 		caveman: inputs.caveman,
 		language: directive !== "",
 	};
@@ -425,8 +422,11 @@ function checkDefinitionMatchesPlugin(): void {
 		}
 	}
 	for (const inputs of everyTextInput()) {
-		const { memory, dreamer, temporal, caveman, language, surface } = inputs;
+		const { memory, dreamer, caveman, language, surface } = inputs;
 		const lang = language ?? undefined;
+		// The plugin keeps its own time markers (it is frozen at 0.49); the
+		// module has none, so it is compared with the plugin's text without them.
+		const temporal = false;
 		for (const reduce of [true, false]) {
 			const variant = reduce ? "primary/reduce" : "primary/no_reduce";
 			const expected = buildMagicContextSection(
@@ -441,7 +441,7 @@ function checkDefinitionMatchesPlugin(): void {
 				memory,
 				surface,
 			);
-			if (renderVariant(variant, inputs) !== expected) {
+			if (withoutClockNote(renderVariant(variant, inputs)) !== expected) {
 				throw new Error(
 					`${variant} differs from the plugin for ${JSON.stringify(inputs)}`,
 				);
@@ -459,7 +459,12 @@ function checkDefinitionMatchesPlugin(): void {
 				surface,
 				OVERRIDE_SAMPLE,
 			);
-			if (renderVariant(variant, inputs, OVERRIDE_SAMPLE) !== overridden) {
+			if (
+				withoutOverrideMarkings(
+					renderVariant(variant, inputs, OVERRIDE_SAMPLE),
+					inputs,
+				) !== overridden
+			) {
 				throw new Error(
 					`the override text differs from the plugin for ${JSON.stringify(inputs)}`,
 				);
@@ -498,18 +503,58 @@ function checkDefinitionMatchesPlugin(): void {
 const OVERRIDE_SAMPLE =
 	"## My guidance\n\nA user's own section, with {{braces}} kept as typed.";
 
+/**
+ * `text` with `part` taken out, failing unless it holds `part` exactly once.
+ * The module's guidance differs from the plugin's only by such parts.
+ */
+function withoutOnce(text: string, part: string, what: string): string {
+	const pieces = text.split(part);
+	if (pieces.length !== 2) {
+		throw new Error(`the module's text should hold ${what} exactly once`);
+	}
+	return pieces.join("");
+}
+
+/**
+ * A head's desk names the clock note among the records, a note only the
+ * module sends; the plugin's text has no such item.
+ */
+function withoutClockNote(text: string): string {
+	const record = DEFINITION.texts.clock_note_record;
+	if (record === undefined) throw new Error("no clock_note_record text");
+	return withoutOnce(text, record, "the clock-note record");
+}
+
+/**
+ * A user's override is followed by the desk's markings paragraph, which the
+ * plugin adds only with its time markers on.
+ */
+function withoutOverrideMarkings(text: string, inputs: TextInputs): string {
+	const directive = buildPrimaryLanguageDirective(inputs.language ?? undefined);
+	const markings = renderText(
+		"override_markings",
+		{
+			memory: inputs.memory,
+			dreamer: inputs.dreamer,
+			caveman: inputs.caveman,
+			language: directive !== "",
+		},
+		{ language_directive: directive },
+	);
+	return withoutOnce(text, markings, "the markings paragraph");
+}
+
 /** Languages the parity check and the matrix cover: none, and one with a directive. */
 const SAMPLE_LANGUAGES: (string | null)[] = [null, "fr"];
 
 function* everyTextInput(): Generator<TextInputs> {
 	for (const surface of ["full", "light"] as Surface[]) {
 		for (const language of SAMPLE_LANGUAGES) {
-			for (let bits = 0; bits < 16; bits++) {
+			for (let bits = 0; bits < 8; bits++) {
 				yield {
 					memory: (bits & 1) !== 0,
 					dreamer: (bits & 2) !== 0,
-					temporal: (bits & 4) !== 0,
-					caveman: (bits & 8) !== 0,
+					caveman: (bits & 4) !== 0,
 					language,
 					surface,
 				};
@@ -554,7 +599,6 @@ interface ResolvedConfig {
 	compaction_enabled: boolean;
 	memory_enabled: boolean;
 	dreamer_runnable: boolean;
-	temporal_awareness: boolean;
 	caveman_text_compression: boolean;
 	language: string | null;
 	prompt_surface: { default: Surface; models: Record<string, Surface> };
@@ -567,7 +611,6 @@ export const EXAMPLE_CONFIG: ResolvedConfig = {
 	compaction_enabled: true,
 	memory_enabled: true,
 	dreamer_runnable: true,
-	temporal_awareness: true,
 	caveman_text_compression: false,
 	language: null,
 	prompt_surface: {
@@ -916,7 +959,6 @@ function guidanceText(request: CatalogRequest, config: ResolvedConfig): string {
 	const inputs: TextInputs = {
 		memory: config.memory_enabled && own.has("ctx_memory"),
 		dreamer: config.dreamer_runnable,
-		temporal: config.temporal_awareness,
 		caveman: config.caveman_text_compression,
 		language: config.language,
 		surface: textSurface(item.params, config),
@@ -987,7 +1029,6 @@ function checkTextRevisionCoversAssets(): void {
 		const flags: TextFlags = {
 			memory: EXAMPLE_CONFIG.memory_enabled,
 			dreamer: EXAMPLE_CONFIG.dreamer_runnable,
-			temporal: EXAMPLE_CONFIG.temporal_awareness,
 			caveman: EXAMPLE_CONFIG.caveman_text_compression,
 			language: false,
 		};

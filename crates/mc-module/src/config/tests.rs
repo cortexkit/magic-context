@@ -823,3 +823,131 @@ fn dreamer_projects_limit_the_dreamer_and_an_unreadable_list_means_none() {
     assert!(!off.runs_for("pj-a"));
     assert!(settings(json!({})).unwrap().runs_for("pj-a"));
 }
+
+#[test]
+fn clock_note_defaults_to_thirty_minutes_and_only_the_user_sets_it() {
+    let interval =
+        |user: Value, project: Value| resolve_for_test(user, project, OPUS, 100_000).clock_note;
+    const MINUTE: u64 = 60_000;
+    assert_eq!(interval(json!({}), json!({})), Some(30 * MINUTE));
+    assert_eq!(
+        interval(json!({"clock_note": "10m"}), json!({})),
+        Some(10 * MINUTE)
+    );
+    assert_eq!(
+        interval(json!({"clock_note": "42m"}), json!({})),
+        Some(42 * MINUTE)
+    );
+    assert_eq!(
+        interval(json!({"clock_note": "1h"}), json!({})),
+        Some(60 * MINUTE)
+    );
+    assert_eq!(interval(json!({"clock_note": false}), json!({})), None);
+    // A value that can't be used leaves the default rather than turning the
+    // note off.
+    for bad in [json!("90s"), json!(true), json!(30), json!("1d")] {
+        assert_eq!(
+            interval(json!({ "clock_note": bad }), json!({})),
+            Some(30 * MINUTE),
+            "{bad}"
+        );
+    }
+    // A cloned repository's file neither adds notes nor takes them away.
+    assert_eq!(
+        interval(json!({}), json!({"clock_note": "1m"})),
+        Some(30 * MINUTE)
+    );
+    assert_eq!(
+        interval(json!({"clock_note": "10m"}), json!({"clock_note": false})),
+        Some(10 * MINUTE)
+    );
+}
+
+#[test]
+fn clock_note_follows_an_edit_without_a_restart() {
+    let root = temp_config("clock-note");
+    let user = root.join("user.jsonc");
+    let loader = Loader::with_user_path(user.clone());
+    rewrite_config(&user, r#"{"clock_note": "10m"}"#, 1);
+    assert_eq!(
+        loader.resolve(None, OPUS, 100_000).clock_note,
+        Some(600_000)
+    );
+    rewrite_config(&user, r#"{"clock_note": false}"#, 2);
+    assert_eq!(loader.resolve(None, OPUS, 100_000).clock_note, None);
+    rewrite_config(&user, r#"{"clock_note": "2h"}"#, 3);
+    assert_eq!(
+        loader.resolve(None, OPUS, 100_000).clock_note,
+        Some(7_200_000)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn an_unusable_clock_note_is_named_in_the_log_once_per_value() {
+    let root = temp_config("clock-note-log");
+    fs::create_dir_all(root.join(".cortexkit")).unwrap();
+    let user = root.join("user.jsonc");
+    let loader = Loader::with_user_path(user.clone());
+    let mut lines = Vec::new();
+    for tick in [1, 2] {
+        rewrite_config(&user, r#"{"clock_note": "5s"}"#, tick);
+        loader.read_with_warning(&user, &mut |line| lines.push(line));
+    }
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].ends_with(
+            r#"clock_note must be false or a duration in minutes or hours such as "30m" or "1h", not "5s"; the default of 30m applies"#
+        ),
+        "{lines:?}"
+    );
+    assert!(
+        lines[0].starts_with(&user.display().to_string()),
+        "{lines:?}"
+    );
+    rewrite_config(&user, r#"{"clock_note": "15m"}"#, 3);
+    loader.read_with_warning(&user, &mut |line| lines.push(line));
+    assert_eq!(lines.len(), 1, "a usable value logs nothing: {lines:?}");
+    // In a project file the key is ignored, and the log says so.
+    let project = root.join(".cortexkit/magic-context.jsonc");
+    rewrite_config(&project, r#"{"clock_note": "1m"}"#, 1);
+    loader.read_with_warning(&project, &mut |line| lines.push(line));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[1].ends_with("clock_note is read from the user's file only; ignored here"),
+        "{lines:?}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_config_with_temporal_awareness_loads_and_logs_the_key_obsolete_once() {
+    let root = temp_config("temporal-awareness");
+    let user = root.join("user.jsonc");
+    let loader = Loader::with_user_path(user.clone());
+    let mut lines = Vec::new();
+    for (tick, value) in [(1, "true"), (2, "false"), (3, "true")] {
+        rewrite_config(
+            &user,
+            &format!(r#"{{"execute_threshold_percentage": 80, "temporal_awareness": {value}}}"#),
+            tick,
+        );
+        let settings = loader.read_with_warning(&user, &mut |line| lines.push(line));
+        assert_eq!(settings.unwrap()["execute_threshold_percentage"], 80);
+        // The rest of the file still applies.
+        assert_eq!(
+            loader
+                .resolve(None, OPUS, 100_000)
+                .execute_threshold_percentage,
+            80.0
+        );
+    }
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].ends_with(
+            "temporal_awareness is obsolete and ignored: ck-mc no longer adds time markers to messages; clock_note sets how often an agent is told the time"
+        ),
+        "{lines:?}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}

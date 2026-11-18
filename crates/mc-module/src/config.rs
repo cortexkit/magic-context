@@ -284,6 +284,13 @@ impl Loader {
                         }
                         parsed.value = Value::Object(serde_json::Map::new());
                     }
+                    // Each line once per file for the process's life, so an
+                    // edit that leaves the key as it was logs nothing again.
+                    for note in setting_notes(&parsed.value, path == self.user_path) {
+                        if entry.warned.insert(note.clone()) {
+                            warn(format!("{}: {note}", path.display()));
+                        }
+                    }
                     if let Some(issue) = parsed.issue {
                         let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
                         if entry.warned.insert(digest) {
@@ -313,6 +320,27 @@ impl Loader {
         }
         entry.value.clone()
     }
+}
+
+/// What a file's settings call for in the log: an obsolete key that is
+/// ignored, and a `clock_note` that can't be used. `user` is whether this
+/// is the user's file, the only one `clock_note` is read from.
+fn setting_notes(value: &Value, user: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    if value.get("temporal_awareness").is_some() {
+        notes.push(
+            "temporal_awareness is obsolete and ignored: ck-mc no longer adds time markers to messages; clock_note sets how often an agent is told the time"
+                .to_owned(),
+        );
+    }
+    if let Some(clock_note) = value.get("clock_note") {
+        if !user {
+            notes.push("clock_note is read from the user's file only; ignored here".to_owned());
+        } else if let Err(error) = crate::clock_note::parse_interval(clock_note) {
+            notes.push(format!("{error}; the default of 30m applies"));
+        }
+    }
+    notes
 }
 
 /// Merge the two tiers into one session's settings.
@@ -409,9 +437,6 @@ fn resolve_tiers(
         if let Some(budget) = in_range(tier, "/memory/injection_budget_tokens", 500.0, 20_000.0) {
             settings.memory_budget_tokens = budget as u64;
         }
-        if let Some(enabled) = tier.get("temporal_awareness").and_then(Value::as_bool) {
-            settings.temporal_awareness = enabled;
-        }
         // A project may turn the mural on or off, as in the plugin: it only
         // changes how the project's own memories are shown.
         if let Some(enabled) = tier.pointer("/mural/enabled").and_then(Value::as_bool) {
@@ -470,6 +495,16 @@ fn resolve_tiers(
         .get("keep_subagents")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // Only the user sets how often an agent is told the time: a cloned
+    // repository can neither add notes to every session nor take them away.
+    // A value that can't be used leaves the default, and the file's read
+    // logs why (`setting_notes`).
+    if let Some(Ok(interval)) = user
+        .get("clock_note")
+        .map(crate::clock_note::parse_interval)
+    {
+        settings.clock_note = interval;
+    }
     settings
 }
 
@@ -605,7 +640,6 @@ fn catalog_config(
             .and_then(Value::as_bool)
             .unwrap_or(true),
         memory_enabled: last_bool("/memory/enabled", true),
-        temporal_awareness: last_bool("/temporal_awareness", true),
         caveman_text_compression: last_bool("/caveman_text_compression/enabled", false),
         language: user
             .and_then(|user| user.pointer("/language"))

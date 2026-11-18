@@ -51,6 +51,9 @@ mod notes_tokens_tests;
 #[path = "reminder_delivery_tests.rs"]
 mod reminder_delivery_tests;
 
+#[path = "session/clock_note_tests.rs"]
+mod clock_note_tests;
+
 #[path = "move_floor_tests.rs"]
 mod move_floor_tests;
 
@@ -162,6 +165,10 @@ struct Client {
     fail_applied_view: Mutex<bool>,
     capabilities: crate::runner_capabilities::RunnerCapabilities,
     descriptions: Mutex<VecDeque<Result<Value, crate::client::ClientError>>>,
+    /// Every `session.send` on the session's own route, in order.
+    sent: Mutex<Vec<SendRequest>>,
+    /// Refusals the next sends get, one each, before sends are accepted.
+    send_refusals: Mutex<VecDeque<crate::client::ClientError>>,
 }
 
 impl RunnerClient for Client {
@@ -182,6 +189,20 @@ impl RunnerClient for Client {
     async fn turn_system_cleared(&self, session: &SessionRef) -> bool {
         self.capabilities
             .turn_system_cleared(&session.runner, 1, async {
+                self.descriptions
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(serde_json::json!({})))
+            })
+            .await
+    }
+    async fn clock_note_delivery(
+        &self,
+        session: &SessionRef,
+    ) -> Option<Vec<cortexkit_role_llm_runner::delivery_order::Mode>> {
+        self.capabilities
+            .clock_note_delivery(&session.runner, 1, async {
                 self.descriptions
                     .lock()
                     .unwrap()
@@ -260,9 +281,13 @@ impl RunnerClient for Client {
     async fn send(
         &self,
         _: &SessionRef,
-        _: SendRequest,
+        request: SendRequest,
     ) -> Result<SendReply, crate::client::ClientError> {
-        Ok(SendReply::new("pending"))
+        self.sent.lock().unwrap().push(request);
+        match self.send_refusals.lock().unwrap().pop_front() {
+            Some(refusal) => Err(refusal),
+            None => Ok(SendReply::new("pending")),
+        }
     }
     async fn send_child(
         &self,
@@ -909,27 +934,6 @@ fn lifecycle_the_index_keeps_compact_sizes_tags_and_full_checksums() {
         transcript.entries()[0].parts[1].digest
     );
     assert_eq!(held.parts[1].tag, Some(42));
-}
-
-#[tokio::test]
-async fn a_time_marker_counts_from_when_the_previous_message_finished() {
-    let marker = |completed_at: Option<u64>| async move {
-        let (mut session, _, _, _, settings) = fixture();
-        session.features.time_marker = true;
-        let mut reply = text(1, "reply");
-        reply.written_at = 0;
-        reply.completed_at = completed_at;
-        session.index.extend(vec![reply]);
-        session
-            .pre_user(&settings, "Carry on with the parser fix", 12 * 60_000)
-            .await
-            .prepend
-    };
-    // Written at minute 0 and finished at minute 10: the next message two
-    // minutes later gets no marker.
-    assert_eq!(marker(Some(10 * 60_000)).await, None);
-    // Without a finish stamp the gap runs from when it was written.
-    assert_eq!(marker(None).await.as_deref(), Some("<!-- +12m -->\n"));
 }
 
 #[test]

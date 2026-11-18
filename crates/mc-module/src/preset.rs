@@ -22,25 +22,46 @@ pub struct Features {
     /// commits look relevant to it. Not for sessions another agent started:
     /// their prompts come from that agent, not from a person's question.
     pub auto_memory: bool,
-    /// A person's message gets a marker of the time since the previous
-    /// message after a long gap. A reader runs one short task and gets none.
-    pub time_marker: bool,
+    /// Saved as `"time_marker": false`, where earlier builds kept the switch
+    /// for the time markers they put in a person's message. Those markers
+    /// are gone (the clock note took their place, [`crate::clock_note`]);
+    /// the member stays in the saved state so a build from before can still
+    /// read it.
+    #[serde(rename = "time_marker", default)]
+    pub retired_time_marker: Retired,
     /// Older long text is compressed by age when the user turns
     /// `caveman_text_compression` on. Never for a session another agent
     /// started, as in the plugin.
     pub caveman: bool,
 }
 
+/// A saved switch no build reads any more: always written as `false`, and
+/// any boolean is accepted when read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Retired;
+
+impl serde::Serialize for Retired {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(false)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Retired {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer).map(|_| Self)
+    }
+}
+
 impl Features {
     /// A session Magic Context does not compact, whose tools it only serves.
     /// As in the plugin with compaction off: no summaries, no reminders, no
-    /// time markers or memory hints.
+    /// clock notes or memory hints.
     pub const NONE: Self = Self {
         summarizer: false,
         keep_first_message: false,
         ctx_keep: false,
         auto_memory: false,
-        time_marker: false,
+        retired_time_marker: Retired,
         caveman: false,
     };
 }
@@ -54,7 +75,7 @@ pub fn features(preset: &str) -> Option<Features> {
             keep_first_message: false,
             ctx_keep: false,
             auto_memory: true,
-            time_marker: true,
+            retired_time_marker: Retired,
             caveman: true,
         }),
         "worker" => Some(Features {
@@ -62,7 +83,7 @@ pub fn features(preset: &str) -> Option<Features> {
             keep_first_message: true,
             ctx_keep: true,
             auto_memory: false,
-            time_marker: true,
+            retired_time_marker: Retired,
             caveman: false,
         }),
         "reader" => Some(Features {
@@ -70,7 +91,7 @@ pub fn features(preset: &str) -> Option<Features> {
             keep_first_message: true,
             ctx_keep: true,
             auto_memory: false,
-            time_marker: false,
+            retired_time_marker: Retired,
             caveman: false,
         }),
         _ => None,
@@ -79,6 +100,29 @@ pub fn features(preset: &str) -> Option<Features> {
 
 #[cfg(test)]
 mod tests {
+    /// Saved state keeps the retired `time_marker` member as `false` in its
+    /// old place, so an older build still reads it, and a saved `true` from
+    /// an older build reads back.
+    #[test]
+    fn saved_features_keep_the_retired_time_marker_member() {
+        let head = super::features("head").unwrap();
+        let saved = serde_json::to_string(&head).unwrap();
+        assert_eq!(
+            saved,
+            r#"{"summarizer":true,"keep_first_message":false,"ctx_keep":false,"auto_memory":true,"time_marker":false,"caveman":true}"#
+        );
+        let older = saved.replace(r#""time_marker":false"#, r#""time_marker":true"#);
+        assert_eq!(
+            serde_json::from_str::<super::Features>(&older).unwrap(),
+            head
+        );
+        let without = saved.replace(r#""time_marker":false,"#, "");
+        assert_eq!(
+            serde_json::from_str::<super::Features>(&without).unwrap(),
+            head
+        );
+    }
+
     /// Every gate reads a preset's [`super::Features`], never the preset's
     /// name, so a new preset is a change in this file alone. Only the files
     /// that map a name to its settings may spell one: this one, the tool

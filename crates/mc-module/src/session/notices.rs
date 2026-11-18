@@ -6,7 +6,7 @@ use super::*;
 impl Session {
     /// Handle a notice. Returns a summarizer run for the worker to start, when
     /// one is due. After the pass, the `ctx_reduce` reminders read what the
-    /// model now sees.
+    /// model now sees, and a clock note goes out when one is due.
     pub async fn notice<C: RunnerClient>(
         &mut self,
         client: &C,
@@ -50,6 +50,7 @@ impl Session {
         let rebuilt = self.latest.as_ref().map(|view| view.version) != version;
         let cut_moved = self.cut_ordinal() > cut;
         self.remind(client, settings, rebuilt, cut_moved).await;
+        self.send_clock_note_if_due(client, settings).await;
         summary
     }
 

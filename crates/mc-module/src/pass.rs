@@ -69,9 +69,9 @@ pub struct Settings {
     pub embedding: Option<crate::embedding::Provider>,
     /// `rerank.*`: who scores an explicit prose search's best candidates.
     pub rerank: crate::search::rerank::Reranker,
-    /// `temporal_awareness`: a person's message after a gap of five minutes
-    /// or more starts with a marker saying how long it was.
-    pub temporal_awareness: bool,
+    /// `clock_note`: the least time between two clock notes, in
+    /// milliseconds ([`crate::clock_note`]). `None` when it is `false`.
+    pub clock_note: Option<u64>,
     /// `mural.enabled`: the history head carries an image of the project
     /// memories its memory budget left out, on models that read images.
     pub mural_enabled: bool,
@@ -143,7 +143,7 @@ impl Default for Settings {
             auto_promote: true,
             embedding: None,
             rerank: crate::search::rerank::Reranker::Synapse,
-            temporal_awareness: true,
+            clock_note: Some(crate::clock_note::DEFAULT_INTERVAL_MS),
             mural_enabled: false,
             auto_search: AutoSearch::default(),
             caveman: None,

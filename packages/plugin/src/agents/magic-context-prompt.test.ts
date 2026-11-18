@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { enabledCatalogGuidance } from "../../scripts/catalog-guidance.fixture";
+import { CLOCK_NOTE_RECORD, enabledCatalogGuidance } from "../../scripts/catalog-guidance.fixture";
 import { CTX_REDUCE_DESCRIPTION } from "../tools/ctx-reduce/constants";
 import { CTX_REDUCE_LIGHT_DESCRIPTION } from "../tools/light-descriptions";
 import { buildMagicContextSection } from "./magic-context-prompt";
@@ -488,7 +488,11 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
     });
 });
 
-/** The Rust catalog consumes this matrix too, independently checking the rendered bytes. */
+/**
+ * The Rust catalog consumes this matrix too, independently checking the rendered bytes.
+ * The Rust module has no time markers, so it is compared with this guidance without
+ * them; it adds the clock note, which only it sends, to the desk's list of records.
+ */
 describe("buildMagicContextSection — Rust catalog guidance parity", () => {
     const matrix = JSON.parse(
         readFileSync(
@@ -505,7 +509,6 @@ describe("buildMagicContextSection — Rust catalog guidance parity", () => {
             override: boolean;
             memory: boolean;
             dreamer: boolean;
-            temporal: boolean;
             caveman: boolean;
             language: string | null;
             bytes: number;
@@ -528,7 +531,6 @@ describe("buildMagicContextSection — Rust catalog guidance parity", () => {
                     !entry.override &&
                     entry.memory &&
                     entry.dreamer &&
-                    entry.temporal &&
                     !entry.caveman &&
                     entry.language === null,
             );
@@ -538,16 +540,19 @@ describe("buildMagicContextSection — Rust catalog guidance parity", () => {
                 20,
                 reduce,
                 true,
-                true,
+                false,
                 false,
                 false,
                 undefined,
                 true,
                 preset,
             );
-            expect(Buffer.byteLength(rendered, "utf8")).toBe(row.bytes);
-            expect(enabledCatalogGuidance(reduce, preset)).toBe(rendered);
-            expect(createHash("sha256").update(rendered, "utf8").digest("hex")).toBe(row.sha256);
+            const catalog = enabledCatalogGuidance(reduce, preset);
+            expect(Buffer.byteLength(catalog, "utf8")).toBe(row.bytes);
+            expect(createHash("sha256").update(catalog, "utf8").digest("hex")).toBe(row.sha256);
+            expect(CLOCK_NOTE_RECORD).not.toBe("");
+            expect(catalog.split(CLOCK_NOTE_RECORD)).toHaveLength(2);
+            expect(catalog.replace(CLOCK_NOTE_RECORD, "")).toBe(rendered);
         });
     }
 });

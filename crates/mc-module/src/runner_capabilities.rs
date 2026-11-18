@@ -17,6 +17,9 @@ type Declaration = (u64, Arc<OnceCell<Features>>);
 struct Features {
     capabilities: HashSet<String>,
     delivery_order_modes: HashSet<String>,
+    /// The describe carries a `delivery_order_modes` list, which narrows the
+    /// list modes `delivery_order` declares to the ones it names.
+    delivery_order_modes_listed: bool,
     /// `session_retention.max_days` from the describe, when it is readable.
     retention_max_days: Option<u32>,
 }
@@ -177,6 +180,32 @@ impl RunnerCapabilities {
             .contains("turn_system_cleared")
     }
 
+    /// The delivery order of a clock note (see [`crate::clock_note`]), or
+    /// `None` when the runner does not declare `template_datetime` and so
+    /// gets no note. `turn_system` is listed first when the runner declares
+    /// it: `delivery_order` declares it unless a `delivery_order_modes` list
+    /// leaves it out.
+    pub async fn clock_note_delivery(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> Option<Vec<cortexkit_role_llm_runner::delivery_order::Mode>> {
+        let declared = self.declared(runner, connection_epoch, describe).await;
+        if !declared
+            .capabilities
+            .contains(cortexkit_role_llm_runner::capabilities::TEMPLATE_DATETIME)
+        {
+            return None;
+        }
+        let turn_system = declared
+            .capabilities
+            .contains(cortexkit_role_llm_runner::capabilities::DELIVERY_ORDER)
+            && (!declared.delivery_order_modes_listed
+                || declared.delivery_order_modes.contains("turn_system"));
+        Some(crate::clock_note::delivery(turn_system))
+    }
+
     async fn declared(
         &self,
         runner: &str,
@@ -208,6 +237,8 @@ impl RunnerCapabilities {
                         let declared = Features {
                             capabilities: names("capabilities"),
                             delivery_order_modes: names("delivery_order_modes"),
+                            delivery_order_modes_listed: value["delivery_order_modes"]
+                                .is_array(),
                             // The contract's limits start at one day, so a
                             // zero can't be fitted to and counts as unstated.
                             retention_max_days: value["session_retention"]["max_days"]
