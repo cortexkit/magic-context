@@ -4634,7 +4634,7 @@ impl RunnerClient for SynapseClient {
         match method {
             "models.list" => Ok(json!({"result": {"table_epoch": 1, "models": [{
                 "model_id": mc_module::search::rerank::MODEL,
-                "certified": true,
+                "serving_admission": "enabled",
                 "fingerprints": [fingerprint],
             }]}})),
             "rerank.score" => {

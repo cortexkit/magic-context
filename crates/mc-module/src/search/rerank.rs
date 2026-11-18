@@ -14,7 +14,7 @@
 //!    limit.
 //!
 //! Any failure keeps the ordinary ranking. The reranker is the local Synapse
-//! module by default (`models.list` pins its certified model, `rerank.score`
+//! module by default (`models.list` pins its reranker lane, `rerank.score`
 //! scores), a hosted endpoint when the user configures one, or off.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -28,8 +28,9 @@ use serde_json::{json, Value};
 use super::Hit;
 use crate::vault::{Keyed, Sent};
 
-/// Synapse's certified reranker model.
-pub const MODEL: &str = "gte-reranker-modernbert-base-f32";
+/// Synapse's reranker lane. A catalog lane checks itself after an install,
+/// a restart or an OS update, so it needs no manual re-probe.
+pub const MODEL: &str = "gte-reranker-modernbert-base-metal";
 /// How many hits of each lane are fused.
 pub const LANE_LIMIT: usize = 25;
 /// The most candidates one rerank scores.
@@ -487,7 +488,7 @@ pub fn order(pool: Vec<Hit>, scores: &[f64], limit: usize) -> Vec<Hit> {
     ranked.into_iter().take(limit).map(|(_, hit)| hit).collect()
 }
 
-/// Synapse's certified reranker, as `models.list` names it.
+/// Synapse's reranker lane, as `models.list` names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pinned {
     pub fingerprint: String,
@@ -598,8 +599,12 @@ fn unwrap_reply(value: Value) -> Result<Value, Skipped> {
     Ok(body)
 }
 
-/// `pinReranker`: the certified model's single fingerprint and the table
-/// epoch from a `models.list` answer.
+/// `pinReranker`: the reranker lane's single fingerprint and the table epoch
+/// from a `models.list` answer. The gate is `serving_admission: "enabled"`,
+/// not `certified`: a catalog lane reads `certified: false` until its
+/// self-check runs on its first request, so waiting for `certified` would
+/// never send that request. A lane whose check failed stops being
+/// `enabled`, and its calls answer a typed refusal.
 pub fn pin(reply: Value) -> Result<Pinned, Skipped> {
     let body = unwrap_reply(reply)?;
     let model = body["models"]
@@ -608,8 +613,8 @@ pub fn pin(reply: Value) -> Result<Pinned, Skipped> {
     let invalid = || Skipped("catalog_validation".into());
     let model = model.ok_or_else(invalid)?;
     let fingerprints = model["fingerprints"].as_array().ok_or_else(invalid)?;
-    let fingerprint = match (model["certified"].as_bool(), fingerprints.as_slice()) {
-        (Some(true), [only]) => only.as_str().ok_or_else(invalid)?,
+    let fingerprint = match (model["serving_admission"].as_str(), fingerprints.as_slice()) {
+        (Some("enabled"), [only]) => only.as_str().ok_or_else(invalid)?,
         _ => return Err(invalid()),
     };
     if fingerprint.len() != 64
@@ -898,17 +903,24 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_needs_one_certified_fingerprint_and_scores_must_match_it() {
+    fn a_pin_needs_an_enabled_lane_with_one_fingerprint_and_scores_must_match_it() {
         let fingerprint = "a".repeat(64);
         let catalog = json!({"result": {"table_epoch": 7, "models": [
-            {"model_id": MODEL, "certified": true, "fingerprints": [fingerprint]}
+            {"model_id": MODEL, "certified": false, "serving_admission": "enabled",
+             "self_check": {"state": "pending"}, "fingerprints": [fingerprint]}
         ]}});
         let pinned = pin(catalog).unwrap();
         assert_eq!(pinned.table_epoch, 7);
-        let uncertified = json!({"result": {"table_epoch": 7, "models": [
-            {"model_id": MODEL, "certified": false, "fingerprints": [fingerprint]}
+        let refused = json!({"result": {"table_epoch": 7, "models": [
+            {"model_id": MODEL, "certified": true, "serving_admission": "disabled",
+             "fingerprints": [fingerprint]}
         ]}});
-        assert_eq!(pin(uncertified), Err(Skipped("catalog_validation".into())));
+        assert_eq!(pin(refused), Err(Skipped("catalog_validation".into())));
+        let two = json!({"result": {"table_epoch": 7, "models": [
+            {"model_id": MODEL, "serving_admission": "enabled",
+             "fingerprints": [fingerprint, "b".repeat(64)]}
+        ]}});
+        assert_eq!(pin(two), Err(Skipped("catalog_validation".into())));
         let good =
             json!({"result": {"fingerprint": fingerprint, "table_epoch": 7, "scores": [0.1, 2.0]}});
         assert_eq!(scores(good, &pinned, 2), Ok(vec![0.1, 2.0]));
