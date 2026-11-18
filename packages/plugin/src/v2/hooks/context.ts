@@ -2716,7 +2716,8 @@ export async function registerContext(context: V2Context) {
                         const replayDb = db ?? storage.current();
                         // Compaction on only, as in the managed pass below: with
                         // it off nothing is restored after a host checkpoint, and
-                        // no last-good replay runs in that mode.
+                        // Magic Context never resends its last successfully served
+                        // request in that mode, so this path isn't reached.
                         if (!compactionOff && localCut && incoming && replayDb) {
                             const admission = nativeFoldReplay
                                 ? await nativeFoldReplay.replayAdmission(
