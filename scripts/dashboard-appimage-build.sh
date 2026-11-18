@@ -7,9 +7,10 @@
 # libwayland from the AppImage, repacks and re-signs it
 # (dashboard-appimage-drop-wayland.sh), then verifies the result
 # (dashboard-appimage-verify.sh). All of that happens before this script
-# returns, and tauri-action only then uploads the AppImage and its .sig and
-# writes the latest.json entry from that .sig, so the release never carries the
-# original AppImage or a signature made over it.
+# returns, and tauri-action only then uploads the AppImage and its .sig. The
+# workflow's deploy-updater job builds the latest.json entry from that uploaded
+# .sig, so the release never carries the original AppImage or a signature made
+# over it.
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"

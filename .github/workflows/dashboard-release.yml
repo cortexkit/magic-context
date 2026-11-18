@@ -16,10 +16,10 @@ jobs:
   # Create the draft release ONCE, up front, and hand its id to every build leg.
   # The previous design let each matrix leg create-or-find the release by tagName;
   # when two legs started simultaneously they both saw "no release yet" and each
-  # created its own draft, splitting the platform assets (and the per-arch
-  # latest.json) across two drafts for the same tag. Creating it here first means
-  # every leg uploads into the same release, so tauri-action merges one complete
-  # latest.json across all architectures.
+  # created its own draft, splitting the platform assets across two drafts for
+  # the same tag. Creating it here first means every leg uploads into the same
+  # release, so deploy-updater finds every architecture's assets on it when it
+  # assembles latest.json.
   create-release:
     name: Create draft release
     runs-on: ubuntu-latest
@@ -189,10 +189,15 @@ jobs:
           # scripts/dashboard-appimage-build.sh. Other legs run bunx tauri as is.
           tauriScript: ${{ contains(matrix.settings.host, 'ubuntu') && 'bash ../../scripts/dashboard-appimage-build.sh' || 'bunx tauri' }}
           args: --target ${{ matrix.settings.target }}${{ matrix.settings.bundles && format(' --bundles {0}', matrix.settings.bundles) || '' }}
-          updaterJsonPreferNsis: true
+          # Upload installers and their .sig files only. Legs that each merge
+          # their platforms into the release's latest.json lose entries when they
+          # run in parallel, and a re-run leg drops the platforms of the legs that
+          # were not re-run; deploy-updater assembles latest.json from the
+          # uploaded .sig files instead.
+          includeUpdaterJson: false
           # Upload into the single pre-created draft (see create-release). Using
           # releaseId (not tagName) guarantees every leg targets the same release,
-          # so there is exactly one release and one merged latest.json per tag.
+          # so there is exactly one release per tag.
           releaseId: ${{ needs.create-release.outputs.release_id }}
           assetNamePattern: magic-context-dashboard-[platform]-${{ matrix.settings.arch }}[ext]
         env:
@@ -269,30 +274,64 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --draft=false
 
-      - name: Download latest.json from release (with retry)
+      # Bun runs scripts/dashboard-updater-manifest.ts and, with the workspace
+      # dependencies, scripts/dashboard-updater-verify.ts, which imports the CLI
+      # installer's signature verifier.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      # Build latest.json here from the release's installers and .sig files
+      # rather than downloading the copy the build legs used to merge into. Each
+      # leg read that file, added its platforms and wrote it back, so legs
+      # running in parallel lost each other's entries, and re-running one leg
+      # rebuilt it without the platforms of the legs that were not re-run
+      # (dashboard-v0.21.0 lost all eight Linux entries that way). Once every leg
+      # has succeeded the release's assets are complete, and the script fails,
+      # naming the platform, if an installer or its .sig is missing.
+      - name: Assemble latest.json from release assets (with retry)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          mkdir -p _updater_publish
-          OUT=_updater_publish/latest.json
-          # Retry up to 20×15s (5 minutes) — first-time uploads of large
-          # platform binaries can take longer than a single fixed sleep,
-          # and tauri-action publishes assets in parallel.
+          REPO="${{ github.repository }}"
+          WORK="$RUNNER_TEMP/manifest"
+          # The release API can lag the legs' uploads and the undraft above, so a
+          # read taken right away may list an incomplete release. Retry up to
+          # 20×15s (5 minutes); each attempt prints what is missing.
           for attempt in $(seq 1 20); do
-            if gh release download "$TAG" --pattern "latest.json" --output "$OUT" --clobber 2>/dev/null; then
-              echo "✓ downloaded latest.json on attempt $attempt"
-              cat "$OUT"
+            rm -rf "$WORK"
+            mkdir -p "$WORK/sigs"
+            if gh release view "$TAG" --repo "$REPO" --json assets --jq '[.assets[].name]' > "$WORK/assets.json" \
+              && gh release download "$TAG" --repo "$REPO" --pattern '*.sig' --dir "$WORK/sigs" \
+              && bun scripts/dashboard-updater-manifest.ts "$WORK/assets.json" "$WORK/sigs" "$REPO" "$WORK/latest.json"; then
+              echo "✓ assembled latest.json on attempt $attempt"
+              mkdir -p _updater_publish
+              cp "$WORK/latest.json" _updater_publish/latest.json
+              cat _updater_publish/latest.json
               exit 0
             fi
-            echo "attempt $attempt: latest.json not yet available, sleeping 15s…"
+            echo "attempt $attempt: could not assemble latest.json yet, sleeping 15s…"
             sleep 15
           done
-          echo "::error::latest.json never became available on release $TAG"
+          echo "::error::could not assemble latest.json from the assets of release $TAG"
           exit 1
 
-      # Pin every asset URL to THIS tag's release. tauri-action writes
-      # /releases/latest/download/ URLs, but in this repo GitHub's "latest
+      # Put the assembled manifest on the release as its latest.json asset,
+      # replacing any copy already there. This is the unpinned file, with the
+      # same /releases/latest/download/ URLs the release's latest.json always
+      # had; only the gh-pages copy is pinned below.
+      - name: Replace latest.json on the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" "$RUNNER_TEMP/manifest/latest.json" --repo "${{ github.repository }}" --clobber
+
+      # Pin every asset URL to THIS tag's release. The manifest carries
+      # /releases/latest/download/ URLs, as tauri-action wrote them, but in this
+      # repo GitHub's "latest
       # release" pointer belongs to the plugin train (v*), which carries no
       # dashboard assets — so /latest/ URLs 404 and Desktop auto-update breaks.
       # Rewrite to /releases/download/<TAG>/, which is immune to the pointer.
@@ -318,15 +357,6 @@ jobs:
               "latest.json still has /releases/latest/download/ URLs after rewrite"
           PY
           cat "$FILE"
-
-      # Bun and the workspace dependencies run scripts/dashboard-updater-verify.ts,
-      # which imports the CLI installer's signature verifier.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install
 
       # Every Linux AppImage entry in the manifest must point at a file that its
       # signature verifies with the updater key in tauri.conf.json. The Linux
