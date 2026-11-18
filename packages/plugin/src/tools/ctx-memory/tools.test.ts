@@ -2962,9 +2962,13 @@ describe("createCtxMemoryTools", () => {
             const jsonSchema = tool.schema.toJSONSchema(
                 tool.schema.object(tools.ctx_memory.args ?? {}),
             ) as { properties?: Record<string, { description?: string }> };
+            for (const field of ["content", "category", "ids"]) {
+                expect(jsonSchema.properties?.[field]?.description).toContain(
+                    "Required on every call",
+                );
+            }
             expect(jsonSchema.properties?.content?.description).toContain("empty string");
-            expect(jsonSchema.properties?.category?.description).toContain("any valid category");
-            expect(jsonSchema.properties?.ids?.description).toContain("empty array");
+            expect(jsonSchema.properties?.ids?.description).toContain("empty list");
         });
 
         it("accepts an empty ids list at the provider-schema level", () => {

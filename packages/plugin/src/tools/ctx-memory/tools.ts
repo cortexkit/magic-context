@@ -392,16 +392,18 @@ const ctxMemoryArgsShape = {
         .describe("write | update | archive | merge | get"),
     content: tool.schema
         .string()
-        .describe("Required on every action — pass an empty string for get and archive."),
+        .describe(
+            "Required on every call — the memory text for write, update and merge; pass an empty string for archive and get.",
+        ),
     category: tool.schema
         .enum([...V2_MEMORY_CATEGORIES])
         .describe(
-            "Required on every action — for get and archive pass any valid category; it is ignored.",
+            "Required on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it.",
         ),
     ids: tool.schema
         .array(tool.schema.number())
         .describe(
-            "Required on every action — one for update, one or more for archive, two or more for merge, 1–20 for get; pass an empty array for write.",
+            "Required on every call — one id for update, one or more for archive, two or more for merge, 1–20 for get; write takes an empty list.",
         ),
     reason: tool.schema.string().optional().describe("Why it is being archived (optional)."),
 };

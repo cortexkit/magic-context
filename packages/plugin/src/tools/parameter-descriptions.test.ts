@@ -136,16 +136,16 @@ describe("parameter descriptions match runtime behavior", () => {
     it("ctx_memory: required action-irrelevant arguments have explicit filler values", () => {
         expect(FULL_PARAMETER_DESCRIPTIONS.ctx_memory).toMatchObject({
             content:
-                "The memory text — one standalone fact (write, update, merge). Archive and get take an empty string.",
+                "Required on every call — the memory text for write, update and merge; pass an empty string for archive and get.",
             category:
-                "Kind of fact: the new fact's kind for write; on update/merge, the memory's current category to keep it. Archive and get ignore it.",
-            ids: "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list.",
+                "Required on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it.",
+            ids: "Required on every call — one id for update, one or more for archive, two or more for merge, 1–20 for get; write takes an empty list.",
         });
         expect(LIGHT_PARAMETER_DESCRIPTIONS.ctx_memory).toMatchObject({
-            content: "One standalone fact (write, update, merge). Archive and get: empty string.",
+            content: "Required on every call: the fact (write, update, merge); empty string for archive/get.",
             category:
-                "Kind of fact (write; on update/merge pass the current category to keep it). Archive and get ignore it.",
-            ids: "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get. Write: empty list.",
+                "Required on every call: kind for write; current category for update/merge; ignored by archive/get.",
+            ids: "Required on every call: one id for update, 1+ for archive, 2+ for merge, 1–20 for get; write: empty list.",
         });
     });
 
