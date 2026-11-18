@@ -279,10 +279,9 @@ describe("Pi ordinal offset independent review", () => {
 
 	it("marker cuts use stored ordinals at the anchor, first entry, and newest entry", async () => {
 		await withFixture((db, sessionId, entries) => {
-			// The combined results after the anchor have no single JSONL entry ID.
-			// A later assistant has fixed that synthetic group in place. Retire this
-			// native marker rather than waiting forever or dropping the kept results;
-			// the newer summary below supplies a replayable boundary instead.
+			// By stored ordinal alone, the combined results after the anchor have no
+			// single JSONL entry ID to keep (the fallback for a boundary the branch
+			// does not hold). The drain below places the marker by the history cut.
 			expect(findFirstKeptEntryId(entries, END, LOST)).toBeNull();
 			expect(findFirstKeptEntryId(entries, LOST, LOST)).toBe("b1");
 			expect(findFirstKeptEntryId(entries, LOST + 1, LOST)).toBe("b2");
@@ -305,10 +304,16 @@ describe("Pi ordinal offset independent review", () => {
 				summary: "covered",
 				publishedAt: 1,
 			};
+			// The summary ends on the call message inside the turn prompted by b16;
+			// its two results follow, and the reply "answer" continues that turn.
+			// The request's history cut drops the call and its results and keeps
+			// the turn's prompt b16, so the marker keeps b16 too: it hides nothing
+			// the request keeps, and no longer has to be retired for want of a
+			// real entry after the combined results.
 			expect(applyDeferredPiCompactionMarker(deps, sessionId, pending)).toEqual(
-				{ kind: "stale-skip", reason: "synthetic-kept-entry" },
+				{ kind: "applied", firstKeptEntryId: "b16", compactionId: "marker" },
 			);
-			expect(appended).toEqual([]);
+			expect(appended).toEqual(["b16"]);
 			appendCompartments(db, sessionId, [
 				{
 					sequence: 2,
@@ -328,7 +333,7 @@ describe("Pi ordinal offset independent review", () => {
 					ordinal: END + 2,
 				}),
 			).toMatchObject({ kind: "applied", firstKeptEntryId: "b21" });
-			expect(appended).toEqual(["b21"]);
+			expect(appended).toEqual(["b16", "b21"]);
 		});
 	});
 

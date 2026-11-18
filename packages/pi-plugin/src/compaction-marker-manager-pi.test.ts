@@ -510,6 +510,8 @@ describe("Pi deferred compaction marker manager", () => {
 				gate: "no-replay-safe-kept-entry",
 				setup: () => {
 					target();
+					// The summary reaches the end of the branch: no entry follows it
+					// for the marker to keep yet.
 					return {
 						pending: pending({ firstKeptEntryId: null }),
 						entries: [
@@ -522,11 +524,6 @@ describe("Pi deferred compaction marker manager", () => {
 								type: "message",
 								id: "m2",
 								message: { role: "assistant", content: "second" },
-							},
-							{
-								type: "message",
-								id: "result-entry",
-								message: { role: "toolResult", toolCallId: "call-1" },
 							},
 						],
 						appendCompaction: () => "compact-1",

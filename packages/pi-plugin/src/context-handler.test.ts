@@ -6641,7 +6641,7 @@ describe("registerPiContextHandler", () => {
 			await handler({ messages }, ctx as never);
 		}
 
-		it("retires a permanently synthetic kept boundary once without appending", async () => {
+		it("keeps the turn's prompt for a summary ending inside a turn instead of retiring the marker", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-marker-synthetic-kept";
 			const logger = await import("@magic-context/core/shared/logger");
@@ -6674,19 +6674,17 @@ describe("registerPiContextHandler", () => {
 				await runDrainPass(args);
 				expect(getPendingPiCompactionMarkerState(db, sessionId)).toBeNull();
 				await runDrainPass(args);
-				expect(appendCompaction).not.toHaveBeenCalled();
-				expect(
-					log.mock.calls.filter(
-						([id, text]) =>
-							id === sessionId &&
-							text.startsWith("Pi compaction-marker clear:"),
-					),
-				).toEqual([
-					[
-						sessionId,
-						"Pi compaction-marker clear: reason=synthetic-kept-entry endMessageId=entry-2 ordinal=2 firstKeptEntryId=<none>",
-					],
-				]);
+				// The summary ends on "second"; a tool result and the reply "fourth"
+				// follow, so the turn prompted by "first" goes on and the request's
+				// history cut keeps that prompt. The marker keeps it as well.
+				expect(appendCompaction).toHaveBeenCalledTimes(1);
+				expect(appendCompaction.mock.calls[0]?.[1]).toBe("entry-1");
+				const clears = log.mock.calls.filter(
+					([id, text]) =>
+						id === sessionId && text.startsWith("Pi compaction-marker clear:"),
+				);
+				expect(clears).toHaveLength(1);
+				expect(clears[0]?.[1]).toContain("reason=applied");
 			} finally {
 				log.mockRestore();
 				clearContextHandlerSession(sessionId);

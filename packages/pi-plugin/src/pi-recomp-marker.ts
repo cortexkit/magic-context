@@ -12,29 +12,25 @@ import {
 } from "./pi-append-compaction";
 import {
 	buildPiCompactionSummary,
-	findFirstKeptEntryId,
+	placePiMarkerKeptEntry,
 } from "./pi-historian-runner";
-import {
-	isPiOrdinalAlignmentUnanchored,
-	resolvePiOrdinalAlignment,
-} from "./pi-ordinal-alignment";
 
 /**
- * The first kept entry after stored ordinal `lastCompactedOrdinal`, or null
- * (stage nothing) while the stored ordinals cannot be placed on this branch.
+ * The first entry a marker for the newest compartment keeps, or null while
+ * there is none yet; see placePiMarkerKeptEntry.
  */
 function placeFirstKeptEntryId(
 	db: ContextDatabase,
 	sessionId: string,
 	branchEntries: readonly unknown[],
-	lastCompactedOrdinal: number,
+	last: { endMessageId: string; endMessage: number },
 ): string | null {
-	const alignment = resolvePiOrdinalAlignment(db, sessionId, branchEntries);
-	if (isPiOrdinalAlignmentUnanchored(alignment)) return null;
-	return findFirstKeptEntryId(
+	return placePiMarkerKeptEntry(
+		db,
+		sessionId,
 		branchEntries,
-		lastCompactedOrdinal,
-		alignment.offset,
+		last.endMessageId,
+		last.endMessage,
 	);
 }
 
@@ -56,11 +52,13 @@ function placeFirstKeptEntryId(
  *
  * The staged marker replaces any marker still pending for the compartments the
  * recomp replaced: the drain could only discard that one, since its summary no
- * longer exists. When the branch has no entry after the newest summary yet (a
+ * longer exists. Its kept entry is the first message the request's history cut
+ * keeps, which is the prompt of the turn when the recomp ran during one (Pi
+ * runs commands while a reply streams). When the cut keeps no message yet (a
  * full recomp of a session with no unsummarized tail ends on the snapshot's
- * newest message), or the stored ordinals cannot be placed on it, the marker is
- * staged without a kept entry, as the historian stages it; the drain places it
- * once the next message arrives, and keeps it waiting until then.
+ * newest message), or the stored ordinals cannot be placed on the branch, the
+ * marker is staged without a kept entry, as the historian stages it; the drain
+ * places it once the next message arrives, and keeps it waiting until then.
  */
 export function stagePiRecompMarker(args: {
 	db: ContextDatabase;
@@ -77,7 +75,7 @@ export function stagePiRecompMarker(args: {
 			args.db,
 			args.sessionId,
 			args.branchEntries,
-			last.endMessage,
+			last,
 		);
 	} catch {
 		firstKeptEntryId = null;
@@ -125,7 +123,7 @@ export function queueAndApplyPiRecompMarker(args: {
 			args.db,
 			args.sessionId,
 			readBranchEntries(),
-			last.endMessage,
+			last,
 		);
 	} catch {
 		firstKeptEntryId = null;

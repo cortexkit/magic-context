@@ -198,7 +198,7 @@ describe("issue 938 review: image accounting and the execute-pass bound", () => 
 	// token_count still includes three images at 1,200 tokens each, because
 	// tagging reads the host's unstripped result before the strip replays.
 	// Skipped: fails on this code; passes with tag-transcript.ts as of v0.49.63.
-	test.skip("WITNESS F1: a queued drop of an already-stripped image result does not justify an execute rebuild", async () => {
+	test("WITNESS F1: a queued drop of an already-stripped image result does not justify an execute rebuild", async () => {
 		const h = strippedImageSession(3);
 		let rebuilds = 0;
 		const restore = __test.setPipelineResultObserverForTests(
@@ -410,7 +410,7 @@ describe("issue 938 review: the recomp marker of a summary that ends inside a tu
 	for (const [boundary, reason] of Object.entries(variants) as Array<
 		[keyof typeof variants, string]
 	>) {
-		test.skip(`WITNESS F2 (${boundary}; ${reason}): the pass after the marker lands keeps the rebuild's bytes and the turn's prompt`, async () => {
+		test(`WITNESS F2 (${boundary}; ${reason}): the pass after the marker lands keeps the rebuild's bytes and the turn's prompt`, async () => {
 			try {
 				const { prompt, rebuild, next } = await midTurnRecomp(boundary);
 				expect(JSON.stringify(rebuild)).toContain(prompt);
