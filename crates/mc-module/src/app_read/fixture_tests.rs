@@ -7,9 +7,9 @@ use super::*;
 use crate::memory_writes::{history_json, history_snapshot, record_history, History};
 use rusqlite::TransactionBehavior;
 
-pub(super) const PROJECT: &str = "pj-sample";
+pub(crate) const PROJECT: &str = "pj-sample";
 /// A project with sessions but nothing else: every page of it is empty.
-pub(super) const EMPTY: &str = "pj-empty";
+pub(crate) const EMPTY: &str = "pj-empty";
 /// A second project whose dreamer schedules show the forms the first one's
 /// don't.
 pub(super) const FORMS: &str = "pj-forms";
@@ -18,7 +18,7 @@ pub(super) const T: i64 = 1_700_000_000_000;
 /// A time no test runs after, for rows that must stay in the future.
 pub(super) const FUTURE: i64 = 4_102_444_800_000;
 
-pub(super) fn head() -> SessionRef {
+pub(crate) fn head() -> SessionRef {
     SessionRef::new("thalamus-harness", "opencode2", "s")
 }
 
@@ -26,18 +26,22 @@ pub(super) fn worker() -> SessionRef {
     SessionRef::new("thalamus-harness", "opencode2", "s-worker")
 }
 
-pub(super) struct Fixture {
+pub(crate) struct Fixture {
     pub dir: tempfile::TempDir,
 }
 
 impl Fixture {
+    pub fn add_summary(&self) {
+        super::tests::insert_summary(&self.context(), &head().session, 1);
+    }
+
     pub fn context(&self) -> Connection {
         Connection::open(self.dir.path().join("context.db")).unwrap()
     }
 
     /// A replica reading this fixture's stores, as the app-read thread opens
     /// them, with the module's settings attached and the time zone fixed.
-    pub fn replica(&self) -> Replica {
+    pub(super) fn replica(&self) -> Replica {
         let mut replica = super::tests::replica(None);
         replica.snapshots.clear();
         replica.store = Some(

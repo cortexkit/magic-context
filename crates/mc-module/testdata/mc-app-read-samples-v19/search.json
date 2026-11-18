@@ -1,0 +1,1340 @@
+{
+  "name": "search",
+  "request": {
+    "method": "context.search",
+    "params": {
+      "query": "needle",
+      "scope": {
+        "session": {
+          "harness": "opencode2",
+          "runner": "thalamus-harness",
+          "session": "s"
+        }
+      },
+      "sources": [
+        "message"
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "agent_resolution": "client",
+      "as_of_ms": 1700000000000,
+      "complete": true,
+      "diagnostics": {
+        "omitted_sessions": 0,
+        "project_resolution": {
+          "status": "ok"
+        }
+      },
+      "hits": [
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 10,
+          "compartment_id": "1",
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m1",
+          "ordinal": 1,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 1.0,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 1",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 20,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m2",
+          "ordinal": 2,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.5,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 2",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 30,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m3",
+          "ordinal": 3,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.3333333333333333,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 3",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 40,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m4",
+          "ordinal": 4,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.25,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 4",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 50,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m5",
+          "ordinal": 5,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.2,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 5",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 60,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m6",
+          "ordinal": 6,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.16666666666666666,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 6",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 70,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m7",
+          "ordinal": 7,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.14285714285714285,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 7",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 80,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m8",
+          "ordinal": 8,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.125,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 8",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 90,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m9",
+          "ordinal": 9,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.1111111111111111,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 9",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 100,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m10",
+          "ordinal": 10,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.1,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 10",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 110,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m11",
+          "ordinal": 11,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.09090909090909091,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 11",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 120,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m12",
+          "ordinal": 12,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.08333333333333333,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 12",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 130,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m13",
+          "ordinal": 13,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.07692307692307693,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 13",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 140,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m14",
+          "ordinal": 14,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.07142857142857142,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 14",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 150,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m15",
+          "ordinal": 15,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.06666666666666667,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 15",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 160,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m16",
+          "ordinal": 16,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.0625,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 16",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 170,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m17",
+          "ordinal": 17,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.058823529411764705,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 17",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 180,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m18",
+          "ordinal": 18,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.05555555555555555,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 18",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 190,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m19",
+          "ordinal": 19,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.05263157894736842,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 19",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 200,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m20",
+          "ordinal": 20,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.05,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 20",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 210,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m21",
+          "ordinal": 21,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.047619047619047616,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 21",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 220,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m22",
+          "ordinal": 22,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.045454545454545456,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 22",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 230,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m23",
+          "ordinal": 23,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.043478260869565216,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 23",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 240,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m24",
+          "ordinal": 24,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.041666666666666664,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 24",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 250,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m25",
+          "ordinal": 25,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.04,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 25",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 260,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m26",
+          "ordinal": 26,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.038461538461538464,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 26",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 270,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m27",
+          "ordinal": 27,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.037037037037037035,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 27",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 280,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m28",
+          "ordinal": 28,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.03571428571428571,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 28",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 290,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m29",
+          "ordinal": 29,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.034482758620689655,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 29",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 300,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m30",
+          "ordinal": 30,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.03333333333333333,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 30",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 310,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m31",
+          "ordinal": 31,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.03225806451612903,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 31",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 320,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m32",
+          "ordinal": 32,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.03125,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 32",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 330,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m33",
+          "ordinal": 33,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.030303030303030304,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 33",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 340,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m34",
+          "ordinal": 34,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.029411764705882353,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 34",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 350,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m35",
+          "ordinal": 35,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.02857142857142857,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 35",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 360,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m36",
+          "ordinal": 36,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.027777777777777776,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 36",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 370,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m37",
+          "ordinal": 37,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.02702702702702703,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 37",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 380,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m38",
+          "ordinal": 38,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.02631578947368421,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 38",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 390,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m39",
+          "ordinal": 39,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.02564102564102564,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 39",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 400,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m40",
+          "ordinal": 40,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.025,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 40",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 410,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m41",
+          "ordinal": 41,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.024390243902439025,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 41",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 420,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m42",
+          "ordinal": 42,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.023809523809523808,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 42",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 430,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m43",
+          "ordinal": 43,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.023255813953488372,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 43",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 440,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m44",
+          "ordinal": 44,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.022727272727272728,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 44",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 450,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m45",
+          "ordinal": 45,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.022222222222222223,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 45",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 460,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m46",
+          "ordinal": 46,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.021739130434782608,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 46",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 470,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m47",
+          "ordinal": 47,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.02127659574468085,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 47",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 480,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m48",
+          "ordinal": 48,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.020833333333333332,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 48",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 490,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m49",
+          "ordinal": 49,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.02040816326530612,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 49",
+          "source": "message"
+        },
+        {
+          "agent_id": null,
+          "agent_resolution": "client",
+          "at_ms": 500,
+          "compartment_id": null,
+          "match_ranges": [
+            [
+              11,
+              17
+            ]
+          ],
+          "message_id": "m50",
+          "ordinal": 50,
+          "project": null,
+          "project_source": null,
+          "ref": null,
+          "role": "assistant",
+          "score": 0.02,
+          "session": {
+            "harness": "opencode2",
+            "runner": "thalamus-harness",
+            "session": "s"
+          },
+          "snippet": "été 🦀 needle 50",
+          "source": "message"
+        }
+      ],
+      "next_cursor": "mca1:a46037918e4c9799806368b4c314d1bb00881a020bbe2f5032f4c842e03c2c76:50",
+      "op": "context.search",
+      "schema": 1,
+      "source_status": {
+        "message": "ok"
+      }
+    }
+  }
+}

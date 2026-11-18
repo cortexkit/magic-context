@@ -1,0 +1,33 @@
+{
+  "name": "fed-app-observations-page",
+  "request": {
+    "method": "observations.page",
+    "params": {
+      "limit": 1
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "next": "mcc1.WyJvYnNlcnZhdGlvbnMucGFnZSIsIjRmNTNjZGExOGMyYmFhMGMiLFsxNzAwMDAwODAwMDAwLDNdXQ",
+      "observations": [
+        {
+          "content": "Uses a Mac.",
+          "created_at": 1700000800000,
+          "id": 3,
+          "session": "s"
+        }
+      ],
+      "op": "observations.page",
+      "schema": 1
+    }
+  },
+  "route": {
+    "harness": "fed-app:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

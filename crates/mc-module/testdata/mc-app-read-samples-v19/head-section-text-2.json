@@ -1,0 +1,28 @@
+{
+  "name": "head-section-text-2",
+  "request": {
+    "method": "context.head_section",
+    "params": {
+      "max_bytes": 1024,
+      "offset": 1023,
+      "section": 0,
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      },
+      "slot": "baseline",
+      "view": 7
+    }
+  },
+  "response": {
+    "result": {
+      "offset": 1023,
+      "part": "text",
+      "section": 0,
+      "slot": "baseline",
+      "text": "ébbbbbbbbbbbb",
+      "view": 7
+    }
+  }
+}
