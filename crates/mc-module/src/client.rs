@@ -249,6 +249,25 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Result<serde_json::Value, String>> + Send {
         async { Err("missing_synapse".to_owned()) }
     }
+    /// One call to a Synapse module's management surface for embeddings
+    /// (`models.list`, `embed.query`, `embed.batch`, `embed.result`), on no
+    /// session's behalf: upkeep embeds outside any session. The answer must
+    /// arrive within `timeout`. `module` is the module id the settings name
+    /// ([`crate::embedding::synapse`]); no other module is called in its
+    /// place. The answer is the reply's JSON; a refusal carries the module's
+    /// code and, for a transient one such as `model_loading`, how long to
+    /// wait. Without Synapse no lane serves and search uses words only,
+    /// which is the default here.
+    fn synapse_embedding_call(
+        &self,
+        _module: &str,
+        _method: &str,
+        _params: serde_json::Value,
+        _timeout: std::time::Duration,
+    ) -> impl Future<Output = Result<serde_json::Value, crate::embedding::synapse::Refusal>> + Send
+    {
+        async { Err(crate::embedding::synapse::Refusal::new("missing_synapse")) }
+    }
     /// One read from Entorhinal's management surface on the session's behalf
     /// (`context.project`, `context.session`), for the session's memory context.
     /// `body` is the whole serialized request. The answer is the reply's bytes;

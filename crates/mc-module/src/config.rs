@@ -71,8 +71,32 @@ impl Config {
     /// measured against.
     pub fn resolve(&self, project_root: Option<&str>, model_key: &str, usable: u64) -> Settings {
         match self {
-            Self::Fixed(settings) => settings.as_ref().clone(),
+            Self::Fixed(settings) => {
+                let mut settings = settings.as_ref().clone();
+                // Each resolution learns its Synapse lane afresh, as one
+                // resolved from the files does.
+                settings.embedding = settings
+                    .embedding
+                    .as_ref()
+                    .map(embedding::Provider::unbound);
+                settings
+            }
             Self::Files(loader) => loader.resolve(project_root.map(Path::new), model_key, usable),
+        }
+    }
+
+    /// Call Synapse through `link` for the embedding providers these
+    /// settings resolve to. The module links its own configuration once, over
+    /// its runner client.
+    pub fn link_synapse(&mut self, link: &std::sync::Arc<embedding::synapse::Link>) {
+        match self {
+            Self::Fixed(settings) => {
+                settings.embedding = settings
+                    .embedding
+                    .take()
+                    .map(|provider| provider.with_synapse_link(link));
+            }
+            Self::Files(loader) => loader.synapse = Some(std::sync::Arc::clone(link)),
         }
     }
 
@@ -168,6 +192,9 @@ pub struct Loader {
     cache: Mutex<HashMap<PathBuf, Cached>>,
     /// Where `{vault:…}` keys in the user file are read.
     vault: std::sync::Arc<Vault>,
+    /// How a Synapse embedding provider calls Synapse; `None` outside the
+    /// module, where nothing is embedded.
+    synapse: Option<std::sync::Arc<embedding::synapse::Link>>,
 }
 
 impl Loader {
@@ -211,6 +238,7 @@ impl Loader {
             user_path,
             cache: Mutex::new(HashMap::new()),
             vault: Vault::none(),
+            synapse: None,
         }
     }
 
@@ -244,13 +272,19 @@ impl Loader {
         let project = project_root
             .map(|root| detect_config_file(&root.join(".cortexkit")))
             .and_then(|path| self.read(&path));
-        resolve_tiers(
+        let mut settings = resolve_tiers(
             user.as_ref(),
             project.as_ref(),
             model_key,
             usable,
             &self.vault,
-        )
+        );
+        if let Some(link) = &self.synapse {
+            settings.embedding = settings
+                .embedding
+                .map(|provider| provider.with_synapse_link(link));
+        }
+        settings
     }
 
     /// The settings `tool.catalog` answers with, for a project folder or, on
@@ -325,9 +359,9 @@ impl Loader {
 }
 
 /// What a file's settings call for in the log: an obsolete key that is
-/// ignored, a `clock_note` that can't be used, and a `rerank.module` that
-/// names no module ck-mc may call. `user` is whether this is the user's
-/// file, the only one `clock_note` and `rerank.module` are read from.
+/// ignored, a `clock_note` that can't be used, and a `rerank.module` or
+/// `embedding.module` that names no module ck-mc may call. `user` is whether
+/// this is the user's file, the only one those settings are read from.
 fn setting_notes(value: &Value, user: bool) -> Vec<String> {
     let mut notes = Vec::new();
     if value.get("temporal_awareness").is_some() {
@@ -344,7 +378,8 @@ fn setting_notes(value: &Value, user: bool) -> Vec<String> {
         }
     }
     if user {
-        notes.extend(crate::search::rerank::module_note(value));
+        notes.extend(crate::search::rerank::module_note(value, "rerank"));
+        notes.extend(crate::search::rerank::module_note(value, "embedding"));
     }
     notes
 }

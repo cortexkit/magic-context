@@ -634,7 +634,7 @@ fn user_strings_expand_and_project_strings_stay_literal() {
     .unwrap();
     let settings = Loader::with_user_path(user_path).resolve(Some(&project), OPUS, 1_000);
     let provider = settings.embedding.expect("provider");
-    assert_eq!(provider.endpoint(), "https://e.invalid/v1");
+    assert_eq!(provider.endpoint(), Some("https://e.invalid/v1"));
     assert_eq!(
         provider.api_key_for_test(),
         Some(&ApiKey::Text(Secret::new("{file:key}".into())))

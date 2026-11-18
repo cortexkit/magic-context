@@ -187,12 +187,13 @@ fn plain_module_id(id: &str) -> bool {
         && !id.chars().any(char::is_whitespace)
 }
 
-/// The log line for a user file whose `rerank.module` names no module ck-mc
-/// may call, so the default applies; `None` when it is absent or usable.
+/// The log line for a user file whose `<setting>.module` (`rerank.module`
+/// or `embedding.module`) names no module ck-mc may call, so the default
+/// applies; `None` when it is absent or usable.
 /// A value with `{env:}` or `{file:}` in it is checked only once expanded,
-/// by [`Reranker::from_tiers_in`], and is not named here.
-pub(crate) fn module_note(user: &Value) -> Option<String> {
-    let value = user.pointer("/rerank/module")?;
+/// by the setting's reader, and is not named here.
+pub(crate) fn module_note(user: &Value, setting: &str) -> Option<String> {
+    let value = user.get(setting)?.get("module")?;
     let usable = match value {
         Value::Null => true,
         Value::String(text) => {
@@ -202,7 +203,7 @@ pub(crate) fn module_note(user: &Value) -> Option<String> {
     };
     (!usable).then(|| {
         format!(
-            "rerank.module must be a module id such as \"{SYNAPSE_MODULE}\" or fed:<fingerprint>:<module id> with a fingerprint of 32 lowercase hex characters, not {value}; the default of {SYNAPSE_MODULE} applies"
+            "{setting}.module must be a module id such as \"{SYNAPSE_MODULE}\" or fed:<fingerprint>:<module id> with a fingerprint of 32 lowercase hex characters, not {value}; the default of {SYNAPSE_MODULE} applies"
         )
     })
 }

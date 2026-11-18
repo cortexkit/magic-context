@@ -887,6 +887,55 @@ impl RunnerClient for SubcRunnerClient {
         serde_json::from_slice(&reply).map_err(|_| "validation".to_owned())
     }
 
+    /// As [`Self::synapse_call`], but bound to a fixed `embedding` session of
+    /// the `magic-context` harness, since upkeep embeds outside any session,
+    /// and given `timeout`. A module refusal keeps its code and the
+    /// `retry_after_ms` its detail carries.
+    async fn synapse_embedding_call(
+        &self,
+        module: &str,
+        method: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value, crate::embedding::synapse::Refusal> {
+        use crate::embedding::synapse::Refusal;
+        let consumer = self
+            .consumer()
+            .await
+            .map_err(|_| Refusal::new("missing_synapse"))?;
+        let reply = consumer
+            .call(
+                RouteTarget::ManagementSurface {
+                    module_id: module.to_owned(),
+                },
+                BindIdentity::new("magic-context", "embedding".to_owned()),
+                wire::encode(method, &params),
+                CallOptions {
+                    timeout,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                error
+                    if matches!(
+                        error
+                            .route_open_refusal()
+                            .map(|refusal| refusal.code.as_str()),
+                        Some("unknown_module")
+                    ) =>
+                {
+                    Refusal::new("unknown_module")
+                }
+                subc_client_rs::CallError::Module(body) => {
+                    Refusal::from_detail(body.code, body.detail.as_ref())
+                }
+                subc_client_rs::CallError::OutcomeUnknown(_) => Refusal::new("deadline_exceeded"),
+                _ => Refusal::new("missing_synapse"),
+            })?;
+        serde_json::from_slice(&reply).map_err(|_| Refusal::new("validation"))
+    }
+
     /// On Entorhinal's management surface, bound to the session's own
     /// identity, as Entorhinal attributes a context read to the session that
     /// asks. The caller bounds the wait.

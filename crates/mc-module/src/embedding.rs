@@ -1,17 +1,21 @@
-//! Query embeddings for `ctx_search`, from an OpenAI-compatible endpoint,
-//! compared with the vectors the standalone plugin stores in `context.db`.
+//! Embeddings for `ctx_search`, the memory hint and upkeep, from a Synapse
+//! module ([`synapse`]) or an OpenAI-compatible endpoint, compared with the
+//! vectors stored in `context.db`.
 //!
 //! A stored vector is usable only for the provider that made it, so every
-//! vector row carries a model id. This module derives that id exactly as the
-//! plugin does (`getEmbeddingProviderIdentity`, and `getChunkEmbeddingModelId`
-//! for history chunks), which lets ck-mc search the plugin's vectors and the
-//! plugin search ck-mc's.
+//! vector row carries a model id. For an endpoint, this module derives that
+//! id exactly as the plugin does (`getEmbeddingProviderIdentity`, and
+//! `getChunkEmbeddingModelId` for history chunks), which lets ck-mc search
+//! the plugin's vectors and the plugin search ck-mc's.
 //!
-//! Only `openai-compatible` providers are served. The plugin's default,
-//! `local`, runs an in-process model that ck-mc does not have; `synapse` needs
-//! the Synapse module. With either, search keeps its lexical lanes.
+//! `embedding.provider` picks the provider: `openai-compatible` an endpoint;
+//! `synapse`, `local` or unset a Synapse module, on this machine unless the
+//! user's `embedding.module` names another; `off` none. 0.49's `local` ran a
+//! model inside the plugin; in 0.50 it means "on this machine, through
+//! Synapse". Without a provider, or while no Synapse lane serves, search
+//! keeps its lexical lanes.
 //!
-//! The request matches `embedding-openai.ts`: one POST to `<endpoint>/embeddings`
+//! An endpoint's request matches `embedding-openai.ts`: one POST to `<endpoint>/embeddings`
 //! with `model`, `input`, and `input_type`/`truncate`/`dimensions` when set; no redirects;
 //! a 30-second background limit and a 5-second explicit-search limit; a response
 //! for another model is refused. A failed query embed only drops semantic scores.
@@ -38,6 +42,7 @@ const QUERY_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(5);
 
 mod circuit;
 use circuit::{Attempt, Circuit};
+pub mod synapse;
 
 #[cfg(test)]
 pub(crate) mod circuit_tests;
@@ -56,37 +61,18 @@ const QUERY_WINDOW_SAFETY_RATIO: f64 = 0.9;
 const QWEN_STYLE_QUERY_INSTRUCTION: &str =
     "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ";
 
-/// An OpenAI-compatible embedding provider, as the user configured it.
-#[derive(Clone)]
-pub struct Provider {
-    endpoint: String,
-    model: String,
-    api_key: Option<ApiKey>,
-    input_type: Option<String>,
-    query_input_type: Option<String>,
-    /// `Some("")` when the user switched the instruction off.
-    query_instruction: Option<String>,
-    document_prefix: Option<String>,
-    truncate: Option<String>,
-    dimensions: Option<u64>,
-    max_input_tokens: Option<u64>,
-    circuit: Arc<Mutex<Circuit>>,
-    fetch_timeout: Duration,
-    query_timeout: Duration,
-}
-
-impl std::fmt::Debug for Provider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Provider")
-            .field("endpoint", &self.endpoint)
-            .field("model", &self.model)
-            .finish_non_exhaustive()
-    }
+/// The embedding provider the settings name.
+#[derive(Clone, Debug)]
+pub enum Provider {
+    /// An OpenAI-compatible endpoint (`provider: "openai-compatible"`).
+    Http(Box<Http>),
+    /// A Synapse module's lane (`provider: "synapse"`, `"local"` or unset).
+    Synapse(synapse::Synapse),
 }
 
 impl Provider {
     /// The provider from the two configuration tiers, or `None` when search
-    /// has no remote embedding. The user tier arrives with `{env:}`/`{file:}`
+    /// has no embedding. The user tier arrives with `{env:}`/`{file:}`
     /// already expanded. A project may tune the model's request, but where
     /// text is sent, how a query is worded and the output width stay the user's choice.
     /// A `{vault:}` key here is never read (no vault); the configuration
@@ -96,7 +82,9 @@ impl Provider {
     }
 
     /// [`Provider::from_tiers`], reading a `{vault:}` key in the user tier
-    /// from `vault`. A project may set its own key, but only as text.
+    /// from `vault`. A project may set its own key, but only as text. Only
+    /// the user picks the provider and the Synapse module
+    /// (`embedding.module`, read as `rerank.module` is).
     pub(crate) fn from_tiers_in(user: &Value, project: &Value, vault: &Vault) -> Option<Self> {
         let mut merged = json!({"provider": "local"});
         merge(
@@ -126,11 +114,193 @@ impl Provider {
                 "max_input_tokens",
             ],
         );
-        if merged["provider"] != "openai-compatible" {
-            return None;
+        match merged["provider"].as_str() {
+            Some("openai-compatible") => Http::from_merged(&merged, user, project, vault)
+                .map(|http| Self::Http(Box::new(http))),
+            Some("synapse" | "local") => Some(Self::Synapse(synapse::Synapse::new(
+                user["embedding"]["module"]
+                    .as_str()
+                    .and_then(crate::search::rerank::module_id)
+                    .unwrap_or(crate::search::rerank::SYNAPSE_MODULE)
+                    .to_owned(),
+                text(&merged, "model").unwrap_or_else(|| synapse::DEFAULT_MODEL.to_owned()),
+                crate::config::integer(&merged["max_input_tokens"]).filter(|n| *n > 0),
+                FETCH_TIMEOUT,
+                QUERY_EMBEDDING_TIMEOUT,
+            ))),
+            // `off`, or a provider ck-mc doesn't serve.
+            _ => None,
         }
-        let endpoint = text(&merged, "endpoint")?.trim_end_matches('/').to_owned();
-        let model = text(&merged, "model")?;
+    }
+
+    /// This provider calling Synapse through `link`; an endpoint is unchanged.
+    pub(crate) fn with_synapse_link(self, link: &Arc<synapse::Link>) -> Self {
+        match self {
+            Self::Synapse(provider) => Self::Synapse(provider.with_link(Arc::clone(link))),
+            http => http,
+        }
+    }
+
+    /// A copy that learns its Synapse lane afresh (see [`synapse`]).
+    pub(crate) fn unbound(&self) -> Self {
+        match self {
+            Self::Synapse(provider) => Self::Synapse(provider.unbound()),
+            http => http.clone(),
+        }
+    }
+
+    /// The endpoint's URL; `None` for a Synapse module.
+    pub fn endpoint(&self) -> Option<&str> {
+        match self {
+            Self::Http(http) => Some(&http.endpoint),
+            Self::Synapse(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn api_key_for_test(&self) -> Option<&ApiKey> {
+        match self {
+            Self::Http(http) => http.api_key.as_ref(),
+            Self::Synapse(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(endpoint: &str, model: &str) -> Self {
+        Self::Http(Box::new(Http::for_test(endpoint, model)))
+    }
+
+    /// The model id memory and commit vectors are stored under. A Synapse
+    /// provider with no serving lane reports an id no vector is stored under.
+    pub fn model_id(&self) -> String {
+        match self {
+            Self::Http(http) => http.model_id(),
+            Self::Synapse(provider) => provider.model_id(),
+        }
+    }
+
+    /// [`Self::model_id`], or `None` while no Synapse lane serves.
+    pub fn serving_model_id(&self) -> Option<String> {
+        match self {
+            Self::Http(http) => Some(http.model_id()),
+            Self::Synapse(provider) => provider.serving_model_id(),
+        }
+    }
+
+    /// The model id history-chunk vectors are stored under: the provider's
+    /// id plus the chunking recipe, so a change in how history is cut into
+    /// chunks retires only chunk vectors.
+    pub fn chunk_model_id(&self) -> String {
+        match self {
+            Self::Http(http) => http.chunk_model_id(),
+            Self::Synapse(provider) => {
+                chunk_identity(&provider.model_id(), provider.chunk_max_input_tokens(), "")
+            }
+        }
+    }
+
+    /// The size history is chunked to, as named in the chunk recipe.
+    pub(crate) fn chunk_max_input_tokens(&self) -> u64 {
+        match self {
+            Self::Http(http) => http.chunk_max_input_tokens(),
+            Self::Synapse(provider) => provider.chunk_max_input_tokens(),
+        }
+    }
+
+    /// Learn which Synapse lane serves before any id is read, for work that
+    /// reads ids before it embeds (upkeep). `false` when no lane serves; an
+    /// endpoint is always ready.
+    pub async fn prepare(&self) -> bool {
+        match self {
+            Self::Http(_) => true,
+            Self::Synapse(provider) => provider.prepare().await,
+        }
+    }
+
+    /// Embed one search query. `None` when the provider fails, refuses, is
+    /// rate limited, has no serving lane, or answers for another model; the
+    /// caller then searches by words only.
+    pub async fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
+        match self {
+            Self::Http(http) => http.embed_query(query).await,
+            Self::Synapse(provider) => provider.query(query, provider.fetch_timeout()).await.0,
+        }
+    }
+
+    /// Explicit search has a shorter semantic budget; expiry is a provider
+    /// timeout, not cancellation of the keyword search.
+    pub async fn embed_search_query(&self, query: &str) -> Option<Vec<f32>> {
+        self.embed_search_query_traced(query).await.0
+    }
+
+    /// [`Self::embed_search_query`], with a word on how the request ended,
+    /// for a slow call's log line ([`crate::tool_timing`]): `ok`, `timeout`,
+    /// `failed`, `unusable` (an answer with no usable vector),
+    /// `rate_limited`, `circuit_open` when no request was sent because
+    /// the endpoint's circuit is open, or `unavailable` when no Synapse lane
+    /// serves. `,probe` follows when an endpoint request was the one probe an
+    /// open circuit lets through.
+    pub async fn embed_search_query_traced(&self, query: &str) -> (Option<Vec<f32>>, &'static str) {
+        match self {
+            Self::Http(http) => http.embed_search_query_traced(query).await,
+            Self::Synapse(provider) => provider.query(query, provider.query_timeout()).await,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_timeouts_for_test(self, fetch: Duration, query: Duration) -> Self {
+        match self {
+            Self::Http(http) => Self::Http(Box::new(http.with_timeouts_for_test(fetch, query))),
+            Self::Synapse(provider) => Self::Synapse(provider.with_timeouts(fetch, query)),
+        }
+    }
+
+    /// Embed stored texts (memories, commit messages, history chunks), one
+    /// slot per text in order. `None` when the whole request failed; a
+    /// `None` slot when only that text came back unusable. A failed batch is
+    /// simply tried again on the next upkeep run.
+    pub async fn embed_documents(&self, texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
+        match self {
+            Self::Http(http) => http.embed_documents(texts).await,
+            Self::Synapse(provider) => provider.documents(texts).await,
+        }
+    }
+}
+
+/// An OpenAI-compatible embedding provider, as the user configured it.
+#[derive(Clone)]
+pub struct Http {
+    endpoint: String,
+    model: String,
+    api_key: Option<ApiKey>,
+    input_type: Option<String>,
+    query_input_type: Option<String>,
+    /// `Some("")` when the user switched the instruction off.
+    query_instruction: Option<String>,
+    document_prefix: Option<String>,
+    truncate: Option<String>,
+    dimensions: Option<u64>,
+    max_input_tokens: Option<u64>,
+    circuit: Arc<Mutex<Circuit>>,
+    fetch_timeout: Duration,
+    query_timeout: Duration,
+}
+
+impl std::fmt::Debug for Http {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http")
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Http {
+    /// The endpoint from the merged `embedding` settings, or `None` when they
+    /// name no endpoint or model, or an endpoint that is not allowed.
+    fn from_merged(merged: &Value, user: &Value, project: &Value, vault: &Vault) -> Option<Self> {
+        let endpoint = text(merged, "endpoint")?.trim_end_matches('/').to_owned();
+        let model = text(merged, "model")?;
         if validate_endpoint(&endpoint).is_err() {
             tracing::info!("ck-mc: the embedding endpoint is not allowed; search uses words only");
             return None;
@@ -152,28 +322,19 @@ impl Provider {
             endpoint,
             model,
             api_key,
-            input_type: text(&merged, "input_type"),
-            query_input_type: text(&merged, "query_input_type"),
+            input_type: text(merged, "input_type"),
+            query_input_type: text(merged, "query_input_type"),
             query_instruction: match &merged["query_instruction"] {
                 Value::String(text) => Some(text.clone()),
                 Value::Bool(false) => Some(String::new()),
                 _ => None,
             },
             document_prefix: merged["document_prefix"].as_str().map(str::to_owned),
-            truncate: text(&merged, "truncate"),
+            truncate: text(merged, "truncate"),
             dimensions: crate::config::integer(&merged["dimensions"]),
             max_input_tokens: crate::config::integer(&merged["max_input_tokens"])
                 .filter(|n| *n > 0),
         })
-    }
-
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    #[cfg(test)]
-    pub(crate) fn api_key_for_test(&self) -> Option<&ApiKey> {
-        self.api_key.as_ref()
     }
 
     #[cfg(test)]
@@ -227,20 +388,13 @@ impl Provider {
         format!("embedding-provider:{:x}", md5::compute(normalized))
     }
 
-    /// The model id history-chunk vectors are stored under: the provider's
-    /// id plus the chunking recipe, so a change in how history is cut into
-    /// chunks retires only chunk vectors.
+    /// The model id history-chunk vectors are stored under.
     pub fn chunk_model_id(&self) -> String {
-        let provider = self.model_id();
-        // Keys in sorted order, as the plugin's stable serialization writes them.
-        let recipe = format!(
-            "{{\"chunkerVersion\":2,\"maxInputTokens\":{},\"providerIdentity\":{},\"truncate\":{}}}",
-            self.max_input_tokens.unwrap_or(DEFAULT_CHUNK_MAX_INPUT_TOKENS),
-            json!(provider),
-            json!(self.truncate.clone().unwrap_or_default()),
-        );
-        let digest = format!("{:x}", Sha256::digest(recipe.as_bytes()));
-        format!("{provider}:chunk:{}", &digest[..16])
+        chunk_identity(
+            &self.model_id(),
+            self.chunk_max_input_tokens(),
+            self.truncate.as_deref().unwrap_or_default(),
+        )
     }
 
     /// The same ceiling used in the chunk recipe and the document request.
@@ -277,18 +431,8 @@ impl Provider {
         self.query_with_timeout(query, self.fetch_timeout).await.0
     }
 
-    /// Explicit search has a shorter semantic budget; expiry is an endpoint
-    /// timeout, not cancellation of the keyword search.
-    pub async fn embed_search_query(&self, query: &str) -> Option<Vec<f32>> {
-        self.embed_search_query_traced(query).await.0
-    }
-
-    /// [`Self::embed_search_query`], with a word on how the request ended,
-    /// for a slow call's log line ([`crate::tool_timing`]): `ok`, `timeout`,
-    /// `failed`, `unusable` (an answer with no usable vector),
-    /// `rate_limited`, or `circuit_open` when no request was sent because
-    /// the endpoint's circuit is open. `,probe` follows when the request was
-    /// the one probe an open circuit lets through.
+    /// One search query within the explicit-search limit, and a word on how
+    /// the request ended (see [`Provider::embed_search_query_traced`]).
     pub async fn embed_search_query_traced(&self, query: &str) -> (Option<Vec<f32>>, &'static str) {
         self.query_with_timeout(query, self.query_timeout).await
     }
@@ -711,6 +855,21 @@ fn validate_endpoint(endpoint: &str) -> Result<(), ()> {
     Ok(())
 }
 
+/// The model id history-chunk vectors are stored under: the provider's id
+/// plus the chunking recipe, so a change in how history is cut into chunks
+/// retires only chunk vectors. Keys are in sorted order, as the plugin's
+/// stable serialization writes them.
+fn chunk_identity(provider: &str, max_input_tokens: u64, truncate: &str) -> String {
+    let recipe = format!(
+        "{{\"chunkerVersion\":2,\"maxInputTokens\":{},\"providerIdentity\":{},\"truncate\":{}}}",
+        max_input_tokens,
+        json!(provider),
+        json!(truncate),
+    );
+    let digest = format!("{:x}", Sha256::digest(recipe.as_bytes()));
+    format!("{provider}:chunk:{}", &digest[..16])
+}
+
 /// A vector as stored: little-endian `f32`s, as the plugin writes them.
 pub fn encode(vector: &[f32]) -> Vec<u8> {
     vector
@@ -779,21 +938,37 @@ fn merge(target: &mut Value, source: &Value, keys: &[&str]) {
 mod config_regression_tests {
     use super::*;
 
+    /// The endpoint provider the settings resolve to.
+    pub(super) fn http(provider: Option<Provider>) -> Http {
+        match provider {
+            Some(Provider::Http(http)) => *http,
+            other => panic!("not an endpoint provider: {other:?}"),
+        }
+    }
+
     #[test]
     fn integral_input_limit_is_accepted() {
-        let provider = Provider::from_tiers(&json!({"embedding": {"provider": "openai-compatible", "endpoint": "https://example.com/v1", "model": "test", "max_input_tokens": 30000.0}}), &json!({}), Path::new("unused")).unwrap();
+        let provider = http(Provider::from_tiers(
+            &json!({"embedding": {"provider": "openai-compatible", "endpoint": "https://example.com/v1", "model": "test", "max_input_tokens": 30000.0}}),
+            &json!({}),
+            Path::new("unused"),
+        ));
         assert_eq!(provider.max_input_tokens, Some(30000));
     }
 
     #[test]
     fn project_embedding_fields_respect_trust_boundary() {
-        let provider = Provider::from_tiers(&json!({"embedding": {
-            "provider": "openai-compatible", "endpoint": "https://trusted.example/v1", "model": "user",
-            "query_instruction": "trusted query", "document_prefix": "trusted document"
-        }}), &json!({"embedding": {
-            "provider": "local", "endpoint": "https://project.example/v1", "query_instruction": "unsafe query", "document_prefix": "unsafe document",
-            "model": "project", "api_key": "{env:SECRET}", "input_type": "document", "query_input_type": "query", "truncate": "end", "max_input_tokens": 30000
-        }}), Path::new("unused")).unwrap();
+        let provider = http(Provider::from_tiers(
+            &json!({"embedding": {
+                "provider": "openai-compatible", "endpoint": "https://trusted.example/v1", "model": "user",
+                "query_instruction": "trusted query", "document_prefix": "trusted document"
+            }}),
+            &json!({"embedding": {
+                "provider": "local", "endpoint": "https://project.example/v1", "query_instruction": "unsafe query", "document_prefix": "unsafe document",
+                "model": "project", "api_key": "{env:SECRET}", "input_type": "document", "query_input_type": "query", "truncate": "end", "max_input_tokens": 30000
+            }}),
+            Path::new("unused"),
+        ));
         assert_eq!(provider.endpoint, "https://trusted.example/v1");
         assert_eq!(provider.query_instruction.as_deref(), Some("trusted query"));
         assert_eq!(
@@ -853,9 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn only_remote_providers_with_safe_endpoints_are_served() {
-        let local = Provider::from_tiers(&json!({}), &json!({}), Path::new("/u"));
-        assert!(local.is_none());
+    fn endpoints_must_be_safe_and_named_by_the_user() {
         let metadata = Provider::from_tiers(
             &json!({"embedding": {"provider": "openai-compatible", "endpoint": "http://169.254.169.254/v1", "model": "m"}}),
             &json!({}),
@@ -868,7 +1041,7 @@ mod tests {
             Path::new("/u"),
         )
         .unwrap();
-        assert_eq!(project_endpoint.endpoint(), "https://a.invalid");
+        assert_eq!(project_endpoint.endpoint(), Some("https://a.invalid"));
     }
 
     #[test]
@@ -887,12 +1060,15 @@ mod tests {
 
     #[test]
     fn prefixes_follow_the_model_family() {
-        let qwen = Provider::for_test("https://e.invalid", "Qwen/Qwen3-Embedding-8B");
+        let qwen = Http::for_test("https://e.invalid", "Qwen/Qwen3-Embedding-8B");
         assert_eq!(qwen.query_prefix(), QWEN_STYLE_QUERY_INSTRUCTION);
-        let nomic = Provider::for_test("https://e.invalid", "nomic-embed-text:latest");
+        let nomic = Http::for_test("https://e.invalid", "nomic-embed-text:latest");
         assert_eq!(nomic.query_prefix(), "search_query: ");
         assert_eq!(nomic.document_prefix(), "search_document: ");
-        assert_eq!(voyage(true).query_prefix(), "");
+        assert_eq!(
+            super::config_regression_tests::http(Some(voyage(true))).query_prefix(),
+            ""
+        );
     }
 
     #[test]
