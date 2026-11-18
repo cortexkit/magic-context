@@ -196,7 +196,9 @@ describe("issue 938 fix-round review: a marker never hides a message the request
 	// the marker that lands on the execute pass starts at that prompt, so on the
 	// pass after it Pi no longer loads the message: the request loses it (the
 	// model never sees it again, and no summary covers it) and changes bytes
-	// right after the history head, on a pass without rebuild permission.
+	// right after the history head. That later pass runs at 10% usage with no
+	// publication or flush to ride, so it may not change any earlier byte: it
+	// should only append the new prompt to what the execute pass sent.
 	const variants = {
 		custom: EXTENSION_NOTE,
 		"branch-summary": BRANCH_SUMMARY,
