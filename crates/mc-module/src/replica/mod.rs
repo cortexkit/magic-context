@@ -43,6 +43,7 @@
 //! outbox kept to one row per changed row.
 
 pub mod apply;
+pub mod epochs;
 pub mod hub;
 pub mod live;
 pub mod nats;
@@ -63,6 +64,8 @@ mod live_tests;
 #[cfg(test)]
 mod nats_tests;
 #[cfg(test)]
+mod order_tests;
+#[cfg(test)]
 mod review_witness_2_tests;
 #[cfg(test)]
 mod review_witness_tests;
@@ -76,7 +79,7 @@ mod seal_client_tests;
 pub(crate) mod test_support;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -128,8 +131,18 @@ pub fn box_id(client: &cortexkit_bus_client::BusClient) -> Option<String> {
 /// generations of the dreamer leases the run holds, by role
 /// ([`crate::dreamer::lease::role`]). Each captured change carries the
 /// epoch of its own row's role ([`schema`]), and none when the run doesn't
-/// hold that role; a receiver skips a dreamer change whose epoch is older
-/// than that role's fence ([`apply`]).
+/// hold that role; a receiver skips a dreamer change older than the fence
+/// of the row it changes ([`apply`]).
+///
+/// A run that names epochs first freezes every change of another writer
+/// still waiting to be sent for a row of a role it holds: that change goes
+/// out as its own message, with the row as it stands now, and the run's
+/// change of the row becomes a message of its own at the next revision. A
+/// receiver that fences the run's change then still applies the other
+/// writer's, and a run's stale change never travels inside a message that
+/// carries no epoch. A run without epochs (no lease, or a build without
+/// `memory-replica`) writes changes no receiver fences, so they join the
+/// waiting ones as any change does.
 pub(crate) fn name_writer(
     tx: &Connection,
     actor: &str,
@@ -148,14 +161,72 @@ pub(crate) fn name_writer(
             "INSERT INTO replica_writer (actor, run_id, role, epoch) VALUES (?1, ?2, ?3, ?4)",
             params![actor, run_id, role, epoch],
         )?;
+        freeze_waiting(tx, Some((actor, role, *epoch)))?;
     }
     Ok(())
 }
 
 /// End [`name_writer`]'s naming, before the transaction commits, so no
-/// other writer is ever named by it.
+/// other writer is ever named by it. The changes a run that named epochs
+/// made are frozen as they stand, so a change another writer makes before
+/// they are sent becomes a message of its own. That later message carries
+/// the run's change too, as the row stood when that writer changed it:
+/// the writer changed the row it saw, and its message is not fenced.
 pub(crate) fn unname_writer(tx: &Connection) -> rusqlite::Result<()> {
+    let epochs: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replica_writer WHERE epoch IS NOT NULL)",
+        [],
+        |row| row.get(0),
+    )?;
+    if epochs {
+        freeze_waiting(tx, None)?;
+    }
     tx.execute("DELETE FROM replica_writer", [])?;
+    Ok(())
+}
+
+/// Freeze the outbox rows waiting to be sent for rows already sent once:
+/// with `Some((actor, role, epoch))`, those of rows of `role` written by
+/// another actor or under another epoch; with `None`, those that carry an
+/// epoch (a run's own changes). A row never sent travels as a create, and
+/// no receiver holds an earlier change of it to fence it by, so its
+/// changes stay joined.
+fn freeze_waiting(tx: &Connection, other_than: Option<(&str, &str, i64)>) -> rusqlite::Result<()> {
+    let mut waiting: Vec<(i64, String, i64)> = Vec::new();
+    for table in schema::TABLES {
+        let role = schema::row_role(table, "t");
+        let (condition, values): (String, Vec<rusqlite::types::Value>) = match other_than {
+            Some((actor, role_held, epoch)) => (
+                format!("{role} = ?1 AND NOT (o.actor = ?2 AND o.epoch IS ?3)"),
+                vec![
+                    role_held.to_owned().into(),
+                    actor.to_owned().into(),
+                    epoch.into(),
+                ],
+            ),
+            None => ("o.epoch IS NOT NULL".to_owned(), Vec::new()),
+        };
+        let mut statement = tx.prepare(&format!(
+            "SELECT o.id, o.kind, o.local_id FROM replica_outbox o JOIN {name} t ON t.id = o.local_id
+              WHERE o.kind = '{kind}' AND o.state = 'pending' AND o.frozen IS NULL
+                AND o.change <> 'delete' AND t.global_id IS NOT NULL AND {condition}",
+            name = table.name,
+            kind = table.kind,
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        for row in rows {
+            waiting.push(row?);
+        }
+    }
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let store = store_id(tx)?;
+    for (outbox_id, kind, local_id) in waiting {
+        publish::freeze(tx, outbox_id, &kind, local_id, &store)?;
+    }
     Ok(())
 }
 
@@ -169,9 +240,15 @@ pub struct Replica {
     pub(crate) hub: Arc<dyn Hub>,
     pub(crate) sealer: Arc<dyn Sealer>,
     pub(crate) box_id: String,
+    /// The hub's fleet epoch record, which decides whether a message the
+    /// vault won't open is held or skipped ([`epochs`]).
+    pub(crate) epochs: Arc<dyn epochs::FleetEpochs>,
     /// Whether this engine read the stream to its end since it started
     /// ([`Replica::catch_up`]); nothing is sent before it has.
     caught_up: AtomicBool,
+    /// Why the stream is held at a message that may open later, as last
+    /// logged, so each hold is logged once.
+    pub(crate) held: Mutex<Option<String>>,
 }
 
 impl Replica {
@@ -186,8 +263,17 @@ impl Replica {
             hub,
             sealer,
             box_id,
+            epochs: Arc::new(epochs::UnknownEpochs),
             caught_up: AtomicBool::new(false),
+            held: Mutex::new(None),
         }
+    }
+
+    /// The engine reading the fleet epoch record from `epochs`, in place of
+    /// a record whose members are all unknown.
+    pub fn with_epochs(mut self, epochs: Arc<dyn epochs::FleetEpochs>) -> Self {
+        self.epochs = epochs;
+        self
     }
 
     /// When this computer joined the stream, if it has.
@@ -227,11 +313,13 @@ impl Replica {
     }
 
     /// Read the stream to its end, once per start of the engine, before
-    /// anything is sent. A store copied to this computer from another one
-    /// takes a new store id first, and a store restored to an earlier state
-    /// takes one when this reading finds a message it sent in a later state
+    /// anything is sent. A store that never joined the stream takes a new
+    /// store id first, and so does a store copied to this computer from
+    /// another one; a store restored to an earlier state takes one when this
+    /// reading finds a message it doesn't know sent under its store id
     /// ([`apply`]): either way, no global id a copy of the store may have
-    /// sent is ever sent again for another row.
+    /// sent is ever sent again for another row. A stream made anew since the
+    /// position was stored is read from its start ([`same_stream`]).
     pub async fn catch_up(&self) -> Result<(), String> {
         if self.caught_up.load(Ordering::SeqCst) {
             return Ok(());
@@ -239,11 +327,11 @@ impl Replica {
         self.db
             .with_connection(|conn| moved_here(conn, &self.box_id))
             .map_err(|error| error.to_string())?;
-        let last = self
-            .hub
-            .last_seq()
-            .await
+        let info = self.hub.info().await.map_err(|error| error.to_string())?;
+        self.db
+            .with_connection(|conn| same_stream(conn, &info))
             .map_err(|error| error.to_string())?;
+        let last = info.last_seq;
         while self.position()? < last {
             if self.follow().await? == 0 {
                 break;
@@ -301,24 +389,94 @@ pub(crate) fn new_store_id(conn: &Connection, why: &str) -> rusqlite::Result<()>
     Ok(())
 }
 
-/// A store that last ran on another computer was copied here: it takes a
-/// new store id, and records this computer's box id.
+/// A store that never joined the stream, or that last ran on another
+/// computer, takes a new store id, and records this computer's box id. A
+/// store that never joined may be a copy of another store that never
+/// joined (a backup restored, the folder copied, before either computer
+/// joined): the box id is recorded only from here on, so nothing told the
+/// two apart, and both held the store id the migration gave them.
 fn moved_here(conn: &mut Connection, box_id: &str) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let recorded: Option<String> =
         tx.query_row("SELECT box_id FROM replica_state WHERE id = 1", [], |row| {
             row.get(0)
         })?;
-    if recorded
-        .as_deref()
-        .is_some_and(|recorded| recorded != box_id)
-    {
-        new_store_id(&tx, "it last ran on another computer")?;
+    let why = match recorded.as_deref() {
+        None => Some("it joins the stream for the first time"),
+        Some(recorded) if recorded != box_id => Some("it last ran on another computer"),
+        Some(_) => None,
+    };
+    if let Some(why) = why {
+        new_store_id(&tx, why)?;
         tx.execute(
             "UPDATE replica_state SET box_id = ?1 WHERE id = 1",
             [box_id],
         )?;
     }
+    tx.commit()
+}
+
+/// Whether the stored position belongs to the stream `info` describes. A
+/// stream made anew (the hub's storage lost, the stream made again) has
+/// another creation time, or ends before the stored position. Then the
+/// position goes back to 0, so the new stream is read from its start;
+/// what this store learned from the old stream goes (each row's deciding
+/// message, fences, passed arrivals, rows to read again, and sends waiting
+/// to come back); and every replicated row is queued again, so the new
+/// stream holds every row for the computers that join it. A position
+/// stored before the creation time was recorded is checked by the last
+/// sequence alone.
+fn same_stream(conn: &mut Connection, info: &hub::StreamInfo) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let (position, created): (i64, Option<String>) = tx.query_row(
+        "SELECT stream_seq, stream_created FROM replica_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let behind = (info.last_seq as i64) < position;
+    let other = created
+        .as_deref()
+        .is_some_and(|created| created != info.created);
+    if behind || other {
+        tracing::warn!(
+            "ck-mc: replica: the hub's memory stream was made anew (created {}, last message {}, this store had read to {position}); it is read from its start, and every row is sent again",
+            info.created,
+            info.last_seq
+        );
+        tx.execute_batch(
+            "UPDATE replica_state SET stream_seq = 0 WHERE id = 1;
+             UPDATE replica_ids SET revision = NULL, seq = NULL, written = NULL, undone = NULL;
+             DELETE FROM replica_fences;
+             DELETE FROM replica_passed;
+             DELETE FROM replica_restore;
+             DELETE FROM replica_outbox WHERE state = 'published';",
+        )?;
+        let now = crate::memory_writes::now_ms();
+        for table in schema::TABLES {
+            let agent = if table.kind == "memory" {
+                " AND level <> 'agent'"
+            } else {
+                ""
+            };
+            tx.execute(
+                &format!(
+                    "INSERT INTO replica_outbox
+                         (kind, local_id, revision, base_revision, change, created_at, actor)
+                     SELECT '{kind}', id, revision, 0, 'create', ?1, 'ck-mc'
+                       FROM {name} WHERE global_id IS NOT NULL{agent} ORDER BY id
+                     ON CONFLICT (kind, local_id) WHERE state <> 'published' AND frozen IS NULL
+                     DO UPDATE SET state = 'pending' WHERE replica_outbox.state = 'raised'",
+                    kind = table.kind,
+                    name = table.name,
+                ),
+                [now],
+            )?;
+        }
+    }
+    tx.execute(
+        "UPDATE replica_state SET stream_created = ?1 WHERE id = 1",
+        [&info.created],
+    )?;
     tx.commit()
 }
 

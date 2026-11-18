@@ -1564,7 +1564,14 @@ impl Engine {
             let written = match run::run(client, &job, batch.as_ref()).await {
                 Ok(reply) => {
                     record_batch(end, &reply);
-                    apply(
+                    // The model's answer may have taken longer than the
+                    // window left when the batch was sent: each role is
+                    // checked again right before the batch commits.
+                    for lease in leases {
+                        lease.refresh().await;
+                    }
+                    let window = || still_acting(leases, &gens, &self.clock);
+                    match apply(
                         db,
                         locks,
                         &self.holder,
@@ -1572,7 +1579,19 @@ impl Engine {
                         &reply,
                         run_id,
                         &gens,
-                    )
+                        &window,
+                    ) {
+                        Ok(written) => written,
+                        Err(closed) => {
+                            end.outcome = "lease_lost".into();
+                            end.error = Some(format!(
+                                "{closed}; the batch's answer was discarded; {} of {} batches left unsent",
+                                batches.len() - index - 1,
+                                batches.len()
+                            ));
+                            return;
+                        }
+                    }
                 }
                 // The model left the batch undecided at its step cap: it
                 // counts as skipped, and the run goes on to its next batch.
@@ -1656,7 +1675,11 @@ impl Engine {
 /// transaction that this process still holds every lock of `locks`. `None`
 /// when it doesn't: nothing is written. The changes are captured for the
 /// user's other computers as the dreamer's, with the run's id and `gens`,
-/// the generation of each role lease the batch was sent under.
+/// the generation of each role lease the batch was sent under. `window` is
+/// checked once the changes are written and before they commit: when it
+/// says a role's acting window closed, the transaction is rolled back and
+/// its reason is the outer `Err`.
+#[allow(clippy::too_many_arguments)]
 fn apply(
     db: &ContextDb,
     locks: &[OwnerKey],
@@ -1665,14 +1688,44 @@ fn apply(
     reply: &TaskReply,
     run_id: i64,
     gens: &[(String, i64)],
-) -> Result<Option<super::task::Applied>, String> {
-    write_locked(db, locks, holder, |tx| {
+    window: &dyn Fn() -> Result<(), String>,
+) -> Result<Result<Option<super::task::Applied>, String>, String> {
+    let closed = std::cell::RefCell::new(None);
+    let written = write_locked(db, locks, holder, |tx| {
         crate::replica::name_writer(tx, "dreamer", Some(run_id), gens)
             .map_err(|error| error.to_string())?;
         let applied = batch.apply(tx, reply, run_id)?;
         crate::replica::unname_writer(tx).map_err(|error| error.to_string())?;
+        if let Err(reason) = window() {
+            *closed.borrow_mut() = Some(reason.clone());
+            return Err(reason);
+        }
         Ok(applied)
-    })
+    });
+    match closed.into_inner() {
+        Some(reason) => Err(reason),
+        None => Ok(written),
+    }
+}
+
+/// Whether every role of `leases` still lets the run commit a batch sent
+/// under `gens` ([`Lease::still_acting`]).
+fn still_acting(
+    leases: &[Lease],
+    gens: &[(String, i64)],
+    clock: &lease::Clock,
+) -> Result<(), String> {
+    for lease in leases {
+        let Some(gen) = gens
+            .iter()
+            .find(|(role, _)| role == lease.role())
+            .map(|(_, gen)| u64::try_from(*gen).unwrap_or(0))
+        else {
+            return Err(format!("no generation was recorded for {}", lease.role()));
+        };
+        lease.still_acting(clock, gen)?;
+    }
+    Ok(())
 }
 
 /// Run `write` in its own transaction, after checking in that transaction

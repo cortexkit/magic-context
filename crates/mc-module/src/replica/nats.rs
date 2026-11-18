@@ -20,8 +20,11 @@
 //!   applied message, so the consumer needs no durable name and no acks. One
 //!   consumer serves read after read as long as each read starts where the
 //!   last one ended.
-//! - **The last sequence** comes from `STREAM.INFO`, for the engine's
-//!   catch-up.
+//! - **The stream's information** comes from `STREAM.INFO`: its last
+//!   sequence, for the engine's catch-up, and its creation time, which tells
+//!   the engine whether its stored position belongs to this stream.
+//! - **One message by sequence** is a direct get on the stream, for the
+//!   message that decides a row's state when the engine reads it again.
 //! - **Ack** does nothing: the position the engine stores is the
 //!   acknowledgement.
 //!
@@ -46,7 +49,7 @@ use futures_util::StreamExt;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use super::hub::{Ack, Hub, HubError, HubMessage};
+use super::hub::{Ack, Hub, HubError, HubMessage, StreamInfo};
 
 /// The hub's memory stream.
 pub const STREAM: &str = cortexkit_bus_naming::federation::HUB_MEMORY_STREAM;
@@ -142,8 +145,13 @@ pub trait HubStream: Send + Sync {
         payload: Vec<u8>,
     ) -> Result<Ack, Fault>;
 
-    /// `HUB_MEMORY`'s last stored sequence, from `STREAM.INFO`.
-    async fn last_seq(&self) -> Result<u64, Fault>;
+    /// `HUB_MEMORY`'s last stored sequence and creation time, from
+    /// `STREAM.INFO`.
+    async fn info(&self) -> Result<StreamInfo, Fault>;
+
+    /// The message stored at `seq`, by a direct get; `None` when the stream
+    /// holds none there.
+    async fn get(&self, seq: u64) -> Result<Option<HubMessage>, Fault>;
 
     /// Make an ordered push consumer that delivers every message from
     /// stream sequence `start` on, and subscribe to its subject.
@@ -397,11 +405,18 @@ impl Hub for NatsHub {
         Ok(messages)
     }
 
-    async fn last_seq(&self) -> Result<u64, HubError> {
+    async fn info(&self) -> Result<StreamInfo, HubError> {
         self.stream
-            .last_seq()
+            .info()
             .await
-            .map_err(|fault| HubError(format!("reading {STREAM}'s last sequence: {fault}")))
+            .map_err(|fault| HubError(format!("reading {STREAM}'s information: {fault}")))
+    }
+
+    async fn get(&self, seq: u64) -> Result<Option<HubMessage>, HubError> {
+        self.stream
+            .get(seq)
+            .await
+            .map_err(|fault| HubError(format!("reading {STREAM}'s message {seq}: {fault}")))
     }
 
     async fn ack(&self, _seq: u64) -> Result<(), HubError> {
@@ -473,13 +488,39 @@ impl HubStream for JetStream {
         })
     }
 
-    async fn last_seq(&self) -> Result<u64, Fault> {
+    async fn info(&self) -> Result<StreamInfo, Fault> {
         let stream = self
             .context
             .get_stream(STREAM)
             .await
             .map_err(|error| Fault::Failed(error.to_string()))?;
-        Ok(stream.cached_info().state.last_sequence)
+        let info = stream.cached_info();
+        Ok(StreamInfo {
+            created: info.created.to_string(),
+            last_seq: info.state.last_sequence,
+        })
+    }
+
+    async fn get(&self, seq: u64) -> Result<Option<HubMessage>, Fault> {
+        use jetstream::stream::DirectGetErrorKind;
+        let stream = self
+            .context
+            .get_stream_no_info(STREAM)
+            .await
+            .map_err(|error| Fault::Failed(error.to_string()))?;
+        match stream.direct_get(seq).await {
+            Ok(message) => Ok(Some(HubMessage {
+                seq: message.sequence,
+                subject: message.subject.to_string(),
+                message_id: message
+                    .headers
+                    .get(async_nats::header::NATS_MESSAGE_ID)
+                    .map(|value| value.as_str().to_owned()),
+                payload: message.payload.to_vec(),
+            })),
+            Err(error) if matches!(error.kind(), DirectGetErrorKind::NotFound) => Ok(None),
+            Err(error) => Err(Fault::Failed(error.to_string())),
+        }
     }
 
     async fn follow(&self, start: u64) -> Result<Following, Fault> {

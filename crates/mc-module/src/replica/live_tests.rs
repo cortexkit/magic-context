@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use tokio::sync::{watch, Notify};
 use tokio::time::Instant;
 
-use super::hub::{Ack, HubMessage};
+use super::hub::{Ack, HubMessage, StreamInfo};
 use super::live::{
     retry_after, round_retry, Connect, Link, Live, Refusal, ReplicaTask, IDLE, RETRY_MAX,
 };
@@ -110,8 +110,23 @@ impl HubStream for Stream {
         })
     }
 
-    async fn last_seq(&self) -> Result<u64, Fault> {
-        Ok(self.0.messages() as u64)
+    async fn info(&self) -> Result<StreamInfo, Fault> {
+        Ok(StreamInfo {
+            created: "the live test stream".into(),
+            last_seq: self.0.messages() as u64,
+        })
+    }
+
+    async fn get(&self, seq: u64) -> Result<Option<HubMessage>, Fault> {
+        Ok(self
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .find(|m| m.seq == seq)
+            .cloned())
     }
 
     async fn follow(&self, start: u64) -> Result<Following, Fault> {
@@ -363,7 +378,9 @@ fn start(fake: &Arc<Fake>, db: &Arc<ContextDb>, wake: &Arc<Notify>) -> ReplicaTa
         connect: Arc::clone(fake) as Arc<dyn Connect>,
         db: Arc::clone(db),
         sealer: TestSealer::new(KEY, 1),
+        epochs: Arc::new(super::epochs::UnknownEpochs),
         wake: Arc::clone(wake),
+        epoch_wake: Arc::new(Notify::new()),
     })
 }
 

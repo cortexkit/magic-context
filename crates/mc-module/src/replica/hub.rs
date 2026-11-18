@@ -10,8 +10,12 @@
 //!   stores a message id once (a retry of an unconfirmed publish is
 //!   recognised as the same message);
 //! - the stored messages after a sequence, in stream order;
-//! - the stream's last sequence, which tells a joining computer when it has
-//!   read everyone else's history;
+//! - the stream's last sequence and its creation time ([`StreamInfo`]): the
+//!   last sequence tells a joining computer when it has read everyone else's
+//!   history, and the creation time which stream a stored position belongs
+//!   to, since a stream made anew starts at sequence 1 again;
+//! - one stored message by its sequence, to read again the message that
+//!   decides a row's state ([`super::apply`]);
 //! - an acknowledgement of each message once it is applied, for a stream
 //!   that wants one (the live stream doesn't: the stored position is the
 //!   acknowledgement).
@@ -33,6 +37,15 @@ pub struct HubMessage {
 pub struct Ack {
     pub seq: u64,
     pub duplicate: bool,
+}
+
+/// What the stream says of itself: the sequence of its newest message (0
+/// when it is empty), and when it was made, in a form compared only for
+/// equality. A stream made again has another creation time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamInfo {
+    pub created: String,
+    pub last_seq: u64,
 }
 
 /// The hub could not be reached, or refused. A publish that ends this way
@@ -59,25 +72,50 @@ pub trait Hub: Send + Sync {
     /// Up to `max` stored messages with a sequence above `after`, in order.
     async fn fetch(&self, after: u64, max: usize) -> Result<Vec<HubMessage>, HubError>;
 
-    /// The sequence of the newest stored message, 0 for an empty stream.
-    async fn last_seq(&self) -> Result<u64, HubError>;
+    /// The newest stored sequence and when the stream was made.
+    async fn info(&self) -> Result<StreamInfo, HubError>;
+
+    /// The message stored at `seq`; `None` when the stream holds none
+    /// there.
+    async fn get(&self, seq: u64) -> Result<Option<HubMessage>, HubError>;
 
     /// The message at `seq` is applied (or recorded as rejected).
     async fn ack(&self, seq: u64) -> Result<(), HubError>;
 }
 
 /// A stream held in memory, shared by the stores of one test as the hub is
-/// shared by a user's computers.
+/// shared by a user's computers. Each one made counts as a stream made
+/// anew: it has a creation time of its own.
 #[cfg(test)]
-#[derive(Default)]
 pub struct InMemoryHub {
+    created: String,
     state: std::sync::Mutex<InMemoryState>,
+}
+
+/// Every in-memory stream of a test process takes its creation time from
+/// this counter, so no two are taken for the same stream.
+#[cfg(test)]
+static STREAMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[cfg(test)]
+impl Default for InMemoryHub {
+    fn default() -> Self {
+        Self {
+            created: format!(
+                "stream-{}",
+                STREAMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+            state: std::sync::Mutex::default(),
+        }
+    }
 }
 
 #[cfg(test)]
 #[derive(Default)]
 struct InMemoryState {
     messages: Vec<HubMessage>,
+    /// The sequence of the newest message stored, removed or not.
+    last: u64,
     ids: std::collections::HashMap<String, u64>,
     acked: Vec<u64>,
     /// Publishes still to fail before storing anything.
@@ -104,7 +142,8 @@ impl InMemoryHub {
     /// test builds by hand.
     pub fn inject(&self, subject: &str, message_id: Option<&str>, payload: Vec<u8>) -> u64 {
         let mut state = self.state();
-        let seq = state.messages.len() as u64 + 1;
+        state.last += 1;
+        let seq = state.last;
         state.messages.push(HubMessage {
             seq,
             subject: subject.to_owned(),
@@ -139,6 +178,21 @@ impl InMemoryHub {
     pub fn lose_next_acks(&self, count: usize) {
         self.state().lose_acks = count;
     }
+
+    /// A stream made with creation time `created`, as a stream made again
+    /// with the same one would be.
+    pub fn named(created: &str) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            created: created.to_owned(),
+            state: std::sync::Mutex::default(),
+        })
+    }
+
+    /// Remove the message at `seq` from the stream, keeping the others'
+    /// sequences.
+    pub fn forget(&self, seq: u64) {
+        self.state().messages.retain(|message| message.seq != seq);
+    }
 }
 
 #[cfg(test)]
@@ -164,7 +218,8 @@ impl Hub for InMemoryHub {
                 duplicate: true,
             },
             None => {
-                let seq = state.messages.len() as u64 + 1;
+                state.last += 1;
+                let seq = state.last;
                 state.messages.push(HubMessage {
                     seq,
                     subject: subject.to_owned(),
@@ -196,8 +251,20 @@ impl Hub for InMemoryHub {
             .collect())
     }
 
-    async fn last_seq(&self) -> Result<u64, HubError> {
-        Ok(self.state().messages.len() as u64)
+    async fn info(&self) -> Result<StreamInfo, HubError> {
+        Ok(StreamInfo {
+            created: self.created.clone(),
+            last_seq: self.state().last,
+        })
+    }
+
+    async fn get(&self, seq: u64) -> Result<Option<HubMessage>, HubError> {
+        Ok(self
+            .state()
+            .messages
+            .iter()
+            .find(|message| message.seq == seq)
+            .cloned())
     }
 
     async fn ack(&self, seq: u64) -> Result<(), HubError> {

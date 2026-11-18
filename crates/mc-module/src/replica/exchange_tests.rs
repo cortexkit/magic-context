@@ -81,10 +81,13 @@ async fn an_arrival_sends_the_change_notices_of_a_local_write_and_no_epoch_bump(
 }
 
 /// Both computers change one memory before either hears of the other's
-/// change. Both send under the same revision; the hub keeps the first, and
-/// both end with it, the replaced text in the other's history.
+/// change. Both send under the same revision, and each writer's message has
+/// an id of its own, so the hub keeps both: of equal revisions the later
+/// message in the stream decides, so both end with B's change, and A's
+/// replaced text is in A's history.
 #[tokio::test]
-async fn concurrent_edits_under_one_revision_converge_with_the_replaced_text_in_history() {
+async fn concurrent_edits_under_one_revision_converge_on_the_later_message_with_the_replaced_text_in_history(
+) {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
     memory(&a, "pj-a", "Releases need one reviewer.");
@@ -94,13 +97,14 @@ async fn concurrent_edits_under_one_revision_converge_with_the_replaced_text_in_
     b.execute("UPDATE memories SET content = 'Releases need three reviewers.'");
     a.publish_all().await;
     b.publish_all().await;
+    assert_eq!(hub.messages().len(), 3, "the hub keeps both changes");
     a.follow_all().await;
     b.follow_all().await;
-    assert_eq!(contents(&a), ["Releases need two reviewers."]);
-    assert_eq!(contents(&b), ["Releases need two reviewers."]);
+    assert_eq!(contents(&a), ["Releases need three reviewers."]);
+    assert_eq!(contents(&b), ["Releases need three reviewers."]);
     assert_eq!(
-        b.texts("SELECT previous_text FROM memory_history"),
-        ["Releases need three reviewers."]
+        a.texts("SELECT previous_text FROM memory_history"),
+        ["Releases need two reviewers."]
     );
     assert!(outbox(&a).is_empty() && outbox(&b).is_empty());
 }
@@ -302,7 +306,7 @@ async fn a_bad_message_is_recorded_and_skipped_and_the_next_one_applies() {
         b.texts("SELECT stream_seq || ':' || reason FROM replica_rejects ORDER BY stream_seq"),
         [
             "1:not a sealed envelope",
-            "3:not opened: fleet_epoch_open_failed"
+            "3:not opened: fleet_epoch_open_failed under epoch 1, which this computer's vault holds"
         ]
     );
     assert_eq!(b.replica.position().unwrap(), 4);
@@ -458,7 +462,14 @@ async fn several_changes_before_a_send_go_out_as_one_message_with_the_newest_sta
     assert_eq!(hub.messages().len(), 2);
     assert_eq!(
         hub.messages()[1].message_id.as_deref(),
-        Some(format!("{}@2", wire::global_id(&a.store_id(), "memory", 1)).as_str())
+        Some(
+            format!(
+                "{}@2/{}",
+                wire::global_id(&a.store_id(), "memory", 1),
+                a.store_id()
+            )
+            .as_str()
+        )
     );
     b.sync().await;
     assert_eq!(contents(&b), ["Version three."]);
@@ -529,9 +540,9 @@ async fn a_memory_an_observation_and_a_primer_with_one_local_id_all_arrive() {
     assert_eq!(
         ids,
         [
-            format!("{store}.o1@1"),
-            format!("{store}.p1@1"),
-            format!("{store}.m1@1")
+            format!("{store}.o1@1/{store}"),
+            format!("{store}.p1@1/{store}"),
+            format!("{store}.m1@1/{store}")
         ]
     );
     assert_eq!(contents(&b), ["Builds use cargo."]);
@@ -734,7 +745,10 @@ async fn a_store_restored_from_an_earlier_copy_keeps_every_memory_on_every_compu
         .collect();
     assert_eq!(
         ids,
-        [format!("{before}.m1@1"), format!("{}.m1@1", a.store_id())]
+        [
+            format!("{before}.m1@1/{before}"),
+            format!("{now}.m1@1/{now}", now = a.store_id())
+        ]
     );
 }
 

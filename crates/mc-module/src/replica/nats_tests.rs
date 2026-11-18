@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::time::Instant;
 
-use super::hub::{Ack, Hub, HubError, HubMessage};
+use super::hub::{Ack, Hub, HubError, HubMessage, StreamInfo};
 use super::nats::{
     full, Delivered, Delivery, Fault, Following, HubStream, NatsHub, NEXT_WAIT, PENDING_WAIT,
     QUIET_WAIT, SILENCE, STREAM_FULL,
@@ -28,6 +28,7 @@ struct Calls {
     follows: Vec<u64>,
     answered: Vec<String>,
     closed: usize,
+    gets: Vec<u64>,
 }
 
 /// JetStream as a script: the answers to publishes, the consumers made in
@@ -37,6 +38,8 @@ struct Script {
     publishes: Mutex<VecDeque<Result<Ack, Fault>>>,
     consumers: Mutex<VecDeque<(u64, Vec<Step>)>>,
     last: Mutex<Result<u64, Fault>>,
+    /// Messages a direct get answers, by sequence.
+    stored: Mutex<std::collections::HashMap<u64, HubMessage>>,
 }
 
 impl Script {
@@ -46,6 +49,7 @@ impl Script {
             publishes: Mutex::default(),
             consumers: Mutex::default(),
             last: Mutex::new(Ok(0)),
+            stored: Mutex::default(),
         })
     }
 
@@ -90,8 +94,24 @@ impl HubStream for Script {
             .unwrap_or_else(|| Err(Fault::Failed("unscripted publish".into())))
     }
 
-    async fn last_seq(&self) -> Result<u64, Fault> {
-        self.last.lock().unwrap().clone()
+    async fn info(&self) -> Result<StreamInfo, Fault> {
+        self.last
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|last_seq| StreamInfo {
+                created: "2025-11-18 09:00:00.0 +00:00:00".into(),
+                last_seq,
+            })
+    }
+
+    async fn get(&self, seq: u64) -> Result<Option<HubMessage>, Fault> {
+        self.calls.lock().unwrap().gets.push(seq);
+        self.stored
+            .lock()
+            .unwrap()
+            .remove(&seq)
+            .map_or(Ok(None), |message| Ok(Some(message)))
     }
 
     async fn follow(&self, start: u64) -> Result<Following, Fault> {
@@ -430,7 +450,10 @@ async fn a_failed_consumer_or_a_failed_lookup_fails_the_read() {
         async fn publish(&self, _: &str, _: &str, _: Vec<u8>) -> Result<Ack, Fault> {
             unreachable!()
         }
-        async fn last_seq(&self) -> Result<u64, Fault> {
+        async fn info(&self) -> Result<StreamInfo, Fault> {
+            Err(Fault::Failed("no responders".into()))
+        }
+        async fn get(&self, _: u64) -> Result<Option<HubMessage>, Fault> {
             Err(Fault::Failed("no responders".into()))
         }
         async fn follow(&self, _: u64) -> Result<Following, Fault> {
@@ -443,9 +466,9 @@ async fn a_failed_consumer_or_a_failed_lookup_fails_the_read() {
         Err(HubError("making the memory consumer: no responders".into()))
     );
     assert_eq!(
-        hub.last_seq().await,
+        hub.info().await,
         Err(HubError(
-            "reading HUB_MEMORY's last sequence: no responders".into()
+            "reading HUB_MEMORY's information: no responders".into()
         ))
     );
 }
@@ -532,7 +555,11 @@ async fn acknowledging_does_nothing_and_the_last_sequence_comes_from_the_stream(
     let script = Script::new();
     *script.last.lock().unwrap() = Ok(42);
     let hub = script.hub();
-    assert_eq!(hub.last_seq().await, Ok(42));
+    assert_eq!(
+        hub.info().await.map(|info| info.last_seq),
+        Ok(42),
+        "the last sequence comes from the stream's information"
+    );
     assert_eq!(hub.ack(42).await, Ok(()));
     assert!(script.follows().is_empty());
     assert!(script.calls.lock().unwrap().published.is_empty());

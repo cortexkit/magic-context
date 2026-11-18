@@ -508,6 +508,36 @@ impl Lease {
         }
     }
 
+    /// Take every notice the watch delivered so far, before
+    /// [`Lease::still_acting`] checks the window.
+    pub async fn refresh(&self) {
+        self.settle().await;
+    }
+
+    /// Whether a batch sent under generation `gen` may still be committed
+    /// now by `clock`: the role was not handed over, and the newest notice
+    /// taken holds it at that generation with at least [`MARGIN_MS`] of its
+    /// window left. A model's answer can take longer than the window that
+    /// was left when the batch was sent, so the dreamer checks again right
+    /// before it commits, and discards the batch otherwise. Call
+    /// [`Lease::refresh`] first. `Err` says why not.
+    pub fn still_acting(&self, clock: &Clock, gen: u64) -> Result<(), String> {
+        let role = &self.role;
+        if self.handed_over.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(format!("{role} was handed over to another computer"));
+        }
+        match self.window(clock) {
+            Ok(notice) if notice.gen == gen => Ok(()),
+            Ok(notice) => Err(format!(
+                "{role} is held at generation {} now, not at {gen}, the one the batch was sent under",
+                notice.gen
+            )),
+            Err(Standing::Lost(why)) => Err(why),
+            Err(Standing::HandedBack) => Err(format!("{role} was handed over to another computer")),
+            Err(Standing::Acting { .. }) => Ok(()),
+        }
+    }
+
     /// Close the watch, which releases the role, and wait until it is
     /// closed.
     pub async fn close(mut self) {

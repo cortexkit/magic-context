@@ -629,8 +629,9 @@ fn a_reply_is_not_applied_once_the_lock_passed_to_another_writer() {
             &reply,
             1,
             &[],
+            &|| Ok(()),
         ),
-        Ok(None)
+        Ok(Ok(None))
     );
     let written: bool = db
         .with_connection(|conn| {
@@ -983,7 +984,9 @@ fn a_batch_the_dreamer_applies_names_its_run_in_the_outbox() {
         &reply,
         9,
         &[(lease::role(&locks[0]), 3)],
+        &|| Ok(()),
     )
+    .unwrap()
     .unwrap();
     assert!(applied.is_some());
     let (named, left): (String, i64) = db

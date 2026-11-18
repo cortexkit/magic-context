@@ -47,10 +47,13 @@ pub fn store_of(global_id: &str) -> &str {
     global_id.split_once('.').map_or("", |(store, _)| store)
 }
 
-/// The JetStream message id, `<global id>@<revision>`. A publish sent again
-/// after an unconfirmed one carries the same id, so the hub stores it once.
-pub fn message_id(global_id: &str, revision: i64) -> String {
-    format!("{global_id}@{revision}")
+/// The JetStream message id, `<global id>@<revision>/<store id>`, the store
+/// id being the sending store's. Two computers' changes of one row at the
+/// same revision are two messages, and both are stored; the stream's order
+/// decides between them ([`super::apply`]). A publish sent again after an
+/// unconfirmed one carries the same id, so the hub stores it once.
+pub fn message_id(global_id: &str, revision: i64, store_id: &str) -> String {
+    format!("{global_id}@{revision}/{store_id}")
 }
 
 /// The hub subject of a row: project memories and primers under their
@@ -95,13 +98,16 @@ pub fn aad(global_id: &str, revision: i64, subject: &str) -> Vec<u8> {
 }
 
 /// Who wrote a change: the computer's box id, for the journal and the apps,
+/// the store id of the store that sent it (the one its message id names),
 /// and the writer's actor. `dreamer_epoch` is, on a dreamer change, the
 /// generation of the dreamer lease of the changed row's role that the run
-/// held; receivers skip one older than that role's fence
+/// held; receivers skip one older than that row's fence
 /// ([`super::apply`]). It is absent on every other change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Writer {
     pub box_id: String,
+    #[serde(default)]
+    pub store_id: String,
     pub actor: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dreamer_epoch: Option<i64>,

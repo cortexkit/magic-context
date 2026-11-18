@@ -19,8 +19,11 @@
 //!   something is followed by the next at once; otherwise the next one
 //!   waits for a message on the consumer, a memory change on this computer,
 //!   or [`IDLE`]. A failed round (the connection lost, a gap in the
-//!   consumer's delivery, a busy store, the stream full) is tried again
-//!   after [`round_retry`].
+//!   consumer's delivery, a busy store, the stream full, a message held
+//!   because this computer's vault can't open it yet) is tried again after
+//!   [`round_retry`], or at once when Entorhinal's fleet epoch marker
+//!   changes, which is when a held message may open
+//!   ([`super::epochs`]).
 //! - starts again on the new connection when the bus client replaces the
 //!   connection, and from the connect step when the connection's credential
 //!   maintenance stops (the hub refused it, or it can't be renewed).
@@ -39,6 +42,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{watch, Notify};
 
+use super::epochs::FleetEpochs;
 use super::hub::Hub;
 use super::nats::{HubStream, JetStream, NatsHub};
 use super::seal::Sealer;
@@ -172,6 +176,8 @@ impl Link for HubLink {
 pub struct ReplicaTask {
     stop: watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
+    /// The watch on Entorhinal's fleet epoch marker, ended with the task.
+    marker: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ReplicaTask {
@@ -180,11 +186,15 @@ impl ReplicaTask {
         Self {
             stop,
             handle: tokio::spawn(live.run(stopped)),
+            marker: None,
         }
     }
 
     /// Stop the task and wait for it to end, at most [`STOP_WAIT`].
     pub async fn stop(self) {
+        if let Some(marker) = &self.marker {
+            marker.abort();
+        }
         let _ = self.stop.send(true);
         let mut handle = self.handle;
         if tokio::time::timeout(STOP_WAIT, &mut handle).await.is_err() {
@@ -208,12 +218,33 @@ pub fn start(
     let wake = Arc::new(Notify::new());
     db.wake_replica_on_memory_changes(Arc::clone(&wake));
     let sealer = super::seal::Claustrum::over(consumer.clone());
-    Some(ReplicaTask::spawn(Live {
+    let epochs = super::epochs::EntorhinalEpochs::over(consumer.clone());
+    let epoch_wake = Arc::new(Notify::new());
+    let marker = {
+        let bus = Arc::clone(&bus);
+        let wake = Arc::clone(&epoch_wake);
+        tokio::spawn(async move {
+            crate::entorhinal_changes::run_marker(
+                bus,
+                Arc::new(crate::entorhinal_changes::WatchState::for_marker(
+                    "a shared memory waiting for its fleet epoch is read again",
+                )),
+                super::epochs::EPOCH_MARKER,
+                move || wake.notify_one(),
+            )
+            .await;
+        })
+    };
+    let mut task = ReplicaTask::spawn(Live {
         connect: Arc::new(Ckbus { consumer, bus }),
         db,
         sealer,
+        epochs,
         wake,
-    }))
+        epoch_wake,
+    });
+    task.marker = Some(marker);
+    Some(task)
 }
 
 /// What the task works with.
@@ -221,8 +252,12 @@ pub(crate) struct Live {
     pub(crate) connect: Arc<dyn Connect>,
     pub(crate) db: Arc<ContextDb>,
     pub(crate) sealer: Arc<dyn Sealer>,
+    /// The hub's fleet epoch record ([`super::epochs`]).
+    pub(crate) epochs: Arc<dyn FleetEpochs>,
     /// Signalled by a memory change on this computer.
     pub(crate) wake: Arc<Notify>,
+    /// Signalled when Entorhinal's fleet epoch marker changes.
+    pub(crate) epoch_wake: Arc<Notify>,
 }
 
 /// Where the task stands, for logging each change once.
@@ -402,7 +437,8 @@ impl Live {
                 Arc::clone(&hub) as Arc<dyn Hub>,
                 Arc::clone(&self.sealer),
                 box_id.to_owned(),
-            );
+            )
+            .with_epochs(Arc::clone(&self.epochs));
             let ended = self
                 .rounds(&replica, &hub, report, &mut changes, stop)
                 .await;
@@ -448,7 +484,9 @@ impl Live {
             report.round(&outcome);
             // After a failed round only time brings the next one, so a
             // stream that stays full or a store that stays busy is not
-            // retried at the pace of local writes.
+            // retried at the pace of local writes. A change of the fleet
+            // epoch record does, as a message held for its epoch may open
+            // now.
             let retry = match outcome {
                 Ok(0) => {
                     failures = 0;
@@ -469,6 +507,7 @@ impl Live {
                 changed = changes.changed() => return ended(changed),
                 () = self.wake.notified(), if retry.is_none() => {}
                 () = hub.arrival(), if retry.is_none() => {}
+                () = self.epoch_wake.notified() => {}
                 () = tokio::time::sleep(retry.unwrap_or(IDLE)) => {}
             }
         }

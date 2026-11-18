@@ -38,9 +38,21 @@ pub(crate) const RETRY_CAP: Duration = Duration::from_secs(5 * 60);
 pub(crate) struct WatchState {
     /// `None` until the first try; then whether the watch is up.
     up: Mutex<Option<bool>>,
+    /// What the log lines say a change of the marker does, for a marker
+    /// other than [`KEY`]; `None` for the registry marker.
+    effect: Option<&'static str>,
 }
 
 impl WatchState {
+    /// The state of a watch on another marker than [`KEY`], whose change
+    /// does `effect` (said in the log lines).
+    pub(crate) fn for_marker(effect: &'static str) -> Self {
+        Self {
+            up: Mutex::new(None),
+            effect: Some(effect),
+        }
+    }
+
     /// Whether the watch is up now.
     #[cfg(test)]
     pub(crate) fn is_up(&self) -> bool {
@@ -50,28 +62,38 @@ impl WatchState {
     /// The watch is up.
     fn up(&self) {
         if self.up.lock().expect("watch state").replace(true) != Some(true) {
-            tracing::info!(
-                "ck-mc: entorhinal changes: watching the registry marker; workspaces and legacy project rows are read again when it changes"
-            );
+            match self.effect {
+                None => tracing::info!(
+                    "ck-mc: entorhinal changes: watching the registry marker; workspaces and legacy project rows are read again when it changes"
+                ),
+                Some(effect) => tracing::info!(
+                    "ck-mc: entorhinal changes: watching a marker; when it changes, {effect}"
+                ),
+            }
         }
     }
 
     /// The watch couldn't start or ended, because of `why`.
     fn down(&self, why: &str) {
         if self.up.lock().expect("watch state").replace(false) != Some(false) {
-            tracing::info!(
-                "ck-mc: entorhinal changes: no watch on the registry marker ({why}); workspaces are read at each Setup and legacy project rounds run hourly, and the watch is tried again"
-            );
+            match self.effect {
+                None => tracing::info!(
+                    "ck-mc: entorhinal changes: no watch on the registry marker ({why}); workspaces are read at each Setup and legacy project rounds run hourly, and the watch is tried again"
+                ),
+                Some(effect) => tracing::info!(
+                    "ck-mc: entorhinal changes: no watch on a marker ({why}); it is tried again, and meanwhile what it would do ({effect}) waits for its timer"
+                ),
+            }
         }
     }
 }
 
-/// Start the watch: open the bus session and watch [`KEY`]. A watch the bus
+/// Start the watch: open the bus session and watch `key`. A watch the bus
 /// refused leaves the session to the others that use it; any other failure
 /// drops it, since its connection may be gone.
-async fn open(bus: &Bus) -> Result<Box<dyn RegisterWatch>, String> {
+async fn open(bus: &Bus, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
     let session = bus.session().await?;
-    match session.watch(OWNER, BUCKET, KEY).await {
+    match session.watch(OWNER, BUCKET, key).await {
         Ok(watch) => Ok(watch),
         Err(error) => {
             if error == "nats_watch_failed" {
@@ -86,10 +108,20 @@ async fn open(bus: &Bus) -> Result<Box<dyn RegisterWatch>, String> {
 /// that differs from the last one seen, the first one included. `state`
 /// tells whether the watch is up.
 pub(crate) async fn run(bus: Arc<Bus>, state: Arc<WatchState>, changed: impl Fn() + Send + Sync) {
+    run_marker(bus, state, KEY, changed).await;
+}
+
+/// Follow marker `key` of the bucket as [`run`] follows [`KEY`].
+pub(crate) async fn run_marker(
+    bus: Arc<Bus>,
+    state: Arc<WatchState>,
+    key: &str,
+    changed: impl Fn() + Send + Sync,
+) {
     let mut last: Option<Vec<u8>> = None;
     let mut retry = RETRY_FIRST;
     loop {
-        match open(&bus).await {
+        match open(&bus, key).await {
             Err(error) => state.down(&error),
             Ok(mut watch) => {
                 let ended = loop {
@@ -99,10 +131,10 @@ pub(crate) async fn run(bus: Arc<Bus>, state: Arc<WatchState>, changed: impl Fn(
                             retry = RETRY_FIRST;
                             entries
                                 .into_iter()
-                                .find(|entry| entry.key == KEY)
+                                .find(|entry| entry.key == key)
                                 .map(|entry| entry.value)
                         }
-                        Ok(WatchEvent::Update(RegisterUpdate::Put(entry))) if entry.key == KEY => {
+                        Ok(WatchEvent::Update(RegisterUpdate::Put(entry))) if entry.key == key => {
                             Some(entry.value)
                         }
                         Ok(WatchEvent::Update(_)) => None,

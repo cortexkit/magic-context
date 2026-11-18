@@ -1,6 +1,5 @@
-//! Replication cases the engine gets wrong today. Each test describes the
-//! case, checks how the engine must behave, and is ignored until the engine
-//! is fixed: run them with `--ignored` to see them fail.
+//! Replication cases the second review found the engine got wrong. Each
+//! test describes the case and checks how the engine must behave.
 //!
 //! - A store copied to another computer before it first joined the stream.
 //! - A person's delete whose message id another computer's change of the
@@ -58,7 +57,6 @@ fn importance(computer: &Computer) -> i64 {
 /// still be able to send its memories, under global ids no other row
 /// holds, and both computers must end with every memory.
 #[tokio::test]
-#[ignore = "review witness: a store copied before its first join keeps its store id, so both copies form the same global ids"]
 async fn a_store_copied_before_it_first_joined_sends_under_ids_of_its_own() {
     let hub = InMemoryHub::new();
     let a = Computer::new(&hub, 1);
@@ -93,7 +91,6 @@ async fn a_store_copied_before_it_first_joined_sends_under_ids_of_its_own() {
 /// for its duplicate window; the test hub keeps every id) stores nothing
 /// and answers with A's sequence. The delete must still reach A.
 #[tokio::test]
-#[ignore = "review witness: a tombstone whose message id a concurrent update took is never sent, and the computers diverge for good"]
 async fn a_delete_whose_message_id_another_change_took_still_reaches_every_computer() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
@@ -129,7 +126,6 @@ async fn a_delete_whose_message_id_another_change_took_still_reaches_every_compu
 /// position A stored on the old stream. A must read the new stream's
 /// messages, not wait until it grows past the old position.
 #[tokio::test]
-#[ignore = "review witness: a stored position past the end of a new stream silently skips everything up to it"]
 async fn a_stream_made_anew_is_read_from_its_start() {
     let old = InMemoryHub::new();
     let a = Computer::new(&old, 1);
@@ -167,7 +163,6 @@ async fn a_stream_made_anew_is_read_from_its_start() {
 /// with the same memory as every other computer, not keep its own batch
 /// and pass over the newer holder's change as older than its own.
 #[tokio::test]
-#[ignore = "review witness: a fenced dreamer change stays on the computer that wrote it, which also skips the newer holder's change"]
 async fn a_fenced_dreamer_change_does_not_stay_on_the_computer_that_wrote_it() {
     let hub = InMemoryHub::new();
     let (stale, holder, other) = (
@@ -213,7 +208,6 @@ async fn a_fenced_dreamer_change_does_not_stay_on_the_computer_that_wrote_it() {
 /// change under generation 6 yet and applies it. Every computer must decide
 /// the same for one message, or they hold different memories for good.
 #[tokio::test]
-#[ignore = "review witness: receivers fence by their own dreamer journal, so one dreamer change applies on some computers and not on others"]
 async fn every_receiver_decides_the_same_for_a_fenced_dreamer_change() {
     let hub = InMemoryHub::new();
     let (stale, holder, other) = (
@@ -244,7 +238,6 @@ async fn every_receiver_decides_the_same_for_a_fenced_dreamer_change() {
 /// revision it raised to. One change must raise the revision once, so the
 /// evidence is found at the memory's revision.
 #[tokio::test]
-#[ignore = "review witness: a change of a row whose send is unconfirmed raises its revision twice, orphaning the writer's clause evidence"]
 async fn a_change_of_a_row_whose_send_is_unconfirmed_raises_its_revision_once() {
     let hub = InMemoryHub::new();
     let computer = Computer::new(&hub, 1);
@@ -300,7 +293,6 @@ async fn a_change_of_a_row_whose_send_is_unconfirmed_raises_its_revision_once() 
 /// changed, so B's clause evidence must still be found at the revision B's
 /// memory ends at.
 #[tokio::test]
-#[ignore = "review witness: the revision a send raises past another computer's message id carries no clause evidence"]
 async fn a_send_requeued_past_a_taken_message_id_keeps_its_clause_evidence() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
@@ -355,12 +347,11 @@ fn plan(computer: &Computer, sql: &str) -> String {
 /// Every applied memory looks up the other memories holding its fact, and
 /// every message of this computer's own looks its outbox row up by global
 /// id. The statements below are the engine's own (`apply::settle_fact`,
-/// `apply::own_known`, `apply::own_change_ahead`). On a store with tens of
+/// `apply::own_known`, `apply::own_changes`). On a store with tens of
 /// thousands of memories under one owner, and an outbox holding a create
 /// for each of them after a join, each must find its rows through an index,
 /// not read the owner's every memory or the whole outbox once per message.
 #[tokio::test]
-#[ignore = "review witness: the same-fact lookup and the outbox lookups of every applied message read the owner's every memory or the whole outbox"]
 async fn the_lookups_of_every_applied_message_use_an_index() {
     let hub = InMemoryHub::new();
     let computer = Computer::new(&hub, 1);
@@ -373,11 +364,17 @@ async fn the_lookups_of_every_applied_message_use_an_index() {
     );
     let own = plan(
         &computer,
-        "SELECT EXISTS(SELECT 1 FROM replica_outbox WHERE global_id = ?1 AND revision >= ?2)",
+        "SELECT EXISTS(SELECT 1 FROM replica_outbox
+                        WHERE global_id = ?1 AND revision = ?2 AND sender = ?3
+                          AND state IN ('sending', 'published'))",
     );
     let ahead = plan(
         &computer,
-        "SELECT id, state, stream_seq FROM replica_outbox WHERE kind = ?1 AND local_id = ?2",
+        "SELECT id, state, revision, epoch, frozen, actor FROM replica_outbox
+          WHERE kind = ?1 AND local_id = ?2 AND change <> 'delete' AND state <> 'raised'
+            AND NOT (state = 'published'
+                     AND stream_seq <= (SELECT stream_seq FROM replica_state WHERE id = 1))
+          ORDER BY id",
     );
     assert!(
         facts.contains("normalized_hash=?"),
