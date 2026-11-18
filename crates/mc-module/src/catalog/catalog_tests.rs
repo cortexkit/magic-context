@@ -575,7 +575,9 @@ fn role_describe_lists_every_reminder_template_with_digest_and_delivery() {
             ))
         );
         // The clock note is a persistent system note where the route takes
-        // one; the reminders clear, or ride a tool result or a steer.
+        // one, else it rides a tool result. The reminders prefer a system
+        // note the provider clears, else they ride a tool result or go as a
+        // steer (a message into the run in progress).
         let expected = if template.id == crate::clock_note::TEMPLATE {
             json!(["turn_system", "tool_result"])
         } else if template.id == crate::nudges::KEEP_TEMPLATE

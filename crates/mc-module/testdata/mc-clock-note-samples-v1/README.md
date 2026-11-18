@@ -28,7 +28,8 @@ goes in the note.
 Each file holds `request`, the `session.send` body exactly as ck-mc encodes
 it on the session's own route (`{"method", "params"}`), and `rendered`, the
 text the runner renders from it. The time is 2026-11-18T22:52:00Z, the
-contract's own clock-notice sample, so it renders `Now: Wed 18 Nov 22:52Z`.
+clock-notice sample of the llm-runner contract (`cortexkit-role-llm-runner`
+0.8.62, `CONTRACT.md`, §9.7), so it renders `Now: Wed 18 Nov 22:52Z`.
 `send_id` is `mc.clock_note:counter:<n>`, from the session's reminder
 counter; `dedupe_key` is `mc.clock_note`, so a newer note replaces one the
 runner still holds queued.

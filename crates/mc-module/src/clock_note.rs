@@ -142,8 +142,8 @@ pub fn parse_interval(value: &Value) -> Result<Option<u64>, String> {
         .ok_or_else(refuse)
 }
 
-/// What a session keeps of its clock notes, across a restart and a quiet
-/// free.
+/// What a session keeps of its clock notes across a restart, and while the
+/// module frees a quiet session from memory and resumes it later.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
     /// When the runner last accepted a clock note for the session, in
