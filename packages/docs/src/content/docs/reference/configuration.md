@@ -201,6 +201,7 @@ Project config may only set `"rerank": {"provider": "off"}`. Project routing, cr
 |---|---|---|---|
 | `rerank` | object | — | Explicit ctx_search reranking only. Defaults to local Synapse. Hosted settings are user-level only; projects may only select off. |
 | `rerank.provider` | `"synapse"` \| `"remote"` \| `"off"` | `"synapse"` | Explicit ctx_search reranker: local Synapse by default, remote for hosted scoring, or off. Projects may only select off. |
+| `rerank.module` | string | — | The Synapse module ck-mc reranks with when provider is synapse: synapse (the local module) by default, or fed:<fingerprint>:synapse for a Synapse on another paired computer, as Callosum re-exports it (the fingerprint is that computer's 32 lowercase hex characters). Read from the user config only, and only by ck-mc; a malformed value is logged once and the default applies. |
 | `rerank.endpoint` | string | — | User-level rerank API base URL; prefix with tei+ for Hugging Face TEI. |
 | `rerank.model` | string | — | Hosted reranker model name. |
 | `rerank.api_key` | string | — | Bearer API key. In the user config it may be {env:NAME}, {file:path} or {vault:<credential id>}; {vault:} is read only when Magic Context runs as a module (ck-mc) with the CortexKit vault. None of the three expand in a project config. |
