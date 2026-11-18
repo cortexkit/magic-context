@@ -1251,7 +1251,9 @@ fn handler_slots(pools: &[subc_client_rs::RequestPoolSnapshot]) -> String {
 struct AppCaller {
     principal: Principal,
     harness: String,
-    /// Direct callers have access to more reads on the internal service.
+    /// Whether the route is ck-mc's management surface. Only a Direct caller
+    /// on the internal service reaches every app read; every other caller
+    /// gets the list for its kind, whichever surface it bound.
     management: bool,
 }
 
