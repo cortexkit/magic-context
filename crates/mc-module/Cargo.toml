@@ -63,7 +63,7 @@ cortexkit-role-step-transform-provider = "=0.5.0"
 # has no model chain of its own and never falls back to the session's model.
 cortexkit-role-routing = "=0.7.23"
 # A session moves between machines through the agent-data/v1 contract.
-cortexkit-role-agent-data = "=0.3.1"
+cortexkit-role-agent-data = "=0.3.3"
 cortexkit-role-user-commands = "=0.1.4"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
 # A session's memory context comes from Entorhinal, in these
@@ -101,7 +101,7 @@ cortexkit-role-tool-provider-conformance = "=0.15.13"
 rusqlite = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["test-util"] }
 # The contract's published vectors, for the participant's own tests.
-cortexkit-role-agent-data = { version = "=0.3.1", features = ["test-vectors"] }
+cortexkit-role-agent-data = { version = "=0.3.3", features = ["test-vectors"] }
 mc-mock-runner = { workspace = true }
 tempfile = "3"
 filetime = "0.2"

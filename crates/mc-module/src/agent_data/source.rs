@@ -327,16 +327,19 @@ pub(crate) async fn export<H: Host>(
     })
 }
 
-/// `release {refs, cutId, holder}`: the freeze becomes a tombstone naming
-/// the new holder, so every surface refuses the session `session_moved`,
-/// reads included, and nothing this process keeps for it outlives the
-/// move. Its facts stay reserved, so this machine never decides them again;
-/// a move back replaces them.
+/// `release {refs, cutId, holder, holderBox?}`: the freeze becomes a
+/// tombstone, so every surface refuses the session `session_moved`, reads
+/// included, and nothing this process keeps for it outlives the move. The
+/// tombstone records both members; refusals name the new computer by
+/// `holderBox` alone, and name none when the driver sent none. Its facts
+/// stay reserved, so this machine never decides them again; a move back
+/// replaces them.
 pub(crate) async fn release<H: Host>(
     host: &H,
     cut: &str,
     record: &Cut,
     holder: &str,
+    holder_box: Option<&str>,
 ) -> Result<Done, ErrorBody> {
     let contents = host.journal().contents().ok_or_else(journal_unreadable)?;
     let sessions: Vec<SessionRef> = record
@@ -364,6 +367,7 @@ pub(crate) async fn release<H: Host>(
         after.push(After::Remove(cut_folder(&db, cut)));
     }
     let (cut, holder) = (cut.to_owned(), holder.to_owned());
+    let holder_box = holder_box.map(str::to_owned);
     Ok(Done {
         reply: canonical(&ReleaseReply::new(true)),
         edit: Box::new(move |contents| {
@@ -374,6 +378,7 @@ pub(crate) async fn release<H: Host>(
                 entry.released = Some(Released {
                     cut: cut.clone(),
                     holder: holder.clone(),
+                    holder_box: holder_box.clone(),
                 });
             }
         }),
@@ -743,7 +748,8 @@ fn held_elsewhere(
                     r,
                     &format!(
                         "session_moved: cut {} moved the session to {}",
-                        released.cut, released.holder
+                        released.cut,
+                        released.destination()
                     ),
                 ))
             }

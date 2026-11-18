@@ -582,17 +582,19 @@ async fn a_restart_after_an_activated_move_keeps_what_the_next_turn_wrote() {
 
 /// The journal's moves stay enforced after a restart into a build that
 /// does not serve moves: a session released from here is refused
-/// `session_moved` naming its holder, a frozen one stays refused
-/// `session_moving` with its facts reserved, and an install the last run
-/// started is finished at startup. No move request is served.
+/// `session_moved` naming the box of the computer it moved to, a frozen
+/// one stays refused `session_moving` with its facts reserved, and an
+/// install the last run started is finished at startup. No move request is
+/// served.
 #[tokio::test]
 async fn moves_recorded_with_moves_on_are_enforced_after_a_restart_with_them_off() {
+    const BOX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let (a, b) = machines(&["s1", "s2", "s3"]);
     for session in ["s1", "s2", "s3"] {
         seed(&a.conn(), session, PROJECT);
     }
     a.send_out(CUT, &["s1"]).await;
-    a.release(CUT, &["s1"], "machine-b").await;
+    a.release_to_box(CUT, &["s1"], "machine-b", BOX_B).await;
     a.op("prepare", BACK, &["s2"]).await.unwrap();
     a.send_out(THIRD, &["s3"]).await;
     b.op("import", THIRD, &["s3"]).await.unwrap();
@@ -614,7 +616,7 @@ async fn moves_recorded_with_moves_on_are_enforced_after_a_restart_with_them_off
     };
     assert_eq!(
         gated(&a, "s1"),
-        (SESSION_MOVED, Some(json!({"holder": "machine-b"})))
+        (SESSION_MOVED, Some(json!({"holder": BOX_B})))
     );
     assert_eq!(
         gated(&a, "s2"),

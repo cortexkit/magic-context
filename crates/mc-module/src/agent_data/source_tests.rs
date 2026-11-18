@@ -34,6 +34,9 @@ const RUNNER: &str = "thalamus-harness";
 const HARNESS: &str = "pi";
 const PROJECT: &str = "git:proj";
 const MIB: usize = 1024 * 1024;
+/// The permanent box id of the computer a session is released to.
+const BOX: &str = "00112233445566778899aabbccddeeff";
+const OTHER_BOX: &str = "ffeeddccbbaa99887766554433221100";
 
 /// Engram's session door as the source sees it: one append-only stream per
 /// session, copied to the cloud as soon as it is written unless `lagging`.
@@ -430,12 +433,18 @@ impl Fixture {
         self.call("agent_data.export", cut_params(cut, names)).await
     }
 
-    async fn release(&self, cut: &str, names: &[&str], holder: &str) -> Result<Value, ErrorBody> {
-        self.call(
-            "agent_data.release",
-            json!({"refs": refs(names), "cutId": cut, "holder": holder}),
-        )
-        .await
+    async fn release(
+        &self,
+        cut: &str,
+        names: &[&str],
+        holder: &str,
+        holder_box: Option<&str>,
+    ) -> Result<Value, ErrorBody> {
+        let mut params = json!({"refs": refs(names), "cutId": cut, "holder": holder});
+        if let Some(holder_box) = holder_box {
+            params["holderBox"] = json!(holder_box);
+        }
+        self.call("agent_data.release", params).await
     }
 
     async fn abort(&self, cut: &str, names: &[&str]) -> Result<Value, ErrorBody> {
@@ -528,6 +537,16 @@ impl Fixture {
             .session(RUNNER, HARNESS, session)
             .and_then(|entry| entry.moving.clone())
             .map(|moving| (moving.cut, moving.state))
+    }
+
+    /// The tombstone the journal records for the session.
+    fn released(&self, session: &str) -> Option<journal_file::Released> {
+        self.module
+            .journal()
+            .contents()
+            .unwrap()
+            .session(RUNNER, HARNESS, session)
+            .and_then(|entry| entry.released.clone())
     }
 }
 
@@ -1020,7 +1039,8 @@ async fn a_later_cut_of_a_session_builds_on_what_its_stream_already_holds() {
     assert_eq!(f.door().streams[&session_ref], stream);
 }
 
-/// `release` turns the freeze into a tombstone naming the new holder: every
+/// `release` turns the freeze into a tombstone naming the receiving
+/// computer by the box id the release sent: every
 /// surface then refuses the session `session_moved`, the jobs its worker
 /// held are discarded with a log line, and its worker, Setup and cached
 /// project are gone. Its facts stay reserved, so neither a second turn here
@@ -1046,9 +1066,18 @@ async fn release_tombstones_the_session_and_keeps_its_facts_reserved() {
         .unwrap()
         .contains_key(&key("s1")));
 
-    let reply = f.release(CUT, &["s1"], "mac-b").await.unwrap();
+    let reply = f.release(CUT, &["s1"], "mac-b", Some(BOX)).await.unwrap();
     assert_eq!(reply, json!({"enforced": true}));
     assert_eq!(f.status(CUT).await, "released");
+    // The tombstone records both members of the release.
+    assert_eq!(
+        f.released("s1"),
+        Some(journal_file::Released {
+            cut: CUT.into(),
+            holder: "mac-b".into(),
+            holder_box: Some(BOX.into()),
+        })
+    );
     // The worker discards what it held once it gets to its last job.
     let discarded = format!(
         "session thalamus-harness/pi/s1 was released to another machine by agent-data cut {CUT}; discarding the 1 Setup, notice and summary jobs held during the move"
@@ -1099,7 +1128,8 @@ async fn release_tombstones_the_session_and_keeps_its_facts_reserved() {
     let moved = |result: Result<(), ModuleError>| match result {
         Err(ModuleError::Gated(gated)) => {
             assert_eq!(gated.code, SESSION_MOVED);
-            assert_eq!(gated.detail, Some(json!({"holder": "mac-b"})));
+            assert_eq!(gated.detail, Some(json!({"holder": BOX})));
+            assert!(!gated.message.contains("mac-b"), "{}", gated.message);
         }
         other => panic!("expected session_moved, got {other:?}"),
     };
@@ -1154,7 +1184,8 @@ async fn release_tombstones_the_session_and_keeps_its_facts_reserved() {
         "{}",
         refused.message
     );
-    assert!(refused.message.contains("mac-b"), "{}", refused.message);
+    assert!(refused.message.contains(BOX), "{}", refused.message);
+    assert!(!refused.message.contains("mac-b"), "{}", refused.message);
     assert_eq!(f.status(OTHER_CUT).await, "none");
     let refused = f.abort(CUT, &["s1"]).await.unwrap_err();
     assert_eq!(refused.code, RefusalCode::InvalidState);
@@ -1165,6 +1196,141 @@ async fn release_tombstones_the_session_and_keeps_its_facts_reserved() {
     f.settle("s2").await;
     f.bind("s2");
     f.prepare(OTHER_CUT, &["s2"]).await.unwrap();
+}
+
+/// Freeze and export the session under `cut`, ready for its `release`.
+async fn exported(f: &Fixture, cut: &str, session: &str) {
+    seed(&f.conn(), session, "content");
+    f.bind(session);
+    f.settle(session).await;
+    f.prepare(cut, &[session]).await.unwrap();
+    f.export(cut, &[session]).await.unwrap();
+}
+
+/// A release that sends no `holderBox` names no computer: its tombstone
+/// records the `holder` alone, and the session is refused `session_moved`
+/// with an empty detail. No refusal names the `holder`, a backup author id
+/// rather than an address.
+#[tokio::test]
+async fn a_release_without_a_holder_box_names_no_computer() {
+    let f = Fixture::new();
+    exported(&f, CUT, "s1").await;
+    let reply = f.release(CUT, &["s1"], "mac-b", None).await.unwrap();
+    assert_eq!(reply, json!({"enforced": true}));
+    assert_eq!(
+        f.released("s1"),
+        Some(journal_file::Released {
+            cut: CUT.into(),
+            holder: "mac-b".into(),
+            holder_box: None,
+        })
+    );
+    match f.module.notice(&key("s1"), notice(3)) {
+        Err(ModuleError::Gated(gated)) => {
+            assert_eq!(gated.code, SESSION_MOVED);
+            assert_eq!(gated.detail, Some(json!({})));
+            assert!(
+                gated.message.contains("moved to another computer "),
+                "{}",
+                gated.message
+            );
+            assert!(!gated.message.contains("mac-b"), "{}", gated.message);
+        }
+        other => panic!("expected session_moved, got {other:?}"),
+    }
+    let refused = f
+        .module
+        .app_request(
+            "session_data.read",
+            json!({"session": key("s1"), "section": "meta"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, SESSION_MOVED);
+    assert_eq!(refused.detail, Some(json!({})));
+    assert!(!refused.message.contains("mac-b"), "{}", refused.message);
+    let refused = f.prepare(OTHER_CUT, &["s1"]).await.unwrap_err();
+    assert_eq!(refused.code, RefusalCode::UnknownRef);
+    assert!(
+        refused.message.contains("another computer"),
+        "{}",
+        refused.message
+    );
+    assert!(!refused.message.contains("mac-b"), "{}", refused.message);
+}
+
+/// A `holderBox` that is not exactly 32 lowercase hex characters does not
+/// decode: the release is refused `invalid_request` naming the member, and
+/// the cut stays exported with its session frozen, so a well-formed release
+/// still follows.
+#[tokio::test]
+async fn a_release_with_a_malformed_holder_box_is_invalid_request_and_changes_nothing() {
+    let f = Fixture::new();
+    exported(&f, CUT, "s1").await;
+    let release = |holder_box: Value| json!({"refs": refs(&["s1"]), "cutId": CUT, "holder": "mac-b", "holderBox": holder_box});
+    for malformed in [
+        json!(BOX.to_uppercase()),
+        json!(&BOX[..31]),
+        json!(format!("{BOX}0")),
+        json!(format!("{}g", &BOX[..31])),
+        json!(null),
+        json!(42),
+    ] {
+        let refused = f
+            .call("agent_data.release", release(malformed.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, RefusalCode::InvalidRequest, "{malformed}");
+        assert!(
+            refused.message.contains("holderBox"),
+            "{malformed}: {}",
+            refused.message
+        );
+    }
+    assert_eq!(f.status(CUT).await, "exported");
+    assert_eq!(f.moving("s1"), Some((CUT.into(), MovingState::Frozen)));
+    assert_eq!(f.released("s1"), None);
+    f.release(CUT, &["s1"], "mac-b", Some(BOX)).await.unwrap();
+    assert_eq!(f.status(CUT).await, "released");
+}
+
+/// `holderBox` is part of the release a repeat is compared with: the same
+/// request replays its reply, and one that adds, drops or changes the box
+/// is refused `id_reused`, leaving the tombstone as the first release
+/// recorded it.
+#[tokio::test]
+async fn a_repeat_of_release_that_adds_drops_or_changes_its_holder_box_is_id_reused() {
+    let f = Fixture::new();
+    exported(&f, CUT, "s1").await;
+    exported(&f, OTHER_CUT, "s2").await;
+    let with_box = f.release(CUT, &["s1"], "mac-b", Some(BOX)).await.unwrap();
+    let without_box = f.release(OTHER_CUT, &["s2"], "mac-b", None).await.unwrap();
+    let (first_s1, first_s2) = (f.released("s1"), f.released("s2"));
+    assert_eq!(first_s1.as_ref().unwrap().holder_box.as_deref(), Some(BOX));
+    assert_eq!(first_s2.as_ref().unwrap().holder_box, None);
+
+    // The same requests again replay their replies.
+    assert_eq!(
+        f.release(CUT, &["s1"], "mac-b", Some(BOX)).await.unwrap(),
+        with_box
+    );
+    assert_eq!(
+        f.release(OTHER_CUT, &["s2"], "mac-b", None).await.unwrap(),
+        without_box
+    );
+    for (cut, session, holder_box) in [
+        (CUT, "s1", None),
+        (CUT, "s1", Some(OTHER_BOX)),
+        (OTHER_CUT, "s2", Some(BOX)),
+    ] {
+        let refused = f
+            .release(cut, &[session], "mac-b", holder_box)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, RefusalCode::IdReused, "{cut} {holder_box:?}");
+    }
+    assert_eq!(f.released("s1"), first_s1);
+    assert_eq!(f.released("s2"), first_s2);
 }
 
 /// `abort` before `release` lets the reservation go, then unfreezes the
