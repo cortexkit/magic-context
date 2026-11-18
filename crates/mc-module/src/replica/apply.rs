@@ -190,8 +190,8 @@ fn decode(bytes: &[u8], envelope: &Envelope, subject: &str) -> Result<Body, Stri
 const LEVELS: [&str; 3] = ["project", "workspace", "global"];
 
 /// Whether `snapshot` holds every value the store requires of a row of
-/// `kind`, as its `NOT NULL` and `CHECK` constraints say, so applying a
-/// valid message never fails on the message's account.
+/// `kind`, as its `NOT NULL` and `CHECK` constraints say, so a valid
+/// message never breaks those constraints when it is applied.
 fn validate(kind: &str, snapshot: &Map<String, Value>) -> Result<(), String> {
     let present = |column: &str| snapshot.get(column).is_some_and(|value| !value.is_null());
     let text = |column: &str| -> Result<(), String> {
