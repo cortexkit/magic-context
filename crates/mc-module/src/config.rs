@@ -47,9 +47,9 @@ pub(crate) mod review;
 mod user_tier;
 
 use crate::embedding;
-pub(crate) use user_tier::UserTier;
 use crate::pass::Settings;
 use crate::vault::{ApiKey, Secret, Vault};
+pub(crate) use user_tier::UserTier;
 
 /// The highest execute threshold any setting can reach, as the plugin caps
 /// it: above it too little room is left to act before the window fills.
@@ -1212,5 +1212,15 @@ pub(crate) fn resolve_for_test(
     )
 }
 
+#[cfg(test)]
+mod convert_tests;
+#[cfg(test)]
+mod equivalence_tests;
+#[cfg(test)]
+mod jsonc_edit_tests;
+#[cfg(test)]
+mod review_tests;
+#[cfg(test)]
+mod schema_tests;
 #[cfg(test)]
 mod tests;

@@ -116,13 +116,19 @@ pub fn applied(value: &Value, edits: &[Edit]) -> Result<Value, String> {
     Ok(value)
 }
 
-fn as_object<'a>(value: &'a mut Value, pointer: &str) -> Result<&'a mut Map<String, Value>, String> {
+fn as_object<'a>(
+    value: &'a mut Value,
+    pointer: &str,
+) -> Result<&'a mut Map<String, Value>, String> {
     value
         .as_object_mut()
         .ok_or_else(|| format!("{pointer} passes through a value that is not an object"))
 }
 
-fn parent_object<'a>(value: &'a mut Value, parents: &[String]) -> Option<&'a mut Map<String, Value>> {
+fn parent_object<'a>(
+    value: &'a mut Value,
+    parents: &[String],
+) -> Option<&'a mut Map<String, Value>> {
     let mut object = value.as_object_mut()?;
     for key in parents {
         object = object.get_mut(key)?.as_object_mut()?;

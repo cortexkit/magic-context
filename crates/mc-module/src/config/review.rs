@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 use subc_client_rs::config::{
-    ApplyKind, ConfigReviewReply, ConfigReviewRefusal, ConfigReviewRequest, ConfigView,
+    ApplyKind, ConfigReviewRefusal, ConfigReviewReply, ConfigReviewRequest, ConfigView,
     FieldChange, Layer, LayerValue, RecordedValue, Schema, ValidationContext,
 };
 
@@ -34,7 +34,8 @@ pub(crate) fn schema_value() -> &'static Value {
 pub(crate) fn schema() -> &'static Schema {
     static SCHEMA: OnceLock<Schema> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        Schema::new(schema_value().clone()).expect("settings-schema.json follows the daemon's rules")
+        Schema::new(schema_value().clone())
+            .expect("settings-schema.json follows the daemon's rules")
     })
 }
 
@@ -88,10 +89,10 @@ fn holds_credential(node: &Value) -> bool {
 /// declared user file, beside which a relative guidance override path is
 /// read.
 pub fn review(request: &ConfigReviewRequest, user_path: &Path) -> ConfigReviewReply {
-    let module_id = request
-        .layers
-        .first()
-        .map_or_else(|| crate::MODULE_ID.to_owned(), |layer| layer.module_id.clone());
+    let module_id = request.layers.first().map_or_else(
+        || crate::MODULE_ID.to_owned(),
+        |layer| layer.module_id.clone(),
+    );
     let project_id = request
         .layers
         .iter()
@@ -196,7 +197,9 @@ fn why(code: &str) -> &'static str {
 pub(crate) fn checks(effective: &Value, user_path: &Path) -> Vec<(String, String)> {
     let mut problems = Vec::new();
     let text = |pointer: &str| effective.pointer(pointer).and_then(Value::as_str);
-    if let Some(configured) = text("/prompt_surface/guidance_override_path").filter(|path| !path.is_empty()) {
+    if let Some(configured) =
+        text("/prompt_surface/guidance_override_path").filter(|path| !path.is_empty())
+    {
         let path = super::guidance_override_path(configured, user_path);
         if let Err(why) = super::guidance_file(&path) {
             problems.push((

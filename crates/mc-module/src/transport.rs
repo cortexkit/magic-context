@@ -2058,7 +2058,10 @@ impl ModuleHandler for Handler {
     }
 
     #[cfg(feature = "managed-settings")]
-    async fn config_apply(&self, view: subc_client_rs::config::ConfigView) -> Result<(), Vec<String>> {
+    async fn config_apply(
+        &self,
+        view: subc_client_rs::config::ConfigView,
+    ) -> Result<(), Vec<String>> {
         match self.module.config().loader() {
             Some(loader) => loader.config_apply(&view),
             None => Err(vec!["this ck-mc runs on fixed settings".into()]),

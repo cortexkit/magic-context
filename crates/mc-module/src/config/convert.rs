@@ -239,7 +239,8 @@ impl Converter {
                 "{at}: belonged to the 0.49 plugin and means nothing to ck-mc; removed (the old file is saved)"
             ));
         } else {
-            self.notes.push(format!("{at}: not a ck-mc setting; removed"));
+            self.notes
+                .push(format!("{at}: not a ck-mc setting; removed"));
         }
     }
 
@@ -334,12 +335,14 @@ impl Converter {
                 "min_prompt_chars" => this.leaf(at, value, |v| number(v, 5.0, 500.0)),
                 _ => this.unknown(at),
             }),
-            "git_commit_indexing" => this.object(at, value, &mut |this, key, at, value| match key {
-                "enabled" => this.leaf(at, value, boolean),
-                "since_days" => this.leaf(at, value, |v| number(v, 7.0, 3650.0)),
-                "max_commits" => this.leaf(at, value, |v| number(v, 100.0, 20_000.0)),
-                _ => this.unknown(at),
-            }),
+            "git_commit_indexing" => {
+                this.object(at, value, &mut |this, key, at, value| match key {
+                    "enabled" => this.leaf(at, value, boolean),
+                    "since_days" => this.leaf(at, value, |v| number(v, 7.0, 3650.0)),
+                    "max_commits" => this.leaf(at, value, |v| number(v, 100.0, 20_000.0)),
+                    _ => this.unknown(at),
+                })
+            }
             _ => this.unknown(at),
         });
     }

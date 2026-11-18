@@ -567,7 +567,11 @@ fn edit_once(text: &str, edit: &super::edit::Edit) -> Result<String, String> {
         let Node::Object { members, .. } = object else {
             unreachable!("only objects are walked");
         };
-        match members.iter().rev().find(|member| member.key == parents[depth]) {
+        match members
+            .iter()
+            .rev()
+            .find(|member| member.key == parents[depth])
+        {
             Some(member) if matches!(member.value, Node::Object { .. }) => {
                 object = &member.value;
                 depth += 1;
@@ -642,7 +646,11 @@ fn object_at<'a>(root: &'a Node, keys: &[String]) -> Option<&'a Node> {
         let Node::Object { members, .. } = node else {
             return None;
         };
-        node = &members.iter().rev().find(|member| &member.key == key)?.value;
+        node = &members
+            .iter()
+            .rev()
+            .find(|member| &member.key == key)?
+            .value;
     }
     matches!(node, Node::Object { .. }).then_some(node)
 }
@@ -789,7 +797,10 @@ fn remove_member(text: &str, object: &Node, index: usize) -> String {
         .checked_sub(1)
         .and_then(|previous| members[previous].comma);
     let (text, key_start) = match (member.comma, previous_comma) {
-        (Some(comma), _) => (splice(text, member.key_start, comma + 1, ""), member.key_start),
+        (Some(comma), _) => (
+            splice(text, member.key_start, comma + 1, ""),
+            member.key_start,
+        ),
         // The last member gives up the comma before it instead.
         (None, Some(comma)) => {
             let text = splice(text, member.key_start, member.value.end(), "");
@@ -801,7 +812,9 @@ fn remove_member(text: &str, object: &Node, index: usize) -> String {
         ),
     };
     // A line left holding only whitespace goes too.
-    let line_start = text[..key_start].rfind('\n').map_or(0, |newline| newline + 1);
+    let line_start = text[..key_start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
     let line_end = text[key_start..]
         .find('\n')
         .map_or(text.len(), |newline| key_start + newline);

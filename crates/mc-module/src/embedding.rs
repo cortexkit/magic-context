@@ -61,6 +61,30 @@ const QUERY_WINDOW_SAFETY_RATIO: f64 = 0.9;
 const QWEN_STYLE_QUERY_INSTRUCTION: &str =
     "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ";
 
+/// The `embedding` keys read from the user's file, besides `module` and
+/// `api_key`, which are read on their own.
+pub(crate) const USER_KEYS: [&str; 10] = [
+    "provider",
+    "endpoint",
+    "model",
+    "input_type",
+    "query_input_type",
+    "query_instruction",
+    "document_prefix",
+    "truncate",
+    "dimensions",
+    "max_input_tokens",
+];
+
+/// The `embedding` keys a project's file may set, besides its own `api_key`.
+const PROJECT_KEYS: [&str; 5] = [
+    "model",
+    "input_type",
+    "query_input_type",
+    "truncate",
+    "max_input_tokens",
+];
+
 /// The embedding provider the settings name.
 #[derive(Clone, Debug)]
 pub enum Provider {
@@ -87,33 +111,8 @@ impl Provider {
     /// (`embedding.module`, read as `rerank.module` is).
     pub(crate) fn from_tiers_in(user: &Value, project: &Value, vault: &Vault) -> Option<Self> {
         let mut merged = json!({"provider": "local"});
-        merge(
-            &mut merged,
-            &user["embedding"],
-            &[
-                "provider",
-                "endpoint",
-                "model",
-                "input_type",
-                "query_input_type",
-                "query_instruction",
-                "document_prefix",
-                "truncate",
-                "dimensions",
-                "max_input_tokens",
-            ],
-        );
-        merge(
-            &mut merged,
-            &project["embedding"],
-            &[
-                "model",
-                "input_type",
-                "query_input_type",
-                "truncate",
-                "max_input_tokens",
-            ],
-        );
+        merge(&mut merged, &user["embedding"], &USER_KEYS);
+        merge(&mut merged, &project["embedding"], &PROJECT_KEYS);
         match merged["provider"].as_str() {
             Some("openai-compatible") => Http::from_merged(&merged, user, project, vault)
                 .map(|http| Self::Http(Box::new(http))),
@@ -161,6 +160,16 @@ impl Provider {
     pub(crate) fn api_key_for_test(&self) -> Option<&ApiKey> {
         match self {
             Self::Http(http) => http.api_key.as_ref(),
+            Self::Synapse(_) => None,
+        }
+    }
+
+    /// An endpoint's query wording: the input type and the text put before
+    /// the query.
+    #[cfg(test)]
+    pub(crate) fn query_wording_for_test(&self) -> Option<(Option<String>, String)> {
+        match self {
+            Self::Http(http) => Some((http.query_input_type.clone(), http.query_prefix())),
             Self::Synapse(_) => None,
         }
     }

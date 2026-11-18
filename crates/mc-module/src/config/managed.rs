@@ -35,7 +35,7 @@ use subc_client_rs::config::{
     ConfigView, Layer,
 };
 
-use super::{UserTier, Loader};
+use super::{Loader, UserTier};
 
 /// How long the first run's settings resolution waits for the daemon's
 /// first answer before it serves the defaults.
@@ -111,7 +111,10 @@ impl Managed {
     /// The user tier for a resolution, waiting first if this is the first
     /// run and the daemon has not answered yet. `read_file` reads the user
     /// file, only for a daemon without a config gate.
-    pub(super) fn user_tier(&self, read_file: impl FnOnce() -> Option<UserTier>) -> Option<UserTier> {
+    pub(super) fn user_tier(
+        &self,
+        read_file: impl FnOnce() -> Option<UserTier>,
+    ) -> Option<UserTier> {
         let mut state = self.lock();
         loop {
             let deadline = match &mut *state {
@@ -173,7 +176,10 @@ impl Managed {
     }
 
     /// The user tier as it stands, without waiting.
-    pub(super) fn user_tier_now(&self, read_file: impl FnOnce() -> Option<UserTier>) -> Option<UserTier> {
+    pub(super) fn user_tier_now(
+        &self,
+        read_file: impl FnOnce() -> Option<UserTier>,
+    ) -> Option<UserTier> {
         let state = self.lock();
         if matches!(*state, State::Files) {
             drop(state);
@@ -454,10 +460,9 @@ impl Loader {
     /// on a refusal.
     pub fn on_config_state(&self, state: &ConfigState) {
         match state {
-            ConfigState::Failed { reasons, .. } => tracing::warn!(
-                "ck-mc: managed settings: failed: {}",
-                reasons.join("; ")
-            ),
+            ConfigState::Failed { reasons, .. } => {
+                tracing::warn!("ck-mc: managed settings: failed: {}", reasons.join("; "))
+            }
             ConfigState::ConfigGated { refusal, .. }
             | ConfigState::NotDeliveryTarget { refusal, .. }
             | ConfigState::AnchorPending { refusal, .. } => tracing::warn!(
