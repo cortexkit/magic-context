@@ -348,6 +348,16 @@ impl Machine {
         .unwrap();
     }
 
+    /// [`Self::release`], also naming the receiving computer's box id.
+    async fn release_to_box(&self, cut: &str, names: &[&str], holder: &str, holder_box: &str) {
+        self.call(
+            "agent_data.release",
+            json!({"refs": refs(names), "cutId": cut, "holder": holder, "holderBox": holder_box}),
+        )
+        .await
+        .unwrap();
+    }
+
     fn moving(&self, session: &str) -> Option<(String, MovingState)> {
         self.entry(session)
             .and_then(|entry| entry.moving)

@@ -476,7 +476,14 @@ async fn run<H: Host>(host: &H, request: &Request, cut: Option<Cut>) -> Result<D
         }
         Request::Release(release) => {
             let cut = cut.expect("the step machine lets release run only after export");
-            source::release(host, release.cut_id.as_str(), &cut, &release.holder).await
+            source::release(
+                host,
+                release.cut_id.as_str(),
+                &cut,
+                &release.holder,
+                release.holder_box.as_deref(),
+            )
+            .await
         }
         Request::Import(import) => {
             receiver::import(host, import.cut_id.as_str(), &import.refs).await

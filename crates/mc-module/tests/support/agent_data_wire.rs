@@ -746,10 +746,16 @@ impl Machine {
             .await
     }
 
-    async fn release(&self, cut: &str, sessions: &[&str], holder: &str) -> Driven {
+    async fn release(
+        &self,
+        cut: &str,
+        sessions: &[&str],
+        holder: &str,
+        holder_box: &str,
+    ) -> Driven {
         self.drive(
             "release",
-            json!({"refs": refs(sessions), "cutId": cut, "holder": holder}),
+            json!({"refs": refs(sessions), "cutId": cut, "holder": holder, "holderBox": holder_box}),
         )
         .await
     }
@@ -1182,6 +1188,10 @@ fn contract_refusal(driven: Driven) -> (String, Value) {
 const CUT: &str = "0123456789abcdef0123456789abcdef";
 const BACK: &str = "fedcba9876543210fedcba9876543210";
 const CRAFTED: &str = "00112233445566778899aabbccddeeff";
+/// The permanent box ids of the two machines, as Entorhinal's move driver
+/// names them in `release`.
+const BOX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const BOX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 /// The session with rows in every moved table.
 const MOVED: &str = "wire-moved";
 /// A session with no `context.db` rows at all.
@@ -1275,7 +1285,7 @@ async fn with_moves_off_ck_mc_declares_no_agent_data_service_and_serves_no_reque
 /// destination's own publications. A session with no rows arrives with
 /// none. While staged, the destination refuses the session
 /// `session_moving`; once released, the source refuses it `session_moved`
-/// naming the new holder; other sessions are served on both throughout.
+/// naming the new holder's box; other sessions are served on both throughout.
 /// A body no store can hold is refused at import, and nothing is staged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the daemon and mock runner binaries; run through scripts/wire-gate.sh"]
@@ -1355,21 +1365,22 @@ async fn a_session_moves_to_another_machine_and_back_over_the_real_wire() {
     assert!(report.call_errors.is_empty(), "{:?}", report.call_errors);
     assert!(report.refusals.is_empty(), "{:?}", report.refusals);
 
-    // Released: the source refuses the session, naming the new holder,
-    // and serves another session as before.
+    // Released: the source refuses the session, naming the new holder's
+    // box, and serves another session as before.
     let released = contract_reply::<contract::release::ReleaseReply>(
-        a.release(CUT, &sessions, "machine-b").await,
+        a.release(CUT, &sessions, "machine-b", BOX_B).await,
     );
     assert_eq!(released, json!({"enforced": true}));
     assert_eq!(
         a.app_read(MOVED).await.unwrap_err(),
-        (
-            "session_moved".to_owned(),
-            Some(json!({"holder": "machine-b"}))
-        )
+        ("session_moved".to_owned(), Some(json!({"holder": BOX_B})))
     );
     let refused = a.play(MOVED).await.unwrap_err();
-    assert!(refused.contains("was moved to machine-b"), "{refused}");
+    assert!(
+        refused.contains(&format!("was moved to computer {BOX_B}")),
+        "{refused}"
+    );
+    assert!(!refused.contains("machine-b"), "{refused}");
     let report = a.play("wire-a-other").await.unwrap();
     assert!(report.call_errors.is_empty(), "{:?}", report.call_errors);
     assert!(report.refusals.is_empty(), "{:?}", report.refusals);
@@ -1469,7 +1480,7 @@ async fn a_session_moves_to_another_machine_and_back_over_the_real_wire() {
     assert_eq!(states(&diverged), ["at_cut", "at_cut"]);
     contract_reply::<contract::import::ImportReply>(a.op("import", BACK, &sessions).await);
     contract_reply::<contract::release::ReleaseReply>(
-        b.release(BACK, &sessions, "machine-a").await,
+        b.release(BACK, &sessions, "machine-a", BOX_A).await,
     );
     contract_reply::<contract::EmptyReply>(a.op("activate", BACK, &sessions).await);
     assert_eq!(moved_rows(&a.conn(), MOVED), moved_rows(&b.conn(), MOVED));
@@ -1489,10 +1500,7 @@ async fn a_session_moves_to_another_machine_and_back_over_the_real_wire() {
     not_gated(a.app_read(MOVED).await);
     assert_eq!(
         b.app_read(MOVED).await.unwrap_err(),
-        (
-            "session_moved".to_owned(),
-            Some(json!({"holder": "machine-a"}))
-        )
+        ("session_moved".to_owned(), Some(json!({"holder": BOX_A})))
     );
     eprintln!(
         "wire time: a_session_moves_to_another_machine_and_back_over_the_real_wire took {:.1}s",

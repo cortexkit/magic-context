@@ -15,7 +15,7 @@ use cortexkit_role_compaction::read::SessionRef;
 use cortexkit_role_compaction::wire::Refusal;
 use serde_json::{json, Value};
 
-use super::journal::{Contents, MovingState};
+use super::journal::{self, Contents, MovingState};
 
 /// The refusal for a session a move holds on this machine: frozen at the
 /// source, staged or being installed at the receiver. Every session also
@@ -33,8 +33,9 @@ pub struct Gated {
     /// unreadable, so no cut is known.
     pub cut: Option<String>,
     pub message: String,
-    /// `{"cut": ...}` for a moving session, `{"holder": ...}` for a moved
-    /// one, nothing for an unreadable journal.
+    /// `{"cut": ...}` for a moving session. For a moved one, `{"holder":
+    /// ...}` naming the receiving computer's box id when the release named
+    /// one, and `{}` when it named none. Nothing for an unreadable journal.
     pub detail: Option<Value>,
 }
 
@@ -66,7 +67,10 @@ struct Hold {
 #[derive(Clone, Debug)]
 enum Kind {
     Moving(MovingState),
-    Moved { holder: String },
+    /// The receiving computer's box id, when the release named one.
+    Moved {
+        holder_box: Option<String>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -134,14 +138,20 @@ impl Gate {
                 ),
                 detail: Some(json!({"cut": hold.cut})),
             },
-            Kind::Moved { holder } => Gated {
+            Kind::Moved { holder_box } => Gated {
                 code: SESSION_MOVED,
                 cut: Some(hold.cut.clone()),
                 message: format!(
-                    "Session {harness}/{session} was moved to {holder} by agent-data cut {} and is no longer served here.",
+                    "Session {harness}/{session} was moved to {} by agent-data cut {} and is no longer served here.",
+                    journal::destination(holder_box.as_deref()),
                     hold.cut
                 ),
-                detail: Some(json!({"holder": holder})),
+                // `holder` is the llm-runner contract's name for the box id
+                // of the computer that holds the session now.
+                detail: Some(match holder_box {
+                    Some(holder_box) => json!({"holder": holder_box}),
+                    None => json!({}),
+                }),
             },
         })
     }
@@ -158,7 +168,7 @@ impl Gate {
                 (None, Some(released)) => Some((
                     released.cut.clone(),
                     Kind::Moved {
-                        holder: released.holder.clone(),
+                        holder_box: released.holder_box.clone(),
                     },
                 )),
                 (None, None) => None,
