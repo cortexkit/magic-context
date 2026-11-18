@@ -8505,9 +8505,11 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 
 			await new Promise((resolve) => setTimeout(resolve, 150));
 
+			// The first pass records a row too, bound to e4, the reply to its
+			// request. Read the drop pass's row: e5 answered that pass's request.
 			const row = db
 				.prepare(
-					"SELECT session_id, message_id, decision, dropped_count, dropped_tokens FROM transform_decisions WHERE session_id = ?",
+					"SELECT session_id, message_id, decision, dropped_count, dropped_tokens FROM transform_decisions WHERE session_id = ? AND message_id = 'e5'",
 				)
 				.get(sessionId) as
 				| {
@@ -8824,16 +8826,19 @@ describe("Pi transform_decisions dropped_tokens telemetry", () => {
 
 			await new Promise((resolve) => setTimeout(resolve, 150));
 
+			// Each session's first pass records a row too, bound to the reply to
+			// its request (e4, e24). Read each drop pass's row: e5 and e25 answered
+			// those passes' requests.
 			const row1 = db
 				.prepare(
-					"SELECT dropped_tokens, dropped_count FROM transform_decisions WHERE session_id = ?",
+					"SELECT dropped_tokens, dropped_count FROM transform_decisions WHERE session_id = ? AND message_id = 'e5'",
 				)
 				.get(session1) as
 				| { dropped_tokens: number; dropped_count: number }
 				| undefined;
 			const row2 = db
 				.prepare(
-					"SELECT dropped_tokens, dropped_count FROM transform_decisions WHERE session_id = ?",
+					"SELECT dropped_tokens, dropped_count FROM transform_decisions WHERE session_id = ? AND message_id = 'e25'",
 				)
 				.get(session2) as
 				| { dropped_tokens: number; dropped_count: number }
