@@ -13,9 +13,14 @@
 //! 4. The candidates are returned best score first, cut to the search's
 //!    limit.
 //!
-//! Any failure keeps the ordinary ranking. The reranker is the local Synapse
-//! module by default (`models.list` pins its reranker lane, `rerank.score`
-//! scores), a hosted endpoint when the user configures one, or off.
+//! Any failure keeps the ordinary ranking. The reranker is a Synapse module
+//! by default (`models.list` pins its reranker lane, `rerank.score`
+//! scores), a hosted endpoint when the user configures one, or off. The
+//! Synapse module is the local `synapse` unless the user's `rerank.module`
+//! names another, such as one that Callosum re-exports from another paired
+//! computer as `fed:<fingerprint>:synapse`. ck-mc calls only the module the
+//! settings name: it never picks a remote one itself, and never falls back
+//! from one module to another.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
@@ -28,6 +33,8 @@ use serde_json::{json, Value};
 use super::Hit;
 use crate::vault::{Keyed, Sent};
 
+/// The Synapse module a search reranks with when `rerank.module` names none.
+pub const SYNAPSE_MODULE: &str = "synapse";
 /// Synapse's reranker lane. A catalog lane checks itself after an install,
 /// a restart or an OS update, so it needs no manual re-probe.
 pub const MODEL: &str = "gte-reranker-modernbert-base-metal";
@@ -42,14 +49,20 @@ const DOCUMENT_BYTES: usize = 1024;
 const RRF_K: f64 = 60.0;
 
 /// Which reranker an explicit search uses (`rerank.*`).
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reranker {
     Off,
-    /// The local Synapse module, over subc.
-    #[default]
-    Synapse,
+    /// A Synapse module over subc, by its module id: [`SYNAPSE_MODULE`]
+    /// unless the user's `rerank.module` names another.
+    Synapse(String),
     /// A hosted `/rerank` endpoint; user configuration only.
     Remote(Remote),
+}
+
+impl Default for Reranker {
+    fn default() -> Self {
+        Self::local_synapse()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -76,8 +89,14 @@ impl std::fmt::Debug for Remote {
 }
 
 impl Reranker {
+    /// The local Synapse module, the default reranker.
+    pub fn local_synapse() -> Self {
+        Self::Synapse(SYNAPSE_MODULE.to_owned())
+    }
+
     /// The reranker from the configuration tiers. Only the user picks a
-    /// reranker or where text is sent; a project may only switch it off.
+    /// reranker or where text is sent, the Synapse module included; a
+    /// project may only switch it off.
     /// A `{vault:}` key here is never read (no vault); the configuration
     /// loader resolves settings with [`Reranker::from_tiers_in`].
     pub fn from_tiers(user: &Value, project: &Value) -> Self {
@@ -111,7 +130,13 @@ impl Reranker {
                     .filter(|n| (1..=20).contains(n))
                     .map_or(POOL, |n| n as usize),
             }),
-            _ => Self::Synapse,
+            _ => Self::Synapse(
+                rerank["module"]
+                    .as_str()
+                    .and_then(module_id)
+                    .unwrap_or(SYNAPSE_MODULE)
+                    .to_owned(),
+            ),
         }
     }
 
@@ -130,6 +155,56 @@ fn text(value: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned)
+}
+
+/// `rerank.module` as a module id ck-mc may call, surrounding whitespace
+/// aside: a plain subc module id such as `synapse`, or the id Callosum gives
+/// a module it re-exports from another paired computer,
+/// `fed:<fingerprint>:<module id>`, where the fingerprint is that
+/// computer's 32 lowercase hex characters. Anything else is `None`.
+pub fn module_id(value: &str) -> Option<&str> {
+    let id = value.trim();
+    let valid = match id.strip_prefix("fed:") {
+        Some(federated) => federated
+            .split_once(':')
+            .is_some_and(|(fingerprint, module)| {
+                fingerprint.len() == 32
+                    && fingerprint
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                    && plain_module_id(module)
+            }),
+        None => plain_module_id(id),
+    };
+    valid.then_some(id)
+}
+
+/// A module id the daemon registers, without the `:` that separates a
+/// federated id's parts and without whitespace.
+fn plain_module_id(id: &str) -> bool {
+    subc_protocol::manifest::validate_module_id(id).is_ok()
+        && !id.contains(':')
+        && !id.chars().any(char::is_whitespace)
+}
+
+/// The log line for a user file whose `rerank.module` names no module ck-mc
+/// may call, so the default applies; `None` when it is absent or usable.
+/// A value with `{env:}` or `{file:}` in it is checked only once expanded,
+/// by [`Reranker::from_tiers_in`], and is not named here.
+pub(crate) fn module_note(user: &Value) -> Option<String> {
+    let value = user.pointer("/rerank/module")?;
+    let usable = match value {
+        Value::Null => true,
+        Value::String(text) => {
+            module_id(text).is_some() || text.contains("{env:") || text.contains("{file:")
+        }
+        _ => false,
+    };
+    (!usable).then(|| {
+        format!(
+            "rerank.module must be a module id such as \"{SYNAPSE_MODULE}\" or fed:<fingerprint>:<module id> with a fingerprint of 32 lowercase hex characters, not {value}; the default of {SYNAPSE_MODULE} applies"
+        )
+    })
 }
 
 /// `isProseQuery`: questions and descriptive phrases of at least three plain
@@ -495,35 +570,83 @@ pub struct Pinned {
     pub table_epoch: i64,
 }
 
-/// A rerank that did not happen, by a fixed reason: logged once per reason,
-/// and for a hosted reranker also shown under the results.
+/// A rerank that did not happen, by a fixed reason. A Synapse module's
+/// reason is logged when the module starts falling back
+/// ([`synapse_fell_back`]); a hosted reranker's is logged once per reason
+/// and also shown under the results.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skipped(pub String);
 
-/// Pin Synapse's catalog unless the daemon recently refused the module by name.
-/// One daemon serves the process, so sessions share the absence, and a pin
-/// is reused for a minute instead of asking on every prose search.
+/// Pin the catalog of the Synapse `module` unless the daemon recently
+/// refused that module by name. One daemon serves the process, so sessions
+/// share the absence, and a pin is reused for a minute instead of asking on
+/// every prose search. Each module keeps its own pin and its own absence, so
+/// one module's scores are never checked against another's lane.
 pub async fn pin_synapse(
+    module: &str,
     catalog: impl Future<Output = Result<Value, String>>,
 ) -> Result<Pinned, Skipped> {
-    SYNAPSE_CATALOG.pin(catalog).await
+    SYNAPSE_CATALOGS.module(module).pin(catalog).await
 }
 
-/// Drop the reused pin, so the next search asks the catalog again.
-pub fn forget_synapse_pin() {
-    SYNAPSE_CATALOG.forget();
+/// Drop `module`'s reused pin, so its next search asks the catalog again.
+pub fn forget_synapse_pin(module: &str) {
+    SYNAPSE_CATALOGS.module(module).forget();
 }
 
-static SYNAPSE_CATALOG: SynapseCatalog = SynapseCatalog::new();
+/// Record that `module` scored a search. Logs once when the module had been
+/// falling back.
+pub fn synapse_scored(module: &str) {
+    SYNAPSE_CATALOGS.module(module).scored(module);
+}
+
+/// Record that a search kept its ordinary ranking because `module` could
+/// not score it, for `reason`. Logs once when the module starts falling
+/// back, not on every search, however the reason changes until it scores
+/// again.
+pub fn synapse_fell_back(module: &str, reason: &str) {
+    SYNAPSE_CATALOGS.module(module).fell_back(module, reason);
+}
+
+static SYNAPSE_CATALOGS: SynapseCatalogs = SynapseCatalogs::new();
 
 /// How long a pin from a catalog answer is reused. A failed pin is never
 /// kept, so a Synapse that comes back is asked on the next search.
 const PIN_REUSE: Duration = Duration::from_secs(60);
 
+/// Each Synapse module's catalog, by module id. Only the user's file names
+/// a module, so the map holds the few modules it has named.
+struct SynapseCatalogs {
+    modules: Mutex<BTreeMap<String, std::sync::Arc<SynapseCatalog>>>,
+}
+
+impl SynapseCatalogs {
+    const fn new() -> Self {
+        Self {
+            modules: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn module(&self, module: &str) -> std::sync::Arc<SynapseCatalog> {
+        let mut modules = self.modules.lock().expect("Synapse catalogs");
+        match modules.get(module) {
+            Some(catalog) => std::sync::Arc::clone(catalog),
+            None => {
+                let catalog = std::sync::Arc::new(SynapseCatalog::new());
+                modules.insert(module.to_owned(), std::sync::Arc::clone(&catalog));
+                catalog
+            }
+        }
+    }
+}
+
 struct SynapseCatalog {
     retry_at: Mutex<Option<tokio::time::Instant>>,
     /// The last pin and when the catalog gave it.
     pinned: Mutex<Option<(Pinned, tokio::time::Instant)>>,
+    /// Whether the module's last search fell back, so its log line is
+    /// written once per change rather than on every search.
+    falling_back: Mutex<bool>,
 }
 
 impl SynapseCatalog {
@@ -531,11 +654,28 @@ impl SynapseCatalog {
         Self {
             retry_at: Mutex::new(None),
             pinned: Mutex::new(None),
+            falling_back: Mutex::new(false),
         }
     }
 
     fn forget(&self) {
         *self.pinned.lock().expect("Synapse pin") = None;
+    }
+
+    fn scored(&self, module: &str) {
+        let mut falling_back = self.falling_back.lock().expect("Synapse state");
+        if std::mem::replace(&mut *falling_back, false) {
+            tracing::info!("ck-mc: ctx_search rerank: Synapse module {module} scores again");
+        }
+    }
+
+    fn fell_back(&self, module: &str, reason: &str) {
+        let mut falling_back = self.falling_back.lock().expect("Synapse state");
+        if !std::mem::replace(&mut *falling_back, true) {
+            tracing::info!(
+                "ck-mc: ctx_search rerank fallback ({reason}) from Synapse module {module}; keeping the original ranking until it scores again"
+            );
+        }
     }
 
     async fn pin(
@@ -789,8 +929,8 @@ pub fn skipped_line(reason: &str) -> String {
     )
 }
 
-/// Log a fallback to the ordinary ranking once per reason, as the plugin
-/// does, so an absent Synapse does not repeat itself on every search.
+/// Log a hosted reranker's fallback to the ordinary ranking once per
+/// reason, as the plugin does, so it does not repeat itself on every search.
 pub fn log_fallback(reason: &str) {
     static LOGGED: Mutex<BTreeMap<String, ()>> = Mutex::new(BTreeMap::new());
     let mut logged = LOGGED.lock().expect("rerank log");
@@ -804,6 +944,10 @@ pub fn log_fallback(reason: &str) {
 #[cfg(test)]
 #[path = "rerank/synapse_tests.rs"]
 mod synapse_tests;
+
+#[cfg(test)]
+#[path = "rerank/module_tests.rs"]
+mod module_tests;
 
 #[cfg(test)]
 mod tests {
@@ -950,11 +1094,14 @@ mod tests {
     #[test]
     fn only_the_user_picks_a_reranker_and_a_project_may_only_turn_it_off() {
         let none = json!({});
-        assert_eq!(Reranker::from_tiers(&none, &none), Reranker::Synapse);
+        assert_eq!(
+            Reranker::from_tiers(&none, &none),
+            Reranker::local_synapse()
+        );
         let remote_in_project = json!({"rerank": {"provider": "remote", "endpoint": "https://x"}});
         assert_eq!(
             Reranker::from_tiers(&none, &remote_in_project),
-            Reranker::Synapse
+            Reranker::local_synapse()
         );
         let off = json!({"rerank": {"provider": "off"}});
         assert_eq!(Reranker::from_tiers(&none, &off), Reranker::Off);

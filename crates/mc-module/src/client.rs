@@ -232,15 +232,18 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Result<bool, ClientError>> + Send {
         async { Ok(false) }
     }
-    /// One call to the Synapse module's management surface on the session's
+    /// One call to a Synapse module's management surface on the session's
     /// behalf, for `ctx_search`'s rerank (`models.list`, `rerank.score`),
-    /// within [`crate::search::rerank::SYNAPSE_DEADLINE`]. The answer is the
+    /// within [`crate::search::rerank::SYNAPSE_DEADLINE`]. `module` is the
+    /// module id the settings name ([`crate::search::rerank::Reranker`]),
+    /// and no other module is called in its place. The answer is the
     /// reply's JSON; an error is a fixed reason for the log, such as the
     /// module's refusal code. Without Synapse every search keeps its
     /// ordinary ranking, which is the default here.
     fn synapse_call(
         &self,
         _session: &SessionRef,
+        _module: &str,
         _method: &str,
         _params: serde_json::Value,
     ) -> impl Future<Output = Result<serde_json::Value, String>> + Send {

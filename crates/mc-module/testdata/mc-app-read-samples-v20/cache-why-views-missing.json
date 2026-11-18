@@ -1,0 +1,32 @@
+{
+  "name": "cache-why-views-missing",
+  "request": {
+    "method": "context.cache_why",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      },
+      "views": [
+        47
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "decisions": [],
+      "missing": [
+        47
+      ],
+      "op": "context.cache_why",
+      "retention": {
+        "days": 30,
+        "oldest_at_ms": 1699999580000
+      },
+      "schema": 1,
+      "state": "ready"
+    }
+  }
+}

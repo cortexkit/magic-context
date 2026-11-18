@@ -1017,6 +1017,13 @@ export const RerankConfigSchema = z
             .describe(
                 "Explicit ctx_search reranker: local Synapse by default, remote for hosted scoring, or off. Projects may only select off.",
             ),
+        module: z
+            .string()
+            .trim()
+            .optional()
+            .describe(
+                "The Synapse module ck-mc reranks with when provider is synapse: synapse (the local module) by default, or fed:<fingerprint>:synapse for a Synapse on another paired computer, as Callosum re-exports it (the fingerprint is that computer's 32 lowercase hex characters). Read from the user config only, and only by ck-mc; a malformed value is logged once and the default applies.",
+            ),
         endpoint: z
             .string()
             .trim()

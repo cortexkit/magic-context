@@ -1,0 +1,21 @@
+{
+  "name": "memories-stats-empty",
+  "request": {
+    "method": "memories.stats",
+    "params": {
+      "level": "project",
+      "owner": "pj-empty"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "by_category": {},
+      "level": "project",
+      "op": "memories.stats",
+      "owner": "pj-empty",
+      "schema": 1,
+      "total": 0
+    }
+  }
+}

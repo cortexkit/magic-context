@@ -840,10 +840,13 @@ impl RunnerClient for SubcRunnerClient {
 
     /// Synapse admits any principal on its management surface and reads no
     /// project from the bind, so the route is opened unscoped, bound to the
-    /// `magic-context` harness and the session the search is for.
+    /// `magic-context` harness and the session the search is for. `module`
+    /// is the local `synapse` or a remote one Callosum re-exports
+    /// (`fed:<fingerprint>:synapse`); only that module is called.
     async fn synapse_call(
         &self,
         session: &SessionRef,
+        module: &str,
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
@@ -854,7 +857,7 @@ impl RunnerClient for SubcRunnerClient {
         let reply = consumer
             .call(
                 RouteTarget::ManagementSurface {
-                    module_id: "synapse".to_owned(),
+                    module_id: module.to_owned(),
                 },
                 BindIdentity::new("magic-context", session.session.clone()),
                 wire::encode(method, &params),
@@ -1426,15 +1429,24 @@ impl AppCaller {
     }
 }
 
+/// The reads a phone relayed through Callosum may make. Through
+/// `context.states` it gets the per-part token counts and stamp states of
+/// the messages it names, never their text. [`AppCaller::allows_method`]
+/// gives this list to every caller except the remote desktop and a Direct
+/// route on the internal service.
 const PHONE_APP_METHODS: &[&str] = &[
     "session_data.read",
     "context.cache_why",
     "context.search",
     "context.watch",
+    "context.states",
 ];
 
+/// The reads only the remote desktop (a `fed-app:` harness) gets on top of
+/// the phone's: the rendered head of a session's context, its summaries,
+/// and the project-wide stores (memories, observations, facts, the dreamer,
+/// sessions and notes).
 const DESKTOP_ONLY_RELAYED_APP_METHODS: &[&str] = &[
-    "context.states",
     "context.head",
     "context.head_section",
     "context.compartment",
@@ -2016,27 +2028,26 @@ fn module_discovery(request: &RouteBindRequest) -> bool {
             .is_some_and(|roles| roles.contains_key(crate::app_read::ROLE.0))
 }
 
-/// What ck-mc subscribes to for a preset: `pre_user` for presets that
-/// declare it, with ck-mc's budget, passing on any failure so a message is
-/// never held up. `None` for a preset ck-mc does not know.
+/// What ck-mc subscribes to for a preset: `pre_user` with `append` for
+/// presets that get memory hints, with ck-mc's budget, passing on any failure
+/// so a message is never held up. Nothing for the rest. `None` for a preset
+/// ck-mc does not know.
+///
+/// A running session's frozen plan may still name the wider subscription of
+/// earlier builds (`prepend` as well, and a `prepend`-only one for workers).
+/// The runner refuses to refresh such a plan as `plan_stale`, and prefrontal
+/// then composes a new plan from this declaration instead of resending the
+/// old one.
 fn declare(preset: &str) -> Option<Declaration> {
     let features = crate::preset::features(preset)?;
-    let mut ops = Vec::new();
-    // Wider than ck-mc's answers, which never prepend now: running sessions'
-    // frozen plans name these ops, and narrowing them refuses a refresh of
-    // such a plan (`plan_stale`).
-    if features.pre_user_prepend {
-        ops.push(Op::Prepend);
-    }
-    if features.auto_memory {
-        ops.push(Op::Append);
-    }
     let budget = u64::try_from(PRE_USER_BUDGET.as_millis()).unwrap_or(u64::MAX);
-    let subscriptions = if ops.is_empty() {
-        Vec::new()
+    let subscriptions = if features.auto_memory {
+        vec![
+            DeclaredSubscription::new(Hook::PreUser, vec![Op::Append], budget)
+                .with_on_unavailable(OnUnavailable::Pass),
+        ]
     } else {
-        vec![DeclaredSubscription::new(Hook::PreUser, ops, budget)
-            .with_on_unavailable(OnUnavailable::Pass)]
+        Vec::new()
     };
     Some(Declaration::new(subscriptions))
 }

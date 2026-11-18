@@ -1,22 +1,16 @@
-//! ck-mc's `pre_user` declaration for each preset, byte for byte as the
-//! builds before the time markers went declared it. Running sessions' frozen
-//! plans name these subscriptions, and a runner refuses a refresh of a plan
-//! the current declaration no longer covers (`plan_stale`), so the
-//! declaration may not narrow while such plans run.
+//! ck-mc's `pre_user` declaration for each preset, byte for byte: heads get
+//! `append` for memory hints, and workers and readers subscribe to nothing.
 
 use super::*;
 
 #[test]
-fn the_pre_user_declaration_is_unchanged_from_the_previous_build() {
+fn the_pre_user_declaration_is_append_for_heads_only() {
     for (preset, declared) in [
         (
             "head",
-            r#"{"subscriptions":[{"hook":"pre_user","ops":["prepend","append"],"on_unavailable":"pass","budget_ms":1500}]}"#,
+            r#"{"subscriptions":[{"hook":"pre_user","ops":["append"],"on_unavailable":"pass","budget_ms":1500}]}"#,
         ),
-        (
-            "worker",
-            r#"{"subscriptions":[{"hook":"pre_user","ops":["prepend"],"on_unavailable":"pass","budget_ms":1500}]}"#,
-        ),
+        ("worker", r#"{"subscriptions":[]}"#),
         ("reader", r#"{"subscriptions":[]}"#),
     ] {
         let declaration = declare(preset).expect("a preset ck-mc serves");
@@ -28,8 +22,8 @@ fn the_pre_user_declaration_is_unchanged_from_the_previous_build() {
     }
 }
 
-/// ck-mc declares `prepend` but never answers with one: a person's message
-/// gets at most the memory hint after it.
+/// ck-mc never answers with a prepend: a person's message gets at most the
+/// memory hint after it.
 #[test]
 fn a_hook_answer_never_prepends() {
     let hint = Addition {

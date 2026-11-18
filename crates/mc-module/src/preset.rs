@@ -22,13 +22,11 @@ pub struct Features {
     /// commits look relevant to it. Not for sessions another agent started:
     /// their prompts come from that agent, not from a person's question.
     pub auto_memory: bool,
-    /// The preset's `pre_user` subscription declares `prepend` as well as
-    /// any `append`, though ck-mc never prepends now: it no longer puts time
-    /// markers in a person's message (the clock note took their place,
-    /// [`crate::clock_note`]). Running sessions' frozen plans name the op,
-    /// and a declaration narrower than a frozen plan refuses a refresh of
-    /// that plan (`plan_stale`). Saved as `time_marker`, its name in the
-    /// builds that used it, so saved state reads the same both ways.
+    /// Not used any more. Builds up to 7443f56042 put time markers in a
+    /// person's message and declared `prepend` for them. The field stays
+    /// because saved session state carries it under `time_marker`, and those
+    /// builds require it when they read that state, so dropping it would
+    /// leave a rolled-back build unable to read what this one saved.
     #[serde(rename = "time_marker")]
     pub pre_user_prepend: bool,
     /// Older long text is compressed by age when the user turns

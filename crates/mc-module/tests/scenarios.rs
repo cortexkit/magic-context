@@ -4642,6 +4642,7 @@ impl RunnerClient for SynapseClient {
     async fn synapse_call(
         &self,
         _: &SessionRef,
+        _: &str,
         method: &str,
         params: Value,
     ) -> Result<Value, String> {

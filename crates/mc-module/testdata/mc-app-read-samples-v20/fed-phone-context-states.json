@@ -1,0 +1,90 @@
+{
+  "name": "fed-phone-context-states",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "m1"
+      ],
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s-tools"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "compartments": [],
+      "messages": [
+        {
+          "compartment_id": null,
+          "dropped_parts": [],
+          "items": [
+            {
+              "kind": "tool",
+              "part_ref": {
+                "part_key": "call-read"
+              },
+              "source": "runner",
+              "state": "stamped",
+              "tokens": 1500,
+              "tool": "read"
+            },
+            {
+              "kind": "tool",
+              "part_ref": {
+                "part_key": "call-grep"
+              },
+              "source": "runner",
+              "state": "live",
+              "tokens": 200,
+              "tool": "grep"
+            }
+          ],
+          "message_id": "m1",
+          "outside_reason": null,
+          "parts": {
+            "dropped": 0,
+            "stamped": 1,
+            "tagged": 2
+          },
+          "split": null,
+          "stamped_parts": [
+            {
+              "kind": "tool",
+              "part_ref": {
+                "part_key": "call-read"
+              },
+              "size": {
+                "bytes": 6000,
+                "input_bytes": null,
+                "input_tokens": null,
+                "tokens": 1510
+              },
+              "stage": "queued",
+              "stamped_at_ms": 1699999940000,
+              "stamped_at_source": "recorded"
+            }
+          ],
+          "state": "raw"
+        }
+      ],
+      "moved_from_standalone": false,
+      "op": "context.states",
+      "schema": 1,
+      "session_kind": "mode3",
+      "state": "ready",
+      "version": "mca1:2f175fc79aa5782b6fe60df2a0b7c04434a0745ea1bfcf5628bbcbb82461786b"
+    }
+  },
+  "route": {
+    "harness": "fed-phone:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "facts-page-unknown",
+  "request": {
+    "method": "facts.page",
+    "params": {
+      "project": "pj-unknown"
+    }
+  },
+  "response": {
+    "error": {
+      "code": "project_unknown",
+      "message": "No session of this project has been set up with Magic Context."
+    }
+  }
+}

@@ -921,6 +921,83 @@ fn an_unusable_clock_note_is_named_in_the_log_once_per_value() {
 }
 
 #[test]
+fn a_malformed_rerank_module_is_named_in_the_log_once_and_the_default_applies() {
+    use crate::search::rerank::Reranker;
+    let root = temp_config("rerank-module-log");
+    fs::create_dir_all(root.join(".cortexkit")).unwrap();
+    let user = root.join("user.jsonc");
+    let loader = Loader::with_user_path(user.clone());
+    let mut lines = Vec::new();
+    for tick in [1, 2] {
+        rewrite_config(&user, r#"{"rerank": {"module": "fed:ABC:synapse"}}"#, tick);
+        loader.read_with_warning(&user, &mut |line| lines.push(line));
+        assert_eq!(
+            loader.resolve(None, OPUS, 100_000).rerank,
+            Reranker::local_synapse()
+        );
+    }
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].ends_with(
+            r#"rerank.module must be a module id such as "synapse" or fed:<fingerprint>:<module id> with a fingerprint of 32 lowercase hex characters, not "fed:ABC:synapse"; the default of synapse applies"#
+        ),
+        "{lines:?}"
+    );
+    assert!(
+        lines[0].starts_with(&user.display().to_string()),
+        "{lines:?}"
+    );
+    // A usable value logs nothing and applies.
+    let remote = "fed:0123456789abcdef0123456789abcdef:synapse";
+    rewrite_config(
+        &user,
+        &format!(r#"{{"rerank": {{"module": "{remote}"}}}}"#),
+        3,
+    );
+    loader.read_with_warning(&user, &mut |line| lines.push(line));
+    assert_eq!(lines.len(), 1, "a usable value logs nothing: {lines:?}");
+    assert_eq!(
+        loader.resolve(None, OPUS, 100_000).rerank,
+        Reranker::Synapse(remote.into())
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn only_the_user_file_names_the_rerank_module() {
+    use crate::search::rerank::Reranker;
+    let remote = "fed:0123456789abcdef0123456789abcdef:synapse";
+    let rerank =
+        |user: Value, project: Value| resolve_for_test(user, project, OPUS, 100_000).rerank;
+    assert_eq!(rerank(json!({}), json!({})), Reranker::local_synapse());
+    assert_eq!(
+        rerank(json!({}), json!({"rerank": {"module": remote}})),
+        Reranker::local_synapse()
+    );
+    assert_eq!(
+        rerank(
+            json!({"rerank": {"module": remote}}),
+            json!({"rerank": {"provider": "synapse", "module": "synapse"}})
+        ),
+        Reranker::Synapse(remote.into())
+    );
+    // A project may still turn reranking off.
+    assert_eq!(
+        rerank(
+            json!({"rerank": {"module": remote}}),
+            json!({"rerank": {"provider": "off"}})
+        ),
+        Reranker::Off
+    );
+    // A project file naming the module logs nothing: like the rest of
+    // `rerank.*` there, it is simply not read.
+    assert_eq!(
+        setting_notes(&json!({"rerank": {"module": "not a module"}}), false),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn a_config_with_temporal_awareness_loads_and_logs_the_key_obsolete_once() {
     let root = temp_config("temporal-awareness");
     let user = root.join("user.jsonc");

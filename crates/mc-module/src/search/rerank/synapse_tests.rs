@@ -190,7 +190,7 @@ async fn other_failures_do_not_reset_or_extend_an_expired_absence() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn absent_synapse_logs_the_existing_fallback_once_even_after_reprobes() {
+async fn absent_synapse_logs_its_fallback_once_even_after_reprobes() {
     let cache = SynapseCatalog::new();
     let client = FakeSynapse::new([
         Ok(json!({"error": {"code": "unknown_module", "message": "not registered"}})),
@@ -201,18 +201,135 @@ async fn absent_synapse_logs_the_existing_fallback_once_even_after_reprobes() {
     for delay in [0, 0, 0, 30, 600] {
         tokio::time::advance(Duration::from_secs(delay)).await;
         let Skipped(reason) = cache.pin(client.call("models.list")).await.unwrap_err();
-        log_fallback(&reason);
+        cache.fell_back(SYNAPSE_MODULE, &reason);
     }
     assert_eq!(client.calls(), 3);
     let text = output.text();
     assert_eq!(
         text.matches(
-            "ck-mc: ctx_search rerank fallback (unknown_module); keeping the original ranking"
+            "ck-mc: ctx_search rerank fallback (unknown_module) from Synapse module synapse; keeping the original ranking until it scores again"
         )
         .count(),
         1,
         "{text}"
     );
+}
+
+/// A module is logged when it starts falling back and when it scores
+/// again, once each, whatever its searches meet in between.
+#[test]
+fn a_module_is_logged_once_per_change_of_state() {
+    let module = "fed:00112233445566778899aabbccddeeff:synapse";
+    let cache = SynapseCatalog::new();
+    let output = crate::test_log::capture();
+    let fell_back = |text: &str| {
+        text.matches(&format!("from Synapse module {module}; keeping"))
+            .count()
+    };
+    let scores_again = |text: &str| {
+        text.matches(&format!("Synapse module {module} scores again"))
+            .count()
+    };
+    // Reaching the module from the start logs nothing.
+    cache.scored(module);
+    assert_eq!(output.text(), "");
+    for reason in ["unknown_module", "deadline_exceeded", "unknown_module"] {
+        cache.fell_back(module, reason);
+    }
+    let text = output.text();
+    assert_eq!((fell_back(&text), scores_again(&text)), (1, 0), "{text}");
+    assert!(text.contains("fallback (unknown_module) from"), "{text}");
+    cache.scored(module);
+    cache.scored(module);
+    let text = output.text();
+    assert_eq!((fell_back(&text), scores_again(&text)), (1, 1), "{text}");
+    cache.fell_back(module, "deadline_exceeded");
+    cache.fell_back(module, "deadline_exceeded");
+    let text = output.text();
+    assert_eq!((fell_back(&text), scores_again(&text)), (2, 1), "{text}");
+}
+
+fn catalog_with(fingerprint: char) -> Result<Value, String> {
+    Ok(json!({"result": {"table_epoch": 7, "models": [
+        {"model_id": MODEL, "serving_admission": "enabled", "fingerprints": [fingerprint.to_string().repeat(64)]}
+    ]}}))
+}
+
+/// A remote Synapse's pin never answers for the local one, nor the local
+/// one's for it: each module keeps its own pin, its own forgetting and its
+/// own absence.
+#[tokio::test(start_paused = true)]
+async fn each_module_keeps_its_own_pin() {
+    let catalogs = SynapseCatalogs::new();
+    let remote = "fed:00112233445566778899aabbccddeeff:synapse";
+    let local_synapse = FakeSynapse::new([catalog_with('a'), catalog_with('a')]);
+    let remote_synapse = FakeSynapse::new([catalog_with('b'), absent()]);
+    let local_pin = catalogs
+        .module(SYNAPSE_MODULE)
+        .pin(local_synapse.call("models.list"))
+        .await
+        .unwrap();
+    let remote_pin = catalogs
+        .module(remote)
+        .pin(remote_synapse.call("models.list"))
+        .await
+        .unwrap();
+    assert_eq!(local_pin.fingerprint, "a".repeat(64));
+    assert_eq!(remote_pin.fingerprint, "b".repeat(64));
+    // Each pin is reused for its own module only.
+    assert_eq!(
+        catalogs
+            .module(SYNAPSE_MODULE)
+            .pin(local_synapse.call("models.list"))
+            .await,
+        Ok(local_pin.clone())
+    );
+    assert_eq!(
+        catalogs
+            .module(remote)
+            .pin(remote_synapse.call("models.list"))
+            .await,
+        Ok(remote_pin)
+    );
+    assert_eq!((local_synapse.calls(), remote_synapse.calls()), (1, 1));
+    // Forgetting the remote pin leaves the local one in use.
+    catalogs.module(remote).forget();
+    assert_eq!(
+        catalogs
+            .module(SYNAPSE_MODULE)
+            .pin(local_synapse.call("models.list"))
+            .await,
+        Ok(local_pin.clone())
+    );
+    // The remote module is now absent and backed off, while the local one
+    // keeps its pin.
+    for _ in 0..2 {
+        assert_eq!(
+            catalogs
+                .module(remote)
+                .pin(remote_synapse.call("models.list"))
+                .await,
+            Err(Skipped("unknown_module".into()))
+        );
+    }
+    assert_eq!(
+        catalogs
+            .module(SYNAPSE_MODULE)
+            .pin(local_synapse.call("models.list"))
+            .await,
+        Ok(local_pin.clone())
+    );
+    assert_eq!((local_synapse.calls(), remote_synapse.calls()), (1, 2));
+    // The local pin runs out on its own clock and is asked for again.
+    tokio::time::advance(PIN_REUSE).await;
+    assert_eq!(
+        catalogs
+            .module(SYNAPSE_MODULE)
+            .pin(local_synapse.call("models.list"))
+            .await,
+        Ok(local_pin)
+    );
+    assert_eq!((local_synapse.calls(), remote_synapse.calls()), (2, 2));
 }
 
 #[tokio::test(start_paused = true)]
