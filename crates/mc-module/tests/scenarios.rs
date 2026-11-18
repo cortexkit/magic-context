@@ -3484,8 +3484,8 @@ async fn saved_memories_record_their_project_level_from_a_context_read_once() {
         (
             content.to_owned(),
             "project".to_owned(),
-            // The session's project, which readers match on; the context's
-            // project id travels in the sync record.
+            // The session's project, which readers match on, not the
+            // context's project id.
             "pj-test".to_owned(),
             "@cortexkit/memory-swe".to_owned(),
             "swe:naming".to_owned(),

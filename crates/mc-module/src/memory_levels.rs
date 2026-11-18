@@ -1,8 +1,7 @@
 //! Who a new memory belongs to and who wrote it: its level and owner, the
 //! profile category id of the tag it was written under, and the profile that
 //! wrote it. They are columns of the memory row itself (migration 106 folded
-//! the old `memory_placement` sidecar into it); this module decides them and
-//! queues the memory's sync record after a create.
+//! the old `memory_placement` sidecar into it); this module decides them.
 
 use std::collections::BTreeMap;
 
@@ -108,60 +107,11 @@ fn category_levels(context: &MemoryContext) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CreateKind {
-    /// A memory nobody had written before.
-    Create,
-    /// The row a merge or a replacement leaves; never synced.
-    MergeSurvivor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Actor {
-    MainAgent,
-    Historian,
-}
-
-/// One new memory row, as its level record and sync record need it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateEvent {
-    pub kind: CreateKind,
-    pub actor: Actor,
-    pub session_id: Option<String>,
-    /// The message ordinals the memory came from, as inclusive ranges.
-    pub ordinals: Vec<(u64, u64)>,
-    pub memory_id: i64,
-    pub writer_project_id: Option<String>,
-    pub owner: Option<Owner>,
-    pub category_tag: String,
-    pub effective_category_id: Option<String>,
-    pub importance: Option<i64>,
-    pub expires_at: Option<i64>,
-    pub content: String,
-    pub origin_profile: Option<OriginProfile>,
-    pub snapshot_digest: Option<String>,
-}
-
 /// Who writes new memories, and from which messages.
 #[derive(Debug, Clone, Copy)]
 pub struct Placer<'a> {
     pub authority: Option<&'a Authority>,
-    pub actor: Actor,
-    pub session: Option<&'a str>,
     pub ordinals: &'a [(u64, u64)],
-}
-
-impl Placer<'_> {
-    /// A writer with no memory context: its memories stay unplaced.
-    pub fn unplaced() -> Self {
-        Self {
-            authority: None,
-            actor: Actor::Historian,
-            session: None,
-            ordinals: &[],
-        }
-    }
 }
 
 fn refuse(code: &str) -> rusqlite::Error {
@@ -263,80 +213,6 @@ impl NewRow {
     }
 }
 
-/// Queue a new memory's sync record. Call it inside the transaction that
-/// inserted the row, right after the insert. Without an authority or a
-/// project id the memory stays unsynced, and the write still succeeds.
-pub fn created(
-    tx: &Connection,
-    placer: &Placer,
-    id: i64,
-    kind: CreateKind,
-    now: i64,
-) -> rusqlite::Result<()> {
-    if tx.is_autocommit() {
-        return Err(refuse("memory create requires a transaction"));
-    }
-    type Row = (
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<i64>,
-        Option<i64>,
-    );
-    let (level, owner_id, category_id, category, content, importance, expires_at): Row = tx
-        .query_row(
-            "SELECT level, owner_id, category, origin_category, content, importance, expires_at
-               FROM memories WHERE id = ?1",
-            [id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )?;
-    let mut event = CreateEvent {
-        kind,
-        actor: placer.actor,
-        session_id: placer.session.map(str::to_owned),
-        ordinals: placer.ordinals.to_vec(),
-        memory_id: id,
-        writer_project_id: None,
-        owner: None,
-        category_tag: category,
-        effective_category_id: None,
-        importance,
-        expires_at,
-        content,
-        origin_profile: None,
-        snapshot_digest: None,
-    };
-    if let Some((authority, project_id)) = placer
-        .authority
-        .and_then(|authority| Some((authority, authority.project_id.as_ref()?)))
-    {
-        let origin = authority.profile.clone();
-        event.writer_project_id = Some(project_id.clone());
-        event.owner = Some(Owner {
-            kind: level,
-            id: owner_id,
-        });
-        // A category id counts as the writer's only when a resolved profile
-        // gave it.
-        event.effective_category_id = origin.as_ref().map(|_| category_id);
-        event.origin_profile = origin;
-        event.snapshot_digest = authority.snapshot_digest.clone();
-    }
-    crate::memory_sync::queue(tx, &event, now)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -405,8 +281,8 @@ mod tests {
             .with_connection(|conn| memory_writes::save(conn, &who, "NAMING", "Call it the head."))
             .unwrap();
         let id = receipt.memory_id.unwrap();
-        // The row belongs to the writer's project path; the project id the
-        // memory context names travels in the sync record.
+        // The row belongs to the writer's project path, not to the project
+        // id the memory context names.
         assert_ne!(project_id, "pj-a");
         assert_eq!(
             placement(&db, id),

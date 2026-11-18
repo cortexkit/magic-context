@@ -53,7 +53,7 @@ use crate::count::Counter;
 use crate::dreamer::run::{TaskInput, TaskReply};
 use crate::dreamer::store::OwnerKey;
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
-use crate::memory_levels::{created, CreateKind, NewRow, Placer};
+use crate::memory_levels::NewRow;
 use crate::memory_profile::{Profile, FRAMES};
 use crate::memory_writes::{
     archive, clear_derived, get_memory, history_json, history_snapshot, insert_memory,
@@ -1706,7 +1706,6 @@ impl CurateBatch {
         key: &str,
     ) -> rusqlite::Result<()> {
         let now = now_ms();
-        let placer = Placer::unplaced();
         match checked {
             Checked::Shorten { memory, text, hash } => {
                 let before = [snapshot(tx, memory.id)?];
@@ -1752,7 +1751,6 @@ impl CurateBatch {
                         importance,
                     )?;
                     crate::memory_line::stamp(tx, written.id, line.as_ref())?;
-                    created(tx, &placer, written.id, CreateKind::Create, now)?;
                     before.push(None);
                     ids.push(written.id);
                 }
@@ -1871,13 +1869,6 @@ impl CurateBatch {
                 let source = self.source_project(tx, first.id)?;
                 let written =
                     self.insert_beside(tx, first, source.as_deref(), text, child, importance)?;
-                created(
-                    tx,
-                    &Placer::unplaced(),
-                    written.id,
-                    CreateKind::MergeSurvivor,
-                    now,
-                )?;
                 written.id
             }
         };

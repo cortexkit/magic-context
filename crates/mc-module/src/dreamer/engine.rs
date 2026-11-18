@@ -1478,7 +1478,9 @@ impl Engine {
 
 /// Apply one accepted reply in its own transaction, after checking in that
 /// transaction that this process still holds every lock of `locks`. `None`
-/// when it doesn't: nothing is written.
+/// when it doesn't: nothing is written. The changes are captured for the
+/// user's other computers as the dreamer's, with the run's id; the dreamer
+/// lease's epoch is left null until that lease exists.
 fn apply(
     db: &ContextDb,
     locks: &[OwnerKey],
@@ -1487,7 +1489,13 @@ fn apply(
     reply: &TaskReply,
     run_id: i64,
 ) -> Result<Option<super::task::Applied>, String> {
-    write_locked(db, locks, holder, |tx| batch.apply(tx, reply, run_id))
+    write_locked(db, locks, holder, |tx| {
+        crate::replica::name_writer(tx, "dreamer", Some(run_id), None)
+            .map_err(|error| error.to_string())?;
+        let applied = batch.apply(tx, reply, run_id)?;
+        crate::replica::unname_writer(tx).map_err(|error| error.to_string())?;
+        Ok(applied)
+    })
 }
 
 /// Run `write` in its own transaction, after checking in that transaction

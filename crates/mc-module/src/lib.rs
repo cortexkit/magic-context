@@ -94,7 +94,6 @@ pub(crate) mod memory_render;
 /// when asked (`--ignored`), and its tests on synthetic stores.
 #[cfg(test)]
 mod memory_render_sim_tests;
-pub(crate) mod memory_sync;
 pub mod memory_tool;
 pub mod memory_writes;
 pub mod module;
@@ -115,6 +114,7 @@ pub mod prompt_notes;
 pub mod reads;
 pub mod reduce;
 pub mod rekey;
+pub mod replica;
 pub mod route;
 pub mod routing;
 pub mod run_ends;

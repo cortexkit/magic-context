@@ -574,8 +574,6 @@ impl Writer<'_> {
     fn placer(&self) -> crate::memory_levels::Placer<'_> {
         crate::memory_levels::Placer {
             authority: self.authority,
-            actor: crate::memory_levels::Actor::MainAgent,
-            session: Some(self.session),
             ordinals: &[],
         }
     }
@@ -709,13 +707,6 @@ pub fn save_at(
                 Some(50),
             )?;
             crate::memory_line::stamp(&tx, memory.id, who.line)?;
-            crate::memory_levels::created(
-                &tx,
-                &placer,
-                memory.id,
-                crate::memory_levels::CreateKind::Create,
-                now_ms(),
-            )?;
             memory
         }
     };
@@ -979,7 +970,7 @@ pub fn mutate(
                         merge_owner.as_ref(),
                         &category,
                     )?;
-                    let survivor = insert_memory(
+                    insert_memory(
                         &tx,
                         &new_row,
                         who.project,
@@ -988,15 +979,7 @@ pub fn mutate(
                         who.session,
                         "agent",
                         None,
-                    )?;
-                    crate::memory_levels::created(
-                        &tx,
-                        &placer,
-                        survivor.id,
-                        crate::memory_levels::CreateKind::MergeSurvivor,
-                        now_ms(),
-                    )?;
-                    survivor
+                    )?
                 }
             };
             if survivor.content != content || survivor.normalized_hash != hash {

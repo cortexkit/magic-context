@@ -1228,19 +1228,6 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         &self.inner.legacy_wake
     }
 
-    /// Append new memories' sync records to Engram in the background.
-    /// Without `context.db` nothing is ever queued.
-    pub fn spawn_memory_sync(&self) {
-        if self.inner.db.is_none() {
-            return;
-        }
-        let module = self.clone();
-        tokio::spawn(async move {
-            let db = module.inner.db.as_ref().expect("checked above");
-            crate::memory_sync::run(module.inner.client.as_ref(), db).await;
-        });
-    }
-
     /// Mark the session's project active now.
     fn touch(&self, session: &SessionRef) {
         let project = self

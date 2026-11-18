@@ -919,39 +919,6 @@ impl RunnerClient for SubcRunnerClient {
         }
     }
 
-    /// On Engram's device-stream service, under a fixed identity: the stream
-    /// belongs to the device, not to a session.
-    async fn engram_call(&self, method: &str, params: Value) -> Result<Value, String> {
-        let consumer = self
-            .consumer()
-            .await
-            .map_err(|_| "unavailable".to_owned())?;
-        let reply = consumer
-            .call(
-                RouteTarget::InternalService {
-                    module_id: "engram".to_owned(),
-                    service_id: "device-streams".to_owned(),
-                },
-                BindIdentity::new("memory-sync", "memory-sync"),
-                wire::encode(method, &params),
-                CallOptions {
-                    timeout: crate::memory_sync::ENGRAM_DEADLINE,
-                    ..CallOptions::default()
-                },
-            )
-            .await
-            .map_err(|error| match error {
-                subc_client_rs::CallError::Module(body) => body.code,
-                _ => "unavailable".to_owned(),
-            })?;
-        let value: Value =
-            serde_json::from_slice(&reply).map_err(|_| "malformed_reply".to_owned())?;
-        if let Some(error) = value.get("error").and_then(Value::as_str) {
-            return Err(error.to_owned());
-        }
-        engram_result(value)
-    }
-
     /// The modules in the daemon's catalog that claim `capability` and are
     /// ready and nonce-verified. `resolve_providers` matches the claim
     /// alone, and would list a module the daemon would not open a route to.
@@ -1058,7 +1025,7 @@ impl RunnerClient for SubcRunnerClient {
     }
 }
 
-/// Engram answers a device-streams call as `{"result": <answer>}`; a
+/// Engram answers a session-door call as `{"result": <answer>}`; a
 /// refusal arrives as an error frame instead.
 fn engram_result(mut value: Value) -> Result<Value, String> {
     match value

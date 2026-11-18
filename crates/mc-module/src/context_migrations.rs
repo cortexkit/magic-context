@@ -26,7 +26,7 @@ mod catch_up_tests;
 pub const PLUGIN_SCHEMA_VERSION: u32 = crate::context_db::PLUGIN_SCHEMA_VERSION;
 
 /// The schema version this build reads and writes.
-pub const SCHEMA_VERSION: u32 = 111;
+pub const SCHEMA_VERSION: u32 = 112;
 
 struct Migration {
     version: u32,
@@ -75,6 +75,12 @@ const MIGRATIONS: &[Migration] = &[
         description: "attribution facts for the child sessions ck-mc starts",
         rebuilds_referenced_table: false,
         up: attribution_facts_111,
+    },
+    Migration {
+        version: 112,
+        description: "memories shared across the user's computers; the Engram memory sync's tables dropped; message search rows found by full-text row",
+        rebuilds_referenced_table: false,
+        up: shared_memories_112,
     },
 ];
 
@@ -624,6 +630,10 @@ mod tests_110;
 #[path = "context_migrations_111_tests.rs"]
 mod tests_111;
 
+#[cfg(test)]
+#[path = "context_migrations_112_tests.rs"]
+mod tests_112;
+
 /// The module's dreamer state, replacing the 0.49 plugin's.
 ///
 /// The plugin kept one queue and one lease per project, and a run record for
@@ -915,5 +925,32 @@ fn attribution_facts_111(tx: &Transaction) -> rusqlite::Result<()> {
          );
          CREATE INDEX idx_attribution_facts_unpublished
            ON attribution_facts(seq) WHERE published_at_ms IS NULL;",
+    )
+}
+
+/// Memories shared across the user's computers ([`crate::replica`]): a
+/// global id on each replicated row (memories, observations, primers), a
+/// revision on observations and primers (memories have one), the tables
+/// that map global ids, queue changes to send, record skipped messages and
+/// keep the stream position, and the triggers that capture every change of
+/// a replicated column ([`crate::replica::schema::install`]). Rows already
+/// in the store are not queued here; a computer sends them when it first
+/// joins the stream.
+///
+/// The Engram memory sync's tables go (`memory_ops`, `memory_outbox`,
+/// `memory_sync_state`): it only appended new memories to an Engram device
+/// stream that nothing read back, and the hub replaces it.
+///
+/// Unrelated to sharing, and riding the same step: `message_fts_rowid_map`
+/// gets an index on `fts_rowid`. The search's session-reach scan looks map
+/// rows up by their full-text row, and without it reads the whole map,
+/// which takes seconds on a cold disk. A store ck-mc creates gets it here
+/// too, since a new store starts from the plugin's last schema and runs
+/// every module migration.
+fn shared_memories_112(tx: &Transaction) -> rusqlite::Result<()> {
+    crate::replica::schema::install(tx)?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_message_fts_rowid_map_fts_rowid
+             ON message_fts_rowid_map(fts_rowid);",
     )
 }

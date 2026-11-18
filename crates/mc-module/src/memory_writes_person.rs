@@ -372,7 +372,7 @@ fn without_text(snapshot: &Value) -> Value {
 /// evidence, classification excerpts, the standalone plugin's applied-row and
 /// fragment records, its links to other memories, and (through the
 /// `memories_ad` trigger) its search entry.
-fn purge(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
+pub(crate) fn purge(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
     let keys: Vec<String> = tx
         .prepare("SELECT DISTINCT decision_key FROM memory_history WHERE memory_id = ?1")?
         .query_map(params![id], |row| row.get(0))?

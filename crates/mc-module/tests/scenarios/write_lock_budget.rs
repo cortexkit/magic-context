@@ -18,7 +18,6 @@ fn seed(dir: &Path, model_id: &str) {
     let mut conn = Connection::open(dir.join("context.db")).unwrap();
     conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
     let tx = conn.transaction().unwrap();
-    tx.execute("INSERT INTO memory_sync_state(device,account,enrollment_state,next_local_id,hlc_wall_ms,hlc_logical) VALUES('22222222222222222222222222222222','11111111111111111111111111111111','enrolled',1,0,0)", []).unwrap();
     let vector: Vec<u8> = (0..DIMENSIONS)
         .flat_map(|n| (if n == 0 { 1.0_f32 } else { 0.0_f32 }).to_le_bytes())
         .collect();
@@ -444,7 +443,9 @@ async fn werni_sized_writes_stay_within_budget() {
     assert!(
         count("SELECT COUNT(*) FROM memories WHERE id > 1300 AND origin_profile IS NOT NULL") >= 3
     );
-    assert!(count("SELECT COUNT(*) FROM memory_outbox") >= 3);
+    // Each admitted memory's capture row is written inside the measured
+    // write transactions too.
+    assert!(count("SELECT COUNT(*) FROM replica_outbox WHERE kind = 'memory'") >= 3);
     measurements.collect(
         "two-pass-summary-and-admission",
         runner.provider().module().take_context_lock_samples(),

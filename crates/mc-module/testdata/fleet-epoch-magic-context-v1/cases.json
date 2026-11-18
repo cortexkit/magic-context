@@ -1,0 +1,99 @@
+{
+  "batch": {
+    "open_request": {
+      "items": [
+        {
+          "aad": "eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjozLCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ",
+          "ciphertext": "R4L8mAKDoz5Mh-hMtMkqwVEa4Mi27wkIXxxf7iSv4yoauR8",
+          "epoch": 1,
+          "nonce": "1Quk6-GoteghqLZ1ijVnnh5Aa2lAzXTM"
+        },
+        {
+          "aad": "eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjo0LCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ",
+          "ciphertext": "hxus_IsD7Ib8D_Oz83u90ETQmVUOuMcBo4xzQHzLgD6xYpuy",
+          "epoch": 1,
+          "nonce": "UEvtt3HpEwgIC04YYU905Q5UoLq9tpql"
+        }
+      ]
+    },
+    "open_response": {
+      "items": [
+        {
+          "plaintext": "Zmlyc3QgbWVtb3J5IGNoYW5nZQ"
+        },
+        {
+          "plaintext": "c2Vjb25kIG1lbW9yeSBjaGFuZ2U"
+        }
+      ]
+    },
+    "record_aad_utf8": [
+      "{\"aad\":\"eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjozLCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ\",\"epoch\":1,\"v\":\"ck-fleet-epoch-aad/magic-context/v1\"}",
+      "{\"aad\":\"eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjo0LCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ\",\"epoch\":1,\"v\":\"ck-fleet-epoch-aad/magic-context/v1\"}"
+    ],
+    "request": {
+      "items": [
+        {
+          "aad": "eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjozLCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ",
+          "plaintext": "Zmlyc3QgbWVtb3J5IGNoYW5nZQ"
+        },
+        {
+          "aad": "eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjo0LCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ",
+          "plaintext": "c2Vjb25kIG1lbW9yeSBjaGFuZ2U"
+        }
+      ]
+    },
+    "response": {
+      "items": [
+        {
+          "ciphertext": "R4L8mAKDoz5Mh-hMtMkqwVEa4Mi27wkIXxxf7iSv4yoauR8",
+          "epoch": 1,
+          "nonce": "1Quk6-GoteghqLZ1ijVnnh5Aa2lAzXTM"
+        },
+        {
+          "ciphertext": "hxus_IsD7Ib8D_Oz83u90ETQmVUOuMcBo4xzQHzLgD6xYpuy",
+          "epoch": 1,
+          "nonce": "UEvtt3HpEwgIC04YYU905Q5UoLq9tpql"
+        }
+      ]
+    }
+  },
+  "caller": "reserved:magic-context",
+  "epoch_key": "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE",
+  "seal_open": {
+    "cross_domain_open": {
+      "caller": "reserved:prefrontal",
+      "request": {
+        "aad": "eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjozLCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ",
+        "ciphertext": "_GV1djScnZ1GAbQmqiV0ytZELQaW8bXK9RIWzcGLw5rCDiE",
+        "epoch": 1,
+        "nonce": "4bjrjBM3A1ZBcqmwAzr7sju8W1vd1gfJ"
+      },
+      "response": {
+        "error": {
+          "class": "permanent",
+          "code": "fleet_epoch_open_failed"
+        }
+      }
+    },
+    "open_request": {
+      "aad": "eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjozLCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ",
+      "ciphertext": "_GV1djScnZ1GAbQmqiV0ytZELQaW8bXK9RIWzcGLw5rCDiE",
+      "epoch": 1,
+      "nonce": "4bjrjBM3A1ZBcqmwAzr7sju8W1vd1gfJ"
+    },
+    "open_response": {
+      "plaintext": "Zmlyc3QgbWVtb3J5IGNoYW5nZQ"
+    },
+    "record_aad_utf8": "{\"aad\":\"eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjozLCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ\",\"epoch\":1,\"v\":\"ck-fleet-epoch-aad/magic-context/v1\"}",
+    "request": {
+      "aad": "eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjozLCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ",
+      "plaintext": "Zmlyc3QgbWVtb3J5IGNoYW5nZQ"
+    },
+    "response": {
+      "ciphertext": "_GV1djScnZ1GAbQmqiV0ytZELQaW8bXK9RIWzcGLw5rCDiE",
+      "epoch": 1,
+      "nonce": "4bjrjBM3A1ZBcqmwAzr7sju8W1vd1gfJ"
+    }
+  },
+  "version": "fleet-epoch-magic-context-vectors-v1"
+}

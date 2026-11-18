@@ -85,8 +85,7 @@ fn migration_111_adds_an_empty_fact_table_and_keeps_the_rest() {
     let proposals = rows(&conn, "docs_proposals");
     assert_eq!((memories.len(), proposals.len()), (1, 1));
 
-    assert_eq!(upgrade(&mut conn, 110).unwrap(), 111);
-    assert_eq!(SCHEMA_VERSION, 111);
+    assert_eq!(upgrade_through(&mut conn, 110, 111).unwrap(), 111);
 
     let after = schema(&conn);
     let added: Vec<&str> = after

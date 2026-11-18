@@ -77,7 +77,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # NATS credential from ck-bus, a JetStream publish, the fleet's subject names.
 cortexkit-bus-nats = "=0.4.0"
 cortexkit-bus-trait = "=0.3.1"
-cortexkit-bus-naming = "=0.4.0"
+cortexkit-bus-naming = "=0.5.2"
+# The computer's box id (`BusClient::box_id`), which names every memory this
+# computer shares with the user's other computers (`replica/`).
+cortexkit-bus-client = "=0.1.7"
 # API keys the user names as `{vault:<credential id>}` are read from the
 # CortexKit vault over ck-mc's own SDK consumer (`vault.rs`).
 cortexkit-claustrum-client = "=0.12.0"
@@ -106,6 +109,9 @@ mc-mock-runner = { workspace = true }
 tempfile = "3"
 filetime = "0.2"
 tracing-subscriber = "0.3"
+# The vault's fleet epoch cipher, so the replica tests seal and open as the
+# vault does (XChaCha20-Poly1305) and check its published samples.
+chacha20poly1305 = "0.10"
 # An in-memory bus for the notice publisher's tests.
 cortexkit-bus-inmemory = "=0.3.2"
 # The registration live suite (tests/registration_live.rs): an in-process

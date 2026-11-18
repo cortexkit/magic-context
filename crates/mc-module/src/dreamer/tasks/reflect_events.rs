@@ -49,7 +49,7 @@ use crate::dreamer::run::{TaskInput, TaskReply};
 use crate::dreamer::store::OwnerKey;
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Planning, Task, TaskContext};
 use crate::embedding::Provider;
-use crate::memory_levels::{created, CreateKind, NewRow, OriginProfile, Placer};
+use crate::memory_levels::{NewRow, OriginProfile};
 use crate::memory_profile::{Profile, FRAMES};
 use crate::memory_writes::{
     history_json, history_snapshot, insert_memory, normalized_hash, now_ms, record_history, History,
@@ -1189,7 +1189,6 @@ impl ReflectBatch {
             "UPDATE memories SET metadata_json = ?2 WHERE id = ?1",
             params![memory.id, provenance.to_string()],
         )?;
-        created(tx, &Placer::unplaced(), memory.id, CreateKind::Create, now)?;
         let after = [history_snapshot(tx, memory.id)?];
         let recorded = record_history(
             tx,

@@ -469,8 +469,6 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                 let ordinals = fact_ordinals(&tx, admission.fact_id)?;
                 let placer = crate::memory_levels::Placer {
                     authority: admission.authority,
-                    actor: crate::memory_levels::Actor::Historian,
-                    session: Some(admission.source_session),
                     ordinals: &ordinals,
                 };
                 let new_row = crate::memory_levels::NewRow::decide(
@@ -499,13 +497,6 @@ pub fn admit(conn: &mut Connection, admission: &Admission<'_>) -> Result<Receipt
                     set_end_date(&tx, memory.id, date)?;
                 }
                 crate::memory_line::stamp(&tx, memory.id, admission.line)?;
-                crate::memory_levels::created(
-                    &tx,
-                    &placer,
-                    memory.id,
-                    crate::memory_levels::CreateKind::Create,
-                    now_ms(),
-                )?;
                 memory.id
             }
         };
@@ -770,8 +761,6 @@ pub fn commit_revision(
         )?;
         let placer = crate::memory_levels::Placer {
             authority,
-            actor: crate::memory_levels::Actor::Historian,
-            session: None,
             ordinals: &[],
         };
         let mut new_row = crate::memory_levels::NewRow::decide(
@@ -799,13 +788,6 @@ pub fn commit_revision(
         if let Some(date) = &decision.expires {
             set_end_date(&tx, inserted.id, date)?;
         }
-        crate::memory_levels::created(
-            &tx,
-            &placer,
-            inserted.id,
-            crate::memory_levels::CreateKind::MergeSurvivor,
-            now_ms(),
-        )?;
         inserted.id
     } else {
         survivor.id

@@ -568,7 +568,7 @@ const HOST_STATE: &str =
 const SEARCH_INDEX: &str =
     "search index rows, rebuilt on the receiver from the transcript and the summaries";
 const TELEMETRY: &str = "this machine's run records and telemetry";
-const PROJECT: &str = "project data, not session data; it syncs through Engram on its own";
+const PROJECT: &str = "project data, not session data; it reaches the user's other computers through the hub on its own";
 const SECOND_TURN: &str =
     "second-turn records; the move carries only the facts still waiting for a second turn";
 const NO_MOVED_ROWS: &str = "it names no row the move carries";

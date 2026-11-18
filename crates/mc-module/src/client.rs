@@ -259,17 +259,6 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Option<Result<Vec<u8>, EntorhinalRefusal>>> + Send {
         async { None }
     }
-    /// One call to Engram's device-stream service (`stream.heads`,
-    /// `stream.append`), for syncing new memories. The answer
-    /// is the reply's JSON; an error is a fixed reason such as the service's
-    /// refusal code. Without Engram nothing syncs, which is the default here.
-    fn engram_call(
-        &self,
-        _method: &str,
-        _params: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, String>> + Send {
-        async { Err("unavailable".to_owned()) }
-    }
     /// The ids of the modules that would answer a route for `capability`
     /// now: in the daemon's catalog with the claim, ready, and verified by
     /// their launch nonce ([`crate::agent_data::service::ready_participants`]),
