@@ -4935,6 +4935,7 @@ export function registerPiContextHandler(
 					sessionId,
 					branchEntries,
 					assertCurrentPass,
+					assertQueuedWrite: budget.assertDecisionPublication,
 				});
 			let rawOrdinalCount: number | undefined;
 			// Stored ordinals may sit ahead of this branch walk; derive the offset
