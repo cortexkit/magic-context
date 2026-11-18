@@ -574,20 +574,47 @@ fn role_describe_lists_every_reminder_template_with_digest_and_delivery() {
                 template
             ))
         );
-        let expected = if template.id == crate::nudges::KEEP_TEMPLATE
+        // The clock note is a persistent system note where the route takes
+        // one; the reminders clear, or ride a tool result or a steer.
+        let expected = if template.id == crate::clock_note::TEMPLATE {
+            json!(["turn_system", "tool_result"])
+        } else if template.id == crate::nudges::KEEP_TEMPLATE
             || template.id.starts_with("mc.ctx_reduce.ceiling.")
         {
-            "steer"
+            json!(["turn_system_cleared", "steer"])
         } else {
-            "tool_result"
+            json!(["turn_system_cleared", "tool_result"])
         };
-        assert_eq!(
-            entry["delivery"],
-            json!(["turn_system_cleared", expected]),
-            "{}",
-            template.id
-        );
+        assert_eq!(entry["delivery"], expected, "{}", template.id);
     }
+    // The clock template is published with its datetime slot, which core
+    // keeps out of the plans of runners that don't declare
+    // `template_datetime`.
+    let clock = sender
+        .templates
+        .iter()
+        .find(|template| template.id == crate::clock_note::TEMPLATE)
+        .expect("the sender carries the clock template");
+    assert_eq!(
+        serde_json::to_value(clock).unwrap(),
+        json!({
+            "id": "mc.clock_note.v1",
+            "text": "Now: {now}",
+            "slots": {"now": {"type": "datetime", "format": "utc_minute"}},
+        })
+    );
+    assert_eq!(
+        listed
+            .iter()
+            .filter(|entry| entry["id"] == "mc.clock_note.v1")
+            .map(|entry| entry["digest"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(
+            cortexkit_role_llm_runner::delivery_order::template_digest(
+                &crate::clock_note::template()
+            )
+        )]
+    );
 }
 
 #[test]

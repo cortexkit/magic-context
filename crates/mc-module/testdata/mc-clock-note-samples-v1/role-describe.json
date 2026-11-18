@@ -1,0 +1,2067 @@
+{
+  "capabilities": [
+    "compacting-preflight/v1",
+    "bind-no-project/v1",
+    "scope-workdir/v1"
+  ],
+  "implementation_version": "ck-mc (normalized)",
+  "majors": [
+    {
+      "ops": [
+        "role.describe",
+        "tool.catalog"
+      ],
+      "stability": "alpha",
+      "version": "tool-provider/v1"
+    }
+  ],
+  "reminder_templates": {
+    "sender": {
+      "module": "magic-context",
+      "templates": [
+        {
+          "id": "mc.ctx_reduce.gentle.zero.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.zero.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.zero.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.zero.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.zero.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.one.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: 1 spent tool output (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.one.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: 1 spent tool output (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.one.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: 1 spent tool output (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.one.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: 1 spent tool output (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.one.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: 1 spent tool output (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.many.h0.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: {count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.many.h1.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: {count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.many.h2.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: {count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.many.h3.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: {count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.gentle.many.h4.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nHousekeeping: {count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.zero.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.zero.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.zero.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.zero.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.zero.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.one.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.one.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.one.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.one.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.one.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.many.h0.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.many.h1.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.many.h2.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.many.h3.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.firm.many.h4.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.zero.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.zero.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.zero.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.zero.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.zero.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nspent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.one.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.one.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.one.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.one.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.one.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n1 spent tool output (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.many.h0.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.many.h1.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.many.h2.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.many.h3.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.urgent.many.h4.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\n{count} spent tool outputs (~{tokens_k}k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.zero.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.zero.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.zero.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.zero.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.zero.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.one.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: 1 spent tool output (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.one.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: 1 spent tool output (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.one.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: 1 spent tool output (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.one.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: 1 spent tool output (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.one.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: 1 spent tool output (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.many.h0.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: {count} spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.many.h1.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: {count} spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.many.h2.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: {count} spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.many.h3.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: {count} spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.again.many.h4.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nStill unstamped: {count} spent tool outputs (~{tokens_k}k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.zero.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.zero.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.zero.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.zero.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.zero.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.one.h0.v1",
+          "slots": {
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~{tokens_k}k tokens)). Then continue your task.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.one.h1.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.one.h2.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.one.h3.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.one.h4.v1",
+          "slots": {
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (1 spent tool output (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.many.h0.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used ({count} spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.many.h1.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used ({count} spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.many.h2.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used ({count} spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.many.h3.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used ({count} spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1} · {tag2}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_reduce.ceiling.many.h4.v1",
+          "slots": {
+            "count": {
+              "max": 100000000,
+              "min": 2,
+              "type": "integer"
+            },
+            "tag0": {
+              "type": "part_tag"
+            },
+            "tag1": {
+              "type": "part_tag"
+            },
+            "tag2": {
+              "type": "part_tag"
+            },
+            "tag3": {
+              "type": "part_tag"
+            },
+            "tokens_k": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            }
+          },
+          "text": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used ({count} spent tool outputs (~{tokens_k}k tokens)). Then continue your task.\noldest reclaimable: {tag0} · {tag1} · {tag2} · {tag3}.\n</system-reminder>"
+        },
+        {
+          "id": "mc.ctx_keep.v1",
+          "slots": {
+            "freed": {
+              "max": 100000000,
+              "min": 0,
+              "type": "integer"
+            },
+            "usage": {
+              "type": "percentage"
+            }
+          },
+          "text": "<system-reminder>\nYour context is {usage}% full, and dropping old tool output freed only {freed} tokens. Call ctx_keep now. In `tags`, list the tags you still need, most important first. In `note`, write a few lines on where you are and what comes next. Everything else before that call, except messages from the person, is then removed.\n</system-reminder>"
+        },
+        {
+          "id": "mc.clock_note.v1",
+          "slots": {
+            "now": {
+              "format": "utc_minute",
+              "type": "datetime"
+            }
+          },
+          "text": "Now: {now}"
+        }
+      ]
+    },
+    "templates": [
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "44b56abc7149c3de2b2ea1ebfac6c1f3a44fd411b76c252043e6f562f15ee585",
+        "id": "mc.ctx_reduce.gentle.zero.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "064981e05692a2c305a50d523c454f98300d7cfa3450bfef87ce62a3714f232a",
+        "id": "mc.ctx_reduce.gentle.zero.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "174941465236dac63d83baa76d67e567dabc344a044dcecc6d4b6b30a95d15d6",
+        "id": "mc.ctx_reduce.gentle.zero.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "f1d3cb66494f453900f23b117f55a9ae9c427089751e6af3a4a4054a6dd7d140",
+        "id": "mc.ctx_reduce.gentle.zero.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "1b8229854adc28abcb92c4e7d7fe0ac3dd1b95753dc60e24c301c41f6829ff75",
+        "id": "mc.ctx_reduce.gentle.zero.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "bf7ac09b0bdb820757697f3ab8b43d71e6f09c72489f0c0be65ead58ebe8d0e9",
+        "id": "mc.ctx_reduce.gentle.one.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "94e691d511a525d43eff8df8006356be7fb788c4b896840ea6c1df3158930615",
+        "id": "mc.ctx_reduce.gentle.one.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "bbb0f175aedbba95880a4366e149938594d464a82c1a0a7faccbd8eb67dd9258",
+        "id": "mc.ctx_reduce.gentle.one.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "f5dce963f2b5a6132212e3e559b4cdda9424517fb564bbf84b788d298c718ad1",
+        "id": "mc.ctx_reduce.gentle.one.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "ed7781e056755dd4749a93325b08cccd24182b90c1867077bdcc099b8ca9c670",
+        "id": "mc.ctx_reduce.gentle.one.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "bd62bf624dced2ed7fb5b0676d662dbd8a7bc5dcbc06e86548cae42362f5efde",
+        "id": "mc.ctx_reduce.gentle.many.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "0f7fa21ab68ef5837b6f751188cc995bcbbb29606709b6e904982e437e21f580",
+        "id": "mc.ctx_reduce.gentle.many.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "7b84d3bf2a2b6899cf316fb3e49a4937adb66d69181defe9f73121442133a29c",
+        "id": "mc.ctx_reduce.gentle.many.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "da6997aee95eef612f6b1566cd2bd1de2996584591832e06ebcb22d3d694d993",
+        "id": "mc.ctx_reduce.gentle.many.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "c4f4eea96f78c9580f74ccfd40f3a3d10e71054a894478afe30ef9e358c73abc",
+        "id": "mc.ctx_reduce.gentle.many.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "96d8580e3d5579862b3b4dab3c4bb8fae1cee9a8b7f815ae1d4d56c3940f6899",
+        "id": "mc.ctx_reduce.firm.zero.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "e76c17d4141c4ac4fdabfa80418273948293fae5836f44bddcddb66b206f552b",
+        "id": "mc.ctx_reduce.firm.zero.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "c4d1ecae4be8c39bb1a4a95efe0bfcb55b252a4744b470c4ed7f32c541a2295e",
+        "id": "mc.ctx_reduce.firm.zero.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "f697b579e4c09f5ad62d7f03e95487aa6e82220e8169bfee3ed65c0e9889e354",
+        "id": "mc.ctx_reduce.firm.zero.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "0d5b8aac6205e7f96a6f6643222f84796cee662f1c2494f0b95d0745207ff426",
+        "id": "mc.ctx_reduce.firm.zero.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "41ef2302794e6d36bcf20ef5c6b32724bf6bb3c46d3afb0eb9537f053f004aec",
+        "id": "mc.ctx_reduce.firm.one.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "7ad9b5ea61c86b91549ec71b17c34b2c4cb1ac1bf079e40249dbdb87f337903e",
+        "id": "mc.ctx_reduce.firm.one.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "5406311afcda11ac16dce99fbf5f86124f9cc5fc592769f459d316319456adb0",
+        "id": "mc.ctx_reduce.firm.one.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "700997313d5f20a9464518e50819ad2cb3dd8eca819faf6b6ddac26561206009",
+        "id": "mc.ctx_reduce.firm.one.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "fd255b15c0ab5f1d3afb73d76e8af391a383961890f956b4ebfa7c8930b7534a",
+        "id": "mc.ctx_reduce.firm.one.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "b2651a2789413f5eae8bd760f6e5540f630c6b79bf97a0e749331bfe5fc63f67",
+        "id": "mc.ctx_reduce.firm.many.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "f34b180486cd6c847ad78858aee72d7622579250be4d8378ea2ee6797063e289",
+        "id": "mc.ctx_reduce.firm.many.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "841ec2e0b5d07ba6e1f5d06a6b27a067adb17425600f9eaaae8bfa5f0b25c360",
+        "id": "mc.ctx_reduce.firm.many.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "73457c104171e1c4bce20badb48b8e7723b18c1115f9fdb66b4ab71ef9890898",
+        "id": "mc.ctx_reduce.firm.many.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "a804aaf1966402de35a58db00ff04931dc143fa86ae9f6dada342b8dbd848f31",
+        "id": "mc.ctx_reduce.firm.many.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "7bd774aae3d03726315fc3216589db730b3950f298a10c069a4b97d8a70ab18c",
+        "id": "mc.ctx_reduce.urgent.zero.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "90d2c32e16e37203713cc4bb0d00b5db53599f8a4ba8abf7230825752d42db23",
+        "id": "mc.ctx_reduce.urgent.zero.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "1b79b8a19ada1d64a3806acde2bdd08f4186d38acc53c4c0210cc2b033f170b0",
+        "id": "mc.ctx_reduce.urgent.zero.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "e2d2ef5982ccd01beb4856b056d9d1736422d4216ae797aded19b1ea88349660",
+        "id": "mc.ctx_reduce.urgent.zero.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "82156e4d5ac10b54a10553914508986e7baee6a73f2c0f09b37f7900df5a1119",
+        "id": "mc.ctx_reduce.urgent.zero.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "e8ff5cbbe39c07b824d972eefc08ba769b438332abac67c609fa0984218a2b67",
+        "id": "mc.ctx_reduce.urgent.one.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "2d3b3a889892613346a903d886f20178eb577ad1e999acde7460468fce175f9c",
+        "id": "mc.ctx_reduce.urgent.one.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "7501fc1acb2768df2e5162b5b8ca270df61e6b1df4adb3dc560ee42a1e935e7f",
+        "id": "mc.ctx_reduce.urgent.one.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "5d4334fde0fcaf1d648428bea8fcc5dff1afed0457a08bd4f8662439c22aaf7b",
+        "id": "mc.ctx_reduce.urgent.one.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "d391f79dd949cb9980d131e4ce5b12a7c8c20df7e40d768c9e6cde7657464018",
+        "id": "mc.ctx_reduce.urgent.one.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "3c3c1099d475dcf0c23d57313c523205fd6b39f33b0b6a7be78611dadd6afd33",
+        "id": "mc.ctx_reduce.urgent.many.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "f9fcb0637e35ada55ef03fa093e6ea9543a71e57437a86aeca24a92b1f4a54ba",
+        "id": "mc.ctx_reduce.urgent.many.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "86d198c722afbe8b8075d8ecc58438b078c9b4e16e1e2a1dce9b50d974536013",
+        "id": "mc.ctx_reduce.urgent.many.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "9bf16950c61a102c1a129d5976f913283342f4834b51ac364a103524a03a2027",
+        "id": "mc.ctx_reduce.urgent.many.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "d9cef40d948944d83ac450acf5eaa8f1aaa7949be4ec840593a3ce5241ae51ba",
+        "id": "mc.ctx_reduce.urgent.many.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "ab9d29751677d2318bf6cbf174793dc6a6dfbc94804bcd79602812a1ef8104c0",
+        "id": "mc.ctx_reduce.again.zero.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "d4e456230c1d907baa1582cd8ee372006d0f23fe6c27967db9254ff92b9c48bb",
+        "id": "mc.ctx_reduce.again.zero.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "fc6131f571a83c7711a2f3f0999bdb549656d7d87cb6ce0dec14fa3640e1af9f",
+        "id": "mc.ctx_reduce.again.zero.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "47dcc8f76f7e369e2edff97a88900f128df6d6aa0218f62a5982e5efee554d4e",
+        "id": "mc.ctx_reduce.again.zero.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "32f580a78a527a6eee0d28116abcf0c5121d636e9f18b7829b3878a399df099e",
+        "id": "mc.ctx_reduce.again.zero.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "a9805a47aea9bb547c0b94e5c06f939e2ffeb049c3d10e662d0396a5ccf6464e",
+        "id": "mc.ctx_reduce.again.one.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "640d5c2c0b49f0107d25573c06befd76f58029d2225947b595e6b711f43a03a6",
+        "id": "mc.ctx_reduce.again.one.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "174c24b6ffe97ebe3afd143568f439510870568fab8f21c9e548f97dd8ea02db",
+        "id": "mc.ctx_reduce.again.one.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "2741fe5aa1cf16fb6913e40376015427a29a865b68279c9c27f3ba66088caadb",
+        "id": "mc.ctx_reduce.again.one.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "970cebf9983bbaa7cd44c9bd24bffb42f5386ac2261f1102006b41e7ac5427c5",
+        "id": "mc.ctx_reduce.again.one.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "7638247733302aa76bf52e549cd8c296bf02a39f47cb7431b5c6ef45eaa99d5c",
+        "id": "mc.ctx_reduce.again.many.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "9e34694ee0d42809dcdafcb6f8352fc395474b915d298d8671d4a2e7a4132aa1",
+        "id": "mc.ctx_reduce.again.many.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "f71d30705c62205745e73da05f7c2ca8c4e7f515bbce7396c462e68c82ae785b",
+        "id": "mc.ctx_reduce.again.many.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "4620a07f2491428fc5cb37a66cc45bd5a7b073ebfd2cadb6d53d70072011ae2f",
+        "id": "mc.ctx_reduce.again.many.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "tool_result"
+        ],
+        "digest": "93a03a5129cc1486893a1beed94f06cf49539840f62deea08361778ccd9f25f6",
+        "id": "mc.ctx_reduce.again.many.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "d448376cdc5774fab129b46e7ae58e95d66ff510de9f22fcd1b67b3e7da800d4",
+        "id": "mc.ctx_reduce.ceiling.zero.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "7776d5737c14a3de60c3dd20fd97b3262ab76e71e04a80940499bb90459bc867",
+        "id": "mc.ctx_reduce.ceiling.zero.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "b424ef8784841a1bfae62c375f82b0863427018dc294cea404170146697bc4c9",
+        "id": "mc.ctx_reduce.ceiling.zero.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "26fdc49cfeb5a62cd7ff237fca295cc117066a5040e433149c8ac817d9b51e81",
+        "id": "mc.ctx_reduce.ceiling.zero.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "7358955e66008ded203b2657b80187f8c0c29067a006408c83649302cec839ee",
+        "id": "mc.ctx_reduce.ceiling.zero.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "38a6166091c0071baf290e89e7b7a24a7f0bda7829d8f9451428628245614428",
+        "id": "mc.ctx_reduce.ceiling.one.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "73ddd17ab4405d1d065a9eaa26e4e8e5cc7872b9660adbaa00cc270cb7b30e66",
+        "id": "mc.ctx_reduce.ceiling.one.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "c2b572dc2820c43b9769673fa1870b6375eca93a559f5d9dd0943125e3096b45",
+        "id": "mc.ctx_reduce.ceiling.one.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "2db9ae906de738282225529743305398c3854eb969628462c27d6f023fad749e",
+        "id": "mc.ctx_reduce.ceiling.one.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "31caa836b85ba4db334e48aca1183a1a46eb17726eb3955f45903c21e1b6bcbe",
+        "id": "mc.ctx_reduce.ceiling.one.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "20030005a63ea51d797abf723aca9aa60ef79b278113615ff6e2ca29a7466bbf",
+        "id": "mc.ctx_reduce.ceiling.many.h0.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "f39c3250d31ffaeaf5ac021d7d3c208e8a021b12aee043c381a21b05c15898dd",
+        "id": "mc.ctx_reduce.ceiling.many.h1.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "540229f18a4f145bb53027c94602fb8b2dd7ef822a41191631a1099b37063828",
+        "id": "mc.ctx_reduce.ceiling.many.h2.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "dceaa736808d2f720775be285a34aa069b2fe92c79a96c773d9524301418e1c5",
+        "id": "mc.ctx_reduce.ceiling.many.h3.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "60aadcb8f28c912888d29aa952d1e601ce894691328e1119f61fd7c9ab5b3d7f",
+        "id": "mc.ctx_reduce.ceiling.many.h4.v1"
+      },
+      {
+        "delivery": [
+          "turn_system_cleared",
+          "steer"
+        ],
+        "digest": "b36d2537664f02c6675e730d7f835cded8dc655bf42c9d0b3a84839dcfd7686b",
+        "id": "mc.ctx_keep.v1"
+      },
+      {
+        "delivery": [
+          "turn_system",
+          "tool_result"
+        ],
+        "digest": "448f2e8833f3eae08f113aff7dffb55edc15752aeba2afb7c75c0bc9c8e769c4",
+        "id": "mc.clock_note.v1"
+      }
+    ]
+  }
+}

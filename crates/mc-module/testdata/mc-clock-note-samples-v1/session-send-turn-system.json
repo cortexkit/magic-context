@@ -1,0 +1,22 @@
+{
+  "name": "session-send-turn-system",
+  "rendered": "Now: Wed 18 Nov 22:52Z",
+  "request": {
+    "method": "session.send",
+    "params": {
+      "dedupe_key": "mc.clock_note",
+      "delivery": [
+        "turn_system",
+        "tool_result"
+      ],
+      "send_id": "mc.clock_note:counter:7",
+      "template": {
+        "digest": "448f2e8833f3eae08f113aff7dffb55edc15752aeba2afb7c75c0bc9c8e769c4",
+        "id": "mc.clock_note.v1",
+        "slots": {
+          "now": 1795042320
+        }
+      }
+    }
+  }
+}
