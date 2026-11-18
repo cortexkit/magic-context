@@ -386,6 +386,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         self.inner.agent_data.enabled()
     }
 
+    /// Where the module's settings come from.
+    #[cfg(feature = "managed-settings")]
+    pub fn config(&self) -> &Config {
+        &self.inner.config
+    }
+
     /// One `agent-data` request from `caller`, the principal the daemon
     /// stamped on its route, answered with the reply's bytes or the
     /// contract's refusal.
