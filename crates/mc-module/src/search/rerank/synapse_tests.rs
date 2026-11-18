@@ -32,7 +32,7 @@ fn absent() -> Result<Value, String> {
 
 fn catalog() -> Result<Value, String> {
     Ok(json!({"result": {"table_epoch": 7, "models": [
-        {"model_id": MODEL, "certified": true, "fingerprints": ["a".repeat(64)]}
+        {"model_id": MODEL, "serving_admission": "enabled", "fingerprints": ["a".repeat(64)]}
     ]}}))
 }
 
