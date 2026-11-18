@@ -3835,7 +3835,7 @@ async fn a_persons_message_after_a_gap_gets_a_hint_of_related_memory_and_no_time
     assert_clean(&runner);
     let texts = user_texts(runner.host());
     assert_eq!(texts.len(), 3, "{texts:?}");
-    // Every message is stored as written: ck-mc adds no time marker.
+    // Every message is stored as written, with no time marker added.
     assert_eq!(texts[0], "Start.");
     assert_eq!(texts[2], "ok");
     // The second comes six minutes after the reply before it, and a commit
