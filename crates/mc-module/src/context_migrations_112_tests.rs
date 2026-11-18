@@ -126,6 +126,7 @@ fn migration_112_adds_replication_drops_the_engram_sync_and_keeps_every_row() {
         "index idx_replica_pending_links_target",
         "table replica_applying",
         "table replica_derived",
+        "table replica_fences",
         "table replica_ids",
         "table replica_outbox",
         "table replica_pending_links",

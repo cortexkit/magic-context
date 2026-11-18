@@ -1,0 +1,3 @@
+[
+  {"op":"role.lease.yield","request":{"gen":1,"role":"connector_home"},"principal":{"kind":"reserved","moduleId":"plexus"},"frames":[{"type":"Response","body":{"result":{"yielded":false}}}]}
+]

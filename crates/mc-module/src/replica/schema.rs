@@ -217,14 +217,42 @@ const NOW_MS: &str = "CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS I
 /// `trusted_schema` on every connection that writes these tables.
 const CAPTURING: &str = "NOT EXISTS (SELECT 1 FROM replica_applying)";
 
-/// The writer a captured change names: the row of `replica_writer` a writer
-/// put in its own transaction (the dreamer does), or `fallback`.
-fn writer(fallback: &str) -> String {
+/// The writer a captured change names: the rows of `replica_writer` a
+/// writer put in its own transaction (the dreamer does), or `fallback`.
+/// Those rows hold one epoch per dreamer role the run holds; the change
+/// takes the epoch of `role`, the role of the changed row, and none when
+/// the run doesn't hold it. A project's run that records observations of
+/// the person (reflect-events) sends them so, without an epoch, and no
+/// receiver fences them: they are new rows drawn from one project's events,
+/// not edits that two dreamers could fight over, so every receiver keeps
+/// each one.
+fn writer(fallback: &str, role: &str) -> String {
     format!(
         "COALESCE((SELECT actor FROM replica_writer LIMIT 1), {fallback}),
          (SELECT run_id FROM replica_writer LIMIT 1),
-         (SELECT epoch FROM replica_writer LIMIT 1)"
+         (SELECT epoch FROM replica_writer WHERE role = {role})"
     )
+}
+
+/// The dreamer role of a memory at `level` under `owner` (SQL
+/// expressions): `dreamer.global` for the person's own memories, and
+/// `dreamer.<owner id>` for a project's or a workspace's, as
+/// [`crate::dreamer::lease::role`] names them.
+fn memory_role(level: &str, owner: &str) -> String {
+    format!("(CASE WHEN {level} = 'global' THEN 'dreamer.global' ELSE 'dreamer.' || {owner} END)")
+}
+
+/// The dreamer role that owns row `row` (`NEW` or `OLD`) of `table`, in
+/// SQL: the role whose lease a run holds to change it. Observations are the
+/// person's, like global memories; a primer belongs to its project. A
+/// receiver names a change's role by the same rule, from the subject the
+/// change came on ([`super::apply`]).
+fn row_role(table: &Table, row: &str) -> String {
+    match table.kind {
+        "memory" => memory_role(&format!("{row}.level"), &format!("{row}.owner_id")),
+        "observation" => "'dreamer.global'".to_owned(),
+        _ => format!("('dreamer.' || {row}.project_path)"),
+    }
 }
 
 /// The statement that records a change of row `id` at `revision` in the
@@ -232,7 +260,8 @@ fn writer(fallback: &str) -> String {
 /// a later change replaces it, keeping the base revision and `create` while
 /// nothing of it was sent, and a plain metadata change never hides the more
 /// telling kind of an earlier change it joins. A `raised` row becomes a
-/// change to send.
+/// change to send. `role` is the changed row's dreamer role ([`row_role`]).
+#[allow(clippy::too_many_arguments)]
 fn queue(
     kind: &str,
     id: &str,
@@ -240,6 +269,7 @@ fn queue(
     base: &str,
     change: &str,
     actor: &str,
+    role: &str,
     condition: &str,
 ) -> String {
     format!(
@@ -263,7 +293,7 @@ fn queue(
              actor = excluded.actor,
              run_id = excluded.run_id,
              epoch = excluded.epoch;",
-        writer = writer(actor),
+        writer = writer(actor, role),
     )
 }
 
@@ -441,6 +471,7 @@ fn table_triggers(table: &Table) -> String {
             "0",
             "'create'",
             created_by,
+            &row_role(table, "NEW"),
             "1"
         ),
     );
@@ -477,6 +508,7 @@ fn table_triggers(table: &Table) -> String {
             "OLD.revision",
             &update_change(table),
             "'ck-mc'",
+            &row_role(table, "NEW"),
             "1",
         ),
     );
@@ -548,7 +580,7 @@ fn table_triggers(table: &Table) -> String {
              ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at;
              {derived_gone}
          END;",
-        writer = writer("'ck-mc'"),
+        writer = writer("'ck-mc'", &row_role(table, "OLD")),
     );
     format!("{insert}\n{update}\n{raised}\n{delete}")
 }
@@ -574,6 +606,10 @@ fn child_triggers(child: &Child) -> String {
                     FROM memories WHERE id = {id})"
             ),
             "'ck-mc'",
+            &format!(
+                "(SELECT {} FROM memories WHERE id = {id})",
+                memory_role("level", "owner_id")
+            ),
             &format!("EXISTS (SELECT 1 FROM memories WHERE id = {id} AND level <> 'agent')"),
         );
         format!("{raise}\n{queue}")
@@ -699,13 +735,26 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
          -- Holds a row only inside an apply transaction; see the triggers.
          CREATE TABLE replica_applying (applying INTEGER NOT NULL);
 
-         -- Who is writing, while a writer that names itself holds a row here
-         -- inside its own transaction (the dreamer's change lists); the
-         -- triggers copy it into the outbox row.
+         -- Who is writing, while a writer that names itself holds rows here
+         -- inside its own transaction (the dreamer's change lists): one per
+         -- dreamer role its run holds, with that role's lease generation, or
+         -- one without a role. The triggers copy the actor and run into the
+         -- outbox row, with the epoch of the changed row's own role.
          CREATE TABLE replica_writer (
            actor TEXT NOT NULL,
            run_id INTEGER,
+           role TEXT,
            epoch INTEGER
+         );
+
+         -- The newest dreamer lease generation this computer applied a
+         -- change of another computer's under, by role. With the gens the
+         -- dreamer's own journal records (`dream_task_runs.leases_json`), it
+         -- is the role's fence: an arriving dreamer change of an older epoch
+         -- is skipped.
+         CREATE TABLE replica_fences (
+           role TEXT PRIMARY KEY,
+           epoch INTEGER NOT NULL
          );
 
          -- Links an arrival names to a global id not seen yet. Resolved, and

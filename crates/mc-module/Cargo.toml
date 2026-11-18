@@ -16,9 +16,11 @@ notice-cost-timing = ["nix/resource", "nix/time"]
 # records are enforced either way (see `agent_data::switch`).
 agent-data = []
 # Share memories with the user's other computers through the hub's memory
-# stream (`replica::live`). Off, ck-mc never starts the replica task and never
-# contacts the hub; the store still records each change in its outbox, to be
-# sent once a build with the feature runs (see `replica::FEATURE`).
+# stream (`replica::live`), and run each owner's dreamer under its Entorhinal
+# role lease (`dreamer::lease`). Off, ck-mc never starts the replica task,
+# never contacts the hub and opens no lease watch; the store still records
+# each change in its outbox, to be sent once a build with the feature runs
+# (see `replica::FEATURE`), and those changes carry no lease epoch.
 memory-replica = []
 # Opt-in heap attribution for the `heap_profile` test (allocation sites with
 # backtraces). Only that test target requires it; no build of ck-mc turns it on.
@@ -101,10 +103,12 @@ async-trait = "0.1"
 zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["fs"] }
+# `time`: the monotonic clock a dreamer run reads its role lease's acting
+# window on (`dreamer::lease::monotonic_ms`).
+nix = { version = "0.31.3", features = ["fs", "time"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
 cortexkit-role-tool-provider-conformance = "=0.15.13"

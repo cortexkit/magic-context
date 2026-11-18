@@ -1,0 +1,7 @@
+[
+  {"op":"role.lease","request":{"role":"dreamer..global"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"Error","body":{"code":"invalid_request","message":"invalid role name"}}]},
+  {"op":"role.lease","request":{"role":"connector_home"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"Error","body":{"code":"caller_forbidden","message":"only the module assigned to this role may open or control its lease"}}]},
+  {"op":"role.lease","request":{"role":"dreamer.global"},"principal":{"kind":"reserved","moduleId":"plexus"},"frames":[{"type":"Error","body":{"code":"caller_forbidden","message":"only the module assigned to this role may open or control its lease"}}]},
+  {"op":"role.lease","request":{"role":"dreamer.global"},"principal":{"kind":"direct"},"frames":[{"type":"Error","body":{"code":"caller_forbidden","message":"only the module assigned to this role may open or control its lease"}}]},
+  {"op":"role.lease","request":{"role":"dreamer.global"},"principal":{"flowScoped":true,"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"Error","body":{"code":"caller_forbidden","message":"only the module assigned to this role may open or control its lease"}}]}
+]

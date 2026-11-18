@@ -1023,6 +1023,173 @@ impl RunnerClient for SubcRunnerClient {
     fn door_stream(&self) -> String {
         format!("reserved:{}", self.child_scopes.module_id())
     }
+
+    fn role_leases(&self) -> Arc<dyn crate::dreamer::lease::RoleLeases> {
+        Arc::new(EntorhinalLeases {
+            consumer: self.consumer.clone(),
+        })
+    }
+}
+
+/// How long opening a lease watch's route and sending its request may take.
+const LEASE_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The dreamer's role leases ([`crate::dreamer::lease`]) on Entorhinal's
+/// management surface. The route is unscoped, so the daemon attests it as
+/// this module's own principal (`reserved:magic-context`), the only one
+/// Entorhinal admits for a `dreamer.*` role; a route of a session or a
+/// flow is never a candidate. Entorhinal takes a watch's acknowledgements
+/// and yields only on the route that opened the watch, so each watch keeps
+/// its route's handle and sends them on it.
+struct EntorhinalLeases {
+    consumer: SharedConsumer,
+}
+
+#[async_trait::async_trait]
+impl crate::dreamer::lease::RoleLeases for EntorhinalLeases {
+    async fn watch(
+        &self,
+        role: &str,
+    ) -> Result<crate::dreamer::lease::Watch, crate::dreamer::lease::LeaseError> {
+        use crate::dreamer::lease::LeaseError;
+        let consumer = Arc::clone(self.consumer.get().await.map_err(LeaseError::unavailable)?);
+        let route = consumer
+            .open_route(
+                RouteTarget::ManagementSurface {
+                    module_id: "entorhinal".to_owned(),
+                },
+                // Grants nothing: Entorhinal admits the lease by the route's
+                // attested caller. It keeps these routes apart from the
+                // module's other Entorhinal reads.
+                BindIdentity::new("magic-context", "dreamer-lease"),
+                CallOptions {
+                    timeout: LEASE_OPEN_TIMEOUT,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| lease_error(&error))?;
+        let subscription = consumer
+            .subscribe_route(
+                &route,
+                crate::dreamer::lease::watch_request(role),
+                subc_client_rs::SubscribeOptions {
+                    route_open_timeout: LEASE_OPEN_TIMEOUT,
+                    ..subc_client_rs::SubscribeOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| lease_error(&error))?;
+        Ok(crate::dreamer::lease::Watch {
+            notices: Box::new(EntorhinalNotices {
+                subscription,
+                ended: false,
+            }),
+            route: Arc::new(EntorhinalLeaseRoute {
+                consumer,
+                route,
+                role: role.to_owned(),
+            }),
+        })
+    }
+}
+
+/// A refusal or failure of a lease request, with Entorhinal's code when it
+/// refused.
+fn lease_error(error: &subc_client_rs::CallError) -> crate::dreamer::lease::LeaseError {
+    match error {
+        subc_client_rs::CallError::Module(body) => crate::dreamer::lease::LeaseError {
+            code: body.code.clone(),
+            message: body.message.clone(),
+        },
+        other => crate::dreamer::lease::LeaseError::unavailable(format!("{other:?}")),
+    }
+}
+
+/// The notices of one open `role.lease` watch. Dropping the subscription
+/// cancels the held request, which closes the watch and releases the role.
+struct EntorhinalNotices {
+    subscription: subc_client_rs::Subscription,
+    ended: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::dreamer::lease::Notices for EntorhinalNotices {
+    async fn next(
+        &mut self,
+    ) -> Option<Result<crate::dreamer::lease::Notice, crate::dreamer::lease::LeaseError>> {
+        use crate::dreamer::lease::LeaseError;
+        if self.ended {
+            return None;
+        }
+        if let Some(bytes) = self.subscription.events().recv().await {
+            return Some(crate::dreamer::lease::decode_notice(&bytes));
+        }
+        self.ended = true;
+        match self.subscription.ended().await {
+            subc_client_rs::SubscriptionEnd::Response(_)
+            | subc_client_rs::SubscriptionEnd::StreamEnd
+            | subc_client_rs::SubscriptionEnd::Cancelled => None,
+            subc_client_rs::SubscriptionEnd::Error(body) => Some(Err(LeaseError {
+                code: body.code,
+                message: body.message,
+            })),
+            other => Some(Err(LeaseError::unavailable(format!(
+                "the watch ended: {other:?}"
+            )))),
+        }
+    }
+}
+
+/// The route one `role.lease` watch was opened on, for its
+/// acknowledgements and yields.
+struct EntorhinalLeaseRoute {
+    consumer: Arc<SubcConsumer>,
+    route: subc_client_rs::RouteHandle,
+    role: String,
+}
+
+impl EntorhinalLeaseRoute {
+    async fn request(
+        &self,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, crate::dreamer::lease::LeaseError> {
+        self.consumer
+            .request(
+                &self.route,
+                body,
+                CallOptions {
+                    timeout,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| lease_error(&error))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::dreamer::lease::LeaseRoute for EntorhinalLeaseRoute {
+    async fn ack(&self, seq: u64) -> Result<(), crate::dreamer::lease::LeaseError> {
+        let reply = self
+            .request(
+                crate::dreamer::lease::ack_request(&self.role, seq),
+                crate::dreamer::lease::ACK_DEADLINE,
+            )
+            .await?;
+        crate::dreamer::lease::decode_ack(&reply)
+    }
+
+    async fn yield_role(&self, gen: u64) -> Result<bool, crate::dreamer::lease::LeaseError> {
+        let reply = self
+            .request(
+                crate::dreamer::lease::yield_request(&self.role, gen),
+                crate::dreamer::lease::YIELD_DEADLINE,
+            )
+            .await?;
+        crate::dreamer::lease::decode_yield(&reply)
+    }
 }
 
 /// Engram answers a session-door call as `{"result": <answer>}`; a

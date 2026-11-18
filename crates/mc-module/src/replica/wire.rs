@@ -95,8 +95,10 @@ pub fn aad(global_id: &str, revision: i64, subject: &str) -> Vec<u8> {
 }
 
 /// Who wrote a change: the computer's box id, for the journal and the apps,
-/// and the writer's actor. `dreamer_epoch` is the dreamer lease's epoch; it
-/// is absent until that lease exists.
+/// and the writer's actor. `dreamer_epoch` is, on a dreamer change, the
+/// generation of the dreamer lease of the changed row's role that the run
+/// held; receivers skip one older than that role's fence
+/// ([`super::apply`]). It is absent on every other change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Writer {
     pub box_id: String,

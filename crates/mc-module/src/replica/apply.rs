@@ -39,6 +39,9 @@
 //! - A delete removes the row the way the person's delete does, and marks
 //!   its global id deleted, so a late snapshot never brings it back. Any
 //!   arrival for a deleted id is skipped.
+//! - A dreamer change written under a lease generation older than its
+//!   role's fence is recorded and skipped, like a message that can't be
+//!   opened ([`fenced`]): its computer had lost the role.
 //! - An applied change is reported like a local write of its kind
 //!   ([`ContextDb::changed`]), so the apps reload and the memory-changed
 //!   wake goes out, and heads show it as an ordinary memory delta. It never
@@ -301,7 +304,7 @@ fn apply_message(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute("INSERT INTO replica_applying (applying) VALUES (1)", [])?;
     let applied = match &body {
-        Ok(body) => apply_body(&tx, box_id, message.seq, body)?,
+        Ok(body) => apply_body(&tx, box_id, message.seq, &message.subject, body)?,
         Err(reason) => Applied::Skipped(reason.clone()),
     };
     let changes = match applied {
@@ -378,7 +381,13 @@ fn own_known(tx: &Connection, body: &Body) -> rusqlite::Result<bool> {
     )
 }
 
-fn apply_body(tx: &Transaction, box_id: &str, seq: u64, body: &Body) -> rusqlite::Result<Applied> {
+fn apply_body(
+    tx: &Transaction,
+    box_id: &str,
+    seq: u64,
+    subject: &str,
+    body: &Body,
+) -> rusqlite::Result<Applied> {
     let table = table(&body.kind);
     if body.writer.box_id == box_id {
         if own_known(tx, body)? {
@@ -397,6 +406,9 @@ fn apply_body(tx: &Transaction, box_id: &str, seq: u64, body: &Body) -> rusqlite
                 "the stream holds a message an earlier or later state of this store sent",
             )?;
         }
+    }
+    if let Some(reason) = fenced(tx, subject, body)? {
+        return Ok(Applied::Skipped(reason));
     }
     let known = known(tx, &body.global_id)?;
     if let Some((_, Some(_))) = known {
@@ -431,6 +443,74 @@ fn apply_body(tx: &Transaction, box_id: &str, seq: u64, body: &Body) -> rusqlite
     changes.extend(owner_change(tx, table, local)?);
     changes.dedup();
     Ok(Applied::Changed(changes))
+}
+
+/// The dreamer role a change on `subject` belongs to: a project's or a
+/// workspace's memories and a project's primers are their owner's
+/// (`dreamer.<owner>`), global memories and observations the person's
+/// (`dreamer.global`). The capture triggers name a row's role by the same
+/// rule ([`super::schema`]), and [`decode`] has checked that a snapshot's
+/// owner is the one its subject names.
+fn subject_role(subject: &str) -> Option<String> {
+    let mut parts = subject.splitn(5, '.');
+    let kind = parts.nth(3)?;
+    let owner = parts.next()?;
+    Some(match kind {
+        "global" | "observation" => "dreamer.global".to_owned(),
+        _ => format!("dreamer.{owner}"),
+    })
+}
+
+/// Why `body` is skipped as a dreamer change older than its role's fence,
+/// if it is. Otherwise its epoch raises the fence for the changes after it.
+///
+/// A dreamer change carries the generation of the role's lease its run
+/// held, and Entorhinal raises a role's generation each time the role
+/// changes hands, so a change under an older one was written by a computer
+/// that had already lost the role. The fence is the newest generation this
+/// computer has seen for the role: from the dreamer changes it applied
+/// (`replica_fences`) and from the leases its own dreamer held (its
+/// journal, [`crate::dreamer::store::highest_gen`]). A change without an
+/// epoch is never fenced: no dreamer wrote it under a lease of its role.
+///
+/// This computer's own record is enough for now because, until the hub
+/// arbitrates dreamer roles, Entorhinal grants every `dreamer.*` role on
+/// every computer locally at generation 1: every epoch is 1, no change is
+/// older than a fence, and there is no newer holder whose generation a
+/// computer could have missed. Once the hub hands roles over, a computer
+/// that has applied nothing from the new holder and held no lease of its
+/// own would still apply a stale holder's change; reading the hub's
+/// generation with Entorhinal's `role.fence` closes that gap, and comes
+/// with the hub.
+fn fenced(tx: &Connection, subject: &str, body: &Body) -> rusqlite::Result<Option<String>> {
+    let Some(epoch) = body.writer.dreamer_epoch else {
+        return Ok(None);
+    };
+    if body.writer.actor != "dreamer" {
+        return Ok(None);
+    }
+    let Some(role) = subject_role(subject) else {
+        return Ok(None);
+    };
+    let applied: Option<i64> = tx
+        .query_row(
+            "SELECT epoch FROM replica_fences WHERE role = ?1",
+            [&role],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let own = crate::dreamer::store::highest_gen(tx, &role)?;
+    if let Some(fence) = applied.max(own).filter(|fence| epoch < *fence) {
+        return Ok(Some(format!(
+            "a dreamer change written under generation {epoch} of {role}, older than the role's fence {fence}"
+        )));
+    }
+    tx.execute(
+        "INSERT INTO replica_fences (role, epoch) VALUES (?1, ?2)
+         ON CONFLICT (role) DO UPDATE SET epoch = MAX(epoch, excluded.epoch)",
+        params![role, epoch],
+    )?;
+    Ok(None)
 }
 
 /// This computer's own message `body` came back. A memory that has its

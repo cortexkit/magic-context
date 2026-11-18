@@ -77,7 +77,10 @@ fn store() -> (tempfile::TempDir, Arc<ContextDb>) {
 }
 
 fn engine(batches: usize) -> Arc<Engine> {
-    Arc::new(Engine::new("this", vec![Box::new(Fake { batches })]))
+    Arc::new(
+        Engine::new("this", vec![Box::new(Fake { batches })])
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    )
 }
 
 fn profile() -> Arc<Profile> {
@@ -253,7 +256,10 @@ async fn an_applied_memory_task_wakes_its_project() {
     let floor = db
         .with_connection(|conn| crate::memory_changed::revision(conn))
         .unwrap();
-    let engine = Arc::new(Engine::new("this", vec![Box::new(Journaling)]));
+    let engine = Arc::new(
+        Engine::new("this", vec![Box::new(Journaling)])
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     let client = Arc::new(Client::new(&["p/a"], &[Ends::Reply("ok")]));
     engine.see_project(&db, PROJECT, FOLDER, profile(), &Settings::default(), 1);
     make_due(&db);
@@ -368,10 +374,13 @@ async fn a_curate_run_stopped_by_its_budget_resumes_at_its_next_part() {
         }
         tx.commit().unwrap();
     });
-    let engine = Arc::new(Engine::new(
-        "this",
-        vec![Box::new(crate::dreamer::tasks::curate::Curate)],
-    ));
+    let engine = Arc::new(
+        Engine::new(
+            "this",
+            vec![Box::new(crate::dreamer::tasks::curate::Curate)],
+        )
+        .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     let spent = Settings {
         budget_tokens: 100,
         ..Settings::default()
@@ -618,7 +627,8 @@ fn a_reply_is_not_applied_once_the_lock_passed_to_another_writer() {
             "this",
             &FakeBatch(0),
             &reply,
-            1
+            1,
+            &[],
         ),
         Ok(None)
     );
@@ -746,14 +756,17 @@ impl Task for Kinded {
 fn reading_engine() -> (tempfile::TempDir, Arc<Engine>) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
-    let engine = Arc::new(Engine::new(
-        "this",
-        vec![
-            Box::new(Kinded("classify-memories")),
-            Box::new(Kinded("map-memories")),
-            Box::new(Kinded("verify")),
-        ],
-    ));
+    let engine = Arc::new(
+        Engine::new(
+            "this",
+            vec![
+                Box::new(Kinded("classify-memories")),
+                Box::new(Kinded("map-memories")),
+                Box::new(Kinded("verify")),
+            ],
+        )
+        .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     (dir, engine)
 }
 
@@ -937,8 +950,8 @@ impl Batch for RememberingBatch {
 }
 
 /// What a dreamer run applies is captured as the dreamer's, with the run's
-/// id, for the user's other computers; the lease epoch stays empty until
-/// the dreamer lease exists. The naming ends with the run's transaction.
+/// id and the generation of the role lease its batch was sent under, for
+/// the user's other computers. The naming ends with the run's transaction.
 #[test]
 fn a_batch_the_dreamer_applies_names_its_run_in_the_outbox() {
     let (_dir, db) = store();
@@ -962,7 +975,16 @@ fn a_batch_the_dreamer_applies_names_its_run_in_the_outbox() {
         usage: None,
         steps: None,
     };
-    let applied = super::apply(&db, &locks, "this", &RememberingBatch, &reply, 9).unwrap();
+    let applied = super::apply(
+        &db,
+        &locks,
+        "this",
+        &RememberingBatch,
+        &reply,
+        9,
+        &[(lease::role(&locks[0]), 3)],
+    )
+    .unwrap();
     assert!(applied.is_some());
     let (named, left): (String, i64) = db
         .with_connection(|conn| {
@@ -975,5 +997,5 @@ fn a_batch_the_dreamer_applies_names_its_run_in_the_outbox() {
             )
         })
         .unwrap();
-    assert_eq!((named.as_str(), left), ("dreamer 9 -", 0));
+    assert_eq!((named.as_str(), left), ("dreamer 9 3", 0));
 }

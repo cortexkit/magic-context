@@ -1,0 +1,4 @@
+[
+  {"op":"role.lease.ack","request":{"role":"connector_home","seq":1},"principal":{"kind":"reserved","moduleId":"plexus"},"frames":[{"type":"Response","body":{"result":{"acknowledged":true}}}]},
+  {"op":"role.lease.ack","request":{"role":"dreamer.pj-fern_01","seq":2},"principal":{"differentRoute":true,"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"Error","body":{"code":"caller_forbidden","message":"use the route that opened the role lease watch"}}]}
+]

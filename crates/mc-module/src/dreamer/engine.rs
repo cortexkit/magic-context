@@ -24,6 +24,20 @@
 //! own transaction, with the locks checked in that same transaction, so a
 //! run that lost one writes nothing more. A run that used its token budget
 //! stops before its next batch; what it already applied stays.
+//!
+//! The lock keeps two writers of one computer apart; in a build with the
+//! `memory-replica` feature, the role lease keeps two computers apart
+//! ([`super::lease`]). Before it takes its locks, a run
+//! opens the watch of each owner's role, and a run whose role this computer
+//! doesn't hold, or that Entorhinal doesn't answer for within
+//! [`lease::FIRST_NOTICE`], is skipped with the reason, its schedule moving
+//! on as for any skip. Before each paid batch the run checks that its
+//! acting window is still at least [`lease::MARGIN_MS`] ahead and records
+//! the generation it acts under in its journal, which refuses one older
+//! than it has seen; what the batch applies carries that generation to the
+//! user's other computers. A run that lost its role stops before its next
+//! batch (`lease_lost`); one asked for its role finishes the batch in
+//! flight and stops (`handed_back`). The watch closes when the run ends.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -32,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::TransactionBehavior;
 use serde_json::{json, Value};
 
+use super::lease::{self, Clock, Lease, RoleLeases, Standing};
 use super::run::{self, TaskError, TaskReply, TaskRun};
 use super::store::{self, OwnerKey, RunEnd, Settled};
 use super::task::{Batch, Owner, Task, TaskContext};
@@ -154,12 +169,18 @@ pub struct Engine {
     /// project's folder, when they configure one. A project's run plans
     /// with it ([`Task::plan`]); without a source no run has one.
     embedding: Option<EmbeddingSource>,
+    /// Where runs open their roles' lease watches.
+    leases: Arc<dyn RoleLeases>,
+    /// The monotonic clock acting windows are read on.
+    clock: Clock,
 }
 
 /// Where a run finds the embedding provider for a project's folder.
 pub type EmbeddingSource = Arc<dyn Fn(&str) -> Option<crate::embedding::Provider> + Send + Sync>;
 
 impl Engine {
+    /// An engine whose runs open no lease until [`Self::with_leases`] gives
+    /// it Entorhinal: until then every run is skipped as unanswered.
     pub fn new(holder: impl Into<String>, tasks: Vec<Box<dyn Task>>) -> Self {
         Self {
             holder: holder.into(),
@@ -170,7 +191,23 @@ impl Engine {
             running: Mutex::default(),
             checking: Mutex::default(),
             embedding: None,
+            leases: Arc::new(lease::NoEntorhinal),
+            clock: lease::system_clock(),
         }
+    }
+
+    /// The engine with `leases` as where its runs open their role leases.
+    pub fn with_leases(mut self, leases: Arc<dyn RoleLeases>) -> Self {
+        self.leases = leases;
+        self
+    }
+
+    /// The engine reading acting windows on `clock` instead of the
+    /// system's monotonic clock.
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// The engine with `source` as where a project's runs find their
@@ -271,6 +308,72 @@ impl Engine {
         let mut running = self.running.lock().expect("dreamer runs");
         for owner in owners {
             running.remove(owner);
+        }
+    }
+
+    /// Open the lease of each owner's role, in [`store::lock_order`], for a
+    /// run that is about to start. `Err` says why the run can't act for one
+    /// of them; every watch opened is closed then. A build without the
+    /// `memory-replica` feature takes no lease ([`lease::ENABLED`]): the run
+    /// gets none, and opens no watch.
+    async fn take_leases(&self, owners: &[OwnerKey]) -> Result<Vec<Lease>, String> {
+        if !lease::ENABLED {
+            return Ok(Vec::new());
+        }
+        let mut held = Vec::new();
+        for owner in store::lock_order(owners) {
+            match Lease::open(&*self.leases, &lease::role(&owner), &self.clock).await {
+                Ok(lease) => held.push(lease),
+                Err(reason) => {
+                    close(held).await;
+                    return Err(reason);
+                }
+            }
+        }
+        Ok(held)
+    }
+
+    /// Before a paid batch of run `run_id`: whether the run may still act
+    /// for every role of `leases`, and if so the generation of each, now
+    /// recorded in its journal ([`store::journal_leases`]). `Err` is the
+    /// outcome the run ends with, and why. A run without leases (a build
+    /// without `memory-replica`) journals nothing, and its changes carry no
+    /// epoch.
+    async fn fence(
+        &self,
+        db: &ContextDb,
+        run_id: i64,
+        leases: &[Lease],
+    ) -> Result<Vec<(String, i64)>, (&'static str, String)> {
+        if leases.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut gens = Vec::new();
+        for lease in leases {
+            match lease.standing(&self.clock).await {
+                Standing::Acting { gen } => gens.push((
+                    lease.role().to_owned(),
+                    i64::try_from(gen).unwrap_or(i64::MAX),
+                )),
+                Standing::HandedBack => {
+                    return Err((
+                        "handed_back",
+                        format!(
+                            "{} was handed over to another computer that asked for it",
+                            lease.role()
+                        ),
+                    ))
+                }
+                Standing::Lost(reason) => return Err(("lease_lost", reason)),
+            }
+        }
+        match db.with_connection(|conn| store::journal_leases(conn, run_id, &gens)) {
+            Ok(Ok(())) => Ok(gens),
+            Ok(Err(refused)) => Err(("lease_lost", refused)),
+            Err(error) => Err((
+                "failed",
+                format!("recording the run's leases failed: {error}"),
+            )),
         }
     }
 
@@ -695,6 +798,33 @@ impl Engine {
                 tracing::warn!("ck-mc: dreamer: releasing {project}'s locks failed: {error}");
             }
         };
+        // It writes both owners' memories, so it acts only while this
+        // computer holds both roles, taken in the same order. Without them
+        // the lift is recorded as a run that did not complete, so the next
+        // try waits out the once-task's retry wait (`once_retry_at`)
+        // instead of coming every round.
+        let leases = match self.take_leases(&locks).await {
+            Ok(leases) => leases,
+            Err(reason) => {
+                tracing::info!(
+                    "ck-mc: dreamer: {task} for {project} in workspace {workspace} skipped: {reason}"
+                );
+                let end = RunEnd {
+                    outcome: "skipped".into(),
+                    error: Some(reason),
+                    ..RunEnd::default()
+                };
+                if let Err(error) = db.with_connection(|conn| {
+                    store::settle_once(conn, &owner, task, workspace, None, &end, now_ms())
+                }) {
+                    tracing::warn!(
+                        "ck-mc: dreamer: recording {task} for {project} failed: {error}"
+                    );
+                }
+                tell(db, &owner);
+                return;
+            }
+        };
         let now = now_ms();
         match db.with_connection(|conn| {
             store::lock_all(conn, &locks, &self.holder, task, now, now + LOCK_MS)
@@ -702,9 +832,13 @@ impl Engine {
             Ok(true) => {}
             // Another writer holds the project's or the workspace's
             // memories: a later round tries again.
-            Ok(false) => return,
+            Ok(false) => {
+                close(leases).await;
+                return;
+            }
             Err(error) => {
                 tracing::warn!("ck-mc: dreamer: locking {project} for {task} failed: {error}");
+                close(leases).await;
                 return;
             }
         }
@@ -715,6 +849,7 @@ impl Engine {
             .map(|record| record.done_for.as_deref() == Some(workspace));
         if !matches!(done, Ok(false)) {
             release(db);
+            close(leases).await;
             return;
         }
         let due = store::Due {
@@ -744,6 +879,7 @@ impl Engine {
                         Some(&*members),
                         &locks,
                         None,
+                        &leases,
                     )
                     .await;
                 (Some(run_id), end)
@@ -757,6 +893,7 @@ impl Engine {
                 },
             ),
         };
+        close(leases).await;
         if end.applied > 0 {
             db.changed(crate::app_read::Change::Memories {
                 level: "workspace".into(),
@@ -873,6 +1010,20 @@ impl Engine {
                 return;
             }
         };
+        // A computer that doesn't hold the owner's role skips the slot, as
+        // for any other skip; the next slot asks again.
+        let leases = match self.take_leases(std::slice::from_ref(&due.owner)).await {
+            Ok(leases) => leases,
+            Err(reason) => {
+                tracing::info!(
+                    "ck-mc: dreamer: {} for {} skipped: {reason}",
+                    due.task,
+                    due.owner.owner_id
+                );
+                settle(Settled::Skipped { reason });
+                return;
+            }
+        };
         let locked = db.with_connection(|conn| {
             store::lock(
                 conn,
@@ -886,12 +1037,14 @@ impl Engine {
         match locked {
             Ok(true) => {}
             Ok(false) => {
+                close(leases).await;
                 settle(Settled::Skipped {
                     reason: format!("another writer holds {} memories", whose(&due.owner)),
                 });
                 return;
             }
             Err(error) => {
+                close(leases).await;
                 settle(Settled::Failed {
                     error: format!("locking the project failed: {error}"),
                 });
@@ -913,6 +1066,7 @@ impl Engine {
                     members.as_deref(),
                     std::slice::from_ref(&due.owner),
                     reader.as_deref(),
+                    &leases,
                 )
                 .await
             }
@@ -922,6 +1076,7 @@ impl Engine {
                 ..RunEnd::default()
             },
         };
+        close(leases).await;
         self.finish_due(db, &due, &end);
     }
 
@@ -982,11 +1137,14 @@ impl Engine {
     /// the owner's lock.
     fn finish_due(&self, db: &ContextDb, due: &store::Due, end: &RunEnd) {
         let settled = match end.outcome.as_str() {
-            "failed" | "lock_lost" => Settled::Failed {
+            // A run that lost its lock or its role's lease mid-run counts as
+            // failed: it stopped with batches left.
+            "failed" | "lock_lost" | "lease_lost" => Settled::Failed {
                 error: end.error.clone().unwrap_or_default(),
             },
             // A run the person started that found no tool provider to read
-            // code with: not a failure, and not a wait.
+            // code with, or whose role another computer holds: not a
+            // failure, and not a wait.
             "skipped" => Settled::Skipped {
                 reason: end.error.clone().unwrap_or_default(),
             },
@@ -1001,6 +1159,11 @@ impl Engine {
             "applied" => Settled::Ran { status: "applied" },
             "budget_stopped" => Settled::Ran {
                 status: "budget_stopped",
+            },
+            // Another computer asked for the role and runs the task from
+            // here: nothing failed.
+            "handed_back" => Settled::Ran {
+                status: "handed_back",
             },
             _ => Settled::Ran {
                 status: "nothing_to_do",
@@ -1168,47 +1331,35 @@ impl Engine {
                 .ok()
                 .flatten();
             let end = match reader_for(&*client, &kind, &root).await {
-                Ok(reader) => {
-                    engine
-                        .run_task(
-                            &db,
-                            &*client,
-                            &settings,
-                            &due,
-                            &kind,
-                            &declaration,
-                            &root,
-                            &profile,
-                            run_id,
-                            members.as_deref(),
-                            std::slice::from_ref(&due.owner),
-                            reader.as_deref(),
-                        )
-                        .await
-                }
+                Ok(reader) => match engine.take_leases(std::slice::from_ref(&due.owner)).await {
+                    Ok(leases) => {
+                        let end = engine
+                            .run_task(
+                                &db,
+                                &*client,
+                                &settings,
+                                &due,
+                                &kind,
+                                &declaration,
+                                &root,
+                                &profile,
+                                run_id,
+                                members.as_deref(),
+                                std::slice::from_ref(&due.owner),
+                                reader.as_deref(),
+                                &leases,
+                            )
+                            .await;
+                        close(leases).await;
+                        end
+                    }
+                    // The run is already recorded, so it ends as skipped,
+                    // as one whose tools are missing does.
+                    Err(reason) => end_skipped(&db, run_id, &due, reason),
+                },
                 // The run is already recorded, so it ends as skipped, which
                 // settles its schedule as a scheduled run's skip does.
-                Err(missing) => {
-                    let end = RunEnd {
-                        outcome: "skipped".into(),
-                        error: Some(missing),
-                        ..RunEnd::default()
-                    };
-                    tracing::info!(
-                        "ck-mc: dreamer: run {run_id} {} for {}: skipped ({})",
-                        due.task,
-                        due.owner.owner_id,
-                        end.error.as_deref().unwrap_or_default()
-                    );
-                    if let Err(error) =
-                        db.with_connection(|conn| store::finish_run(conn, run_id, &end, now_ms()))
-                    {
-                        tracing::warn!(
-                            "ck-mc: dreamer: recording run {run_id}'s end failed: {error}"
-                        );
-                    }
-                    end
-                }
+                Err(missing) => end_skipped(&db, run_id, &due, missing),
             };
             engine.finish_due(&db, &due, &end);
             engine
@@ -1225,7 +1376,8 @@ impl Engine {
     /// ([`TaskContext::workspace`]), and `locks` the owners whose locks the
     /// run holds, all of which it renews before each batch and checks before
     /// each write. `reader` is the tool provider a task that reads code
-    /// reads with ([`reader_for`]).
+    /// reads with ([`reader_for`]). `leases` are the run's role leases,
+    /// checked and journaled before each batch ([`Self::fence`]).
     #[allow(clippy::too_many_arguments)]
     async fn run_task<C: RunnerClient + Router>(
         &self,
@@ -1241,6 +1393,7 @@ impl Engine {
         workspace: Option<&WorkspaceMembers>,
         locks: &[OwnerKey],
         reader: Option<&str>,
+        leases: &[Lease],
     ) -> RunEnd {
         let mut end = RunEnd::default();
         let (task, demand) = match (self.task(kind), demand(kind)) {
@@ -1307,7 +1460,7 @@ impl Engine {
             Ok(batches) => {
                 self.send_batches(
                     db, client, settings, due, locks, demand, run_id, root, reader, batches,
-                    &mut end,
+                    leases, &mut end,
                 )
                 .await
             }
@@ -1348,6 +1501,7 @@ impl Engine {
         root: &str,
         reader: Option<&str>,
         batches: Vec<Box<dyn Batch>>,
+        leases: &[Lease],
         end: &mut RunEnd,
     ) {
         let name = run_id.to_string();
@@ -1383,6 +1537,20 @@ impl Engine {
                 ));
                 return;
             }
+            // So must the roles, with enough of their acting windows left,
+            // and the generations they are held at are journaled first.
+            let gens = match self.fence(db, run_id, leases).await {
+                Ok(gens) => gens,
+                Err((outcome, reason)) => {
+                    end.outcome = outcome.into();
+                    end.error = Some(format!(
+                        "{reason}; {} of {} batches left unsent",
+                        batches.len() - index,
+                        batches.len()
+                    ));
+                    return;
+                }
+            };
             let job = TaskRun {
                 demand,
                 run_id: &format!("{name}.{index}"),
@@ -1396,7 +1564,15 @@ impl Engine {
             let written = match run::run(client, &job, batch.as_ref()).await {
                 Ok(reply) => {
                     record_batch(end, &reply);
-                    apply(db, locks, &self.holder, batch.as_ref(), &reply, run_id)
+                    apply(
+                        db,
+                        locks,
+                        &self.holder,
+                        batch.as_ref(),
+                        &reply,
+                        run_id,
+                        &gens,
+                    )
                 }
                 // The model left the batch undecided at its step cap: it
                 // counts as skipped, and the run goes on to its next batch.
@@ -1479,8 +1655,8 @@ impl Engine {
 /// Apply one accepted reply in its own transaction, after checking in that
 /// transaction that this process still holds every lock of `locks`. `None`
 /// when it doesn't: nothing is written. The changes are captured for the
-/// user's other computers as the dreamer's, with the run's id; the dreamer
-/// lease's epoch is left null until that lease exists.
+/// user's other computers as the dreamer's, with the run's id and `gens`,
+/// the generation of each role lease the batch was sent under.
 fn apply(
     db: &ContextDb,
     locks: &[OwnerKey],
@@ -1488,9 +1664,10 @@ fn apply(
     batch: &dyn Batch,
     reply: &TaskReply,
     run_id: i64,
+    gens: &[(String, i64)],
 ) -> Result<Option<super::task::Applied>, String> {
     write_locked(db, locks, holder, |tx| {
-        crate::replica::name_writer(tx, "dreamer", Some(run_id), None)
+        crate::replica::name_writer(tx, "dreamer", Some(run_id), gens)
             .map_err(|error| error.to_string())?;
         let applied = batch.apply(tx, reply, run_id)?;
         crate::replica::unname_writer(tx).map_err(|error| error.to_string())?;
@@ -1560,6 +1737,35 @@ fn begin_run(
         }
         Err(error) => Err(format!("recording the run failed: {error}")),
     }
+}
+
+/// Close every watch of `leases`, releasing their roles, and wait until
+/// each is closed.
+async fn close(leases: Vec<Lease>) {
+    for lease in leases {
+        lease.close().await;
+    }
+}
+
+/// End run `run_id`, already recorded, as skipped for `reason`: a run the
+/// person started that can't run on this stack or whose role this computer
+/// doesn't hold. Its schedule settles as a scheduled run's skip does.
+fn end_skipped(db: &ContextDb, run_id: i64, due: &store::Due, reason: String) -> RunEnd {
+    let end = RunEnd {
+        outcome: "skipped".into(),
+        error: Some(reason),
+        ..RunEnd::default()
+    };
+    tracing::info!(
+        "ck-mc: dreamer: run {run_id} {} for {}: skipped ({})",
+        due.task,
+        due.owner.owner_id,
+        end.error.as_deref().unwrap_or_default()
+    );
+    if let Err(error) = db.with_connection(|conn| store::finish_run(conn, run_id, &end, now_ms())) {
+        tracing::warn!("ck-mc: dreamer: recording run {run_id}'s end failed: {error}");
+    }
+    end
 }
 
 fn record_batch(end: &mut RunEnd, reply: &TaskReply) {
@@ -1701,3 +1907,7 @@ mod lift_tests;
 #[cfg(test)]
 #[path = "engine_workspace_tests.rs"]
 mod workspace_tests;
+
+#[cfg(test)]
+#[path = "engine_lease_tests.rs"]
+mod lease_tests;

@@ -299,7 +299,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let dreamer = db.as_ref().map(|_| {
             // A project's dreamer run embeds text with the provider the
             // person's settings configure for its folder, read when the run
-            // starts.
+            // starts, and acts only under its owner's role lease, which it
+            // asks Entorhinal for through the module's client.
             let settings = config.clone();
             Arc::new(
                 crate::dreamer::engine::Engine::new(
@@ -308,7 +309,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 )
                 .with_embedding(Arc::new(move |root: &str| {
                     settings.resolve(Some(root), "", 0).embedding
-                })),
+                }))
+                .with_leases(client.role_leases()),
             )
         });
         // The app reads hear of every change the module's writers make to

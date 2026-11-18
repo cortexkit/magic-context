@@ -770,7 +770,10 @@ async fn broad_through_engine(fixture: Fixture, ends: &[Ends], settings: &Settin
         profile,
     } = fixture;
     let db = Arc::new(db);
-    let engine = Arc::new(Engine::new("this", vec![Box::new(Verify { broad: true })]));
+    let engine = Arc::new(
+        Engine::new("this", vec![Box::new(Verify { broad: true })])
+            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
+    );
     let mut client = Client::new(&["p/a", "p/b"], ends);
     client.plans = vec!["ra", "rb"];
     client.catalog = Ok(vec![

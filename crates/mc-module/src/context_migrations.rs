@@ -950,10 +950,16 @@ fn attribution_facts_111(tx: &Transaction) -> rusqlite::Result<()> {
 /// which takes seconds on a cold disk. A store ck-mc creates gets it here
 /// too, since a new store starts from the plugin's last schema and runs
 /// every module migration.
+///
+/// With sharing comes one dreamer per owner across the computers: a run
+/// acts only under its owner's role lease, and `dream_task_runs` gains
+/// `leases_json`, the roles and generations a run's latest batch was sent
+/// under ([`crate::dreamer::store::journal_leases`]).
 fn shared_memories_112(tx: &Transaction) -> rusqlite::Result<()> {
     crate::replica::schema::install(tx)?;
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_message_fts_rowid_map_fts_rowid
-             ON message_fts_rowid_map(fts_rowid);",
+             ON message_fts_rowid_map(fts_rowid);
+         ALTER TABLE dream_task_runs ADD COLUMN leases_json TEXT;",
     )
 }
