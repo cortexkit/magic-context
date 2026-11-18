@@ -423,7 +423,8 @@ fn the_schema_defaults_are_the_readers_defaults() {
             "{kind}"
         );
     }
-    // Delivered as a view, the defaults are known for what they are.
+    // A delivered view marks the defaults as defaults, so the user tier
+    // leaves them out.
     let view = review(json!({})).unwrap();
     assert_eq!(view.effective, defaults);
     let tier = UserTier::from_view(&view.effective, &view.sources);

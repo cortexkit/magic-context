@@ -166,7 +166,8 @@ fn a_daemon_without_a_config_gate_has_the_user_file_read() {
     loader.config_files();
     let settings = loader.resolve(None, OPUS, 200_000);
     assert_eq!(settings.execute_threshold_percentage, 80.0);
-    // The file is read in the managed shape.
+    // The file is read in the managed shape: `clock_note: "off"` switches
+    // the clock note off.
     assert_eq!(settings.clock_note, None);
 }
 

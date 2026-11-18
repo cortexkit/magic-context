@@ -53,7 +53,8 @@ pub(super) fn assert_same(actual: &Settings, expected: &Settings, case: &str) {
     );
 }
 
-/// The effective view the daemon delivers for `user`, as ck-mc's user tier.
+/// The effective view the daemon delivers for `user`, converted to a
+/// `UserTier`.
 fn delivered(user: &Value) -> UserTier {
     let tuple = super::review::schema()
         .review_tuple(
@@ -135,7 +136,7 @@ fn equivalent_files_resolve_to_the_same_settings_in_both_builds() {
 }
 
 /// What the dreamer runs with: its budget, its projects and each task's
-/// schedule. A schedule set for a task ck-mc doesn't run is never read, and
+/// schedule. A schedule for a task not in `TASK_KINDS` is never read, and
 /// the conversion drops it.
 fn dreamer(user: &Value) -> Option<(u64, Option<std::collections::BTreeSet<String>>, Vec<String>)> {
     super::dreamer_settings(Some(user)).map(|settings| {
@@ -152,9 +153,9 @@ fn dreamer(user: &Value) -> Option<(u64, Option<std::collections::BTreeSet<Strin
     })
 }
 
-/// The one place the conversion changes a meaning (approved with the
-/// design): a number `keep_reasoning_tokens` becomes the map's `default`,
-/// so a project's map now merges into it instead of replacing it.
+/// The one place the conversion changes a meaning: a number
+/// `keep_reasoning_tokens` becomes the map's `default`, so a project's map
+/// now merges into it instead of replacing it.
 #[test]
 fn a_number_keep_reasoning_tokens_survives_a_projects_map_once_converted() {
     let vault = Vault::none();

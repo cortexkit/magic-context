@@ -10,9 +10,12 @@
 //!
 //! The user tier comes from, in order:
 //! 1. the view the daemon delivered this run;
-//! 2. before that, the last view a run applied, saved in ck-mc's data folder
-//!    (it was approved, and serving it keeps a restart from moving the bytes
-//!    of any session's history head);
+//! 2. before that, the last view a run applied, saved in ck-mc's data folder.
+//!    It was approved, and it is what the previous run served: settings such
+//!    as the memory budget and the thresholds shape the history head ck-mc
+//!    renders at the start of every session's request, so serving different
+//!    ones after a restart would change those bytes and cost each session a
+//!    full prompt-cache rewrite;
 //! 3. on the first run, with no saved view, nothing: settings resolution
 //!    waits up to [`FIRST_STATE_WAIT`] for the daemon's first answer, then
 //!    serves its view, the defaults when it refused the settings and none

@@ -25,6 +25,11 @@
 //!
 //! Each file is re-read when its modification time changes, so an edit
 //! applies from the session's next pass without a restart.
+//!
+//! A build with the `managed-settings` switch takes the user's settings from
+//! the daemon's managed settings instead of the user file (`managed`); the
+//! project file is read as above either way. Both builds resolve the user's
+//! settings through one `UserTier`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;

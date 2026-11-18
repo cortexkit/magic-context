@@ -1,5 +1,5 @@
 //! The review of proposed settings ([`super::review::review`]): the
-//! schema's refusals, the checks only ck-mc can make, and the changes an
+//! schema's refusals, the checks the schema can't state, and the changes an
 //! accepted proposal makes.
 
 use std::fs;
