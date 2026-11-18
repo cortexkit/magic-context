@@ -49,6 +49,7 @@ import { createHash } from "node:crypto";
 import type { ContextDatabase } from "../features/magic-context/storage";
 import { saveSourceContent } from "../features/magic-context/storage-source";
 import {
+    setTagTokenCount,
     updateTagByteSize,
     updateTagInputByteSize,
     updateTagInputTokenCount,
@@ -326,6 +327,8 @@ interface ToolAggregate {
     resultImageTokens: number;
     /** This pass's result text blocks, before the tag prefix, for applyImageResultAccounting. */
     resultTexts: ResultTextBlock[];
+    /** Set when applyGrownToolResultAccounting wrote this pass (its write keeps the larger count). */
+    tokenCountGrewThisPass?: boolean;
     /** Tool name from the first occurrence we see one on. */
     toolName: string | null;
     /** Input byte size from the invocation occurrence (for storage projection). */
@@ -821,6 +824,7 @@ function applyGrownToolResultAccounting(args: GrownToolResultAccountingArgs): vo
     }
     args.aggregate.maxByteSize = args.byteSize;
     args.aggregate.maxTokenCount = tokenCount;
+    args.aggregate.tokenCountGrewThisPass = true;
     updateTagByteSize(args.db, args.sessionId, args.aggregate.tagId, args.byteSize);
     updateTagTokenCount(args.db, args.sessionId, args.aggregate.tagId, tokenCount);
     syncToolAggregateAccounting(args.tagger, args.sessionId, args.aggregate);
@@ -840,14 +844,20 @@ function noteResultBlock(
 
 /**
  * A tool result that carries images (Pi's `read` of a picture, an image
- * generator) is sized as its largest text block plus each image at the host's
- * per-image token cost. Byte-growth accounting alone would leave it at the count
- * of its largest block, which is an image whose bytes are base64: the protected
- * tail, the drop planners and status would then see a few dozen tokens for an
- * output the provider bills as an image. Runs once per pass after the walk, so
- * block order does not matter; only raises the stored count, so replaying the
- * same request writes nothing and a row stored before images were counted is
- * corrected on its next pass. Results without images are left untouched.
+ * generator) is sized as its largest text block plus each image at what the
+ * request carries for it: the host's per-image token cost while the image is
+ * sent, or the cost of the text placeholder sent in its place (the
+ * processed-image strip's marker, or the host's note for a model without image
+ * input; see the Pi transcript's `imageTokens`). Byte-growth accounting alone
+ * would leave it at the count of its largest block, an image whose bytes are
+ * base64, so the protected tail, the drop planners and status would see a few
+ * dozen tokens for an output the provider bills as an image. Runs once per
+ * pass after the walk, so block order does not matter. The stored count follows
+ * the request both ways: it rises when a row stored before images were counted
+ * is seen again, and falls once an image leaves the request, so a queued drop
+ * of an already-stripped result is not valued at the images it no longer
+ * removes. Replaying the same request writes nothing. Results without images
+ * are left untouched.
  */
 function applyImageResultAccounting(args: {
     db: ContextDatabase;
@@ -874,9 +884,11 @@ function applyImageResultAccounting(args: {
     }
     if (args.timing) args.timing.tokenCounting += performance.now() - tokenStart;
     const tokenCount = textTokens + aggregate.resultImageTokens;
-    if (tokenCount <= aggregate.maxTokenCount) return;
+    // A growth write this pass keeps the larger of the stored and new counts, so
+    // the in-memory count may not be what the row holds; write the exact count.
+    if (tokenCount === aggregate.maxTokenCount && !aggregate.tokenCountGrewThisPass) return;
     aggregate.maxTokenCount = tokenCount;
-    updateTagTokenCount(args.db, args.sessionId, aggregate.tagId, tokenCount);
+    setTagTokenCount(args.db, args.sessionId, aggregate.tagId, tokenCount);
     syncToolAggregateAccounting(args.tagger, args.sessionId, aggregate);
 }
 

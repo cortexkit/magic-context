@@ -178,6 +178,13 @@ export function createPiTranscript(
 		authorizeToolRemoval?: (callId: string) => boolean | "defer";
 		/** Optional bulk persistence of the same decisions requested during measurement. */
 		authorizeToolRemovals?: (callIds: readonly string[]) => void;
+		/**
+		 * Token cost of the image block at `partIndex` of the tool result at
+		 * `messageIndex`, as the request carries it. Defaults to PI_IMAGE_TOKENS;
+		 * the context handler passes a placeholder's cost for an image the request
+		 * does not carry (see piToolImageWireTokens).
+		 */
+		toolImageTokens?: (messageIndex: number, partIndex: number) => number;
 	} = {},
 ): Transcript & {
 	/**
@@ -220,6 +227,8 @@ export function createPiTranscript(
 	toolRemovals.set(working, removals);
 	if (options.authorizeToolRemoval)
 		toolRemovalAuthorization.set(working, options.authorizeToolRemoval);
+	if (options.toolImageTokens)
+		toolImageTokenCost.set(working, options.toolImageTokens);
 	const emptyRemovedMessages = new Set<unknown>();
 	const toolInputChanges = new Map<number, Set<string>>();
 
@@ -955,10 +964,13 @@ function createPiToolResultPart(
 		kind,
 		id: msg.toolCallId,
 		imageTokens() {
-			return (working[messageIndex] as PiToolResultMessage).content[partIndex]
-				?.type === "image"
-				? PI_IMAGE_TOKENS
-				: 0;
+			if (
+				(working[messageIndex] as PiToolResultMessage).content[partIndex]
+					?.type !== "image"
+			)
+				return 0;
+			const cost = toolImageTokenCost.get(working);
+			return cost ? cost(messageIndex, partIndex) : PI_IMAGE_TOKENS;
 		},
 		remove(): boolean {
 			return markToolRemoval(working, messageIndex, partIndex);
@@ -1101,6 +1113,11 @@ const toolRemovals = new WeakMap<PiAgentMessage[], Map<number, Set<number>>>();
 const toolRemovalAuthorization = new WeakMap<
 	PiAgentMessage[],
 	(callId: string) => boolean | "defer"
+>();
+/** Per-transcript override of a tool-result image's token cost (createPiTranscript's toolImageTokens). */
+const toolImageTokenCost = new WeakMap<
+	PiAgentMessage[],
+	(messageIndex: number, partIndex: number) => number
 >();
 function markToolRemoval(
 	working: PiAgentMessage[],

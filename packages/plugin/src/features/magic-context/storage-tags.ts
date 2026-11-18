@@ -559,7 +559,19 @@ export function updateTagInputByteSize(
 }
 
 const updateTagTokenCountStatements = new WeakMap<Database, PreparedStatement>();
+const setTagTokenCountStatements = new WeakMap<Database, PreparedStatement>();
 const updateTagInputTokenCountStatements = new WeakMap<Database, PreparedStatement>();
+
+function getSetTagTokenCountStatement(db: Database): PreparedStatement {
+    let stmt = setTagTokenCountStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "UPDATE tags SET token_count = ? WHERE session_id = ? AND tag_number = ?",
+        );
+        setTagTokenCountStatements.set(db, stmt);
+    }
+    return stmt;
+}
 
 function getUpdateTagTokenCountStatement(db: Database): PreparedStatement {
     let stmt = updateTagTokenCountStatements.get(db);
@@ -595,6 +607,21 @@ export function updateTagTokenCount(
     newTokenCount: number,
 ): void {
     getUpdateTagTokenCountStatement(db).run(newTokenCount, sessionId, tagNumber);
+}
+
+/**
+ * Set a tag's token_count to exactly `tokenCount`, lower or higher. For a
+ * count that follows what the request carries (a Pi tool result's images, once
+ * the processed-image strip or a text-only model takes them off the request);
+ * growth of a tool result's own payload goes through updateTagTokenCount.
+ */
+export function setTagTokenCount(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    tokenCount: number,
+): void {
+    getSetTagTokenCountStatement(db).run(tokenCount, sessionId, tagNumber);
 }
 
 export interface PersistedToolTagAccounting {

@@ -3,7 +3,9 @@ import {
 	type ContextDatabase,
 	getProcessedImageStrippedIds,
 } from "@magic-context/core/features/magic-context/storage";
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { sessionLog } from "@magic-context/core/shared/logger";
+import { PI_IMAGE_TOKENS } from "./tokenize-pi-messages";
 
 interface PiImagePart {
 	type: "image";
@@ -18,9 +20,10 @@ export interface StripPiProcessedImagesResult {
 
 // A non-empty marker preserves user/tool-result boundaries and keeps Anthropic
 // tool_result content valid after Pi removes the image bytes.
-const STRIPPED_IMAGE_MARKER = "[image stripped]";
+export const STRIPPED_IMAGE_MARKER = "[image stripped]";
 
-function isLargeImagePart(value: unknown): value is PiImagePart {
+/** Whether the processed-image strip replaces this block in a message whose id it froze. */
+export function isLargeImagePart(value: unknown): value is PiImagePart {
 	if (!value || typeof value !== "object") return false;
 	const part = value as Record<string, unknown>;
 	return (
@@ -30,6 +33,44 @@ function isLargeImagePart(value: unknown): value is PiImagePart {
 		typeof part.data === "string" &&
 		part.data.length > 200
 	);
+}
+
+/**
+ * What Pi's provider layer (pi-ai) sends for a tool-result image when the
+ * session's model takes no image input. Oh My Pi sends a similar short note.
+ */
+export const PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER =
+	"(tool image omitted: model does not support images)";
+
+/**
+ * Whether the session's model takes image input, read from the `input` list
+ * Pi's model descriptors carry. A model without that list is assumed to take
+ * images, as before this check existed.
+ */
+export function piModelAcceptsImages(model: unknown): boolean {
+	const input = (model as { input?: unknown } | null | undefined)?.input;
+	return !Array.isArray(input) || input.includes("image");
+}
+
+/**
+ * Token cost of a tool-result image block as the request carries it. An image
+ * counts at the per-image cost only while it is sent. In a message whose id the
+ * processed-image strip froze (`stripped`), a large image is replaced by the
+ * strip's marker; for a model without image input the host replaces every
+ * image with a short note. Either way the block counts as its placeholder text.
+ * (pi-ai merges consecutive images into one note; each is counted here, a few
+ * tokens over.)
+ */
+export function piToolImageWireTokens(args: {
+	block: unknown;
+	stripped: boolean;
+	modelAcceptsImages: boolean;
+}): number {
+	if (args.stripped && isLargeImagePart(args.block))
+		return estimateTokens(STRIPPED_IMAGE_MARKER);
+	if (!args.modelAcceptsImages)
+		return estimateTokens(PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER);
+	return PI_IMAGE_TOKENS;
 }
 
 interface StripPiProcessedImagesArgs {

@@ -5,6 +5,12 @@ import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-ses
 import type { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
+import {
+	PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER,
+	piModelAcceptsImages,
+	piToolImageWireTokens,
+	STRIPPED_IMAGE_MARKER,
+} from "./strip-processed-images-pi";
 import { assistantToolCall, createTestDb } from "./test-utils.test";
 import { PI_IMAGE_TOKENS } from "./tokenize-pi-messages";
 import { createPiTranscript } from "./transcript-pi";
@@ -58,11 +64,13 @@ function tagPass(
 	makeMessages: () => unknown[],
 	entryIds: string[],
 	reuse: boolean,
+	toolImageTokens?: (messageIndex: number, partIndex: number) => number,
 ) {
 	const transcript = createPiTranscript(
 		makeMessages() as never,
 		sessionId,
 		entryIds,
+		{ toolImageTokens },
 	);
 	tagTranscript(sessionId, transcript, tagger, db, {
 		reuseMessageIds: reuse ? new Set(entryIds) : undefined,
@@ -176,19 +184,97 @@ describe("Pi tool results that carry images", () => {
 			// A 49,152-token protection floor, as on the affected Pi session where
 			// the protected tail covered every image output.
 			const window = getProtectionWindowForSession(db, sessionId, 49_152);
-			let newest = 0;
-			let mass = 0;
-			for (const row of toolRows(db, sessionId).reverse()) {
-				newest += 1;
-				mass += row.token_count ?? 0;
-				if (mass >= 49_152) break;
+			// Expected from what each output carries, not from the stored rows: its
+			// caption plus one image. The newest outputs are protected until their
+			// total reaches the floor, the one that crosses it included.
+			let expectedProtected = 0;
+			let carried = 0;
+			for (let index = outputs - 1; index >= 0 && carried < 49_152; index--) {
+				carried += estimateTokens(`Generated image ${index}`) + PI_IMAGE_TOKENS;
+				expectedProtected += 1;
 			}
-			// About 40 outputs of one image each fill the budget; older ones may go.
-			expect(newest).toBeLessThan(outputs);
-			expect(window.status.protectedCount).toBe(newest);
-			expect(window.cutoff).toBeGreaterThan(
-				toolRows(db, sessionId)[0]?.tag_number ?? 0,
+			expect(expectedProtected).toBe(41);
+			expect(window.status.protectedCount).toBe(expectedProtected);
+			const tags = toolRows(db, sessionId).map((row) => row.tag_number);
+			expect(tags).toHaveLength(outputs);
+			expect([...window.protectedTagNumbers].sort((a, b) => a - b)).toEqual(
+				tags.slice(outputs - expectedProtected),
 			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+});
+
+describe("Pi tool-result images the request does not carry", () => {
+	const caption = "Generated image saved to out/cat.png";
+	const makeMessages = () => [
+		assistantToolCall("call-one", "generate_image", { prompt: "cat" }, 1),
+		imageToolResult("call-one", "generate_image", caption, 3, 2),
+	];
+	const entryIds = ["a1", "r1"];
+	const resultIndex = 1;
+	const blockAt = (messageIndex: number, partIndex: number) =>
+		(makeMessages()[messageIndex] as { content: unknown[] } | undefined)
+			?.content[partIndex];
+
+	it("count the processed-image strip's marker once the strip froze the result, and the image again if it returns", () => {
+		const db = createTestDb();
+		const sessionId = "ses-image-tool-stripped";
+		try {
+			const tagger = createTagger();
+			tagger.initFromDb(sessionId, db);
+			let frozen = new Set<string>();
+			const wireTokens = (messageIndex: number, partIndex: number) =>
+				piToolImageWireTokens({
+					block: blockAt(messageIndex, partIndex),
+					stripped: frozen.has(entryIds[messageIndex] ?? ""),
+					modelAcceptsImages: true,
+				});
+			const count = () => toolRows(db, sessionId)[0]?.token_count;
+
+			tagPass(db, tagger, sessionId, makeMessages, entryIds, false, wireTokens);
+			expect(count()).toBe(estimateTokens(caption) + 3 * PI_IMAGE_TOKENS);
+
+			// A later rebuild froze the result: its images go out as markers.
+			frozen = new Set([entryIds[resultIndex] as string]);
+			tagPass(db, tagger, sessionId, makeMessages, entryIds, true, wireTokens);
+			const stripped =
+				estimateTokens(caption) + 3 * estimateTokens(STRIPPED_IMAGE_MARKER);
+			expect(count()).toBe(stripped);
+			expect(stripped).toBeLessThan(40);
+			// Replaying the frozen request keeps the count.
+			tagPass(db, tagger, sessionId, makeMessages, entryIds, true, wireTokens);
+			expect(count()).toBe(stripped);
+
+			frozen = new Set();
+			tagPass(db, tagger, sessionId, makeMessages, entryIds, true, wireTokens);
+			expect(count()).toBe(estimateTokens(caption) + 3 * PI_IMAGE_TOKENS);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("count the host's note for a model without image input", () => {
+		const db = createTestDb();
+		const sessionId = "ses-image-tool-text-model";
+		try {
+			const tagger = createTagger();
+			tagger.initFromDb(sessionId, db);
+			const textOnly = (messageIndex: number, partIndex: number) =>
+				piToolImageWireTokens({
+					block: blockAt(messageIndex, partIndex),
+					stripped: false,
+					modelAcceptsImages: piModelAcceptsImages({ input: ["text"] }),
+				});
+			tagPass(db, tagger, sessionId, makeMessages, entryIds, false, textOnly);
+			expect(toolRows(db, sessionId)[0]?.token_count).toBe(
+				estimateTokens(caption) +
+					3 * estimateTokens(PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER),
+			);
+			expect(piModelAcceptsImages({ input: ["text", "image"] })).toBe(true);
+			// A model descriptor without an input list keeps images counted.
+			expect(piModelAcceptsImages({ id: "unknown" })).toBe(true);
 		} finally {
 			closeQuietly(db);
 		}

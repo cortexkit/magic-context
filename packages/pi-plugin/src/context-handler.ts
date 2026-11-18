@@ -95,6 +95,7 @@ import {
 	getPendingOpsCount,
 	getPendingPiCompactionMarkerState,
 	getPersistedToolTagAccounting,
+	getProcessedImageStrippedIds,
 	getTagsByNumbers,
 	getTagsBySession,
 	getTagsForPendingOperations,
@@ -559,7 +560,11 @@ import {
 	PiServedIdentityError,
 } from "./served-array-ledger";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
-import { stripPiProcessedImages } from "./strip-processed-images-pi";
+import {
+	piModelAcceptsImages,
+	piToolImageWireTokens,
+	stripPiProcessedImages,
+} from "./strip-processed-images-pi";
 import {
 	adoptPiCompactionSystemSnapshot,
 	isPiSystemEntry,
@@ -6252,6 +6257,7 @@ export function registerPiContextHandler(
 				resolvedProviderID: ctx.model?.provider,
 				resolvedModelID: ctx.model?.id,
 				providerApi: ctx.model?.api,
+				modelAcceptsImages: piModelAcceptsImages(ctx.model),
 				canUseEmptySentinels,
 				temporalAwareness: options.injection?.temporalAwareness === true,
 				appendCompaction: guardedPiAppendCompaction(ctx, assertCurrentPass),
@@ -9200,6 +9206,11 @@ interface RunPipelineArgs {
 	resolvedProviderID?: string;
 	resolvedModelID?: string;
 	providerApi?: string;
+	/**
+	 * False when the session's model declares no image input, so the host sends a
+	 * short note instead of each tool-result image. Missing means images are sent.
+	 */
+	modelAcceptsImages?: boolean;
 	assertCurrentPass?: () => void;
 	/** Milliseconds left before the pass's outcome deadline; bounds fallback-tag adoption. */
 	remainingPassMs?: () => number;
@@ -10459,6 +10470,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	};
 	const tTranscriptBuild = performance.now();
+	// Read once, and only when a tool result with an image is tagged.
+	let frozenImageMessageIds: ReadonlySet<string> | undefined;
 	const transcript = createPiTranscript(
 		args.messages,
 		args.sessionId,
@@ -10487,6 +10500,26 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					saved: nativeRemovalInputs,
 					canApply: isCacheBustingPass,
 				}),
+			// A tool result's token count is what the request carries for it: an
+			// image the processed-image strip froze, or one the model cannot take,
+			// counts as the text sent in its place.
+			toolImageTokens: (messageIndex, partIndex) => {
+				const message = args.messages[messageIndex] as
+					| { content?: unknown }
+					| undefined;
+				const id = stableIdResolver(message, messageIndex);
+				frozenImageMessageIds ??= getProcessedImageStrippedIds(
+					args.db,
+					args.sessionId,
+				);
+				return piToolImageWireTokens({
+					block: Array.isArray(message?.content)
+						? message.content[partIndex]
+						: undefined,
+					stripped: id !== undefined && frozenImageMessageIds.has(id),
+					modelAcceptsImages: args.modelAcceptsImages !== false,
+				});
+			},
 		},
 	);
 	logTransformTiming(args.sessionId, "transcriptBuild", tTranscriptBuild);
