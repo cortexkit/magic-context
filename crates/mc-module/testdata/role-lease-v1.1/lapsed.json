@@ -1,0 +1,3 @@
+[
+  {"op":"role.lease","request":{"role":"dreamer.workspace_02"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"StreamData","body":{"holding":true,"gen":4,"valid_for_ms":45000,"issued_at_ms":100000,"seq":4}},{"type":"StreamEnd","body":null}]}
+]

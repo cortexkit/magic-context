@@ -1,0 +1,4 @@
+[
+  {"op":"role.lease","request":{"role":"connector_home"},"principal":{"kind":"reserved","moduleId":"plexus"},"frames":[{"type":"StreamData","body":{"holding":true,"gen":1,"valid_for_ms":45000,"issued_at_ms":100000,"seq":1}},{"type":"StreamData","body":{"holding":true,"gen":1,"valid_for_ms":45000,"issued_at_ms":120000,"seq":2}}]},
+  {"op":"role.lease","request":{"role":"dreamer.global"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"StreamData","body":{"holding":true,"gen":1,"valid_for_ms":45000,"issued_at_ms":120000,"seq":3}},{"type":"StreamData","body":{"holding":true,"gen":1,"valid_for_ms":45000,"issued_at_ms":140000,"seq":4}}]}
+]
