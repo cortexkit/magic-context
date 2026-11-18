@@ -45,6 +45,37 @@ fn review(user: &Value, base: Option<ConfigView>, user_path: &Path) -> ConfigRev
 }
 
 #[test]
+fn a_layer_with_a_byte_order_mark_reads_as_json() {
+    let request = ConfigReviewRequest::new(
+        0,
+        vec![ConfigLayerSnapshot::file(
+            "magic-context",
+            ConfigLayer::User,
+            USER_FILE,
+            Some(b"\xef\xbb\xbf{\"language\": \"tr\"}\r\n".to_vec()),
+        )],
+        None,
+    );
+    let reply = super::review::review(&request, Path::new(USER_FILE));
+    assert!(reply.refusals.is_empty(), "{:?}", reply.refusals);
+    assert!(reply.fields.iter().any(|field| field.path == "/language"));
+    // Bytes that are not JSON are refused, not read as nothing.
+    let request = ConfigReviewRequest::new(
+        0,
+        vec![ConfigLayerSnapshot::file(
+            "magic-context",
+            ConfigLayer::User,
+            USER_FILE,
+            Some(b"{\"language\": \"tr\",} // trailing".to_vec()),
+        )],
+        None,
+    );
+    let reply = super::review::review(&request, Path::new(USER_FILE));
+    assert_eq!(reply.refusals.len(), 1);
+    assert!(reply.fields.is_empty());
+}
+
+#[test]
 fn a_guidance_file_that_is_missing_or_lacks_one_heading_is_refused_naming_the_field() {
     let folder = tempfile::tempdir().unwrap();
     let user_path = folder.path().join("magic-context.jsonc");

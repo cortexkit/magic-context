@@ -120,6 +120,8 @@ pub fn review(request: &ConfigReviewRequest, user_path: &Path) -> ConfigReviewRe
                 "a settings layer of a kind ck-mc does not know".into(),
             )]);
         };
+        // A layer's bytes are plain JSON; a byte order mark is not JSON.
+        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
         match serde_json::from_slice::<Value>(bytes) {
             Ok(value) => layers.push(LayerValue::new(layer, value)),
             Err(error) => {
