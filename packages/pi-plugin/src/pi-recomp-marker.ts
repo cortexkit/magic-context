@@ -39,33 +39,28 @@ function placeFirstKeptEntryId(
 }
 
 /**
- * Advance the Pi native compaction marker to the latest compartment boundary
- * after a recomp republish, so `getBranch()` returns only the kept tail and the
- * JSONL branch actually trims.
+ * Stage the Pi compaction marker for the newest compartment WITHOUT applying
+ * it, then signal a deferred history refresh so the next cache-busting
+ * transform pass drains and applies it via the pipeline's deferred-marker path.
  *
- * A full recomp rebuilds every compartment; without this call it republished
- * compartments but never moved the native marker, so the entire pre-recomp
- * branch stayed visible and grew unbounded until a later incremental historian
- * pass happened to advance it. (The m[0]/m[1] materialization signals a recomp
- * already fires drive the synthetic `<session-history>` render — NOT the native
+ * A full recomp rebuilds every compartment; without a marker for the rebuilt
+ * history the native marker never moves, so `getBranch()` keeps returning the
+ * whole pre-recomp branch. (The m[0]/m[1] materialization signals a recomp
+ * already fires drive the synthetic `<session-history>` render, not the native
  * marker that trims `getBranch()`; those are separate mechanisms.)
- *
- * No-ops safely when the Pi session manager exposes neither appendCompaction nor
- * getBranch, when there is no compartment yet, or when no real replay-safe
- * entry exists at or after the boundary (so we never stage an unmatchable
- * synthetic marker).
- */
-/**
- * Stage the Pi compaction marker WITHOUT applying it, then signal a deferred
- * history refresh so the next cache-busting transform pass drains and applies it
- * via the pipeline's deferred-marker path.
  *
  * Used by detached recomp and upgrade runs: applying the marker eagerly
  * (`appendCompaction`) mutates `getBranch()` immediately and could alter a
  * cache-stable pass. Staging + deferred drain mirrors the background historian's
- * `onPublished` signals so the marker rides the next genuine bust. No-ops safely
- * when the boundary has no
- * replay-safe entry at or after it (same guards as the eager path).
+ * `onPublished` signals so the marker rides the next genuine bust.
+ *
+ * The staged marker replaces any marker still pending for the compartments the
+ * recomp replaced: the drain could only discard that one, since its summary no
+ * longer exists. When the branch has no entry after the newest summary yet (a
+ * full recomp of a session with no unsummarized tail ends on the snapshot's
+ * newest message), or the stored ordinals cannot be placed on it, the marker is
+ * staged without a kept entry, as the historian stages it; the drain places it
+ * once the next message arrives, and keeps it waiting until then.
  */
 export function stagePiRecompMarker(args: {
 	db: ContextDatabase;
@@ -74,7 +69,7 @@ export function stagePiRecompMarker(args: {
 }): void {
 	const compartments = getCompartments(args.db, args.sessionId);
 	const last = compartments[compartments.length - 1];
-	if (!last) return;
+	if (!last || last.endMessageId.length === 0) return;
 
 	let firstKeptEntryId: string | null = null;
 	try {
@@ -87,7 +82,6 @@ export function stagePiRecompMarker(args: {
 	} catch {
 		firstKeptEntryId = null;
 	}
-	if (!firstKeptEntryId || last.endMessageId.length === 0) return;
 
 	setPendingPiCompactionMarkerState(args.db, args.sessionId, {
 		firstKeptEntryId,
