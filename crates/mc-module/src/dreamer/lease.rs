@@ -39,6 +39,11 @@
 //! The live client is the transport's ([`crate::transport`]); tests drive
 //! the same [`Lease`] with a double fed Entorhinal's published samples
 //! (`testdata/role-lease-v1.2`).
+//!
+//! The lease matters only once memories replicate, so the dreamer uses it
+//! only in a build with the `memory-replica` feature ([`ENABLED`]). Without
+//! it a run opens no watch and journals no lease, and runs as it did
+//! before leases existed.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,6 +58,12 @@ use super::store::OwnerKey;
 
 /// Entorhinal's watch of one role's lease.
 pub const LEASE_OP: &str = "role.lease";
+
+/// Whether dreamer runs take their owners' role leases: only in a build
+/// with the `memory-replica` feature, where memories travel between the
+/// user's computers and two of them could otherwise run one owner's
+/// dreamer at once.
+pub const ENABLED: bool = cfg!(feature = "memory-replica");
 /// The acknowledgement of one notice of that watch.
 pub const ACK_OP: &str = "role.lease.ack";
 /// A holder's offer of the role to the computer that asked for it.

@@ -2,7 +2,11 @@
 //! acts only while Entorhinal says this computer holds it, journaling the
 //! generation it acts under before each batch. The leases come from a
 //! stand-in fed Entorhinal's published samples, read on a clock the test
-//! sets.
+//! sets. Runs take leases only in a build with the `memory-replica`
+//! feature; without it, one test checks that they take none.
+
+// The helpers serve the feature's tests; a build without it uses few.
+#![cfg_attr(not(feature = "memory-replica"), allow(dead_code, unused_imports))]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -279,6 +283,7 @@ fn acks(log: &Log, role: &str) -> Vec<u64> {
 /// (`sharing-disabled.json`): the run goes as it always did, every batch
 /// journaled and published under gen 1, every notice acknowledged, and the
 /// watch closed when the run ends.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_single_computer_runs_the_dreamer_as_before() {
     let (_dir, db) = store();
@@ -305,6 +310,7 @@ async fn a_single_computer_runs_the_dreamer_as_before() {
 /// A role another computer holds (`not-holding.json`): the run is skipped
 /// with the reason, its notice acknowledged all the same, and its schedule
 /// moves to the next slot, so the next rounds don't ask again.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_role_another_computer_holds_skips_the_run_and_is_not_asked_again() {
     let (_dir, db) = store();
@@ -344,6 +350,7 @@ async fn a_role_another_computer_holds_skips_the_run_and_is_not_asked_again() {
 /// Nothing renews the window (`lapsed.json`, the watch left open): once
 /// its deadline, less the margin, has passed, the run stops before its next
 /// batch, keeping what it applied.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_lapsed_window_stops_the_run_before_its_next_batch() {
     let (_dir, db) = store();
@@ -375,6 +382,7 @@ async fn a_lapsed_window_stops_the_run_before_its_next_batch() {
 
 /// A run whose first notice comes so late that less than the margin of
 /// its window is left starts nothing.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_late_notice_grants_less_time() {
     let (_dir, db) = store();
@@ -396,6 +404,7 @@ async fn a_late_notice_grants_less_time() {
 /// role at that safe point, and the hand-over (`yield-transferred.json`)
 /// stops it before its next batch, its window not yet passed. It is
 /// recorded as handed back, and its watch closes.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_yield_that_hands_the_role_over_stops_the_run_before_its_next_batch() {
     let (_dir, db) = store();
@@ -437,6 +446,7 @@ async fn a_yield_that_hands_the_role_over_stops_the_run_before_its_next_batch() 
 
 /// The same request withdrawn (`yield-withdrawn.json`): the run keeps the
 /// role and sends every batch.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_withdrawn_yield_lets_the_run_go_on() {
     let (_dir, db) = store();
@@ -465,6 +475,7 @@ async fn a_withdrawn_yield_lets_the_run_go_on() {
 
 /// A lease older than one the journal has seen for the role is refused
 /// before any batch: the computer that holds the newer one acts for it.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn an_older_generation_is_refused_by_the_journal() {
     let (_dir, db) = store();
@@ -532,6 +543,7 @@ fn lift(
 /// The lift writes its workspace's memories and its project's, so it holds
 /// both roles, the workspace's first (the lock order). Each change carries
 /// the generation of its own row's role, and the journal records both.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_lift_holds_both_roles_and_each_change_carries_its_own_roles_generation() {
     let (_dir, db) = store();
@@ -563,6 +575,7 @@ async fn a_lift_holds_both_roles_and_each_change_carries_its_own_roles_generatio
 
 /// Only the workspace's window lapses: the lift needs both roles, so it
 /// stops before its next batch.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_lift_stops_when_only_its_workspace_lease_lapses() {
     let (_dir, db) = store();
@@ -595,6 +608,7 @@ async fn a_lift_stops_when_only_its_workspace_lease_lapses() {
 /// Only the project's role is asked back: the lift yields that one, and,
 /// once it is handed over, stops, since it needs both. The workspace's
 /// role is never offered.
+#[cfg(feature = "memory-replica")]
 #[tokio::test]
 async fn a_lift_yields_the_one_role_asked_back_and_stops() {
     let (_dir, db) = store();
@@ -627,4 +641,27 @@ async fn a_lift_yields_the_one_role_asked_back_and_stops() {
     assert_eq!(client.sends.lock().unwrap().len(), 1);
     assert_eq!(last_run(&db).0.as_deref(), Some("handed_back"));
     assert_eq!(leases.log().yields, [(ROLE.to_owned(), 9)]);
+}
+
+/// Without the `memory-replica` feature the dreamer takes no lease: a run
+/// that Entorhinal would refuse (`not-holding.json`) runs as it did before
+/// leases existed. It opens no watch, journals no lease, and what it
+/// applies carries no epoch.
+#[cfg(not(feature = "memory-replica"))]
+#[tokio::test]
+async fn without_memory_replica_a_run_takes_no_lease() {
+    let (_dir, db) = store();
+    let leases = SampleLeases::new();
+    leases.default_script(steps("not-holding.json", "dreamer.pj-fern_01"));
+    let (_, clock) = clock(100_500);
+    let engine = classify(&db, 2, no_hook(), &leases, clock);
+    let client = replies(2);
+    engine.tick(&db, &client, &Settings::default(), now_ms());
+    settled(&engine).await;
+
+    assert_eq!(client.sends.lock().unwrap().len(), 2);
+    assert_eq!(last_run(&db), (Some("applied".into()), None, None));
+    assert_eq!(epochs(&db), ["project batch 0: -", "project batch 1: -"]);
+    assert_eq!(schedule(&db).0.as_deref(), Some("applied"));
+    assert_eq!(leases.log(), Log::default());
 }

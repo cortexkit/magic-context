@@ -179,7 +179,10 @@ async fn a_lapsed_window_stops_the_run_with_the_watch_still_open() {
 #[tokio::test]
 async fn a_late_notice_grants_less_time() {
     let leases = SampleLeases::new();
-    leases.default_script(steps("lapsed.json", "dreamer.workspace_02"));
+    leases.script(
+        "dreamer.workspace_02",
+        steps("lapsed.json", "dreamer.workspace_02"),
+    );
     // Issued at 100 000 for 45 000: received 30 000 late.
     let (now, clock) = fake_clock(130_000);
     let lease = Lease::open(&*leases, "dreamer.workspace_02", &clock)

@@ -25,8 +25,9 @@
 //! run that lost one writes nothing more. A run that used its token budget
 //! stops before its next batch; what it already applied stays.
 //!
-//! The lock keeps two writers of one computer apart; the role lease keeps
-//! two computers apart ([`super::lease`]). Before it takes its locks, a run
+//! The lock keeps two writers of one computer apart; in a build with the
+//! `memory-replica` feature, the role lease keeps two computers apart
+//! ([`super::lease`]). Before it takes its locks, a run
 //! opens the watch of each owner's role, and a run whose role this computer
 //! doesn't hold, or that Entorhinal doesn't answer for within
 //! [`lease::FIRST_NOTICE`], is skipped with the reason, its schedule moving
@@ -312,8 +313,13 @@ impl Engine {
 
     /// Open the lease of each owner's role, in [`store::lock_order`], for a
     /// run that is about to start. `Err` says why the run can't act for one
-    /// of them; every watch opened is closed then.
+    /// of them; every watch opened is closed then. A build without the
+    /// `memory-replica` feature takes no lease ([`lease::ENABLED`]): the run
+    /// gets none, and opens no watch.
     async fn take_leases(&self, owners: &[OwnerKey]) -> Result<Vec<Lease>, String> {
+        if !lease::ENABLED {
+            return Ok(Vec::new());
+        }
         let mut held = Vec::new();
         for owner in store::lock_order(owners) {
             match Lease::open(&*self.leases, &lease::role(&owner), &self.clock).await {
@@ -330,13 +336,18 @@ impl Engine {
     /// Before a paid batch of run `run_id`: whether the run may still act
     /// for every role of `leases`, and if so the generation of each, now
     /// recorded in its journal ([`store::journal_leases`]). `Err` is the
-    /// outcome the run ends with, and why.
+    /// outcome the run ends with, and why. A run without leases (a build
+    /// without `memory-replica`) journals nothing, and its changes carry no
+    /// epoch.
     async fn fence(
         &self,
         db: &ContextDb,
         run_id: i64,
         leases: &[Lease],
     ) -> Result<Vec<(String, i64)>, (&'static str, String)> {
+        if leases.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut gens = Vec::new();
         for lease in leases {
             match lease.standing(&self.clock).await {

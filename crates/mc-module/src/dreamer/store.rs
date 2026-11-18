@@ -492,6 +492,11 @@ pub fn journal_leases(
     gens: &[(String, i64)],
 ) -> rusqlite::Result<Result<(), String>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // This relies on Entorhinal keeping each role's generation rising on
+    // every computer: it stores a high-water mark that survives restarts,
+    // grants a local lease at the mark plus one, and takes a hub lease above
+    // both the hub's generation and the mark, so a lease held legitimately
+    // never falls below one this journal has seen.
     for (role, gen) in gens {
         if let Some(highest) = highest_gen(&tx, role)?.filter(|highest| gen < highest) {
             return Ok(Err(format!(

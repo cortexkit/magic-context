@@ -18,6 +18,12 @@ agent-data = []
 # Opt-in heap attribution for the `heap_profile` test (allocation sites with
 # backtraces). Only that test target requires it; no build of ck-mc turns it on.
 heap-profile = ["dep:dhat"]
+# Memories shared across the user's computers. Only with it does a dreamer
+# run ask Entorhinal for its owner's role lease (`dreamer::lease`); without
+# it the dreamer opens no watch and records no lease, and the changes it
+# publishes carry no lease epoch, so no receiver ever skips one of them as
+# written by a computer that had lost the role.
+memory-replica = []
 
 [dependencies]
 # The heap profiler behind `heap-profile`.
