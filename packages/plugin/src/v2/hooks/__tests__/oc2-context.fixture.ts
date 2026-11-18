@@ -388,10 +388,11 @@ export async function oc2ContextFixture(
             return ordinalOf(rows[endIndex]!.id);
         },
         /** The host folds: one compaction row after the existing rows, then a short host window. */
-        async fold(windowRows = 3) {
+        async fold(windowRows = 3, suppliedSummary?: string) {
             const draft = structuredClone(lastDraft!);
-            await hooks.get("compaction")!(draft);
-            if (!draft.result) throw new Error("compaction hook supplied no summary");
+            if (suppliedSummary === undefined) await hooks.get("compaction")!(draft);
+            const summary = suppliedSummary ?? draft.result?.summary;
+            if (summary === undefined) throw new Error("compaction hook supplied no summary");
             const id = `fold-${seed}-${rows.length}`;
             hostWindowStart = rows.length - windowRows;
             providerWindow = undefined;
@@ -408,7 +409,7 @@ export async function oc2ContextFixture(
                 Date.now(),
                 JSON.stringify({
                     status: "completed",
-                    summary: draft.result.summary,
+                    summary,
                     time: { completed: Date.now() },
                     ...metadata,
                 }),
@@ -416,7 +417,7 @@ export async function oc2ContextFixture(
             checkpoint = {
                 id,
                 role: "user",
-                content: [{ type: "text", text: `<summary>\n${draft.result.summary}\n</summary>` }],
+                content: [{ type: "text", text: `<summary>\n${summary}\n</summary>` }],
                 ...metadata,
             };
         },

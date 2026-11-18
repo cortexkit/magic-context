@@ -2714,7 +2714,7 @@ export async function registerContext(context: V2Context) {
                             )
                                 admitted.add(message.id);
                         const replayDb = db ?? storage.current();
-                        if (localCut && incoming && replayDb) {
+                        if (!compactionOff && localCut && incoming && replayDb) {
                             const admission = nativeFoldReplay
                                 ? await nativeFoldReplay.replayAdmission(
                                       draft.sessionID,
@@ -3098,7 +3098,7 @@ export async function registerContext(context: V2Context) {
                             draft.sessionID,
                         ),
                     );
-                } else if (localCut && cut && incoming) {
+                } else if (!compactionOff && localCut && cut && incoming) {
                     // Only a matching legacy owner can preserve a frozen carrier.
                     // Unknown native wrappers must not become legacy state; the
                     // existing owner's rebuild policy owns retiring old text.
