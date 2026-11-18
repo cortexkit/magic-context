@@ -208,6 +208,8 @@ export interface ProjectCard {
   memory_count: number;
   workspace_name: string | null;
   last_activity_ms: number;
+  /** The home directory, which can never join a workspace. */
+  is_home_project: boolean;
 }
 
 export interface Compartment {

@@ -13,6 +13,25 @@ describe("theme token contrast", () => {
     expect(failing).toEqual([]);
   });
 
+  it("dark-theme pairs added in PR #912 meet WCAG AA", () => {
+    // The dark theme has 52 pre-existing pairs below AA; this test guards only
+    // the pairs added in #912 (grid error banner, context menu text), ensuring
+    // they meet AA in BOTH themes.
+    const pr912Labels = [
+      "grid error text (70% error-text over text-primary) on error-bg",
+      "context-menu explanation (70% text-secondary over text-primary) on bg-elevated",
+      "context-menu explanation (70% text-secondary over text-primary) on bg-elevated-hover",
+      "disabled menu row (50% text-muted over text-primary) on bg-elevated",
+      "disabled menu row (50% text-muted over text-primary) on bg-elevated-hover",
+      "current workspace label (70% accent over text-primary) on bg-elevated",
+      "current workspace label (70% accent over text-primary) on bg-elevated-hover",
+    ];
+    const failing = evaluatePairs("dark", css)
+      .filter((row) => pr912Labels.includes(row.label) && !row.pass)
+      .map((row) => `${row.label}: ${row.ratio.toFixed(2)} < ${row.min}`);
+    expect(failing).toEqual([]);
+  });
+
   it("the light theme overrides every colour token the dark theme defines", () => {
     // A token left out of the light block silently inherits its dark value
     // (dark text on light surfaces, or the reverse).

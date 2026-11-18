@@ -29,6 +29,12 @@ export interface WorkspaceStage {
   removeMembers: string[];
   setNames: Record<string, string>;
   shareCategories: WorkspaceShareCategory[];
+  /** True only when the user has explicitly toggled at least one category checkbox.
+   * Used to decide whether this save "speaks for" the sharing config.
+   * We never infer intent from a comparison to the live workspace — after a refetch
+   * the live value may have changed from another window, and sending the stale
+   * snapshot would re-enable a category the other window just turned off. */
+  categoriesEdited: boolean;
 }
 
 export interface StagedWorkspaceMemberRow extends WorkspaceMemberView {
@@ -50,6 +56,7 @@ export function createWorkspaceStage(workspace: WorkspaceListItem): WorkspaceSta
     removeMembers: [],
     setNames: {},
     shareCategories: normalizeShareCategories(workspace.share_categories),
+    categoriesEdited: false,
   };
 }
 
@@ -118,9 +125,7 @@ export function workspaceStageDirty(workspace: WorkspaceListItem, stage: Workspa
   if (stage.addMembers.length > 0) return true;
   if (stage.removeMembers.length > 0) return true;
   if (effectiveDisplayNameChanges(workspace, stage).length > 0) return true;
-  const currentCategories = normalizeShareCategories(workspace.share_categories);
-  const stagedCategories = normalizeShareCategories(stage.shareCategories);
-  return currentCategories.join("\u0000") !== stagedCategories.join("\u0000");
+  return stage.categoriesEdited;
 }
 
 export function workspaceStageToPayload(workspace: WorkspaceListItem, stage: WorkspaceStage) {
@@ -131,7 +136,14 @@ export function workspaceStageToPayload(workspace: WorkspaceListItem, stage: Wor
     addMembers: stage.addMembers.map((member) => ({ ...member })),
     removeMembers: [...stage.removeMembers],
     setDisplayNames: effectiveDisplayNameChanges(workspace, stage),
-    shareCategories: normalizeShareCategories(stage.shareCategories),
+    // Only a save where the user explicitly toggled a checkbox speaks for the
+    // sharing config.  We do not compare against the live workspace: after a
+    // refetch the workspace value may have been changed from another window, and
+    // sending the stale snapshot would re-enable a category that was just turned
+    // off.  categoriesEdited is set to true only by the UI toggle handler.
+    ...(stage.categoriesEdited
+      ? { shareCategories: normalizeShareCategories(stage.shareCategories) }
+      : {}),
   };
 }
 

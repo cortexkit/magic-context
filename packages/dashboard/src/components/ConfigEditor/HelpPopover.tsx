@@ -1,7 +1,7 @@
 import { createSignal, Show } from "solid-js";
 import { openExternal } from "../../lib/open-external";
+import FloatingLayer from "../shared/FloatingLayer";
 import { CONFIG_HELP, docsUrl } from "./config-help";
-import FloatingLayer from "./FloatingLayer";
 
 export default function HelpPopover(props: { topic: keyof typeof CONFIG_HELP; label: string }) {
   const [open, setOpen] = createSignal(false);

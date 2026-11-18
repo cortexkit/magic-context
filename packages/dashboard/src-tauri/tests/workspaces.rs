@@ -190,7 +190,7 @@ fn apply_add_member(
         vec![add(project_path, display_name, display_path)],
         Vec::new(),
         Vec::new(),
-        default_share_categories(),
+        Some(default_share_categories()),
     )
     .expect("add member");
 }
@@ -303,7 +303,7 @@ fn workspace_refuses_the_user_home_directory() {
         )],
         Vec::new(),
         Vec::new(),
-        default_share_categories(),
+        Some(default_share_categories()),
     )
     .expect_err("home projects must not join workspaces");
 
@@ -348,7 +348,7 @@ fn apply_workspace_changes_multiple_add_remove_single_epoch_fanout() {
         vec![add("git:c", "svc-c", "/c")],
         vec!["git:a".to_string()],
         vec![set_name("git:b", "svc-b-renamed")],
-        default_share_categories(),
+        Some(default_share_categories()),
     )
     .unwrap();
 
@@ -376,7 +376,7 @@ fn apply_workspace_changes_rename_only_does_not_bump_member_epochs() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        default_share_categories(),
+        Some(default_share_categories()),
     )
     .unwrap();
 
@@ -401,11 +401,11 @@ fn apply_workspace_changes_share_categories_change_bumps_and_stores_canonical_js
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        vec![
+        Some(vec![
             "NAMING".to_string(),
             "PROJECT_RULES".to_string(),
             "NAMING".to_string(),
-        ],
+        ]),
     )
     .unwrap();
 
@@ -422,6 +422,43 @@ fn apply_workspace_changes_share_categories_change_bumps_and_stores_canonical_js
 }
 
 #[test]
+fn apply_workspace_changes_membership_only_keeps_stored_share_categories() {
+    let _g = env_lock();
+    let mut conn = make_db_v35();
+    let ws = seed_workspace(&conn, "w");
+    seed_workspace_member(&conn, ws, "git:a", "a", "/a");
+    // Another window narrows sharing between the menu's read and its write.
+    conn.execute(
+        "UPDATE workspaces SET share_categories = ?1 WHERE id = ?2",
+        params!["[\"CONSTRAINTS\"]", ws],
+    )
+    .unwrap();
+
+    workspaces::apply_workspace_changes(
+        &mut conn,
+        ws,
+        None,
+        vec![add("git:b", "b", "/b")],
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+    .expect("membership-only change");
+
+    let stored: String = conn
+        .query_row(
+            "SELECT share_categories FROM workspaces WHERE id = ?1",
+            params![ws],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored, "[\"CONSTRAINTS\"]",
+        "a membership-only write must not resurrect the categories read earlier"
+    );
+}
+
+#[test]
 fn apply_workspace_changes_validates_against_final_staged_members() {
     let _g = env_lock();
     let mut conn = make_db_v35();
@@ -435,7 +472,7 @@ fn apply_workspace_changes_validates_against_final_staged_members() {
         vec![add("git:b", "shared-name", "/b")],
         vec!["git:a".to_string()],
         Vec::new(),
-        default_share_categories(),
+        Some(default_share_categories()),
     )
     .unwrap();
 
@@ -461,7 +498,7 @@ fn apply_workspace_changes_rejects_identity_in_both_add_and_remove() {
         vec![add("git:a", "a2", "/a")],
         vec!["git:a".to_string()],
         Vec::new(),
-        default_share_categories(),
+        Some(default_share_categories()),
     )
     .unwrap_err();
     assert!(err.to_string().contains("both added and removed"));
@@ -480,7 +517,7 @@ fn apply_workspace_changes_rejects_unknown_share_categories() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        vec!["UNKNOWN".to_string()],
+        Some(vec!["UNKNOWN".to_string()]),
     )
     .unwrap_err();
     assert!(err.to_string().contains("Unknown workspace share category"));
@@ -499,7 +536,7 @@ fn display_name_unique_within_workspace() {
         vec![add("git:b", "dup", "/b")],
         Vec::new(),
         Vec::new(),
-        default_share_categories(),
+        Some(default_share_categories()),
     )
     .unwrap_err();
     assert!(err.to_string().contains("already used"));

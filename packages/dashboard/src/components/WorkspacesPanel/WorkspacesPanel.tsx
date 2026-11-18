@@ -45,6 +45,7 @@ export default function WorkspacesPanel() {
     removeMembers: [...stage.removeMembers],
     setNames: { ...stage.setNames },
     shareCategories: [...stage.shareCategories],
+    categoriesEdited: stage.categoriesEdited,
   });
 
   const stageFor = (workspace: WorkspaceListItem): WorkspaceStage =>
@@ -375,6 +376,7 @@ export default function WorkspacesPanel() {
                                       next.shareCategories,
                                       option().value,
                                     );
+                                    next.categoriesEdited = true;
                                     return next;
                                   })
                                 }
