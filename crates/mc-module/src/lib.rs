@@ -18988,7 +18988,7 @@ Your active memories are already in <project-memory> as `#id: fact` lines. Write
 
 Actions:
 - write: new memory (content + category).
-- update: rewrite one memory whose fact changed (ids: [one], content; category optional to recategorize).
+- update: rewrite one memory whose fact changed (ids: [one], content; category required — the current one to keep, a new one to recategorize).
 - archive: retire wrong or obsolete memories (ids: [one or more], optional reason).
 - merge: collapse duplicates into one (ids: [two or more], content).
 - get: fetch by id (ids: 1–20), readable in every status.

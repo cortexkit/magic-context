@@ -88,8 +88,8 @@
         "tokens": 376
       },
       "ctx_memory": {
-        "chars": 1316,
-        "tokens": 319
+        "chars": 1353,
+        "tokens": 329
       },
       "ctx_search": {
         "chars": 1413,
@@ -119,9 +119,9 @@
       },
       "totalTokens": 853
     },
-    "builtInProviderVisibleTotal": 3989
+    "builtInProviderVisibleTotal": 3999
   },
-  "mutableProseBaseline": 3136,
+  "mutableProseBaseline": 3146,
   "integerLightCeiling": 1917,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",

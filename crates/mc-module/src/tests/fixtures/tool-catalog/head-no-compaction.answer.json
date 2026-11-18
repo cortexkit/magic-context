@@ -1,6 +1,6 @@
 {
-  "generation": "6a31b485cd1e5e71e9e36a626a2ee12443d88ce301b8ae8bc911fe4e94d17b32",
-  "catalog_digest": "6a31b485cd1e5e71e9e36a626a2ee12443d88ce301b8ae8bc911fe4e94d17b32",
+  "generation": "49673f9062789768f48251269a95a54fd9f1f6dfe06306b4a78d086ac4c69244",
+  "catalog_digest": "49673f9062789768f48251269a95a54fd9f1f6dfe06306b4a78d086ac4c69244",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -88,7 +88,7 @@
       "capabilities": [
         "magic-context:memory.write/v1"
       ],
-      "description": "Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.\n\nYour active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence (\"do X later, here is what we know\") is ctx_note, not memory.\n\nActions:\n- write: new memory (content + category).\n- update: rewrite one memory whose fact changed (ids: [one], content; category optional to recategorize).\n- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).\n- merge: collapse duplicates into one (ids: [two or more], content).\n- get: fetch by id (ids: 1–20), readable in every status.\nEvery call must carry action, content, category and ids: argument-dropping providers only emit required fields. For get and archive pass content=\"\" and any valid category; for write pass ids=[].\nExamples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\"",
+      "description": "Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.\n\nYour active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence (\"do X later, here is what we know\") is ctx_note, not memory.\n\nActions:\n- write: new memory (content + category).\n- update: rewrite one memory whose fact changed (ids: [one], content; category required — the current one to keep, a new one to recategorize).\n- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).\n- merge: collapse duplicates into one (ids: [two or more], content).\n- get: fetch by id (ids: 1–20), readable in every status.\nEvery call must carry action, content, category and ids: argument-dropping providers only emit required fields. For get and archive pass content=\"\" and any valid category; for write pass ids=[].\nExamples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\"",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive: what earlier sessions said and decided, commits and notes. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.\n\n`ctx_memory` pins facts about this project that stay true for the months this work lasts, for you and for every other agent working on this project. Pin one when you learn something that must not have to be found again, and especially when it cost you several turns to find. Pinned facts are not shown to you automatically: `ctx_search` recalls them.\n\n`ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says \"take a note\", it always goes in the tray.",
     "item_digest": "73c679706bf3e65cc5f7a3de7e7d52600e8e9d071e8b5bdc074ee66cc316bec0",
-    "preflight_digest": "cb16d12cae3162f9f45c5660eb2b5803d90418b248bc220961b3baa28c358c85",
+    "preflight_digest": "42933d6f76bcea3d1a3845ff0938c0e2b219f9c8c208c9cf991e9fed83682e10",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

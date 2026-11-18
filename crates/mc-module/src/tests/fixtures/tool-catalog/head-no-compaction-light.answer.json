@@ -1,6 +1,6 @@
 {
-  "generation": "ce616585ad4e5fc28ccb414fee631729a116b0b29d18b28bc17ca24742d4c1a0",
-  "catalog_digest": "ce616585ad4e5fc28ccb414fee631729a116b0b29d18b28bc17ca24742d4c1a0",
+  "generation": "0a7db54efdc9bb224c78cafdf0d9fa13cf3abdee69db61265f05cd75b170241d",
+  "catalog_digest": "0a7db54efdc9bb224c78cafdf0d9fa13cf3abdee69db61265f05cd75b170241d",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -88,7 +88,7 @@
       "capabilities": [
         "magic-context:memory.write/v1"
       ],
-      "description": "Durable facts about this project, shared with every agent on it and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact when it must not have to be found again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content; category optional); archive one or more ids (reason optional); merge two or more ids (content); get 1–20 ids in any status.",
+      "description": "Durable facts about this project, shared with every agent on it and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact when it must not have to be found again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content; category required); archive one or more ids (reason optional); merge two or more ids (content); get 1–20 ids in any status.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
     "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
-    "preflight_digest": "bebf7c44145993ce9fbb4707ba9ae1b6dacb9798dd8d54141b725b7e895553f3",
+    "preflight_digest": "245142a89e7f6802ae95ea5bd818e40e63d5a2d3aa1bf355f496c9ecf92db143",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

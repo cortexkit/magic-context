@@ -5,9 +5,10 @@ import { initializeDatabase } from "../features/magic-context/storage-db";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
 import { createCtxNoteTools } from "./ctx-note/tools";
+import { CTX_MEMORY_DESCRIPTION } from "./ctx-memory/constants";
 import { CTX_SEARCH_DESCRIPTION } from "./ctx-search/constants";
 import { createCtxSearchTools } from "./ctx-search/tools";
-import { CTX_SEARCH_LIGHT_DESCRIPTION } from "./light-descriptions";
+import { CTX_MEMORY_LIGHT_DESCRIPTION, CTX_SEARCH_LIGHT_DESCRIPTION } from "./light-descriptions";
 import {
     FULL_PARAMETER_DESCRIPTIONS,
     LIGHT_PARAMETER_DESCRIPTIONS,
@@ -147,6 +148,13 @@ describe("parameter descriptions match runtime behavior", () => {
                 "Required on every call: kind for write; current category for update/merge; ignored by archive/get.",
             ids: "Required on every call: one id for update, 1+ for archive, 2+ for merge, 1–20 for get; write: empty list.",
         });
+    });
+
+    it("ctx_memory: descriptions do not call category optional now that every call sends it", () => {
+        for (const description of [CTX_MEMORY_DESCRIPTION, CTX_MEMORY_LIGHT_DESCRIPTION]) {
+            expect(description).not.toContain("category optional");
+            expect(description).toContain("category required");
+        }
     });
 
     it("ctx_memory: the primary tool no longer describes the dreamer-only list limit", () => {

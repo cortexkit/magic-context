@@ -1,6 +1,6 @@
 {
-  "generation": "e0985bc5a7197529025445d257d1d95ed89bd2c570c4814592d2ee36d47d180b",
-  "catalog_digest": "e0985bc5a7197529025445d257d1d95ed89bd2c570c4814592d2ee36d47d180b",
+  "generation": "6d584cffcac1037a500ec05273c768d18a84df04783a8ce15edd92d2f65c2736",
+  "catalog_digest": "6d584cffcac1037a500ec05273c768d18a84df04783a8ce15edd92d2f65c2736",
   "tools": [
     {
       "name": "ctx_note",
@@ -87,7 +87,7 @@
       "capabilities": [
         "magic-context:memory.write/v1"
       ],
-      "description": "Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.\n\nYour active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence (\"do X later, here is what we know\") is ctx_note, not memory.\n\nActions:\n- write: new memory (content + category).\n- update: rewrite one memory whose fact changed (ids: [one], content; category optional to recategorize).\n- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).\n- merge: collapse duplicates into one (ids: [two or more], content).\n- get: fetch by id (ids: 1–20), readable in every status.\nEvery call must carry action, content, category and ids: argument-dropping providers only emit required fields. For get and archive pass content=\"\" and any valid category; for write pass ids=[].\nExamples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\"",
+      "description": "Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.\n\nYour active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence (\"do X later, here is what we know\") is ctx_note, not memory.\n\nActions:\n- write: new memory (content + category).\n- update: rewrite one memory whose fact changed (ids: [one], content; category required — the current one to keep, a new one to recategorize).\n- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).\n- merge: collapse duplicates into one (ids: [two or more], content).\n- get: fetch by id (ids: 1–20), readable in every status.\nEvery call must carry action, content, category and ids: argument-dropping providers only emit required fields. For get and archive pass content=\"\" and any valid category; for write pass ids=[].\nExamples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\"",
       "input_schema": {
         "type": "object",
         "properties": {
