@@ -300,6 +300,39 @@ export async function oc2ContextFixture(
     const ordinalOf = (id: string) => rows.findIndex((row) => row.id === id) + 1;
     let compartments = 0;
     let coveredThrough = -1;
+    /**
+     * Store a completed summary checkpoint after the existing rows and keep
+     * the newest `windowRows` rows as the host's window after it.
+     */
+    const storeCheckpoint = (summary: string, windowRows: number) => {
+        const id = `fold-${seed}-${rows.length}`;
+        hostWindowStart = rows.length - windowRows;
+        providerWindow = undefined;
+        // 2.1.0 names the first row it kept after the checkpoint.
+        const metadata =
+            host === "2.1.0" ? { metadata: { keepID: rows[hostWindowStart]!.id } } : {};
+        raw.prepare(
+            "INSERT INTO session_message(id,session_id,type,seq,time_created,data) VALUES (?,?,?,?,?,?)",
+        ).run(
+            id,
+            session,
+            "compaction",
+            nextSeq++,
+            Date.now(),
+            JSON.stringify({
+                status: "completed",
+                summary,
+                time: { completed: Date.now() },
+                ...metadata,
+            }),
+        );
+        checkpoint = {
+            id,
+            role: "user",
+            content: [{ type: "text", text: `<summary>\n${summary}\n</summary>` }],
+            ...metadata,
+        };
+    };
     return {
         db,
         raw,
@@ -392,33 +425,18 @@ export async function oc2ContextFixture(
             const draft = structuredClone(lastDraft!);
             await hooks.get("compaction")!(draft);
             if (!draft.result) throw new Error("compaction hook supplied no summary");
-            const id = `fold-${seed}-${rows.length}`;
-            hostWindowStart = rows.length - windowRows;
-            providerWindow = undefined;
-            // 2.1.0 names the first row it kept after the checkpoint.
-            const metadata =
-                host === "2.1.0" ? { metadata: { keepID: rows[hostWindowStart]!.id } } : {};
-            raw.prepare(
-                "INSERT INTO session_message(id,session_id,type,seq,time_created,data) VALUES (?,?,?,?,?,?)",
-            ).run(
-                id,
-                session,
-                "compaction",
-                nextSeq++,
-                Date.now(),
-                JSON.stringify({
-                    status: "completed",
-                    summary: draft.result.summary,
-                    time: { completed: Date.now() },
-                    ...metadata,
-                }),
-            );
-            checkpoint = {
-                id,
-                role: "user",
-                content: [{ type: "text", text: `<summary>\n${draft.result.summary}\n</summary>` }],
-                ...metadata,
-            };
+            storeCheckpoint(draft.result.summary, windowRows);
+        },
+        /**
+         * The host folds with a summary its own model wrote, as it does when the
+         * compaction hook leaves the result unset (Magic Context's compaction
+         * off). The hook is asked first, as the host asks it, and must decline.
+         */
+        async hostFold(summary: string, windowRows = 3) {
+            const draft = structuredClone(lastDraft!);
+            await hooks.get("compaction")!(draft);
+            if (draft.result) throw new Error("compaction hook answered for the host");
+            storeCheckpoint(summary, windowRows);
         },
         /** A real running native checkpoint, optionally written by the V2
          * admission producer to exercise upgrading a V2 admission record.

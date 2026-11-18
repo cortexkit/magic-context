@@ -2714,7 +2714,10 @@ export async function registerContext(context: V2Context) {
                             )
                                 admitted.add(message.id);
                         const replayDb = db ?? storage.current();
-                        if (localCut && incoming && replayDb) {
+                        // Compaction on only, as in the managed pass below: with
+                        // it off nothing is restored after a host checkpoint, and
+                        // no last-good replay runs in that mode.
+                        if (!compactionOff && localCut && incoming && replayDb) {
                             const admission = nativeFoldReplay
                                 ? await nativeFoldReplay.replayAdmission(
                                       draft.sessionID,
@@ -3098,7 +3101,13 @@ export async function registerContext(context: V2Context) {
                             draft.sessionID,
                         ),
                     );
-                } else if (localCut && cut && incoming) {
+                } else if (!compactionOff && localCut && cut && incoming) {
+                    // Compaction on only. With it off the host owns the window:
+                    // its checkpoint and the tail it kept are the request.
+                    // Putting back the rows from before the checkpoint would keep
+                    // the request from shrinking, and the host would compact again
+                    // on every step.
+
                     // Only a matching legacy owner can preserve a frozen carrier.
                     // Unknown native wrappers must not become legacy state; the
                     // existing owner's rebuild policy owns retiring old text.
