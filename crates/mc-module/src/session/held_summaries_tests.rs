@@ -107,7 +107,13 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
     build(&mut session, &settings).expect("m[1] shows summary 5 too");
     let five = session.summary_rows().unwrap().pop().unwrap();
     // Headed with the days `m[1]` recorded for it.
-    let days = session.baseline.as_ref().unwrap().newer_days.as_ref().unwrap()[&5]
+    let days = session
+        .baseline
+        .as_ref()
+        .unwrap()
+        .newer_days
+        .as_ref()
+        .unwrap()[&5]
         .clone()
         .expect("summary 5's messages have times");
     let mut five = crate::summary::render::DecayRenderCompartment::from(&five);

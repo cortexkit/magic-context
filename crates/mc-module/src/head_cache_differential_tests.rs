@@ -223,7 +223,14 @@ fn scenario(run: &mut Run) {
     // with the days its refresh recorded.
     let rows = run.session.summary_rows().unwrap();
     let newer = rows.iter().find(|summary| summary.sequence == 4).unwrap();
-    let days = run.session.baseline.as_ref().unwrap().newer_days.as_ref().unwrap()[&4]
+    let days = run
+        .session
+        .baseline
+        .as_ref()
+        .unwrap()
+        .newer_days
+        .as_ref()
+        .unwrap()[&4]
         .clone()
         .expect("summary 4's messages have times");
     let mut rendered = crate::summary::render::DecayRenderCompartment::from(newer);

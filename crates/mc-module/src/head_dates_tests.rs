@@ -21,10 +21,7 @@ fn time_of(n: u64) -> u64 {
 /// [`super::head_bytes_tests::head`], with every message written at
 /// `written_at(n)` and a `mode3.db` that keeps the times of messages the
 /// index lets go.
-fn timed_head(
-    dir: &std::path::Path,
-    written_at: impl Fn(u64) -> u64,
-) -> (Session, Settings) {
+fn timed_head(dir: &std::path::Path, written_at: impl Fn(u64) -> u64) -> (Session, Settings) {
     let (mut session, settings) = super::head_bytes_tests::head(dir);
     session.index = crate::index::Index::starting_at(1);
     session.index.extend((1..=60).map(|n| {
@@ -206,8 +203,7 @@ fn a_fold_finds_times_the_index_let_go_and_m1_dates_newer_summaries() {
 fn a_summary_with_an_unknown_time_shows_no_date() {
     let dir = scratch("head-dates-unknown");
     // Message 8, summary 2's last, has no known time anywhere.
-    let (mut session, settings) =
-        timed_head(&dir, |n| if n == 8 { 0 } else { time_of(n) });
+    let (mut session, settings) = timed_head(&dir, |n| if n == 8 { 0 } else { time_of(n) });
     build(&mut session, &settings).unwrap();
     let m0 = shown(&session, head::M0_ID);
     assert!(m0.contains("## 5-8 · Work 2"), "{m0}");

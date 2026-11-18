@@ -91,7 +91,14 @@ mod tests {
             &conn,
             "mock",
             "s",
-            &[(1, "m1"), (2, "m2"), (3, "m3"), (4, "m4"), (5, "m5"), (6, "")],
+            &[
+                (1, "m1"),
+                (2, "m2"),
+                (3, "m3"),
+                (4, "m4"),
+                (5, "m5"),
+                (6, ""),
+            ],
         );
         assert_eq!(times, HashMap::from([(1, 1_772_668_800_000)]));
         // An empty id is matched by number alone.
