@@ -365,6 +365,52 @@ fn notice(session: &Session, seq: u64, newest: Option<Cursor>) -> NoticeRequest 
 }
 
 #[tokio::test]
+async fn audit_views_noop_fold_does_not_authorize_the_next_notice() {
+    let (mut session, client, _, _, mut settings) = fixture();
+    session.features.summarizer = true;
+    settings.memory_enabled = false;
+    let entries = vec![text(1, "one"), text(2, "two"), text(3, "latest")];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries.clone();
+    let first = session.build(&settings, None, false, None).0.unwrap();
+    session.accept(first.clone());
+    session.settle_unconfirmed(Some(&first.applied()), &[]);
+    let below_threshold = |session: &Session, seq| {
+        let mut request = notice(session, seq, entries.last().map(cursor));
+        request.applied_view = Some(first.applied());
+        request.conditions.last_prompt_tokens = Some(10_000);
+        request.conditions.last_prompt_view = Some(first.version);
+        request
+    };
+
+    settings.history_budget_percentage = 0.2;
+    assert!(session.head_shape_changed(&settings));
+    let request = below_threshold(&session, 1);
+    session.notice(&client, &settings, request).await;
+    assert!(client.offered.lock().unwrap().is_empty());
+    assert!(!session.head_shape_changed(&settings));
+
+    session
+        .ctx_reduce(&client, &serde_json::json!({"drop": "2"}))
+        .await
+        .unwrap();
+    let request = below_threshold(&session, 2);
+    session.notice(&client, &settings, request).await;
+    assert!(
+        client.offered.lock().unwrap().is_empty(),
+        "a byte-identical fold authorized an unrelated drop"
+    );
+    assert_eq!(session.latest.as_ref().unwrap().checksum, first.checksum);
+    assert!(session.queued.contains(&("two".into(), "p".into())));
+
+    settings.memory_budget_tokens += 1000;
+    assert!(
+        !session.head_shape_changed(&settings),
+        "an inactive memory budget cannot change the head"
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_notice_divergence_reads_again_from_the_cut() {
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![text(1, "a"), text(2, "b"), text(3, "c")];

@@ -677,6 +677,7 @@ impl Session {
                     self.baseline = Some(next);
                     if !flush {
                         self.fold_due = false;
+                        self.head_stale = false;
                     }
                 }
                 if let Some(next) = self.next_caveman.take() {
