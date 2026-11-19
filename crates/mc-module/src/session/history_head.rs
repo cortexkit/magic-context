@@ -1,6 +1,7 @@
 //! The history head (`m[0]`/`m[1]`) and the mural it carries.
 
 use super::*;
+use cortexkit_role_compaction::read::Role;
 
 impl Session {
     /// The history head, and the cut when the newest summary's last message
@@ -63,14 +64,12 @@ impl Session {
                 // The message the request ends on is never cut, so the
                 // request always ends with a message the runner shows as it
                 // is (compaction contract rule PR6; runners refuse such a
-                // view). That is the newest message that has parts: one with
-                // none, such as a tool-results message whose results ride
-                // inside the calls, renders nothing. Summaries normally end
-                // before it anyway; a session moved in fully summarized is
-                // the exception, until a newer message arrives.
+                // view). A trailing system note does not replace the final
+                // user or tool turn; entries with no parts render nothing.
                 let last = entries
                     .iter()
-                    .rposition(|entry| !entry.parts.is_empty())
+                    .rposition(|entry| !entry.parts.is_empty() && entry.role != Role::System)
+                    .or_else(|| entries.iter().rposition(|entry| !entry.parts.is_empty()))
                     .unwrap_or(entries.len() - 1);
                 if end >= last {
                     let before = last.checked_sub(1)?;

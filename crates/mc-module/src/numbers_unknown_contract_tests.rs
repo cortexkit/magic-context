@@ -149,6 +149,52 @@ async fn audit_cuts_adopt_older_cut_reindexes_visible_tail() {
 /// A summary's first or last message: its ordinal and id.
 type Bound<'a> = (u64, &'a str);
 
+#[tokio::test]
+async fn audit_views_cut_preserves_the_final_non_system_turn() {
+    let dir = scratch("system-tail");
+    let mut system = text(3, "system");
+    system.role = Role::System;
+    let entries = vec![text(1, "older"), text(2, "final-user"), system];
+    let (mut session, _, settings) =
+        head(&dir, entries, &[((1, "older"), (2, "final-user"))]).await;
+    let view = session.build(&settings, None, false, None).0;
+    assert_eq!(view.as_ref().and_then(cut_through), Some("older"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn audit_views_invalid_cut_does_not_discard_independent_edits() {
+    let (mut session, _, _, _, _) = fixture();
+    let old = text(1, "old");
+    let part = &old.parts[0];
+    let replace = EditOp::Replace {
+        mid: old.mid.clone(),
+        part: part.id.clone(),
+        field: "text".into(),
+        value: serde_json::json!(lanes::placeholder(1)),
+        expect: part.digest.clone(),
+    };
+    let key = (old.mid.clone(), part.id.clone());
+    session.index.extend([old, text(2, "latest")]);
+    session.queued.insert(key.clone());
+    let view = session
+        .seal(
+            vec![
+                EditOp::Cut {
+                    through: "latest".into(),
+                },
+                replace.clone(),
+            ],
+            std::slice::from_ref(&key),
+        )
+        .expect("reject the cut, not the independent replacement");
+    assert_eq!(cut_through(&view), None);
+    assert!(view.edits.iter().any(|edit| edit.op == replace));
+    assert!(!session.failed_parts.contains(&key));
+    session.accept(view);
+    assert!(!session.queued.contains(&key));
+}
+
 /// A head session (a summarizer, a context store at `dir`) set up over
 /// `entries`, with summaries over the given ranges.
 async fn head(
