@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import { createScheduler } from "../../features/magic-context/scheduler";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
@@ -137,7 +138,10 @@ function measureToolSet(
     );
 }
 
-async function knownWindowTransform(sessionId: string) {
+async function knownWindowTransform(
+    sessionId: string,
+    usage?: Map<string, { usage: ContextUsage; updatedAt: number; hasUsageTokens: boolean }>,
+) {
     const { dir } = createTestTempDir("mc-unmanaged-over-window-");
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
@@ -158,8 +162,10 @@ async function knownWindowTransform(sessionId: string) {
     });
     const transform = createTransform({
         tagger: createTagger(),
-        scheduler: { shouldExecute: mock(() => "defer" as const) },
-        contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>(),
+        scheduler: usage
+            ? createScheduler({ executeThresholdPercentage: 65 })
+            : { shouldExecute: mock(() => "defer" as const) },
+        contextUsageMap: usage ?? new Map<string, { usage: ContextUsage; updatedAt: number }>(),
         db: openDatabase(),
         historyRefreshSessions: new Set<string>(),
         pendingMaterializationSessions: new Set<string>(),
@@ -178,6 +184,53 @@ async function knownWindowTransform(sessionId: string) {
         return output.messages as unknown as Message[];
     };
 }
+
+it("checks a warm defer whose newly appended user prompt dwarfs the window", async () => {
+    const sessionId = "ses-over-window-after-warm-defer";
+    const usage = new Map<
+        string,
+        { usage: ContextUsage; updatedAt: number; hasUsageTokens: boolean }
+    >();
+    const serve = await knownWindowTransform(sessionId, usage);
+    await serve(history(sessionId, 0, 0));
+    const limit = resolveTrustedContextLimit(PROVIDER, MODEL)!;
+    expect(limit).toBeGreaterThan(0);
+    usage.set(sessionId, {
+        usage: { inputTokens: 1000, percentage: (1000 / limit) * 100 },
+        updatedAt: Date.now(),
+        hasUsageTokens: true,
+    });
+    const messages = history(sessionId, 0, 0);
+    messages.push(
+        {
+            info: {
+                id: "first-answer",
+                role: "assistant",
+                sessionID: sessionId,
+                providerID: PROVIDER,
+                modelID: MODEL,
+                finish: "stop",
+            },
+            parts: [{ type: "text", text: "hello" }],
+        },
+        {
+            info: {
+                id: "large-paste",
+                role: "user",
+                sessionID: sessionId,
+                model: { providerID: PROVIDER, modelID: MODEL },
+            },
+            parts: [{ type: "text", text: LINE.repeat(9000) }],
+        },
+    );
+    expect(historyTokens(messages)).toBeGreaterThan(limit * 2);
+    const output = await serve(messages).catch((error) => {
+        if (!(error instanceof Error) || !/over|window|context limit|fit/i.test(error.message))
+            throw error;
+        return undefined;
+    });
+    if (output) expect(historyTokens(output)).toBeLessThanOrEqual(limit);
+}, 30_000);
 
 describe("a first pass with no Magic Context state and a history over the window", () => {
     it("is refused before the provider, naming the reason", async () => {
