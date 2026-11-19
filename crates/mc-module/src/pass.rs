@@ -215,6 +215,16 @@ pub fn signed_thinking_hold(
     settings: &Settings,
     signed_floor: Option<u64>,
 ) -> bool {
+    signed_thinking_hold_in_view(entries, conditions, settings, signed_floor, || None)
+}
+
+pub(crate) fn signed_thinking_hold_in_view(
+    entries: &[Entry],
+    conditions: &Conditions,
+    settings: &Settings,
+    signed_floor: Option<u64>,
+    edited: impl FnOnce() -> Option<lanes::Edited>,
+) -> bool {
     if conditions.rules.signed_parts != SignedParts::Bound {
         return false;
     }
@@ -226,7 +236,7 @@ pub fn signed_thinking_hold(
     {
         return false;
     }
-    heavy_signed_turn(entries, conditions, signed_floor)
+    heavy_signed_turn_in_view(entries, conditions, signed_floor, edited().as_ref())
 }
 
 /// The part of [`signed_thinking_hold`] that doesn't depend on usage: the
@@ -240,6 +250,15 @@ pub fn heavy_signed_turn(
     conditions: &Conditions,
     signed_floor: Option<u64>,
 ) -> bool {
+    heavy_signed_turn_in_view(entries, conditions, signed_floor, None)
+}
+
+pub(crate) fn heavy_signed_turn_in_view(
+    entries: &[Entry],
+    conditions: &Conditions,
+    signed_floor: Option<u64>,
+    edited: Option<&lanes::Edited>,
+) -> bool {
     if conditions.rules.signed_parts != SignedParts::Bound {
         return false;
     }
@@ -252,7 +271,7 @@ pub fn heavy_signed_turn(
         .filter(|entry| entry.role == Role::Assistant && !entry.parts.is_empty())
         .take(HEAVY_REASONING_WINDOW_STEPS)
         .filter(|entry| !signed_floor.is_some_and(|floor| entry.ordinal <= floor))
-        .any(|entry| lanes::step_reasoning_tokens(entry) > HEAVY_REASONING_TOKENS)
+        .any(|entry| lanes::step_reasoning_tokens_shown(entry, edited) > HEAVY_REASONING_TOKENS)
 }
 
 /// Where the current turn starts: after the latest non-notice user input,

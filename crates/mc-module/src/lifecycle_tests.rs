@@ -442,6 +442,57 @@ async fn audit_views_refusal_preserves_later_stamp() {
 }
 
 #[tokio::test]
+async fn audit_views_no_hold_for_already_dropped_thinking() {
+    use cortexkit_role_compaction::part::Seal;
+    use cortexkit_role_compaction::read::StepUsage;
+
+    let (mut session, client, _, _, settings) = fixture();
+    session.conditions.rules.signed_parts = SignedParts::Bound;
+    session.conditions.last_prompt_tokens = Some(70_000);
+    let mut thinking = Entry::new(
+        2,
+        "think",
+        Role::Assistant,
+        0,
+        vec![Part::new(
+            "r",
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(12_000),
+            },
+        )
+        .with_seal(Seal::Signed)],
+    );
+    let mut usage = StepUsage::new();
+    usage.reasoning_tokens = Some(3_000);
+    thinking.usage = Some(usage);
+    let mut last = text(3, "last");
+    last.role = Role::Assistant;
+    session.index.extend([text(1, "task"), thinking, last]);
+    assert!(!session.rebuild_permitted(&settings));
+
+    let view = session
+        .seal(
+            vec![EditOp::Drop {
+                mid: "think".into(),
+                part: Some("r".into()),
+            }],
+            &[],
+        )
+        .unwrap();
+    assert!(session.publish(&client, view.clone()).await);
+    assert!(
+        !session.rebuild_permitted(&settings),
+        "accepted does not mean applied"
+    );
+    session.settle_unconfirmed(Some(&view.applied()), &[]);
+    assert!(
+        session.rebuild_permitted(&settings),
+        "the applied view dropped the turn's heavy reasoning"
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_notice_divergence_reads_again_from_the_cut() {
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![text(1, "a"), text(2, "b"), text(3, "c")];

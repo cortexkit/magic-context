@@ -696,13 +696,25 @@ pub const UNKNOWN_REASONING_STEP_TOKENS: u64 = 1_000;
 /// thinking a rebuild would invalidate (`pass.rs`), so it measures how hard
 /// the model just thought, not what sending the reasoning again costs.
 pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
-    let reasoning: Vec<&Part> = entry
+    step_reasoning_tokens_shown(entry, None)
+}
+
+pub(crate) fn step_reasoning_tokens_shown(entry: &Entry, edited: Option<&Edited>) -> u64 {
+    let mut reasoning: Vec<&Part> = entry
         .parts
         .iter()
         .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
         .collect();
+    let generated_parts = reasoning.len();
+    if let Some(edited) = edited {
+        reasoning.retain(|part| !edited.covers(&entry.mid, &part.id));
+    }
     if reasoning.is_empty() {
         return 0;
+    }
+    if reasoning.len() != generated_parts {
+        // A step's aggregate usage includes reasoning that is no longer sent.
+        return visible_cost(&reasoning);
     }
     generated_cost(entry)
         .or_else(|| entry.reasoning_tokens.map(|counted| counted.count))
