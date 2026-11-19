@@ -302,7 +302,11 @@ export function getCompartments(db: Database, sessionId: string): Compartment[] 
     return rows.map(toCompartment);
 }
 
-/** Read the IDs just appended under the writer, in ascending sequence order. */
+/**
+ * The ids of a session's `count` newest compartments, oldest first. Called
+ * while the caller still holds the write lock it appended them under, so no
+ * other writer can add a compartment in between.
+ */
 export function getNewestCompartmentIds(db: Database, sessionId: string, count: number): number[] {
     const rows = db
         .prepare("SELECT id FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT ?")
