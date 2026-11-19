@@ -421,6 +421,7 @@ impl Session {
                 notes: self.notes.clone(),
                 ceiling_tokens: (usable as f64 * settings.execute_threshold_percentage / 100.0)
                     as u64,
+                usable_tokens: usable,
                 over_limit: over_limit.is_some(),
                 priced,
                 removed_tokens,
