@@ -194,6 +194,31 @@ test("a cause whose facts are missing on either step falls back to the module lo
     expect(unlogged.observations.get("cause-unexplained")?.evidence).toStartWith("no model change");
 });
 
+test("an unexplained label gives way to a cause the steps' own facts show", async () => {
+    const pair = ["baseline-5", "cause-unexplained"].map((step) => metered(sampleRow(step)));
+    const cases = {
+        "the account changed": [pair[0]!, { ...pair[1]!, account_ref: "c".repeat(64) }],
+        "the cache lifetime passed": [
+            pair[0]!,
+            { ...pair[1]!, started_at_ms: pair[0]!.finished_at_ms! + pair[0]!.cache_ttl_ms! + 5_000 },
+        ],
+    };
+    const expected = {
+        "the account changed": ["scope_changed", "account_or_model_changed"],
+        "the cache lifetime passed": ["expired", "cache_expired"],
+    } as const;
+    for (const [shown, rows] of Object.entries(cases)) {
+        const [kind, cause] = expected[shown as keyof typeof expected];
+        const s = await scan(rows);
+        const rewrite = s.observations.get("cause-unexplained");
+        expect(rewrite, shown).toMatchObject({ class: kind, cause });
+        expect(rewrite!.evidence, shown).toStartWith(`cause=${cause} (astrocyte); `);
+        // Neither an account move nor an expired cache wakes on its own.
+        expect(s.alerts, shown).toEqual([]);
+        expect((await analyze(rows)).get("cause-unexplained")?.class, shown).toBe(kind);
+    }
+});
+
 test("a view change credits the applied view, even one logged after the request", async () => {
     const rows = [
         ...["baseline-3", "cause-view_changed"].map((step) => metered(sampleRow(step))),

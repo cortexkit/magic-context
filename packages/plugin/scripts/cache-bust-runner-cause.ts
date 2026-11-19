@@ -40,6 +40,28 @@ export function carriesCauseFacts(facts: RunnerStepFacts | undefined): boolean {
         facts.system_digest !== undefined || facts.account_ref !== undefined);
 }
 
+/**
+ * The cause the two steps' own facts show, checked in Astrocyte's order: a
+ * changed account or model, then a gap from the previous request's finish to
+ * this one's start longer than the previous request's cache lifetime.
+ */
+function causeShownByFacts(previous: RunnerMeterStep, current: RunnerMeterStep): string | undefined {
+    const before = previous.facts;
+    const after = current.facts;
+    if (!before || !after) return undefined;
+    const accountChanged =
+        before.account_ref !== undefined && after.account_ref !== undefined && before.account_ref !== after.account_ref;
+    if (accountChanged || previous.model !== current.model) return "account_or_model_changed";
+    if (
+        before.finished_at_ms !== undefined &&
+        before.cache_ttl_ms !== undefined &&
+        after.started_at_ms !== undefined &&
+        after.started_at_ms - before.finished_at_ms > before.cache_ttl_ms
+    )
+        return "cache_expired";
+    return undefined;
+}
+
 /** The facts both steps must carry before Astrocyte's "unexplained" is trusted. */
 const UNEXPLAINED_NEEDS = ["view_version", "tools_digest", "system_digest"] as const;
 
@@ -61,6 +83,14 @@ export function classifyRunnerFeedStep(
     facts: RunnerCacheFacts = {},
     cause?: string,
 ): RunnerFeedStepDecision {
+    // Astrocyte has called a rewrite unexplained while the facts on the two
+    // steps showed an account change and a gap of a day and a half against a
+    // one-hour cache lifetime. The facts are the evidence; when they name a
+    // cause, it replaces the label.
+    if (cause === "unexplained") {
+        const shown = causeShownByFacts(previous, current);
+        if (shown) return classifyRunnerFeedStep(previous, current, decisions, facts, shown);
+    }
     // An unfamiliar cause from a newer Astrocyte has no class here yet.
     const mapped = cause === undefined ? undefined : ASTROCYTE_CAUSE_CLASSES.get(cause);
     if (cause === undefined || !mapped || !carriesCauseFacts(previous.facts) || !carriesCauseFacts(current.facts))
