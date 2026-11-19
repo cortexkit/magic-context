@@ -544,14 +544,11 @@ impl Session {
         }) else {
             return;
         };
-        // A cut ends where a summary ends. A runner's cut past the summaries
-        // `context.db` holds comes from state newer than it (see
-        // `distrust_state_ahead_of_summaries`): the index keeps those
-        // messages, and the next view moves the cut back.
-        if self
-            .summarized_through()
-            .is_none_or(|covered| ordinal > covered)
-        {
+        // A cut may also cross entries the runner serves without part
+        // numbers once we know they have nothing to summarize. Beyond
+        // either kind of coverage, keep the raw entries: the runner may
+        // have a view from before a restore of context.db.
+        if self.numbers_reach().is_none_or(|covered| ordinal > covered) {
             self.head_stale = true;
             return;
         }

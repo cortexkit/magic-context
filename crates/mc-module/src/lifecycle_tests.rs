@@ -493,6 +493,54 @@ async fn audit_views_no_hold_for_already_dropped_thinking() {
 }
 
 #[tokio::test]
+async fn audit_views_ordinary_rebuild_and_defer_keep_wire_bytes() {
+    use cortexkit_role_compaction::view::Edit;
+
+    let (mut session, client, _, _, settings) = fixture();
+    let old = text(1, "earlier");
+    let pinned = View::seal(
+        1,
+        vec![Edit::new(
+            1,
+            EditOp::Replace {
+                mid: "earlier".into(),
+                part: "p".into(),
+                field: "text".into(),
+                value: serde_json::json!("[dropped §1§]"),
+                expect: old.parts[0].digest.clone(),
+            },
+        )],
+    );
+    let bytes = serde_json::to_vec(&pinned).unwrap();
+    let entries = vec![old, text(2, "latest")];
+    *client.entries.lock().unwrap() = entries.clone();
+    session.index.extend(entries.clone());
+    session
+        .ctx_reduce(&client, &serde_json::json!({"drop":"1"}))
+        .await
+        .unwrap();
+    let mut execute = notice(&session, 1, entries.last().map(cursor));
+    execute.conditions.last_prompt_tokens = Some(70_000);
+    session.notice(&client, &settings, execute).await;
+    assert_eq!(client.offered.lock().unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_vec(&client.offered.lock().unwrap()[0]).unwrap(),
+        bytes
+    );
+
+    let mut defer = notice(&session, 2, entries.last().map(cursor));
+    defer.applied_view = Some(pinned.applied());
+    defer.conditions.last_prompt_view = Some(pinned.version);
+    defer.conditions.last_prompt_tokens = Some(30_000);
+    session.notice(&client, &settings, defer).await;
+    assert_eq!(client.offered.lock().unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_vec(session.latest.as_ref().unwrap()).unwrap(),
+        bytes
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_notice_divergence_reads_again_from_the_cut() {
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![text(1, "a"), text(2, "b"), text(3, "c")];

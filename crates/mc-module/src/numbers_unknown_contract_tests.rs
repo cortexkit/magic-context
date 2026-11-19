@@ -102,7 +102,7 @@ fn cut_through(view: &View) -> Option<&str> {
 }
 
 #[tokio::test]
-async fn audit_cuts_adopt_older_cut_reindexes_visible_tail() {
+async fn audit_views_adopt_older_cut_reindexes_visible_tail() {
     let dir = scratch("older-cut");
     let entries: Vec<_> = (1..=10).map(|n| text(n, &format!("m{n}"))).collect();
     let (mut session, client, settings) =
@@ -193,6 +193,28 @@ fn audit_views_invalid_cut_does_not_discard_independent_edits() {
     assert!(!session.failed_parts.contains(&key));
     session.accept(view);
     assert!(!session.queued.contains(&key));
+}
+
+#[tokio::test]
+async fn audit_views_non_summarized_numbers_coverage_commits_cut() {
+    let dir = scratch("coverage-cut");
+    let (_, marked_notice) = transition();
+    let mut entries = vec![marked_notice];
+    entries.extend((2..=6).map(|n| text(n, &format!("m{n}"))));
+    let (mut session, _, settings) = head(&dir, entries, &[]).await;
+    assert!(session.summary_due(&settings).is_none());
+    assert_eq!(
+        session.numbers_covered.as_ref().map(|floor| floor.ordinal),
+        Some(1)
+    );
+    let view = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&view), Some("message-a"));
+    session.accept(view.clone());
+    session.settle_unconfirmed(Some(&view.applied()), &[]);
+    assert_eq!(session.cut, Some(1));
+    assert!(!session.head_stale);
+    assert!(!session.numbers_view_due());
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// A head session (a summarizer, a context store at `dir`) set up over
