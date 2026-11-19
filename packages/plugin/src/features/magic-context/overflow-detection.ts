@@ -21,6 +21,15 @@ import type { ContextLimitProvenance } from "../../shared/context-limit-provenan
  *     https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/utils/overflow.ts
  */
 
+// Capture the whole number, including malformed grouping, so it cannot be read
+// as a shorter integer. A dot can group digits only before an explicit token unit.
+const TOKEN_COUNT = String.raw`(?<![\d+_-])(?:\d+(?:[,_ .\u202f]+\d+)*(?=\s*tokens?\b)|\d+(?:[,_ \u202f]+\d+)*)(?!\w|[,_\s.]+\d)`;
+const ESTIMATED_REQUEST = String.raw`\bthis request has an estimated\b`;
+
+function overflowPattern(strings: TemplateStringsArray, ...fragments: string[]): RegExp {
+    return new RegExp(String.raw(strings, ...fragments), "i");
+}
+
 /**
  * Regexes that match provider-reported context-overflow errors. Keep in sync
  * with upstream OpenCode patterns — new providers can be added here as they
@@ -33,7 +42,7 @@ export const OVERFLOW_PATTERNS: ReadonlyArray<RegExp> = [
     /input token count.*exceeds the maximum/i, // Google Gemini
     /maximum prompt length is \d+/i, // xAI (Grok)
     /reduce the length of the messages/i, // Groq
-    /maximum context length is \d+ tokens/i, // OpenRouter, DeepSeek, vLLM
+    overflowPattern`maximum context length is ${TOKEN_COUNT} tokens?\b`, // OpenRouter, DeepSeek, vLLM
     /maximum model length is \d+/i, // vLLM
     /exceeds the limit of \d+/i, // GitHub Copilot
     /exceeds the available context size/i, // llama.cpp server
@@ -42,12 +51,12 @@ export const OVERFLOW_PATTERNS: ReadonlyArray<RegExp> = [
     /exceeded model token limit/i, // Kimi For Coding, Moonshot
     /context[_ ]length[_ ]exceeded/i, // Generic fallback
     /request entity too large/i, // HTTP 413
-    /context length is only \d+ tokens/i, // vLLM
+    overflowPattern`context length is only ${TOKEN_COUNT} tokens?\b`, // vLLM
     /input length.*exceeds.*context length/i, // vLLM
     /\bContextWindowExceededError\b/i, // LiteLLM
-    /\bthe input \(\d+ tokens?\) is longer than the model's context length \(\d+ tokens?\)/i, // LiteLLM
+    overflowPattern`\bthe input \(${TOKEN_COUNT} tokens?\) is longer than the model's context length \(${TOKEN_COUNT} tokens?\)`, // LiteLLM
     /prompt too long; exceeded (?:max )?context length/i, // Ollama explicit overflow
-    /too large for model with \d+ maximum context length/i, // Mistral
+    overflowPattern`too large for model with ${TOKEN_COUNT} maximum context length`, // Mistral
     /model_context_window_exceeded/i, // z.ai non-standard finish_reason
     /context size has been exceeded/i, // Lemonade / llama-cpp wrappers
     /prepared prompt exceeds engine max_context/i, // Matches local-engine errors phrased as “prepared prompt exceeds engine max_context”.
@@ -67,46 +76,83 @@ interface LimitExtractionPattern {
 }
 
 const LIMIT_EXTRACTION_PATTERNS: ReadonlyArray<LimitExtractionPattern> = [
-    { pattern: /maximum prompt length is (\d+)/i, provenance: "prompt_only" }, // xAI
     {
-        pattern: /maximum context length is (\d+) tokens?/i,
+        pattern: overflowPattern`maximum prompt length is (${TOKEN_COUNT})`,
+        provenance: "prompt_only",
+    }, // xAI
+    {
+        pattern: overflowPattern`maximum context length is (${TOKEN_COUNT}) tokens?\b`,
         provenance: "combined",
     }, // OpenAI / OpenRouter / DeepSeek / vLLM
-    { pattern: /maximum model length is (\d+)/i, provenance: "combined" }, // vLLM
-    { pattern: /context length is only (\d+) tokens?/i, provenance: "combined" }, // vLLM
-    { pattern: /exceeds the limit of (\d+)/i, provenance: "unknown" }, // GitHub Copilot
+    { pattern: overflowPattern`maximum model length is (${TOKEN_COUNT})`, provenance: "combined" }, // vLLM
     {
-        pattern: /too large for model with (\d+) maximum context length/i,
+        pattern: overflowPattern`context length is only (${TOKEN_COUNT}) tokens?\b`,
+        provenance: "combined",
+    }, // vLLM
+    { pattern: overflowPattern`exceeds the limit of (${TOKEN_COUNT})`, provenance: "unknown" }, // GitHub Copilot
+    {
+        pattern: overflowPattern`too large for model with (${TOKEN_COUNT}) maximum context length`,
         provenance: "combined",
     }, // Mistral
-    // Non-greedy digit gap: a greedy `.*` here backtracks to a single-digit
-    // capture ("limit 200000 tokens" → "0"), which the plausibility clamp then
-    // discards — so the limit was silently never extracted for llama.cpp-style
-    // messages. Anchor the capture to the first ≥4-digit number after the phrase.
-    { pattern: /context size[^0-9]{0,40}(\d{4,})\s*tokens?/i, provenance: "combined" }, // llama.cpp variants
+    // Stop at the first number rather than backtracking into it or skipping to
+    // an unrelated number later in the message.
+    {
+        pattern: overflowPattern`context size[^0-9]{0,40}(${TOKEN_COUNT})\s*tokens?\b`,
+        provenance: "combined",
+    }, // llama.cpp variants
     // "input length N exceeds the context length of M" — we want M (the limit),
     // NOT N (the actual prompt size). Explicit pattern keeps the fallback below
     // from greedily matching N.
-    { pattern: /exceeds? the context length of (\d+)/i, provenance: "combined" }, // vLLM overflow
     {
-        pattern:
-            /\bthe input \(\d+ tokens?\) is longer than the model's context length \((\d+) tokens?\)/i,
+        pattern: overflowPattern`exceeds? the context length of (${TOKEN_COUNT})`,
+        provenance: "combined",
+    }, // vLLM overflow
+    {
+        pattern: overflowPattern`\bthe input \(${TOKEN_COUNT} tokens?\) is longer than the model's context length \((${TOKEN_COUNT}) tokens?\)`,
         provenance: "combined",
     }, // LiteLLM
     {
-        pattern: />\s*(\d+)\s*(?:tokens?\s*)?(?:maximum|max|limit)\b/i,
+        pattern: overflowPattern`>\s*(${TOKEN_COUNT})\s*(?:tokens?\s*)?(?:maximum|max|limit)\b`,
         provenance: "prompt_only",
     }, // Anthropic reports the accepted input ceiling, not input plus output.
     // Gemini puts both numbers in parentheses: "input token count (N) exceeds the
     // maximum number of tokens allowed (M)". M is the input ceiling.
     {
-        pattern: /maximum number of tokens allowed\s*\(?\s*(\d+)/i,
+        pattern: overflowPattern`maximum number of tokens allowed\s*\(?\s*(${TOKEN_COUNT})`,
         provenance: "prompt_only",
     }, // Google Gemini
-    { pattern: /prepared prompt exceeds engine max_context\s+(\d+)/i, provenance: "unknown" }, // This format reports the engine's max_context limit after the message.
-    { pattern: /prompt exceeds (?:the )?.{0,32}\bmax_context\s+(\d+)/i, provenance: "unknown" }, // Other local engines
-    { pattern: /max(?:imum)?.*context.*?(\d+)/i, provenance: "unknown" }, // generic fallback
+    {
+        pattern: overflowPattern`prepared prompt exceeds engine max_context\s+(${TOKEN_COUNT})`,
+        provenance: "unknown",
+    }, // Engine max_context limit
+    {
+        pattern: overflowPattern`prompt exceeds (?:the )?.{0,32}\bmax_context\s+(${TOKEN_COUNT})`,
+        provenance: "unknown",
+    }, // Other local engines
+    {
+        pattern: overflowPattern`\ballows a context of up to (${TOKEN_COUNT}) tokens?\b`,
+        provenance: "combined",
+    },
+    {
+        pattern: overflowPattern`(?<!${ESTIMATED_REQUEST}\s+)\bup to (${TOKEN_COUNT}) tokens?\b`,
+        provenance: "unknown",
+    },
+    // An overflow marker may precede the estimate of the rejected request. The
+    // fallback must not follow that clause to find a number that is not a limit.
+    {
+        pattern: overflowPattern`max(?:imum)?.*context(?:(?!${ESTIMATED_REQUEST})[^\d\r\n])*(${TOKEN_COUNT})`,
+        provenance: "unknown",
+    },
 ];
+
+function parseTokenCount(raw: string | undefined): number | null {
+    // Grouped counts use one consistent separator and exactly three digits per group.
+    if (raw === undefined || !/^(?:\d+|\d{1,3}([,_ .\u202f])\d{3}(?:\1\d{3})*)$/.test(raw)) {
+        return null;
+    }
+    const value = Number(raw.replace(/[,_ .\u202f]/g, ""));
+    return Number.isSafeInteger(value) ? value : null;
+}
 
 /** Minimum plausible context limit. Anything smaller is probably a match
  *  against an unrelated number in the error (e.g., error code). Kept at 1024
@@ -353,6 +399,17 @@ export function detectOverflow(error: unknown): OverflowDetection {
     };
 }
 
+const INPUT_EXTRACTION_PATTERNS = [
+    overflowPattern`prompt is too long:\s*(${TOKEN_COUNT})`,
+    overflowPattern`input token count\s*\(?\s*(${TOKEN_COUNT})`,
+    overflowPattern`input length\s*(${TOKEN_COUNT})`,
+    overflowPattern`prompt was\s*(${TOKEN_COUNT})`,
+    overflowPattern`messages resulted in\s*(${TOKEN_COUNT})\s*tokens?\b`,
+    overflowPattern`\bthe input \((${TOKEN_COUNT}) tokens?\) is longer than the model's context length \(${TOKEN_COUNT} tokens?\)`,
+    overflowPattern`\(\s*(${TOKEN_COUNT})\s+in the messages,\s*${TOKEN_COUNT}\s+in the completion\s*\)`,
+    overflowPattern`${ESTIMATED_REQUEST}\s+(${TOKEN_COUNT})`,
+];
+
 /**
  * Extract the rejected input count (in tokens) from an error message if one
  * of the known patterns matches. Returns undefined when no plausible number
@@ -360,20 +417,9 @@ export function detectOverflow(error: unknown): OverflowDetection {
  */
 export function parseReportedInputTokens(message: string): number | undefined {
     if (!message) return undefined;
-    const patterns = [
-        /prompt is too long:\s*(\d+)/i,
-        /input token count\s*\(?\s*(\d+)/i,
-        /input length\s*(\d+)/i,
-        /prompt was\s*(\d+)/i,
-        /messages resulted in\s*(\d+)\s*tokens?/i,
-        /\bthe input \((\d+) tokens?\) is longer than the model's context length \(\d+ tokens?\)/i,
-        /\(\s*(\d+)\s+in the messages,\s*\d+\s+in the completion\s*\)/i,
-    ];
-    for (const pattern of patterns) {
-        const raw = message.match(pattern)?.[1];
-        if (!raw) continue;
-        const value = Number.parseInt(raw, 10);
-        if (Number.isFinite(value) && value > 0) return value;
+    for (const pattern of INPUT_EXTRACTION_PATTERNS) {
+        const value = parseTokenCount(message.match(pattern)?.[1]);
+        if (value !== null && value > 0) return value;
     }
     return undefined;
 }
@@ -381,13 +427,8 @@ export function parseReportedInputTokens(message: string): number | undefined {
 export function parseReportedLimit(message: string): ReportedContextLimit | undefined {
     if (!message) return undefined;
     for (const { pattern, provenance } of LIMIT_EXTRACTION_PATTERNS) {
-        const match = message.match(pattern);
-        if (!match) continue;
-        const raw = match[1];
-        if (!raw) continue;
-        const value = Number.parseInt(raw, 10);
-        if (!Number.isFinite(value)) continue;
-        if (value < MIN_PLAUSIBLE_LIMIT || value > MAX_PLAUSIBLE_LIMIT) continue;
+        const value = parseTokenCount(message.match(pattern)?.[1]);
+        if (value === null || value < MIN_PLAUSIBLE_LIMIT || value > MAX_PLAUSIBLE_LIMIT) continue;
         return { value, provenance };
     }
     return undefined;

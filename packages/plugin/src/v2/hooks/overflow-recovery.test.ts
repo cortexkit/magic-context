@@ -7,6 +7,8 @@ import {
     getOrCreateSessionMeta,
     openDatabase,
 } from "../../features/magic-context/storage";
+import { clearEmergencyRecovery } from "../../features/magic-context/storage-meta-persisted";
+import { resolveTrustedContextLimit } from "../../hooks/magic-context/event-resolvers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { V2OverflowRecovery } from "./overflow-recovery";
 
@@ -57,7 +59,7 @@ function setup(compactionOff = false) {
     const arms = () => (db.prepare("SELECT value FROM arm_count").get() as { value: number }).value;
     const begin = (assistantMessageID = "step", selected = model) =>
         recovery.begin({ sessionID: "ses", kind: "primary", model: selected, assistantMessageID });
-    return { recovery, hidden, usage, state, arms, begin };
+    return { db, recovery, hidden, usage, state, arms, begin };
 }
 
 it("arms once across HTTP, step, execution and compatible session error observations", () => {
@@ -115,6 +117,31 @@ it("resolves a stored failing step when no HTTP request snapshot was observed", 
         detected_context_limit: 100_000,
         detected_context_limit_model_key: "openai/mock-model",
     });
+});
+
+it("persists the provider plan cap rather than the rejected request size", () => {
+    const f = setup();
+    f.begin();
+    f.recovery.observe({
+        sessionID: "ses",
+        model,
+        status: 400,
+        error: {
+            message:
+                "Your plan allows a context of up to 500,000 tokens, this request has an estimated 502,574\n" +
+                "(maximum context length exceeded). Shorten the history or start a new session.",
+        },
+    });
+    expect(f.state()).toMatchObject({
+        needs_emergency_recovery: 1,
+        detected_context_limit: 500_000,
+        detected_context_limit_model_key: "openai/mock-model",
+    });
+    expect(f.usage).toEqual([502_574]);
+    clearEmergencyRecovery(f.db, "ses");
+    expect(
+        resolveTrustedContextLimit(model.providerID, model.id, { db: f.db, sessionID: "ses" }),
+    ).toBe(500_000);
 });
 
 it("binds a request to its failing step, not a previous accepted reply", () => {

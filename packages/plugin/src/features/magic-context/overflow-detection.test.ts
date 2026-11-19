@@ -136,6 +136,82 @@ describe("overflow-detection / detectOverflow", () => {
         });
     });
 
+    test("extracts the provider plan cap and rejected input from the reported error", () => {
+        const message =
+            "Your plan allows a context of up to 500,000 tokens, this request has an estimated 502,574\n" +
+            "(maximum context length exceeded). Shorten the history or start a new session.";
+        expect(detectOverflow(message)).toMatchObject({
+            isOverflow: true,
+            reportedLimit: 500_000,
+            reportedInputTokens: 502_574,
+        });
+    });
+
+    test("keeps the cap separate when the input estimate comes first", () => {
+        expect(
+            detectOverflow(
+                "Maximum context length exceeded: this request has an estimated 502,574. Up to 500,000 tokens are allowed.",
+            ),
+        ).toMatchObject({ isOverflow: true, reportedLimit: 500_000, reportedInputTokens: 502_574 });
+    });
+
+    test("does not learn a cap from the rejected input estimate alone", () => {
+        expect(
+            detectOverflow(
+                "Maximum context length exceeded: this request has an estimated 502,574",
+            ),
+        ).toMatchObject({
+            isOverflow: true,
+            reportedLimit: undefined,
+            reportedInputTokens: 502_574,
+        });
+        expect(
+            detectOverflow(
+                "Maximum context length exceeded: this request has an estimated up to 502,574 tokens",
+            ),
+        ).toMatchObject({ isOverflow: true, reportedLimit: undefined });
+    });
+
+    test.each([
+        ["1,048,576", "1,260,773", 1_048_576, 1_260_773],
+        ["500_000", "502_574", 500_000, 502_574],
+        ["500 000", "502 574", 500_000, 502_574],
+        ["500\u202f000", "502\u202f574", 500_000, 502_574],
+        ["500.000", "502.574", 500_000, 502_574],
+    ])("parses the grouped limit %s and input %s in explicit token counts", (cap, input, limit, tokens) => {
+        expect(
+            detectOverflow(
+                `Maximum context length is ${cap} tokens. Messages resulted in ${input} tokens.`,
+            ),
+        ).toMatchObject({ isOverflow: true, reportedLimit: limit, reportedInputTokens: tokens });
+    });
+
+    test.each([
+        "1.5",
+        "128000.5",
+        "500,00",
+        "1_048,576",
+        "500,,000",
+        "500  000",
+        "500_000_",
+    ])("rejects malformed counts without reading their prefix: %s", (count) => {
+        expect(parseReportedInputTokens(`prompt is too long: ${count} tokens`)).toBeUndefined();
+        expect(parseReportedLimit(`maximum prompt length is ${count} tokens`)).toBeUndefined();
+    });
+
+    test("does not treat a dot as grouping without an explicit token unit", () => {
+        expect(parseReportedInputTokens("this request has an estimated 500.000")).toBeUndefined();
+        expect(parseReportedLimit("maximum prompt length is 500.000")).toBeUndefined();
+    });
+
+    test("extracts grouped LiteLLM counts without an overflow class name", () => {
+        expect(
+            detectOverflow(
+                "The input (626,827 tokens) is longer than the model's context length (262,144 tokens).",
+            ),
+        ).toMatchObject({ isOverflow: true, reportedLimit: 262_144, reportedInputTokens: 626_827 });
+    });
+
     test("detects LiteLLM HTTP 400 overflow and separates input from the combined limit", () => {
         const message =
             "litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - The input (626827 tokens) is longer than the model's context length (262144 tokens).\n" +
