@@ -497,7 +497,7 @@ fn held(conn: &rusqlite::Connection, row: &str, revision: i64) -> bool {
 /// answer `corrupt` for an epoch whose key copy is damaged.
 pub(crate) struct Vault {
     held: std::sync::Mutex<Vec<u64>>,
-    missing: (&'static str, &'static str),
+    missing: (String, String),
     corrupt: std::sync::Mutex<Vec<u64>>,
     refuse_call: std::sync::Mutex<Option<&'static str>>,
     /// How many open calls reached it.
@@ -505,10 +505,10 @@ pub(crate) struct Vault {
 }
 
 impl Vault {
-    pub(crate) fn new(held: &[u64], missing: (&'static str, &'static str)) -> Arc<Self> {
+    pub(crate) fn new(held: &[u64], missing: (&str, &str)) -> Arc<Self> {
         Arc::new(Self {
             held: std::sync::Mutex::new(held.to_vec()),
-            missing,
+            missing: (missing.0.to_owned(), missing.1.to_owned()),
             corrupt: std::sync::Mutex::default(),
             refuse_call: std::sync::Mutex::default(),
             opens: std::sync::atomic::AtomicUsize::new(0),
@@ -562,8 +562,8 @@ impl Sealer for Vault {
                     TestSealer::with_domain(KEY, item.epoch, MAGIC_CONTEXT_DOMAIN).open_one(item)
                 } else {
                     Opened::Refused {
-                        code: self.missing.0.into(),
-                        class: self.missing.1.into(),
+                        code: self.missing.0.clone(),
+                        class: self.missing.1.clone(),
                     }
                 }
             })

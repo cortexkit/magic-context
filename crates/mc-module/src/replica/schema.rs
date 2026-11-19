@@ -581,10 +581,11 @@ fn table_triggers(table: &Table) -> String {
              SELECT '{kind}', OLD.id, OLD.revision + 1, OLD.revision, 'delete', {NOW_MS},
                     {writer}, OLD.global_id, {level}, {owner}, 'null'
               WHERE OLD.global_id IS NOT NULL;
-             INSERT INTO replica_ids (kind, global_id, local_id, deleted_at)
-             SELECT '{kind}', OLD.global_id, OLD.id, {NOW_MS}
+             INSERT INTO replica_ids (kind, global_id, local_id, deleted_at, level, owner)
+             SELECT '{kind}', OLD.global_id, OLD.id, {NOW_MS}, {level}, {owner}
               WHERE OLD.global_id IS NOT NULL
-             ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at;
+             ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at,
+                 level = excluded.level, owner = excluded.owner;
              {derived_gone}
          END;",
         writer = writer("'ck-mc'", &row_role(table, "OLD")),
@@ -673,7 +674,9 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
          -- the row with a higher outbox id were written over it. `undone` is
          -- the newest outbox row id of this computer's own changes of the
          -- row that were undone because they could no longer win, the row
-         -- brought back to an older own change.
+         -- brought back to an older own change. A deleted row keeps the level
+         -- and owner its tombstone's subject names, so the tombstone can be
+         -- sent again to a stream made anew.
          CREATE TABLE replica_ids (
            kind TEXT NOT NULL CHECK (kind IN ('memory', 'observation', 'primer')),
            global_id TEXT PRIMARY KEY,
@@ -682,7 +685,9 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
            revision INTEGER,
            seq INTEGER,
            written INTEGER,
-           undone INTEGER
+           undone INTEGER,
+           level TEXT,
+           owner TEXT
          );
          CREATE INDEX idx_replica_ids_local ON replica_ids(kind, local_id);
 

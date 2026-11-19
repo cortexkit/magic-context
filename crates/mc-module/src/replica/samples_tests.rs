@@ -1,11 +1,11 @@
 //! The vault's tagged Magic Context samples
-//! (`fleet-epoch-magic-context-vectors-v1`, copied from claustrum's
-//! `crates/credentials-module/tests/fixtures/fleet-epoch-magic-context-v1/`
-//! with their `SHA256SUMS`): the additional data ck-mc builds for a memory
-//! change matches the samples' byte for byte, the batch requests it sends
-//! and the replies it reads have the samples' shape, the samples'
-//! ciphertexts open under the vault's rules, and a message ck-mc seals opens
-//! under the same rules.
+//! (`fleet-epoch-magic-context-vectors-v1.1`, copied from claustrum's tag of
+//! that name with their `SHA256SUMS`): the additional data ck-mc builds for
+//! a memory change matches the samples' byte for byte, the batch requests it
+//! sends and the replies it reads have the samples' shape, the samples'
+//! ciphertexts open under the vault's rules, a message ck-mc seals opens
+//! under the same rules, and the vault's refusal to open a message under an
+//! epoch it doesn't hold holds the stream until the epoch arrives.
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,9 +18,9 @@ use super::seal::{
 use super::test_support::{vault_aad, TestSealer, MAGIC_CONTEXT_DOMAIN};
 use super::wire::{self, decode, encode};
 
-const README: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1/README.md");
-const CASES: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1/cases.json");
-const SUMS: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1/SHA256SUMS");
+const README: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1.1/README.md");
+const CASES: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1.1/cases.json");
+const SUMS: &str = include_str!("../../testdata/fleet-epoch-magic-context-v1.1/SHA256SUMS");
 
 /// The memory change the samples seal: a project memory of `pj-example`
 /// under the global id `0123456789abcdef0123456789abcdef.42`. The samples
@@ -55,8 +55,16 @@ fn plaintext(opened: &Opened) -> String {
     }
 }
 
+/// The SHA-256 of the tagged set's `SHA256SUMS`, as the vault's team
+/// published it with the tag.
+const SUMS_SHA256: &str = "52b3fddff7eaf5fe5336fc7ffb31dba66341ea35e114cac02f4ec124410b588c";
+
 #[test]
 fn the_copied_samples_are_the_tagged_ones() {
+    assert_eq!(
+        format!("{:x}", Sha256::digest(SUMS.as_bytes())),
+        SUMS_SHA256
+    );
     for (name, text) in [("README.md", README), ("cases.json", CASES)] {
         let line = SUMS
             .lines()
@@ -69,8 +77,78 @@ fn the_copied_samples_are_the_tagged_ones() {
             "{name}"
         );
     }
+    // The set's cases keep the version they were made under; v1.1 adds
+    // `unheld_epoch_open` and leaves the others byte for byte as they were.
     assert_eq!(cases()["version"], "fleet-epoch-magic-context-vectors-v1");
     assert_eq!(cases()["caller"], "reserved:magic-context");
+}
+
+/// The samples' open request sent to a vault that doesn't hold its epoch
+/// (`unheld_epoch_open`) is refused `fleet_epoch_unavailable`, transient,
+/// as a per-item answer. Whatever this computer knows of the epoch record,
+/// that refusal holds the stream and is never skipped; once the vault holds
+/// the epoch, the message is read again and applies.
+#[tokio::test]
+async fn a_refusal_for_an_epoch_the_vault_doesnt_hold_is_held_and_read_again() {
+    use super::epochs::{unopened, EpochStatus, UnknownEpochs, Unopened};
+    use super::hub::InMemoryHub;
+    use super::test_support::{memory, Computer, Vault};
+
+    let case = &cases()["unheld_epoch_open"];
+    let request = open_input(&case["request"]);
+    assert_eq!(
+        open_batch_params(std::slice::from_ref(&request))["items"][0],
+        case["request"],
+        "the request has the shape ck-mc sends"
+    );
+    let reply = serde_json::json!({"items": [case["response"]]});
+    let opened = parse_open_reply(&reply, 1).unwrap();
+    let Opened::Refused { code, class } = &opened[0] else {
+        panic!("the sample is a refusal");
+    };
+    assert_eq!(
+        (code.as_str(), class.as_str()),
+        ("fleet_epoch_unavailable", "transient")
+    );
+    for current in [None, Some(1), Some(2)] {
+        for highest_held in [None, Some(0), Some(1), Some(2)] {
+            for opened_before in [false, true] {
+                let record = EpochStatus {
+                    current,
+                    highest_held,
+                };
+                assert!(
+                    matches!(
+                        unopened(code, class, request.epoch, opened_before, record),
+                        Unopened::Hold { .. }
+                    ),
+                    "{record:?} opened before: {opened_before}"
+                );
+            }
+        }
+    }
+
+    // The engine, under a vault that answers as the sample does.
+    let hub = InMemoryHub::new();
+    let a = Computer::new(&hub, 1);
+    memory(&a, "pj-a", "Sealed under epoch one.");
+    a.sync().await;
+    let mut b = Computer::new(&hub, 2);
+    let vault = Vault::new(&[], (code, class));
+    b.with_vault(
+        &hub,
+        2,
+        std::sync::Arc::clone(&vault) as _,
+        std::sync::Arc::new(UnknownEpochs),
+    );
+    for _ in 0..2 {
+        assert!(b.replica.follow().await.is_err(), "held");
+    }
+    assert_eq!(b.replica.position().unwrap(), 0);
+    assert_eq!(b.value::<i64>("SELECT COUNT(*) FROM replica_rejects"), 0);
+    vault.receive(1);
+    b.follow_all().await;
+    assert_eq!(b.live(), ["Sealed under epoch one."]);
 }
 
 #[test]

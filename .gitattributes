@@ -10,4 +10,4 @@ crates/mc-module/testdata/app-read-samples/**/*.json text eol=lf
 crates/mc-module/testdata/app-read-samples/SHA256SUMS text eol=lf
 crates/mc-module/testdata/app-read-samples/README.md text eol=lf
 crates/mc-module/testdata/role-lease-v1.2/*.json text eol=lf
-crates/mc-module/testdata/fleet-epoch-magic-context-v1/*.json text eol=lf
+crates/mc-module/testdata/fleet-epoch-magic-context-v1.1/* text eol=lf

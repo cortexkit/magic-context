@@ -1008,3 +1008,42 @@ async fn a_round_stops_publishing_at_its_first_unconfirmed_send() {
     assert_eq!(hub.messages().len(), 3);
     assert_eq!(hub.publish_calls(), 4);
 }
+
+/// A person deleted a memory on A while B was away, so B still holds it.
+/// Then the hub's stream is made anew. Both computers send every row again,
+/// and A sends the tombstone too: B, and a computer that joins the new
+/// stream, delete the memory, so every computer ends with the same rows.
+#[tokio::test]
+async fn a_delete_in_the_old_streams_history_reaches_every_computer_after_the_stream_is_made_anew()
+{
+    let old = InMemoryHub::new();
+    let (a, b) = (Computer::new(&old, 1), Computer::new(&old, 2));
+    let gone = memory(&a, "pj-a", "Deleted on A while B was away.");
+    memory(&a, "pj-a", "Kept everywhere.");
+    a.sync().await;
+    b.sync().await;
+    a.db.with_connection(|conn| {
+        let tx = conn.transaction().unwrap();
+        crate::memory_writes::person::purge(&tx, gone).unwrap();
+        tx.commit().unwrap();
+    });
+    a.sync().await;
+    assert_eq!(b.live().len(), 2, "B never read the delete");
+
+    let new = InMemoryHub::new();
+    let b = Computer::open(&new, 2, b.copy());
+    b.sync().await;
+    let a = Computer::open(&new, 1, a.copy());
+    a.sync().await;
+    b.follow_all().await;
+    let c = Computer::new(&new, 3);
+    c.sync().await;
+    for computer in [&a, &b, &c] {
+        assert_eq!(computer.live(), ["Kept everywhere."]);
+    }
+    assert_eq!(
+        b.value::<i64>("SELECT COUNT(*) FROM memories"),
+        1,
+        "the deleted memory is gone from B, not only archived"
+    );
+}

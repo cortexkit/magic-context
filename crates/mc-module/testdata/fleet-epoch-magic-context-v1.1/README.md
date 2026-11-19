@@ -11,6 +11,8 @@ in `tests/fleet_epoch_vectors.rs`.
 - `seal_open` records a Magic Context single seal and its successful open on the
   second store. `cross_domain_open` submits the identical open request as
   Prefrontal and pins the refusal.
+- `unheld_epoch_open` sends the same request to a vault without the epoch and
+  pins the transient `fleet_epoch_unavailable` refusal.
 - `batch` records two ordered Magic Context seal inputs and outputs and their
   successful open batch on the second store. Each item has a separate nonce.
 
@@ -34,8 +36,8 @@ cargo test --locked -p credentials-module --features credentials-core/test-suppo
 
 The test exercises fresh single and batch seals, replays the committed
 ciphertexts through real open calls, and compares all three generated files byte
-for byte. Production draws each nonce at emission; normal runs replay those
-nonces rather than changing the nonce source. To regenerate, set
+for byte. Regeneration reuses existing sealed samples; if `cases.json` is absent,
+production draws fresh nonces. To regenerate, set
 `CK_EMIT_MAGIC_CONTEXT_FLEET_VECTORS=1` on the command above and return all three
 files from the build-server job. Never hand-edit generated sample files.
 `SHA256SUMS` pins README and cases, excluding itself.

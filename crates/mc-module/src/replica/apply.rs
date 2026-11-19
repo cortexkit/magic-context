@@ -685,7 +685,7 @@ fn apply_body(
         return Ok(Applied::Changed(Vec::new()));
     }
     if body.change == "delete" {
-        return tombstone(tx, table, body, local).map(Applied::Changed);
+        return tombstone(tx, table, body, subject, local).map(Applied::Changed);
     }
     let fence = fenced(tx, subject, body)?;
     let winner = fence.is_none()
@@ -856,6 +856,22 @@ fn subject_role(subject: &str) -> Option<String> {
         "global" | "observation" => "dreamer.global".to_owned(),
         _ => format!("dreamer.{owner}"),
     })
+}
+
+/// The level and owner a subject names, as a deleted row keeps them for
+/// its tombstone ([`super::publish`] forms the subject from them again):
+/// a memory's level and owner, a primer's project, nothing for an
+/// observation.
+fn subject_owner(subject: &str) -> (Option<String>, Option<String>) {
+    let mut parts = subject.splitn(5, '.');
+    let (Some(kind), Some(owner)) = (parts.nth(3), parts.next()) else {
+        return (None, None);
+    };
+    match kind {
+        "project" | "workspace" | "global" => (Some(kind.to_owned()), Some(owner.to_owned())),
+        "primer" => (None, Some(owner.to_owned())),
+        _ => (None, None),
+    }
 }
 
 /// The dreamer role of row `local` as it stands here, by the same rule.
@@ -1780,9 +1796,11 @@ fn tombstone(
     tx: &Transaction,
     table: &Table,
     body: &Body,
+    subject: &str,
     local: Option<i64>,
 ) -> rusqlite::Result<Vec<Change>> {
     let now = now_ms();
+    let (level, owner) = subject_owner(subject);
     let mut changes = Vec::new();
     if let Some(local) = local {
         changes.extend(owner_change(tx, table, local)?);
@@ -1820,9 +1838,11 @@ fn tombstone(
         )?;
     }
     tx.execute(
-        "INSERT INTO replica_ids (kind, global_id, local_id, deleted_at) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at",
-        params![table.kind, body.global_id, local, now],
+        "INSERT INTO replica_ids (kind, global_id, local_id, deleted_at, level, owner)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at,
+             level = excluded.level, owner = excluded.owner",
+        params![table.kind, body.global_id, local, now, level, owner],
     )?;
     tx.execute(
         "DELETE FROM replica_pending_links WHERE target_global_id = ?1",

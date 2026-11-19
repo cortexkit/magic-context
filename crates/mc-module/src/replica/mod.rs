@@ -428,8 +428,9 @@ fn moved_here(conn: &mut Connection, box_id: &str) -> rusqlite::Result<()> {
 /// position goes back to 0, so the new stream is read from its start;
 /// what this store learned from the old stream goes (each row's deciding
 /// message, fences, passed arrivals, rows to read again, and sends waiting
-/// to come back); and every replicated row is queued again, so the new
-/// stream holds every row for the computers that join it. A position
+/// to come back); and every replicated row is queued again, with every
+/// deleted row's tombstone, so the new stream holds every row and every
+/// delete for the computers that join it. A position
 /// stored before the creation time was recorded is checked by the last
 /// sequence alone.
 fn same_stream(conn: &mut Connection, info: &hub::StreamInfo) -> rusqlite::Result<()> {
@@ -449,6 +450,24 @@ fn same_stream(conn: &mut Connection, info: &hub::StreamInfo) -> rusqlite::Resul
             info.created,
             info.last_seq
         );
+        // Each deleted row's tombstone goes to the new stream too, so a
+        // computer that still holds the row (it missed the delete) or joins
+        // the new stream deletes it: deletes are final everywhere. It is
+        // queued before the old stream's revisions are forgotten, one past
+        // the last one this store applied.
+        tx.execute(
+            "INSERT INTO replica_outbox
+                 (kind, local_id, revision, base_revision, change, created_at, actor,
+                  global_id, level, owner, frozen)
+             SELECT kind, COALESCE(local_id, 0), COALESCE(revision, 0) + 1, COALESCE(revision, 0),
+                    'delete', ?1, 'ck-mc', global_id, level, owner, 'null'
+               FROM replica_ids
+              WHERE deleted_at IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM replica_outbox o
+                                 WHERE o.global_id = replica_ids.global_id
+                                   AND o.change = 'delete' AND o.state <> 'published')",
+            [crate::memory_writes::now_ms()],
+        )?;
         tx.execute_batch(
             "UPDATE replica_state SET stream_seq = 0 WHERE id = 1;
              UPDATE replica_ids SET revision = NULL, seq = NULL, written = NULL, undone = NULL;

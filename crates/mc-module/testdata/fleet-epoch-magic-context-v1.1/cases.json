@@ -95,5 +95,19 @@
       "nonce": "4bjrjBM3A1ZBcqmwAzr7sju8W1vd1gfJ"
     }
   },
+  "unheld_epoch_open": {
+    "request": {
+      "aad": "eyJnbG9iYWxfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZi40MiIsInJldmlzaW9uIjozLCJzdWJqZWN0IjoiY2suZmxlZXQubWVtb3J5LnByb2plY3QucGotZXhhbXBsZSIsInYiOiJjay1tZW1vcnkvdjEifQ",
+      "ciphertext": "_GV1djScnZ1GAbQmqiV0ytZELQaW8bXK9RIWzcGLw5rCDiE",
+      "epoch": 1,
+      "nonce": "4bjrjBM3A1ZBcqmwAzr7sju8W1vd1gfJ"
+    },
+    "response": {
+      "error": {
+        "class": "transient",
+        "code": "fleet_epoch_unavailable"
+      }
+    }
+  },
   "version": "fleet-epoch-magic-context-vectors-v1"
 }

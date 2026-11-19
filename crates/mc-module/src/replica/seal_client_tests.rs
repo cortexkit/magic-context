@@ -18,7 +18,7 @@ use super::wire::decode;
 
 fn cases() -> Value {
     serde_json::from_str(include_str!(
-        "../../testdata/fleet-epoch-magic-context-v1/cases.json"
+        "../../testdata/fleet-epoch-magic-context-v1.1/cases.json"
     ))
     .unwrap()
 }
