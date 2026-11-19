@@ -92,6 +92,31 @@ fn a_schedule_is_due_at_its_next_slot_and_moves_when_its_setting_changes() {
 }
 
 #[test]
+fn audit_a_wait_cannot_enable_a_disabled_schedule() {
+    let conn = ContextDb::fresh_in_memory();
+    let owner = OwnerKey::project("pj-a");
+    let task = "swe:classify-memories";
+    let now = local(10, 1);
+    ensure_schedule(&conn, &owner, task, "0 6 * * *", now).unwrap();
+    ensure_schedule(&conn, &owner, task, "", now).unwrap();
+    let until = now + HOUR;
+    settle(
+        &conn,
+        &owner,
+        task,
+        &Settled::Waiting {
+            until,
+            reason: "concurrency_full".into(),
+        },
+        None,
+        now,
+    )
+    .unwrap();
+    assert_eq!(due(&conn, until).unwrap().len(), 0);
+    assert_eq!(row(&conn, task).1.as_deref(), Some("waiting"));
+}
+
+#[test]
 fn settling_moves_the_due_time_and_counts_only_failures() {
     let conn = ContextDb::fresh_in_memory();
     let owner = OwnerKey::project("pj-a");

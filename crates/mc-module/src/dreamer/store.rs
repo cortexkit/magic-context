@@ -174,7 +174,8 @@ pub fn settle(
         Settled::Waiting { until, reason } => (
             "waiting",
             Some(reason.as_str()),
-            Some(next_slot.map_or(*until, |slot| slot.min(*until))),
+            (!schedule.trim().is_empty())
+                .then(|| next_slot.map_or(*until, |slot| slot.min(*until))),
             "failures",
         ),
         Settled::Skipped { reason } => ("skipped", Some(reason.as_str()), next_slot, "failures"),
