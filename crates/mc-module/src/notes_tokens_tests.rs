@@ -161,7 +161,7 @@ fn notes_tokens_change_emergency_target_without_double_counting_a_ride() {
             removed_tokens: 0,
         };
         assert_eq!(
-            lanes::emergency_drop(&context, None, &emergency).len(),
+            lanes::emergency_drop(&context, None, &emergency, &BTreeSet::new()).len(),
             expected
         );
     }

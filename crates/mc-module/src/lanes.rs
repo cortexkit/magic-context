@@ -1413,6 +1413,7 @@ pub fn emergency_drop(
     context: &Context,
     cutoff: Option<u64>,
     emergency: &Emergency,
+    failed_parts: &BTreeSet<PartKey>,
 ) -> Vec<(PartKey, Shape)> {
     if (emergency.prompt_tokens == 0 && emergency.request_tokens.unwrap_or(0) == 0)
         || (!emergency.over_limit && emergency.ceiling_tokens == 0)
@@ -1466,13 +1467,16 @@ pub fn emergency_drop(
         return Vec::new();
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
-    // Every output that could go, tail included: the tier reserve is taken
-    // over these, as the plugin does, so it mostly overlaps the tail.
+    // The tier reserve includes every output that could go, even in the
+    // protected tail. A part that already caused a refusal counts toward
+    // neither reserve nor reclaim.
     let droppable: Vec<(&Entry, &Part, u8)> = tool_parts(context)
         .filter(|(entry, part, tool)| {
             is_finished(&tool.status)
                 && part.tag.is_some()
                 && !context.edited.covers(&entry.mid, &part.id)
+                && (failed_parts.is_empty()
+                    || !failed_parts.contains(&(entry.mid.clone(), part.id.clone())))
         })
         .map(|(entry, part, tool)| (entry, part, emergency_tier(&tool.name)))
         .collect();

@@ -431,7 +431,8 @@ impl Session {
                 edited: &emergency_edited,
                 ..context
             };
-            let mut selected = lanes::emergency_drop(&emergency_context, cutoff, &emergency);
+            let mut selected =
+                lanes::emergency_drop(&emergency_context, cutoff, &emergency, &self.failed_parts);
             selected.retain(|(key, _)| !kept(key));
             if !selected.is_empty() {
                 // An over-limit request drops calls whole, whatever shape an

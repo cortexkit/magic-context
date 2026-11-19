@@ -172,6 +172,35 @@ fn audit_views_fit_reclaim_above_execute_fixed_cost() {
 }
 
 #[test]
+fn audit_views_emergency_excludes_previously_refused_tool() {
+    let (mut session, settings) = head_with_unmeasured_growth();
+    let ride = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    )
+    .with_request_tokens(99_100);
+    let first = session.ride(&settings, &ride).unwrap();
+    assert!(touches(&first, "tool-2", "p"));
+    session.settle_refused(&[(
+        first.version,
+        ViewRefusal::RunningTool {
+            mid: "tool-2".into(),
+            part: "p".into(),
+        },
+    )]);
+    assert!(session
+        .failed_parts
+        .contains(&("tool-2".into(), "p".into())));
+    let second = session.ride(&settings, &ride).unwrap();
+    assert!(
+        !touches(&second, "tool-2", "p"),
+        "the ride retried an edit that was already refused"
+    );
+    assert!(touches(&second, "tool-3", "p"));
+}
+
+#[test]
 fn ride_over_limit_without_a_count_uses_the_usable_window() {
     let logs = crate::test_log::capture();
     let (mut session, settings) = head_with_unmeasured_growth();
