@@ -76,6 +76,8 @@ mod order_tests;
 #[cfg(test)]
 mod review_witness_2_tests;
 #[cfg(test)]
+mod review_witness_3_tests;
+#[cfg(test)]
 mod review_witness_tests;
 #[cfg(test)]
 mod samples_tests;
