@@ -373,7 +373,7 @@ pub const MEMORY_FORMAT: u32 = 1;
 impl Shape {
     /// Whether a baseline rendered under `self` must fold for `now`, as the
     /// plugin's budget identity decides. A change the user makes (memory
-    /// on or off, the memory budget, the history percentage) folds. The
+    /// on or off, an active memory budget, the history percentage) folds. The
     /// history budget in tokens also moves with the window the runner
     /// reports, which a catalog refresh can change without any edit: that
     /// folds only when it shrinks by more than 64 tokens or 1%, whichever is
@@ -383,15 +383,15 @@ impl Shape {
             .history_budget_tokens
             .saturating_sub(now.history_budget_tokens)
             > 64.max(self.history_budget_tokens / 100);
-        // With memory off, m[0] has no memory blocks, so the profile's budget
-        // changes none of its bytes.
+        // With memory off, there are no memory blocks, so neither budget
+        // can change the baseline's bytes.
         let memory_blocks_changed = now.memory_enabled
-            && matches!(
-                (self.profile_budget_tokens, now.profile_budget_tokens),
-                (Some(old), Some(new)) if old != new
-            );
+            && (self.memory_budget_tokens != now.memory_budget_tokens
+                || matches!(
+                    (self.profile_budget_tokens, now.profile_budget_tokens),
+                    (Some(old), Some(new)) if old != new
+                ));
         self.memory_enabled != now.memory_enabled
-            || self.memory_budget_tokens != now.memory_budget_tokens
             || memory_blocks_changed
             || matches!(
                 (self.history_budget_percentage_bp, now.history_budget_percentage_bp),

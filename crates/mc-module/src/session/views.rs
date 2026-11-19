@@ -421,6 +421,7 @@ impl Session {
                 notes: self.notes.clone(),
                 ceiling_tokens: (usable as f64 * settings.execute_threshold_percentage / 100.0)
                     as u64,
+                usable_tokens: usable,
                 over_limit: over_limit.is_some(),
                 priced,
                 removed_tokens,
@@ -430,7 +431,8 @@ impl Session {
                 edited: &emergency_edited,
                 ..context
             };
-            let mut selected = lanes::emergency_drop(&emergency_context, cutoff, &emergency);
+            let mut selected =
+                lanes::emergency_drop(&emergency_context, cutoff, &emergency, &self.failed_parts);
             selected.retain(|(key, _)| !kept(key));
             if !selected.is_empty() {
                 // An over-limit request drops calls whole, whatever shape an
@@ -604,31 +606,55 @@ impl Session {
         let version = self.version + 1;
         ops.retain(|op| !self.render_failed.excludes(op));
         let covered = self.renderable_covered(&ops, covered);
-        let retire = retired_history(self.summaries.is_empty(), &ops);
-        let full = self.with_replaced_outputs(&ops);
-        let built = view_builder::next_view_cached(
-            self.latest.as_ref(),
-            full.as_deref().unwrap_or(self.index.entries()),
-            ops,
-            view_builder::ViewPolicy {
-                rules: &self.conditions.rules,
-                version,
-                built_through: self
-                    .index
-                    .cursor()
-                    .filter(|_| self.view_anchor)
-                    .map(|cursor| cursor.mid.clone()),
-                new_signed: (self.view_anchor
-                    && cortexkit_compaction_view::rules::is_bound_signed_model(
-                        &self.conditions.model.model,
-                    ))
-                .then(|| "strip".into()),
-                signed_floor: self.signed_floor.clone(),
-                force: self.render_failed.repair_pending,
-            },
-            |op| retire(op) || self.render_failed.excludes(op),
-            &mut self.view_validation,
-        );
+        let is_cut = |op: &EditOp| matches!(op, EditOp::Cut { .. });
+        let without_new_cut = ops
+            .iter()
+            .any(|op| {
+                is_cut(op)
+                    && !self
+                        .latest
+                        .iter()
+                        .flat_map(|view| &view.edits)
+                        .any(|e| e.op == *op)
+            })
+            .then(|| ops.iter().filter(|op| !is_cut(op)).cloned().collect());
+        let mut build = |ops: Vec<EditOp>, keep_old_cut| {
+            let retire = retired_history(self.summaries.is_empty(), &ops);
+            let full = self.with_replaced_outputs(&ops);
+            view_builder::next_view_cached(
+                self.latest.as_ref(),
+                full.as_deref().unwrap_or(self.index.entries()),
+                ops,
+                view_builder::ViewPolicy {
+                    rules: &self.conditions.rules,
+                    version,
+                    built_through: self
+                        .index
+                        .cursor()
+                        .filter(|_| self.view_anchor)
+                        .map(|cursor| cursor.mid.clone()),
+                    new_signed: (self.view_anchor
+                        && cortexkit_compaction_view::rules::is_bound_signed_model(
+                            &self.conditions.model.model,
+                        ))
+                    .then(|| "strip".into()),
+                    signed_floor: self.signed_floor.clone(),
+                    force: self.render_failed.repair_pending,
+                },
+                |op| {
+                    (!(keep_old_cut && is_cut(op)) && retire(op)) || self.render_failed.excludes(op)
+                },
+                &mut self.view_validation,
+            )
+        };
+        let mut built = build(ops, false);
+        // A bad proposed cut must not discard independent edits. Keep the
+        // previous cut and validate the rest of the batch as a new candidate.
+        if let (Err(_), Some(remaining)) = (&built, without_new_cut) {
+            if let Ok(view) = build(remaining, true) {
+                built = Ok(view);
+            }
+        }
         match built {
             Ok(Some(view)) => {
                 if self.repeats_failed_edits(&view) {
@@ -676,6 +702,7 @@ impl Session {
                     self.baseline = Some(next);
                     if !flush {
                         self.fold_due = false;
+                        self.head_stale = false;
                     }
                 }
                 if let Some(next) = self.next_caveman.take() {

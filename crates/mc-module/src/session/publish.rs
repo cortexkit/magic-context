@@ -684,8 +684,20 @@ impl Session {
         if self.latest.as_ref().is_some_and(|view| !view.verify()) {
             self.latest_unknown = true;
         }
-        self.queued = before.queued;
-        self.refused_once = before.refused_once;
+        // Restore only work removed by the undone views. The live queue can
+        // contain parts added after the first view was handed over; a later
+        // undone view may already have covered some of those parts too.
+        for pending in &undone {
+            for part in &pending.covered {
+                if pending.before.queued.contains(part) {
+                    self.queued.insert(part.clone());
+                    self.app_projection.dirty.insert(part.0.clone());
+                    if pending.before.refused_once.contains(part) {
+                        self.refused_once.insert(part.clone());
+                    }
+                }
+            }
+        }
         self.transcript_retry = before.transcript_retry;
         self.emergency_latched = before.emergency_latched;
         self.summary_unshown |= before.summary_unshown;
@@ -763,6 +775,19 @@ impl Session {
             .fetch_add(1, Ordering::Relaxed);
         match client.applied_view(&self.key).await {
             Ok(answer) => {
+                let own = answer
+                    .applied_by
+                    .as_deref()
+                    .is_none_or(|id| id == crate::MODULE_ID);
+                if own {
+                    if let Some(through) = answer.view.as_ref().and_then(move_floor::cut_of) {
+                        if !self.index_adopted_cut(client, through).await {
+                            self.latest_unknown = true;
+                            self.index_ready = false;
+                            return;
+                        }
+                    }
+                }
                 self.keep_spent_reading_for(&answer);
                 // The runner's own answer is what it applies now. It replaces
                 // the newest version rather than raising it: a runner whose
@@ -777,11 +802,7 @@ impl Session {
                     self.version = self.version.max(view.version);
                     // A different provider owns its cut and edits. Only its
                     // version is a floor for our whole replacement.
-                    if answer
-                        .applied_by
-                        .as_deref()
-                        .is_some_and(|id| id != crate::MODULE_ID)
-                    {
+                    if !own {
                         self.latest = None;
                         self.latest_unknown = false;
                         self.app_adopt_head();
@@ -802,5 +823,30 @@ impl Session {
                 self.runner_call_failed("session.applied_view", &error);
             }
         }
+    }
+
+    /// A runner restored to an earlier cut serves entries that the newer
+    /// cut let us prune. Load them before making its view our current one.
+    async fn index_adopted_cut<C: RunnerClient>(&mut self, client: &C, through: &str) -> bool {
+        if self.index.base() <= 1 || self.index.ordinal_of(through).is_some() {
+            return true;
+        }
+        let move_floor::Placed::At(ordinal) = self.place(client, through).await else {
+            return false;
+        };
+        if ordinal >= self.index.base() {
+            return true;
+        }
+        let before = std::mem::replace(&mut self.index, Index::starting_at(ordinal));
+        let cut = self.cut.replace(ordinal);
+        let ready = self.read_until(client, None, true).await
+            && self.index.ordinal_of(through) == Some(ordinal);
+        self.cut = cut;
+        if !ready {
+            self.index = before;
+            return false;
+        }
+        self.app_projection.render_changed();
+        true
     }
 }

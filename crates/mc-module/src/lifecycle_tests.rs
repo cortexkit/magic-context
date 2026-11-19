@@ -365,6 +365,182 @@ fn notice(session: &Session, seq: u64, newest: Option<Cursor>) -> NoticeRequest 
 }
 
 #[tokio::test]
+async fn audit_views_noop_fold_does_not_authorize_the_next_notice() {
+    let (mut session, client, _, _, mut settings) = fixture();
+    session.features.summarizer = true;
+    settings.memory_enabled = false;
+    let entries = vec![text(1, "one"), text(2, "two"), text(3, "latest")];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries.clone();
+    let first = session.build(&settings, None, false, None).0.unwrap();
+    session.accept(first.clone());
+    session.settle_unconfirmed(Some(&first.applied()), &[]);
+    let below_threshold = |session: &Session, seq| {
+        let mut request = notice(session, seq, entries.last().map(cursor));
+        request.applied_view = Some(first.applied());
+        request.conditions.last_prompt_tokens = Some(10_000);
+        request.conditions.last_prompt_view = Some(first.version);
+        request
+    };
+
+    settings.history_budget_percentage = 0.2;
+    assert!(session.head_shape_changed(&settings));
+    let request = below_threshold(&session, 1);
+    session.notice(&client, &settings, request).await;
+    assert!(client.offered.lock().unwrap().is_empty());
+    assert!(!session.head_shape_changed(&settings));
+
+    session
+        .ctx_reduce(&client, &serde_json::json!({"drop": "2"}))
+        .await
+        .unwrap();
+    let request = below_threshold(&session, 2);
+    session.notice(&client, &settings, request).await;
+    assert!(
+        client.offered.lock().unwrap().is_empty(),
+        "a byte-identical fold authorized an unrelated drop"
+    );
+    assert_eq!(session.latest.as_ref().unwrap().checksum, first.checksum);
+    assert!(session.queued.contains(&("two".into(), "p".into())));
+
+    settings.memory_budget_tokens += 1000;
+    assert!(
+        !session.head_shape_changed(&settings),
+        "an inactive memory budget cannot change the head"
+    );
+}
+
+#[tokio::test]
+async fn audit_views_refusal_preserves_later_stamp() {
+    let (mut session, client, _, _, settings) = fixture();
+    let entries = vec![text(1, "one"), text(2, "two"), text(3, "latest")];
+    session.index.extend(entries.clone());
+    let stamp = |tag: &str| serde_json::json!({"drop": tag});
+    assert_eq!(
+        session.ctx_reduce(&client, &stamp("1")).await.unwrap(),
+        "1 tag stamped."
+    );
+    let view = session.build(&settings, None, false, None).0.unwrap();
+    assert!(session.publish(&client, view.clone()).await);
+    assert_eq!(
+        session.ctx_reduce(&client, &stamp("2")).await.unwrap(),
+        "1 tag stamped."
+    );
+
+    let mut request = notice(&session, 1, entries.last().map(cursor));
+    request.entries = entries;
+    request.events = vec![Event::ViewRefused {
+        version: view.version,
+        refusal: ViewRefusal::BadSince,
+    }];
+    session.notice(&client, &settings, request).await;
+    assert_eq!(
+        session.queued,
+        BTreeSet::from([("one".into(), "p".into()), ("two".into(), "p".into())]),
+        "refusing an earlier view must not lose a later stamp"
+    );
+}
+
+#[tokio::test]
+async fn audit_views_no_hold_for_already_dropped_thinking() {
+    use cortexkit_role_compaction::part::Seal;
+    use cortexkit_role_compaction::read::StepUsage;
+
+    let (mut session, client, _, _, settings) = fixture();
+    session.conditions.rules.signed_parts = SignedParts::Bound;
+    session.conditions.last_prompt_tokens = Some(70_000);
+    let mut thinking = Entry::new(
+        2,
+        "think",
+        Role::Assistant,
+        0,
+        vec![Part::new(
+            "r",
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(12_000),
+            },
+        )
+        .with_seal(Seal::Signed)],
+    );
+    let mut usage = StepUsage::new();
+    usage.reasoning_tokens = Some(3_000);
+    thinking.usage = Some(usage);
+    let mut last = text(3, "last");
+    last.role = Role::Assistant;
+    session.index.extend([text(1, "task"), thinking, last]);
+    assert!(!session.rebuild_permitted(&settings));
+
+    let view = session
+        .seal(
+            vec![EditOp::Drop {
+                mid: "think".into(),
+                part: Some("r".into()),
+            }],
+            &[],
+        )
+        .unwrap();
+    assert!(session.publish(&client, view.clone()).await);
+    assert!(
+        !session.rebuild_permitted(&settings),
+        "accepted does not mean applied"
+    );
+    session.settle_unconfirmed(Some(&view.applied()), &[]);
+    assert!(
+        session.rebuild_permitted(&settings),
+        "the applied view dropped the turn's heavy reasoning"
+    );
+}
+
+#[tokio::test]
+async fn audit_views_ordinary_rebuild_and_defer_keep_wire_bytes() {
+    use cortexkit_role_compaction::view::Edit;
+
+    let (mut session, client, _, _, settings) = fixture();
+    let old = text(1, "earlier");
+    let pinned = View::seal(
+        1,
+        vec![Edit::new(
+            1,
+            EditOp::Replace {
+                mid: "earlier".into(),
+                part: "p".into(),
+                field: "text".into(),
+                value: serde_json::json!("[dropped §1§]"),
+                expect: old.parts[0].digest.clone(),
+            },
+        )],
+    );
+    let bytes = serde_json::to_vec(&pinned).unwrap();
+    let entries = vec![old, text(2, "latest")];
+    *client.entries.lock().unwrap() = entries.clone();
+    session.index.extend(entries.clone());
+    session
+        .ctx_reduce(&client, &serde_json::json!({"drop":"1"}))
+        .await
+        .unwrap();
+    let mut execute = notice(&session, 1, entries.last().map(cursor));
+    execute.conditions.last_prompt_tokens = Some(70_000);
+    session.notice(&client, &settings, execute).await;
+    assert_eq!(client.offered.lock().unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_vec(&client.offered.lock().unwrap()[0]).unwrap(),
+        bytes
+    );
+
+    let mut defer = notice(&session, 2, entries.last().map(cursor));
+    defer.applied_view = Some(pinned.applied());
+    defer.conditions.last_prompt_view = Some(pinned.version);
+    defer.conditions.last_prompt_tokens = Some(30_000);
+    session.notice(&client, &settings, defer).await;
+    assert_eq!(client.offered.lock().unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_vec(session.latest.as_ref().unwrap()).unwrap(),
+        bytes
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_notice_divergence_reads_again_from_the_cut() {
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![text(1, "a"), text(2, "b"), text(3, "c")];

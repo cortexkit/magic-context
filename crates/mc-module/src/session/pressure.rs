@@ -4,6 +4,36 @@
 use super::*;
 
 impl Session {
+    fn confirmed_thinking_edits(&self) -> Option<lanes::Edited> {
+        use cortexkit_role_compaction::rules::SignedParts;
+        if self.conditions.rules.signed_parts != SignedParts::Bound {
+            return None;
+        }
+        // Accepted views can wait for the next step. Until the runner says
+        // it applied one, its drops cannot release the thinking hold.
+        let view = self
+            .latest
+            .iter()
+            .chain(
+                self.unconfirmed
+                    .iter()
+                    .filter_map(|p| p.before.latest.as_ref()),
+            )
+            .find(|view| view.version == self.newest_applied)?;
+        let rendered = self.rendered_view(Some(view))?;
+        Some(lanes::Edited::of(Some(&rendered), &self.index, None))
+    }
+
+    pub(super) fn signed_thinking_held(&self, pressure: &Conditions, settings: &Settings) -> bool {
+        pass::signed_thinking_hold_in_view(
+            self.index.entries(),
+            pressure,
+            settings,
+            self.signed_floor(),
+            || self.confirmed_thinking_edits(),
+        )
+    }
+
     /// Whether the session's own state lets this pass rebuild: a stale head,
     /// or an execute pass with no summary on its way (or in the force band)
     /// and no signed-thinking hold. A notice asks this after admitting a
@@ -13,12 +43,7 @@ impl Session {
         let (hold, execute, force) = {
             let pressure = self.pressure();
             (
-                pass::signed_thinking_hold(
-                    self.index.entries(),
-                    &pressure,
-                    settings,
-                    self.signed_floor(),
-                ),
+                self.signed_thinking_held(&pressure, settings),
                 pass::at_execute(&pressure, settings),
                 pass::in_force_band(&pressure, settings),
             )
@@ -28,10 +53,11 @@ impl Session {
         // current reading, as the hold would make it wait.
         let fold_held = hold
             || (self.reading_stale
-                && pass::heavy_signed_turn(
+                && pass::heavy_signed_turn_in_view(
                     self.index.entries(),
                     &self.conditions,
                     self.signed_floor(),
+                    self.confirmed_thinking_edits().as_ref(),
                 ));
         // A fold for a settings or window change waits out a heavy-thinking
         // turn, as an execute pass does: re-rendering `m[0]` then would drop

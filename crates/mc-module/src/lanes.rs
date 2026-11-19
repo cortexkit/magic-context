@@ -696,13 +696,25 @@ pub const UNKNOWN_REASONING_STEP_TOKENS: u64 = 1_000;
 /// thinking a rebuild would invalidate (`pass.rs`), so it measures how hard
 /// the model just thought, not what sending the reasoning again costs.
 pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
-    let reasoning: Vec<&Part> = entry
+    step_reasoning_tokens_shown(entry, None)
+}
+
+pub(crate) fn step_reasoning_tokens_shown(entry: &Entry, edited: Option<&Edited>) -> u64 {
+    let mut reasoning: Vec<&Part> = entry
         .parts
         .iter()
         .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
         .collect();
+    let generated_parts = reasoning.len();
+    if let Some(edited) = edited {
+        reasoning.retain(|part| !edited.covers(&entry.mid, &part.id));
+    }
     if reasoning.is_empty() {
         return 0;
+    }
+    if reasoning.len() != generated_parts {
+        // A step's aggregate usage includes reasoning that is no longer sent.
+        return visible_cost(&reasoning);
     }
     generated_cost(entry)
         .or_else(|| entry.reasoning_tokens.map(|counted| counted.count))
@@ -1376,6 +1388,9 @@ pub struct Emergency {
     pub notes: crate::prompt_notes::Notes,
     /// The usable window times the execute threshold.
     pub ceiling_tokens: u64,
+    /// The usable window itself, for a refused request whose fixed cost
+    /// already reaches the execute ceiling.
+    pub usable_tokens: u64,
     /// The runner said the next request would not fit: the protected tail and
     /// the tier reserve yield, and dropped calls go whole. Protected tools
     /// still stay.
@@ -1398,9 +1413,10 @@ pub fn emergency_drop(
     context: &Context,
     cutoff: Option<u64>,
     emergency: &Emergency,
+    failed_parts: &BTreeSet<PartKey>,
 ) -> Vec<(PartKey, Shape)> {
     if (emergency.prompt_tokens == 0 && emergency.request_tokens.unwrap_or(0) == 0)
-        || emergency.ceiling_tokens == 0
+        || (!emergency.over_limit && emergency.ceiling_tokens == 0)
     {
         return Vec::new();
     }
@@ -1430,24 +1446,37 @@ pub fn emergency_drop(
     {
         (prompt, fixed) = account(request);
     }
-    let ceiling = emergency.ceiling_tokens as f64;
+    let mut ceiling = emergency.ceiling_tokens as f64;
+    if emergency.over_limit {
+        if fixed >= emergency.usable_tokens.saturating_sub(EMERGENCY_MIN_TOKENS) as f64 {
+            // Even dropping the whole indexed transcript would leave less
+            // than the safety margin for estimation error.
+            return Vec::new();
+        }
+        if fixed >= ceiling {
+            ceiling = emergency.usable_tokens as f64;
+        }
+    }
     if fixed > ceiling {
         // Dropping tool output cannot reach the target.
         return Vec::new();
     }
     let target = fixed + EMERGENCY_TARGET_FRACTION * (ceiling - fixed);
     let reclaim = (prompt - target).round();
-    if reclaim <= EMERGENCY_MIN_TOKENS as f64 {
+    if reclaim <= 0.0 || (!emergency.over_limit && reclaim <= EMERGENCY_MIN_TOKENS as f64) {
         return Vec::new();
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
-    // Every output that could go, tail included: the tier reserve is taken
-    // over these, as the plugin does, so it mostly overlaps the tail.
+    // The tier reserve includes every output that could go, even in the
+    // protected tail. A part that already caused a refusal counts toward
+    // neither reserve nor reclaim.
     let droppable: Vec<(&Entry, &Part, u8)> = tool_parts(context)
         .filter(|(entry, part, tool)| {
             is_finished(&tool.status)
                 && part.tag.is_some()
                 && !context.edited.covers(&entry.mid, &part.id)
+                && (failed_parts.is_empty()
+                    || !failed_parts.contains(&(entry.mid.clone(), part.id.clone())))
         })
         .map(|(entry, part, tool)| (entry, part, emergency_tier(&tool.name)))
         .collect();
@@ -1497,7 +1526,7 @@ pub fn emergency_drop(
             }
         }
     }
-    if !emergency.priced && reclaimed < EMERGENCY_MIN_TOKENS {
+    if !emergency.over_limit && !emergency.priced && reclaimed < EMERGENCY_MIN_TOKENS {
         return Vec::new();
     }
     selected

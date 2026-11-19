@@ -144,6 +144,63 @@ fn reclaimed_tools(view: Option<&View>) -> usize {
 }
 
 #[test]
+fn audit_views_fit_reclaim_above_execute_fixed_cost() {
+    use cortexkit_role_compaction::tokens::PartTokens;
+
+    let (mut session, _, _, _, settings) = fixture();
+    let mut tool = output_part("p", 2);
+    tool.tokens = Some(PartTokens::tool(0, 20_000));
+    session.index.extend_counted(
+        [
+            text(1, "task"),
+            Entry::new(2, "tool", Role::Assistant, 0, vec![tool]),
+            text(3, "next"),
+        ],
+        Some("family"),
+    );
+    session.conditions.last_prompt_tokens = Some(100_000);
+    let ride = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    )
+    .with_request_tokens(100_000);
+    let view = session
+        .ride(&settings, &ride)
+        .expect("dropping a 20k tool result can fit 100k into a 99k window");
+    assert!(touches(&view, "tool", "p"));
+}
+
+#[test]
+fn audit_views_emergency_excludes_previously_refused_tool() {
+    let (mut session, settings) = head_with_unmeasured_growth();
+    let ride = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    )
+    .with_request_tokens(99_100);
+    let first = session.ride(&settings, &ride).unwrap();
+    assert!(touches(&first, "tool-2", "p"));
+    session.settle_refused(&[(
+        first.version,
+        ViewRefusal::RunningTool {
+            mid: "tool-2".into(),
+            part: "p".into(),
+        },
+    )]);
+    assert!(session
+        .failed_parts
+        .contains(&("tool-2".into(), "p".into())));
+    let second = session.ride(&settings, &ride).unwrap();
+    assert!(
+        !touches(&second, "tool-2", "p"),
+        "the ride retried an edit that was already refused"
+    );
+    assert!(touches(&second, "tool-3", "p"));
+}
+
+#[test]
 fn ride_over_limit_without_a_count_uses_the_usable_window() {
     let logs = crate::test_log::capture();
     let (mut session, settings) = head_with_unmeasured_growth();

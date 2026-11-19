@@ -101,8 +101,121 @@ fn cut_through(view: &View) -> Option<&str> {
     })
 }
 
+#[tokio::test]
+async fn audit_views_adopt_older_cut_reindexes_visible_tail() {
+    let dir = scratch("older-cut");
+    let entries: Vec<_> = (1..=10).map(|n| text(n, &format!("m{n}"))).collect();
+    let (mut session, client, settings) =
+        head(&dir, entries.clone(), &[((1, "m1"), (2, "m2"))]).await;
+    let old = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&old), Some("m2"));
+    session.accept(old.clone());
+    session.settle_unconfirmed(Some(&old.applied()), &[]);
+
+    summary(session.db.as_ref().unwrap(), 2, (3, "m3"), (6, "m6"));
+    session.load_summaries();
+    session.summary_unshown = true;
+    let new = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&new), Some("m6"));
+    session.accept(new.clone());
+    session.settle_unconfirmed(Some(&new.applied()), &[]);
+    assert!(session.index.find("m3", "p").is_none());
+
+    *client.applied.lock().unwrap() = Some(
+        AppliedViewAnswer::new()
+            .with_view(old.clone())
+            .with_applied_by(crate::MODULE_ID),
+    );
+    let mut request = notice(&session, 1, entries.last().map(cursor));
+    request.applied_view = Some(old.applied());
+    session.notice(&client, &settings, request).await;
+    assert_eq!(session.latest.as_ref().unwrap().checksum, old.checksum);
+    let reply = session
+        .ctx_reduce(&client, &serde_json::json!({"drop": "3-5"}))
+        .await
+        .unwrap();
+    assert_eq!(reply, "3 tags stamped.");
+    assert_eq!(session.cut, Some(2));
+    assert_eq!(session.index.base(), 2);
+    assert!(session.index_ready);
+    for ordinal in 3..=5 {
+        assert!(session
+            .queued
+            .contains(&(format!("m{ordinal}"), "p".into())));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A summary's first or last message: its ordinal and id.
 type Bound<'a> = (u64, &'a str);
+
+#[tokio::test]
+async fn audit_views_cut_preserves_the_final_non_system_turn() {
+    let dir = scratch("system-tail");
+    let mut system = text(3, "system");
+    system.role = Role::System;
+    let entries = vec![text(1, "older"), text(2, "final-user"), system];
+    let (mut session, _, settings) =
+        head(&dir, entries, &[((1, "older"), (2, "final-user"))]).await;
+    let view = session.build(&settings, None, false, None).0;
+    assert_eq!(view.as_ref().and_then(cut_through), Some("older"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn audit_views_invalid_cut_does_not_discard_independent_edits() {
+    let (mut session, _, _, _, _) = fixture();
+    let old = text(1, "old");
+    let part = &old.parts[0];
+    let replace = EditOp::Replace {
+        mid: old.mid.clone(),
+        part: part.id.clone(),
+        field: "text".into(),
+        value: serde_json::json!(lanes::placeholder(1)),
+        expect: part.digest.clone(),
+    };
+    let key = (old.mid.clone(), part.id.clone());
+    session.index.extend([old, text(2, "latest")]);
+    session.queued.insert(key.clone());
+    let view = session
+        .seal(
+            vec![
+                EditOp::Cut {
+                    through: "latest".into(),
+                },
+                replace.clone(),
+            ],
+            std::slice::from_ref(&key),
+        )
+        .expect("reject the cut, not the independent replacement");
+    assert_eq!(cut_through(&view), None);
+    assert!(view.edits.iter().any(|edit| edit.op == replace));
+    assert!(!session.failed_parts.contains(&key));
+    session.accept(view);
+    assert!(!session.queued.contains(&key));
+}
+
+#[tokio::test]
+async fn audit_views_non_summarized_numbers_coverage_commits_cut() {
+    let dir = scratch("coverage-cut");
+    let (_, marked_notice) = transition();
+    let mut entries = vec![marked_notice];
+    entries.extend((2..=6).map(|n| text(n, &format!("m{n}"))));
+    let (mut session, _, settings) = head(&dir, entries, &[]).await;
+    assert!(session.summary_due(&settings).is_none());
+    assert_eq!(
+        session.numbers_covered.as_ref().map(|floor| floor.ordinal),
+        Some(1)
+    );
+    let view = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&view), Some("message-a"));
+    session.accept(view.clone());
+    session.settle_unconfirmed(Some(&view.applied()), &[]);
+    assert_eq!(session.cut, Some(1));
+    assert!(!session.head_stale);
+    assert!(!session.numbers_view_due());
+    std::fs::remove_dir_all(dir).unwrap();
+}
 
 /// A head session (a summarizer, a context store at `dir`) set up over
 /// `entries`, with summaries over the given ranges.

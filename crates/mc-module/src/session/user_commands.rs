@@ -160,12 +160,7 @@ impl Session {
     }
 
     fn flush_reason(&self, settings: &Settings) -> Option<&'static str> {
-        if pass::signed_thinking_hold(
-            self.index.entries(),
-            &self.pressure(),
-            settings,
-            self.signed_floor(),
-        ) {
+        if self.signed_thinking_held(&self.pressure(), settings) {
             Some("thinking_hold")
         } else if self.summarizing {
             Some("summary_running")

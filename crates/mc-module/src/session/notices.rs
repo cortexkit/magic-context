@@ -247,6 +247,9 @@ impl Session {
         // so the view's cut message is in the index.
         if self.runner_differs(self.judged_view(stated).as_ref()) {
             self.adopt_runner_view(client).await;
+            if !self.index_ready {
+                return None;
+            }
             self.rebuild_when_runner_lost_view(held);
             // The reading was judged before ck-mc knew its own newest view.
             let judged = self.judged_view(stated);

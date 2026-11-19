@@ -927,16 +927,9 @@ impl Session {
         let continuation = self.accept_publication(summarized, now_ms);
         // The signed-thinking hold applies here as on a notice: the summary
         // lands on the next pass the hold lets through.
-        let execute = {
-            let pressure = self.pressure();
-            pass::at_execute(&pressure, settings)
-                && !pass::signed_thinking_hold(
-                    self.index.entries(),
-                    &pressure,
-                    settings,
-                    self.signed_floor(),
-                )
-        };
+        let pressure = self.pressure();
+        let execute = pass::at_execute(&pressure, settings)
+            && !self.signed_thinking_held(&pressure, settings);
         if execute {
             let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
