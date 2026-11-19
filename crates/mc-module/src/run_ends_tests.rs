@@ -47,6 +47,7 @@ pub(crate) enum Pull {
 /// A durable whose pulls the test sends, and that records each
 /// acknowledgement. It binds once; every later bind finds no durable.
 pub(crate) struct Feed {
+    account: &'static str,
     pulls: Mutex<Option<mpsc::UnboundedReceiver<Pull>>>,
     /// The id of each acknowledged event, in order.
     pub(crate) acked: Arc<Mutex<Vec<Option<String>>>>,
@@ -57,8 +58,13 @@ pub(crate) struct Feed {
 
 impl Feed {
     pub(crate) fn new() -> (Arc<Self>, mpsc::UnboundedSender<Pull>) {
+        Self::for_account("box_test")
+    }
+
+    fn for_account(account: &'static str) -> (Arc<Self>, mpsc::UnboundedSender<Pull>) {
         let (send, pulls) = mpsc::unbounded_channel();
         let feed = Self {
+            account,
             pulls: Mutex::new(Some(pulls)),
             acked: Arc::default(),
             ack: Arc::default(),
@@ -87,6 +93,7 @@ impl Durable for Feed {
             .take()
             .ok_or("the durable is not provisioned")?;
         Ok(Box::new(FeedCursor {
+            subjects: test_subjects(self.account),
             pulls,
             acked: self.acked.clone(),
             ack: self.ack.clone(),
@@ -96,6 +103,7 @@ impl Durable for Feed {
 }
 
 struct FeedCursor {
+    subjects: RunEndSubjects,
     pulls: mpsc::UnboundedReceiver<Pull>,
     acked: Arc<Mutex<Vec<Option<String>>>>,
     ack: Arc<Notify>,
@@ -104,6 +112,10 @@ struct FeedCursor {
 
 #[async_trait]
 impl Cursor for FeedCursor {
+    fn subjects(&self) -> &RunEndSubjects {
+        &self.subjects
+    }
+
     async fn next(&mut self) -> Result<Option<Delivery>, String> {
         assert!(self.in_flight.is_none(), "the last event was acknowledged");
         match self.pulls.recv().await {
@@ -123,6 +135,11 @@ impl Cursor for FeedCursor {
         self.ack.notify_one();
         Ok(())
     }
+}
+
+fn test_subjects(account: &str) -> RunEndSubjects {
+    let account = AccountNames::derive(account).unwrap();
+    RunEndSubjects::new(&account, &account.event_binding(), &[])
 }
 
 /// The run-end event of `session`'s run, as Broca publishes it, under the
@@ -154,7 +171,11 @@ fn both_runners_events_name_their_session_in_a_header() {
     );
     // A turn of a session nobody waits on is handled and wakes nobody.
     assert_eq!(
-        handle(&RunEnds::new(), &thalamus_turn_ended()),
+        handle(
+            &RunEnds::new(),
+            &test_subjects("box_test"),
+            &thalamus_turn_ended()
+        ),
         Outcome::Ended(Woke::Nobody)
     );
     assert_eq!(
@@ -278,6 +299,45 @@ async fn every_event_is_acknowledged_once_handled_and_an_unnamed_one_stops_nothi
     let start = tokio::time::Instant::now();
     watch.pause(start + Duration::from_secs(60)).await;
     assert_eq!(tokio::time::Instant::now(), start);
+}
+
+#[tokio::test]
+async fn foreign_run_end_subjects_are_acknowledged_without_waking_either_runner() {
+    use futures_util::FutureExt as _;
+
+    let ends = Arc::new(RunEnds::new());
+    let (feed, pulls) = Feed::new();
+    let reader = tokio::spawn({
+        let (ends, feed) = (ends.clone(), feed.clone());
+        async move { read_bound(&ends, feed.as_ref()).await }
+    });
+    let broca = broca_child();
+    let thalamus = SessionRef::new("thalamus-harness", "opencode2", "parent:mc-summary:0");
+    let Pull::Event(broca_event) = ended("broca-end", &broca) else {
+        unreachable!();
+    };
+    let mut thalamus_event = thalamus_turn_ended();
+    thalamus_event.headers.insert(
+        SESSION_REF_HEADER.into(),
+        crate::agent_data::source::session_ref(&thalamus),
+    );
+    for (child, event) in [(broca, broca_event), (thalamus, thalamus_event)] {
+        let watch = ends.watch(&child);
+        let mut foreign = event.clone();
+        foreign.subject = event.subject.replacen("ck.box_test.", "ck.box_other.", 1);
+        pulls.send(Pull::Event(foreign)).unwrap();
+        feed.ack.notified().await;
+        assert!(watch.ended().now_or_never().is_none(), "{}", event.subject);
+
+        // A rejected message must not mark the matching event's id as handled.
+        pulls.send(Pull::Event(event)).unwrap();
+        feed.ack.notified().await;
+        assert!(watch.ended().now_or_never().is_some());
+    }
+    pulls.send(Pull::Fail("done".into())).unwrap();
+    assert_eq!(reader.await.unwrap(), "done");
+    assert_eq!(feed.acked().len(), 4);
+    assert_eq!(ends.subject_drops.count(), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -428,9 +488,16 @@ fn broca_new_storage_run_ended_sample_wakes_the_wait_on_its_session() {
         session_ref_of(&ended.headers),
         Some(BROCA_STORE_SESSION_REF)
     );
-    assert_eq!(handle(&ends, &ended), Outcome::Ended(Woke::Waits(1)));
+    let subjects = test_subjects("box_sample");
+    assert_eq!(
+        handle(&ends, &subjects, &ended),
+        Outcome::Ended(Woke::Waits(1))
+    );
     // The same publication again is a redelivery.
-    assert_eq!(handle(&ends, &ended), Outcome::Ended(Woke::Again));
+    assert_eq!(
+        handle(&ends, &subjects, &ended),
+        Outcome::Ended(Woke::Again)
+    );
 }
 
 #[test]
@@ -443,7 +510,10 @@ fn the_session_comes_from_the_header_never_the_body() {
     assert!(publication.body.contains(BROCA_STORE_SESSION_REF));
     let mut ended = broca_sample("03-run.ended.json");
     ended.headers.remove(SESSION_REF_HEADER);
-    assert_eq!(handle(&ends, &ended), Outcome::NoSession);
+    assert_eq!(
+        handle(&ends, &test_subjects("box_sample"), &ended),
+        Outcome::NoSession
+    );
 }
 
 #[test]
@@ -464,15 +534,65 @@ fn broca_samples_of_its_other_run_events_wake_nothing() {
         );
         let relative = event.subject.splitn(3, '.').nth(2).unwrap();
         assert!(!SUBJECTS.contains(&relative), "{name}");
-        assert_eq!(handle(&ends, &event), Outcome::NotARunEnd, "{name}");
+        assert_eq!(
+            handle(&ends, &test_subjects("box_sample"), &event),
+            Outcome::NotARunEnd,
+            "{name}"
+        );
     }
+}
+
+#[tokio::test]
+async fn configured_run_started_is_acknowledged_without_warning_or_drop() {
+    use futures_util::FutureExt as _;
+
+    let mut log = crate::test_log::capture();
+    let ends = RunEnds::new();
+    let watch = ends.watch(&SessionRef::new("broca", "store-actor", "s1"));
+    let (feed, pulls) = Feed::for_account("box_sample");
+    let started = broca_sample("01-run.started.json");
+    assert_eq!(
+        session_ref_of(&started.headers),
+        Some(BROCA_STORE_SESSION_REF)
+    );
+    let id = started.id.clone();
+    pulls.send(Pull::Event(started)).unwrap();
+    pulls.send(Pull::Fail("done".into())).unwrap();
+    assert_eq!(read_bound(&ends, feed.as_ref()).await, "done");
+    log.stop();
+
+    assert_eq!(feed.acked(), [id]);
+    assert!(watch.ended().now_or_never().is_none());
+    assert_eq!(ends.subject_drops.count(), 0);
+    assert_eq!(log.count("dropped a bus delivery"), 0);
+}
+
+#[test]
+fn the_bound_account_and_consumer_filters_both_limit_deliveries() {
+    let account = AccountNames::derive("box_sample").unwrap();
+    let subjects = RunEndSubjects::new(
+        &account,
+        "",
+        &[
+            "ck.*.event.broca.run.*.v1".into(),
+            "ck.box_sample.event.thalamus-harness.turn_ended.v1".into(),
+        ],
+    );
+    let ends = RunEnds::new();
+    let mut event = broca_sample("01-run.started.json");
+    assert_eq!(handle(&ends, &subjects, &event), Outcome::NotARunEnd);
+    event.subject = "ck.box_other.event.broca.run.started.v1".into();
+    assert_eq!(handle(&ends, &subjects, &event), Outcome::OutsideFilters);
+    event.subject = "ck.box_sample.event.broca.unrelated.v1".into();
+    assert_eq!(handle(&ends, &subjects, &event), Outcome::OutsideFilters);
+    assert_eq!(ends.subject_drops.count(), 2);
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_reader_acknowledges_every_broca_sample_and_wakes_the_wait_once() {
     let ends = Arc::new(RunEnds::new());
     let watch = ends.watch(&SessionRef::new("broca", "store-actor", "s1"));
-    let (feed, pulls) = Feed::new();
+    let (feed, pulls) = Feed::for_account("box_sample");
     let names = [
         "01-run.started.json",
         "02-run.steer_consumed.json",

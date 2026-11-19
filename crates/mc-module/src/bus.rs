@@ -1102,35 +1102,47 @@ pub(crate) struct RunEndDurable {
 #[async_trait]
 impl run_ends::Durable for RunEndDurable {
     async fn bind(&self) -> Result<Box<dyn run_ends::Cursor>, String> {
-        let (generation, connection, consumer) = bind_run_ends(&self.bus).await?;
         Ok(Box::new(RunEndCursor {
             bus: self.bus.clone(),
-            generation,
-            connection,
-            consumer,
+            binding: bind_run_ends(&self.bus).await?,
             in_flight: None,
         }))
     }
 }
 
-/// Bind the run-end durable on the bus's current connection, with the
-/// connection's generation.
-async fn bind_run_ends(bus: &Bus) -> Result<(u64, NatsConnection, Consumer<pull::Config>), String> {
-    let (generation, connection, stream) = {
+struct RunEndBinding {
+    generation: u64,
+    connection: NatsConnection,
+    consumer: Consumer<pull::Config>,
+    subjects: run_ends::RunEndSubjects,
+}
+
+/// Keep the expected subjects with their connection so a rebind also
+/// updates the account against which we check deliveries.
+async fn bind_run_ends(bus: &Bus) -> Result<RunEndBinding, String> {
+    let (generation, connection, account) = {
         let session = bus.session().await?;
         let active: &BusSession = &session;
         let connection = active.connection.clone().ok_or("nats_connection_absent")?;
         (
             bus.generation.load(Ordering::SeqCst),
             connection,
-            active.account.streams().event.clone(),
+            active.account.clone(),
         )
     };
     let consumer = async_nats::jetstream::new(connection.client())
-        .get_consumer_from_stream::<pull::Config, _, _>(run_ends::DURABLE, &stream)
+        .get_consumer_from_stream::<pull::Config, _, _>(run_ends::DURABLE, &account.streams().event)
         .await
         .map_err(|error| binding_refused(&error))?;
-    Ok((generation, connection, consumer))
+    let config = &consumer.cached_info().config;
+    let subjects =
+        run_ends::RunEndSubjects::new(&account, &config.filter_subject, &config.filter_subjects);
+    Ok(RunEndBinding {
+        generation,
+        connection,
+        consumer,
+        subjects,
+    })
 }
 
 /// Why the run-end durable could not be bound, for the log.
@@ -1159,15 +1171,17 @@ fn binding_refused(error: &async_nats::jetstream::stream::ConsumerError) -> Stri
 /// The run-end durable, bound on one connection of the bus's session.
 struct RunEndCursor {
     bus: Arc<Bus>,
-    generation: u64,
-    connection: NatsConnection,
-    consumer: Consumer<pull::Config>,
+    binding: RunEndBinding,
     /// The event `next` returned and the reader has not acknowledged yet.
     in_flight: Option<async_nats::jetstream::Message>,
 }
 
 #[async_trait]
 impl run_ends::Cursor for RunEndCursor {
+    fn subjects(&self) -> &run_ends::RunEndSubjects {
+        &self.binding.subjects
+    }
+
     async fn next(&mut self) -> Result<Option<run_ends::Delivery>, String> {
         // Opening the session renews its credential when that is due, which
         // moves the session to a new connection; the durable is then bound
@@ -1176,17 +1190,17 @@ impl run_ends::Cursor for RunEndCursor {
             let _session = self.bus.session().await?;
             self.bus.generation.load(Ordering::SeqCst)
         };
-        if current != self.generation {
-            (self.generation, self.connection, self.consumer) = bind_run_ends(&self.bus).await?;
+        if current != self.binding.generation {
+            self.binding = bind_run_ends(&self.bus).await?;
         }
         let pulled = self.pull().await;
         if pulled.is_err()
-            && self.connection.client().connection_state()
+            && self.binding.connection.client().connection_state()
                 != async_nats::connection::State::Connected
         {
             // A lost connection is not reconnected: the next use of the bus
             // opens a new session.
-            self.bus.forget(self.generation).await;
+            self.bus.forget(self.binding.generation).await;
         }
         pulled
     }
@@ -1206,6 +1220,7 @@ impl RunEndCursor {
     /// One pull of at most one event, waiting up to [`PULL_EXPIRES`].
     async fn pull(&mut self) -> Result<Option<run_ends::Delivery>, String> {
         let mut batch = self
+            .binding
             .consumer
             .fetch()
             .max_messages(1)

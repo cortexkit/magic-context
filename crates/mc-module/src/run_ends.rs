@@ -30,9 +30,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cortexkit_bus_naming::AccountNames;
 use cortexkit_bus_trait::Headers;
 use cortexkit_role_compaction::read::SessionRef;
 use tokio::sync::Notify;
+
+use crate::bus_subject::SubjectDrops;
 
 /// The durable on the account's EVENT stream that carries the run-end
 /// events of every runner ck-mc runs children on.
@@ -57,6 +60,28 @@ pub const RETRY: Duration = Duration::from_secs(60);
 /// ids can come again.
 const REMEMBERED: usize = 4096;
 
+/// The bound EVENT stream, its consumer filters, and the events that wake waits.
+pub(crate) struct RunEndSubjects {
+    event_scope: String,
+    filters: Vec<String>,
+    run_end: [String; SUBJECTS.len()],
+}
+
+impl RunEndSubjects {
+    pub(crate) fn new(account: &AccountNames, single: &str, multiple: &[String]) -> Self {
+        let mut filters = multiple.to_vec();
+        if !single.is_empty() {
+            filters.push(single.to_owned());
+        }
+        let account_id = account.account();
+        Self {
+            event_scope: account.event_binding(),
+            filters,
+            run_end: SUBJECTS.map(|subject| format!("ck.{account_id}.{subject}")),
+        }
+    }
+}
+
 /// The waits on child runs in this process, and whether a reader is
 /// delivering their runners' run-end events.
 #[derive(Default)]
@@ -66,6 +91,7 @@ pub struct RunEnds {
     next_wait: AtomicU64,
     reader: Mutex<Reader>,
     handled: Mutex<Handled>,
+    subject_drops: SubjectDrops,
     /// Whether an event without a `session_ref` header was logged, so it
     /// is logged once.
     unnamed_logged: AtomicBool,
@@ -298,6 +324,8 @@ pub(crate) struct Delivery {
 #[async_trait]
 #[allow(clippy::double_must_use)]
 pub(crate) trait Cursor: Send {
+    /// The current binding's stream and consumer filter subjects.
+    fn subjects(&self) -> &RunEndSubjects;
     /// The next event, or `None` when none came within one pull.
     async fn next(&mut self) -> Result<Option<Delivery>, String>;
     /// Acknowledge the event `next` returned last.
@@ -336,8 +364,8 @@ pub(crate) async fn read_bound(ends: &RunEnds, durable: &dyn Durable) -> String 
         let Some(delivery) = delivery else {
             continue;
         };
-        handle(ends, &delivery);
-        // Acknowledged only now that its wait was woken, or found missing.
+        handle(ends, cursor.subjects(), &delivery);
+        // Acknowledge even a rejected delivery so it is not redelivered.
         if let Err(reason) = cursor.ack().await {
             return reason;
         }
@@ -349,29 +377,29 @@ pub(crate) async fn read_bound(ends: &RunEnds, durable: &dyn Durable) -> String 
 pub(crate) enum Outcome {
     /// A run-end event: what waking its session's waits did.
     Ended(Woke),
-    /// Another event of a runner's, which the durable's filters should keep
-    /// out: it wakes nobody.
+    /// An event allowed by the durable's filters that does not wake waits.
     NotARunEnd,
+    /// A message outside the bound stream or consumer filters.
+    OutsideFilters,
     /// A run-end event without a `session_ref` header.
     NoSession,
 }
 
-/// Whether `subject` is one of [`SUBJECTS`] in some account:
-/// `ck.{account}.` followed by it.
-fn is_run_end(subject: &str) -> bool {
-    subject
-        .strip_prefix("ck.")
-        .and_then(|rest| rest.split_once('.'))
-        .is_some_and(|(_, event)| SUBJECTS.contains(&event))
-}
-
-/// Wake the waits on the session `delivery` names. Any other event of a
-/// runner's, such as Broca's `run.started`, wakes nobody, since only a run's
-/// end is worth a read. A run-end event without a `session_ref` header is
-/// logged the first time one comes. Either way the reader acknowledges the
-/// event, so one bad event never stops it.
-fn handle(ends: &RunEnds, delivery: &Delivery) -> Outcome {
-    if !is_run_end(&delivery.subject) {
+/// Diagnose a delivery the durable could not have selected. Allow other
+/// events from a broader durable without treating them as run-end wakes.
+fn handle(ends: &RunEnds, subjects: &RunEndSubjects, delivery: &Delivery) -> Outcome {
+    // An unfiltered consumer selects the whole EVENT stream, not other accounts.
+    if !ends
+        .subject_drops
+        .accepts(&[&subjects.event_scope], &delivery.subject)
+        || (!subjects.filters.is_empty()
+            && !ends
+                .subject_drops
+                .accepts(&subjects.filters, &delivery.subject))
+    {
+        return Outcome::OutsideFilters;
+    }
+    if !subjects.run_end.contains(&delivery.subject) {
         return Outcome::NotARunEnd;
     }
     let Some(session_ref) = session_ref_of(&delivery.headers) else {

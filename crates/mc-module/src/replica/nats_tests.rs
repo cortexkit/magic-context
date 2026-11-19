@@ -10,9 +10,56 @@ use tokio::time::Instant;
 
 use super::hub::{Ack, Hub, HubError, HubMessage, StreamInfo};
 use super::nats::{
-    full, Delivered, Delivery, Fault, Following, HubStream, NatsHub, NEXT_WAIT, PENDING_WAIT,
-    QUIET_WAIT, SILENCE, STREAM_FULL,
+    full, next_delivery, Delivered, Delivery, Fault, Following, HubStream, NatsHub, NEXT_WAIT,
+    PENDING_WAIT, QUIET_WAIT, SILENCE, STREAM_FULL,
 };
+
+#[tokio::test]
+async fn hub_inbox_rejects_foreign_data_and_keeps_control_frames_and_matching_data() {
+    fn frame(subject: &'static str, status: Option<async_nats::StatusCode>) -> async_nats::Message {
+        async_nats::Message {
+            subject: subject.into(),
+            reply: None,
+            payload: Default::default(),
+            headers: None,
+            status,
+            description: None,
+            length: 0,
+        }
+    }
+
+    let inbox = "_INBOX.hub.test";
+    let matching = "ck.fleet.memory.project.pj-test";
+    let heartbeat = frame(inbox, Some(async_nats::StatusCode::IDLE_HEARTBEAT));
+    let mut flow_control = heartbeat.clone();
+    flow_control.reply = Some("$JS.FC.hub".into());
+    let mut messages = futures_util::stream::iter([
+        frame("$KV.foreign.registry", None),
+        heartbeat,
+        frame(inbox, None),
+        flow_control,
+        frame("ck.fleet.memory.project.pj-test.extra", None),
+        frame(matching, None),
+        frame("ck.fleet.memory.project", None),
+    ]);
+
+    let heartbeat = next_delivery(&mut messages).await.unwrap();
+    assert_eq!(
+        heartbeat.status,
+        Some(async_nats::StatusCode::IDLE_HEARTBEAT)
+    );
+    assert!(heartbeat.reply.is_none());
+    let flow_control = next_delivery(&mut messages).await.unwrap();
+    assert_eq!(
+        flow_control.status,
+        Some(async_nats::StatusCode::IDLE_HEARTBEAT)
+    );
+    assert_eq!(flow_control.reply.unwrap().as_str(), "$JS.FC.hub");
+    let data = next_delivery(&mut messages).await.unwrap();
+    assert_eq!(data.subject.as_str(), matching);
+    assert!(data.status.is_none());
+    assert!(next_delivery(&mut messages).await.is_none());
+}
 
 /// One step of a scripted consumer: an answer now, or a delivery after
 /// some time.
