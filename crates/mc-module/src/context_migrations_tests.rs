@@ -349,6 +349,65 @@ fn search_after_the_migration_finds_the_same_memories() {
 }
 
 #[test]
+fn migration_106_archives_live_alias_duplicates_without_deleting_rows() {
+    let mut conn = plugin_store();
+    let groups: &[&[&str]] = &[
+        &["ARCHITECTURE_DECISIONS", "ARCHITECTURE"],
+        &["KNOWN_ISSUES", "CONSTRAINTS"],
+        &["CONFIG_DEFAULTS", "ENVIRONMENT", "CONFIG_VALUES"],
+        &[
+            "USER_DIRECTIVES",
+            "USER_PREFERENCES",
+            "WORKFLOW_RULES",
+            "PROJECT_RULES",
+        ],
+    ];
+    for (group, tags) in groups.iter().enumerate() {
+        let project = format!("project-{group}");
+        let survivor = 10 * group as i64 + 1;
+        for (i, tag) in tags.iter().enumerate().rev() {
+            insert_memory(
+                &conn,
+                survivor + i as i64,
+                &project,
+                tag,
+                "Keep this same fact.",
+                if i == 0 { "permanent" } else { "active" },
+            );
+        }
+    }
+
+    upgrade_through(&mut conn, i64::from(PLUGIN_SCHEMA_VERSION), 106).unwrap();
+    for (group, tags) in groups.iter().enumerate() {
+        let project = format!("project-{group}");
+        let survivor = 10 * group as i64 + 1;
+        let mut stmt = conn
+            .prepare("SELECT id, status, superseded_by_memory_id, origin_category FROM memories WHERE owner_id = ?1 ORDER BY id")
+            .unwrap();
+        let found: Vec<(i64, String, Option<i64>, String)> = stmt
+            .query_map([project], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let wanted: Vec<_> = tags
+            .iter()
+            .enumerate()
+            .map(|(i, tag)| {
+                (
+                    survivor + i as i64,
+                    if i == 0 { "permanent" } else { "archived" }.to_owned(),
+                    (i != 0).then_some(survivor),
+                    (*tag).to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(found, wanted);
+    }
+}
+
+#[test]
 fn only_live_memories_are_unique_for_their_owner_and_category() {
     let mut connection = plugin_store();
     populate(&connection);
