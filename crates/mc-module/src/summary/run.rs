@@ -1387,7 +1387,14 @@ async fn wait_for<C: RunnerClient>(
         )
         .await;
         let result = match answer {
-            Ok(answer) => answer.map_err(|error| format!("run.result: {error:?}"))?,
+            Ok(Ok(result)) => result,
+            // A lost read does not end a named run. Retry the same run on
+            // the next poll rather than abandoning it for another child.
+            Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
+                crate::run_ends::pause(watch.as_ref(), deadline).await;
+                continue;
+            }
+            Ok(Err(_)) => return timed_out(client, child, run_id, last, send).await,
             Err(_) => return timed_out(client, child, run_id, last, send).await,
         };
         let runner_wait = result
@@ -1425,6 +1432,10 @@ async fn timed_out<C: RunnerClient>(
         .as_ref()
         .and_then(|status| status.resume_not_before_ms);
     let mut run = last.unwrap_or_else(|| RunResult::new(run_id, states::ACTIVE));
+    let cancel = status.as_ref().map_or_else(
+        || still_running(&run.state),
+        |status| still_running(&status.state),
+    );
     if let Some(status) = status {
         // Without a caller- or person-owned wait, keep the run result's
         // existing error and reason instead of adopting status diagnostics.
@@ -1464,7 +1475,7 @@ async fn timed_out<C: RunnerClient>(
                 })
                 .map(|next| AccountWait::retry_at(next, send, now))
         });
-    if run.state == states::PAUSED || person.is_some() {
+    if cancel || person.is_some() {
         cancel_waiting(client, child, run_id).await;
     }
     Err(match wait {
@@ -1473,13 +1484,13 @@ async fn timed_out<C: RunnerClient>(
     })
 }
 
-/// Cancel a run whose summary caller has stopped waiting, when the runner
+/// Cancel a run whose caller has stopped waiting, when the runner
 /// serves `run.cancel`. Best effort: a cancel that fails is logged and
 /// changes nothing else.
 async fn cancel_waiting<C: RunnerClient>(client: &C, child: &Child, run_id: &str) {
     match client.cancel_child_run(child, run_id).await {
         Ok(true) => tracing::info!(
-            "ck-mc: summarizer run {run_id} in {} was waiting without a reader; cancelled it",
+            "ck-mc: child run {run_id} in {} no longer has a reader; cancelled it",
             child.session.session
         ),
         Ok(false) => {}

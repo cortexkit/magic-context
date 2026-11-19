@@ -5,7 +5,7 @@ use crate::client::ClientError;
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 use cortexkit_role_llm_runner::awaits::{AwaitMessage, AwaitMessageFrom, RunAwaits};
-use cortexkit_role_llm_runner::run::RunStatus;
+use cortexkit_role_llm_runner::run::{RunError, RunStatus};
 use cortexkit_role_llm_runner::send::SendReply;
 use cortexkit_role_routing::report::ReportRequest;
 use cortexkit_role_routing::select::{SelectAnswer, SelectRequest};
@@ -27,6 +27,8 @@ struct Runner {
     cancels: bool,
     cancelled: Mutex<usize>,
     sends: Mutex<usize>,
+    reads: Mutex<usize>,
+    failed_reads: usize,
     reports: Mutex<Vec<Outcome>>,
 }
 
@@ -41,6 +43,8 @@ impl Runner {
             cancels: true,
             cancelled: Mutex::new(0),
             sends: Mutex::new(0),
+            reads: Mutex::new(0),
+            failed_reads: 0,
             reports: Mutex::new(Vec::new()),
         }
     }
@@ -86,6 +90,11 @@ impl RunnerClient for Runner {
         Ok(reply)
     }
     async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
+        let mut reads = self.reads.lock().unwrap();
+        *reads += 1;
+        if *reads <= self.failed_reads {
+            return Err(ClientError::new("result temporarily unavailable"));
+        }
         let mut results = self.results.lock().unwrap();
         if results.len() > 1 {
             Ok(results.pop_front().unwrap())
@@ -257,11 +266,51 @@ async fn run_awaits_nobody_status_keeps_the_timeout() {
             tokio::time::Instant::now() - started,
             Duration::from_secs(2)
         );
-        assert_eq!(
-            *client.cancelled.lock().unwrap(),
-            usize::from(state == states::PAUSED)
-        );
+        assert_eq!(*client.cancelled.lock().unwrap(), 1);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn audit_active_timeout_requests_child_cancellation() {
+    let client = Runner::ended(RunResult::new("r1", states::ACTIVE));
+    let error = send_error(&client, SendKind::TurnOne).await;
+    assert!(matches!(error, SummaryError::Failed(_)));
+    assert_eq!(*client.cancelled.lock().unwrap(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_run_with_failed_reads_is_polled_until_deadline_then_cancelled() {
+    let mut status: RunStatus = sample(CODES, "terminal-unknown-code.store.after.run.status.json");
+    status.state = send_states::PENDING.into();
+    let client = Runner {
+        failed_reads: usize::MAX,
+        ..Runner::waiting(status)
+    };
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        send_error(&client, SendKind::TurnOne).await,
+        SummaryError::Failed("the run did not finish in time".into())
+    );
+    assert_eq!(started.elapsed(), Duration::from_secs(2));
+    assert!(*client.reads.lock().unwrap() > 1);
+    assert_eq!(*client.cancelled.lock().unwrap(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_result_rpc_failure_can_recover_at_the_next_poll() {
+    let terminal = RunResult::new("r1", states::ERROR).with_error(RunError::new(
+        "provider",
+        "terminal result observed",
+        "provider_error",
+    ));
+    let client = Runner {
+        failed_reads: 1,
+        ..Runner::ended(terminal)
+    };
+    assert!(matches!(send_error(&client, SendKind::Dream).await,
+        SummaryError::Failed(error) if error.contains("terminal result observed")));
+    assert_eq!(*client.reads.lock().unwrap(), 2);
+    assert_eq!(*client.cancelled.lock().unwrap(), 0);
 }
 
 #[tokio::test(start_paused = true)]
