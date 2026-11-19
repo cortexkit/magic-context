@@ -28,7 +28,10 @@ function message(ordinal: number): RawMessage {
 		parts: [
 			{
 				type: "text",
-				text: `Message ${ordinal}: investigate the historian retry behavior.`,
+				// Give the eligible head at least 6,000 tokens so the first pass at 80% can start.
+				text: `Message ${ordinal}: investigate the historian retry behavior.\n`.repeat(
+					80,
+				),
 			},
 		],
 	};

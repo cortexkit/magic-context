@@ -3060,10 +3060,10 @@ A: Done; no hashes.</p1><p2>Keep 128.68 s.</p2><p3>Done.</p3><p4/></compartment>
             "producer prompt must label the raw message ordinal range"
         );
         let prompt_hash = format!("{:x}", sha2::Sha256::digest(firing.prompt.as_bytes()));
-        // The digest now covers the raw-ordinal header; transcript bytes stay unchanged.
+        // Pin the entire prompt, including the raw ordinal range and the examples picked by session ID.
         assert_eq!(
             prompt_hash,
-            "de9fcb7dacb191f6b93bbb242ab08f00d1789d825e3d8645925e8285b2253066"
+            "276eb9a05a405c02ee189e3dc4e08461e428f07010a94404e858d3f4f46de7df"
         );
         let validated = crate::historian_validate::validate_historian_output(
             &historian_output(1, 3, 4),
