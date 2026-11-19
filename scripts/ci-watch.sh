@@ -52,6 +52,9 @@ if [[ "${1:-}" == "--sha" ]]; then
     RUN_ID="$(gh_json run list --commit "$2" --workflow CI --limit 1 --json databaseId \
         | python3 -c 'import sys,json;r=json.load(sys.stdin);print(r[0]["databaseId"] if r else "")')"
 elif [[ -n "${1:-}" ]]; then
+    # A run id is all digits. Anything else is refused rather than polled
+    # forever as a run that never appears; a commit sha needs --sha.
+    [[ "$1" =~ ^[0-9]+$ ]] || die "'$1' is not a run id (a commit sha needs --sha)"
     RUN_ID="$1"
 else
     sha="$(git rev-parse HEAD)"
