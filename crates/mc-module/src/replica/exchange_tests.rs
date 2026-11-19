@@ -1073,7 +1073,11 @@ async fn a_stream_restored_with_the_same_creation_time_is_read_from_its_start() 
     let kept = old.messages()[0].clone();
     restored.inject(&kept.subject, kept.message_id.as_deref(), kept.payload);
     let c = Computer::new(&restored, 3);
-    for text in ["First memory on C.", "Second memory on C.", "Third memory on C."] {
+    for text in [
+        "First memory on C.",
+        "Second memory on C.",
+        "Third memory on C.",
+    ] {
         memory(&c, "pj-a", text);
     }
     c.sync().await;
@@ -1141,7 +1145,10 @@ async fn a_delete_sent_to_a_stream_made_anew_is_never_settled_by_an_older_own_ch
     b.sync().await;
     a.execute("UPDATE memories SET content = 'Edited on A before the delete arrived.'");
     old.refuse_next(1);
-    assert!(a.replica.publish().await.is_err(), "A's edit is unconfirmed");
+    assert!(
+        a.replica.publish().await.is_err(),
+        "A's edit is unconfirmed"
+    );
     b.db.with_connection(|conn| {
         let tx = conn.transaction().unwrap();
         crate::memory_writes::person::purge(&tx, gone).unwrap();

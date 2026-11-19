@@ -228,12 +228,9 @@ async fn run(seed: u64, steps: usize, kinds: Steps) -> Result<(), String> {
                 }
             }
             _ => {
-                let id: Option<i64> = c
-                    .db
-                    .with_connection(|conn| {
-                        conn.query_row(&format!("SELECT {row}(id) FROM memories"), [], |r| {
-                            r.get(0)
-                        })
+                let id: Option<i64> =
+                    c.db.with_connection(|conn| {
+                        conn.query_row(&format!("SELECT {row}(id) FROM memories"), [], |r| r.get(0))
                     })
                     .unwrap();
                 if let Some(id) = id {

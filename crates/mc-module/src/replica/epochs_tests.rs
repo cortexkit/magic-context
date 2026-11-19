@@ -224,7 +224,11 @@ async fn a_message_under_an_epoch_the_vault_doesnt_hold_yet_holds_the_stream_unt
         ]
     );
     assert_eq!(hold(&b), None, "the hold ends once the message applies");
-    assert_eq!(hub.messages().len(), 2, "B's memory is sent once it is read");
+    assert_eq!(
+        hub.messages().len(),
+        2,
+        "B's memory is sent once it is read"
+    );
 }
 
 /// A message the vault can't open under an epoch whose key it holds never
@@ -306,7 +310,11 @@ async fn a_damaged_key_or_a_refused_call_holds_the_stream() {
         "logged once: {}",
         log.text()
     );
-    assert_eq!(hold(&b), None, "the vault holds the epoch; its copy is damaged");
+    assert_eq!(
+        hold(&b),
+        None,
+        "the vault holds the epoch; its copy is damaged"
+    );
     let mut b = Computer::open(&hub, 2, b.copy());
     let vault = Vault::new(&[1], (UNAVAILABLE, "transient"));
     b.with_vault(&hub, 2, Arc::clone(&vault) as _, Arc::new(UnknownEpochs));

@@ -254,8 +254,9 @@ pub struct Replica {
     pub(crate) hub: Arc<dyn Hub>,
     pub(crate) sealer: Arc<dyn Sealer>,
     pub(crate) box_id: String,
-    /// The hub's fleet epoch record, which decides whether a message the
-    /// vault won't open is held or skipped ([`epochs`]).
+    /// The hub's fleet epoch record, which a hold of the stream at a
+    /// message the vault won't open names in its reason; the vault's own
+    /// refusal decides whether it is held or skipped ([`epochs`]).
     pub(crate) epochs: Arc<dyn epochs::FleetEpochs>,
     /// Whether this engine read the stream to its end since it started
     /// ([`Replica::catch_up`]); nothing is sent before it has.
@@ -485,11 +486,16 @@ fn same_stream(
     )?;
     let why = if (info.last_seq as i64) < position {
         Some("it ends before the position this store had read to".to_owned())
-    } else if let Some(created) = created.as_deref().filter(|created| *created != info.created) {
+    } else if let Some(created) = created
+        .as_deref()
+        .filter(|created| *created != info.created)
+    {
         Some(format!("it was created {}, not {created}", info.created))
     } else {
         match stored.filter(|_| position > 0 && checked as i64 == position) {
-            Some(None) => Some("it holds no message at the position this store had read to".to_owned()),
+            Some(None) => {
+                Some("it holds no message at the position this store had read to".to_owned())
+            }
             Some(Some(found))
                 if message_id
                     .as_deref()
@@ -525,9 +531,10 @@ fn same_stream(
 /// computers that join it.
 ///
 /// - The store takes a new store id first, so every message it sends to
-///   the new stream has a message id never used before: a send of the old
-///   stream tried again can't be taken for one of the new stream's, and
-///   the hub never answers a new message as a duplicate of an old one.
+///   the new stream has a message id it never used before: none of them
+///   can be answered as a duplicate of, or skipped as a copy of, a
+///   message it sent to the old stream, which a stream restored from a
+///   backup of the hub may still hold.
 /// - A row's waiting changes, sent or not, collapse into the one change
 ///   queued for it, which carries the row as it stands now and is fixed
 ///   as it is queued. It goes at the revision the old stream decided the
@@ -579,7 +586,16 @@ fn start_over(tx: &Connection) -> rusqlite::Result<()> {
                  (kind, local_id, revision, base_revision, change, created_at, actor,
                   global_id, level, owner, frozen)
              VALUES (?1, ?2, ?3, ?4, 'delete', ?5, 'ck-mc', ?6, ?7, ?8, 'null')",
-            params![kind, local, revision, revision - 1, now, global, level, owner],
+            params![
+                kind,
+                local,
+                revision,
+                revision - 1,
+                now,
+                global,
+                level,
+                owner
+            ],
         )?;
     }
     for table in schema::TABLES {
@@ -626,7 +642,12 @@ fn start_over(tx: &Connection) -> rusqlite::Result<()> {
 /// Raise row `local` of `table` to `revision`, with a memory's clause
 /// evidence, which readers look up at the row's current revision, under
 /// the apply marker the caller holds, so nothing is captured.
-fn raise_to(tx: &Connection, table: &schema::Table, local: i64, revision: i64) -> rusqlite::Result<()> {
+fn raise_to(
+    tx: &Connection,
+    table: &schema::Table,
+    local: i64,
+    revision: i64,
+) -> rusqlite::Result<()> {
     if table.kind == "memory" {
         tx.execute(
             &schema::carry_evidence("?1", "m.revision", "?2", "m.revision < ?2"),

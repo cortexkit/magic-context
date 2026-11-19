@@ -321,9 +321,7 @@ impl Replica {
                         alert,
                         missing,
                     },
-                ) => {
-                    return Err(self.hold(&format!("opening {seq} again: {why}"), alert, missing))
-                }
+                ) => return Err(self.hold(&format!("opening {seq} again: {why}"), alert, missing)),
                 (Some(message), Opening::Body(body)) if body.global_id == global => self
                     .db
                     .with_connection(|conn| restore_message(conn, &self.box_id, &message, &body))
@@ -941,10 +939,10 @@ fn subject_role(subject: &str) -> Option<String> {
     })
 }
 
-/// The level and owner a subject names, as a deleted row keeps them for
-/// its tombstone ([`super::publish`] forms the subject from them again):
-/// a memory's level and owner, a primer's project, nothing for an
-/// observation.
+/// The level and owner a subject names, as `replica_ids` keeps them with
+/// the subject a row was last sent under, for its tombstone
+/// ([`super::publish`] forms the subject from them again): a memory's
+/// level and owner, a primer's project, nothing for an observation.
 fn subject_owner(subject: &str) -> (Option<String>, Option<String>) {
     let mut parts = subject.splitn(5, '.');
     let (Some(kind), Some(owner)) = (parts.nth(3), parts.next()) else {
@@ -1925,7 +1923,15 @@ fn tombstone(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at,
              level = excluded.level, owner = excluded.owner, subject = excluded.subject",
-        params![table.kind, body.global_id, local, now, level, owner, subject],
+        params![
+            table.kind,
+            body.global_id,
+            local,
+            now,
+            level,
+            owner,
+            subject
+        ],
     )?;
     tx.execute(
         "DELETE FROM replica_pending_links WHERE target_global_id = ?1",

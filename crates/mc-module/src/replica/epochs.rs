@@ -174,7 +174,8 @@ pub fn unopened(code: &str, class: &str, epoch: u64, status: EpochStatus) -> Uno
         ));
     }
     if code == UNAVAILABLE {
-        let known = |value: Option<u64>| value.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
+        let known =
+            |value: Option<u64>| value.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
         return Unopened::Hold {
             why: format!(
                 "the vault answered {code} ({class}) for epoch {epoch}: this computer's vault doesn't hold that epoch's key, so nothing is sent until it does (the hub's current epoch is {}, and the highest this vault holds is {}, as last read); it is read again when the epoch record changes",
