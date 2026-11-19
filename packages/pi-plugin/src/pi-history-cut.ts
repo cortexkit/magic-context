@@ -3,10 +3,50 @@
  * request, and which one it keeps. The request's cut (inject-compartments-pi.ts)
  * and the Pi compaction marker that trims the host's own branch
  * (compaction-marker-manager-pi.ts, pi-historian-runner.ts, pi-recomp-marker.ts)
- * both decide it here, so the marker never hides a message the request keeps.
+ * both decide it here. The marker's kept entry is the first message the
+ * request's cut keeps, computed over the same branch entries the request is
+ * built from, so the marker never hides a message the request keeps. Where the
+ * request keeps more than the first entry after the summary (the prompt of a
+ * turn the summary ends inside, an orphan tool result, a custom message), the
+ * marker keeps it too, even where it used to start later.
  */
 import { SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 import { isPiSystemEntry } from "./system-entry-pi";
+
+/**
+ * Whether a branch entry becomes a message in the context Pi builds a request
+ * from (buildSessionContext): a message entry, a custom message, or a branch
+ * summary that carries a summary.
+ */
+export function isPiContextEmitEligible(
+	entry: unknown,
+): entry is { id: string } {
+	if (!entry || typeof entry !== "object") return false;
+	const row = entry as { type?: unknown; id?: unknown; summary?: unknown };
+	if (typeof row.id !== "string") return false;
+	return (
+		row.type === "message" ||
+		row.type === "custom_message" ||
+		(row.type === "branch_summary" &&
+			typeof row.summary === "string" &&
+			row.summary.length > 0)
+	);
+}
+
+/**
+ * The message the cut reads for a branch entry, with the role Pi gives it in
+ * the context (`custom` for a custom message, `branchSummary` for a branch
+ * summary), or undefined for an entry that adds no context message.
+ */
+function piCutMessageForEntry(entry: unknown): PiCutMessage | undefined {
+	if (!isPiContextEmitEligible(entry)) return undefined;
+	const row = entry as { type?: unknown; message?: unknown };
+	if (row.type === "custom_message") return { role: "custom" };
+	if (row.type === "branch_summary") return { role: "branchSummary" };
+	return row.message && typeof row.message === "object"
+		? (row.message as PiCutMessage)
+		: undefined;
+}
 
 /** The fields of a Pi message the cut reads. */
 export interface PiCutMessage {
@@ -134,12 +174,14 @@ export type PiMarkerKeptEntry =
 
 /**
  * The entry a Pi compaction marker keeps first for a summary ending at
- * `endMessageId`: the first message the history cut keeps, read from the
- * branch's message entries. When the summary ends inside a turn, the cut keeps
- * that turn's prompt, so the marker starts at the prompt instead of hiding it
- * (a `/ctx-recomp` run while a reply streams ends on the prompt or a tool result
- * of the live turn). When the summary ends a finished turn, this is the first
- * message after the boundary, the entry the marker has always kept.
+ * `endMessageId`: the first message the request's history cut keeps, computed
+ * over the branch entries Pi builds the request's context from, with the roles
+ * that context gives them. The marker therefore never hides a message the
+ * request keeps. When the summary ends inside a turn, the cut keeps that turn's
+ * prompt (a `/ctx-recomp` run while a reply streams ends on the prompt or a
+ * tool result of the live turn); when the next prompt follows the summary, the
+ * cut keeps whatever lies between, such as a custom message, a branch summary
+ * or an orphan tool result, and the marker starts there.
  *
  * A folded tool-result boundary (`synth-user-<id>`) is the result entry `<id>`,
  * as the cut reads it. `waiting`: no message follows the boundary yet, or the
@@ -155,24 +197,14 @@ export function resolvePiMarkerKeptEntry(
 		? endMessageId.slice(SYNTH_USER_ID_PREFIX.length)
 		: endMessageId;
 	if (boundaryId.length === 0) return { kind: "missing" };
-	const messages: unknown[] = [];
+	const messages: PiCutMessage[] = [];
 	const ids: string[] = [];
-	for (const raw of branchEntries) {
-		const entry = raw as {
-			type?: unknown;
-			id?: unknown;
-			message?: unknown;
-		} | null;
-		if (
-			entry?.type !== "message" ||
-			typeof entry.id !== "string" ||
-			entry.id.length === 0 ||
-			!entry.message ||
-			typeof entry.message !== "object"
-		)
-			continue;
-		messages.push(entry.message);
-		ids.push(entry.id);
+	for (const entry of branchEntries) {
+		const message = piCutMessageForEntry(entry);
+		const id = (entry as { id: string }).id;
+		if (!message || id.length === 0) continue;
+		messages.push(message);
+		ids.push(id);
 	}
 	const cutoffIndex = ids.indexOf(boundaryId);
 	if (cutoffIndex < 0) return { kind: "missing" };

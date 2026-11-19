@@ -1,10 +1,23 @@
 import { describe, expect, it } from "bun:test";
+import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { applyDeferredPiCompactionMarker } from "./compaction-marker-manager-pi";
 import { __test as injectTest } from "./inject-compartments-pi";
 import { findFirstKeptEntryId } from "./pi-historian-runner";
 import { resolvePiMarkerKeptEntry } from "./pi-history-cut";
 import { iterateEntriesToRawMessageRange } from "./read-session-pi";
+import { createTestDb } from "./test-utils.test";
 
-type Entry = { type: string; id: string; message?: Record<string, unknown> };
+type Entry = {
+	type: string;
+	id: string;
+	message?: Record<string, unknown>;
+	customType?: string;
+	content?: unknown;
+	summary?: string;
+	fromId?: string;
+	timestamp?: string;
+};
 
 const user = (id: string, text: string): Entry => ({
 	type: "message",
@@ -49,6 +62,61 @@ const bash = (id: string): Entry => ({
 	id,
 	message: { role: "bashExecution", command: "ls", output: "a" },
 });
+/** A tool result whose call is not on the branch. */
+const orphanResult = (id: string): Entry => result(id, "call-not-on-branch");
+/** A tool result that carries no call id at all. */
+const resultWithoutCallId = (id: string): Entry => ({
+	type: "message",
+	id,
+	message: {
+		role: "toolResult",
+		toolName: "read",
+		content: [{ type: "text", text: "out" }],
+	},
+});
+/** What an extension's sendCustomMessage appends while the agent is idle. */
+const customMessage = (id: string): Entry => ({
+	type: "custom_message",
+	id,
+	customType: "extension-note",
+	content: "a note from an extension",
+	timestamp: "2026-01-01T00:00:00.000Z",
+});
+const branchSummary = (id: string): Entry => ({
+	type: "branch_summary",
+	id,
+	summary: "what the abandoned branch did",
+	fromId: "elsewhere",
+	timestamp: "2026-01-01T00:00:00.000Z",
+});
+
+/**
+ * The context message Pi's buildSessionContext makes of an entry (role
+ * `custom` for a custom message, `branchSummary` for a branch summary), the
+ * input the request's cut runs on.
+ */
+function contextMessage(entry: Entry): Record<string, unknown> | undefined {
+	const timestamp = entry.timestamp
+		? new Date(entry.timestamp).getTime()
+		: undefined;
+	if (entry.type === "message") return structuredClone(entry.message);
+	if (entry.type === "custom_message")
+		return {
+			role: "custom",
+			customType: entry.customType,
+			content: entry.content,
+			display: true,
+			timestamp,
+		};
+	if (entry.type === "branch_summary" && entry.summary)
+		return {
+			role: "branchSummary",
+			summary: entry.summary,
+			fromId: entry.fromId,
+			timestamp,
+		};
+	return undefined;
+}
 
 /** The raw message a summary ending at `ordinal` ends on, as the historian records it. */
 function rawAt(entries: readonly Entry[], ordinal: number) {
@@ -69,11 +137,14 @@ function firstKeptByRequestCut(
 	entries: readonly Entry[],
 	endMessageId: string,
 ): string | undefined {
-	const messageEntries = entries.filter((entry) => entry.type === "message");
-	const messages = messageEntries.map((entry) =>
-		structuredClone(entry.message),
-	);
-	const ids = messageEntries.map((entry) => entry.id);
+	const messages: Record<string, unknown>[] = [];
+	const ids: string[] = [];
+	for (const entry of entries) {
+		const message = contextMessage(entry);
+		if (!message) continue;
+		messages.push(message);
+		ids.push(entry.id);
+	}
 	injectTest.trimPiMessagesToBoundary(
 		messages as never,
 		ids,
@@ -87,8 +158,9 @@ function firstKeptByRequestCut(
 }
 
 describe("Pi compaction marker kept entry", () => {
-	// Summaries that end a finished turn: the marker keeps exactly the entry
-	// it kept before it was derived from the history cut.
+	// Summaries that end a turn the next prompt closes, with nothing else the
+	// request keeps in between: the marker keeps the same entry the ordinal
+	// placement it replaced kept, the next prompt or the first entry after it.
 	const finishedTurns: Array<[string, Entry[], number]> = [
 		[
 			"a reply followed by the next prompt",
@@ -131,7 +203,7 @@ describe("Pi compaction marker kept entry", () => {
 		["the newest message", [user("u1", "a"), reply("a1", "b")], 2],
 	];
 	for (const [name, entries, ordinal] of finishedTurns) {
-		it(`is unchanged for a summary ending a finished turn: ${name}`, () => {
+		it(`keeps the entry the ordinal placement kept: ${name}`, () => {
 			const boundary = rawAt(entries, ordinal);
 			const before = findFirstKeptEntryId(entries, ordinal);
 			const kept = resolvePiMarkerKeptEntry(entries, boundary.id);
@@ -140,6 +212,139 @@ describe("Pi compaction marker kept entry", () => {
 				expect(firstKeptByRequestCut(entries, boundary.id)).toBe(before);
 		});
 	}
+
+	// Shapes where the ordinal placement started the marker after an entry the
+	// request keeps; the marker now keeps that entry, as the request does.
+	const requestKeepsMore: Array<
+		[string, Entry[], number, string, string | null]
+	> = [
+		[
+			"an orphan tool result before the next prompt",
+			[user("u1", "a"), reply("a1", "b"), orphanResult("r1"), user("u2", "c")],
+			2,
+			"r1",
+			"u2",
+		],
+		[
+			"a tool result without a call id before the next prompt",
+			[
+				user("u1", "a"),
+				reply("a1", "b"),
+				resultWithoutCallId("r1"),
+				user("u2", "c"),
+			],
+			2,
+			"r1",
+			"u2",
+		],
+		[
+			// No prompt closes the turn yet, so the request keeps its prompt.
+			"a branch that so far holds only a shell run after the summary",
+			[user("u1", "a"), reply("a1", "b"), bash("b1")],
+			2,
+			"u1",
+			"b1",
+		],
+		[
+			"a branch that so far holds only a failed reply after the summary",
+			[user("u1", "a"), reply("a1", "b"), reply("a2", "boom", "error")],
+			2,
+			"u1",
+			"a2",
+		],
+		[
+			"a custom message an extension appended before the next prompt",
+			[
+				user("u1", "a"),
+				reply("a1", "b"),
+				customMessage("cm1"),
+				user("u2", "c"),
+			],
+			2,
+			"cm1",
+			"u2",
+		],
+		[
+			"a branch summary before the next prompt",
+			[
+				user("u1", "a"),
+				reply("a1", "b"),
+				branchSummary("bs1"),
+				user("u2", "c"),
+			],
+			2,
+			"bs1",
+			"u2",
+		],
+	];
+	for (const [name, entries, ordinal, kept, before] of requestKeepsMore) {
+		it(`keeps what the request keeps: ${name}`, () => {
+			const boundary = rawAt(entries, ordinal);
+			expect(findFirstKeptEntryId(entries, ordinal)).toBe(before);
+			expect(resolvePiMarkerKeptEntry(entries, boundary.id)).toEqual({
+				kind: "resolved",
+				entryId: kept,
+			});
+			expect(firstKeptByRequestCut(entries, boundary.id)).toBe(kept);
+		});
+	}
+
+	it("places a marker staged on another branch at the entry this branch's request keeps", () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-history-cut-fork";
+		try {
+			appendCompartments(db, sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					startMessageId: "u1",
+					endMessageId: "a1",
+					title: "Shared start",
+					content: "shared start",
+				},
+			]);
+			// Published on the branch that continued with u2a; the session has
+			// since forked at a1 and continues with u2b.
+			const branch = [
+				user("u1", "a"),
+				reply("a1", "b"),
+				user("u2b", "c"),
+				reply("a2b", "d"),
+			];
+			const appended: string[] = [];
+			const outcome = applyDeferredPiCompactionMarker(
+				{
+					db,
+					readBranchEntries: () => branch,
+					appendCompaction: (_summary, firstKeptEntryId) => {
+						appended.push(firstKeptEntryId);
+						return "compact-fork";
+					},
+				},
+				sessionId,
+				{
+					firstKeptEntryId: "u2a",
+					endMessageId: "a1",
+					ordinal: 2,
+					tokensBefore: 0,
+					summary: "Shared start",
+					publishedAt: 1,
+				},
+			);
+			// The ordinal placement kept the staged entry and retired the marker
+			// because that entry is not on this branch.
+			expect(outcome).toEqual({
+				kind: "applied",
+				firstKeptEntryId: "u2b",
+				compactionId: "compact-fork",
+			});
+			expect(appended).toEqual(["u2b"]);
+			expect(firstKeptByRequestCut(branch, "a1")).toBe("u2b");
+		} finally {
+			closeQuietly(db);
+		}
+	});
 
 	const midTurn: Array<[string, Entry[], number]> = [
 		[

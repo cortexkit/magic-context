@@ -11,12 +11,13 @@ import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provid
 import { readHostSystemPrompt } from "./host-system-prompt";
 import type { PiFitEnvelope } from "./pi-raw-fallback";
 import type { PiToolWireSchema } from "./pi-tool-wire-schema";
+import { piModelAcceptsImages } from "./strip-processed-images-pi";
 
 /** Only complete current host metadata can make a replay admissible. Counting
  * every registered tool (including inactive tools) and serialized wrappers is
  * conservative relative to counting just the active definitions' prose. */
 export function readPiLkgFitEnvelope(
-	ctx: { getSystemPrompt?: () => unknown },
+	ctx: { getSystemPrompt?: () => unknown; model?: unknown },
 	pi: { getAllTools?: () => unknown; getActiveTools?: () => unknown },
 	modelKey: string | null | undefined,
 	frozen: DecisionCalibration,
@@ -145,6 +146,8 @@ export function readPiLkgFitEnvelope(
 						.digest("hex")
 				: undefined,
 			calibration,
+			// Recorded only for a model without image input; missing means images are sent.
+			...(piModelAcceptsImages(ctx.model) ? {} : { modelAcceptsImages: false }),
 		};
 	} catch {
 		// Missing metadata, cycles, invalid schemas and throwing APIs are partial.

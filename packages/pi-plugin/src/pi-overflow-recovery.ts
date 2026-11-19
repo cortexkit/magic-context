@@ -10,6 +10,7 @@ import {
 	estimatePiOutgoingInputTokens,
 	type PiFitEnvelope,
 } from "./pi-raw-fallback";
+import { piMessagesWithWireImages } from "./strip-processed-images-pi";
 import { PI_IMAGE_TOKENS, tokenizePiMessages } from "./tokenize-pi-messages";
 
 export function piRecoveryFitCalibration(calibration: DecisionCalibration): {
@@ -88,11 +89,15 @@ function piToolResultImageTokens(
  * counts neutrally), the way OpenCode counts a served request; the default
  * applies the fit envelope's margin for unseeded models. */
 export function estimatePiOverflowRecoveryInputTokens(
-	messages: readonly unknown[],
+	servedMessages: readonly unknown[],
 	envelope: PiFitEnvelope | undefined,
 	options: { fitEnvelope?: boolean } = {},
 ): number | undefined {
 	if (!envelope || !estimatePiOutgoingInputTokens([], envelope).trusted) return;
+	// Images the model cannot take go out as a short note.
+	const messages = piMessagesWithWireImages(servedMessages, {
+		modelAcceptsImages: envelope.modelAcceptsImages !== false,
+	});
 	const raw = tokenizePiMessages([...messages]);
 	for (const value of messages) {
 		if (!value || typeof value !== "object") return;

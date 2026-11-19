@@ -206,7 +206,7 @@ describe("issue 938 fix-round review: a marker never hides a message the request
 	for (const [between, text] of Object.entries(variants) as Array<
 		[keyof typeof variants, string]
 	>) {
-		test.skip(`WITNESS (${between}): the pass after the marker lands keeps the rebuild's bytes`, async () => {
+		test(`WITNESS (${between}): the pass after the marker lands keeps the rebuild's bytes`, async () => {
 			const { rebuild, next, landed } = await markerAfterFinishedTurn(between);
 			expect(landed).toBe(true);
 			expect(JSON.stringify(rebuild)).toContain(text);

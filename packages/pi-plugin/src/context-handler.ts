@@ -438,6 +438,7 @@ import {
 	inPiHistorianRootContext,
 	waitForPiHistorianInTurn,
 } from "./pi-historian-turn-wait";
+import { isPiContextEmitEligible } from "./pi-history-cut";
 import { readPiHistoryRetirement } from "./pi-history-retirement";
 import {
 	clearPiLkgSessionState,
@@ -561,6 +562,7 @@ import {
 } from "./served-array-ledger";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import {
+	piMessagesWithWireImages,
 	piModelAcceptsImages,
 	piToolImageWireTokens,
 	stripPiProcessedImages,
@@ -2022,26 +2024,10 @@ function collectMessageEntryIds(
 
 	const ids: (string | undefined)[] = [];
 
-	// Helper: is this entry type one that produces an AgentMessage in
-	// buildSessionContext? Same three types: message, custom_message,
-	// branch_summary (the latter only when summary is set). Note that
-	// branch_summary entries with `summary === undefined` are skipped
-	// by buildSessionContext but we accept all branch_summary entries
-	// here for robustness — the worst case is we emit an extra id that
-	// never matches a compartment boundary, which is harmless.
-	const isEmitEligible = (entry: unknown): entry is { id: string } => {
-		if (!entry || typeof entry !== "object") return false;
-		const t = (entry as { type?: unknown }).type;
-		const id = (entry as { id?: unknown }).id;
-		if (typeof id !== "string") return false;
-		if (t === "message") return true;
-		if (t === "custom_message") return true;
-		if (t === "branch_summary") {
-			const summary = (entry as { summary?: unknown }).summary;
-			return typeof summary === "string" && summary.length > 0;
-		}
-		return false;
-	};
+	// Entries that produce an AgentMessage in buildSessionContext: message,
+	// custom_message, and branch_summary with a summary (the history cut's
+	// isPiContextEmitEligible, shared with the compaction marker).
+	const isEmitEligible = isPiContextEmitEligible;
 
 	if (compactionIndex >= 0) {
 		const hasSystemSnapshot = isPiSystemEntry(
@@ -2714,19 +2700,6 @@ function addPiBranchEntryToLookup(
 	const bucket = lookup.entryIdsByFingerprint.get(fingerprint);
 	if (bucket) bucket.push(row.id);
 	else lookup.entryIdsByFingerprint.set(fingerprint, [row.id]);
-}
-
-function isPiContextEmitEligible(entry: unknown): entry is { id: string } {
-	if (!entry || typeof entry !== "object") return false;
-	const row = entry as { type?: unknown; id?: unknown; summary?: unknown };
-	if (typeof row.id !== "string") return false;
-	return (
-		row.type === "message" ||
-		row.type === "custom_message" ||
-		(row.type === "branch_summary" &&
-			typeof row.summary === "string" &&
-			row.summary.length > 0)
-	);
 }
 
 function buildPiAlignedEntryIds(entries: readonly unknown[]): {
@@ -10470,8 +10443,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	};
 	const tTranscriptBuild = performance.now();
-	// Read once, and only when a tool result with an image is tagged.
+	// The ids the processed-image strip froze, read once per pass and only when
+	// an image is priced (tag counts, the emergency planner's image mass).
 	let frozenImageMessageIds: ReadonlySet<string> | undefined;
+	const imageStrippedMessage = (message: unknown, index: number) => {
+		const id = stableIdResolver(message, index);
+		frozenImageMessageIds ??= getProcessedImageStrippedIds(
+			args.db,
+			args.sessionId,
+		);
+		return id !== undefined && frozenImageMessageIds.has(id);
+	};
 	const transcript = createPiTranscript(
 		args.messages,
 		args.sessionId,
@@ -10507,16 +10489,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				const message = args.messages[messageIndex] as
 					| { content?: unknown }
 					| undefined;
-				const id = stableIdResolver(message, messageIndex);
-				frozenImageMessageIds ??= getProcessedImageStrippedIds(
-					args.db,
-					args.sessionId,
-				);
 				return piToolImageWireTokens({
 					block: Array.isArray(message?.content)
 						? message.content[partIndex]
 						: undefined,
-					stripped: id !== undefined && frozenImageMessageIds.has(id),
+					stripped: imageStrippedMessage(message, messageIndex),
 					modelAcceptsImages: args.modelAcceptsImages !== false,
 				});
 			},
@@ -11429,11 +11406,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// both the planner and the measurement before the drain count them. During
 	// provider-overflow recovery they count at their serialized size, the units
 	// of recovery's own request estimate; otherwise at the per-image token cost
-	// the provider's reading of the request reflects.
-	const emergencyToolImageTokens = () =>
-		args.providerOverflowRecovery === true
-			? piRecoveryToolImageTokens(workingMessages)
-			: piToolImageCostTokens(workingMessages);
+	// the provider's reading of the request reflects. Only images the request
+	// carries count: one the processed-image strip froze, or one the model cannot
+	// take, goes out as text and is no image mass (piMessagesWithWireImages).
+	const emergencyToolImageTokens = () => {
+		const sent = piMessagesWithWireImages(workingMessages, {
+			modelAcceptsImages: args.modelAcceptsImages !== false,
+			strippedMessage: imageStrippedMessage,
+		});
+		return args.providerOverflowRecovery === true
+			? piRecoveryToolImageTokens(sent)
+			: piToolImageCostTokens(sent);
+	};
 	const emergencyServedBeforeDrain =
 		emergencyPlannerMayRun && shouldApplyPendingOps && queuedDropTags.size > 0
 			? snapshotPiEmergencyServedMass(

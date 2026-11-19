@@ -5,8 +5,11 @@ import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-ses
 import type { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
+import { piToolImageCostTokens } from "./pi-overflow-recovery";
+import { estimatePiOutgoingInputTokens } from "./pi-raw-fallback";
 import {
 	PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER,
+	piMessagesWithWireImages,
 	piModelAcceptsImages,
 	piToolImageWireTokens,
 	STRIPPED_IMAGE_MARKER,
@@ -278,5 +281,75 @@ describe("Pi tool-result images the request does not carry", () => {
 		} finally {
 			closeQuietly(db);
 		}
+	});
+});
+
+describe("one image rule for tag counts, the emergency planner and the local estimate", () => {
+	const caption = "Generated image saved to out/cat.png";
+	const messages = () => [
+		{
+			role: "user",
+			content: [{ type: "text", text: "draw a cat" }],
+			timestamp: 1,
+		},
+		assistantToolCall("call-one", "generate_image", { prompt: "cat" }, 2),
+		imageToolResult("call-one", "generate_image", caption, 2, 3),
+	];
+	const textOnly = (message: unknown) =>
+		piMessagesWithWireImages([message], { modelAcceptsImages: false })[0];
+
+	it("leaves the request untouched while the model takes images and nothing is stripped", () => {
+		const served = messages();
+		expect(piMessagesWithWireImages(served, { modelAcceptsImages: true })).toBe(
+			served,
+		);
+	});
+
+	it("replaces each image a text-only model cannot take with the host's note", () => {
+		const sent = piMessagesWithWireImages(messages(), {
+			modelAcceptsImages: false,
+		});
+		expect((sent[2] as { content: unknown[] }).content).toEqual([
+			{ type: "text", text: caption },
+			{ type: "text", text: PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER },
+			{ type: "text", text: PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER },
+		]);
+	});
+
+	it("gives the emergency planner no image mass for images the request does not carry", () => {
+		expect(piToolImageCostTokens(messages()).get("call-one")).toBe(
+			2 * PI_IMAGE_TOKENS,
+		);
+		const textModel = piMessagesWithWireImages(messages(), {
+			modelAcceptsImages: false,
+		});
+		expect(piToolImageCostTokens(textModel).get("call-one")).toBeUndefined();
+		const stripped = piMessagesWithWireImages(messages(), {
+			modelAcceptsImages: true,
+			strippedMessage: (_message, index) => index === 2,
+		});
+		expect(piToolImageCostTokens(stripped).get("call-one")).toBeUndefined();
+	});
+
+	it("prices a text-only model's request with the note, not 1,200 tokens per image", () => {
+		const envelope = {
+			modelKey: "test/text-only",
+			systemTokens: 100,
+			toolDefinitionTokens: 50,
+		};
+		const withImages = estimatePiOutgoingInputTokens(messages(), envelope);
+		const textModel = estimatePiOutgoingInputTokens(messages(), {
+			...envelope,
+			modelAcceptsImages: false,
+		});
+		const asSent = estimatePiOutgoingInputTokens(
+			messages().map(textOnly),
+			envelope,
+		);
+		expect(textModel.trusted).toBe(true);
+		expect(textModel.tokens).toBe(asSent.tokens);
+		expect(withImages.tokens - textModel.tokens).toBeGreaterThan(
+			2 * PI_IMAGE_TOKENS - 100,
+		);
 	});
 });
