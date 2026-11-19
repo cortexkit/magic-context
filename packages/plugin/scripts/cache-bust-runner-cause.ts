@@ -84,9 +84,16 @@ export function classifyRunnerFeedStep(
     // step can carry an account and nothing else: a runner may send the view
     // and digests only on requests that asked the module. Then a view or plan
     // change is invisible to Astrocyte, and the module log decides.
+    // Expiry is judged from the previous request's finish time and cache
+    // lifetime and this request's start time. Without them Astrocyte cannot
+    // see an idle-expired cache, so a step after a day's silence would read
+    // as unexplained.
     if (
         cause === "unexplained" &&
-        UNEXPLAINED_NEEDS.some((key) => before[key] === undefined || after[key] === undefined)
+        (UNEXPLAINED_NEEDS.some((key) => before[key] === undefined || after[key] === undefined) ||
+            before.cache_ttl_ms === undefined ||
+            before.finished_at_ms === undefined ||
+            after.started_at_ms === undefined)
     )
         return { classification: guess };
     const changed = (key: keyof RunnerStepFacts): boolean =>

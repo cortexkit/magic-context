@@ -172,6 +172,11 @@ test("a cause whose facts are missing on either step falls back to the module lo
             { ...pair[0]!, view_version: undefined, tools_digest: undefined, system_digest: undefined },
             pair[1]!,
         ],
+        // Without the previous request's cache lifetime and times Astrocyte
+        // cannot see an idle-expired cache, so its "unexplained" compared no
+        // expiry.
+        "the previous step's cache lifetime": [{ ...pair[0]!, cache_ttl_ms: undefined }, pair[1]!],
+        "the rewrite's start time": [pair[0]!, { ...pair[1]!, started_at_ms: undefined }],
     };
     for (const [missing, rows] of Object.entries(cases)) {
         const s = await scan(rows, [accepted]);
