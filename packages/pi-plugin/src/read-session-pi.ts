@@ -941,11 +941,13 @@ export function countPiRawMessages(
  * message id that the branch contains, synthetic folded-tool ids included.
  * Counts exactly as `iterateEntriesToRawMessageRange` numbers, without
  * building any message content; ids the branch does not contain are absent
- * from the result.
+ * from the result. `onLocatedInPrefix` runs only if every target was found
+ * without synthesizing a tool ordinal at the end of the branch.
  */
 export function locatePiRawOrdinals(
 	entries: Iterable<unknown>,
 	wanted: ReadonlySet<string>,
+	onLocatedInPrefix?: () => void,
 ): Map<string, number> {
 	const found = new Map<string, number>();
 	if (wanted.size === 0) return found;
@@ -980,7 +982,10 @@ export function locatePiRawOrdinals(
 			ordinal++;
 			note(entry.id);
 		}
-		if (found.size === wanted.size) return found;
+		if (found.size === wanted.size) {
+			onLocatedInPrefix?.();
+			return found;
+		}
 	}
 	if (pendingFirstId !== null) {
 		ordinal++;

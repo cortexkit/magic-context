@@ -14,6 +14,7 @@ import { applyDeferredPiCompactionMarker } from "./compaction-marker-manager-pi"
 import {
 	awaitInFlightHistorians,
 	clearContextHandlerSession,
+	__test as contextHandlerInternals,
 	registerPiContextHandler,
 } from "./context-handler";
 import entriesWithSystem from "./fixtures/system-ordinals-pi.input.json";
@@ -29,6 +30,80 @@ import {
 } from "./read-session-pi";
 import { createFakePi, createTestDb, fakeContext } from "./test-utils.test";
 import { createCtxExpandTool } from "./tools/ctx-expand";
+
+for (const count of [1000, 50000]) {
+	it(`reuses located anchors on a one-entry append to ${count} Pi entries`, () => {
+		const db = createTestDb();
+		const sessionId = `append-${count}`;
+		const branch = Array.from({ length: count + 1 }, (_, index) => ({
+			type: "message",
+			id: `m${index}`,
+			parentId: index === 0 ? null : `m${index - 1}`,
+			message: { role: "user", content: `question ${index}` },
+		}));
+		const byId = new Map(branch.map((entry) => [entry.id, entry]));
+		let leafId = `m${count - 1}`;
+		let hostEntryVisits = 0;
+		const ctx = {
+			sessionManager: {
+				getLeafId: () => leafId,
+				getEntry: (id: string) => {
+					hostEntryVisits++;
+					return byId.get(id);
+				},
+			},
+		} as never;
+		const readBranch = () => {
+			const entries = contextHandlerInternals.readPiBranchEntriesForContext(
+				ctx,
+				sessionId,
+			);
+			if (!entries) throw new Error("fixture branch could not be read");
+			return entries;
+		};
+		try {
+			appendCompartments(db, sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: count,
+					startMessageId: "m0",
+					endMessageId: leafId,
+					title: "History",
+					content: "Summary",
+				},
+			]);
+			const before = readBranch();
+			const expected = resolvePiOrdinalAlignment(db, sessionId, before);
+			expect(expected).toEqual({ kind: "aligned", offset: 0 });
+			hostEntryVisits = 0;
+			leafId = `m${count}`;
+			const appended = readBranch();
+			expect(hostEntryVisits).toBe(1);
+			expect(before).toHaveLength(count);
+			expect(appended).toEqual(branch);
+			let alignmentVisits = 0;
+			Object.defineProperty(appended, Symbol.iterator, {
+				value: function* () {
+					for (let index = 0; index < appended.length; index += 1) {
+						alignmentVisits++;
+						yield appended[index];
+					}
+				},
+			});
+			expect(resolvePiOrdinalAlignment(db, sessionId, appended)).toEqual(
+				expected,
+			);
+			console.log(
+				`pi-ordinal-append entries=${count} projectionLookups=${hostEntryVisits} alignmentVisits=${alignmentVisits}`,
+			);
+			expect(alignmentVisits).toBe(0);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+}
 
 /*
  * Fixture for a session whose branch walk lost its first entries: one

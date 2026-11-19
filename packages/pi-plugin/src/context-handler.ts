@@ -459,6 +459,7 @@ import {
 } from "./pi-message-identity";
 import {
 	clearPiOrdinalAlignmentSession,
+	inheritPiOrdinalAlignment,
 	isPiOrdinalAlignmentUnanchored,
 	type PiOrdinalAlignment,
 	piRawOrdinalOffsetSource,
@@ -3048,6 +3049,7 @@ function readPiBranchEntriesForContext(
 			};
 			piBranchProjectionBySession.set(sessionId, projection);
 			piBranchLookupByProjection.set(entries, cached.lookup);
+			inheritPiOrdinalAlignment(sessionId, cached.entries, entries);
 			return entries;
 		}
 
