@@ -220,6 +220,8 @@ pub struct Session {
     baseline: Option<Arc<Baseline>>,
     /// A summarizer run is in progress.
     summarizing: bool,
+    /// A validated answer waiting for the context store to accept it.
+    pending_publication: Option<Box<summarizer::PendingPublication>>,
     /// The runner held a summarizer send back until an account has room:
     /// no summary run starts before the time it named. Kept in memory only.
     account_wait: Option<crate::summary::account_wait::Waiting>,

@@ -1376,7 +1376,7 @@ mod tests {
 /// (`memory_observations`, read only by the global review). With a project,
 /// the session is also recorded as that project's (`session_projects`), so a
 /// read of a project's stored events (the dreamer's reflect task) finds them.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Recall {
     pub events: Vec<crate::summary::validate::ParsedEvent>,
     pub primer: Option<PrimerSource>,
@@ -1387,6 +1387,7 @@ pub struct Recall {
 }
 
 /// One observation about the person and where it came from.
+#[derive(Clone, Debug)]
 pub struct ObservationSource {
     /// The user category tag the summarizer filed it under.
     pub category: String,
@@ -1402,6 +1403,7 @@ pub struct ObservationSource {
 }
 
 /// A primer candidate and where it came from.
+#[derive(Clone, Debug)]
 pub struct PrimerSource {
     pub project: String,
     pub question: String,

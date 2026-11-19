@@ -1678,6 +1678,18 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     },
                 };
                 let settings = &settings;
+                if on_summaries && !matches!(&job, Job::SummaryFinished(..)) {
+                    if let Some(session) = &mut session {
+                        if let Some(continuation) = session
+                            .retry_summary_publication(inner.client.as_ref(), now_ms())
+                            .await
+                        {
+                            if let Some(job) = session.turn_two_job(settings, continuation) {
+                                start_turn_two(&inner, own.clone(), job, &held_key);
+                            }
+                        }
+                    }
+                }
                 let publish_app = !matches!(
                     &job,
                     Job::Idle(_)
@@ -1866,7 +1878,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             // A run that made progress is followed at once by
                             // the next one a numbers floor or a wrap-up still
                             // needs, not by the session's next notice.
-                            if progressed {
+                            if progressed && !session.has_pending_publication() {
                                 if let Some(request) = session
                                     .pending_numbers_summary(settings)
                                     .or_else(|| session.pending_wrapup_summary(settings))

@@ -3,6 +3,16 @@
 
 use super::*;
 
+#[derive(Clone, Debug)]
+pub(super) struct PendingPublication {
+    result: run::Summarized,
+    recall: crate::context_db::Recall,
+    error: String,
+    previous_through: Option<u64>,
+}
+
+const PUBLICATION_BACKOFF_MS: [u64; 2] = [50, 150];
+
 impl Session {
     /// Retain the unindexed evaluator as an oracle for differential and cost
     /// tests. Ordinary builds have no runtime switch for trigger evaluation.
@@ -27,6 +37,9 @@ impl Session {
     /// run at this usage.
     pub(super) fn summary_due(&mut self, settings: &Settings) -> Option<run::Request> {
         let _timing = crate::notice_cost_timing::span("trigger.summary_due");
+        if self.has_pending_publication() {
+            return None;
+        }
         // No view may cut before history the runner serves without part
         // numbers, so a summary through it comes before any other.
         if let Some(due) = self.numbers_summary_due(settings) {
@@ -569,18 +582,14 @@ impl Session {
         self.summarizing = false;
         let reservation = self.reservation.take();
         let started = self.run_start.take();
-        let (validated, publication, continuation) = match result {
+        let summarized = match result {
             Ok(Some(summarized)) => {
                 // The runner served the summarizer, so whatever account wait
                 // an earlier send met is over, and an older one that arrives
                 // late is stale.
                 self.account_wait = None;
                 self.last_served_ms = crate::summary::account_wait::now_ms();
-                (
-                    summarized.validated,
-                    summarized.publication,
-                    summarized.continuation,
-                )
+                summarized
             }
             Ok(None) => {
                 if let Some(reservation) = reservation {
@@ -634,8 +643,8 @@ impl Session {
         };
         // A revert during the run may have removed what it summarized.
         let present = |mid: &str| self.index.entries().iter().any(|entry| entry.mid == mid);
-        if validated.compartments.is_empty()
-            || !validated.compartments.iter().all(|summary| {
+        if summarized.validated.compartments.is_empty()
+            || !summarized.validated.compartments.iter().all(|summary| {
                 present(&summary.end_message_id) && present(&summary.start_message_id)
             })
         {
@@ -649,94 +658,236 @@ impl Session {
         // publication; they never become memories here. A session with no
         // memory level it can write to keeps no publication, and its facts
         // are dropped.
-        if let Some(db) = &self.db {
-            // The plugin stores one primer candidate per run, the first.
-            let primer = match (&self.project, validated.primer_candidates.first()) {
-                (Some(project), Some(candidate)) => {
-                    let origin = candidate.origin_compartment_index;
-                    let source = origin
-                        .and_then(|at| at.checked_sub(1))
-                        .and_then(|index| validated.compartments.get(index as usize))
-                        .or(validated.compartments.first());
-                    let source_time = source
-                        .and_then(|summary| {
-                            self.index
-                                .entries()
-                                .iter()
-                                .find(|entry| entry.mid == summary.start_message_id)
-                        })
-                        .map_or(now_ms, |entry| entry.written_at as i64);
-                    Some(crate::context_db::PrimerSource {
-                        project: project.id.clone(),
-                        question: candidate.question.clone(),
-                        origin,
-                        source_time,
-                    })
-                }
-                _ => None,
-            };
-            let observations = validated
-                .user_observations
-                .iter()
-                .map(|observation| {
-                    let source = observation
-                        .origin_compartment_index
-                        .and_then(|at| at.checked_sub(1))
-                        .and_then(|index| validated.compartments.get(index as usize));
-                    let (start, end) = match source {
-                        Some(summary) => (summary.start_message, summary.end_message),
-                        None => (
-                            validated
-                                .compartments
-                                .first()
-                                .map_or(0, |c| c.start_message),
-                            validated.compartments.last().map_or(0, |c| c.end_message),
-                        ),
-                    };
-                    crate::context_db::ObservationSource {
-                        category: observation.category.clone(),
-                        content: observation.content.clone(),
-                        start_ordinal: start,
-                        end_ordinal: end,
-                        profile: self
-                            .authority
-                            .as_ref()
-                            .and_then(|authority| authority.profile.clone()),
-                        project_id: self
-                            .memory_context
-                            .as_ref()
-                            .and_then(|context| context.project_id.clone()),
-                        workspace_id: self
-                            .memory_context
-                            .as_ref()
-                            .and_then(|context| context.workspace_id.clone()),
+        let mut publication = PendingPublication {
+            recall: self.publication_recall(&summarized.validated, now_ms),
+            result: summarized,
+            error: String::new(),
+            previous_through: self.summarized_through(),
+        };
+        if let Err(error) = self.store_publication(&publication, now_ms) {
+            tracing::warn!(
+                "ck-mc: session {}: storing summaries failed, retrying: {error}",
+                self.key.session
+            );
+            publication.error = error;
+            for delay in PUBLICATION_BACKOFF_MS {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                match self.publication_is_current(client, &publication).await {
+                    Some(false) => {
+                        self.give_up_publication(publication);
+                        return None;
                     }
-                })
-                .collect();
-            let recall = crate::context_db::Recall {
-                events: validated.events.clone(),
-                primer,
-                observations,
-                project: self.project.as_ref().map(|project| project.id.clone()),
-            };
-            if let Err(error) = db.publish_summaries(
-                &self.key.harness,
-                &self.key.session,
-                &validated.compartments,
-                publication.as_ref(),
-                &recall,
-                now_ms,
-            ) {
-                self.app.failures += 1;
-                self.app.last_error = Some(error.clone());
-                tracing::warn!(
-                    "ck-mc: session {}: storing summaries failed: {error}",
-                    self.key.session
-                );
-                self.record_no_progress(settings);
+                    None => break,
+                    Some(true) => {}
+                }
+                match self.store_publication(&publication, now_ms) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "ck-mc: session {}: summary publication recovered",
+                            self.key.session
+                        );
+                        return self
+                            .show_publication(client, settings, publication.result, now_ms)
+                            .await;
+                    }
+                    Err(error) => publication.error = error,
+                }
+            }
+            tracing::warn!(
+                "ck-mc: session {}: holding validated summaries for the next job: {}",
+                self.key.session,
+                publication.error
+            );
+            self.pending_publication = Some(Box::new(publication));
+            return None;
+        }
+        self.show_publication(client, settings, publication.result, now_ms)
+            .await
+    }
+
+    pub(crate) fn has_pending_publication(&self) -> bool {
+        self.pending_publication.is_some()
+    }
+
+    /// Retry before the next view or summary decision. A failed transcript
+    /// read is not evidence that the words changed, so keep the result held.
+    pub(crate) async fn retry_summary_publication<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        now_ms: i64,
+    ) -> Option<run::Continuation> {
+        let publication = self.pending_publication.take()?;
+        match self.publication_is_current(client, &publication).await {
+            Some(true) => {}
+            Some(false) => {
+                self.give_up_publication(*publication);
+                return None;
+            }
+            None => {
+                self.pending_publication = Some(publication);
                 return None;
             }
         }
+        if let Err(error) = self.store_publication(&publication, now_ms) {
+            let mut publication = publication;
+            publication.error = error;
+            self.pending_publication = Some(publication);
+            return None;
+        }
+        tracing::info!(
+            "ck-mc: session {}: held summary publication recovered",
+            self.key.session
+        );
+        // Store first; the incoming job checks the runner's view, context
+        // usage and signed-thinking hold before changing the prompt.
+        self.accept_publication(publication.result, now_ms)
+    }
+
+    async fn publication_is_current<C: RunnerClient>(
+        &self,
+        client: &C,
+        publication: &PendingPublication,
+    ) -> Option<bool> {
+        let source = &publication.result.source;
+        if self.cut_ordinal().is_some_and(|cut| cut >= source.from)
+            || self.summarized_through() != publication.previous_through
+        {
+            return Some(false);
+        }
+        // The job that brought an undo or edit may not have updated the
+        // index yet. Compare the runner's raw transcript, not just endpoints.
+        crate::reads::full_range(
+            client,
+            &self.key,
+            source.from,
+            source.until,
+            self.limits,
+            |_| false,
+        )
+        .await
+        .ok()
+        .map(|entries| source.matches(&entries))
+    }
+
+    fn give_up_publication(&mut self, publication: PendingPublication) {
+        tracing::warn!(
+            "ck-mc: session {}: discarding a held summary after its transcript changed: {}",
+            self.key.session,
+            publication.error,
+        );
+        let error = format!(
+            "discarding a held summary after its transcript changed: {}",
+            publication.error
+        );
+        self.app.failures += 1;
+        self.app.last_error = Some(error);
+        self.drain.record_failure(self.clock());
+    }
+
+    fn publication_recall(
+        &self,
+        validated: &crate::summary::validate::ValidatedChunk,
+        now_ms: i64,
+    ) -> crate::context_db::Recall {
+        // Store at most one primer candidate per run, the first.
+        let primer = match (&self.project, validated.primer_candidates.first()) {
+            (Some(project), Some(candidate)) => {
+                let origin = candidate.origin_compartment_index;
+                let source = origin
+                    .and_then(|at| at.checked_sub(1))
+                    .and_then(|index| validated.compartments.get(index as usize))
+                    .or(validated.compartments.first());
+                let source_time = source
+                    .and_then(|summary| {
+                        self.index
+                            .entries()
+                            .iter()
+                            .find(|entry| entry.mid == summary.start_message_id)
+                    })
+                    .map_or(now_ms, |entry| entry.written_at as i64);
+                Some(crate::context_db::PrimerSource {
+                    project: project.id.clone(),
+                    question: candidate.question.clone(),
+                    origin,
+                    source_time,
+                })
+            }
+            _ => None,
+        };
+        let observations = validated
+            .user_observations
+            .iter()
+            .map(|observation| {
+                let source = observation
+                    .origin_compartment_index
+                    .and_then(|at| at.checked_sub(1))
+                    .and_then(|index| validated.compartments.get(index as usize));
+                let (start, end) = match source {
+                    Some(summary) => (summary.start_message, summary.end_message),
+                    None => (
+                        validated
+                            .compartments
+                            .first()
+                            .map_or(0, |c| c.start_message),
+                        validated.compartments.last().map_or(0, |c| c.end_message),
+                    ),
+                };
+                crate::context_db::ObservationSource {
+                    category: observation.category.clone(),
+                    content: observation.content.clone(),
+                    start_ordinal: start,
+                    end_ordinal: end,
+                    profile: self
+                        .authority
+                        .as_ref()
+                        .and_then(|authority| authority.profile.clone()),
+                    project_id: self
+                        .memory_context
+                        .as_ref()
+                        .and_then(|context| context.project_id.clone()),
+                    workspace_id: self
+                        .memory_context
+                        .as_ref()
+                        .and_then(|context| context.workspace_id.clone()),
+                }
+            })
+            .collect();
+        crate::context_db::Recall {
+            events: validated.events.clone(),
+            primer,
+            observations,
+            project: self.project.as_ref().map(|project| project.id.clone()),
+        }
+    }
+
+    fn store_publication(
+        &self,
+        publication: &PendingPublication,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        if let Some(db) = &self.db {
+            db.publish_summaries(
+                &self.key.harness,
+                &self.key.session,
+                &publication.result.validated.compartments,
+                publication.result.publication.as_ref(),
+                &publication.recall,
+                now_ms,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn accept_publication(
+        &mut self,
+        summarized: run::Summarized,
+        now_ms: i64,
+    ) -> Option<run::Continuation> {
+        let run::Summarized {
+            validated,
+            continuation,
+            ..
+        } = summarized;
         self.no_progress = None;
         self.app_projection.summaries_dirty = true;
         self.summaries
@@ -757,6 +908,23 @@ impl Session {
                     .map_or(0, |compartment| compartment.end_message)
             );
         }
+        if self.writable_memory_level().is_none() {
+            tracing::info!(
+                "ck-mc: session {}: no second summary turn: the session has no memory level it can write to",
+                self.key.session
+            );
+        }
+        continuation.filter(|_| self.db.is_some())
+    }
+
+    async fn show_publication<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        summarized: run::Summarized,
+        now_ms: i64,
+    ) -> Option<run::Continuation> {
+        let continuation = self.accept_publication(summarized, now_ms);
         // The signed-thinking hold applies here as on a notice: the summary
         // lands on the next pass the hold lets through.
         let execute = {
@@ -775,13 +943,7 @@ impl Session {
                 self.publish(client, view).await;
             }
         }
-        if self.writable_memory_level().is_none() {
-            tracing::info!(
-                "ck-mc: session {}: no second summary turn: the session has no memory level it can write to",
-                self.key.session
-            );
-        }
-        continuation.filter(|_| self.db.is_some())
+        continuation
     }
 
     /// The second turn a two-pass summary's first turn calls for.

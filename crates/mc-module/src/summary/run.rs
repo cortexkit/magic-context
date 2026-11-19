@@ -111,12 +111,54 @@ pub struct Request {
 #[derive(Clone, Debug)]
 pub struct Summarized {
     pub validated: ValidatedChunk,
+    /// The raw messages this publication covers, before any change to a view.
+    pub(crate) source: PublicationSource,
     /// The first turn's send and publication record, stored with the
     /// summaries. `None` without a project or store.
     pub publication: Option<turn_one::Publication>,
     /// With memory on and a publication: the conversation the second turn
     /// continues.
     pub continuation: Option<Continuation>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PublicationSource {
+    pub(crate) from: u64,
+    pub(crate) until: u64,
+    entries: Vec<cortexkit_role_compaction::read::Cursor>,
+}
+
+impl PublicationSource {
+    pub(crate) fn new(
+        from: u64,
+        until: u64,
+        entries: &[cortexkit_role_compaction::read::Entry],
+    ) -> Self {
+        Self {
+            from,
+            until,
+            entries: entries
+                .iter()
+                .filter(|entry| (from..until).contains(&entry.ordinal))
+                .map(|entry| {
+                    cortexkit_role_compaction::read::Cursor::new(
+                        entry.ordinal,
+                        entry.mid.clone(),
+                        entry.digest.clone(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn matches(&self, entries: &[cortexkit_role_compaction::read::Entry]) -> bool {
+        self.entries
+            .iter()
+            .map(|cursor| (cursor.ordinal, &cursor.mid, &cursor.digest))
+            .eq(entries
+                .iter()
+                .map(|entry| (entry.ordinal, &entry.mid, &entry.digest)))
+    }
 }
 
 /// The child conversation a first turn answered in, and the model it ran on,
@@ -617,8 +659,10 @@ async fn summarize_on<C: RunnerClient>(
         prompts: call.prompts.clone(),
         keep_child: call.keep_child,
     });
+    let source = PublicationSource::new(job.from, validated.unprocessed_from, entries);
     Ok(Some(Summarized {
         validated,
+        source,
         publication,
         continuation,
     }))

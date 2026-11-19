@@ -236,7 +236,7 @@ impl Session {
             return None;
         }
         let floor = self.numbers_floor()?;
-        if self.summarizing || self.waits_for_new_history(false) {
+        if self.summarizing || self.has_pending_publication() || self.waits_for_new_history(false) {
             return Some(None);
         }
         let from = self.numbers_reach().map_or(1, |n| n + 1);

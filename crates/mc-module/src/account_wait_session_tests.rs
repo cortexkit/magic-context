@@ -313,6 +313,7 @@ async fn account_wait_ends_when_a_run_is_served() {
             &settings,
             Ok(Some(run::Summarized {
                 validated: Default::default(),
+                source: Default::default(),
                 publication: None,
                 continuation: None,
             })),
@@ -339,6 +340,7 @@ async fn account_wait_an_older_refusal_after_a_served_run_is_ignored() {
             &settings,
             Ok(Some(run::Summarized {
                 validated: Default::default(),
+                source: Default::default(),
                 publication: None,
                 continuation: None,
             })),

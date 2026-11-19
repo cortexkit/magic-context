@@ -210,7 +210,7 @@ impl Session {
     }
 
     pub(super) fn wrapup_summary_due(&mut self, settings: &Settings) -> Option<run::Request> {
-        if self.summarizing || !self.features.summarizer {
+        if self.summarizing || self.has_pending_publication() || !self.features.summarizer {
             return None;
         }
         let target = self.wrapup_target.as_ref()?;

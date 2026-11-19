@@ -97,6 +97,7 @@ impl Session {
             refused_once: BTreeSet::new(),
             transcript_retry: None,
             summarizing: false,
+            pending_publication: None,
             account_wait: None,
             run_start: None,
             last_served_ms: 0,
@@ -439,6 +440,7 @@ impl Session {
             && self.unconfirmed.is_empty()
             && !self.reoffer_pending
             && !self.summarizing
+            && !self.has_pending_publication()
             && self.run_start.is_none()
             && self.reservation.is_none()
             && self.transcript_behind.is_none()

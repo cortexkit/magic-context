@@ -226,6 +226,7 @@ async fn publish(
         "title": "Earlier work", "content": "A summary of the earlier work.", "p1": "Earlier work."
     }))
     .unwrap();
+    let source = run::PublicationSource::new(from, until, session.index.entries());
     session
         .summary_finished(
             client,
@@ -235,12 +236,97 @@ async fn publish(
                     compartments: vec![compartment],
                     ..Default::default()
                 },
+                source,
                 publication: None,
                 continuation: None,
             })),
             100,
         )
         .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_summary_publication_is_not_counted_until_the_result_is_given_up() {
+    for changed in [false, true] {
+        let (mut session, client, settings) = ready();
+        let (_dir, db) = block_summary_store();
+        session.db = Some(db.clone());
+        *client.entries.lock().unwrap() = session.index.entries().to_vec();
+        publish(&mut session, &client, &settings, 1, 5).await;
+        assert_eq!(session.app.failures, 0);
+        assert_eq!(session.no_progress, None);
+        assert!(session.summaries.is_empty());
+        assert!(session.has_pending_publication());
+        assert!(session.summary_due(&settings).is_none());
+
+        if changed {
+            // Change an interior message without changing either endpoint
+            // or giving the worker a notice about that edit yet.
+            let mut entries = client.entries.lock().unwrap();
+            entries[1] = Entry::new(
+                2,
+                "m2",
+                Role::Assistant,
+                2,
+                vec![Part::new(
+                    "p",
+                    PartBody::Text {
+                        text: "rewritten answer".into(),
+                    },
+                )],
+            );
+        }
+        unblock_summary_store(&db);
+        session.retry_summary_publication(&client, 200).await;
+        session.retry_summary_publication(&client, 201).await;
+        assert!(!session.has_pending_publication());
+        assert_eq!(session.app.failures, u64::from(changed));
+        assert_eq!(session.no_progress, None);
+        assert_eq!(session.summaries.len(), usize::from(!changed));
+        let rows: i64 = db
+            .with_connection(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM compartments", [], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(rows, i64::from(!changed));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_brief_publication_failure_recovers_in_the_same_job() {
+    let (mut session, client, settings) = ready();
+    let (_dir, db) = block_summary_store();
+    session.db = Some(db.clone());
+    *client.entries.lock().unwrap() = session.index.entries().to_vec();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        unblock_summary_store(&db);
+    });
+    publish(&mut session, &client, &settings, 1, 5).await;
+    release.await.unwrap();
+    assert!(!session.has_pending_publication());
+    assert_eq!(session.app.failures, 0);
+    assert_eq!(session.summaries.len(), 1);
+    assert!(!client.reads.lock().unwrap().is_empty());
+}
+
+fn block_summary_store() -> (tempfile::TempDir, std::sync::Arc<ContextDb>) {
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        std::sync::Arc::new(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap());
+    db.with_connection(|conn| {
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER block_summary BEFORE INSERT ON compartments
+         BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END;",
+        )
+    })
+    .unwrap();
+    (dir, db)
+}
+
+fn unblock_summary_store(db: &ContextDb) {
+    db.with_connection(|conn| conn.execute_batch("DROP TRIGGER block_summary"))
+        .unwrap();
 }
 
 #[tokio::test]
