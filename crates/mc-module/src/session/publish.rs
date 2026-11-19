@@ -684,8 +684,20 @@ impl Session {
         if self.latest.as_ref().is_some_and(|view| !view.verify()) {
             self.latest_unknown = true;
         }
-        self.queued = before.queued;
-        self.refused_once = before.refused_once;
+        // Restore only work removed by the undone views. The live queue can
+        // contain parts added after the first view was handed over; a later
+        // undone view may already have covered some of those parts too.
+        for pending in &undone {
+            for part in &pending.covered {
+                if pending.before.queued.contains(part) {
+                    self.queued.insert(part.clone());
+                    self.app_projection.dirty.insert(part.0.clone());
+                    if pending.before.refused_once.contains(part) {
+                        self.refused_once.insert(part.clone());
+                    }
+                }
+            }
+        }
         self.transcript_retry = before.transcript_retry;
         self.emergency_latched = before.emergency_latched;
         self.summary_unshown |= before.summary_unshown;

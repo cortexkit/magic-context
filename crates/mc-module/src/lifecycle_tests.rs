@@ -411,6 +411,37 @@ async fn audit_views_noop_fold_does_not_authorize_the_next_notice() {
 }
 
 #[tokio::test]
+async fn audit_views_refusal_preserves_later_stamp() {
+    let (mut session, client, _, _, settings) = fixture();
+    let entries = vec![text(1, "one"), text(2, "two"), text(3, "latest")];
+    session.index.extend(entries.clone());
+    let stamp = |tag: &str| serde_json::json!({"drop": tag});
+    assert_eq!(
+        session.ctx_reduce(&client, &stamp("1")).await.unwrap(),
+        "1 tag stamped."
+    );
+    let view = session.build(&settings, None, false, None).0.unwrap();
+    assert!(session.publish(&client, view.clone()).await);
+    assert_eq!(
+        session.ctx_reduce(&client, &stamp("2")).await.unwrap(),
+        "1 tag stamped."
+    );
+
+    let mut request = notice(&session, 1, entries.last().map(cursor));
+    request.entries = entries;
+    request.events = vec![Event::ViewRefused {
+        version: view.version,
+        refusal: ViewRefusal::BadSince,
+    }];
+    session.notice(&client, &settings, request).await;
+    assert_eq!(
+        session.queued,
+        BTreeSet::from([("one".into(), "p".into()), ("two".into(), "p".into())]),
+        "refusing an earlier view must not lose a later stamp"
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_notice_divergence_reads_again_from_the_cut() {
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![text(1, "a"), text(2, "b"), text(3, "c")];
