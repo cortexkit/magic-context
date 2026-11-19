@@ -36,7 +36,9 @@ function message(ordinal: number): RawMessage {
         parts: [
             {
                 type: "text",
-                // Give the eligible head at least 6,000 tokens so the first pass at 80% can start.
+                // A summary run below the force band needs at least 6,000 tokens of
+                // unsummarized history, so each message is long enough for the
+                // first pass, at 80% context usage, to start one.
                 text: `Message ${ordinal}: investigate and fix the historian retry behavior.\n`.repeat(
                     80,
                 ),
