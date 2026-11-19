@@ -272,15 +272,22 @@ async function runWithLease(args: {
 }
 
 describe("runCompartmentAgent wrapup controls", () => {
-    it("OpenCode publish selects drop candidates and reads raw messages before taking the writer", async () => {
+    it("OpenCode publish reads only new IDs inside the writer and prepares drops outside it", async () => {
         const db = createDb();
         const sessionId = "ses-publish-lock-scope";
         insertTag(db, sessionId, "m-1:p0", "message", 10, 1);
         const scanStates: boolean[] = [];
         const queueStates: boolean[] = [];
         const rawReadStates: boolean[] = [];
+        const lockedCompartmentReads: string[] = [];
         const prepare = db.prepare.bind(db);
         const prepareSpy = spyOn(db, "prepare").mockImplementation((sql) => {
+            if (
+                db.inTransaction &&
+                /FROM compartments WHERE session_id = \? ORDER BY sequence/.test(sql)
+            ) {
+                lockedCompartmentReads.push(sql);
+            }
             const statement = prepare(sql);
             if (
                 sql.startsWith("SELECT") &&
@@ -325,6 +332,9 @@ describe("runCompartmentAgent wrapup controls", () => {
             expect(rawReadStates.length).toBeGreaterThan(0);
             expect(rawReadStates.every((inTransaction) => !inTransaction)).toBe(true);
             expect(queueStates).toEqual([true]);
+            expect(lockedCompartmentReads).toEqual([
+                "SELECT id FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT ?",
+            ]);
         } finally {
             unregister();
             prepareSpy.mockRestore();

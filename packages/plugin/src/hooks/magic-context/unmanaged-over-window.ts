@@ -1,4 +1,6 @@
 import { renderUserFacingFailure } from "../../shared/user-facing-codes";
+import { wireContentBytes } from "./final-wire-token-estimate";
+import type { MessageLike } from "./tag-messages";
 
 /**
  * How far over the model's context window a session's history has to be
@@ -23,6 +25,25 @@ export function isClearlyOverWindow(tokens: number, contextLimit: number | undef
         return false;
     if (!Number.isFinite(tokens) || tokens <= 0) return false;
     return tokens > contextLimit * UNMANAGED_OVER_WINDOW_FACTOR;
+}
+
+/** Sample only the new tail. The latest assistant may now carry tool results
+ * that were absent when the provider reported its input count. */
+export function appendedTailMayExceedWindow(
+    messages: readonly MessageLike[],
+    previousInputTokens: number,
+    limit: number,
+): boolean {
+    let remainingBytes = (limit - previousInputTokens) / 2;
+    for (let i = messages.length - 1; i >= 0; --i) {
+        const message = messages[i];
+        if (!message) continue;
+        const size = wireContentBytes([message], remainingBytes, 0.5);
+        if (!size || size.bytes >= remainingBytes) return true;
+        if (message.info.role === "assistant") break;
+        remainingBytes -= size.bytes;
+    }
+    return false;
 }
 
 /**

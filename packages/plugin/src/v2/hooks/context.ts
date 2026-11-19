@@ -3527,7 +3527,13 @@ export async function registerContext(context: V2Context) {
                 cause,
             });
         }
-        if (estimate.tokens <= limit) return;
+        if (
+            estimate.refusalGrade !== true ||
+            estimate.refusalTokens === undefined ||
+            !Number.isFinite(estimate.refusalTokens) ||
+            estimate.refusalTokens <= limit
+        )
+            return;
         await refuseBeforeProvider(context.session, draft.sessionID, "checkpoint-over-window");
         throw new V2ContextRefusal("Magic Context refused an oversized host checkpoint.");
     };

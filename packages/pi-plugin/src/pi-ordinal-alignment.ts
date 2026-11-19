@@ -86,11 +86,30 @@ export type PiOrdinalAlignment =
 
 const ALIGNED: PiOrdinalAlignment = { kind: "aligned", offset: 0 };
 
-/** Results per branch-entries array, so one pass derives each session once. */
+interface CachedAlignment {
+	key: string;
+	alignment: PiOrdinalAlignment;
+	prefixComplete: boolean;
+}
+
+/** Cache direct reads, and carry proven results to verified appends. */
 const resolvedByEntries = new WeakMap<
 	readonly unknown[],
-	Map<string, { key: string; alignment: PiOrdinalAlignment }>
+	Map<string, CachedAlignment>
 >();
+
+export function inheritPiOrdinalAlignment(
+	sessionId: string,
+	previous: readonly unknown[],
+	appended: readonly unknown[],
+): void {
+	// The caller proved that the entire previous branch is the unchanged prefix.
+	// An anchor synthesized from trailing tool results is not proof: a new user
+	// message can prevent the synthetic entry from being emitted at all.
+	const cached = resolvedByEntries.get(previous)?.get(sessionId);
+	if (cached?.prefixComplete)
+		resolvedByEntries.set(appended, new Map([[sessionId, cached]]));
+}
 
 /** The last alignment logged per session, so each change is logged once. */
 const loggedSignatureBySession = new Map<string, string>();
@@ -117,6 +136,7 @@ function readAnchorRows(db: Database, sessionId: string): AnchorRow[] {
 function deriveAlignment(
 	rows: readonly AnchorRow[],
 	entries: readonly unknown[],
+	onLocatedInPrefix: () => void,
 ): PiOrdinalAlignment {
 	const [newest, previous] = rows;
 	if (!newest) return ALIGNED;
@@ -141,6 +161,7 @@ function deriveAlignment(
 	const located = locatePiRawOrdinals(
 		entries,
 		new Set([newest.end_message_id, ...checks.map((check) => check.id)]),
+		onLocatedInPrefix,
 	);
 	const branchOrdinal = located.get(newest.end_message_id);
 	if (branchOrdinal === undefined) {
@@ -238,21 +259,27 @@ export function resolvePiOrdinalAlignment(
 		report(sessionId, unresolved);
 		return unresolved;
 	}
-	const key = rows
-		.map(
-			(row) =>
-				`${row.sequence}:${row.start_message}:${row.end_message}:${row.start_message_id ?? ""}:${row.end_message_id}`,
-		)
-		.join("|");
+	const key = JSON.stringify(
+		rows.map((row) => [
+			row.sequence,
+			row.start_message,
+			row.end_message,
+			row.start_message_id,
+			row.end_message_id,
+		]),
+	);
 	let bySession = resolvedByEntries.get(entries);
 	const cached = bySession?.get(sessionId);
 	if (cached && cached.key === key) return cached.alignment;
-	const alignment = deriveAlignment(rows, entries);
+	let prefixComplete = false;
+	const alignment = deriveAlignment(rows, entries, () => {
+		prefixComplete = true;
+	});
 	if (!bySession) {
 		bySession = new Map();
 		resolvedByEntries.set(entries, bySession);
 	}
-	bySession.set(sessionId, { key, alignment });
+	bySession.set(sessionId, { key, alignment, prefixComplete });
 	report(sessionId, alignment);
 	return alignment;
 }

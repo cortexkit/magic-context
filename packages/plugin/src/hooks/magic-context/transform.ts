@@ -285,7 +285,11 @@ import {
     servesThinkingBlock,
 } from "./transform-postprocess-phase";
 import { logTransformTiming, withTransformTimingSummary } from "./transform-stage-logger";
-import { isClearlyOverWindow, UnmanagedOverWindowError } from "./unmanaged-over-window";
+import {
+    appendedTailMayExceedWindow,
+    isClearlyOverWindow,
+    UnmanagedOverWindowError,
+} from "./unmanaged-over-window";
 import {
     type HistoryBoundaryRefusalRemedy,
     historyBoundaryRefusalCause,
@@ -1928,6 +1932,19 @@ export function createTransform(deps: TransformDeps) {
                   sessionID: sessionId,
               })
             : undefined;
+        const warmAppendFitLimit =
+            !compactionOff &&
+            !isFirstTransformPassForSession &&
+            resolvedContextLimit !== undefined &&
+            resolvedContextLimit > 0 &&
+            contextUsageEarly.inputTokens < resolvedContextLimit &&
+            appendedTailMayExceedWindow(
+                messages,
+                contextUsageEarly.inputTokens,
+                resolvedContextLimit,
+            )
+                ? resolvedContextLimit
+                : undefined;
         const hostEstimate = deps.hostInputEstimate?.(sessionId);
         // Text an OpenCode 2 host adds after this transform (its checkpoint
         // message wraps the history head); a recovery pass counts it too.
@@ -2818,6 +2835,12 @@ export function createTransform(deps: TransformDeps) {
                 projectIdentity,
                 deps.memoryConfig?.injectionBudgetTokens,
                 deps.experimentalTemporalAwareness,
+                sessionMeta.cachedM0TrimBoundaryId === undefined
+                    ? undefined
+                    : {
+                          hasCachedM0: sessionMeta.cachedM0Bytes !== null,
+                          boundary: sessionMeta.cachedM0TrimBoundaryId,
+                      },
             );
             if (messagesBeforeInitialPrepare) {
                 const skippedVisibleMessages =
@@ -4370,6 +4393,34 @@ export function createTransform(deps: TransformDeps) {
                     sessionId,
                     `over-window first pass reduced: the request is about ${servedTokens} tokens (history started at ${unmanagedOverWindowPass.tokens}), under the ${unmanagedOverWindowPass.limit}-token window`,
                 );
+            }
+            if (warmAppendFitLimit !== undefined && !unmanagedOverWindowPass) {
+                // Tail bytes only select a fit check. Counting after replay
+                // avoids forcing reductions on a request that already fits.
+                const served = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                    sessionId,
+                });
+                const localTokens = served.toolDefinitionsMeasured
+                    ? (served.rawTokens ?? served.tokens)
+                    : Math.max(0, sessionMeta.systemPromptTokens) +
+                      served.messageTokens.conversation +
+                      served.messageTokens.toolCall;
+                const provenTokens = served.refusalGrade ? served.refusalTokens : undefined;
+                if (
+                    provenTokens !== undefined
+                        ? provenTokens > warmAppendFitLimit
+                        : isClearlyOverWindow(localTokens, warmAppendFitLimit)
+                ) {
+                    throw new UnmanagedOverWindowError(
+                        provenTokens ?? localTokens,
+                        warmAppendFitLimit,
+                    );
+                }
             }
             const timedOutHistorianFailure = compartmentPhase.historianJoinTimedOut
                 ? historianJoinFailClosedMessage({

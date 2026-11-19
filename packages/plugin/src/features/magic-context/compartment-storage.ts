@@ -302,6 +302,14 @@ export function getCompartments(db: Database, sessionId: string): Compartment[] 
     return rows.map(toCompartment);
 }
 
+/** Read the IDs just appended under the writer, in ascending sequence order. */
+export function getNewestCompartmentIds(db: Database, sessionId: string, count: number): number[] {
+    const rows = db
+        .prepare("SELECT id FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT ?")
+        .all(sessionId, count) as Array<{ id: number }>;
+    return rows.reverse().map(({ id }) => id);
+}
+
 /**
  * Highest message ordinal any compartment covers — the line between compacted
  * history and the live tail.
@@ -944,6 +952,14 @@ export function getUncoveredCompartmentEndsThrough(
         successorStartMessage: row.successor_start,
     }));
 }
+
+/** Read whether the cached summary covers only part of its final message, in the same SELECT as the summary. */
+export const CACHED_TRIM_PARTIAL_SQL = `EXISTS (
+    SELECT 1 FROM compartments
+    WHERE compartments.session_id = session_meta.session_id
+      AND compartments.end_message_id = session_meta.cached_m0_last_baseline_end_message_id
+      AND compartments.end_block_index IS NOT NULL
+)`;
 
 export function isPartialCompartmentEnd(
     db: Database,

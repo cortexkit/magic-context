@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { MEMORY_MURAL_BLOCK } from "../../agents/magic-context-prompt";
 import {
     buildCompartmentBlock,
+    CACHED_TRIM_PARTIAL_SQL,
     type Compartment,
     type CompartmentDateRanges,
     escapeXmlAttr,
@@ -459,6 +460,7 @@ export function prepareCompartmentInjection(
     projectPath?: string,
     injectionBudgetTokens?: number,
     temporalAwareness?: boolean,
+    frozenBaseline?: { hasCachedM0: boolean; boundary: string | null },
 ): PreparedCompartmentInjection | null {
     // On defer (cache-safe) passes, replay the cached injection result so that
     // historian publications between passes do not bust the prompt-cache prefix.
@@ -653,7 +655,7 @@ export function prepareCompartmentInjection(
     // raw history that the replayed summary does not cover. Legacy sessions with
     // no m0 baseline retain their existing latest-compartment trim behavior.
     let trimEndMessageId = lastEndMessageId;
-    const baseline = readCachedBaselineState(db, sessionId);
+    const baseline = frozenBaseline ?? readCachedBaselineState(db, sessionId);
     if (!isCacheBusting || baseline.hasCachedM0) {
         // A modern prefix is only a candidate for refresh here. Keep its raw
         // boundary frozen until the off-wire renderer has actually chosen bytes.
@@ -971,6 +973,7 @@ export interface M0M1State {
     isSubagent?: boolean;
     cachedM0Bytes: Buffer | null;
     cachedM1Bytes: Buffer | null;
+    cachedM0TrimBoundaryId?: string | null;
     cachedM0ProjectMemoryEpoch: number | null;
     cachedM0WorkspaceFingerprint: string | null;
     cachedM0ProjectUserProfileVersion: number | null;
@@ -1145,6 +1148,7 @@ export interface InjectM0M1Result {
     m1Text: string | null;
     preparedMessages?: MessageLike[];
     preparedTrimBoundaryId?: string | null;
+    preparedTrimBoundaryPartial?: boolean;
     prefixTrimStatus?: PrefixTrimStatus;
     prefixTrimRefusal?: PrefixTrimRefusal;
 }
@@ -2909,6 +2913,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         );
         options.state.cachedM0MuralDataUrl = frozenMuralDataUrl;
         options.state.cachedM0MuralHash = frozenMuralHash;
+        options.state.cachedM0TrimBoundaryId = baselineEndMessageId;
     } catch (error) {
         try {
             options.db.exec("ROLLBACK");
@@ -3197,6 +3202,7 @@ interface CachedM0M1Row {
     cached_m0_model_key: string | null;
     cached_m0_project_identity: string | null;
     cached_m0_last_baseline_end_message_id: string | null;
+    cached_trim_partial?: number;
     memory_block_ids: string | null;
 }
 
@@ -3240,7 +3246,11 @@ export function hydrateCachedM0Mural(db: Database, sessionId: string, state: M0M
     }
 }
 
-function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | null {
+function readCachedM0M1Row(
+    db: Database,
+    sessionId: string,
+    includePartialBoundary = false,
+): CachedM0M1Row | null {
     return db
         .prepare(
             `SELECT cached_m0_bytes, cached_m0_mural_data_url,
@@ -3261,7 +3271,7 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
                      cached_m0_model_key,
                      cached_m0_project_identity,
                      cached_m0_last_baseline_end_message_id,
-                     memory_block_ids
+                      memory_block_ids${includePartialBoundary ? `, ${CACHED_TRIM_PARTIAL_SQL} AS cached_trim_partial` : ""}
                FROM session_meta
               WHERE session_id = ?`,
         )
@@ -3340,6 +3350,7 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
     state.cachedM0MuralDataUrl = row.cached_m0_mural_data_url ?? null;
     state.cachedM0MuralHash = row.cached_m0_mural_hash ?? null;
     state.cachedM1Bytes = toBuffer(row.cached_m1_bytes);
+    state.cachedM0TrimBoundaryId = row.cached_m0_last_baseline_end_message_id || null;
     state.cachedM0ProjectMemoryEpoch = markers.projectMemoryEpoch;
     state.cachedM0WorkspaceFingerprint = markers.workspaceFingerprint;
     state.cachedM0ProjectUserProfileVersion = markers.projectUserProfileVersion;
@@ -3447,6 +3458,7 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
             steps.durations,
         );
         options.state.cachedM1Bytes = m1Bytes;
+        options.state.cachedM0TrimBoundaryId = baselineEndMessageId;
         options.state.cachedM0UpgradeState = withCachedM0MemoryIds(
             row.cached_m0_upgrade_state,
             renderedM0Ids,
@@ -4004,6 +4016,7 @@ function trimToPreparedPrefix(
     prepared: Pick<
         InjectM0M1Result,
         | "preparedTrimBoundaryId"
+        | "preparedTrimBoundaryPartial"
         | "m0RematerializedThisPass"
         | "materializationContentionRetryExhausted"
     >,
@@ -4014,6 +4027,9 @@ function trimToPreparedPrefix(
     let outcome: PrefixTrimOutcome = { status: "not-required" };
 
     if (boundary) {
+        const preserveBoundary =
+            prepared.preparedTrimBoundaryPartial ??
+            isPartialCompartmentEnd(options.db, options.sessionId, boundary);
         const retireDecisions = (messageIds: readonly string[]) => {
             // These messages were just removed because the injected history summary
             // covers them. Their saved search hints (or no-hint omissions) can go:
@@ -4037,9 +4053,7 @@ function trimToPreparedPrefix(
         const trimAtVisibleBoundary = (reanchor: boolean): PrefixTrimOutcome => {
             const index = findBoundaryIndex(options.sessionId, messages, boundary);
             if (index >= 0) {
-                const cut =
-                    index +
-                    (isPartialCompartmentEnd(options.db, options.sessionId, boundary) ? 0 : 1);
+                const cut = index + (preserveBoundary ? 0 : 1);
                 // Match source-order trimming: a summary is not proof that an
                 // ID-less host instruction is dispensable. Retaining it here too
                 // keeps request bytes unchanged if the host later hides only the
@@ -4190,8 +4204,7 @@ function trimToPreparedPrefix(
                         placeUnplaced(position <= boundaryPosition);
                         if (
                             position > boundaryPosition ||
-                            (position === boundaryPosition &&
-                                isPartialCompartmentEnd(options.db, options.sessionId, boundary))
+                            (position === boundaryPosition && preserveBoundary)
                         )
                             retained.push(message);
                     }
@@ -4210,11 +4223,6 @@ function trimToPreparedPrefix(
                             logBoundaryPrecedesWindow(options, boundary, firstLiveId);
                         }
                         options.messages.splice(0, options.messages.length, ...retained);
-                        const preserveBoundary = isPartialCompartmentEnd(
-                            options.db,
-                            options.sessionId,
-                            boundary,
-                        );
                         retireDecisions(
                             sourceOrder.messageIds.slice(
                                 0,
@@ -4242,7 +4250,7 @@ export function prepareCachedM0M1Replay(
     db: Database,
     sessionId: string,
 ): InjectM0M1Result | undefined {
-    const row = readCachedM0M1Row(db, sessionId);
+    const row = readCachedM0M1Row(db, sessionId, true);
     if (!row?.cached_m0_bytes || !row.cached_m1_bytes) return undefined;
     const m0Bytes = toBuffer(row.cached_m0_bytes);
     const m1Text = toBuffer(row.cached_m1_bytes).toString("utf8");
@@ -4264,6 +4272,7 @@ export function prepareCachedM0M1Replay(
         m1Text,
         preparedMessages,
         preparedTrimBoundaryId: row.cached_m0_last_baseline_end_message_id,
+        preparedTrimBoundaryPartial: row.cached_trim_partial === 1,
     };
 }
 
@@ -4364,7 +4373,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
 
     const completePairAtEntry =
         options.state.cachedM0Bytes != null && options.state.cachedM1Bytes != null;
-    let contentionReplayBoundary = options.contentionFallbackPrefix?.preparedTrimBoundaryId ?? null;
+    let replayBoundaryPartial: boolean | undefined;
 
     const decision = mustMaterialize({
         db: options.db,
@@ -4414,11 +4423,13 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
                 if (captured?.m0Bytes && captured.m1Text !== null) {
                     options.state.cachedM0Bytes = Buffer.from(captured.m0Bytes);
                     options.state.cachedM1Bytes = Buffer.from(captured.m1Text, "utf8");
+                    options.state.cachedM0TrimBoundaryId = captured.preparedTrimBoundaryId ?? null;
+                    replayBoundaryPartial = captured.preparedTrimBoundaryPartial;
                 } else {
-                    const persisted = readCachedM0M1Row(options.db, options.sessionId);
+                    const persisted = readCachedM0M1Row(options.db, options.sessionId, true);
                     if (persisted?.cached_m0_bytes && persisted.cached_m1_bytes) {
                         applyCachedRowToState(options.state, persisted);
-                        contentionReplayBoundary = persisted.cached_m0_last_baseline_end_message_id;
+                        replayBoundaryPartial = persisted.cached_trim_partial === 1;
                     }
                 }
             }
@@ -4543,21 +4554,20 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     // ~15% of m[0] tokens". XML-heavy / non-Latin content makes char length
     // diverge sharply from token count, so the ratio must compare tokens on both
     // sides. Computed once; this branch is rare (cache-busting + m1Recomputed).
-    const m1HasContent = m1Text !== M1_EMPTY_PLACEHOLDER;
-    const m1Tokens = m1HasContent ? estimateTokens(m1Text) : 0;
-    const m0Tokens = estimateTokens(m0Text);
-    const m1OverAbsoluteCap = m1HasContent && m1Tokens > m1AbsoluteBudget;
-    if (
-        !rematerialized &&
-        !contentionExhausted &&
-        m1Recomputed &&
-        options.isCacheBustingPass &&
-        (memoryUpdateCount > 40 ||
-            m1OverAbsoluteCap ||
-            (m1HasContent &&
-                m0Tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS &&
-                m1Tokens > m0Tokens * M1_DRIFT_RATIO))
-    ) {
+    let driftNeedsRefold = false;
+    if (!rematerialized && !contentionExhausted && m1Recomputed && options.isCacheBustingPass) {
+        driftNeedsRefold = memoryUpdateCount > 40;
+        if (!driftNeedsRefold && m1Text !== M1_EMPTY_PLACEHOLDER) {
+            const m1Tokens = estimateTokens(m1Text);
+            driftNeedsRefold = m1Tokens > m1AbsoluteBudget;
+            if (!driftNeedsRefold) {
+                const m0Tokens = estimateTokens(m0Text);
+                driftNeedsRefold =
+                    m0Tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS && m1Tokens > m0Tokens * M1_DRIFT_RATIO;
+            }
+        }
+    }
+    if (driftNeedsRefold) {
         try {
             const refolded = materializeWithRetry(options);
             applyMarkersToState(
@@ -4596,9 +4606,18 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
                     end_message_id: string;
                 } | null
             )?.end_message_id ?? null)
-          : contentionExhausted
-            ? contentionReplayBoundary
-            : readCachedBaselineState(options.db, options.sessionId).boundary;
+          : options.state.cachedM0TrimBoundaryId !== undefined
+            ? options.state.cachedM0TrimBoundaryId
+            : contentionExhausted
+              ? (options.contentionFallbackPrefix?.preparedTrimBoundaryId ?? null)
+              : readCachedBaselineState(options.db, options.sessionId).boundary;
+    // A rendered summary can be installed later in the pass. Carry its trim
+    // decision so replacing a compartment meanwhile cannot remove a suffix
+    // that the prepared summary did not cover.
+    const preparedTrimBoundaryPartial = preparedTrimBoundaryId
+        ? (replayBoundaryPartial ??
+          isPartialCompartmentEnd(options.db, options.sessionId, preparedTrimBoundaryId))
+        : false;
     const preparedMessages: MessageLike[] = [];
     const muralForWire = options.state.cachedM0MuralDataUrl
         ? {
@@ -4621,6 +4640,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             m0RematerializedThisPass: rematerialized,
             materializationContentionRetryExhausted: contentionExhausted,
             preparedTrimBoundaryId,
+            preparedTrimBoundaryPartial,
         });
         options.messages.unshift(...structuredClone(preparedMessages));
     } else prependedMessageCount = 0;
@@ -4635,6 +4655,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m1Text,
         preparedMessages,
         preparedTrimBoundaryId,
+        preparedTrimBoundaryPartial,
         prefixTrimStatus: prefixTrim.status,
         ...(prefixTrim.refusal ? { prefixTrimRefusal: prefixTrim.refusal } : {}),
     };
