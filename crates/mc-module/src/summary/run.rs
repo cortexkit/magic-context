@@ -1025,10 +1025,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
     }) else {
         return Err(format!("the runner did not start a run: {}", reply.state).into());
     };
-    let result = wait_for(client, child, &run_id, how.deadline, how.send).await?;
-    if let Some(reported) = &result.usage {
-        *usage = Some(add_usage(usage.take(), &step_usage(reported)));
-    }
+    let result = wait_for(client, child, &run_id, how.deadline, how.send, usage).await?;
     if result.state != states::COMPLETED {
         if result.state == states::ERROR
             && result.error.as_ref().is_some_and(|error| {
@@ -1247,7 +1244,7 @@ mod step_usage_tests {
 
 /// The usage of several calls on one decision, added up. A count either
 /// call left out stays as the other reported it.
-fn add_usage(total: Option<StepUsage>, more: &StepUsage) -> StepUsage {
+pub(crate) fn add_usage(total: Option<StepUsage>, more: &StepUsage) -> StepUsage {
     let Some(total) = total else {
         return *more;
     };
@@ -1385,12 +1382,14 @@ async fn wait_for<C: RunnerClient>(
     run_id: &str,
     deadline: tokio::time::Instant,
     send: SendKind,
+    usage: &mut Option<StepUsage>,
 ) -> Result<RunResult, SummaryError> {
     // Registered before the first read: an event that comes after that read
     // wakes the next pause, and one that came before it means the read
     // already sees the run's end.
     let watch = client.run_ends().map(|ends| ends.watch(&child.session));
     let mut last: Option<RunResult> = None;
+    let mut reported = None;
     loop {
         let answer = tokio::time::timeout_at(
             deadline,
@@ -1405,22 +1404,32 @@ async fn wait_for<C: RunnerClient>(
                 crate::run_ends::pause(watch.as_ref(), deadline).await;
                 continue;
             }
-            Ok(Err(_)) => return timed_out(client, child, run_id, last, send).await,
-            Err(_) => return timed_out(client, child, run_id, last, send).await,
+            Ok(Err(_)) | Err(_) => break,
         };
+        if let Some(current) = &result.usage {
+            // Each read reports usage for the whole child run, not a delta.
+            reported = Some(step_usage(current));
+        }
         let runner_wait = result
             .awaits
             .as_ref()
             .is_some_and(|wait| wait.party == AwaitParty::Runner);
         if !still_running(&result.state) && !runner_wait {
+            if let Some(reported) = reported {
+                *usage = Some(add_usage(usage.take(), &reported));
+            }
             return Ok(result);
         }
         last = Some(result);
         if tokio::time::Instant::now() >= deadline {
-            return timed_out(client, child, run_id, last, send).await;
+            break;
         }
         crate::run_ends::pause(watch.as_ref(), deadline).await;
     }
+    if let Some(reported) = reported {
+        *usage = Some(add_usage(usage.take(), &reported));
+    }
+    timed_out(client, child, run_id, last, send).await
 }
 
 /// Read status before cancelling: cancellation may clear the wait. Older

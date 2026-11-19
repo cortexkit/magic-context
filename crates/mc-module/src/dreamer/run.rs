@@ -128,8 +128,8 @@ pub struct TaskReply {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskError {
     /// Routing or the runner named a time to ask again. Not a failure.
-    AccountWait(AccountWait),
-    Failed(String),
+    AccountWait(AccountWait, Option<Box<StepUsage>>),
+    Failed(String, Option<StepUsage>),
     /// The child's run reached its step cap ([`TaskInput::step_cap`]) and
     /// its answer to the finalize message can't be used. No other model is tried:
     /// the batch counts as skipped, and the run goes on to its next batch.
@@ -150,8 +150,8 @@ pub struct Skipped {
 impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AccountWait(wait) => write!(f, "waiting on an account: {}", wait.code),
-            Self::Failed(error) => f.write_str(error),
+            Self::AccountWait(wait, _) => write!(f, "waiting on an account: {}", wait.code),
+            Self::Failed(error, _) => f.write_str(error),
             Self::Skipped(skipped) => write!(f, "skipped at the step cap: {}", skipped.reason),
         }
     }
@@ -167,6 +167,7 @@ pub async fn run<C: RunnerClient + Router>(
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
     let mut paid_failure: Option<String> = None;
+    let mut total = None;
     for attempt in 0..=MAX_FALLBACKS {
         let answer = match client
             .select(routing::dream_select(job.demand, &tried))
@@ -178,13 +179,14 @@ pub async fn run<C: RunnerClient + Router>(
                 // made the fallback necessary.
                 if paid_failure.is_none() && failure.is_none() {
                     if let Some(wait) = AccountWait::of_routing(&error, SendKind::Dream, now_ms()) {
-                        return Err(TaskError::AccountWait(wait));
+                        return Err(TaskError::AccountWait(wait, total.map(Box::new)));
                     }
                 }
                 return Err(TaskError::Failed(
                     paid_failure
                         .or(failure)
                         .unwrap_or_else(|| error.to_string()),
+                    total,
                 ));
             }
         };
@@ -224,6 +226,7 @@ pub async fn run<C: RunnerClient + Router>(
                 report(Outcome::Cancelled, None).await;
                 return Err(TaskError::Failed(
                     "the task reads code, and no tool provider was chosen to read it with".into(),
+                    total,
                 ));
             };
             let child = Child {
@@ -250,7 +253,7 @@ pub async fn run<C: RunnerClient + Router>(
                 // model would get further.
                 Err(ReaderPlan::Tools(problem)) => {
                     report(Outcome::Cancelled, None).await;
-                    return Err(TaskError::Failed(problem));
+                    return Err(TaskError::Failed(problem, total));
                 }
             }
         } else {
@@ -273,6 +276,13 @@ pub async fn run<C: RunnerClient + Router>(
             attribution: job.attribution,
         };
         let mut usage = None;
+        // Routing wants just this decision's usage. The task's budget and
+        // journal must also count every earlier route that was tried.
+        let batch_usage = |usage: Option<StepUsage>| {
+            usage.map_or(total, |more| {
+                Some(crate::summary::run::add_usage(total, &more))
+            })
+        };
         let mut retry = 0;
         let outcome = loop {
             let child = Child {
@@ -308,8 +318,7 @@ pub async fn run<C: RunnerClient + Router>(
                         Ok(answered) => answered,
                         Err(wait) => {
                             report(Outcome::Cancelled, usage.as_ref()).await;
-                            return Err(paid_failure
-                                .map_or(TaskError::AccountWait(wait), TaskError::Failed));
+                            return Err(waiting(wait, paid_failure, batch_usage(usage)));
                         }
                     };
                     let reply = TaskReply {
@@ -317,18 +326,18 @@ pub async fn run<C: RunnerClient + Router>(
                         model: model.clone(),
                         runner: answer.runner.module.clone(),
                         child: child.session.session.clone(),
-                        usage,
+                        usage: batch_usage(usage),
                         steps: capped_steps
                             .zip(last.steps)
                             .map(|(capped, last)| capped + last),
                     };
                     return match usable {
                         Ok(()) => {
-                            report(Outcome::Completed, reply.usage.as_ref()).await;
+                            report(Outcome::Completed, usage.as_ref()).await;
                             Ok(reply)
                         }
                         Err(problem) => {
-                            report(Outcome::Failed, reply.usage.as_ref()).await;
+                            report(Outcome::Failed, usage.as_ref()).await;
                             Err(TaskError::Skipped(Box::new(Skipped {
                                 reason: format!(
                                     "the run reached its step cap, and its answer to the request to stop reading can't be used: {problem} (child {})",
@@ -371,9 +380,7 @@ pub async fn run<C: RunnerClient + Router>(
                 },
                 Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
                     report(Outcome::Cancelled, usage.as_ref()).await;
-                    return Err(
-                        paid_failure.map_or(TaskError::AccountWait(wait), TaskError::Failed)
-                    );
+                    return Err(waiting(wait, paid_failure, batch_usage(usage)));
                 }
                 Err(SummaryError::Failed(error)) if retry < MAX_RETRIES && retryable(&error) => {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -386,19 +393,29 @@ pub async fn run<C: RunnerClient + Router>(
             }
         };
         match outcome {
-            Ok(reply) => {
+            Ok(mut reply) => {
                 report(Outcome::Completed, reply.usage.as_ref()).await;
+                reply.usage = batch_usage(reply.usage);
                 return Ok(reply);
             }
             Err(error) => {
                 report(Outcome::Failed, usage.as_ref()).await;
+                total = batch_usage(usage);
                 paid_failure = Some(error);
             }
         }
     }
     Err(TaskError::Failed(
         paid_failure.or(failure).unwrap_or_default(),
+        total,
     ))
+}
+
+fn waiting(wait: AccountWait, failed: Option<String>, usage: Option<StepUsage>) -> TaskError {
+    failed.map_or_else(
+        || TaskError::AccountWait(wait, usage.map(Box::new)),
+        |error| TaskError::Failed(error, usage),
+    )
 }
 
 /// Send `message`, the task's finalize message, to `child`, whose run under

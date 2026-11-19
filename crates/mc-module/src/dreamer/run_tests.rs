@@ -31,6 +31,7 @@ pub(crate) enum Ends {
     /// Ends with routing's full capacity (`concurrency_full`) until this
     /// reset, the way an llm-runner 0.8.51 runner ends a queued run.
     Full(u64),
+    SpentFull(u64, u64),
     /// The runner could not hand the prompt to its host, so no model ran.
     NeverRan,
 }
@@ -239,7 +240,7 @@ impl RunnerClient for Client {
                 result.error = Some(RunError::new("provider", message, "provider_error"));
                 result
             }
-            Ends::Full(reset) => {
+            Ends::Full(reset) | Ends::SpentFull(reset, _) => {
                 let error = RunError::new(
                     "transient",
                     "every account on the route is at its concurrency cap",
@@ -252,6 +253,12 @@ impl RunnerClient for Client {
                     now_ms() as u64,
                 ));
                 result.error = Some(error);
+                if let Ends::SpentFull(_, tokens) = ends {
+                    let mut usage = cortexkit_role_llm_runner::usage::RunUsage::default();
+                    usage.steps = 1;
+                    usage.input_tokens = Some(tokens);
+                    result.usage = Some(usage);
+                }
                 result
             }
         })
@@ -385,6 +392,17 @@ async fn a_run_sends_the_task_to_a_child_of_its_own_where_routing_chose() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn audit_fallback_usage_reaches_the_dreamer_budget() {
+    let client = Client::new(
+        &["p/a", "p/b"],
+        &[Ends::Spent("nonsense", 70_000), Ends::Spent("ok", 30_000)],
+    );
+    let reply = run(&client, &job(), &Task { fits: true }).await.unwrap();
+    assert_eq!(client.children().len(), 2);
+    assert_eq!(reply.usage.unwrap().prompt_tokens, Some(100_000));
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_unusable_or_cut_off_reply_moves_to_the_next_model() {
     let client = Client::new(
         &["p/a", "p/b", "p/c"],
@@ -461,7 +479,7 @@ async fn three_failed_models_fail_the_run_with_the_last_reason() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, TaskError::Failed(reason) if reason.contains("not ok: z") && reason.contains("mc-dream:17:2.0")),
+        matches!(&error, TaskError::Failed(reason, _) if reason.contains("not ok: z") && reason.contains("mc-dream:17:2.0")),
         "{error:?}"
     );
     assert_eq!(client.selects.lock().unwrap().len(), 3);
@@ -475,7 +493,7 @@ async fn a_waiting_fallback_preserves_the_failed_dreamer_route() {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, TaskError::Failed(reason) if reason.contains("bad first reply")),
+            matches!(&error, TaskError::Failed(reason, _) if reason.contains("bad first reply")),
             "{error:?}"
         );
         assert_eq!(
@@ -510,7 +528,7 @@ async fn a_model_without_a_harness_or_room_for_the_input_is_passed_over_unsent()
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, TaskError::Failed(reason) if reason.contains("doesn't fit")),
+        matches!(&error, TaskError::Failed(reason, _) if reason.contains("doesn't fit")),
         "{error:?}"
     );
     assert!(client.sends.lock().unwrap().is_empty());
@@ -529,7 +547,7 @@ async fn a_routing_refusal_with_a_reset_time_is_a_wait_not_a_failure() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, TaskError::AccountWait(wait) if wait.send == SendKind::Dream),
+        matches!(&error, TaskError::AccountWait(wait, _) if wait.send == SendKind::Dream),
         "{error:?}"
     );
     assert!(client.sends.lock().unwrap().is_empty());
@@ -561,7 +579,7 @@ async fn a_full_capacity_refusal_is_a_wait_until_routing_s_reset() {
         let error = run(&client, &job(), &Task { fits: true })
             .await
             .unwrap_err();
-        let TaskError::AccountWait(wait) = error else {
+        let TaskError::AccountWait(wait, _) = error else {
             panic!("full capacity failed the run: {error:?}");
         };
         assert_eq!(wait.code, "no_route:concurrency_full");
@@ -584,7 +602,7 @@ async fn a_run_ended_for_full_capacity_is_a_wait_not_a_failed_model() {
     let error = run(&client, &job(), &Task { fits: true })
         .await
         .unwrap_err();
-    let TaskError::AccountWait(wait) = error else {
+    let TaskError::AccountWait(wait, _) = error else {
         panic!("full capacity failed the run: {error:?}");
     };
     assert_eq!(wait.code, "concurrency_full");
@@ -670,7 +688,7 @@ async fn unsafe_or_missing_reader_tools_fail_the_run_unsent() {
         let error = run(&client, &verify(), &Task { fits: true })
             .await
             .unwrap_err();
-        assert!(matches!(error, TaskError::Failed(_)), "{error:?}");
+        assert!(matches!(error, TaskError::Failed(..)), "{error:?}");
         assert!(client.sends.lock().unwrap().is_empty());
         assert_eq!(client.selects.lock().unwrap().len(), 1);
         assert_eq!(*client.reports.lock().unwrap(), ["decision-a cancelled"]);
@@ -916,7 +934,7 @@ async fn an_uncapped_task_takes_a_run_stopped_at_its_step_limit_as_a_failed_mode
         );
         let error = run(&client, &job, &Task { fits: true }).await.unwrap_err();
         assert!(
-            matches!(&error, TaskError::Failed(reason) if reason.starts_with("the run ended max_steps: ") && reason.contains("mc-dream:18:2.0")),
+            matches!(&error, TaskError::Failed(reason, _) if reason.starts_with("the run ended max_steps: ") && reason.contains("mc-dream:18:2.0")),
             "{error:?}"
         );
     }

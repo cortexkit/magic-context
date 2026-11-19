@@ -1616,16 +1616,25 @@ impl Engine {
                     );
                     write_locked(db, locks, &self.holder, |tx| batch.skip(tx, run_id))
                 }
-                Err(TaskError::AccountWait(wait)) => {
+                Err(TaskError::AccountWait(wait, usage)) => {
                     end.outcome = "waiting".into();
                     end.error = Some(wait.code.clone());
-                    end.batches
-                        .push(json!({"wait_until": wait.until_ms, "code": wait.code}));
+                    let (input, output) = record_usage(end, usage.as_deref());
+                    end.batches.push(json!({
+                        "wait_until": wait.until_ms, "code": wait.code,
+                        "input_tokens": input, "output_tokens": output,
+                    }));
                     return;
                 }
-                Err(TaskError::Failed(error)) => {
+                Err(TaskError::Failed(error, usage)) => {
                     end.outcome = "failed".into();
                     end.failure_class = Some("model".into());
+                    if usage.is_some() {
+                        let (input, output) = record_usage(end, usage.as_ref());
+                        end.batches.push(json!({
+                            "error": error, "input_tokens": input, "output_tokens": output,
+                        }));
+                    }
                     end.error = Some(error);
                     return;
                 }
@@ -1825,16 +1834,7 @@ fn end_skipped(db: &ContextDb, run_id: i64, due: &store::Due, reason: String) ->
 }
 
 fn record_batch(end: &mut RunEnd, reply: &TaskReply) {
-    // `prompt_tokens` is the whole prompt: uncached input, cache reads and
-    // cache writes.
-    let (input, output) = reply.usage.as_ref().map_or((0, 0), |usage| {
-        (
-            usage.prompt_tokens.unwrap_or(0),
-            usage.output_tokens.unwrap_or(0),
-        )
-    });
-    end.input_tokens += input;
-    end.output_tokens += output;
+    let (input, output) = record_usage(end, reply.usage.as_ref());
     end.batches.push(json!({
         "model": format!("{}/{}", reply.model.provider, reply.model.model),
         "runner": reply.runner,
@@ -1842,6 +1842,23 @@ fn record_batch(end: &mut RunEnd, reply: &TaskReply) {
         "input_tokens": input,
         "output_tokens": output,
     }));
+}
+
+fn record_usage(
+    end: &mut RunEnd,
+    usage: Option<&cortexkit_role_compaction::read::StepUsage>,
+) -> (u64, u64) {
+    // `prompt_tokens` is the whole prompt: uncached input, cache reads and
+    // cache writes.
+    let (input, output) = usage.map_or((0, 0), |usage| {
+        (
+            usage.prompt_tokens.unwrap_or(0),
+            usage.output_tokens.unwrap_or(0),
+        )
+    });
+    end.input_tokens += input;
+    end.output_tokens += output;
+    (input, output)
 }
 
 /// Tell the app reads that `owner`'s schedules, lock or runs changed. Only
