@@ -350,14 +350,21 @@ pub(crate) fn carry_evidence(id: &str, from: &str, to: &str, condition: &str) ->
 /// revision isn't still unsent. An unsent revision can carry any number of
 /// changes, since the publisher reads the row as it is when it sends it.
 /// A frozen row's revision is already taken by its fixed message, whatever
-/// its state (`sending` included), so a change raises past it once.
+/// its state (`sending` included), so a change raises past it once, even
+/// when a row that changes may join waits at that revision too: the two
+/// would otherwise be sent as two messages under one message id, and the
+/// hub would store only the first.
 fn raisable(table: &Table, row: &str, id: &str) -> String {
     format!(
         "{row}.global_id IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM replica_outbox o
                           WHERE o.kind = '{kind}' AND o.local_id = {id}
                             AND o.state IN {UNSENT} AND o.frozen IS NULL
-                            AND o.revision = {row}.revision)",
+                            AND o.revision = {row}.revision
+                            AND NOT EXISTS (SELECT 1 FROM replica_outbox f
+                                             WHERE f.kind = o.kind AND f.local_id = o.local_id
+                                               AND f.frozen IS NOT NULL
+                                               AND f.revision = o.revision))",
         kind = table.kind,
     )
 }
@@ -551,11 +558,18 @@ fn table_triggers(table: &Table) -> String {
     };
     // A row never sent is known nowhere else, so its delete sends nothing.
     // A sent row's delete sends a tombstone under its global id, which the
-    // outbox row carries, with the level and owner its subject needs,
-    // because the row is gone by the time it is sent. Its message is fixed
-    // (`frozen` is JSON null, a delete's snapshot), so nothing joins it. The
-    // row's changes still waiting to be sent go: the tombstone replaces them
-    // on every computer. One being sent stays, as it may be in the stream
+    // outbox row carries, because the row is gone by the time it is sent.
+    // The tombstone goes to the subject the row was last sent under, as
+    // `replica_ids` records it, not to the row's owner as it stands: a
+    // writer may have moved the row to an owner no subject can name, or to
+    // another owner whose change was never sent, and the other computers
+    // hold the row where it was last sent. A row that has a global id but
+    // was never sent records no subject: its tombstone names the row's own
+    // level and owner, and the publisher drops it ([`super::publish`]).
+    // Its message is fixed (`frozen` is
+    // JSON null, a delete's snapshot), so nothing joins it. The row's
+    // changes still waiting to be sent go: the tombstone replaces them on
+    // every computer. One being sent stays, as it may be in the stream
     // already, and so does one sent. The global id is marked deleted at
     // once, in the delete's own transaction, so no arrival read before the
     // tombstone is sent brings the row back.
@@ -579,13 +593,15 @@ fn table_triggers(table: &Table) -> String {
                  (kind, local_id, revision, base_revision, change, created_at, actor, run_id,
                   epoch, global_id, level, owner, frozen)
              SELECT '{kind}', OLD.id, OLD.revision + 1, OLD.revision, 'delete', {NOW_MS},
-                    {writer}, OLD.global_id, {level}, {owner}, 'null'
+                    {writer}, OLD.global_id,
+                    CASE WHEN r.subject IS NULL THEN {level} ELSE r.level END,
+                    CASE WHEN r.subject IS NULL THEN {owner} ELSE r.owner END, 'null'
+               FROM (SELECT 1) LEFT JOIN replica_ids r ON r.global_id = OLD.global_id
               WHERE OLD.global_id IS NOT NULL;
-             INSERT INTO replica_ids (kind, global_id, local_id, deleted_at, level, owner)
-             SELECT '{kind}', OLD.global_id, OLD.id, {NOW_MS}, {level}, {owner}
+             INSERT INTO replica_ids (kind, global_id, local_id, deleted_at)
+             SELECT '{kind}', OLD.global_id, OLD.id, {NOW_MS}
               WHERE OLD.global_id IS NOT NULL
-             ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at,
-                 level = excluded.level, owner = excluded.owner;
+             ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at;
              {derived_gone}
          END;",
         writer = writer("'ck-mc'", &row_role(table, "OLD")),
@@ -674,9 +690,13 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
          -- the row with a higher outbox id were written over it. `undone` is
          -- the newest outbox row id of this computer's own changes of the
          -- row that were undone because they could no longer win, the row
-         -- brought back to an older own change. A deleted row keeps the level
-         -- and owner its tombstone's subject names, so the tombstone can be
-         -- sent again to a stream made anew.
+         -- brought back to an older own change. `subject` is the hub subject
+         -- the row was last sent under, by this computer (recorded when a
+         -- change of it is claimed to be sent) or by another (recorded when
+         -- its message is applied here), and `level` and `owner` are that
+         -- subject's: the row's tombstone goes there, as that is where the
+         -- other computers hold it, and can be sent again to a stream made
+         -- anew. A row with no subject was never sent anywhere.
          CREATE TABLE replica_ids (
            kind TEXT NOT NULL CHECK (kind IN ('memory', 'observation', 'primer')),
            global_id TEXT PRIMARY KEY,
@@ -687,9 +707,25 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
            written INTEGER,
            undone INTEGER,
            level TEXT,
-           owner TEXT
+           owner TEXT,
+           subject TEXT
          );
          CREATE INDEX idx_replica_ids_local ON replica_ids(kind, local_id);
+
+         -- The senders whose message of a row this computer applied at the
+         -- row's deciding revision (`replica_ids.revision`), by store id. A
+         -- message carrying the same global id, revision and sender again is
+         -- a copy of one already applied: the hub stores a send tried again
+         -- as a new message once its duplicate window has passed. Every
+         -- computer skips such a copy, so none lets it win over a change
+         -- that landed between the two. Only the deciding revision's senders
+         -- are kept: a copy of a message at a lower revision decides nothing.
+         CREATE TABLE replica_applied (
+           global_id TEXT NOT NULL,
+           revision INTEGER NOT NULL,
+           sender TEXT NOT NULL,
+           PRIMARY KEY (global_id, revision, sender)
+         );
 
          -- Changes waiting to be sent. A local row has at most one row a
          -- further change joins; the others are frozen: `frozen` holds the
@@ -739,20 +775,29 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
            recorded_at INTEGER NOT NULL
          );
 
-         -- The stream position applied so far, and the creation time of the
-         -- stream it belongs to (a stream made anew is read from its start);
-         -- the store id this store's global ids are formed under (32 random
+         -- The stream position applied so far, the message id of the message
+         -- stored there, and the creation time of the stream it belongs to:
+         -- a stream whose message at that position has another id, or none,
+         -- was made anew, and is read from its start, even when it keeps the
+         -- creation time (a stream restored from a backup of the hub); the
+         -- store id this store's global ids are formed under (32 random
          -- lowercase hex characters, made anew at the first join and when
          -- the store may have been copied or restored); the box id of the
-         -- computer it last ran on; and when it first joined the stream (null
-         -- until then).
+         -- computer it last ran on; when it first joined the stream (null
+         -- until then); and, while the stream is held at a message sealed
+         -- under a fleet epoch this computer's vault doesn't hold, that
+         -- epoch, since when, and why, for the person to see and fix.
          CREATE TABLE replica_state (
            id INTEGER PRIMARY KEY CHECK (id = 1),
            stream_seq INTEGER NOT NULL DEFAULT 0,
+           stream_message_id TEXT,
            store_id TEXT NOT NULL,
            box_id TEXT,
            joined_at INTEGER,
-           stream_created TEXT
+           stream_created TEXT,
+           held_epoch INTEGER,
+           held_since INTEGER,
+           held_why TEXT
          );
          INSERT INTO replica_state (id, store_id) VALUES (1, lower(hex(randomblob(16))));
 
@@ -817,10 +862,6 @@ pub(crate) fn install(tx: &Transaction) -> rusqlite::Result<()> {
            global_id TEXT PRIMARY KEY,
            seq INTEGER NOT NULL
          );
-
-         -- The fleet epochs this computer's vault has opened a message of.
-         -- A message the vault can't open under one of them never will be.
-         CREATE TABLE replica_epochs (epoch INTEGER PRIMARY KEY);
 
          -- Every memory holding a fact, live or not, for the rule that keeps
          -- one live memory per fact (the store's unique key counts live

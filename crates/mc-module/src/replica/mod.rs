@@ -23,7 +23,9 @@
 //!   its own that has no global id yet.
 //! - **Catch up** ([`Replica::catch_up`]): after every start, the engine
 //!   reads the stream to its end before it sends anything, from the start
-//!   of a stream made anew since it last read.
+//!   of a stream made anew since it last read. Every new consumer on the
+//!   hub checks the stream's identity again ([`Replica::check_stream`]),
+//!   so a stream made anew under a running engine is noticed too.
 //!
 //! A row's global id is `<store id>.<table letter><local id>` of the store
 //! that first published it ([`wire::global_id`]), given when the row is
@@ -67,6 +69,8 @@ mod epochs_tests;
 mod exchange_tests;
 #[cfg(test)]
 mod fence_tests;
+#[cfg(test)]
+mod fuzz_tests;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]
@@ -329,7 +333,9 @@ impl Replica {
     /// reading finds a message it doesn't know sent under its store id
     /// ([`apply`]): either way, no global id a copy of the store may have
     /// sent is ever sent again for another row. A stream made anew since the
-    /// position was stored is read from its start ([`same_stream`]).
+    /// position was stored is read from its start ([`same_stream`]), and so
+    /// is one found made anew while the engine runs, which reads it to its
+    /// end again before it sends.
     pub async fn catch_up(&self) -> Result<(), String> {
         if self.caught_up.load(Ordering::SeqCst) {
             return Ok(());
@@ -337,11 +343,7 @@ impl Replica {
         self.db
             .with_connection(|conn| moved_here(conn, &self.box_id))
             .map_err(|error| error.to_string())?;
-        let info = self.hub.info().await.map_err(|error| error.to_string())?;
-        self.db
-            .with_connection(|conn| same_stream(conn, &info))
-            .map_err(|error| error.to_string())?;
-        let last = info.last_seq;
+        let last = self.check_stream().await?.last_seq;
         while self.position()? < last {
             if self.follow().await? == 0 {
                 break;
@@ -352,6 +354,38 @@ impl Replica {
         }
         self.caught_up.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Check that the stored position belongs to the stream the hub holds
+    /// now, and start the stream over if it doesn't ([`same_stream`]).
+    /// Returns the stream's information. The message stored at the
+    /// position is read again, so a stream made anew with the creation time
+    /// of the old one (restored from a backup of the hub) is told apart too,
+    /// once other computers have sent past the position. The engine runs
+    /// this whenever it reads from a new consumer, since a hub that lost its
+    /// storage only ends the consumer the engine reads.
+    pub(crate) async fn check_stream(&self) -> Result<hub::StreamInfo, String> {
+        let info = self.hub.info().await.map_err(|error| error.to_string())?;
+        let position = self.position()?;
+        let stored = if position > 0 && info.last_seq >= position {
+            Some(
+                self.hub
+                    .get(position)
+                    .await
+                    .map_err(|error| format!("reading message {position} again: {error}"))?,
+            )
+        } else {
+            None
+        };
+        let anew = self
+            .db
+            .with_connection(|conn| same_stream(conn, &info, position, stored.as_ref()))
+            .map_err(|error| error.to_string())?;
+        if anew {
+            // The new stream is read to its end before anything is sent.
+            self.caught_up.store(false, Ordering::SeqCst);
+        }
+        Ok(info)
     }
 
     /// The stream position applied so far.
@@ -426,87 +460,234 @@ fn moved_here(conn: &mut Connection, box_id: &str) -> rusqlite::Result<()> {
     tx.commit()
 }
 
-/// Whether the stored position belongs to the stream `info` describes. A
-/// stream made anew (the hub's storage lost, the stream made again) has
-/// another creation time, or ends before the stored position. Then the
-/// position goes back to 0, so the new stream is read from its start;
-/// what this store learned from the old stream goes (each row's deciding
-/// message, fences, passed arrivals, rows to read again, and sends waiting
-/// to come back); and every replicated row is queued again, with every
-/// deleted row's tombstone, so the new stream holds every row and every
-/// delete for the computers that join it. A position
-/// stored before the creation time was recorded is checked by the last
-/// sequence alone.
-fn same_stream(conn: &mut Connection, info: &hub::StreamInfo) -> rusqlite::Result<()> {
+/// Whether the stored position belongs to the stream `info` describes, and
+/// if not, start over on the stream as it is now. `stored` is the message
+/// the hub holds at position `checked`, if it was read. A stream made anew
+/// (the hub's storage lost, the stream made again, or restored from a
+/// backup of the hub) has another creation time, ends before the stored
+/// position, or holds no message, or another message, at that position
+/// than the one this store read there. Then [`start_over`] runs. A
+/// position stored before the creation time was recorded is checked by the
+/// rest alone, and one stored without a message id by the creation time
+/// and whether the stream still holds a message there. Returns whether the
+/// stream was made anew.
+fn same_stream(
+    conn: &mut Connection,
+    info: &hub::StreamInfo,
+    checked: u64,
+    stored: Option<&Option<hub::HubMessage>>,
+) -> rusqlite::Result<bool> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let (position, created): (i64, Option<String>) = tx.query_row(
-        "SELECT stream_seq, stream_created FROM replica_state WHERE id = 1",
+    let (position, message_id, created): (i64, Option<String>, Option<String>) = tx.query_row(
+        "SELECT stream_seq, stream_message_id, stream_created FROM replica_state WHERE id = 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    let behind = (info.last_seq as i64) < position;
-    let other = created
-        .as_deref()
-        .is_some_and(|created| created != info.created);
-    if behind || other {
+    let why = if (info.last_seq as i64) < position {
+        Some("it ends before the position this store had read to".to_owned())
+    } else if let Some(created) = created.as_deref().filter(|created| *created != info.created) {
+        Some(format!("it was created {}, not {created}", info.created))
+    } else {
+        match stored.filter(|_| position > 0 && checked as i64 == position) {
+            Some(None) => Some("it holds no message at the position this store had read to".to_owned()),
+            Some(Some(found))
+                if message_id
+                    .as_deref()
+                    .is_some_and(|id| found.message_id.as_deref() != Some(id)) =>
+            {
+                Some("it holds another message at the position this store had read to".to_owned())
+            }
+            _ => None,
+        }
+    };
+    if let Some(why) = &why {
         tracing::warn!(
-            "ck-mc: replica: the hub's memory stream was made anew (created {}, last message {}, this store had read to {position}); it is read from its start, and every row is sent again",
+            "ck-mc: replica: the hub's memory stream was made anew ({why}; created {}, last message {}, this store had read to {position}); it is read from its start, and every row is sent again",
             info.created,
             info.last_seq
         );
-        // Each deleted row's tombstone goes to the new stream too, so a
-        // computer that still holds the row (it missed the delete) or joins
-        // the new stream deletes it: deletes are final everywhere. It is
-        // queued before the old stream's revisions are forgotten, one past
-        // the last one this store applied.
-        tx.execute(
-            "INSERT INTO replica_outbox
-                 (kind, local_id, revision, base_revision, change, created_at, actor,
-                  global_id, level, owner, frozen)
-             SELECT kind, COALESCE(local_id, 0), COALESCE(revision, 0) + 1, COALESCE(revision, 0),
-                    'delete', ?1, 'ck-mc', global_id, level, owner, 'null'
-               FROM replica_ids
-              WHERE deleted_at IS NOT NULL
-                AND NOT EXISTS (SELECT 1 FROM replica_outbox o
-                                 WHERE o.global_id = replica_ids.global_id
-                                   AND o.change = 'delete' AND o.state <> 'published')",
-            [crate::memory_writes::now_ms()],
-        )?;
-        tx.execute_batch(
-            "UPDATE replica_state SET stream_seq = 0 WHERE id = 1;
-             UPDATE replica_ids SET revision = NULL, seq = NULL, written = NULL, undone = NULL;
-             DELETE FROM replica_fences;
-             DELETE FROM replica_passed;
-             DELETE FROM replica_restore;
-             DELETE FROM replica_outbox WHERE state = 'published';",
-        )?;
-        let now = crate::memory_writes::now_ms();
-        for table in schema::TABLES {
-            let agent = if table.kind == "memory" {
-                " AND level <> 'agent'"
-            } else {
-                ""
-            };
-            tx.execute(
-                &format!(
-                    "INSERT INTO replica_outbox
-                         (kind, local_id, revision, base_revision, change, created_at, actor)
-                     SELECT '{kind}', id, revision, 0, 'create', ?1, 'ck-mc'
-                       FROM {name} WHERE global_id IS NOT NULL{agent} ORDER BY id
-                     ON CONFLICT (kind, local_id) WHERE state <> 'published' AND frozen IS NULL
-                     DO UPDATE SET state = 'pending' WHERE replica_outbox.state = 'raised'",
-                    kind = table.kind,
-                    name = table.name,
-                ),
-                [now],
-            )?;
-        }
+        start_over(&tx)?;
     }
     tx.execute(
         "UPDATE replica_state SET stream_created = ?1 WHERE id = 1",
         [&info.created],
     )?;
-    tx.commit()
+    tx.commit()?;
+    Ok(why.is_some())
+}
+
+/// Start over on a stream made anew. The position goes back to 0, so the
+/// new stream is read from its start; what this store learned from the old
+/// stream goes (each row's deciding message, fences, passed arrivals, rows
+/// to read again, the senders applied, and sends waiting to come back); and
+/// every replicated row is queued again, with every deleted row's
+/// tombstone, so the new stream holds every row and every delete for the
+/// computers that join it.
+///
+/// - The store takes a new store id first, so every message it sends to
+///   the new stream has a message id never used before: a send of the old
+///   stream tried again can't be taken for one of the new stream's, and
+///   the hub never answers a new message as a duplicate of an old one.
+/// - A row's waiting changes, sent or not, collapse into the one change
+///   queued for it, which carries the row as it stands now and is fixed
+///   as it is queued. It goes at the revision the old stream decided the
+///   row at, or above it for a change of this computer's own the old
+///   stream never brought back ([`apply::resend_revision`]); the row's
+///   revision rises to it if it is below. A `raised` revision stays
+///   `raised`: a later change of the row is sent at it.
+/// - A deleted row's tombstone goes one revision above everything this
+///   computer sent or queued for the row, so no own change of the row that
+///   comes back can settle it away, and to the subject the row was last
+///   sent under. A row never sent anywhere needs none.
+fn start_over(tx: &Connection) -> rusqlite::Result<()> {
+    tx.execute("INSERT INTO replica_applying (applying) VALUES (1)", [])?;
+    new_store_id(
+        tx,
+        "the hub's memory stream was made anew, so no message id it sent to the old stream is used again",
+    )?;
+    let store = store_id(tx)?;
+    let now = crate::memory_writes::now_ms();
+    // Each deleted row's tombstone goes to the new stream too, so a
+    // computer that still holds the row (it missed the delete) or joins the
+    // new stream deletes it: deletes are final everywhere.
+    type Deleted = (String, String, i64, i64, Option<String>, Option<String>);
+    let deleted: Vec<Deleted> = tx
+        .prepare(
+            "SELECT r.kind, r.global_id, COALESCE(r.local_id, 0),
+                    MAX(COALESCE(r.revision, 0),
+                        COALESCE((SELECT MAX(o.revision) FROM replica_outbox o
+                                   WHERE o.global_id = r.global_id), 0)) + 1,
+                    r.level, r.owner
+               FROM replica_ids r
+              WHERE r.deleted_at IS NOT NULL AND r.subject IS NOT NULL",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (kind, global, local, revision, level, owner) in deleted {
+        tx.execute("DELETE FROM replica_outbox WHERE global_id = ?1", [&global])?;
+        tx.execute(
+            "INSERT INTO replica_outbox
+                 (kind, local_id, revision, base_revision, change, created_at, actor,
+                  global_id, level, owner, frozen)
+             VALUES (?1, ?2, ?3, ?4, 'delete', ?5, 'ck-mc', ?6, ?7, ?8, 'null')",
+            params![kind, local, revision, revision - 1, now, global, level, owner],
+        )?;
+    }
+    for table in schema::TABLES {
+        let agent = if table.kind == "memory" {
+            " AND level <> 'agent'"
+        } else {
+            ""
+        };
+        let rows: Vec<(i64, String, i64)> = tx
+            .prepare(&format!(
+                "SELECT id, global_id, revision FROM {} WHERE global_id IS NOT NULL{agent} ORDER BY id",
+                table.name
+            ))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (local, global, own_revision) in rows {
+            let revision = apply::resend_revision(tx, table, local, &global)?;
+            tx.execute(
+                "DELETE FROM replica_outbox
+                  WHERE kind = ?1 AND local_id = ?2 AND state <> 'raised' AND change <> 'delete'",
+                params![table.kind, local],
+            )?;
+            if revision > own_revision {
+                raise_to(tx, table, local, revision)?;
+            }
+            publish::queue_again(tx, table.kind, local, revision, &store)?;
+        }
+    }
+    tx.execute_batch(
+        "UPDATE replica_state
+            SET stream_seq = 0, stream_message_id = NULL,
+                held_epoch = NULL, held_since = NULL, held_why = NULL
+          WHERE id = 1;
+         UPDATE replica_ids SET revision = NULL, seq = NULL, written = NULL, undone = NULL;
+         DELETE FROM replica_fences;
+         DELETE FROM replica_passed;
+         DELETE FROM replica_restore;
+         DELETE FROM replica_applied;
+         DELETE FROM replica_outbox WHERE state = 'published';
+         DELETE FROM replica_applying;",
+    )
+}
+
+/// Raise row `local` of `table` to `revision`, with a memory's clause
+/// evidence, which readers look up at the row's current revision, under
+/// the apply marker the caller holds, so nothing is captured.
+fn raise_to(tx: &Connection, table: &schema::Table, local: i64, revision: i64) -> rusqlite::Result<()> {
+    if table.kind == "memory" {
+        tx.execute(
+            &schema::carry_evidence("?1", "m.revision", "?2", "m.revision < ?2"),
+            params![local, revision],
+        )?;
+    }
+    tx.execute(
+        &format!(
+            "UPDATE {} SET revision = ?2 WHERE id = ?1 AND revision < ?2",
+            table.name
+        ),
+        params![local, revision],
+    )?;
+    Ok(())
+}
+
+/// A hold of the memory stream at a message sealed under a fleet epoch
+/// this computer's vault doesn't hold: nothing is sent while it lasts
+/// ([`apply`]), so the person must see it and get the epoch's key to the
+/// vault.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpochHold {
+    /// The epoch the stream waits for.
+    pub epoch: u64,
+    /// When the stream was first held for it, in milliseconds since the
+    /// Unix epoch.
+    pub since: i64,
+    /// Why, as the engine logged it.
+    pub why: String,
+}
+
+/// The hold of the memory stream for a fleet epoch, as the store records
+/// it, for a health report to show; `None` while the stream isn't held for
+/// one.
+pub fn hold_status(conn: &Connection) -> rusqlite::Result<Option<EpochHold>> {
+    conn.query_row(
+        "SELECT held_epoch, held_since, held_why FROM replica_state
+          WHERE id = 1 AND held_epoch IS NOT NULL",
+        [],
+        |row| {
+            Ok(EpochHold {
+                epoch: row.get::<_, i64>(0)?.max(0) as u64,
+                since: row.get::<_, Option<i64>>(1)?.unwrap_or_default(),
+                why: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            })
+        },
+    )
+    .optional()
+}
+
+/// Record that the stream is held for fleet epoch `epoch`, for `why`.
+/// Returns whether this is a new hold: the stream wasn't held for that
+/// epoch already. A hold for the same epoch keeps the time it began. The
+/// hold ends when a message is next applied ([`apply`]).
+pub(crate) fn record_hold(conn: &Connection, epoch: u64, why: &str) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE replica_state SET held_epoch = ?1, held_since = ?2, held_why = ?3
+          WHERE id = 1 AND held_epoch IS NOT ?1",
+        params![epoch as i64, crate::memory_writes::now_ms(), why],
+    )?;
+    Ok(changed > 0)
 }
 
 /// Queue a create for every row of this computer that was never sent, and

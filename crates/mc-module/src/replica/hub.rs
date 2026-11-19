@@ -18,7 +18,9 @@
 //!   decides a row's state ([`super::apply`]);
 //! - an acknowledgement of each message once it is applied, for a stream
 //!   that wants one (the live stream doesn't: the stored position is the
-//!   acknowledgement).
+//!   acknowledgement);
+//! - whether a read starts a new consumer, so the engine checks first that
+//!   its position still belongs to the stream ([`Hub::starts_consumer`]).
 
 use async_trait::async_trait;
 
@@ -81,6 +83,15 @@ pub trait Hub: Send + Sync {
 
     /// The message at `seq` is applied (or recorded as rejected).
     async fn ack(&self, seq: u64) -> Result<(), HubError>;
+
+    /// Whether a read of the messages after `after` starts a new consumer
+    /// on the hub, rather than going on with the one the last read used.
+    /// The engine checks first that its position still belongs to the
+    /// stream, since a stream made anew only ends the consumer. A hub that
+    /// keeps no consumer starts one for every read.
+    async fn starts_consumer(&self, _after: u64) -> bool {
+        true
+    }
 }
 
 /// A stream held in memory, shared by the stores of one test as the hub is
@@ -120,6 +131,8 @@ struct InMemoryState {
     acked: Vec<u64>,
     /// Publishes still to fail before storing anything.
     refuse: usize,
+    /// Publishes still to let through before failing one.
+    refuse_after: Option<usize>,
     /// Publishes still to store but answer without an acknowledgement, as
     /// when the acknowledgement is lost on the way back.
     lose_acks: usize,
@@ -179,6 +192,19 @@ impl InMemoryHub {
         self.state().lose_acks = count;
     }
 
+    /// Let the next `passing` publishes through, then fail the one after
+    /// without storing it.
+    pub fn refuse_after(&self, passing: usize) {
+        self.state().refuse_after = Some(passing);
+    }
+
+    /// Forget every message id stored so far, as JetStream does once its
+    /// duplicate window has passed: a publish under one of them is stored
+    /// again as a new message.
+    pub fn forget_ids(&self) {
+        self.state().ids.clear();
+    }
+
     /// A stream made with creation time `created`, as a stream made again
     /// with the same one would be.
     pub fn named(created: &str) -> std::sync::Arc<Self> {
@@ -209,6 +235,14 @@ impl Hub for InMemoryHub {
         if state.refuse > 0 {
             state.refuse -= 1;
             return Err(HubError("hub unreachable".into()));
+        }
+        match state.refuse_after {
+            Some(0) => {
+                state.refuse_after = None;
+                return Err(HubError("hub unreachable".into()));
+            }
+            Some(passing) => state.refuse_after = Some(passing - 1),
+            None => {}
         }
         // JetStream keeps a message id for its duplicate window; the test
         // stream keeps every id for good.

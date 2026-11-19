@@ -27,6 +27,12 @@
 //!   tried again when the row changes. If this computer passed over another
 //!   computer's change of the row for it, that change is applied now, as
 //!   this one can't reach the others ([`super::apply`]).
+//! - Each claimed row records the subject it is sent under with its global
+//!   id. A tombstone goes to that subject, where the other computers hold
+//!   the row, whatever owner the row had here when it was deleted; the
+//!   tombstone of a row never sent anywhere is dropped, as no other
+//!   computer holds the row. Rows that can't be sent wait in a state of
+//!   their own, so no number of them keeps a claim from later changes.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, PoisonError};
@@ -229,6 +235,16 @@ fn claim(
                     tx.execute("DELETE FROM replica_outbox WHERE id = ?1", [outbox_id])?;
                     continue;
                 };
+                if row.change == "delete" && !sent_somewhere(&tx, &global)? {
+                    // Never sent anywhere: no other computer holds the row,
+                    // so its tombstone has nothing to delete. Without it,
+                    // nothing comes back to decide the facts it held here.
+                    tx.execute("DELETE FROM replica_outbox WHERE id = ?1", [outbox_id])?;
+                    if row.kind == super::schema::MEMORIES.kind {
+                        changes.extend(super::apply::unsent_survivor_gone(&tx, row.local_id)?);
+                    }
+                    continue;
+                }
                 Some(Frozen {
                     global_id: global,
                     revision: row.revision,
@@ -283,6 +299,18 @@ fn claim(
         };
         let subject = match wire::subject(&row.kind, fixed.level.as_deref(), &fixed.owner) {
             Ok(subject) => subject,
+            Err(reason) if row.change == "delete" => {
+                // A tombstone goes to the subject its row was last sent
+                // under, so this is never expected; it waits out of every
+                // claim's way all the same.
+                log_unaddressable(&row.kind, &fixed.owner, &reason);
+                tx.execute(
+                    "UPDATE replica_outbox SET state = 'unaddressable' WHERE id = ?1",
+                    [outbox_id],
+                )?;
+                unaddressable += 1;
+                continue;
+            }
             Err(reason) => {
                 log_unaddressable(&row.kind, &fixed.owner, &reason);
                 changes.extend(set_unsendable(
@@ -302,6 +330,14 @@ fn claim(
             "UPDATE replica_outbox SET state = 'sending', sender = ?2 WHERE id = ?1",
             params![outbox_id, sender],
         )?;
+        if row.change != "delete" {
+            // The row may be in the stream under this subject from now on,
+            // so its tombstone goes there.
+            tx.execute(
+                "UPDATE replica_ids SET subject = ?2, level = ?3, owner = ?4 WHERE global_id = ?1",
+                params![fixed.global_id, subject, fixed.level, fixed.owner],
+            )?;
+        }
         claimed.push(Claimed {
             outbox_id,
             kind: row.kind.clone(),
@@ -325,6 +361,16 @@ fn claim(
     }
     tx.commit()?;
     Ok((claimed, unaddressable, changes))
+}
+
+/// Whether row `global` was ever sent to the stream, by this computer or
+/// another: a subject is recorded for it ([`super::schema`]).
+fn sent_somewhere(tx: &Connection, global: &str) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replica_ids WHERE global_id = ?1 AND subject IS NOT NULL)",
+        [global],
+        |row| row.get(0),
+    )
 }
 
 /// A message's fixed content: the row's global id and revision, the level
@@ -397,6 +443,49 @@ pub(crate) fn freeze(
 ) -> rusqlite::Result<()> {
     fix(tx, outbox_id, kind, local_id, store_id, false)?;
     Ok(())
+}
+
+/// Queue row `local_id` of `kind`, sent before, to be sent to a stream
+/// made anew at `revision`, as the row stands now ([`super::same_stream`]).
+/// Its message is fixed as it is queued, at that revision, so it is not
+/// sent at the row's own revision as an unfixed change would be, and a
+/// further change of the row is an outbox row of its own. Its sender is
+/// fixed when it is first claimed, as for any change. Returns whether it
+/// was queued: a row gone, never sent or at the agent level is not.
+pub(crate) fn queue_again(
+    tx: &Connection,
+    kind: &str,
+    local_id: i64,
+    revision: i64,
+    store_id: &str,
+) -> rusqlite::Result<bool> {
+    let Some(Current {
+        global_id: Some(global),
+        level,
+        owner,
+        ..
+    }) = current(tx, kind, local_id)?
+    else {
+        return Ok(false);
+    };
+    let snapshot = snapshot::read(tx, kind, store_id, local_id)?;
+    tx.execute(
+        "INSERT INTO replica_outbox
+             (kind, local_id, revision, base_revision, change, created_at, actor,
+              global_id, level, owner, frozen)
+         VALUES (?1, ?2, ?3, 0, 'create', ?4, 'ck-mc', ?5, ?6, ?7, ?8)",
+        params![
+            kind,
+            local_id,
+            revision,
+            crate::memory_writes::now_ms(),
+            global,
+            level,
+            owner,
+            serde_json::to_string(&snapshot).expect("a snapshot serializes")
+        ],
+    )?;
+    Ok(true)
 }
 
 /// A row's global id, revision, and the level and owner its subject names.

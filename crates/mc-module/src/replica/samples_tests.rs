@@ -112,19 +112,20 @@ async fn a_refusal_for_an_epoch_the_vault_doesnt_hold_is_held_and_read_again() {
     );
     for current in [None, Some(1), Some(2)] {
         for highest_held in [None, Some(0), Some(1), Some(2)] {
-            for opened_before in [false, true] {
-                let record = EpochStatus {
-                    current,
-                    highest_held,
-                };
-                assert!(
-                    matches!(
-                        unopened(code, class, request.epoch, opened_before, record),
-                        Unopened::Hold { .. }
-                    ),
-                    "{record:?} opened before: {opened_before}"
-                );
-            }
+            let record = EpochStatus {
+                current,
+                highest_held,
+            };
+            assert!(
+                matches!(
+                    unopened(code, class, request.epoch, record),
+                    Unopened::Hold {
+                        missing: Some(epoch),
+                        ..
+                    } if epoch == request.epoch
+                ),
+                "{record:?}"
+            );
         }
     }
 

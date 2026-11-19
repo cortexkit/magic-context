@@ -1,7 +1,6 @@
-//! Replication cases the engine gets wrong today.
-//! Each test describes the case and checks how the engine must behave. Each
-//! is ignored until the engine is fixed, and fails when run with
-//! `--ignored`.
+//! Replication cases around a stream made anew, a fact's surviving memory
+//! and deletes no subject reaches. Each test describes the case and checks
+//! how the engine must behave.
 //!
 //! - The hub's stream made anew while a computer's engine keeps running on
 //!   the same connection.
@@ -99,7 +98,6 @@ impl Hub for SameConnection {
 /// otherwise A never reads B's memory, and B never gets A's, until A's
 /// engine happens to start again.
 #[tokio::test]
-#[ignore = "witness of a defect: the stream's identity is checked only when an engine starts"]
 async fn a_stream_made_anew_under_a_running_engine_is_read_from_its_start() {
     let old = InMemoryHub::new();
     let hub = Arc::new(SameConnection(Mutex::new(Arc::clone(&old))));
@@ -151,7 +149,6 @@ async fn a_stream_made_anew_under_a_running_engine_is_read_from_its_start() {
 /// is the newest change of the memory, so both computers must end with it,
 /// not with the older text B never changed.
 #[tokio::test]
-#[ignore = "witness of a defect: a stream made anew is sent each row at its local revision, raised ones included"]
 async fn after_the_stream_is_made_anew_an_edit_beats_an_older_copy_that_missed_it() {
     let old = InMemoryHub::new();
     let (a, b) = (Computer::new(&old, 1), Computer::new(&old, 2));
@@ -190,7 +187,6 @@ async fn after_the_stream_is_made_anew_an_edit_beats_an_older_copy_that_missed_i
 /// next send. That edit is a change like any other, and both computers
 /// must end with it.
 #[tokio::test]
-#[ignore = "witness of a defect: a row queued again for a stream made anew shares a message id with a send already fixed"]
 async fn an_edit_made_after_the_stream_is_made_anew_reaches_every_computer() {
     let old = InMemoryHub::new();
     let (a, b) = (Computer::new(&old, 1), Computer::new(&old, 2));
@@ -232,7 +228,6 @@ async fn an_edit_made_after_the_stream_is_made_anew_reaches_every_computer() {
 /// left holding it, is live there. A must decide the same for its own
 /// delete.
 #[tokio::test]
-#[ignore = "witness of a defect: a local delete of a fact's surviving memory leaves the memories archived for it archived"]
 async fn deleting_the_surviving_memory_of_a_fact_on_its_own_computer_brings_the_other_back_there_too(
 ) {
     let hub = InMemoryHub::new();
@@ -269,7 +264,6 @@ async fn deleting_the_surviving_memory_of_a_fact_on_its_own_computer_brings_the_
 /// still holds the memory under the owner it was sent under, must delete it
 /// too.
 #[tokio::test]
-#[ignore = "witness of a defect: a tombstone whose owner no subject can name is never sent"]
 async fn a_delete_of_a_memory_filed_where_no_subject_reaches_still_reaches_every_computer() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
@@ -293,7 +287,6 @@ async fn a_delete_of_a_memory_filed_where_no_subject_reaches_still_reaches_every
 /// a new memory on A. It must still reach B: deletes that can never be sent
 /// must not keep every later change from being sent.
 #[tokio::test]
-#[ignore = "witness of a defect: unsendable tombstones stay pending and fill every round's claim"]
 async fn deletes_that_can_never_be_sent_dont_stop_later_changes_from_being_sent() {
     let hub = InMemoryHub::new();
     let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));

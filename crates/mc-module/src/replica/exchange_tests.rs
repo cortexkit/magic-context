@@ -1047,3 +1047,123 @@ async fn a_delete_in_the_old_streams_history_reaches_every_computer_after_the_st
         "the deleted memory is gone from B, not only archived"
     );
 }
+
+/// The hub's stream is restored from a backup of the hub, which keeps the
+/// stream's creation time but holds fewer messages than A had read, and
+/// another computer sends past A's position before A starts again. The
+/// message the stream now holds at A's position is another one than A read
+/// there, so the stream was made anew all the same: A must read it from
+/// its start, or it skips C's first memories for good, and must send its
+/// rows again, or C never gets the ones the backup lost.
+#[tokio::test]
+async fn a_stream_restored_with_the_same_creation_time_is_read_from_its_start() {
+    let old = InMemoryHub::named("a stream later restored from a backup");
+    let a = Computer::new(&old, 1);
+    for text in [
+        "First memory on A.",
+        "Second memory on A.",
+        "Third memory on A.",
+    ] {
+        memory(&a, "pj-a", text);
+    }
+    a.sync().await;
+    assert_eq!(a.replica.position().unwrap(), 3);
+
+    let restored = InMemoryHub::named("a stream later restored from a backup");
+    let kept = old.messages()[0].clone();
+    restored.inject(&kept.subject, kept.message_id.as_deref(), kept.payload);
+    let c = Computer::new(&restored, 3);
+    for text in ["First memory on C.", "Second memory on C.", "Third memory on C."] {
+        memory(&c, "pj-a", text);
+    }
+    c.sync().await;
+    assert_eq!(restored.messages().len(), 4, "C sent past A's position");
+
+    let a = Computer::open(&restored, 1, a.copy());
+    a.sync().await;
+    c.follow_all().await;
+    let all = [
+        "First memory on A.",
+        "First memory on C.",
+        "Second memory on A.",
+        "Second memory on C.",
+        "Third memory on A.",
+        "Third memory on C.",
+    ];
+    assert_eq!(a.live(), all, "A reads C's memories");
+    assert_eq!(c.live(), all, "A's memories the backup lost reach C");
+}
+
+/// A's send of an edit is stored, but its acknowledgement is lost. B, which
+/// hasn't read it, edits the same memory at the same revision, and its
+/// change is stored after A's. A then sends its edit again after the hub's
+/// duplicate window has passed, and the hub stores it once more. That copy
+/// is the message every computer already applied: every computer must skip
+/// it, so B's edit, later in the stream at the same revision, holds
+/// everywhere, and A must not take the copy for a message of a copy of its
+/// store.
+#[tokio::test]
+async fn a_send_stored_again_after_the_duplicate_window_is_applied_once() {
+    let hub = InMemoryHub::new();
+    let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
+    memory(&a, "pj-a", "Releases need one reviewer.");
+    a.sync().await;
+    b.sync().await;
+    a.execute("UPDATE memories SET content = 'Releases need two reviewers.'");
+    hub.lose_next_acks(1);
+    assert!(a.replica.publish().await.is_err(), "the ack is lost");
+    b.execute("UPDATE memories SET content = 'Releases need three reviewers.'");
+    b.publish_all().await;
+    hub.forget_ids();
+    let store = a.store_id();
+    a.publish_all().await;
+    assert_eq!(hub.messages().len(), 4, "A's edit is stored twice");
+    a.follow_all().await;
+    b.follow_all().await;
+    for computer in [&a, &b] {
+        assert_eq!(contents(computer), ["Releases need three reviewers."]);
+    }
+    assert_eq!(a.store_id(), store, "A knows its own message");
+}
+
+/// A person on A edits a memory, and the send is never confirmed. Then B
+/// deletes the memory, and A applies the delete. The hub's stream is made
+/// anew, and A sends the delete to it again, as every deleted row's. A's
+/// unconfirmed edit must not settle that delete away when it comes back
+/// from the new stream: a computer that joins the new stream must not hold
+/// the memory.
+#[tokio::test]
+async fn a_delete_sent_to_a_stream_made_anew_is_never_settled_by_an_older_own_change() {
+    let old = InMemoryHub::new();
+    let (a, b) = (Computer::new(&old, 1), Computer::new(&old, 2));
+    let gone = memory(&a, "pj-a", "Deleted on B, edited on A.");
+    a.sync().await;
+    b.sync().await;
+    a.execute("UPDATE memories SET content = 'Edited on A before the delete arrived.'");
+    old.refuse_next(1);
+    assert!(a.replica.publish().await.is_err(), "A's edit is unconfirmed");
+    b.db.with_connection(|conn| {
+        let tx = conn.transaction().unwrap();
+        crate::memory_writes::person::purge(&tx, gone).unwrap();
+        tx.commit().unwrap();
+    });
+    b.sync().await;
+    a.follow_all().await;
+    assert_eq!(a.value::<i64>("SELECT COUNT(*) FROM memories"), 0);
+
+    let new = InMemoryHub::new();
+    let a = Computer::open(&new, 1, a.copy());
+    a.replica.join().await.unwrap();
+    // The first send of this round goes through; the next is refused.
+    new.refuse_after(1);
+    let _ = a.replica.publish().await;
+    a.replica.round().await.unwrap();
+    a.publish_all().await;
+    let c = Computer::new(&new, 3);
+    c.sync().await;
+    assert_eq!(
+        c.value::<i64>("SELECT COUNT(*) FROM memories"),
+        0,
+        "the delete reached the new stream"
+    );
+}

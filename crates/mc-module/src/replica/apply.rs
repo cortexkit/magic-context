@@ -77,12 +77,17 @@ use crate::memory_writes::now_ms;
 
 /// What opening one message gave.
 enum Opening {
-    /// Its body, and the epoch it was sealed under.
-    Body(Body, u64),
+    /// Its body.
+    Body(Body),
     /// It can never be applied, for this reason: recorded and skipped.
     Skip(String),
-    /// It may open later: the round ends before it.
-    Hold { why: String, alert: bool },
+    /// It may open later: the round ends before it. `missing` is the fleet
+    /// epoch this computer's vault doesn't hold, when that is why.
+    Hold {
+        why: String,
+        alert: bool,
+        missing: Option<u64>,
+    },
 }
 
 impl Replica {
@@ -90,8 +95,15 @@ impl Replica {
     /// Returns how many were read. A round that can't apply a message for
     /// this computer's own reasons stops before it, with the position
     /// after the last message applied, to read it again. Rows to read again
-    /// from the stream ([`reconcile`]) are read first.
+    /// from the stream ([`reconcile`]) are read first. A read that starts a
+    /// new consumer on the hub first checks that the stored position still
+    /// belongs to the stream ([`Replica::check_stream`]): a hub that lost
+    /// its storage and made the stream again only ends the consumer, and
+    /// the engine may run on for long after.
     pub async fn follow(&self) -> Result<usize, String> {
+        if self.hub.starts_consumer(self.position()?).await {
+            self.check_stream().await?;
+        }
         self.restore().await?;
         let after = self.position()?;
         let messages = self
@@ -104,16 +116,24 @@ impl Replica {
         }
         let openings = self.open(&messages).await?;
         for (message, opening) in messages.iter().zip(openings) {
-            let (body, epoch) = match opening {
-                Opening::Body(body, epoch) => (Ok(body), Some(epoch)),
-                Opening::Skip(reason) => (Err(reason), None),
-                Opening::Hold { why, alert } => {
-                    return Err(self.hold(&format!("opening {}: {why}", message.seq), alert))
+            let body = match opening {
+                Opening::Body(body) => Ok(body),
+                Opening::Skip(reason) => Err(reason),
+                Opening::Hold {
+                    why,
+                    alert,
+                    missing,
+                } => {
+                    return Err(self.hold(
+                        &format!("opening {}: {why}", message.seq),
+                        alert,
+                        missing,
+                    ))
                 }
             };
             let changes = self
                 .db
-                .with_connection(|conn| apply_message(conn, &self.box_id, message, body, epoch))
+                .with_connection(|conn| apply_message(conn, &self.box_id, message, body))
                 .map_err(|error| format!("applying {}: {error}", message.seq))?;
             self.release();
             for change in changes {
@@ -132,8 +152,30 @@ impl Replica {
     /// Hold the stream at a message that may open later: log `why` once,
     /// at error level when `alert`, and return it as the round's error. The
     /// replica task reads it again after its backoff, or at once when the
-    /// epoch record changes ([`super::live`]).
-    fn hold(&self, why: &str, alert: bool) -> String {
+    /// epoch record changes ([`super::live`]). A hold for a fleet epoch
+    /// this computer's vault doesn't hold (`missing`) stops every send
+    /// until the vault gets the key, so it is recorded in the store, with
+    /// the epoch and since when ([`super::hold_status`]), and logged at
+    /// error level once per epoch, across restarts of the engine too.
+    fn hold(&self, why: &str, alert: bool, missing: Option<u64>) -> String {
+        if let Some(epoch) = missing {
+            match self
+                .db
+                .with_connection(|conn| super::record_hold(conn, epoch, why))
+            {
+                Ok(first) => {
+                    if first {
+                        tracing::error!(
+                            "ck-mc: replica: the memory stream is held for fleet epoch {epoch}, whose key this computer's vault doesn't hold; nothing is sent until it does: {why}"
+                        );
+                    }
+                    return why.to_owned();
+                }
+                Err(error) => tracing::debug!(
+                    "ck-mc: replica: recording the hold for fleet epoch {epoch} failed: {error}"
+                ),
+            }
+        }
         let mut held = self
             .held
             .lock()
@@ -189,18 +231,11 @@ impl Replica {
                     return Err(self.hold(
                         &format!("opening: the vault refused the call: {error}"),
                         error.code == INVALID_PARAMS,
+                        None,
                     ))
                 }
             }
         };
-        // An epoch the vault opened any message of in this same call is one
-        // it holds, as much as one it opened before.
-        let opened_now: std::collections::HashSet<u64> = inputs
-            .iter()
-            .zip(&opened)
-            .filter(|(_, opened)| matches!(opened, Opened::Plaintext(_)))
-            .map(|(input, _)| input.epoch)
-            .collect();
         let mut opened = opened.into_iter();
         let mut status: Option<EpochStatus> = None;
         let mut openings = Vec::with_capacity(messages.len());
@@ -215,7 +250,7 @@ impl Replica {
             openings.push(match opened.next() {
                 Some(Opened::Plaintext(bytes)) => match decode(&bytes, &envelope, &message.subject)
                 {
-                    Ok(body) => Opening::Body(body, envelope.epoch),
+                    Ok(body) => Opening::Body(body),
                     Err(reason) => Opening::Skip(reason),
                 },
                 Some(Opened::Refused { code, .. }) if code == super::seal::ENVELOPE_INVALID => {
@@ -228,19 +263,23 @@ impl Replica {
                         Some(status) => status,
                         None => *status.insert(self.epochs.status().await),
                     };
-                    let seen = opened_now.contains(&envelope.epoch)
-                        || self
-                            .db
-                            .with_connection(|conn| opened_before(conn, envelope.epoch))
-                            .map_err(|error| error.to_string())?;
-                    match unopened(&code, &class, envelope.epoch, seen, status) {
+                    match unopened(&code, &class, envelope.epoch, status) {
                         Unopened::Skip(reason) => Opening::Skip(reason),
-                        Unopened::Hold { why, alert } => Opening::Hold { why, alert },
+                        Unopened::Hold {
+                            why,
+                            alert,
+                            missing,
+                        } => Opening::Hold {
+                            why,
+                            alert,
+                            missing,
+                        },
                     }
                 }
                 None => Opening::Hold {
                     why: "the vault gave no answer for it".into(),
                     alert: false,
+                    missing: None,
                 },
             });
         }
@@ -275,14 +314,19 @@ impl Replica {
                     .expect("one opening per message"),
             };
             let changes = match (message, opening) {
-                (_, Opening::Hold { why, alert }) => {
-                    return Err(self.hold(&format!("opening {seq} again: {why}"), alert))
+                (
+                    _,
+                    Opening::Hold {
+                        why,
+                        alert,
+                        missing,
+                    },
+                ) => {
+                    return Err(self.hold(&format!("opening {seq} again: {why}"), alert, missing))
                 }
-                (Some(message), Opening::Body(body, epoch)) if body.global_id == global => self
+                (Some(message), Opening::Body(body)) if body.global_id == global => self
                     .db
-                    .with_connection(|conn| {
-                        restore_message(conn, &self.box_id, &message, &body, Some(epoch))
-                    })
+                    .with_connection(|conn| restore_message(conn, &self.box_id, &message, &body))
                     .map_err(|error| format!("applying {seq} again: {error}"))?,
                 (_, opening) => {
                     let why = match opening {
@@ -307,15 +351,6 @@ impl Replica {
         }
         Ok(())
     }
-}
-
-/// Whether this computer has opened a message sealed under `epoch`.
-fn opened_before(conn: &Connection, epoch: u64) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM replica_epochs WHERE epoch = ?1)",
-        [epoch as i64],
-        |row| row.get(0),
-    )
 }
 
 /// The body of an opened message, checked against the envelope and the
@@ -464,25 +499,16 @@ enum Applied {
 /// Apply one message in its own transaction, or record why it was skipped;
 /// either way the stream position moves past it. A store error leaves the
 /// position where it was: the transaction rolls back, nothing of the
-/// message stays, and it is read again on the next round. `epoch` is the
-/// fleet epoch the message opened under, recorded as one this computer's
-/// vault holds.
+/// message stays, and it is read again on the next round.
 fn apply_message(
     conn: &mut Connection,
     box_id: &str,
     message: &HubMessage,
     body: Result<Body, String>,
-    epoch: Option<u64>,
 ) -> rusqlite::Result<Vec<Change>> {
     let global = body.as_ref().ok().map(|body| body.global_id.clone());
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute("INSERT INTO replica_applying (applying) VALUES (1)", [])?;
-    if let Some(epoch) = epoch {
-        tx.execute(
-            "INSERT OR IGNORE INTO replica_epochs (epoch) VALUES (?1)",
-            [epoch as i64],
-        )?;
-    }
     let applied = match &body {
         Ok(body) => apply_body(&tx, box_id, message.seq, &message.subject, body)?,
         Err(reason) => Applied::Skipped(reason.clone()),
@@ -494,7 +520,7 @@ fn apply_message(
             Vec::new()
         }
     };
-    advance(&tx, message.seq)?;
+    advance(&tx, message)?;
     tx.execute("DELETE FROM replica_applying", [])?;
     tx.commit()?;
     Ok(changes)
@@ -510,16 +536,9 @@ fn restore_message(
     box_id: &str,
     message: &HubMessage,
     body: &Body,
-    epoch: Option<u64>,
 ) -> rusqlite::Result<Vec<Change>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute("INSERT INTO replica_applying (applying) VALUES (1)", [])?;
-    if let Some(epoch) = epoch {
-        tx.execute(
-            "INSERT OR IGNORE INTO replica_epochs (epoch) VALUES (?1)",
-            [epoch as i64],
-        )?;
-    }
     let queued = tx.execute(
         "DELETE FROM replica_restore WHERE global_id = ?1 AND seq = ?2",
         params![body.global_id, message.seq as i64],
@@ -568,10 +587,18 @@ fn reject(
     Ok(())
 }
 
-fn advance(tx: &Connection, seq: u64) -> rusqlite::Result<()> {
+/// The stream position moves past `message`: its sequence and message id
+/// are stored, so the next consumer can check that the stream still holds
+/// this message there ([`Replica::check_stream`]). A hold recorded for a
+/// message before it is over.
+fn advance(tx: &Connection, message: &HubMessage) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE replica_state SET stream_seq = MAX(stream_seq, ?1) WHERE id = 1",
-        [seq as i64],
+        "UPDATE replica_state
+            SET stream_message_id = CASE WHEN ?1 >= stream_seq THEN ?2 ELSE stream_message_id END,
+                stream_seq = MAX(stream_seq, ?1),
+                held_epoch = NULL, held_since = NULL, held_why = NULL
+          WHERE id = 1",
+        params![message.seq as i64, message.message_id],
     )?;
     Ok(())
 }
@@ -644,13 +671,51 @@ fn own_known(tx: &Connection, body: &Body) -> rusqlite::Result<bool> {
     )
 }
 
-/// Record that the message at `seq` (of `revision`) decides `global`'s row.
-fn decides(tx: &Connection, global: &str, revision: i64, seq: u64) -> rusqlite::Result<()> {
+/// Record that the message at `seq`, `body` on `subject`, decides its
+/// row: its revision and sequence; its sender, among the senders applied
+/// at that revision, so a later copy of the same message is skipped
+/// ([`applied_before`]); and its subject, where the row's tombstone goes
+/// ([`super::schema`]).
+fn decides(tx: &Connection, body: &Body, seq: u64, subject: &str) -> rusqlite::Result<()> {
+    let (level, owner) = subject_owner(subject);
     tx.execute(
-        "UPDATE replica_ids SET revision = ?2, seq = ?3 WHERE global_id = ?1",
-        params![global, revision, seq as i64],
+        "UPDATE replica_ids SET revision = ?2, seq = ?3, subject = ?4, level = ?5, owner = ?6
+          WHERE global_id = ?1",
+        params![
+            body.global_id,
+            body.revision,
+            seq as i64,
+            subject,
+            level,
+            owner
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM replica_applied WHERE global_id = ?1 AND revision <> ?2",
+        params![body.global_id, body.revision],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO replica_applied (global_id, revision, sender) VALUES (?1, ?2, ?3)",
+        params![body.global_id, body.revision, body.writer.store_id],
     )?;
     Ok(())
+}
+
+/// Whether this computer applied `body`'s message before: the same global
+/// id, revision and sender as a message applied at the row's deciding
+/// revision. JetStream stores a message id once only within its duplicate
+/// window, so a send tried again after that window is stored again, later
+/// in the stream. Every computer skips that copy alike, so it never wins
+/// over a change another computer made at the same revision meanwhile, and
+/// the store that sent it doesn't take it for a message of a copy of
+/// itself.
+fn applied_before(tx: &Connection, body: &Body) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replica_applied
+                        WHERE global_id = ?1 AND revision = ?2 AND sender = ?3)",
+        params![body.global_id, body.revision, body.writer.store_id],
+        |row| row.get(0),
+    )
 }
 
 fn apply_body(
@@ -661,6 +726,12 @@ fn apply_body(
     body: &Body,
 ) -> rusqlite::Result<Applied> {
     let table = table(&body.kind);
+    if body.change != "delete" && applied_before(tx, body)? {
+        return Ok(Applied::Skipped(format!(
+            "a copy of {}@{} from {}, applied here before: a send tried again after the hub's duplicate window",
+            body.global_id, body.revision, body.writer.store_id
+        )));
+    }
     let own = body.writer.box_id == box_id && own_known(tx, body)?;
     if !own && body.writer.store_id == super::store_id(tx)? {
         super::new_store_id(
@@ -682,7 +753,19 @@ fn apply_body(
         if own {
             settle_own(tx, body)?;
         }
-        return Ok(Applied::Changed(Vec::new()));
+        // A memory deleted here may have held a fact for memories archived
+        // here for it. Every computer that still held it decides that fact
+        // again when it applies the tombstone; this computer does the same
+        // at the same place in the stream, whoever's tombstone comes first.
+        let mut changes = Vec::new();
+        if let ("delete", true, Some(local)) = (
+            body.change.as_str(),
+            table.kind == MEMORIES.kind,
+            found.as_ref().and_then(|found| found.local),
+        ) {
+            changes = survivor_deleted(tx, local)?;
+        }
+        return Ok(Applied::Changed(changes));
     }
     if body.change == "delete" {
         return tombstone(tx, table, body, subject, local).map(Applied::Changed);
@@ -700,7 +783,7 @@ fn apply_body(
         // outbox rows that waited for it are settled.
         let mut changes = Vec::new();
         if winner {
-            decides(tx, &body.global_id, body.revision, seq)?;
+            decides(tx, body, seq, subject)?;
             // The row shows this change, or a later one of this computer's
             // written over it.
             let own_row: Option<i64> = tx.query_row(
@@ -735,7 +818,7 @@ fn apply_body(
         }
         let snapshot = body.snapshot.as_ref().expect("checked when decoded");
         let local = insert(tx, table, body, snapshot)?;
-        decides(tx, &body.global_id, body.revision, seq)?;
+        decides(tx, body, seq, subject)?;
         written(tx, &body.global_id, None)?;
         let mut changes = Vec::new();
         if table.kind == MEMORIES.kind {
@@ -751,7 +834,7 @@ fn apply_body(
         // have fenced a change of this computer's own.
         return reconcile(tx, box_id, table, local).map(Applied::Changed);
     }
-    decides(tx, &body.global_id, body.revision, seq)?;
+    decides(tx, body, seq, subject)?;
     arrive(tx, box_id, table, local, seq, body).map(Applied::Changed)
 }
 
@@ -1838,17 +1921,22 @@ fn tombstone(
         )?;
     }
     tx.execute(
-        "INSERT INTO replica_ids (kind, global_id, local_id, deleted_at, level, owner)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO replica_ids (kind, global_id, local_id, deleted_at, level, owner, subject)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT (global_id) DO UPDATE SET deleted_at = excluded.deleted_at,
-             level = excluded.level, owner = excluded.owner",
-        params![table.kind, body.global_id, local, now, level, owner],
+             level = excluded.level, owner = excluded.owner, subject = excluded.subject",
+        params![table.kind, body.global_id, local, now, level, owner, subject],
     )?;
     tx.execute(
         "DELETE FROM replica_pending_links WHERE target_global_id = ?1",
         [&body.global_id],
     )?;
-    for gone in ["replica_passed", "replica_restore", "replica_fences"] {
+    for gone in [
+        "replica_passed",
+        "replica_restore",
+        "replica_fences",
+        "replica_applied",
+    ] {
         tx.execute(
             &format!("DELETE FROM {gone} WHERE global_id = ?1"),
             [&body.global_id],
@@ -2012,4 +2100,75 @@ fn survivor_gone(tx: &Connection, local: i64) -> rusqlite::Result<bool> {
         }
     }
     Ok(changed)
+}
+
+/// [`survivor_gone`] for memory `local`, deleted here: the change notices
+/// of the memories its delete put back are returned, to be reported.
+fn survivor_deleted(tx: &Connection, local: i64) -> rusqlite::Result<Vec<Change>> {
+    let aside: Vec<i64> = tx
+        .prepare("SELECT local_id FROM replica_derived WHERE survivor = ?1")?
+        .query_map([local], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !survivor_gone(tx, local)? {
+        return Ok(Vec::new());
+    }
+    let mut changes = Vec::new();
+    for id in aside {
+        changes.extend(owner_change(tx, &MEMORIES, id)?);
+    }
+    changes.dedup();
+    Ok(changes)
+}
+
+/// Memory `local` was deleted here before any change of it was sent, so no
+/// tombstone of it goes out and none comes back ([`super::publish`]): the
+/// memories archived here because it held their fact are decided again
+/// now, under the apply marker, so the capture triggers stay quiet. No
+/// other computer ever held it, so none of them archived anything for it.
+pub(crate) fn unsent_survivor_gone(tx: &Connection, local: i64) -> rusqlite::Result<Vec<Change>> {
+    tx.execute("INSERT INTO replica_applying (applying) VALUES (1)", [])?;
+    let changes = survivor_deleted(tx, local)?;
+    tx.execute("DELETE FROM replica_applying", [])?;
+    Ok(changes)
+}
+
+/// The revision row `local` of `table`, global id `global`, is sent at to a
+/// stream made anew, read before the old stream's order is forgotten.
+///
+/// It is the revision the old stream decided the row at, not the row's
+/// own revision here: a computer raises its own revision with nothing
+/// replicated changed (a fact seen again), or past the deciding one when it
+/// applies an arrival, and a computer that missed a change of the row would
+/// otherwise send its older copy above that change. Only a change of this
+/// computer's own that the old stream never brought back, and that would
+/// still have decided the row once it landed, goes above the deciding
+/// revision: at its own revision, and at least one above, since on the
+/// old stream it would have landed after the deciding message. A row the
+/// old stream never decided is sent at its own revision.
+pub(crate) fn resend_revision(
+    tx: &Connection,
+    table: &Table,
+    local: i64,
+    global: &str,
+) -> rusqlite::Result<i64> {
+    let deciding = known(tx, global)?.and_then(|found| found.revision);
+    let fence = match local_role(tx, table, local)? {
+        Some(role) => fence_of(tx, global, &role)?,
+        None => None,
+    };
+    let ahead = own_changes(tx, table, local)?
+        .iter()
+        .filter(|own| can_win(own, deciding.unwrap_or(0), fence))
+        .map(|own| own.revision)
+        .max();
+    Ok(match (ahead, deciding) {
+        (Some(own), Some(deciding)) => own.max(deciding + 1),
+        (Some(own), None) => own,
+        (None, Some(deciding)) => deciding,
+        (None, None) => tx.query_row(
+            &format!("SELECT revision FROM {} WHERE id = ?1", table.name),
+            [local],
+            |row| row.get(0),
+        )?,
+    })
 }

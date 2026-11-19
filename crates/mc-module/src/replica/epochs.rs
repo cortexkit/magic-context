@@ -9,13 +9,15 @@
 //! the engine holds its position before it and reads it again
 //! ([`super::apply`]). Only a message the vault can never open is skipped.
 //!
-//! [`unopened`] decides which, in one place. It reads the vault's refusal
-//! code and the hub's epoch record as Entorhinal reports it
-//! ([`FleetEpochs`], `fleet.epoch_current`): `current`, the hub's current
+//! [`unopened`] decides which, in one place, from the vault's own refusal
+//! code alone. The hub's epoch record as Entorhinal reports it
+//! ([`FleetEpochs`], `fleet.epoch_current`: `current`, the hub's current
 //! epoch as this computer last saw it, and `highest_held`, the highest
-//! epoch this computer's vault holds. Either may be unknown. When a member
-//! changes, Entorhinal bumps its `fleet_epoch` marker, and the replica task
-//! reads a held message again at once ([`super::live`]).
+//! epoch this computer's vault holds) never decides a skip, because a vault
+//! can hold an epoch and miss one below it; it only says, in the hold's
+//! reason, when a retry may help. When a member changes, Entorhinal bumps
+//! its `fleet_epoch` marker, and the replica task reads a held message
+//! again at once ([`super::live`]).
 
 use std::sync::Arc;
 
@@ -128,63 +130,59 @@ impl FleetEpochs for EntorhinalEpochs {
 pub enum Unopened {
     /// The message may open later: the engine holds its position before
     /// it and reads it again. `alert` asks for an error-level log line,
-    /// for a state someone should look at.
-    Hold { why: String, alert: bool },
+    /// for a state someone should look at. `missing` is the fleet epoch
+    /// this computer's vault doesn't hold, when that is why: the engine
+    /// records that hold for the person to see ([`super::hold_status`]).
+    Hold {
+        why: String,
+        alert: bool,
+        missing: Option<u64>,
+    },
     /// The message can never open: it is recorded and skipped.
     Skip(String),
 }
 
-/// The vault's code for an item it can't open with the epoch key it holds
-/// (a tag, additional data or caller domain that doesn't match). Today's
-/// vault also gives it for an epoch it doesn't hold.
+/// The vault's code for an item of an epoch whose key it holds that still
+/// doesn't open: its bytes, additional data or caller domain don't
+/// authenticate. The message never opens anywhere.
 pub const OPEN_FAILED: &str = "fleet_epoch_open_failed";
 
+/// The vault's code for an item of an epoch whose key it doesn't hold.
+pub const UNAVAILABLE: &str = "fleet_epoch_unavailable";
+
 /// What the vault's refusal `code` (of `class`) to open a message sealed
-/// under `epoch` means, given whether this computer has opened a message
-/// of that epoch before (`opened`) and the epoch record `status`.
+/// under `epoch` means. The vault's own answer decides; the epoch record
+/// `status` only says, in the hold's reason, what this computer last read
+/// of the hub's epochs.
 ///
-/// - An epoch above the hub's current one is held, and alerted: the cached
-///   record may lag a rotation another computer just made, and its marker
-///   brings the retry once it catches up.
-/// - `fleet_epoch_open_failed` is skipped for good for an epoch the vault
-///   holds (at or below `highest_held`): the key is there and still doesn't
-///   open the message. For an epoch above it, the vault hasn't received
-///   that epoch's key yet, so it is held. While `highest_held` is unknown, only an epoch
-///   this computer has opened before counts as held by the vault.
+/// - `fleet_epoch_open_failed` is skipped for good, whatever the epoch:
+///   the vault holds that epoch's key, and the message doesn't
+///   authenticate under it. (Sharing is never switched on against an
+///   older vault, which answered it for an epoch it lacked as well.)
+/// - `fleet_epoch_unavailable` is held, and alerted: the vault doesn't
+///   hold the epoch's key yet. Nothing is sent meanwhile, so the person
+///   must see it and get the key to the vault; the engine records the hold
+///   with the epoch it waits for.
 /// - `corrupt` is the vault's own copy of the key damaged, not the
 ///   message: held, and alerted.
-/// - Every other code (`fleet_epoch_unavailable`, `store_error`, or one this
-///   build doesn't know) is held.
-pub fn unopened(
-    code: &str,
-    class: &str,
-    epoch: u64,
-    opened: bool,
-    status: EpochStatus,
-) -> Unopened {
-    if let Some(current) = status.current.filter(|current| epoch > *current) {
+/// - Every other code (`store_error`, or one this build doesn't know) is
+///   held.
+pub fn unopened(code: &str, class: &str, epoch: u64, status: EpochStatus) -> Unopened {
+    if code == OPEN_FAILED {
+        return Unopened::Skip(format!(
+            "not opened: {code} under epoch {epoch}, which this computer's vault holds"
+        ));
+    }
+    if code == UNAVAILABLE {
+        let known = |value: Option<u64>| value.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
         return Unopened::Hold {
             why: format!(
-                "the vault answered {code} ({class}) for epoch {epoch}, above the hub's current epoch {current} as this computer last read it; it is read again when the epoch record changes"
+                "the vault answered {code} ({class}) for epoch {epoch}: this computer's vault doesn't hold that epoch's key, so nothing is sent until it does (the hub's current epoch is {}, and the highest this vault holds is {}, as last read); it is read again when the epoch record changes",
+                known(status.current),
+                known(status.highest_held)
             ),
             alert: true,
-        };
-    }
-    if code == OPEN_FAILED {
-        let held_by_vault = match status.highest_held {
-            Some(highest) => epoch <= highest,
-            None => opened,
-        };
-        if held_by_vault {
-            return Unopened::Skip(format!(
-                "not opened: {code} under epoch {epoch}, which this computer's vault holds"
-            ));
-        }
-        return Unopened::Hold {
-            why: format!(
-                "the vault answered {code} for epoch {epoch}, whose key this computer's vault doesn't hold yet; it is read again when the key arrives"
-            ),
-            alert: false,
+            missing: Some(epoch),
         };
     }
     Unopened::Hold {
@@ -192,6 +190,7 @@ pub fn unopened(
             "the vault answered {code} ({class}) for epoch {epoch}; it is read again later"
         ),
         alert: code == "corrupt",
+        missing: None,
     }
 }
 

@@ -34,7 +34,10 @@
 //! connection lost or made again (a restarted server has forgotten the
 //! consumer), or any JetStream error. The engine's round ends there, and the
 //! next read makes a new consumer from the stored position, so no message is
-//! skipped and none is applied twice.
+//! skipped and none is applied twice. Before it reads from a new consumer,
+//! the engine checks that its position still belongs to the stream
+//! ([`Hub::starts_consumer`]): a server that restarted with its storage lost
+//! made the stream again, and only the consumer's end says so.
 //!
 //! [`HubStream`] is the seam between these decisions and the server: the few
 //! JetStream calls they need. [`JetStream`] makes them against a server; the
@@ -421,6 +424,14 @@ impl Hub for NatsHub {
 
     async fn ack(&self, _seq: u64) -> Result<(), HubError> {
         Ok(())
+    }
+
+    async fn starts_consumer(&self, after: u64) -> bool {
+        self.follower
+            .lock()
+            .await
+            .as_ref()
+            .is_none_or(|follower| follower.read_to != after)
     }
 }
 
