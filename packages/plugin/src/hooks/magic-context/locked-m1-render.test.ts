@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
@@ -13,6 +13,7 @@ import {
     prepareCachedM0M1Replay,
     renderM1,
 } from "./inject-compartments";
+import * as formatting from "./read-session-formatting";
 
 function options(f: LockedDeltaFixture, render: LockedDeltaOptions) {
     return {
@@ -65,6 +66,26 @@ function rawHistory(sessionID: string) {
         parts: [{ type: "text", text: `original raw ${n}` }],
     }));
 }
+
+test("a defer does not tokenize frozen history to check refold drift", () => {
+    const f = createLockedDeltaFixture("defer-drift-sizing");
+    try {
+        appendCompartments(f.db, f.sessionId, [historyRange(0, 0, 0)]);
+        const first = injectM0M1(options(f, {}));
+        const before = first.m0Bytes?.toString("utf8");
+        const estimate = spyOn(formatting, "estimateTokens");
+        try {
+            const defer = injectM0M1({ ...options(f, {}), isCacheBustingPass: false });
+            expect(defer.m0Bytes?.toString("utf8")).toBe(before);
+            expect(defer.m1Text).toBe(first.m1Text);
+            expect(estimate.mock.calls.filter(([text]) => text === before)).toHaveLength(0);
+        } finally {
+            estimate.mockRestore();
+        }
+    } finally {
+        f.close();
+    }
+});
 
 for (const hasOlderCut of [false, true]) {
     test(`defer keeps raw history beyond the captured ${hasOlderCut ? "existing" : "empty"} cut`, () => {

@@ -4554,21 +4554,20 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     // ~15% of m[0] tokens". XML-heavy / non-Latin content makes char length
     // diverge sharply from token count, so the ratio must compare tokens on both
     // sides. Computed once; this branch is rare (cache-busting + m1Recomputed).
-    const m1HasContent = m1Text !== M1_EMPTY_PLACEHOLDER;
-    const m1Tokens = m1HasContent ? estimateTokens(m1Text) : 0;
-    const m0Tokens = estimateTokens(m0Text);
-    const m1OverAbsoluteCap = m1HasContent && m1Tokens > m1AbsoluteBudget;
-    if (
-        !rematerialized &&
-        !contentionExhausted &&
-        m1Recomputed &&
-        options.isCacheBustingPass &&
-        (memoryUpdateCount > 40 ||
-            m1OverAbsoluteCap ||
-            (m1HasContent &&
-                m0Tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS &&
-                m1Tokens > m0Tokens * M1_DRIFT_RATIO))
-    ) {
+    let driftNeedsRefold = false;
+    if (!rematerialized && !contentionExhausted && m1Recomputed && options.isCacheBustingPass) {
+        driftNeedsRefold = memoryUpdateCount > 40;
+        if (!driftNeedsRefold && m1Text !== M1_EMPTY_PLACEHOLDER) {
+            const m1Tokens = estimateTokens(m1Text);
+            driftNeedsRefold = m1Tokens > m1AbsoluteBudget;
+            if (!driftNeedsRefold) {
+                const m0Tokens = estimateTokens(m0Text);
+                driftNeedsRefold =
+                    m0Tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS && m1Tokens > m0Tokens * M1_DRIFT_RATIO;
+            }
+        }
+    }
+    if (driftNeedsRefold) {
         try {
             const refolded = materializeWithRetry(options);
             applyMarkersToState(

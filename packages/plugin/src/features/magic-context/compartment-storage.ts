@@ -302,6 +302,14 @@ export function getCompartments(db: Database, sessionId: string): Compartment[] 
     return rows.map(toCompartment);
 }
 
+/** Read the IDs just appended under the writer, in ascending sequence order. */
+export function getNewestCompartmentIds(db: Database, sessionId: string, count: number): number[] {
+    const rows = db
+        .prepare("SELECT id FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT ?")
+        .all(sessionId, count) as Array<{ id: number }>;
+    return rows.reverse().map(({ id }) => id);
+}
+
 /**
  * Highest message ordinal any compartment covers — the line between compacted
  * history and the live tail.

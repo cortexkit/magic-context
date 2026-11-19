@@ -6,6 +6,7 @@ import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment
 import {
     appendCompartments,
     getCompartments,
+    getNewestCompartmentIds,
 } from "../../features/magic-context/compartment-storage";
 import { externalHistorianFailureReason } from "../../features/magic-context/historian-failure-reason";
 import {
@@ -1338,13 +1339,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 return;
             }
             appendCompartments(db, sessionId, persistedCompartments);
-            // v2 (E2): resolve durable ids for the compartments we just appended.
-            // They are the last `persistedCompartments.length` rows by sequence
-            // (appendCompartments inserts at the tail). Used for events anchoring +
-            // embedding. Pure DB read — cheap, no message mutation.
-            persistedIds = getCompartments(db, sessionId)
-                .slice(-persistedCompartments.length)
-                .map((c) => c.id);
+            persistedIds = getNewestCompartmentIds(db, sessionId, persistedCompartments.length);
             // v2 faithful fact lifecycle: facts are NOT a REPLACE-the-whole-list
             // store anymore. The historian emits only THIS chunk's facts (deduped
             // against <project-memory> in the prompt); they flow to project memory
