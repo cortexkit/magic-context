@@ -234,8 +234,24 @@ fn an_old_memory_is_archived_when_there_is_one_live_branch() {
 /// whose archive is refused.
 #[test]
 fn a_memory_that_names_its_branch_is_archived_while_there_are_two_live_branches() {
-    let (fixture, _feature) = agreed_file(true);
-    fixture.insert(&[row(3, "`other` in src/other.rs takes no arguments.")]);
+    let fixture = Fixture::on("master", &[("src/other.rs", "fn other() {}\n")]);
+    let (_feature, worktree) = fixture.repo.worktree("feature");
+    commit_at(
+        &worktree,
+        &[("src/other.rs", "fn other(x: u8) {}\n")],
+        "feature",
+    );
+    // This contradiction only concerns a file introduced on master after
+    // the branches split. The feature branch has no copy of its citations.
+    fixture.repo.write(&[("src/b.rs", "fn beta(x: u8) {}\n")]);
+    fixture.repo.commit("add beta on master");
+    fixture.insert(&[
+        Row {
+            files: vec!["src/b.rs"],
+            ..row(2, "`beta` in src/b.rs takes no arguments at all.")
+        },
+        row(3, "`other` in src/other.rs takes no arguments."),
+    ]);
     learned_on(&fixture, 2, "master");
     let batch = fixture.several(true).remove(0);
     let mut sent = read(&batch);
@@ -292,12 +308,26 @@ fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
     );
     assert_eq!(fixture.memory(2).0, "active");
 
-    // Once that worktree is gone, master is the only live branch and the
-    // archive is applied as before.
+    // Removing the checkout leaves just one live branch, but the keeper
+    // branch still holds the name and protects the memory on its own.
     git_at(
         repo.path(),
         &["worktree", "remove", "--force", worktree.to_str().unwrap()],
     );
+    let batch = fixture.batches(true).remove(0);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(r#"<archive id="2" missing="gone_function"/>"#),
+    );
+    assert_eq!(applied.applied, 0);
+    assert_eq!(
+        applied.dropped,
+        ["memory 2: gone_function is on branch keep (recent, not merged)"]
+    );
+    assert_eq!(fixture.memory(2).0, "active");
+
+    // The default branch's removal is enough once the keeper ref is gone.
+    repo.git(&["branch", "-D", "keep"]);
     let batch = fixture.batches(true).remove(0);
     let applied = fixture.apply(
         &batch,

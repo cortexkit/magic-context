@@ -26,12 +26,20 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use super::branches::{read_blob, Copy};
+use super::branches::{read_blob, Copy, Refs};
 
 /// How long one git command may run before it is killed.
 pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Output past this many bytes is a failure, not a truncated answer.
 const GIT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
+/// The most local branch tips an archive check may search.
+pub(crate) const RECENT_BRANCH_LIMIT: usize = 50;
+const RECENT_BRANCH_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+pub(crate) struct RecentBranch {
+    pub name: String,
+    pub commit: String,
+}
 
 /// How far one literal search may go before it stops and says so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +278,110 @@ impl Checkout {
         ];
         args.extend(self.at.as_deref());
         run_git_within(&self.repo, &args, timeout).map(|listed| names_a_commit(&listed))
+    }
+
+    /// Recent local tips not reachable from the default branch, newest first.
+    /// One extra tip tells the caller that it cannot finish within the limit.
+    pub(crate) fn recent_unmerged_branches(&self) -> Result<Vec<RecentBranch>, String> {
+        let (_, default) = Refs::read(&self.repo)?
+            .default_branch()
+            .ok_or("the default branch could not be resolved")?;
+        let count = format!("--count={}", RECENT_BRANCH_LIMIT + 1);
+        let unmerged = format!("--no-merged={default}");
+        let listed = run_git_within(
+            &self.repo,
+            &[
+                "for-each-ref",
+                &count,
+                &unmerged,
+                "--sort=-committerdate",
+                "--format=%(refname)%09%(objectname)%09%(committerdate:unix)",
+                "refs/heads/",
+            ],
+            GIT_TIMEOUT,
+        )
+        .map_err(|why| {
+            format!("listing local branches not merged into the default branch failed: {why}")
+        })?;
+        let cutoff = crate::memory_writes::now_ms() / 1000 - RECENT_BRANCH_AGE.as_secs() as i64;
+        let mut recent = Vec::new();
+        for line in listed.lines() {
+            let mut fields = line.split('\t');
+            let name = fields
+                .next()
+                .and_then(|field| field.strip_prefix("refs/heads/"));
+            let commit = fields.next().filter(|field| is_commit(field));
+            let date = fields.next().and_then(|field| field.parse::<i64>().ok());
+            let (Some(name), Some(commit), Some(date), None) = (name, commit, date, fields.next())
+            else {
+                return Err("git did not report a name, commit and date for a local branch".into());
+            };
+            if date < cutoff {
+                break;
+            }
+            recent.push(RecentBranch {
+                name: name.to_owned(),
+                commit: commit.to_owned(),
+            });
+        }
+        Ok(recent)
+    }
+
+    /// NUL-separated tracked paths, including folders, at the listed tip.
+    pub(crate) fn branch_paths(
+        &self,
+        branch: &RecentBranch,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        run_git_within(
+            &self.repo,
+            &[
+                "ls-tree",
+                "-r",
+                "-t",
+                "-z",
+                "--name-only",
+                "--full-tree",
+                &branch.commit,
+            ],
+            timeout,
+        )
+    }
+
+    /// Whether a tracked file at the listed tip contains `text` literally.
+    pub(crate) fn branch_has_text(
+        &self,
+        branch: &RecentBranch,
+        text: &str,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        // The usual success-only git wrapper would turn grep's normal
+        // no-match exit into an error, so read the exit code here.
+        let output = run_git_output(
+            &self.repo,
+            &[
+                "grep",
+                "-l",
+                "-F",
+                "--no-textconv",
+                "--no-recurse-submodules",
+                "--threads=1",
+                "-e",
+                text,
+                &branch.commit,
+                "--",
+            ],
+            timeout,
+        )?;
+        match output.code {
+            Some(0) => Ok(true),
+            Some(1) if output.stderr.is_empty() && output.stdout.is_empty() => Ok(false),
+            _ => Err(format!(
+                "git grep failed (exit {:?}): {}",
+                output.code,
+                output.stderr.trim().chars().take(500).collect::<String>()
+            )),
+        }
     }
 
     /// Look for each of `names` as literal bytes in the tracked paths and in

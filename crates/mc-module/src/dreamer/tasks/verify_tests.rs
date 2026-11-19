@@ -326,6 +326,7 @@ pub(crate) fn replay_batch(
         gate,
         history_timeout: HISTORY_TIMEOUT,
         absence: Mutex::default(),
+        archive_branches: Default::default(),
         confirmations: Mutex::default(),
         files: Mutex::default(),
     }

@@ -873,6 +873,7 @@ impl Verify {
                     gate,
                     history_timeout: HISTORY_TIMEOUT,
                     absence: Mutex::default(),
+                    archive_branches: apply::ArchiveBranches::default(),
                     confirmations: Mutex::default(),
                     files: Mutex::default(),
                 });
@@ -1235,6 +1236,8 @@ pub(crate) struct VerifyBatch {
     /// lookups run when the reply is accepted, before the store's write lock
     /// is taken, and the write reads the answer from here.
     absence: Mutex<HashMap<Cite, Absence>>,
+    /// Recent unmerged branches are checked for archives before the write.
+    archive_branches: apply::ArchiveBranches,
     /// Each confirmation's check, by memory and the `cites` and `derive` the
     /// reply gave: the cited lines it rests on, or why it counts as a skip.
     /// The checks run when the reply is accepted, before the store's write
@@ -1354,24 +1357,21 @@ impl TaskInput for VerifyBatch {
 
     fn accepts(&self, reply: &str) -> Result<(), String> {
         let verdicts = parse_manifest(reply, &self.ids())?;
-        for verdict in &verdicts {
-            if let (Decision::Archive, Some(missing)) = (verdict.decision, &verdict.missing) {
-                let read = self.read.iter().find(|read| read.id == verdict.id);
-                if let Some(cite) = read
-                    .map(|read| cites::cites(&read.content, self.checkout.top_level()))
-                    .and_then(|cited| cited.into_iter().find(|cite| cite.text() == missing))
-                {
-                    self.absence(&cite);
-                }
-            }
-        }
         // The live branches are read here too, before the store's write
         // lock is taken, for each change the write will check against them,
         // and so are the lines each confirmation cites.
         self.warm_gate(&verdicts);
         for verdict in &verdicts {
-            if verdict.decision == Decision::Verified {
-                let _ = self.confirmation(verdict);
+            match verdict.decision {
+                Decision::Archive => {
+                    if let Some(read) = self.read.iter().find(|read| read.id == verdict.id) {
+                        self.warm_archive(verdict, read);
+                    }
+                }
+                Decision::Verified => {
+                    let _ = self.confirmation(verdict);
+                }
+                Decision::Update | Decision::Skip => {}
             }
         }
         Ok(())
