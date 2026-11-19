@@ -3657,3 +3657,82 @@ it("Pi shrinking budget refolds an oversized baseline once with empty m1", () =>
 		closeQuietly(db);
 	}
 });
+
+it("prepared Pi replay keeps an uncovered block after recomp", () => {
+	const dir = createTestTempDirFromPath(
+		join(tmpdir(), "mc-pi-prepared-partial-"),
+	);
+	const path = join(dir, "context.db");
+	const db = createTestDb(path);
+	const sibling = createTestDb(path);
+	const sessionId = "pi-prepared-partial";
+	const state = { sessionId, injectDocs: false };
+	try {
+		appendCompartments(db, sessionId, [
+			{
+				sequence: 0,
+				startMessage: 1,
+				endMessage: 2,
+				startMessageId: "old",
+				endMessageId: "cut",
+				endBlockIndex: 0,
+				title: "Partial",
+				content: "Only the first block was summarized.",
+			},
+		]);
+		materializeM0Pi(state, db);
+		const preparedPrefix = prepareCachedM0M1PiReplay(state, db);
+		expect(preparedPrefix?.trimBoundaryId).toBe("cut");
+		const replay = () => {
+			const messages = [
+				userMessage("old", 1),
+				assistant([], "UNCOVERED_SUFFIX"),
+				userMessage("tail", 3),
+			];
+			injectM0M1Pi({ ...state, preparedPrefix }, db, messages, [
+				"old",
+				"cut",
+				"tail",
+			]);
+			return JSON.stringify(messages);
+		};
+		const original = replay();
+		expect(original).toBe(
+			JSON.stringify([
+				{
+					role: "user",
+					content: [
+						{
+							type: "text",
+							text: "<session-history>\n## 1-2 · Partial\n</session-history>",
+						},
+					],
+					timestamp: -1,
+				},
+				{
+					role: "user",
+					content: [
+						{
+							type: "text",
+							text: "<session-history-since>(no new content since last materialization)</session-history-since>",
+						},
+					],
+					timestamp: 0,
+				},
+				userMessage("old", 1),
+				assistant([], "UNCOVERED_SUFFIX"),
+				userMessage("tail", 3),
+			]),
+		);
+		sibling
+			.prepare(
+				"UPDATE compartments SET end_block_index = NULL WHERE session_id = ?",
+			)
+			.run(sessionId);
+		expect(replay()).toBe(original);
+	} finally {
+		closeQuietly(sibling);
+		closeQuietly(db);
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

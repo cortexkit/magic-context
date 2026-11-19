@@ -945,6 +945,14 @@ export function getUncoveredCompartmentEndsThrough(
     }));
 }
 
+/** Read whether the cached summary covers only part of its final message, in the same SELECT as the summary. */
+export const CACHED_TRIM_PARTIAL_SQL = `EXISTS (
+    SELECT 1 FROM compartments
+    WHERE compartments.session_id = session_meta.session_id
+      AND compartments.end_message_id = session_meta.cached_m0_last_baseline_end_message_id
+      AND compartments.end_block_index IS NOT NULL
+)`;
+
 export function isPartialCompartmentEnd(
     db: Database,
     sessionId: string,

@@ -26,7 +26,10 @@
  */
 
 import { MEMORY_MURAL_BLOCK } from "@magic-context/core/agents/magic-context-prompt";
-import { isPartialCompartmentEnd } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	CACHED_TRIM_PARTIAL_SQL,
+	isPartialCompartmentEnd,
+} from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	getMaxMemoryIdForProjects,
 	getMemoriesByProject,
@@ -536,6 +539,7 @@ export interface PiM0M1State {
 		result: PiM0M1InjectionResult;
 		messages: PiAgentMessage[];
 		trimBoundaryId: string | null;
+		trimBoundaryPartial: boolean;
 	};
 	sessionId: string;
 	projectIdentity: string;
@@ -2346,6 +2350,7 @@ export interface CachedPiM0M1Row {
 	cached_m0_model_key: string | null;
 	cached_m0_project_identity: string | null;
 	cached_m0_last_baseline_end_message_id: string | null;
+	cached_trim_partial: number;
 	memory_block_ids: string | null;
 }
 
@@ -2397,6 +2402,7 @@ function readCachedPiM0M1Row(
 					cached_m0_model_key,
 					cached_m0_project_identity,
 					cached_m0_last_baseline_end_message_id,
+					${CACHED_TRIM_PARTIAL_SQL} AS cached_trim_partial,
 					memory_block_ids
 			   FROM session_meta
 			  WHERE session_id = ?`,
@@ -2846,7 +2852,12 @@ function replayCompletePiPrefix(
 		syntheticLeadingCount: insertionIndex + 2,
 	};
 	if (state.freezePrefixForPass)
-		state.preparedPrefix = { result, messages: head, trimBoundaryId };
+		state.preparedPrefix = {
+			result,
+			messages: head,
+			trimBoundaryId,
+			trimBoundaryPartial: row.cached_trim_partial === 1,
+		};
 	return result;
 }
 
@@ -2886,7 +2897,7 @@ export function injectM0M1Pi(
 					prepared.trimBoundaryId,
 					false,
 					state.sessionId,
-					isPartialCompartmentEnd(db, state.sessionId, prepared.trimBoundaryId),
+					prepared.trimBoundaryPartial,
 					(ids) =>
 						queueAutoSearchHintDecisionRetirement(db, state.sessionId, ids),
 				)
@@ -3193,6 +3204,9 @@ export function injectM0M1Pi(
 			};
 		}
 	}
+	const trimBoundaryPartial =
+		trimBoundaryId != null &&
+		isPartialCompartmentEnd(db, state.sessionId, trimBoundaryId);
 	const skippedVisibleMessages = trimBoundaryId
 		? trimPiMessagesToBoundary(
 				piMessages,
@@ -3200,7 +3214,7 @@ export function injectM0M1Pi(
 				trimBoundaryId,
 				false,
 				state.sessionId,
-				isPartialCompartmentEnd(db, state.sessionId, trimBoundaryId),
+				trimBoundaryPartial,
 				(ids) =>
 					queueAutoSearchHintDecisionRetirement(db, state.sessionId, ids),
 			)
@@ -3277,6 +3291,7 @@ export function injectM0M1Pi(
 				piMessages.slice(insertionIndex, insertionIndex + 2),
 			),
 			trimBoundaryId,
+			trimBoundaryPartial,
 		};
 	return result;
 }

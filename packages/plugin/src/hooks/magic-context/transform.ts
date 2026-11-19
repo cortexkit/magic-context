@@ -2818,6 +2818,12 @@ export function createTransform(deps: TransformDeps) {
                 projectIdentity,
                 deps.memoryConfig?.injectionBudgetTokens,
                 deps.experimentalTemporalAwareness,
+                sessionMeta.cachedM0TrimBoundaryId === undefined
+                    ? undefined
+                    : {
+                          hasCachedM0: sessionMeta.cachedM0Bytes !== null,
+                          boundary: sessionMeta.cachedM0TrimBoundaryId,
+                      },
             );
             if (messagesBeforeInitialPrepare) {
                 const skippedVisibleMessages =

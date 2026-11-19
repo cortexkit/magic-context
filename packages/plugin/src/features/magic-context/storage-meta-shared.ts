@@ -32,6 +32,7 @@ export interface SessionMetaRow {
     cached_m0_mural_data_url: string | null;
     cached_m0_mural_hash: string | null;
     cached_m1_bytes: Buffer | Uint8Array | null;
+    cached_m0_last_baseline_end_message_id: string | null;
     cached_m0_project_memory_epoch: number | null;
     cached_m0_workspace_fingerprint: string | null;
     cached_m0_project_user_profile_version: number | null;
@@ -90,6 +91,7 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cached_m0_mural_data_url",
     "cached_m0_mural_hash",
     "cached_m1_bytes",
+    "cached_m0_last_baseline_end_message_id",
     "cached_m0_project_memory_epoch",
     "cached_m0_workspace_fingerprint",
     "cached_m0_project_user_profile_version",
@@ -332,6 +334,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0MuralDataUrl: null,
         cachedM0MuralHash: null,
         cachedM1Bytes: null,
+        cachedM0TrimBoundaryId: null,
         cachedM0ProjectMemoryEpoch: null,
         cachedM0WorkspaceFingerprint: null,
         cachedM0ProjectUserProfileVersion: null,
@@ -469,6 +472,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0MuralDataUrl: stringOrNull(row.cached_m0_mural_data_url),
         cachedM0MuralHash: stringOrNull(row.cached_m0_mural_hash),
         cachedM1Bytes: toBufferOrNull(row.cached_m1_bytes),
+        cachedM0TrimBoundaryId: row.cached_m0_last_baseline_end_message_id || null,
         cachedM0ProjectMemoryEpoch: numOrNull(row.cached_m0_project_memory_epoch),
         cachedM0WorkspaceFingerprint: stringOrNull(row.cached_m0_workspace_fingerprint),
         cachedM0ProjectUserProfileVersion: numOrNull(row.cached_m0_project_user_profile_version),
