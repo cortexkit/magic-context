@@ -168,7 +168,11 @@ export function buildCompartmentAgentPrompt(inputs: CompartmentPromptInputs): st
     return parts.join("\n\n");
 }
 
-/** Measure the prompt at dispatch so repairs and fallbacks are counted too. */
+/**
+ * Log the byte size of each part of a summary request. It runs where the
+ * request is sent, so a retry that repairs a malformed answer and a run on a
+ * fallback model are logged as well as the first request.
+ */
 export function logHistorianPromptSizes(sessionId: string, system: string, prompt: string): void {
     const sourceStart = prompt.indexOf("<new_messages>\n\n");
     const sourceEnd = prompt.lastIndexOf(`\n\n</new_messages>\n\n${HISTORIAN_TRANSCRIPT_GUARD}`);
