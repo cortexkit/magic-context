@@ -1,0 +1,3 @@
+[
+  {"op":"fleet.epoch_current","request":{},"principal":{"kind":"reserved","moduleId":"phone"},"reply":{"result":{"current":2}}}
+]

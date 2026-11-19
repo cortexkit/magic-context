@@ -60,6 +60,8 @@ pub mod wire;
 #[cfg(test)]
 mod capture_tests;
 #[cfg(test)]
+mod entorhinal_epoch_samples_tests;
+#[cfg(test)]
 mod epochs_tests;
 #[cfg(test)]
 mod exchange_tests;
