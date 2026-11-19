@@ -346,6 +346,30 @@ async fn never_ran_handover_retries_use_transient_backoff_and_fresh_children() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn audit_fallback_never_ran_cannot_erase_a_paid_failure() {
+    let bad = RunResult::new("run", states::ERROR).with_error(RunError::new(
+        "provider",
+        "first model failed",
+        "provider_error",
+    ));
+    let mut results = vec![bad];
+    results.extend(vec![handover("nothing_written"); 3]);
+    let client = Client::new(vec![active()], results);
+    let error = run(&client, None, &account_wait_send_tests::job())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        *client.reports.lock().unwrap(),
+        [Outcome::Failed, Outcome::Cancelled]
+    );
+    assert!(
+        matches!(&error, SummaryError::Failed(reason) if reason.contains("first model failed")),
+        "{error:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn never_ran_handover_exhaustion_is_cancelled_without_fallback() {
     let client = Client::new(vec![active()], vec![handover("no_stdin"); 3]);
     let start = tokio::time::Instant::now();

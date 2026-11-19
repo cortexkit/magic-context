@@ -468,6 +468,24 @@ async fn three_failed_models_fail_the_run_with_the_last_reason() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_waiting_fallback_preserves_the_failed_dreamer_route() {
+    for wait in [Ends::NeverRan, Ends::Full((now_ms() + 120_000) as u64)] {
+        let client = Client::new(&["p/a", "p/b"], &[Ends::Reply("bad first reply"), wait]);
+        let error = run(&client, &job(), &Task { fits: true })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, TaskError::Failed(reason) if reason.contains("bad first reply")),
+            "{error:?}"
+        );
+        assert_eq!(
+            *client.reports.lock().unwrap(),
+            ["decision-a failed", "decision-b cancelled"]
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_transient_error_retries_on_the_same_model_in_a_new_child() {
     let client = Client::new(&["p/a"], &[Ends::Error("overloaded"), Ends::Reply("ok")]);
     let reply = run(&client, &job(), &Task { fits: true }).await.unwrap();

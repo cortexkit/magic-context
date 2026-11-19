@@ -166,6 +166,7 @@ pub async fn run<C: RunnerClient + Router>(
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
+    let mut paid_failure: Option<String> = None;
     for attempt in 0..=MAX_FALLBACKS {
         let answer = match client
             .select(routing::dream_select(job.demand, &tried))
@@ -175,13 +176,15 @@ pub async fn run<C: RunnerClient + Router>(
             Err(error) => {
                 // A wait after a failed model would hide the failure that
                 // made the fallback necessary.
-                if failure.is_none() {
+                if paid_failure.is_none() && failure.is_none() {
                     if let Some(wait) = AccountWait::of_routing(&error, SendKind::Dream, now_ms()) {
                         return Err(TaskError::AccountWait(wait));
                     }
                 }
                 return Err(TaskError::Failed(
-                    failure.unwrap_or_else(|| error.to_string()),
+                    paid_failure
+                        .or(failure)
+                        .unwrap_or_else(|| error.to_string()),
                 ));
             }
         };
@@ -305,7 +308,8 @@ pub async fn run<C: RunnerClient + Router>(
                         Ok(answered) => answered,
                         Err(wait) => {
                             report(Outcome::Cancelled, usage.as_ref()).await;
-                            return Err(TaskError::AccountWait(wait));
+                            return Err(paid_failure
+                                .map_or(TaskError::AccountWait(wait), TaskError::Failed));
                         }
                     };
                     let reply = TaskReply {
@@ -367,7 +371,9 @@ pub async fn run<C: RunnerClient + Router>(
                 },
                 Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
                     report(Outcome::Cancelled, usage.as_ref()).await;
-                    return Err(TaskError::AccountWait(wait));
+                    return Err(
+                        paid_failure.map_or(TaskError::AccountWait(wait), TaskError::Failed)
+                    );
                 }
                 Err(SummaryError::Failed(error)) if retry < MAX_RETRIES && retryable(&error) => {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -386,11 +392,13 @@ pub async fn run<C: RunnerClient + Router>(
             }
             Err(error) => {
                 report(Outcome::Failed, usage.as_ref()).await;
-                failure = Some(error);
+                paid_failure = Some(error);
             }
         }
     }
-    Err(TaskError::Failed(failure.unwrap_or_default()))
+    Err(TaskError::Failed(
+        paid_failure.or(failure).unwrap_or_default(),
+    ))
 }
 
 /// Send `message`, the task's finalize message, to `child`, whose run under

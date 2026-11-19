@@ -221,6 +221,7 @@ pub async fn run<C: RunnerClient + Router>(
     let child_harness = job.child_harness.as_deref().unwrap_or(&job.session.harness);
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
+    let mut paid_failure: Option<String> = None;
     // Every child the run creates is attributed to this session, its agent
     // and its project, before the child's first send.
     let purpose = crate::attribution::Purpose::summary(
@@ -247,14 +248,17 @@ pub async fn run<C: RunnerClient + Router>(
             Err(error) => {
                 // Waiting charges no failure, so a fallback refusal must not
                 // erase the route failure that made the fallback necessary.
-                if failure.is_none() {
+                if paid_failure.is_none() && failure.is_none() {
                     if let Some(wait) = AccountWait::of_routing(&error, SendKind::TurnOne, now_ms())
                     {
                         return Err(SummaryError::AccountWait(wait));
                     }
                 }
                 // No route left after a failure: the failure is what to report.
-                return Err(failure.unwrap_or_else(|| error.to_string()).into());
+                return Err(paid_failure
+                    .or(failure)
+                    .unwrap_or_else(|| error.to_string())
+                    .into());
             }
         };
         // Routing picks the model per attempt and ck-mc keeps no other record
@@ -322,12 +326,19 @@ pub async fn run<C: RunnerClient + Router>(
             Ok(result) => return Ok(result),
             // Another model would draw on the same accounts, and the
             // runner named when to ask again: the run ends waiting.
-            Err(Failure::AccountWait(wait)) => return Err(SummaryError::AccountWait(wait)),
-            Err(Failure::NeverRan(wait)) => return Err(SummaryError::NeverRan(wait)),
-            Err(Failure::NotSent(error) | Failure::Failed(error)) => failure = Some(error),
+            Err(Failure::AccountWait(wait)) => {
+                return Err(
+                    paid_failure.map_or(SummaryError::AccountWait(wait), SummaryError::Failed)
+                );
+            }
+            Err(Failure::NeverRan(wait)) => {
+                return Err(paid_failure.map_or(SummaryError::NeverRan(wait), SummaryError::Failed));
+            }
+            Err(Failure::NotSent(error)) => failure = Some(error),
+            Err(Failure::Failed(error)) => paid_failure = Some(error),
         }
     }
-    Err(failure.unwrap_or_default().into())
+    Err(paid_failure.or(failure).unwrap_or_default().into())
 }
 
 /// Why a summarizer send, or a whole run, produced no reply.
