@@ -86,6 +86,35 @@ describe("provider-overflow recovery from the host's overflow check", () => {
 		});
 	});
 
+	it("persists a grouped plan cap and rejected input from a failed reply", () => {
+		const database = db();
+		const sessionId = "plan-cap-overflow";
+		handlePiProviderFailure({
+			db: database,
+			sessionId,
+			message: failedReply(
+				"Your plan allows a context of up to 500,000 tokens, this request has an estimated 502,574\n" +
+					"(maximum context length exceeded). Shorten the history or start a new session.",
+			),
+		});
+		expect(
+			getOverflowState(database, sessionId, "google/gemini-3.8-flash"),
+		).toMatchObject({
+			needsEmergencyRecovery: true,
+			detectedContextLimit: 500_000,
+		});
+		expect(
+			database
+				.prepare(
+					"SELECT last_input_tokens, last_context_percentage FROM session_meta WHERE session_id = ?",
+				)
+				.get(sessionId),
+		).toMatchObject({
+			last_input_tokens: 502_574,
+			last_context_percentage: expect.closeTo(100.5148),
+		});
+	});
+
 	it("arms nothing for an error neither check calls an overflow", async () => {
 		const database = db();
 		for (const [index, errorMessage] of [
