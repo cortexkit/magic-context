@@ -7,6 +7,7 @@ import { BoundedSessionMap } from "@magic-context/core/shared/bounded-session-ma
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import { resolvePiFirstKeptEntry } from "./pi-historian-runner";
+import { resolvePiMarkerKeptEntry } from "./pi-history-cut";
 import {
 	isPiOrdinalAlignmentUnanchored,
 	resolvePiOrdinalAlignment,
@@ -243,8 +244,26 @@ export function applyDeferredPiCompactionMarker(
 		}
 
 		const branchEntries = deps.readBranchEntries();
+		// The marker starts at the first message the request's history cut keeps,
+		// decided from the branch now rather than when the summary was published:
+		// a summary that ends inside a turn keeps that turn's prompt, and a marker
+		// starting after it would hide the prompt from every later request. While
+		// the stored ordinals cannot be placed on the branch, or the boundary is
+		// not on it, the marker is placed as before: by the kept entry chosen at
+		// publication, else by stored ordinal.
 		let firstKeptEntryId: string | null | undefined = pending.firstKeptEntryId;
-		if (!firstKeptEntryId) {
+		let placedByCut = false;
+		const kept = resolvePiMarkerKeptEntry(branchEntries, pending.endMessageId);
+		if (
+			kept.kind !== "missing" &&
+			!isPiOrdinalAlignmentUnanchored(
+				resolvePiOrdinalAlignment(deps.db, sessionId, branchEntries),
+			)
+		) {
+			placedByCut = true;
+			firstKeptEntryId = kept.kind === "resolved" ? kept.entryId : null;
+		}
+		if (!placedByCut && !firstKeptEntryId) {
 			// The pending ordinal is a stored coordinate. Place it on this branch
 			// the same way every raw reader does, and keep the marker waiting while
 			// the stored coordinates cannot be placed at all: trimming the branch

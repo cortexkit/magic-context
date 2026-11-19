@@ -166,6 +166,7 @@ import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child
 import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
+import { resolvePiMarkerKeptEntry } from "./pi-history-cut";
 import { acknowledgePiHistoryRetirement } from "./pi-history-retirement";
 import {
 	isPiOrdinalAlignmentUnanchored,
@@ -1493,17 +1494,15 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			let firstKeptEntryId: string | null = null;
 			if (readBranchEntries) {
 				try {
-					const branchEntries = readBranchEntries();
-					const alignment = resolvePiOrdinalAlignment(
-						db,
-						sessionId,
-						branchEntries,
-					);
-					// Leave the marker unresolved (pending) while stored ordinals
-					// cannot be placed on the branch; a later drain resolves it.
-					firstKeptEntryId = isPiOrdinalAlignmentUnanchored(alignment)
-						? null
-						: findFirstKeptEntryId(branchEntries, lastNewEnd, alignment.offset);
+					firstKeptEntryId = lastNewEndMessageId
+						? placePiMarkerKeptEntry(
+								db,
+								sessionId,
+								readBranchEntries(),
+								lastNewEndMessageId,
+								lastNewEnd,
+							)
+						: null;
 					if (!firstKeptEntryId) {
 						sessionLog(
 							sessionId,
@@ -2115,6 +2114,29 @@ export function buildPiCompactionSummary(
 	return `Magic Context compacted ${titles.length} segments: ${shown}; …and ${
 		titles.length - MAX_SUMMARY_TITLES
 	} more`;
+}
+
+/**
+ * The entry a Pi compaction marker for a summary ending at `endMessageId`
+ * (stored ordinal `endOrdinal`) keeps first, or null while there is none yet:
+ * the first message the history cut keeps (resolvePiMarkerKeptEntry). A
+ * boundary this branch does not hold falls back to the stored ordinal, placed
+ * as every raw reader places it. Null while the stored ordinals cannot be
+ * placed on the branch at all, as before.
+ */
+export function placePiMarkerKeptEntry(
+	db: Database,
+	sessionId: string,
+	branchEntries: readonly unknown[],
+	endMessageId: string,
+	endOrdinal: number,
+): string | null {
+	const alignment = resolvePiOrdinalAlignment(db, sessionId, branchEntries);
+	if (isPiOrdinalAlignmentUnanchored(alignment)) return null;
+	const kept = resolvePiMarkerKeptEntry(branchEntries, endMessageId);
+	if (kept.kind === "resolved") return kept.entryId;
+	if (kept.kind === "waiting") return null;
+	return findFirstKeptEntryId(branchEntries, endOrdinal, alignment.offset);
 }
 
 /**

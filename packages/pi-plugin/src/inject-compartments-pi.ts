@@ -107,6 +107,7 @@ import {
 	logSlowWriteTransaction,
 	WriteTransactionSteps,
 } from "@magic-context/core/shared/write-transaction-timing";
+import { planPiHistoryCut } from "./pi-history-cut";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 import {
 	isPiSystemEntry,
@@ -154,7 +155,8 @@ function resolveStableId(
 /**
  * Mutate `piMessages` in place: remove non-system messages whose synthesized
  * id appears at or before the cutoff. Preserve all system entries, the prompt
- * keptPromptIndex keeps, and the tail. A boundary missing from the array is
+ * of a turn the boundary ends inside (pi-history-cut.ts), and the tail. A
+ * boundary missing from the array is
  * placed by branch position (placeCutByBranchPosition) and cut the same way.
  *
  * Mirrors the `messages.splice(0, cutoffIndex+1)` behavior the shared
@@ -249,94 +251,21 @@ function trimPiMessagesToBoundary(
 	}
 	if (cutoffIndex < 0) return 0;
 
-	// Start with the same prefix trim as the shared OpenCode projection, then
-	// repeatedly sweep both directions across Pi's split tool-call shape. The
-	// sweep is intentionally scoped by the owning assistant message index, not by
-	// bare callId: Pi/OpenCode may reuse callIds across turns, and a global callId
-	// match can delete a valid kept-tail pair from a later turn. Pair ownership is
-	// inferred from the nearest assistant carrying that callId (backward first,
-	// then forward for legacy/test shapes where a result precedes its call). This
-	// preserves the non-contiguous same-turn cleanup while avoiding cross-turn
-	// over-removal.
-	const remove = new Set<number>();
-	let preserved = 0;
-	for (let i = 0; i <= cutoffIndex; i++) {
-		if (isPiSystemEntry(piMessages[i])) preserved++;
-		else remove.add(i);
-	}
+	// The same cut the Pi compaction marker uses for its first kept entry
+	// (pi-history-cut.ts), so the marker never hides a message kept here.
+	const preserved = piMessages
+		.slice(0, cutoffIndex + 1)
+		.filter((message) => isPiSystemEntry(message)).length;
 	if (preserved > 0)
 		logSession(
 			sessionId ?? "unknown",
 			`pi system entries preserved across fold: ${preserved}`,
 		);
-
-	let changed = true;
-	while (changed) {
-		changed = false;
-		const removedCallKeys = new Set<string>();
-		const removedResultKeys = new Set<string>();
-
-		for (const index of remove) {
-			const msg = piMessages[index];
-			if (!msg) continue;
-			if (msg.role === "assistant") {
-				for (const callId of getPiToolCallIds(msg)) {
-					removedCallKeys.add(toolPairKey(callId, index));
-				}
-			} else if (msg.role === "toolResult") {
-				const callId = getPiToolResultCallId(msg);
-				const ownerIndex = callId
-					? findToolResultOwnerAssistantIndex(piMessages, index, callId)
-					: null;
-				if (callId && ownerIndex !== null) {
-					removedResultKeys.add(toolPairKey(callId, ownerIndex));
-				}
-			}
-		}
-
-		for (let i = 0; i < piMessages.length; i++) {
-			if (remove.has(i)) continue;
-			const msg = piMessages[i];
-			if (!msg) continue;
-			if (msg.role === "toolResult") {
-				const callId = getPiToolResultCallId(msg);
-				const ownerIndex = callId
-					? findToolResultOwnerAssistantIndex(piMessages, i, callId)
-					: null;
-				if (
-					callId &&
-					ownerIndex !== null &&
-					removedCallKeys.has(toolPairKey(callId, ownerIndex))
-				) {
-					remove.add(i);
-					changed = true;
-				}
-				continue;
-			}
-			if (msg.role === "assistant") {
-				const callIds = getPiToolCallIds(msg);
-				if (
-					callIds.some((callId) =>
-						removedResultKeys.has(toolPairKey(callId, i)),
-					)
-				) {
-					remove.add(i);
-					changed = true;
-				}
-			}
-		}
-	}
-	// The kept prompt is a user message, which the sweep never removes, so taking
-	// it out of the cut afterwards leaves the tool pairs as the sweep settled them.
-	// It is chosen from what remains after the cut, so a call the sweep removes
-	// after the boundary does not count as the turn going on.
-	const keptPrompt = keptPromptIndex(
+	const remove = planPiHistoryCut(
 		piMessages,
 		cutoffIndex,
-		remove,
 		promptReachesBoundary,
 	);
-	if (keptPrompt >= 0) remove.delete(keptPrompt);
 
 	const retiredIds = new Set<string>();
 	if (retireDecisions) {
@@ -392,7 +321,7 @@ type BranchCutPlacement =
  * a boundary it finds by id: every event message up to and including the cut
  * point goes, including messages with no branch position (a host compaction's
  * `compactionSummary`, branch summaries, custom messages, and tool results
- * folded into another raw message), and keptPromptIndex keeps the same prompt.
+ * folded into another raw message), and the same prompt stays kept.
  * Messages with no branch position after the cut point stay. So the early trim
  * to the cached boundary, the head's own trim and a later pass that cannot find
  * the boundary serve the same messages, and a boundary that one pass finds by id
@@ -479,62 +408,6 @@ function placeCutByBranchPosition(
 }
 
 /**
- * The one message at or before the cut point that the cut keeps, or -1: the
- * last user prompt at or before it, while the boundary sits inside that
- * prompt's turn. The turn is closed when the first user or assistant message
- * after the cut point that the cut does not remove (`removed`) is a user
- * prompt. A failed reply does not count there, because Pi hides one before it
- * retries and may show it again after a restart. On the branch-position path
- * the boundary must also follow the prompt with no other user prompt between
- * them (`promptReachesBoundary`), which matters when the hidden boundary is
- * itself a prompt.
- *
- * Why: a summary can end inside the live turn, for example a full rebuild of
- * every summary (the `/ctx-recomp` command) that ends on the last raw message,
- * here a failed reply Pi hid. Cutting
- * there would remove the prompt the model is answering. The rule reads only the
- * messages around the boundary, never which prompt is newest, so later passes
- * keep the same cut, and finding the boundary by id or by branch position keeps
- * the same prompt. The prompt stays served even though the summary covers it.
- *
- * Cache: a boundary that closes a turn keeps nothing, so those cuts are
- * unchanged. A session whose boundary sits inside a turn, live or older, gets
- * that turn's prompt back once, on the first pass after this rule shipped, and
- * keeps it until a newer summary moves the boundary.
- *
- * Known one-time flip: if Pi exits while it retries a hidden failed reply that
- * ends the summary, the person's next prompt lands right after the boundary,
- * the turn reads as closed, and the prompt kept until then is cut once.
- */
-function keptPromptIndex(
-	piMessages: readonly PiAgentMessage[],
-	cutoffIndex: number,
-	removed: ReadonlySet<number>,
-	promptReachesBoundary?: (eventIndex: number) => boolean,
-): number {
-	let promptIndex = -1;
-	for (let i = cutoffIndex; i >= 0; i--) {
-		if (piMessages[i]?.role === "user") {
-			promptIndex = i;
-			break;
-		}
-	}
-	if (promptIndex < 0) return -1;
-	for (let i = cutoffIndex + 1; i < piMessages.length; i++) {
-		if (removed.has(i)) continue;
-		const message = piMessages[i];
-		if (message?.role === "user") return -1;
-		if (
-			message?.role === "assistant" &&
-			(message as { stopReason?: unknown }).stopReason !== "error"
-		)
-			break;
-	}
-	if (promptReachesBoundary && !promptReachesBoundary(promptIndex)) return -1;
-	return promptIndex;
-}
-
-/**
  * The boundary each message array was last cut at by id. The early trim to the
  * cached boundary removes the boundary message from the pass's array, so the
  * head's own trim to the same boundary cannot find it by id and falls back to
@@ -575,51 +448,6 @@ function logUnplacedCut(
 		`pi history cut not placed: boundary ${boundaryMessageId} is not among the ${eventLength} context messages and ${reason}; first message without a branch position: ${firstUnplacedRole}; nothing was cut at this boundary`,
 	);
 }
-function toolPairKey(callId: string, assistantIndex: number): string {
-	return `${callId}\0${assistantIndex}`;
-}
-
-function findToolResultOwnerAssistantIndex(
-	messages: readonly PiAgentMessage[],
-	resultIndex: number,
-	callId: string,
-): number | null {
-	for (let i = resultIndex - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg?.role === "assistant" && getPiToolCallIds(msg).includes(callId)) {
-			return i;
-		}
-	}
-	for (let i = resultIndex + 1; i < messages.length; i++) {
-		const msg = messages[i];
-		if (msg?.role === "assistant" && getPiToolCallIds(msg).includes(callId)) {
-			return i;
-		}
-	}
-	return null;
-}
-
-function getPiToolCallIds(message: PiAssistantMessage): string[] {
-	if (!Array.isArray(message.content)) return [];
-	const ids: string[] = [];
-	for (const part of message.content) {
-		if (
-			part &&
-			typeof part === "object" &&
-			(part as Record<string, unknown>).type === "toolCall" &&
-			typeof (part as Record<string, unknown>).id === "string"
-		) {
-			ids.push((part as Record<string, unknown>).id as string);
-		}
-	}
-	return ids;
-}
-
-function getPiToolResultCallId(message: PiToolResultMessage): string | null {
-	const callId = (message as Record<string, unknown>).toolCallId;
-	return typeof callId === "string" && callId.length > 0 ? callId : null;
-}
-
 export const __test = {
 	trimPiMessagesToBoundary,
 	renderFreshM0PiNonPersisted,

@@ -49,6 +49,8 @@ export interface PiTestHarnessOptions {
   modelsCatalog?: string;
   /** Extra host CLI arguments, placed before the model selection (for example OMP's `--plan-yolo`). */
   hostArgs?: string[];
+  /** Declare the session model as accepting images (see PiRunnerOptions.imageInput). */
+  imageInput?: boolean;
 }
 
 const DEFAULT_MOCK_RESPONSE: MockResponse = {
@@ -256,6 +258,7 @@ export class PiTestHarness implements PiHostHarness {
       historianModel: options.historianModel,
       modelsCatalog: options.modelsCatalog,
       hostArgs: options.hostArgs,
+      imageInput: options.imageInput,
     });
 
     try {
@@ -587,6 +590,16 @@ export class PiTestHarness implements PiHostHarness {
       await Bun.sleep(20);
     }
     throw new Error(`Pi extension command /${command} did not settle`);
+  }
+
+  /**
+   * Run an extension command while a turn is under way, without waiting for
+   * the host to go idle. Pi runs an extension command at once even while a
+   * reply streams; this returns once the host acknowledged the command.
+   */
+  async invokeExtensionCommandDuringTurn(command: string): Promise<void> {
+    const response = await this.rpc.sendCommand("prompt", { message: `/${command}` });
+    requireSuccessfulResponse(response);
   }
 
   async newSession(): Promise<void> {

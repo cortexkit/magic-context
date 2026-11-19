@@ -49,6 +49,7 @@ import { createHash } from "node:crypto";
 import type { ContextDatabase } from "../features/magic-context/storage";
 import { saveSourceContent } from "../features/magic-context/storage-source";
 import {
+    setTagTokenCount,
     updateTagByteSize,
     updateTagInputByteSize,
     updateTagInputTokenCount,
@@ -296,6 +297,12 @@ interface ToolOccurrence {
     originalInput?: Record<string, unknown>;
 }
 
+interface ResultTextBlock {
+    part: TranscriptPart;
+    text: string;
+    tokenCacheKey: string;
+}
+
 interface TagTranscriptTiming {
     identity: number;
     prefix: number;
@@ -310,8 +317,18 @@ interface ToolAggregate {
     occurrences: ToolOccurrence[];
     /** Largest byteSize seen across occurrences — used as the tag size. */
     maxByteSize: number;
-    /** Token count paired with maxByteSize (the same output occurrence). */
+    /**
+     * Token count paired with maxByteSize (the same output occurrence). A result
+     * that carries images instead counts its largest text block plus every image
+     * at the host's per-image cost (see applyImageResultAccounting).
+     */
     maxTokenCount: number;
+    /** Per-image token cost of the image blocks in this pass's result occurrences. */
+    resultImageTokens: number;
+    /** This pass's result text blocks, before the tag prefix, for applyImageResultAccounting. */
+    resultTexts: ResultTextBlock[];
+    /** Set when applyGrownToolResultAccounting wrote this pass (its write keeps the larger count). */
+    tokenCountGrewThisPass?: boolean;
     /** Tool name from the first occurrence we see one on. */
     toolName: string | null;
     /** Input byte size from the invocation occurrence (for storage projection). */
@@ -572,6 +589,9 @@ export function tagTranscript(
                         if (timing) timing.identity += performance.now() - identityStart;
                     }
                     existing.identityReusable &&= reuseIdentity;
+                    if (part.kind === "tool_result") {
+                        noteResultBlock(existing, part, text, tokenCacheKey);
+                    }
                     applyToolPrefixAndTarget({
                         skipPrefixInjection,
                         part,
@@ -612,6 +632,8 @@ export function tagTranscript(
                         // genuinely larger folded result can still bump accounting.
                         maxByteSize: reusableAccounting.byteSize,
                         maxTokenCount: reusableAccounting.tokenCount ?? 0,
+                        resultImageTokens: 0,
+                        resultTexts: [],
                         toolName: null,
                         inputByteSize: reusableAccounting.inputByteSize,
                         inputTokenCount: reusableAccounting.inputTokenCount,
@@ -674,6 +696,8 @@ export function tagTranscript(
                         occurrences: [{ message, part, kind: part.kind }],
                         maxByteSize: persistedAccounting?.byteSize ?? outputByteSize,
                         maxTokenCount: persistedAccounting?.tokenCount ?? outputTokenCount,
+                        resultImageTokens: 0,
+                        resultTexts: [],
                         toolName: accounting.toolName,
                         inputByteSize:
                             persistedAccounting?.inputByteSize ??
@@ -703,6 +727,8 @@ export function tagTranscript(
                 toolAggregates.set(aggregateKey, aggregate);
                 if (part.kind === "tool_use") {
                     openToolAggregateKeysByCallId.set(callId, [...pendingKeys, aggregateKey]);
+                } else {
+                    noteResultBlock(aggregate, part, text, tokenCacheKey);
                 }
                 applyToolPrefixAndTarget({
                     skipPrefixInjection,
@@ -721,6 +747,17 @@ export function tagTranscript(
             }
             // thinking, image, file, structural, unknown → skip.
         }
+    }
+
+    for (const aggregate of toolAggregates.values()) {
+        applyImageResultAccounting({
+            db,
+            sessionId,
+            tagger,
+            aggregate,
+            timing,
+            tokenCache: options.toolTokenCache,
+        });
     }
 
     if (timing && options.onTiming) {
@@ -787,9 +824,72 @@ function applyGrownToolResultAccounting(args: GrownToolResultAccountingArgs): vo
     }
     args.aggregate.maxByteSize = args.byteSize;
     args.aggregate.maxTokenCount = tokenCount;
+    args.aggregate.tokenCountGrewThisPass = true;
     updateTagByteSize(args.db, args.sessionId, args.aggregate.tagId, args.byteSize);
     updateTagTokenCount(args.db, args.sessionId, args.aggregate.tagId, tokenCount);
     syncToolAggregateAccounting(args.tagger, args.sessionId, args.aggregate);
+}
+
+/** Record one result block of this pass; `text` must be read before the tag prefix is added. */
+function noteResultBlock(
+    aggregate: ToolAggregate,
+    part: TranscriptPart,
+    text: string,
+    tokenCacheKey: string,
+): void {
+    const imageTokens = part.imageTokens?.() ?? 0;
+    if (imageTokens > 0) aggregate.resultImageTokens += imageTokens;
+    else if (text.length > 0) aggregate.resultTexts.push({ part, text, tokenCacheKey });
+}
+
+/**
+ * A tool result that carries images (Pi's `read` of a picture, an image
+ * generator) is sized as its largest text block plus each image at what the
+ * request carries for it: the host's per-image token cost while the image is
+ * sent, or the cost of the text placeholder sent in its place (the
+ * processed-image strip's marker, or the host's note for a model without image
+ * input; see the Pi transcript's `imageTokens`). Byte-growth accounting alone
+ * would leave it at the count of its largest block, an image whose bytes are
+ * base64, so the protected tail, the drop planners and status would see a few
+ * dozen tokens for an output the provider bills as an image. Runs once per
+ * pass after the walk, so block order does not matter. The stored count follows
+ * the request both ways: it rises when a row stored before images were counted
+ * is seen again, and falls once an image leaves the request, so a queued drop
+ * of an already-stripped result is not valued at the images it no longer
+ * removes. Replaying the same request writes nothing. Results without images
+ * are left untouched.
+ */
+function applyImageResultAccounting(args: {
+    db: ContextDatabase;
+    sessionId: string;
+    tagger: Tagger;
+    aggregate: ToolAggregate & { tagId: number };
+    timing: TagTranscriptTiming | undefined;
+    tokenCache?: Map<string, { text: string; tokenCount: number }>;
+}): void {
+    const { aggregate } = args;
+    if (aggregate.resultImageTokens === 0) return;
+    const tokenStart = args.timing ? performance.now() : 0;
+    let textTokens = 0;
+    for (const block of aggregate.resultTexts) {
+        textTokens = Math.max(
+            textTokens,
+            getCachedToolPartTokenCount(
+                block.part,
+                block.text,
+                args.tokenCache,
+                block.tokenCacheKey,
+            ),
+        );
+    }
+    if (args.timing) args.timing.tokenCounting += performance.now() - tokenStart;
+    const tokenCount = textTokens + aggregate.resultImageTokens;
+    // A growth write this pass keeps the larger of the stored and new counts, so
+    // the in-memory count may not be what the row holds; write the exact count.
+    if (tokenCount === aggregate.maxTokenCount && !aggregate.tokenCountGrewThisPass) return;
+    aggregate.maxTokenCount = tokenCount;
+    setTagTokenCount(args.db, args.sessionId, aggregate.tagId, tokenCount);
+    syncToolAggregateAccounting(args.tagger, args.sessionId, aggregate);
 }
 
 function readAggregateToolAccounting(
@@ -960,9 +1060,13 @@ function getToolPartByteSize(part: TranscriptPart, text: string): number {
  * Real-tokenizer mirror of {@link getToolPartByteSize}: token count of a tool
  * part's output text (falling back to the raw payload for non-text results,
  * matching the byte path so token_count stays consistent with byte_size).
+ * An image block is the exception: it counts at the host's per-image cost, since
+ * the provider bills the image, not the length of its base64 encoding.
  */
 function getToolPartTokenCount(part: TranscriptPart, text: string): number {
     if (text.length > 0 || part.kind !== "tool_result") return estimateTokens(text);
+    const imageTokens = part.imageTokens?.() ?? 0;
+    if (imageTokens > 0) return imageTokens;
     const raw = part.rawByteSize?.();
     if (typeof raw === "number" && raw > 0) {
         const record = isRecord(part) ? part : undefined;

@@ -115,14 +115,17 @@ for (const harness of ["pi", "omp"] as const) {
 						captured,
 					);
 					if (shape === "resolved") {
+						// The summary ends on the tool result and the reply continues the
+						// turn, so the request's history cut keeps the turn's prompt u1;
+						// the marker keeps it too instead of hiding it.
 						expect(outcome).toEqual({
 							kind: "applied",
-							firstKeptEntryId: "a2",
+							firstKeptEntryId: "u1",
 							compactionId: "compact",
 						});
 						expect(appendCompaction).toHaveBeenCalledWith(
 							captured.summary,
-							"a2",
+							"u1",
 							2151,
 							{ source: "magic-context", lastCompactedOrdinal: 6988 },
 							true,
@@ -155,7 +158,7 @@ for (const harness of ["pi", "omp"] as const) {
 			});
 		}
 
-		it("retires an interior synthetic kept slot but lets a trailing slot recover", () => {
+		it("keeps the turn's prompt for a summary ending on a call whose result follows, then the next prompt once the turn closes", () => {
 			_resetHarnessForTesting();
 			const db = createTestDb();
 			_resetHarnessForTesting();
@@ -175,21 +178,27 @@ for (const harness of ["pi", "omp"] as const) {
 					},
 				]);
 				const appendCompaction = mock(() => "compact");
-				expect(
-					applyDeferredPiCompactionMarker(
-						{ db, readBranchEntries: () => entries(true), appendCompaction },
-						sessionId,
-						marker,
-					),
-				).toEqual({ kind: "stale-skip", reason: "synthetic-kept-entry" });
-				expect(
-					applyDeferredPiCompactionMarker(
-						{ db, readBranchEntries: () => entries(false), appendCompaction },
-						sessionId,
-						marker,
-					),
-				).toEqual({ kind: "waiting-for-entry" });
-				expect(appendCompaction).not.toHaveBeenCalled();
+				// The history cut drops the call and its result and keeps the turn's
+				// prompt u1 while the turn goes on, with or without the reply yet.
+				for (const withAnswer of [true, false])
+					expect(
+						applyDeferredPiCompactionMarker(
+							{
+								db,
+								readBranchEntries: () => entries(withAnswer),
+								appendCompaction,
+							},
+							sessionId,
+							marker,
+						),
+					).toEqual({
+						kind: "applied",
+						firstKeptEntryId: "u1",
+						compactionId: "compact",
+					});
+				expect(appendCompaction).toHaveBeenCalledTimes(2);
+				// A next prompt right after the result closes the turn: the cut keeps
+				// nothing before it, and the marker starts there.
 				expect(
 					applyDeferredPiCompactionMarker(
 						{

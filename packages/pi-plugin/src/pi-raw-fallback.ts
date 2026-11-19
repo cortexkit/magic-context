@@ -12,6 +12,7 @@ import {
 import { UNKNOWN_FIT_RATIO } from "@magic-context/core/hooks/magic-context/tokenizer-calibration";
 import { isTransientSqliteError } from "@magic-context/core/shared/sqlite";
 import { isTransientPiStorageError } from "./pi-lkg";
+import { piMessagesWithWireImages } from "./strip-processed-images-pi";
 import {
 	PI_IMAGE_TOKENS,
 	piFitMessageBytesPricingImages,
@@ -109,14 +110,42 @@ export interface PiFitEnvelope {
 	envelopeSignature?: string;
 	/** Session's saved fit policy; without one, use the unknown-model rule. */
 	calibration?: DecisionCalibration;
+	/**
+	 * False when the session's model declares no image input, so the host sends
+	 * a short note instead of each image. Missing means images are sent.
+	 */
+	modelAcceptsImages?: boolean;
+}
+
+/** The messages with their images as the request carries them (piMessagesWithWireImages). */
+function piSentMessages(
+	messages: readonly unknown[],
+	observed: PiFitEnvelope | undefined,
+): readonly unknown[] {
+	return piMessagesWithWireImages(messages, {
+		modelAcceptsImages: observed?.modelAcceptsImages !== false,
+	});
+}
+
+/** A measured prefix whose appended messages carry their images as the request does. */
+function piSentMeasuredPrefix(
+	measuredPrefix: PiMeasuredPrefixFit | undefined,
+	observed: PiFitEnvelope | undefined,
+): PiMeasuredPrefixFit | undefined {
+	if (!measuredPrefix || observed?.modelAcceptsImages !== false)
+		return measuredPrefix;
+	return {
+		...measuredPrefix,
+		appendedMessages: piSentMessages(measuredPrefix.appendedMessages, observed),
+	};
 }
 
 /** Require current system/tool counts for an estimate. Missing metadata alone
- * must not reject a request. */
+ * must not reject a request. Images are priced as the request carries them. */
 export function estimatePiOutgoingInputTokens(
-	messages: readonly unknown[],
+	servedMessages: readonly unknown[],
 	observed?: PiFitEnvelope,
-	measuredPrefix?: PiMeasuredPrefixFit,
+	servedMeasuredPrefix?: PiMeasuredPrefixFit,
 	contextLimit?: number,
 	/**
 	 * The pass's per-message token cache. Every cached count is checked against
@@ -140,6 +169,8 @@ export function estimatePiOutgoingInputTokens(
 		!hasTokenizerForFit()
 	)
 		return { tokens: 0, trusted: false };
+	const messages = piSentMessages(servedMessages, observed);
+	const measuredPrefix = piSentMeasuredPrefix(servedMeasuredPrefix, observed);
 	const knownRole = (message: unknown) => {
 		if (!message || typeof message !== "object") return false;
 		return ["user", "assistant", "toolResult", "custom"].includes(
@@ -414,13 +445,15 @@ export interface PiMeasuredPrefixFit {
 
 /** Prefer correlated provider input plus the new tail; otherwise price the full envelope. */
 export function assertPiRawFallbackFits(
-	messages: readonly unknown[],
+	servedMessages: readonly unknown[],
 	contextLimit: number | undefined,
 	log: (message: string) => void,
 	cause: unknown,
 	observed?: PiFitEnvelope,
-	measuredPrefix?: PiMeasuredPrefixFit,
+	servedMeasuredPrefix?: PiMeasuredPrefixFit,
 ): void {
+	const messages = piSentMessages(servedMessages, observed);
+	const measuredPrefix = piSentMeasuredPrefix(servedMeasuredPrefix, observed);
 	if (
 		!contextLimit ||
 		!Number.isFinite(contextLimit) ||

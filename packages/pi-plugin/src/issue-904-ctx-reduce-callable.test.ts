@@ -20,6 +20,7 @@ import { createTagger } from "@magic-context/core/features/magic-context/tagger"
 import { autoSearchTestSnapshot } from "@magic-context/core/hooks/magic-context/auto-search-snapshot.fixture";
 import * as searchModule from "@magic-context/core/hooks/magic-context/auto-search-worker-client";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
+import { __setAsyncProcessProbeForTests } from "@magic-context/core/shared/rpc-utils";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
 	cleanupTestTempDir,
@@ -651,7 +652,27 @@ function createRuntime() {
 describe("issue 904: the Pi extension's own sites", () => {
 	it("guidance, both reminders and the spawned-session record follow the session", async () => {
 		const runtime = createRuntime();
-		await magicContextPiExtension(runtime.pi as never);
+		// The extension boot migrates this process's fresh store, and the migration
+		// guard refuses while any Pi or OMP process runs on the machine: the test
+		// preload's store counts as the shared default store. Other test files run
+		// a real OMP in parallel workers (and a developer may run Pi), which left
+		// the boot without storage and registered no tools. Show the guard's
+		// process scan only this process for the boot.
+		__setAsyncProcessProbeForTests(async () => {
+			// One `ps -axo pid=,ppid=,lstart=,command=` row; lstart reads like
+			// "Thu Nov 19 00:38:39 2026".
+			const [day, month, date, year, time] = new Date(
+				Date.now() - process.uptime() * 1000,
+			)
+				.toString()
+				.split(" ");
+			return `${process.pid} ${process.ppid} ${day} ${month} ${date} ${time} ${year} bun test\n`;
+		});
+		try {
+			await magicContextPiExtension(runtime.pi as never);
+		} finally {
+			__setAsyncProcessProbeForTests();
+		}
 		const { dir } = createTestTempDir("issue-904-extension-");
 		const db = openDatabase();
 		const ctxFor = (sessionId: string, agent?: Record<string, unknown>) => ({
