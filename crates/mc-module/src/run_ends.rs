@@ -34,6 +34,8 @@ use cortexkit_bus_trait::Headers;
 use cortexkit_role_compaction::read::SessionRef;
 use tokio::sync::Notify;
 
+use crate::bus_subject::SubjectDrops;
+
 /// The durable on the account's EVENT stream that carries the run-end
 /// events of every runner ck-mc runs children on.
 pub const DURABLE: &str = "m_magic-context_runs";
@@ -56,6 +58,12 @@ pub const RETRY: Duration = Duration::from_secs(60);
 /// whose acknowledgement was lost one ack wait (30 s) later, so only recent
 /// ids can come again.
 const REMEMBERED: usize = 4096;
+
+static SUBJECT_DROPS: SubjectDrops = SubjectDrops::new();
+
+pub(crate) fn subjects(account: &str) -> [String; SUBJECTS.len()] {
+    SUBJECTS.map(|subject| format!("ck.{account}.{subject}"))
+}
 
 /// The waits on child runs in this process, and whether a reader is
 /// delivering their runners' run-end events.
@@ -298,6 +306,8 @@ pub(crate) struct Delivery {
 #[async_trait]
 #[allow(clippy::double_must_use)]
 pub(crate) trait Cursor: Send {
+    /// The run-end subjects in this binding's account.
+    fn subjects(&self) -> &[String];
     /// The next event, or `None` when none came within one pull.
     async fn next(&mut self) -> Result<Option<Delivery>, String>;
     /// Acknowledge the event `next` returned last.
@@ -336,8 +346,8 @@ pub(crate) async fn read_bound(ends: &RunEnds, durable: &dyn Durable) -> String 
         let Some(delivery) = delivery else {
             continue;
         };
-        handle(ends, &delivery);
-        // Acknowledged only now that its wait was woken, or found missing.
+        handle(ends, cursor.subjects(), &delivery);
+        // Acknowledge even a rejected delivery so it is not redelivered.
         if let Err(reason) = cursor.ack().await {
             return reason;
         }
@@ -356,22 +366,10 @@ pub(crate) enum Outcome {
     NoSession,
 }
 
-/// Whether `subject` is one of [`SUBJECTS`] in some account:
-/// `ck.{account}.` followed by it.
-fn is_run_end(subject: &str) -> bool {
-    subject
-        .strip_prefix("ck.")
-        .and_then(|rest| rest.split_once('.'))
-        .is_some_and(|(_, event)| SUBJECTS.contains(&event))
-}
-
-/// Wake the waits on the session `delivery` names. Any other event of a
-/// runner's, such as Broca's `run.started`, wakes nobody, since only a run's
-/// end is worth a read. A run-end event without a `session_ref` header is
-/// logged the first time one comes. Either way the reader acknowledges the
-/// event, so one bad event never stops it.
-fn handle(ends: &RunEnds, delivery: &Delivery) -> Outcome {
-    if !is_run_end(&delivery.subject) {
+/// Only the bound account's run-end subjects may wake session waits. Reject
+/// deliveries outside those subjects before using their headers or ids.
+fn handle(ends: &RunEnds, subjects: &[String], delivery: &Delivery) -> Outcome {
+    if !SUBJECT_DROPS.accepts(subjects, &delivery.subject) {
         return Outcome::NotARunEnd;
     }
     let Some(session_ref) = session_ref_of(&delivery.headers) else {

@@ -48,14 +48,18 @@ use std::time::Duration;
 
 use async_nats::jetstream;
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use cortexkit_bus_naming::federation::HUB_MEMORY_SUBJECT;
+use futures_util::{Stream, StreamExt};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
+
+use crate::bus_subject::SubjectDrops;
 
 use super::hub::{Ack, Hub, HubError, HubMessage, StreamInfo};
 
 /// The hub's memory stream.
 pub const STREAM: &str = cortexkit_bus_naming::federation::HUB_MEMORY_STREAM;
+static SUBJECT_DROPS: SubjectDrops = SubjectDrops::new();
 
 /// How often the consumer sends an idle heartbeat when it has nothing to
 /// deliver.
@@ -606,7 +610,7 @@ impl Delivery for Subscription {
                 "the connection to the hub is down".to_owned(),
             ));
         }
-        match tokio::time::timeout(wait, self.subscriber.next()).await {
+        match tokio::time::timeout(wait, next_delivery(&mut self.subscriber)).await {
             Err(_) => Ok(None),
             Ok(None) => Err(Fault::Failed("the connection to the hub closed".to_owned())),
             Ok(Some(message)) => delivered(&self.context, message).map(Some),
@@ -634,6 +638,21 @@ impl Delivery for Subscription {
         )
         .await;
     }
+}
+
+pub(super) async fn next_delivery(
+    messages: &mut (impl Stream<Item = async_nats::Message> + Unpin),
+) -> Option<async_nats::Message> {
+    while let Some(message) = messages.next().await {
+        // Data sent to the inbox keeps its original stream subject. Control
+        // frames instead use the inbox and must reach the existing handler.
+        if message.status.is_some()
+            || SUBJECT_DROPS.accepts(&[HUB_MEMORY_SUBJECT], message.subject.as_str())
+        {
+            return Some(message);
+        }
+    }
+    None
 }
 
 /// The value of header `name`, if the message has it.

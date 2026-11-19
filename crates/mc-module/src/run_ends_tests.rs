@@ -47,6 +47,7 @@ pub(crate) enum Pull {
 /// A durable whose pulls the test sends, and that records each
 /// acknowledgement. It binds once; every later bind finds no durable.
 pub(crate) struct Feed {
+    account: &'static str,
     pulls: Mutex<Option<mpsc::UnboundedReceiver<Pull>>>,
     /// The id of each acknowledged event, in order.
     pub(crate) acked: Arc<Mutex<Vec<Option<String>>>>,
@@ -57,8 +58,13 @@ pub(crate) struct Feed {
 
 impl Feed {
     pub(crate) fn new() -> (Arc<Self>, mpsc::UnboundedSender<Pull>) {
+        Self::for_account("box_test")
+    }
+
+    fn for_account(account: &'static str) -> (Arc<Self>, mpsc::UnboundedSender<Pull>) {
         let (send, pulls) = mpsc::unbounded_channel();
         let feed = Self {
+            account,
             pulls: Mutex::new(Some(pulls)),
             acked: Arc::default(),
             ack: Arc::default(),
@@ -87,6 +93,7 @@ impl Durable for Feed {
             .take()
             .ok_or("the durable is not provisioned")?;
         Ok(Box::new(FeedCursor {
+            subjects: subjects(self.account),
             pulls,
             acked: self.acked.clone(),
             ack: self.ack.clone(),
@@ -96,6 +103,7 @@ impl Durable for Feed {
 }
 
 struct FeedCursor {
+    subjects: [String; SUBJECTS.len()],
     pulls: mpsc::UnboundedReceiver<Pull>,
     acked: Arc<Mutex<Vec<Option<String>>>>,
     ack: Arc<Notify>,
@@ -104,6 +112,10 @@ struct FeedCursor {
 
 #[async_trait]
 impl Cursor for FeedCursor {
+    fn subjects(&self) -> &[String] {
+        &self.subjects
+    }
+
     async fn next(&mut self) -> Result<Option<Delivery>, String> {
         assert!(self.in_flight.is_none(), "the last event was acknowledged");
         match self.pulls.recv().await {
@@ -154,7 +166,11 @@ fn both_runners_events_name_their_session_in_a_header() {
     );
     // A turn of a session nobody waits on is handled and wakes nobody.
     assert_eq!(
-        handle(&RunEnds::new(), &thalamus_turn_ended()),
+        handle(
+            &RunEnds::new(),
+            &subjects("box_test"),
+            &thalamus_turn_ended()
+        ),
         Outcome::Ended(Woke::Nobody)
     );
     assert_eq!(
@@ -278,6 +294,44 @@ async fn every_event_is_acknowledged_once_handled_and_an_unnamed_one_stops_nothi
     let start = tokio::time::Instant::now();
     watch.pause(start + Duration::from_secs(60)).await;
     assert_eq!(tokio::time::Instant::now(), start);
+}
+
+#[tokio::test]
+async fn foreign_run_end_subjects_are_acknowledged_without_waking_either_runner() {
+    use futures_util::FutureExt as _;
+
+    let ends = Arc::new(RunEnds::new());
+    let (feed, pulls) = Feed::new();
+    let reader = tokio::spawn({
+        let (ends, feed) = (ends.clone(), feed.clone());
+        async move { read_bound(&ends, feed.as_ref()).await }
+    });
+    let broca = broca_child();
+    let thalamus = SessionRef::new("thalamus-harness", "opencode2", "parent:mc-summary:0");
+    let Pull::Event(broca_event) = ended("broca-end", &broca) else {
+        unreachable!();
+    };
+    let mut thalamus_event = thalamus_turn_ended();
+    thalamus_event.headers.insert(
+        SESSION_REF_HEADER.into(),
+        crate::agent_data::source::session_ref(&thalamus),
+    );
+    for (child, event) in [(broca, broca_event), (thalamus, thalamus_event)] {
+        let watch = ends.watch(&child);
+        let mut foreign = event.clone();
+        foreign.subject = event.subject.replacen("ck.box_test.", "ck.box_other.", 1);
+        pulls.send(Pull::Event(foreign)).unwrap();
+        feed.ack.notified().await;
+        assert!(watch.ended().now_or_never().is_none(), "{}", event.subject);
+
+        // A rejected message must not mark the matching event's id as handled.
+        pulls.send(Pull::Event(event)).unwrap();
+        feed.ack.notified().await;
+        assert!(watch.ended().now_or_never().is_some());
+    }
+    pulls.send(Pull::Fail("done".into())).unwrap();
+    assert_eq!(reader.await.unwrap(), "done");
+    assert_eq!(feed.acked().len(), 4);
 }
 
 #[tokio::test(start_paused = true)]
@@ -428,9 +482,16 @@ fn broca_new_storage_run_ended_sample_wakes_the_wait_on_its_session() {
         session_ref_of(&ended.headers),
         Some(BROCA_STORE_SESSION_REF)
     );
-    assert_eq!(handle(&ends, &ended), Outcome::Ended(Woke::Waits(1)));
+    let subjects = subjects("box_sample");
+    assert_eq!(
+        handle(&ends, &subjects, &ended),
+        Outcome::Ended(Woke::Waits(1))
+    );
     // The same publication again is a redelivery.
-    assert_eq!(handle(&ends, &ended), Outcome::Ended(Woke::Again));
+    assert_eq!(
+        handle(&ends, &subjects, &ended),
+        Outcome::Ended(Woke::Again)
+    );
 }
 
 #[test]
@@ -443,7 +504,10 @@ fn the_session_comes_from_the_header_never_the_body() {
     assert!(publication.body.contains(BROCA_STORE_SESSION_REF));
     let mut ended = broca_sample("03-run.ended.json");
     ended.headers.remove(SESSION_REF_HEADER);
-    assert_eq!(handle(&ends, &ended), Outcome::NoSession);
+    assert_eq!(
+        handle(&ends, &subjects("box_sample"), &ended),
+        Outcome::NoSession
+    );
 }
 
 #[test]
@@ -464,7 +528,11 @@ fn broca_samples_of_its_other_run_events_wake_nothing() {
         );
         let relative = event.subject.splitn(3, '.').nth(2).unwrap();
         assert!(!SUBJECTS.contains(&relative), "{name}");
-        assert_eq!(handle(&ends, &event), Outcome::NotARunEnd, "{name}");
+        assert_eq!(
+            handle(&ends, &subjects("box_sample"), &event),
+            Outcome::NotARunEnd,
+            "{name}"
+        );
     }
 }
 
@@ -472,7 +540,7 @@ fn broca_samples_of_its_other_run_events_wake_nothing() {
 async fn the_reader_acknowledges_every_broca_sample_and_wakes_the_wait_once() {
     let ends = Arc::new(RunEnds::new());
     let watch = ends.watch(&SessionRef::new("broca", "store-actor", "s1"));
-    let (feed, pulls) = Feed::new();
+    let (feed, pulls) = Feed::for_account("box_sample");
     let names = [
         "01-run.started.json",
         "02-run.steer_consumed.json",
