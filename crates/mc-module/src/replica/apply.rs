@@ -587,8 +587,9 @@ fn reject(
 
 /// The stream position moves past `message`: its sequence and message id
 /// are stored, so the next consumer can check that the stream still holds
-/// this message there ([`Replica::check_stream`]). A hold recorded for a
-/// message before it is over.
+/// this message there ([`Replica::check_stream`]). A recorded hold for a
+/// fleet epoch ends here: the stream held at this message, or one before
+/// it, and has moved on.
 fn advance(tx: &Connection, message: &HubMessage) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE replica_state

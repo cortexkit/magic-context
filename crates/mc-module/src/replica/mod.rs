@@ -254,9 +254,11 @@ pub struct Replica {
     pub(crate) hub: Arc<dyn Hub>,
     pub(crate) sealer: Arc<dyn Sealer>,
     pub(crate) box_id: String,
-    /// The hub's fleet epoch record, which a hold of the stream at a
-    /// message the vault won't open names in its reason; the vault's own
-    /// refusal decides whether it is held or skipped ([`epochs`]).
+    /// The hub's fleet epoch record (which sealing key generation is the
+    /// hub's current one, and the highest this computer's vault holds), as
+    /// Entorhinal reports it. A hold of the stream at a message the vault
+    /// won't open names it in its reason; the vault's own refusal decides
+    /// whether the message is held or skipped ([`epochs`]).
     pub(crate) epochs: Arc<dyn epochs::FleetEpochs>,
     /// Whether this engine read the stream to its end since it started
     /// ([`Replica::catch_up`]); nothing is sent before it has.
