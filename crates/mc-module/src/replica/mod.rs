@@ -256,7 +256,8 @@ pub struct Replica {
     pub(crate) box_id: String,
     /// The hub's fleet epoch record (which sealing key generation is the
     /// hub's current one, and the highest this computer's vault holds), as
-    /// Entorhinal reports it. A hold of the stream at a message the vault
+    /// Entorhinal, the module that tracks this computer's fleet membership,
+    /// reports it. A hold of the stream at a message the vault
     /// won't open names it in its reason; the vault's own refusal decides
     /// whether the message is held or skipped ([`epochs`]).
     pub(crate) epochs: Arc<dyn epochs::FleetEpochs>,

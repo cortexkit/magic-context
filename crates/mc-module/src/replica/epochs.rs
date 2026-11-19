@@ -10,7 +10,8 @@
 //! ([`super::apply`]). Only a message the vault can never open is skipped.
 //!
 //! [`unopened`] decides which, in one place, from the vault's own refusal
-//! code alone. The hub's epoch record as Entorhinal reports it
+//! code alone. The hub's epoch record as Entorhinal (the module that tracks
+//! this computer's fleet membership) reports it
 //! ([`FleetEpochs`], `fleet.epoch_current`: `current`, the hub's current
 //! epoch as this computer last saw it, and `highest_held`, the highest
 //! epoch this computer's vault holds) never decides a skip, because a vault
@@ -143,8 +144,8 @@ pub enum Unopened {
 }
 
 /// The vault's code for an item of an epoch whose key it holds that still
-/// doesn't open: its bytes, additional data or caller domain don't
-/// authenticate. The message never opens anywhere.
+/// doesn't open: its bytes or additional data don't authenticate. The
+/// message never opens anywhere.
 pub const OPEN_FAILED: &str = "fleet_epoch_open_failed";
 
 /// The vault's code for an item of an epoch whose key it doesn't hold.
@@ -157,8 +158,9 @@ pub const UNAVAILABLE: &str = "fleet_epoch_unavailable";
 ///
 /// - `fleet_epoch_open_failed` is skipped for good, whatever the epoch:
 ///   the vault holds that epoch's key, and the message doesn't
-///   authenticate under it. (Sharing is never switched on against an
-///   older vault, which answered it for an epoch it lacked as well.)
+///   authenticate under it. (Memory sharing between computers is only
+///   switched on with a vault that gives these two answers; an older vault
+///   also answered `fleet_epoch_open_failed` for an epoch it lacked.)
 /// - `fleet_epoch_unavailable` is held, and alerted: the vault doesn't
 ///   hold the epoch's key yet. Nothing is sent meanwhile, so the person
 ///   must see it and get the key to the vault; the engine records the hold
