@@ -6,6 +6,7 @@ import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
+import { estimateFinalWireInputTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import * as transformModule from "../../hooks/magic-context/transform";
 import * as logger from "../../shared/logger";
@@ -382,12 +383,17 @@ test("the served history head replaces the checkpoint summary literally, `$` seq
     }
 });
 
+function measuredCheckpointDraft(draft: SessionContext): SessionContext {
+    draft.model = { ...draft.model, providerID: "openai", id: "gpt-5.5" };
+    return draft;
+}
+
 test("an oversized deferred checkpoint is refused, then an overflow permission repairs it before egress", async () => {
     const f = await fixture();
     const logs = spyOn(logger, "sessionLog");
     try {
         const oversized = () => {
-            const draft = f.draft();
+            const draft = measuredCheckpointDraft(f.draft());
             draft.messages[0]!.content[0]!.text = String(
                 draft.messages[0]!.content[0]!.text,
             ).replace("RAW-HOST-TRANSCRIPT", "oversized raw transcript ".repeat(40000));
@@ -418,7 +424,9 @@ test("removing recent-context never permits an oversized remaining request", asy
             .prepare("UPDATE session_message SET data=? WHERE id='u1'")
             .run(JSON.stringify({ text: "unsummarized user content ".repeat(40000) }));
         f.setPermission(true);
-        await expect(f.hooks.get("context")!(f.draft())).rejects.toThrow("Context full");
+        await expect(f.hooks.get("context")!(measuredCheckpointDraft(f.draft()))).rejects.toThrow(
+            "Context full",
+        );
         expect(
             logs.mock.calls.some(([, message]) => message.includes("arm=checkpoint-over-window")),
         ).toBe(true);
@@ -438,14 +446,14 @@ test("checkpoint review: oversized generate suffix is refused after a permitted 
     const f = await fixture();
     try {
         f.setPermission(true);
-        const main = f.draft();
+        const main = measuredCheckpointDraft(f.draft());
         await f.hooks.get("context")!(main);
         expect(JSON.stringify(main.messages[0])).not.toContain("<recent-context>");
 
-        const side = f.draft();
+        const side = measuredCheckpointDraft(f.draft());
         side.messages.push({
             role: "user",
-            content: [{ type: "text", text: "side question beyond the window ".repeat(40000) }],
+            content: [{ type: "text", text: "side question beyond the window ".repeat(18000) }],
         });
         const generating = f.hooks.get("generate")!(side);
         await generating.then(
@@ -465,7 +473,7 @@ test("generate refuses an oversized checkpoint without a recent-context block or
     const f = await fixture();
     const logs = spyOn(logger, "sessionLog");
     try {
-        const side = f.draft();
+        const side = measuredCheckpointDraft(f.draft());
         side.messages[0]!.content[0]!.text =
             `<conversation-checkpoint><summary>${"checkpoint summary ".repeat(40000)}</summary></conversation-checkpoint>`;
         await expect(f.hooks.get("generate")!(side)).rejects.toThrow("Context full");
@@ -474,6 +482,31 @@ test("generate refuses an oversized checkpoint without a recent-context block or
         ).toBe(true);
     } finally {
         logs.mockRestore();
+        await f.close();
+    }
+});
+
+test("generate admits an unseeded checkpoint when only the fit margin exceeds the window", async () => {
+    const f = await fixture();
+    try {
+        const draft = f.draft();
+        const text = `<conversation-checkpoint><summary>${"checkpoint summary ".repeat(10000)}</summary></conversation-checkpoint>`;
+        draft.messages[0]!.content[0]!.text = text;
+        const limit = draft.model.limit!.context!;
+        const estimate = estimateFinalWireInputTokens({
+            messages: [{ info: { role: "user" }, parts: [{ type: "text", text }] }],
+            systemPromptTokens: estimateTokens("[]"),
+            toolDefinitionTokens: 0,
+            providerID: draft.model.providerID,
+            modelID: draft.model.id,
+            agentName: draft.agent,
+        });
+        expect(estimate.rawTokens).toBeLessThan(limit);
+        expect(estimate.tokens).toBeGreaterThan(limit);
+        expect(estimate.refusalGrade).toBe(false);
+        await f.hooks.get("generate")!(draft);
+        expect(draft.messages[0]!.content[0]!.text).toBe(text);
+    } finally {
         await f.close();
     }
 });
