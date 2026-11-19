@@ -35,6 +35,7 @@ fn matches(pattern: &str, subject: &str) -> bool {
 /// Count rejected deliveries even when their warnings are suppressed. Keep
 /// one counter and log budget per reader, not per subject or binding, so a
 /// sender cannot get more warnings printed by varying subjects or rebinding.
+#[derive(Default)]
 pub(crate) struct SubjectDrops {
     count: AtomicU64,
     last_log: Mutex<Option<Instant>>,
@@ -46,6 +47,11 @@ impl SubjectDrops {
             count: AtomicU64::new(0),
             last_log: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
     }
 
     pub(crate) fn accepts(&self, patterns: &[impl AsRef<str> + Debug], subject: &str) -> bool {

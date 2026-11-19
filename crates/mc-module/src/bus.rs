@@ -1114,27 +1114,29 @@ struct RunEndBinding {
     generation: u64,
     connection: NatsConnection,
     consumer: Consumer<pull::Config>,
-    subjects: [String; run_ends::SUBJECTS.len()],
+    subjects: run_ends::RunEndSubjects,
 }
 
 /// Keep the expected subjects with their connection so a rebind also
 /// updates the account against which we check deliveries.
 async fn bind_run_ends(bus: &Bus) -> Result<RunEndBinding, String> {
-    let (generation, connection, stream, subjects) = {
+    let (generation, connection, account) = {
         let session = bus.session().await?;
         let active: &BusSession = &session;
         let connection = active.connection.clone().ok_or("nats_connection_absent")?;
         (
             bus.generation.load(Ordering::SeqCst),
             connection,
-            active.account.streams().event.clone(),
-            run_ends::subjects(active.account.account()),
+            active.account.clone(),
         )
     };
     let consumer = async_nats::jetstream::new(connection.client())
-        .get_consumer_from_stream::<pull::Config, _, _>(run_ends::DURABLE, &stream)
+        .get_consumer_from_stream::<pull::Config, _, _>(run_ends::DURABLE, &account.streams().event)
         .await
         .map_err(|error| binding_refused(&error))?;
+    let config = &consumer.cached_info().config;
+    let subjects =
+        run_ends::RunEndSubjects::new(&account, &config.filter_subject, &config.filter_subjects);
     Ok(RunEndBinding {
         generation,
         connection,
@@ -1176,7 +1178,7 @@ struct RunEndCursor {
 
 #[async_trait]
 impl run_ends::Cursor for RunEndCursor {
-    fn subjects(&self) -> &[String] {
+    fn subjects(&self) -> &run_ends::RunEndSubjects {
         &self.binding.subjects
     }
 

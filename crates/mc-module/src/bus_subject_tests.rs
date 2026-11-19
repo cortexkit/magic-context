@@ -26,7 +26,7 @@ fn subject_drop_warning_names_both_subjects_and_is_rate_limited() {
         assert!(!drops.accepts(&["ck.box.run"], subject));
     }
     log.stop();
-    assert_eq!(drops.count.load(Ordering::Relaxed), 2);
+    assert_eq!(drops.count(), 2);
     assert_eq!(log.count("dropped a bus delivery"), 1);
     assert_eq!(log.count("ck.box.run"), 1);
     assert_eq!(log.count("ck.foreign.run"), 1);

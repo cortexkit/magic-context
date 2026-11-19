@@ -93,7 +93,7 @@ impl Durable for Feed {
             .take()
             .ok_or("the durable is not provisioned")?;
         Ok(Box::new(FeedCursor {
-            subjects: subjects(self.account),
+            subjects: test_subjects(self.account),
             pulls,
             acked: self.acked.clone(),
             ack: self.ack.clone(),
@@ -103,7 +103,7 @@ impl Durable for Feed {
 }
 
 struct FeedCursor {
-    subjects: [String; SUBJECTS.len()],
+    subjects: RunEndSubjects,
     pulls: mpsc::UnboundedReceiver<Pull>,
     acked: Arc<Mutex<Vec<Option<String>>>>,
     ack: Arc<Notify>,
@@ -112,7 +112,7 @@ struct FeedCursor {
 
 #[async_trait]
 impl Cursor for FeedCursor {
-    fn subjects(&self) -> &[String] {
+    fn subjects(&self) -> &RunEndSubjects {
         &self.subjects
     }
 
@@ -135,6 +135,11 @@ impl Cursor for FeedCursor {
         self.ack.notify_one();
         Ok(())
     }
+}
+
+fn test_subjects(account: &str) -> RunEndSubjects {
+    let account = AccountNames::derive(account).unwrap();
+    RunEndSubjects::new(&account, &account.event_binding(), &[])
 }
 
 /// The run-end event of `session`'s run, as Broca publishes it, under the
@@ -168,7 +173,7 @@ fn both_runners_events_name_their_session_in_a_header() {
     assert_eq!(
         handle(
             &RunEnds::new(),
-            &subjects("box_test"),
+            &test_subjects("box_test"),
             &thalamus_turn_ended()
         ),
         Outcome::Ended(Woke::Nobody)
@@ -332,6 +337,7 @@ async fn foreign_run_end_subjects_are_acknowledged_without_waking_either_runner(
     pulls.send(Pull::Fail("done".into())).unwrap();
     assert_eq!(reader.await.unwrap(), "done");
     assert_eq!(feed.acked().len(), 4);
+    assert_eq!(ends.subject_drops.count(), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -482,7 +488,7 @@ fn broca_new_storage_run_ended_sample_wakes_the_wait_on_its_session() {
         session_ref_of(&ended.headers),
         Some(BROCA_STORE_SESSION_REF)
     );
-    let subjects = subjects("box_sample");
+    let subjects = test_subjects("box_sample");
     assert_eq!(
         handle(&ends, &subjects, &ended),
         Outcome::Ended(Woke::Waits(1))
@@ -505,7 +511,7 @@ fn the_session_comes_from_the_header_never_the_body() {
     let mut ended = broca_sample("03-run.ended.json");
     ended.headers.remove(SESSION_REF_HEADER);
     assert_eq!(
-        handle(&ends, &subjects("box_sample"), &ended),
+        handle(&ends, &test_subjects("box_sample"), &ended),
         Outcome::NoSession
     );
 }
@@ -529,11 +535,57 @@ fn broca_samples_of_its_other_run_events_wake_nothing() {
         let relative = event.subject.splitn(3, '.').nth(2).unwrap();
         assert!(!SUBJECTS.contains(&relative), "{name}");
         assert_eq!(
-            handle(&ends, &subjects("box_sample"), &event),
+            handle(&ends, &test_subjects("box_sample"), &event),
             Outcome::NotARunEnd,
             "{name}"
         );
     }
+}
+
+#[tokio::test]
+async fn configured_run_started_is_acknowledged_without_warning_or_drop() {
+    use futures_util::FutureExt as _;
+
+    let mut log = crate::test_log::capture();
+    let ends = RunEnds::new();
+    let watch = ends.watch(&SessionRef::new("broca", "store-actor", "s1"));
+    let (feed, pulls) = Feed::for_account("box_sample");
+    let started = broca_sample("01-run.started.json");
+    assert_eq!(
+        session_ref_of(&started.headers),
+        Some(BROCA_STORE_SESSION_REF)
+    );
+    let id = started.id.clone();
+    pulls.send(Pull::Event(started)).unwrap();
+    pulls.send(Pull::Fail("done".into())).unwrap();
+    assert_eq!(read_bound(&ends, feed.as_ref()).await, "done");
+    log.stop();
+
+    assert_eq!(feed.acked(), [id]);
+    assert!(watch.ended().now_or_never().is_none());
+    assert_eq!(ends.subject_drops.count(), 0);
+    assert_eq!(log.count("dropped a bus delivery"), 0);
+}
+
+#[test]
+fn the_bound_account_and_consumer_filters_both_limit_deliveries() {
+    let account = AccountNames::derive("box_sample").unwrap();
+    let subjects = RunEndSubjects::new(
+        &account,
+        "",
+        &[
+            "ck.*.event.broca.run.*.v1".into(),
+            "ck.box_sample.event.thalamus-harness.turn_ended.v1".into(),
+        ],
+    );
+    let ends = RunEnds::new();
+    let mut event = broca_sample("01-run.started.json");
+    assert_eq!(handle(&ends, &subjects, &event), Outcome::NotARunEnd);
+    event.subject = "ck.box_other.event.broca.run.started.v1".into();
+    assert_eq!(handle(&ends, &subjects, &event), Outcome::OutsideFilters);
+    event.subject = "ck.box_sample.event.broca.unrelated.v1".into();
+    assert_eq!(handle(&ends, &subjects, &event), Outcome::OutsideFilters);
+    assert_eq!(ends.subject_drops.count(), 2);
 }
 
 #[tokio::test(start_paused = true)]
