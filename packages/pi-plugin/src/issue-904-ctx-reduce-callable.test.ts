@@ -653,9 +653,9 @@ describe("issue 904: the Pi extension's own sites", () => {
 	it("guidance, both reminders and the spawned-session record follow the session", async () => {
 		const runtime = createRuntime();
 		// The extension boot migrates this process's fresh store, and the migration
-		// guard refuses while any Pi or OMP process runs on the machine: the test
+		// guard refuses while any Pi or Oh My Pi process runs on the machine: the test
 		// preload's store counts as the shared default store. Other test files run
-		// a real OMP in parallel workers (and a developer may run Pi), which left
+		// a real Oh My Pi in parallel workers (and a developer may run Pi), which left
 		// the boot without storage and registered no tools. Show the guard's
 		// process scan only this process for the boot.
 		__setAsyncProcessProbeForTests(async () => {

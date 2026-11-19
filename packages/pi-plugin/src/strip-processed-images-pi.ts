@@ -41,7 +41,7 @@ export function isLargeImagePart(value: unknown): value is PiImagePart {
  */
 export const PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER =
 	"(tool image omitted: model does not support images)";
-/** The same note for an image in a user message. */
+/** What pi-ai sends for an image in a user message when the model takes no image input. */
 export const PI_NON_VISION_USER_IMAGE_PLACEHOLDER =
 	"(image omitted: model does not support images)";
 
