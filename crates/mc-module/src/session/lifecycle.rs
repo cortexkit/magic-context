@@ -643,6 +643,9 @@ impl Session {
         // is in the index.
         if self.runner_differs(request.applied_view.as_ref()) {
             self.adopt_runner_view(client).await;
+            if !self.index_ready {
+                return;
+            }
         }
         self.settle_spent_reading(request.applied_view.as_ref());
         if let Some(view) = &self.latest {

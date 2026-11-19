@@ -101,6 +101,51 @@ fn cut_through(view: &View) -> Option<&str> {
     })
 }
 
+#[tokio::test]
+async fn audit_cuts_adopt_older_cut_reindexes_visible_tail() {
+    let dir = scratch("older-cut");
+    let entries: Vec<_> = (1..=10).map(|n| text(n, &format!("m{n}"))).collect();
+    let (mut session, client, settings) =
+        head(&dir, entries.clone(), &[((1, "m1"), (2, "m2"))]).await;
+    let old = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&old), Some("m2"));
+    session.accept(old.clone());
+    session.settle_unconfirmed(Some(&old.applied()), &[]);
+
+    summary(session.db.as_ref().unwrap(), 2, (3, "m3"), (6, "m6"));
+    session.load_summaries();
+    session.summary_unshown = true;
+    let new = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&new), Some("m6"));
+    session.accept(new.clone());
+    session.settle_unconfirmed(Some(&new.applied()), &[]);
+    assert!(session.index.find("m3", "p").is_none());
+
+    *client.applied.lock().unwrap() = Some(
+        AppliedViewAnswer::new()
+            .with_view(old.clone())
+            .with_applied_by(crate::MODULE_ID),
+    );
+    let mut request = notice(&session, 1, entries.last().map(cursor));
+    request.applied_view = Some(old.applied());
+    session.notice(&client, &settings, request).await;
+    assert_eq!(session.latest.as_ref().unwrap().checksum, old.checksum);
+    let reply = session
+        .ctx_reduce(&client, &serde_json::json!({"drop": "3-5"}))
+        .await
+        .unwrap();
+    assert_eq!(reply, "3 tags stamped.");
+    assert_eq!(session.cut, Some(2));
+    assert_eq!(session.index.base(), 2);
+    assert!(session.index_ready);
+    for ordinal in 3..=5 {
+        assert!(session
+            .queued
+            .contains(&(format!("m{ordinal}"), "p".into())));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A summary's first or last message: its ordinal and id.
 type Bound<'a> = (u64, &'a str);
 

@@ -29,7 +29,7 @@ pub struct MoveFloor {
 }
 
 /// Where the runner said an entry sits.
-enum Placed {
+pub(super) enum Placed {
     At(u64),
     /// Not on the active path, or the read failed.
     Nowhere,
@@ -179,7 +179,7 @@ impl Session {
 
     /// The ordinal of entry `mid`: from the index when it holds it,
     /// otherwise from the runner.
-    async fn place<C: RunnerClient>(&self, client: &C, mid: &str) -> Placed {
+    pub(super) async fn place<C: RunnerClient>(&self, client: &C, mid: &str) -> Placed {
         if let Some(ordinal) = self.index.ordinal_of(mid) {
             return Placed::At(ordinal);
         }
