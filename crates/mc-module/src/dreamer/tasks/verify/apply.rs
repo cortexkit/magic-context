@@ -25,8 +25,8 @@
 //!   and some commit of the checked-out history to have held it, so it was
 //!   removed rather than never here; without it, it needs evidence in
 //!   `reason`, and is refused for a directive-shaped rule. Either form is
-//!   refused when a recent unmerged local branch still holds a citation,
-//!   or when that check cannot finish.
+//!   refused when the unmerged history of a recent local branch changed a
+//!   citation, or when that check cannot finish.
 //!
 //! A memory checked without a line of its own is never rewritten or archived
 //! while the repository has more than one live branch ([`super::live`]);
@@ -51,7 +51,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use regex::Regex;
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -61,9 +61,8 @@ use super::cites::{cites, Cite};
 use super::manifest::{js_trim, Decision, Verdict};
 use super::spans::{Confirmation, STORED_KEY};
 use super::{Absence, Read, VerifyBatch};
-use crate::dreamer::checkout::{
-    clean_path, Checkout, RecentBranch, GIT_TIMEOUT, RECENT_BRANCH_LIMIT,
-};
+use crate::dreamer::branches::short;
+use crate::dreamer::checkout::{Checkout, RecentBranches, GIT_TIMEOUT};
 use crate::dreamer::task::Applied;
 use crate::dreamer::tasks::map_memories::{
     mapping_json, mapping_rows, put_mapping, MappingRow, MAPPER,
@@ -90,7 +89,7 @@ pub(super) const METADATA: &str = "CASE WHEN json_valid(metadata_json)
 /// A batch reads recent tips once, even if several archives need checking.
 /// Archives of memories with the same citations also share their result.
 pub(super) struct ArchiveBranches {
-    tips: OnceLock<Result<Vec<RecentBranch>, String>>,
+    tips: OnceLock<Result<RecentBranches, String>>,
     checked: Mutex<HashMap<Vec<Cite>, Option<String>>>,
     timeout: Duration,
 }
@@ -125,70 +124,37 @@ impl ArchiveBranches {
     }
 
     fn look_up(&self, checkout: &Checkout, cited: &[Cite]) -> Result<Option<String>, String> {
-        let tips = self
+        let branches = self
             .tips
             .get_or_init(|| checkout.recent_unmerged_branches())
             .as_ref()
             .map_err(Clone::clone)?;
-        for branch in tips.iter().take(RECENT_BRANCH_LIMIT) {
-            if let Some(found) = branch_citation(checkout, branch, cited, self.timeout)
-                .map_err(|why| format!("reading branch {} failed: {why}", branch.name))?
-            {
-                return Ok(Some(format!(
-                    "{} is on branch {} (recent, not merged)",
-                    found.text(),
-                    branch.name
-                )));
+        for cite in cited {
+            let commit = match cite {
+                Cite::Name(name) => checkout.text_in_unmerged_history(branches, name, self.timeout),
+                Cite::Path(path) => checkout.path_in_unmerged_history(branches, path, self.timeout),
             }
-        }
-        if tips.len() > RECENT_BRANCH_LIMIT {
-            return Err(format!(
-                "more than {RECENT_BRANCH_LIMIT} recent unmerged local branches"
-            ));
+            .map_err(|why| {
+                format!(
+                    "searching unmerged history for {} failed: {why}",
+                    cite.text()
+                )
+            })?;
+            if let Some(commit) = commit {
+                let mut reason = format!(
+                    "{} changed in unmerged commit {}",
+                    cite.text(),
+                    short(&commit)
+                );
+                if let Some(branch) = checkout.branch_containing(branches, &commit) {
+                    reason.push_str(" on branch ");
+                    reason.push_str(&branch);
+                }
+                return Ok(Some(reason));
+            }
         }
         Ok(None)
     }
-}
-
-/// The first citation held by this tip. The time limit covers all reads of
-/// one tip, not a fresh allowance for each citation.
-fn branch_citation<'a>(
-    checkout: &Checkout,
-    branch: &RecentBranch,
-    cited: &'a [Cite],
-    timeout: Duration,
-) -> Result<Option<&'a Cite>, String> {
-    let started = Instant::now();
-    let remaining = || timeout.saturating_sub(started.elapsed());
-    let mut paths = None;
-    for cite in cited {
-        let found = match cite {
-            Cite::Name(name) => checkout.branch_has_text(branch, name, remaining())?,
-            Cite::Path(path) => {
-                let path =
-                    clean_path(path).ok_or_else(|| format!("{path} is not a repository path"))?;
-                let paths = match &paths {
-                    Some(paths) => paths,
-                    None => paths.insert(checkout.branch_paths(branch, remaining())?),
-                };
-                // Like the checkout lookup, accept paths cited relative to
-                // a folder inside the repository, but only at a slash boundary.
-                paths.split('\0').any(|listed| {
-                    listed == path
-                        || listed
-                            .strip_suffix(&path)
-                            .is_some_and(|prefix| prefix.ends_with('/'))
-                })
-            }
-        };
-        if found {
-            return Ok(Some(cite));
-        }
-        if remaining().is_zero() {
-            return Err("searching its tracked files timed out".into());
-        }
-    }
-    Ok(None)
 }
 
 /// Whether a project rule reads as a behavioural directive (when to act, how

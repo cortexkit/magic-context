@@ -32,13 +32,15 @@ use super::branches::{read_blob, Copy, Refs};
 pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Output past this many bytes is a failure, not a truncated answer.
 const GIT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
-/// The most local branch tips an archive check may search.
-pub(crate) const RECENT_BRANCH_LIMIT: usize = 50;
 const RECENT_BRANCH_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+/// Keep lists of commit IDs well below the Windows command-line limit. More
+/// tips are searched in further calls, not left out.
+const TIPS_PER_LOG: usize = 256;
 
-pub(crate) struct RecentBranch {
-    pub name: String,
-    pub commit: String,
+pub(crate) struct RecentBranches {
+    default: String,
+    tips: Vec<String>,
+    names: HashSet<String>,
 }
 
 /// How far one literal search may go before it stops and says so.
@@ -245,18 +247,7 @@ impl Checkout {
     /// [`Checkout::has_path`] matches it. `Err` when `cited` holds no path,
     /// or git fails or runs longer than `timeout`.
     pub(crate) fn path_in_history(&self, cited: &str, timeout: Duration) -> Result<bool, String> {
-        let path = clean_path(cited).ok_or_else(|| format!("{cited} is not a path"))?;
-        // A glob pathspec, so the path is matched under any folder; the
-        // characters a glob reads are escaped to stand for themselves.
-        let mut escaped = String::with_capacity(path.len());
-        for ch in path.chars() {
-            if matches!(ch, '*' | '?' | '[' | '\\') {
-                escaped.push('\\');
-            }
-            escaped.push(ch);
-        }
-        let itself = format!(":(glob)**/{escaped}");
-        let inside = format!(":(glob)**/{escaped}/**");
+        let [itself, inside] = history_pathspec(cited)?;
         let mut args = vec!["log", "--format=%H", "-1"];
         args.extend(self.at.as_deref());
         args.extend(["--", itself.as_str(), inside.as_str()]);
@@ -280,19 +271,16 @@ impl Checkout {
         run_git_within(&self.repo, &args, timeout).map(|listed| names_a_commit(&listed))
     }
 
-    /// Recent local tips not reachable from the default branch, newest first.
-    /// One extra tip tells the caller that it cannot finish within the limit.
-    pub(crate) fn recent_unmerged_branches(&self) -> Result<Vec<RecentBranch>, String> {
+    /// The default branch and all recent local tips not reachable from it.
+    pub(crate) fn recent_unmerged_branches(&self) -> Result<RecentBranches, String> {
         let (_, default) = Refs::read(&self.repo)?
             .default_branch()
             .ok_or("the default branch could not be resolved")?;
-        let count = format!("--count={}", RECENT_BRANCH_LIMIT + 1);
         let unmerged = format!("--no-merged={default}");
         let listed = run_git_within(
             &self.repo,
             &[
                 "for-each-ref",
-                &count,
                 &unmerged,
                 "--sort=-committerdate",
                 "--format=%(refname)%09%(objectname)%09%(committerdate:unix)",
@@ -304,7 +292,9 @@ impl Checkout {
             format!("listing local branches not merged into the default branch failed: {why}")
         })?;
         let cutoff = crate::memory_writes::now_ms() / 1000 - RECENT_BRANCH_AGE.as_secs() as i64;
-        let mut recent = Vec::new();
+        let mut tips = Vec::new();
+        let mut names = HashSet::new();
+        let mut seen = HashSet::new();
         for line in listed.lines() {
             let mut fields = line.split('\t');
             let name = fields
@@ -319,69 +309,98 @@ impl Checkout {
             if date < cutoff {
                 break;
             }
-            recent.push(RecentBranch {
-                name: name.to_owned(),
-                commit: commit.to_owned(),
-            });
+            names.insert(name.to_owned());
+            if seen.insert(commit) {
+                tips.push(commit.to_owned());
+            }
         }
-        Ok(recent)
+        Ok(RecentBranches {
+            default,
+            tips,
+            names,
+        })
     }
 
-    /// NUL-separated tracked paths, including folders, at the listed tip.
-    pub(crate) fn branch_paths(
+    /// A commit in the recent tips' unmerged history that touched `cited`.
+    pub(crate) fn path_in_unmerged_history(
         &self,
-        branch: &RecentBranch,
+        branches: &RecentBranches,
+        cited: &str,
         timeout: Duration,
-    ) -> Result<String, String> {
-        run_git_within(
-            &self.repo,
-            &[
-                "ls-tree",
-                "-r",
-                "-t",
-                "-z",
-                "--name-only",
-                "--full-tree",
-                &branch.commit,
-            ],
+    ) -> Result<Option<String>, String> {
+        let [itself, inside] = history_pathspec(cited)?;
+        self.unmerged_change(branches, &[], &[&itself, &inside], timeout)
+    }
+
+    /// A commit in the recent tips' unmerged history that changed how often
+    /// a file contains `text` literally (git's pickaxe).
+    pub(crate) fn text_in_unmerged_history(
+        &self,
+        branches: &RecentBranches,
+        text: &str,
+        timeout: Duration,
+    ) -> Result<Option<String>, String> {
+        let pickaxe = format!("-S{text}");
+        self.unmerged_change(
+            branches,
+            &[&pickaxe, "--no-ext-diff", "--no-textconv"],
+            &[],
             timeout,
         )
     }
 
-    /// Whether a tracked file at the listed tip contains `text` literally.
-    pub(crate) fn branch_has_text(
+    fn unmerged_change(
         &self,
-        branch: &RecentBranch,
-        text: &str,
+        branches: &RecentBranches,
+        filters: &[&str],
+        paths: &[&str],
         timeout: Duration,
-    ) -> Result<bool, String> {
-        // The usual success-only git wrapper would turn grep's normal
-        // no-match exit into an error, so read the exit code here.
-        let output = run_git_output(
+    ) -> Result<Option<String>, String> {
+        let started = Instant::now();
+        for tips in branches.tips.chunks(TIPS_PER_LOG) {
+            let mut args = vec!["log", "--format=%H", "-1"];
+            args.extend_from_slice(filters);
+            args.extend(tips.iter().map(String::as_str));
+            args.extend(["--not", &branches.default, "--"]);
+            args.extend_from_slice(paths);
+            let found =
+                run_git_within(&self.repo, &args, timeout.saturating_sub(started.elapsed()))?;
+            let commit = found.trim();
+            if is_commit(commit) {
+                return Ok(Some(commit.to_owned()));
+            }
+            if !commit.is_empty() {
+                return Err("git log did not report a commit id".into());
+            }
+        }
+        Ok(None)
+    }
+
+    /// A recent branch containing `commit`, when git can still name one.
+    pub(crate) fn branch_containing(
+        &self,
+        branches: &RecentBranches,
+        commit: &str,
+    ) -> Option<String> {
+        let contains = format!("--contains={commit}");
+        let listed = run_git_within(
             &self.repo,
             &[
-                "grep",
-                "-l",
-                "-F",
-                "--no-textconv",
-                "--no-recurse-submodules",
-                "--threads=1",
-                "-e",
-                text,
-                &branch.commit,
-                "--",
+                "for-each-ref",
+                &contains,
+                "--format=%(refname)",
+                "refs/heads/",
             ],
-            timeout,
-        )?;
-        match output.code {
-            Some(0) => Ok(true),
-            Some(1) if output.stderr.is_empty() && output.stdout.is_empty() => Ok(false),
-            _ => Err(format!(
-                "git grep failed (exit {:?}): {}",
-                output.code,
-                output.stderr.trim().chars().take(500).collect::<String>()
-            )),
-        }
+            GIT_TIMEOUT,
+        )
+        .ok()?;
+        // Filter before taking the first match: stale branches can contain
+        // the commit too.
+        listed
+            .lines()
+            .filter_map(|name| name.strip_prefix("refs/heads/"))
+            .find(|name| branches.names.contains(*name))
+            .map(str::to_owned)
     }
 
     /// Look for each of `names` as literal bytes in the tracked paths and in
@@ -554,6 +573,22 @@ pub(crate) fn clean_path(cited: &str) -> Option<String> {
     let path = path.trim_end_matches('/').to_owned();
     (!path.is_empty() && !path.split('/').any(|part| part.is_empty() || part == ".."))
         .then_some(path)
+}
+
+/// Match the path itself or files in the named folder at any depth.
+fn history_pathspec(cited: &str) -> Result<[String; 2], String> {
+    let path = clean_path(cited).ok_or_else(|| format!("{cited} is not a path"))?;
+    let mut escaped = String::with_capacity(path.len());
+    for ch in path.chars() {
+        if matches!(ch, '*' | '?' | '[' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    Ok([
+        format!(":(glob)**/{escaped}"),
+        format!(":(glob)**/{escaped}/**"),
+    ])
 }
 
 pub(crate) fn is_commit(text: &str) -> bool {

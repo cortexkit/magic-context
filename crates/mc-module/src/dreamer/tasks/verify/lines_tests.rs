@@ -285,9 +285,12 @@ fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
     // Another worktree's branch moved the function instead of removing it.
     let (_outer, worktree) = repo.worktree("keep");
     std::fs::remove_file(worktree.join("src/old/gone.rs")).unwrap();
-    commit_at(
+    let keeper = commit_at(
         &worktree,
-        &[("src/moved.rs", "fn gone_function() {}\n")],
+        &[(
+            "src/moved.rs",
+            "fn gone_function() {}\nfn call() { gone_function(); }\n",
+        )],
         "move",
     );
     std::fs::remove_file(repo.path().join("src/old/gone.rs")).unwrap();
@@ -309,7 +312,7 @@ fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
     assert_eq!(fixture.memory(2).0, "active");
 
     // Removing the checkout leaves just one live branch, but the keeper
-    // branch still holds the name and protects the memory on its own.
+    // branch's unmerged change to the name still protects the memory.
     git_at(
         repo.path(),
         &["worktree", "remove", "--force", worktree.to_str().unwrap()],
@@ -322,7 +325,10 @@ fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
     assert_eq!(applied.applied, 0);
     assert_eq!(
         applied.dropped,
-        ["memory 2: gone_function is on branch keep (recent, not merged)"]
+        [format!(
+            "memory 2: gone_function changed in unmerged commit {} on branch keep",
+            &keeper[..12]
+        )]
     );
     assert_eq!(fixture.memory(2).0, "active");
 
