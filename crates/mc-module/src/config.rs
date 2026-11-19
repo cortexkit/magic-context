@@ -25,6 +25,11 @@
 //!
 //! Each file is re-read when its modification time changes, so an edit
 //! applies from the session's next pass without a restart.
+//!
+//! A build with the `managed-settings` switch takes the user's settings from
+//! the daemon's managed settings instead of the user file (`managed`); the
+//! project file is read as above either way. Both builds resolve the user's
+//! settings through one `UserTier`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -35,11 +40,21 @@ use std::time::SystemTime;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[cfg(any(test, feature = "managed-settings"))]
+pub mod convert;
+#[cfg(any(test, feature = "managed-settings"))]
+pub mod edit;
 mod jsonc;
+#[cfg(feature = "managed-settings")]
+pub mod managed;
+#[cfg(any(test, feature = "managed-settings"))]
+pub(crate) mod review;
+mod user_tier;
 
 use crate::embedding;
 use crate::pass::Settings;
 use crate::vault::{ApiKey, Secret, Vault};
+pub(crate) use user_tier::UserTier;
 
 /// The highest execute threshold any setting can reach, as the plugin caps
 /// it: above it too little room is left to act before the window fills.
@@ -71,8 +86,32 @@ impl Config {
     /// measured against.
     pub fn resolve(&self, project_root: Option<&str>, model_key: &str, usable: u64) -> Settings {
         match self {
-            Self::Fixed(settings) => settings.as_ref().clone(),
+            Self::Fixed(settings) => {
+                let mut settings = settings.as_ref().clone();
+                // Each resolution learns its Synapse lane afresh, as one
+                // resolved from the files does.
+                settings.embedding = settings
+                    .embedding
+                    .as_ref()
+                    .map(embedding::Provider::unbound);
+                settings
+            }
             Self::Files(loader) => loader.resolve(project_root.map(Path::new), model_key, usable),
+        }
+    }
+
+    /// Call Synapse through `link` for the embedding providers these
+    /// settings resolve to. The module links its own configuration once, over
+    /// its runner client.
+    pub fn link_synapse(&mut self, link: &std::sync::Arc<embedding::synapse::Link>) {
+        match self {
+            Self::Fixed(settings) => {
+                settings.embedding = settings
+                    .embedding
+                    .take()
+                    .map(|provider| provider.with_synapse_link(link));
+            }
+            Self::Files(loader) => loader.synapse = Some(std::sync::Arc::clone(link)),
         }
     }
 
@@ -90,12 +129,18 @@ impl Config {
     pub fn dreamer(&self) -> Option<crate::dreamer::engine::Settings> {
         match self {
             Self::Fixed(_) => Some(crate::dreamer::engine::Settings::default()),
-            Self::Files(loader) => dreamer_settings(
-                loader
-                    .read(&loader.user_path)
-                    .map(|value| expand_user(value, &loader.user_path))
-                    .as_ref(),
-            ),
+            Self::Files(loader) => {
+                dreamer_settings(loader.user_tier().as_ref().map(UserTier::value))
+            }
+        }
+    }
+
+    /// The loader that reads the settings files, when settings come from
+    /// them.
+    pub fn loader(&self) -> Option<&Loader> {
+        match self {
+            Self::Fixed(_) => None,
+            Self::Files(loader) => Some(loader),
         }
     }
 }
@@ -168,6 +213,13 @@ pub struct Loader {
     cache: Mutex<HashMap<PathBuf, Cached>>,
     /// Where `{vault:…}` keys in the user file are read.
     vault: std::sync::Arc<Vault>,
+    /// How a Synapse embedding provider calls Synapse; `None` outside the
+    /// module, where nothing is embedded.
+    synapse: Option<std::sync::Arc<embedding::synapse::Link>>,
+    /// Where the user tier comes from when the daemon manages the settings
+    /// ([`managed`]); `None` reads the user file.
+    #[cfg(feature = "managed-settings")]
+    managed: Option<std::sync::Arc<managed::Managed>>,
 }
 
 impl Loader {
@@ -211,7 +263,16 @@ impl Loader {
             user_path,
             cache: Mutex::new(HashMap::new()),
             vault: Vault::none(),
+            synapse: None,
+            #[cfg(feature = "managed-settings")]
+            managed: None,
         }
+    }
+
+    /// The user file this loader reads, and the one ck-mc declares to the
+    /// daemon.
+    pub fn user_path(&self) -> &Path {
+        &self.user_path
     }
 
     /// Read `{vault:…}` keys from `vault`. The keys the user file names now
@@ -219,50 +280,70 @@ impl Loader {
     /// a key the file names later is read when a session's settings first
     /// name it.
     pub fn with_vault(mut self, vault: std::sync::Arc<Vault>) -> Self {
-        let user = self
-            .read(&self.user_path)
-            .map(|value| expand_user(value, &self.user_path));
-        if let Some(user) = user {
-            for pointer in SECRET_SETTINGS {
-                if let Some(id) = user
-                    .pointer(pointer)
-                    .and_then(Value::as_str)
-                    .and_then(vault_reference)
-                {
-                    vault.key(id);
-                }
-            }
+        if let Some(user) = self.user_tier_now() {
+            register_vault_keys(&user, &vault);
         }
         self.vault = vault;
         self
     }
 
+    /// The user tier as the settings resolve it now. With managed settings
+    /// this may wait, once, for the daemon's first answer ([`managed`]).
+    fn user_tier(&self) -> Option<UserTier> {
+        #[cfg(feature = "managed-settings")]
+        if let Some(managed) = &self.managed {
+            return managed.user_tier(|| self.user_file_tier());
+        }
+        self.user_file_tier()
+    }
+
+    /// [`Self::user_tier`] without waiting.
+    fn user_tier_now(&self) -> Option<UserTier> {
+        #[cfg(feature = "managed-settings")]
+        if let Some(managed) = &self.managed {
+            return managed.user_tier_now(|| self.user_file_tier());
+        }
+        self.user_file_tier()
+    }
+
+    /// The user file, read the way this build reads it ([`UserTier::from_file`]).
+    fn user_file_tier(&self) -> Option<UserTier> {
+        self.read(&self.user_path)
+            .map(|value| UserTier::from_file(value, &self.user_path))
+    }
+
     pub fn resolve(&self, project_root: Option<&Path>, model_key: &str, usable: u64) -> Settings {
-        let user = self
-            .read(&self.user_path)
-            .map(|value| expand_user(value, &self.user_path));
+        let user = self.user_tier();
         let project = project_root
             .map(|root| detect_config_file(&root.join(".cortexkit")))
             .and_then(|path| self.read(&path));
-        resolve_tiers(
-            user.as_ref(),
+        let mut settings = resolve_tiers(
+            user.as_ref().map(UserTier::value),
             project.as_ref(),
             model_key,
             usable,
             &self.vault,
-        )
+        );
+        if let Some(link) = &self.synapse {
+            settings.embedding = settings
+                .embedding
+                .map(|provider| provider.with_synapse_link(link));
+        }
+        settings
     }
 
     /// The settings `tool.catalog` answers with, for a project folder or, on
     /// an unscoped preflight, the user's file alone.
     pub fn catalog_config(&self, project_root: Option<&Path>) -> crate::catalog::CatalogConfig {
-        let user = self
-            .read(&self.user_path)
-            .map(|value| expand_user(value, &self.user_path));
+        let user = self.user_tier();
         let project = project_root
             .map(|root| detect_config_file(&root.join(".cortexkit")))
             .and_then(|path| self.read(&path));
-        catalog_config(user.as_ref(), project.as_ref(), &self.user_path)
+        catalog_config(
+            user.as_ref().map(UserTier::value),
+            project.as_ref(),
+            &self.user_path,
+        )
     }
 
     fn read(&self, path: &Path) -> Option<Value> {
@@ -325,9 +406,9 @@ impl Loader {
 }
 
 /// What a file's settings call for in the log: an obsolete key that is
-/// ignored, a `clock_note` that can't be used, and a `rerank.module` that
-/// names no module ck-mc may call. `user` is whether this is the user's
-/// file, the only one `clock_note` and `rerank.module` are read from.
+/// ignored, a `clock_note` that can't be used, and a `rerank.module` or
+/// `embedding.module` that names no module ck-mc may call. `user` is whether
+/// this is the user's file, the only one those settings are read from.
 fn setting_notes(value: &Value, user: bool) -> Vec<String> {
     let mut notes = Vec::new();
     if value.get("temporal_awareness").is_some() {
@@ -344,7 +425,8 @@ fn setting_notes(value: &Value, user: bool) -> Vec<String> {
         }
     }
     if user {
-        notes.extend(crate::search::rerank::module_note(value));
+        notes.extend(crate::search::rerank::module_note(value, "rerank"));
+        notes.extend(crate::search::rerank::module_note(value, "embedding"));
     }
     notes
 }
@@ -667,7 +749,6 @@ fn catalog_config(
 /// read, is empty, or does not hold exactly one `## Magic Context` heading
 /// is ignored with a warning, and the built-in guidance applies.
 fn guidance_override(user: &Value, user_path: &Path) -> Option<String> {
-    const MARKER: &str = "## Magic Context";
     let configured = user
         .pointer("/prompt_surface/guidance_override_path")
         .and_then(Value::as_str)
@@ -679,35 +760,45 @@ fn guidance_override(user: &Value, user_path: &Path) -> Option<String> {
             .filter(|text| !text.trim().is_empty())
             .map(str::to_owned);
     };
+    let path = guidance_override_path(configured, user_path);
+    match guidance_file(&path) {
+        Ok(content) => Some(content),
+        Err(why) => {
+            tracing::info!(
+                "ck-mc: prompt_surface.guidance_override_path ({}) {why}; using built-in guidance",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Where `prompt_surface.guidance_override_path` points: an absolute path as
+/// written, a relative one beside the user's settings file.
+fn guidance_override_path(configured: &str, user_path: &Path) -> PathBuf {
     let path = Path::new(configured);
-    let path = if path.is_absolute() {
+    if path.is_absolute() {
         path.to_path_buf()
     } else {
         user_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(path)
-    };
-    let warn = |why: &str| {
-        tracing::info!(
-            "ck-mc: prompt_surface.guidance_override_path ({}) {why}; using built-in guidance",
-            path.display()
-        );
-    };
-    let content = match fs::read(&path) {
+    }
+}
+
+/// A guidance override file's text, or why it can't replace the built-in
+/// guidance: it can't be read, is not a file, is empty, or does not hold
+/// exactly one `## Magic Context` heading.
+fn guidance_file(path: &Path) -> Result<String, String> {
+    const MARKER: &str = "## Magic Context";
+    let content = match fs::read(path) {
         Ok(bytes) if path.is_file() => String::from_utf8_lossy(&bytes).into_owned(),
-        Ok(_) => {
-            warn("is not a file");
-            return None;
-        }
-        Err(error) => {
-            warn(&format!("could not be read ({error})"));
-            return None;
-        }
+        Ok(_) => return Err("is not a file".to_owned()),
+        Err(error) => return Err(format!("could not be read ({error})")),
     };
     if content.trim().is_empty() {
-        warn("is empty");
-        return None;
+        return Err("is empty".to_owned());
     }
     let markers = content
         .split('\n')
@@ -718,12 +809,11 @@ fn guidance_override(user: &Value, user_path: &Path) -> Option<String> {
         })
         .count();
     if markers != 1 {
-        warn(&format!(
+        return Err(format!(
             "must contain exactly one {MARKER:?} heading, found {markers}"
         ));
-        return None;
     }
-    Some(content)
+    Ok(content)
 }
 
 /// The execute threshold for one model, as a percentage of the usable window.
@@ -979,6 +1069,21 @@ fn expand_user(value: Value, user_path: &Path) -> Value {
 /// The secret settings a `{vault:…}` reference may stand for.
 const SECRET_SETTINGS: [&str; 2] = ["/embedding/api_key", "/rerank/api_key"];
 
+/// Name to `vault` the credentials the user's settings refer to, so it
+/// reads them as soon as it starts.
+fn register_vault_keys(user: &UserTier, vault: &Vault) {
+    for pointer in SECRET_SETTINGS {
+        if let Some(id) = user
+            .value()
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .and_then(vault_reference)
+        {
+            vault.key(id);
+        }
+    }
+}
+
 /// The credential id in a `{vault:<credential id>}` reference, when the
 /// reference is the whole value (surrounding whitespace aside).
 pub(crate) fn vault_reference(text: &str) -> Option<&str> {
@@ -1112,5 +1217,15 @@ pub(crate) fn resolve_for_test(
     )
 }
 
+#[cfg(test)]
+mod convert_tests;
+#[cfg(test)]
+mod equivalence_tests;
+#[cfg(test)]
+mod jsonc_edit_tests;
+#[cfg(test)]
+mod review_tests;
+#[cfg(test)]
+mod schema_tests;
 #[cfg(test)]
 mod tests;

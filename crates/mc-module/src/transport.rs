@@ -887,6 +887,55 @@ impl RunnerClient for SubcRunnerClient {
         serde_json::from_slice(&reply).map_err(|_| "validation".to_owned())
     }
 
+    /// As [`Self::synapse_call`], but bound to a fixed `embedding` session of
+    /// the `magic-context` harness, since upkeep embeds outside any session,
+    /// and given `timeout`. A module refusal keeps its code and the
+    /// `retry_after_ms` its detail carries.
+    async fn synapse_embedding_call(
+        &self,
+        module: &str,
+        method: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value, crate::embedding::synapse::Refusal> {
+        use crate::embedding::synapse::Refusal;
+        let consumer = self
+            .consumer()
+            .await
+            .map_err(|_| Refusal::new("missing_synapse"))?;
+        let reply = consumer
+            .call(
+                RouteTarget::ManagementSurface {
+                    module_id: module.to_owned(),
+                },
+                BindIdentity::new("magic-context", "embedding".to_owned()),
+                wire::encode(method, &params),
+                CallOptions {
+                    timeout,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                error
+                    if matches!(
+                        error
+                            .route_open_refusal()
+                            .map(|refusal| refusal.code.as_str()),
+                        Some("unknown_module")
+                    ) =>
+                {
+                    Refusal::new("unknown_module")
+                }
+                subc_client_rs::CallError::Module(body) => {
+                    Refusal::from_detail(body.code, body.detail.as_ref())
+                }
+                subc_client_rs::CallError::OutcomeUnknown(_) => Refusal::new("deadline_exceeded"),
+                _ => Refusal::new("missing_synapse"),
+            })?;
+        serde_json::from_slice(&reply).map_err(|_| Refusal::new("validation"))
+    }
+
     /// On Entorhinal's management surface, bound to the session's own
     /// identity, as Entorhinal attributes a context read to the session that
     /// asks. The caller bounds the wait.
@@ -2116,6 +2165,56 @@ fn refusal(error: ModuleError) -> Refusal {
 
 #[async_trait]
 impl ModuleHandler for Handler {
+    /// With managed settings, ck-mc declares its user settings to the
+    /// daemon ([`crate::config::managed`]); otherwise it declares nothing
+    /// and reads its files.
+    #[cfg(feature = "managed-settings")]
+    fn config_declaration(&self) -> Option<subc_client_rs::config::ConfigDeclareRequest> {
+        self.module.config().loader()?.config_declaration()
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn config_review(
+        &self,
+        request: subc_client_rs::config::ConfigReviewRequest,
+    ) -> subc_client_rs::config::ConfigReviewReply {
+        match self.module.config().loader() {
+            Some(loader) => loader.config_review(&request),
+            None => subc_client_rs::config::ConfigReviewReply::new(
+                vec![],
+                vec![subc_client_rs::config::ConfigReviewRefusal::new(
+                    "value_invalid",
+                    vec![],
+                    vec!["this ck-mc runs on fixed settings".into()],
+                )],
+            ),
+        }
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn config_apply(
+        &self,
+        view: subc_client_rs::config::ConfigView,
+    ) -> Result<(), Vec<String>> {
+        match self.module.config().loader() {
+            Some(loader) => loader.config_apply(&view),
+            None => Err(vec!["this ck-mc runs on fixed settings".into()]),
+        }
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn config_files(&self) {
+        if let Some(loader) = self.module.config().loader() {
+            loader.config_files();
+        }
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn on_config_state(&self, state: subc_client_rs::config::ConfigState) {
+        if let Some(loader) = self.module.config().loader() {
+            loader.on_config_state(&state);
+        }
+    }
     /// Record who opened the route and for which session. Only a module the
     /// daemon attests can open one: the runner's identity is the attested
     /// module, the session is the route's bind identity, and the project is

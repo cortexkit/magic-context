@@ -1050,6 +1050,7 @@ async fn busy_refuses_a_ref_this_machine_does_not_hold_naming_it() {
                 .released = Some(super::journal::Released {
                 cut: CUT.into(),
                 holder: "mac-b".into(),
+                holder_box: None,
             });
         })
         .unwrap();

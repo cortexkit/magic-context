@@ -245,8 +245,31 @@ impl MovingState {
 #[serde(deny_unknown_fields)]
 pub struct Released {
     pub cut: String,
-    /// The machine that holds the session now.
+    /// The `holder` the release named: an identifier of the receiving
+    /// computer's backup author, recorded as the release gave it. It is not
+    /// an address, so no refusal or log line names it.
     pub holder: String,
+    /// The `holderBox` the release named: the permanent box id of the
+    /// computer that holds the session now. Absent when the driver sent
+    /// none, and then nothing here names the computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_box: Option<String>,
+}
+
+impl Released {
+    /// The computer the session moved to, as refusals and logs name it:
+    /// by its box id when the release named one, otherwise unnamed.
+    pub fn destination(&self) -> String {
+        destination(self.holder_box.as_deref())
+    }
+}
+
+/// [`Released::destination`] for a box id that may be absent.
+pub(super) fn destination(holder_box: Option<&str>) -> String {
+    match holder_box {
+        Some(holder_box) => format!("computer {holder_box}"),
+        None => "another computer".to_owned(),
+    }
 }
 
 /// Why a journal change was not made.
@@ -431,9 +454,9 @@ fn log_held(contents: &Contents, agent_data: bool) {
             (None, Some(released)) => tracing::info!(
                 session = %session,
                 cut = %released.cut,
-                holder = %released.holder,
+                holder_box = released.holder_box.as_deref(),
                 "ck-mc: session {session} was released to {} by agent-data cut {} and is refused session_moved here; only a move back to this machine serves it here again",
-                released.holder,
+                released.destination(),
                 released.cut
             ),
             (None, None) => {}

@@ -7,7 +7,7 @@ Tools (read-only): read, grep, glob, plus any available AFT navigation tools. Us
 Decide ONE of four outcomes per memory:
 - VERIFIED — the code you read states the claim, and you cite the lines that state it (see "Citing evidence"). Keep it as-is.
 - UPDATE — a CODE FACT is still true but a file-falsifiable DETAIL drifted (a renamed symbol, moved file, changed number/name). Provide corrected content in terse present tense ("X uses Y", not "X was changed to Y"). Only update for genuine drift, not style. If a legitimate update intentionally consolidates the old claim into much shorter content, set consolidation="true" explicitly.
-- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists. Also archive a memory, rule or fact, whose subject is gone: every path and code name it cites no longer exists in the checkout. Name one of them in `missing`.
+- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists. Also archive a memory, rule or fact, whose subject is gone: every path and code name it cites no longer exists in the checkout. Name one of them in `missing`, written exactly as the memory's own text writes it. A backing file the memory's text does not name is not a citation: when the backing files are gone, look for the code names and paths the text states, and name one of those.
 - SKIP — the claim is not a code fact, or code cannot decide it. Keep it unchanged and do not claim verification.
 
 What this repository's code cannot decide, SKIP:

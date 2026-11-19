@@ -325,6 +325,188 @@ fn an_archive_naming_what_is_missing_needs_it_cited_and_gone() {
 }
 
 #[test]
+fn a_recent_unmerged_branch_without_a_worktree_refuses_both_archive_forms() {
+    let fixture = Fixture::on("main", &[("src/live.rs", "fn live_function() {}\n")]);
+    let branch = "campaign/local-secret-delivery-b17";
+    fixture
+        .repo
+        .write(&[("src/job.rs", "struct WindowsJob;\n")]);
+    fixture.repo.commit("add job");
+    fixture.repo.git(&["checkout", "-qb", branch]);
+    fixture.repo.write(&[(
+        "src/job.rs",
+        "struct WindowsJob;\nfn revoke(_: WindowsJob) {}\n",
+    )]);
+    let campaign = fixture.repo.commit("revoke job");
+    fixture.repo.git(&["checkout", "-q", "main"]);
+    fixture.repo.git(&["rm", "-q", "src/job.rs"]);
+    fixture.repo.commit("remove job from main");
+    fixture.insert(&[
+        row(1, "`WindowsJob` is revoked synchronously."),
+        row(2, "`WindowsJob` is revoked at task completion."),
+    ]);
+
+    let applied = fixture.apply(
+        &plan_one(&fixture),
+        &manifest(
+            r#"<archive id="1" reason="main never revokes the job"/>
+<archive id="2" missing="WindowsJob"/>"#,
+        ),
+    );
+    assert_eq!((applied.proposed, applied.applied), (2, 0), "{applied:?}");
+    assert_eq!(
+        applied.dropped,
+        [
+            format!(
+                "memory 1: WindowsJob changed in unmerged commit {} on branch {branch}",
+                &campaign[..12]
+            ),
+            format!(
+                "memory 2: WindowsJob changed in unmerged commit {} on branch {branch}",
+                &campaign[..12]
+            ),
+        ]
+    );
+    assert_eq!(fixture.memory(1).0, "active");
+    assert_eq!(fixture.memory(2).0, "active");
+    assert!(fixture.history().is_empty());
+}
+
+#[test]
+fn unmerged_history_can_touch_a_different_citation_by_path() {
+    let fixture = Fixture::on("main", &[("src/live.rs", "fn live_function() {}\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("src/job.rs", "struct WindowsJob;\n")]);
+    fixture.repo.git(&["checkout", "-qb", "campaign"]);
+    fixture.repo.write(&[("crates/worker/src/job.rs", "\n")]);
+    let change = fixture.repo.commit("move job path");
+    fixture.repo.git(&["checkout", "-q", "main"]);
+    fixture.insert(&[row(1, "`WindowsJob` runs cleanup in `src/job.rs`.")]);
+
+    let applied = fixture.apply(
+        &plan_one(&fixture),
+        &manifest(r#"<archive id="1" missing="WindowsJob"/>"#),
+    );
+    assert_eq!(
+        applied.dropped,
+        [format!(
+            "memory 1: src/job.rs changed in unmerged commit {} on branch campaign",
+            &change[..12]
+        )]
+    );
+    assert_eq!(fixture.memory(1).0, "active");
+}
+
+#[test]
+fn old_or_merged_local_branches_do_not_refuse_an_archive() {
+    let fixture = Fixture::on("main", &[("src/live.rs", "fn live_function() {}\n")]);
+    let repo = &fixture.repo;
+    repo.git(&["checkout", "-qb", "stale"]);
+    repo.write(&[("src/old.rs", "struct WindowsJob;\n")]);
+    repo.git(&["add", "src/old.rs"]);
+    repo.git(&["commit", "-qm", "old job", "--date=2001-01-01T00:00:00Z"]);
+    repo.git(&[
+        "rebase",
+        "-q",
+        "--force-rebase",
+        "--committer-date-is-author-date",
+        "main",
+    ]);
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["checkout", "-qb", "merged"]);
+    repo.write(&[("src/job.rs", "struct WindowsJob;\n")]);
+    repo.commit("add job");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["merge", "-q", "--ff-only", "merged"]);
+    repo.git(&["rm", "-q", "src/job.rs"]);
+    repo.commit("remove job");
+    fixture.insert(&[row(1, "`WindowsJob` runs cleanup.")]);
+
+    let applied = fixture.apply(
+        &plan_one(&fixture),
+        &manifest(r#"<archive id="1" missing="WindowsJob"/>"#),
+    );
+    assert_eq!(
+        (applied.applied, applied.dropped.len()),
+        (1, 0),
+        "{applied:?}"
+    );
+    assert_eq!(fixture.memory(1).0, "archived");
+}
+
+#[test]
+fn a_recent_branch_search_timeout_refuses_the_archive_as_undecided() {
+    let fixture = Fixture::on("main", &[("src/live.rs", "fn live_function() {}\n")]);
+    fixture.repo.git(&["checkout", "-qb", "campaign"]);
+    fixture.repo.commit("campaign work");
+    fixture.repo.git(&["checkout", "-q", "main"]);
+    fixture.insert(&[row(1, "`WindowsJob` runs cleanup.")]);
+    let mut batch = plan_one(&fixture);
+    batch.archive_branches.timeout = std::time::Duration::ZERO;
+
+    let applied = fixture.apply(
+        &batch,
+        &manifest(r#"<archive id="1" reason="main does not hold the job"/>"#),
+    );
+    assert_eq!(
+        applied.dropped,
+        ["memory 1: the recent local branch check is undecided: searching unmerged history for WindowsJob failed: git log timed out"]
+    );
+    assert_eq!(fixture.memory(1).0, "active");
+}
+
+#[test]
+fn archives_search_all_recent_tips_even_when_they_need_several_log_calls() {
+    let fixture = Fixture::on("main", &[("src/live.rs", "fn live_function() {}\n")]);
+    let repo = &fixture.repo;
+    repo.git(&["checkout", "-qb", "keeper"]);
+    repo.write(&[("src/job.rs", "struct WindowsJob;\n")]);
+    repo.git(&["add", "src/job.rs"]);
+    repo.git(&["commit", "-qm", "add job", "--date=7.days.ago"]);
+    repo.git(&[
+        "rebase",
+        "-q",
+        "--force-rebase",
+        "--committer-date-is-author-date",
+        "main",
+    ]);
+    let keeper = repo.git(&["rev-parse", "HEAD"]);
+    repo.git(&["checkout", "-q", "main"]);
+    let tree = repo.git(&["rev-parse", "HEAD^{tree}"]);
+    // Put the match after more than one command's worth of newer tips.
+    for index in 0..260 {
+        let name = format!("worker-{index}");
+        let tip = repo.git(&["commit-tree", tree.trim(), "-p", "main", "-m", &name]);
+        repo.git(&["branch", &name, tip.trim()]);
+    }
+    fixture.insert(&[
+        row(1, "`WindowsJob` runs cleanup."),
+        row(2, "The cache holds ten entries."),
+        row(3, "`RemovedWorker` shows the queue."),
+    ]);
+
+    let applied = fixture.apply(
+        &plan_one(&fixture),
+        &manifest(
+            r#"<archive id="1" reason="main does not hold the job"/>
+<archive id="2" reason="the cache is gone"/>
+<archive id="3" reason="main has no queue"/>"#,
+        ),
+    );
+    assert_eq!(
+        applied.dropped,
+        [format!(
+            "memory 1: WindowsJob changed in unmerged commit {} on branch keeper",
+            &keeper[..12]
+        )]
+    );
+    assert_eq!(fixture.memory(1).0, "active");
+    assert_eq!(fixture.memory(2).0, "archived");
+    assert_eq!(fixture.memory(3).0, "archived");
+}
+
+#[test]
 fn a_missing_name_that_is_not_one_of_the_memorys_citations_is_refused() {
     let fixture = fixture();
     let batch = plan_one(&fixture);

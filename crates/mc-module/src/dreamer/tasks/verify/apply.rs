@@ -24,7 +24,9 @@
 //!   citations as [`super::cites`] reads them, the checkout not to hold it,
 //!   and some commit of the checked-out history to have held it, so it was
 //!   removed rather than never here; without it, it needs evidence in
-//!   `reason`, and is refused for a directive-shaped rule.
+//!   `reason`, and is refused for a directive-shaped rule. Either form is
+//!   refused when the unmerged history of a recent local branch changed a
+//!   citation, or when that check cannot finish.
 //!
 //! A memory checked without a line of its own is never rewritten or archived
 //! while the repository has more than one live branch ([`super::live`]);
@@ -47,17 +49,20 @@
 //! and restoring a text clears the mapping, as every text change does, so a
 //! recorded mapping would no longer match and would stop the whole undo.
 
-use std::collections::BTreeSet;
-use std::sync::OnceLock;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use regex::Regex;
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
-use super::cites::cites;
+use super::cites::{cites, Cite};
 use super::manifest::{js_trim, Decision, Verdict};
 use super::spans::{Confirmation, STORED_KEY};
 use super::{Absence, Read, VerifyBatch};
+use crate::dreamer::branches::short;
+use crate::dreamer::checkout::{Checkout, RecentBranches, GIT_TIMEOUT};
 use crate::dreamer::task::Applied;
 use crate::dreamer::tasks::map_memories::{
     mapping_json, mapping_rows, put_mapping, MappingRow, MAPPER,
@@ -80,6 +85,77 @@ const MAX_CONTENT: usize = 20_000;
 pub(super) const METADATA: &str = "CASE WHEN json_valid(metadata_json)
         THEN CASE WHEN json_type(metadata_json) = 'object' THEN metadata_json ELSE '{}' END
         ELSE '{}' END";
+
+/// A batch reads recent tips once, even if several archives need checking.
+/// Archives of memories with the same citations also share their result.
+pub(super) struct ArchiveBranches {
+    tips: OnceLock<Result<RecentBranches, String>>,
+    checked: Mutex<HashMap<Vec<Cite>, Option<String>>>,
+    timeout: Duration,
+}
+
+impl Default for ArchiveBranches {
+    fn default() -> Self {
+        Self {
+            tips: OnceLock::new(),
+            checked: Mutex::default(),
+            timeout: GIT_TIMEOUT,
+        }
+    }
+}
+
+impl ArchiveBranches {
+    fn refusal(&self, checkout: &Checkout, cited: Vec<Cite>) -> Option<String> {
+        if cited.is_empty() {
+            return None;
+        }
+        if let Some(known) = self.checked.lock().expect("archive branches").get(&cited) {
+            return known.clone();
+        }
+        let checked = match self.look_up(checkout, &cited) {
+            Ok(refusal) => refusal,
+            Err(why) => Some(format!("the recent local branch check is undecided: {why}")),
+        };
+        self.checked
+            .lock()
+            .expect("archive branches")
+            .insert(cited, checked.clone());
+        checked
+    }
+
+    fn look_up(&self, checkout: &Checkout, cited: &[Cite]) -> Result<Option<String>, String> {
+        let branches = self
+            .tips
+            .get_or_init(|| checkout.recent_unmerged_branches())
+            .as_ref()
+            .map_err(Clone::clone)?;
+        for cite in cited {
+            let commit = match cite {
+                Cite::Name(name) => checkout.text_in_unmerged_history(branches, name, self.timeout),
+                Cite::Path(path) => checkout.path_in_unmerged_history(branches, path, self.timeout),
+            }
+            .map_err(|why| {
+                format!(
+                    "searching unmerged history for {} failed: {why}",
+                    cite.text()
+                )
+            })?;
+            if let Some(commit) = commit {
+                let mut reason = format!(
+                    "{} changed in unmerged commit {}",
+                    cite.text(),
+                    short(&commit)
+                );
+                if let Some(branch) = checkout.branch_containing(branches, &commit) {
+                    reason.push_str(" on branch ");
+                    reason.push_str(&branch);
+                }
+                return Ok(Some(reason));
+            }
+        }
+        Ok(None)
+    }
+}
 
 /// Whether a project rule reads as a behavioural directive (when to act, how
 /// to work, who decides): 0.49's patterns, compiled with the JavaScript
@@ -247,7 +323,17 @@ impl VerifyBatch {
             Decision::Archive => self.check_archive(verdict, &current),
             Decision::Verified | Decision::Skip => None,
         };
-        let refusal = refusal.or_else(|| self.check_lines(verdict, read));
+        let refusal = refusal
+            .or_else(|| self.check_lines(verdict, read))
+            .or_else(|| {
+                if verdict.decision != Decision::Archive {
+                    return None;
+                }
+                self.archive_branches.refusal(
+                    &self.checkout,
+                    cites(&current.content, self.checkout.top_level()),
+                )
+            });
         Ok(match refusal {
             Some(reason) => Err(format!("memory {id}: {reason}")),
             None => Ok(current),
@@ -287,6 +373,21 @@ impl VerifyBatch {
         });
         if checked {
             gate.warm();
+        }
+    }
+
+    /// Read the archive evidence before taking the store's write lock.
+    pub(super) fn warm_archive(&self, verdict: &Verdict, read: &Read) {
+        let cited = cites(&read.content, self.checkout.top_level());
+        let has_evidence = match &verdict.missing {
+            Some(missing) => cited
+                .iter()
+                .find(|cite| cite.text() == missing)
+                .is_some_and(|cite| self.absence(cite) == Absence::Absent),
+            None => !js_trim(&verdict.reason).is_empty(),
+        };
+        if has_evidence && self.check_lines(verdict, read).is_none() {
+            self.archive_branches.refusal(&self.checkout, cited);
         }
     }
 

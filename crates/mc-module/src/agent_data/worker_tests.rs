@@ -22,6 +22,9 @@ use cortexkit_role_llm_runner::{
 };
 use serde_json::json;
 
+/// The box id of the computer a released session moved to.
+const BOX: &str = "0123456789abcdef0123456789abcdef";
+
 struct Client;
 
 impl RunnerClient for Client {
@@ -362,7 +365,7 @@ async fn every_surface_refuses_a_held_session_at_admission_and_serves_others() {
     );
     assert!(f.module.ride(&other.session, f.ride()).await.is_ok());
 
-    // Released: the holder is named instead of the cut.
+    // Released: the receiving computer's box is named instead of the cut.
     let key = f.key.clone();
     f.journal
         .change(|contents| {
@@ -371,13 +374,14 @@ async fn every_surface_refuses_a_held_session_at_admission_and_serves_others() {
             entry.released = Some(Released {
                 cut: "cut-1".into(),
                 holder: "mac-b".into(),
+                holder_box: Some(BOX.into()),
             });
         })
         .unwrap();
     match f.setup() {
         Err(ModuleError::Gated(gated)) => {
             assert_eq!(gated.code, SESSION_MOVED);
-            assert_eq!(gated.detail, Some(json!({"holder": "mac-b"})));
+            assert_eq!(gated.detail, Some(json!({"holder": BOX})));
         }
         other => panic!("expected session_moved, got {other:?}"),
     }
@@ -390,7 +394,8 @@ async fn every_surface_refuses_a_held_session_at_admission_and_serves_others() {
         .await
         .unwrap_err();
     assert_eq!(refused.code, SESSION_MOVED);
-    assert_eq!(refused.detail, Some(json!({"holder": "mac-b"})));
+    assert_eq!(refused.detail, Some(json!({"holder": BOX})));
+    assert!(!refused.message.contains("mac-b"), "{}", refused.message);
 }
 
 /// `busy`'s `historian_running` counts a run for its session until the
@@ -524,6 +529,7 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
                             entry.released = Some(Released {
                                 cut: cut.into(),
                                 holder: "mac-b".into(),
+                                holder_box: Some(BOX.into()),
                             })
                         }
                     }
@@ -559,6 +565,15 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
             "{session}: {log}"
         );
     }
+    // The released session's line names the receiving computer by its box.
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("runner/mock/released")
+                && line.contains(&format!("released to computer {BOX} "))),
+        "{log}"
+    );
+    assert!(!log.contains("mac-b"), "{log}");
     let ((), with_moves_on) = logged(|| journal.log_held(true));
     assert!(
         with_moves_on.contains("until Entorhinal aborts or finishes the move"),
@@ -597,7 +612,7 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
     match setup(&released) {
         Err(ModuleError::Gated(gated)) => {
             assert_eq!(gated.code, SESSION_MOVED);
-            assert_eq!(gated.detail, Some(json!({"holder": "mac-b"})));
+            assert_eq!(gated.detail, Some(json!({"holder": BOX})));
         }
         other => panic!("expected session_moved, got {other:?}"),
     }

@@ -89,6 +89,15 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODULE_ID.to_owned());
     let context_path = context_db_path();
+    // With managed settings, a 0.49-shaped user file is converted once,
+    // before ck-mc connects to the daemon or reads its settings.
+    #[cfg(feature = "managed-settings")]
+    let settings = {
+        let settings = Loader::from_environment();
+        let data_dir = data_dir(&context_path);
+        mc_module::config::managed::rewrite_0_49(settings.user_path(), &data_dir);
+        settings.managed(&data_dir)
+    };
     let db = open_context_db(&context_path)?;
     let store = Store::open(&store_path(&context_path))?;
     // Moves are enforced in every build: the journal is read before any
@@ -114,9 +123,11 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     let vault = mc_module::vault::Vault::new(Arc::new(mc_module::vault::Claustrum::over(
         client.shared_consumer(),
     )));
+    #[cfg(not(feature = "managed-settings"))]
+    let settings = Loader::from_environment();
     let module = Module::with_journal(
         client,
-        Config::Files(Loader::from_environment().with_vault(Arc::clone(&vault))),
+        Config::Files(settings.with_vault(Arc::clone(&vault))),
         Some(db),
         Some(store),
         journal,
@@ -198,14 +209,22 @@ fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
             (source_harness, source_session),
         ],
     )?;
-    let moved = mc_module::move_in::move_in(
-        db,
-        &store,
-        &Config::Files(Loader::from_environment()),
-        &request,
-    )?;
+    let settings = Loader::from_environment();
+    // Without the daemon, managed settings come from the last view a run
+    // applied, or the defaults.
+    #[cfg(feature = "managed-settings")]
+    let settings = settings.managed_offline(&data_dir(&context_path));
+    let moved = mc_module::move_in::move_in(db, &store, &Config::Files(settings), &request)?;
     println!("{}", serde_json::to_string(&moved)?);
     Ok(())
+}
+
+/// ck-mc's data folder, where `context.db` lives.
+#[cfg(feature = "managed-settings")]
+fn data_dir(context_path: &std::path::Path) -> PathBuf {
+    context_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
 }
 
 fn rekey_runner() -> Result<(), Box<dyn Error + Send + Sync>> {

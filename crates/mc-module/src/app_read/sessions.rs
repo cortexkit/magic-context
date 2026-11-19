@@ -77,7 +77,8 @@ impl Apps {
     }
 
     /// The model id the project's memories are embedded under now, when
-    /// its folder is known in this process and its settings embed memories.
+    /// its folder is known in this process, its settings embed memories, and
+    /// (for Synapse) a lane serves.
     pub(super) fn embedding_model(&self, project: &str) -> Option<String> {
         let root = self.projects.get(project)?.root.as_deref()?;
         let config = &self.attached.as_ref()?.config;
@@ -85,7 +86,7 @@ impl Apps {
         plan.memory
             .then_some(plan.embedding)
             .flatten()
-            .map(|provider| provider.model_id())
+            .and_then(|provider| provider.serving_model_id())
     }
 }
 

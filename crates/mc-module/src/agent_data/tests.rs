@@ -22,12 +22,22 @@ fn freeze(contents: &mut Contents, key: &SessionRef, cut: &str, state: MovingSta
     });
 }
 
-fn release(contents: &mut Contents, key: &SessionRef, cut: &str, holder: &str) {
+/// The box id of the computer the sessions in these tests move to.
+const BOX: &str = "0123456789abcdef0123456789abcdef";
+
+fn release(
+    contents: &mut Contents,
+    key: &SessionRef,
+    cut: &str,
+    holder: &str,
+    holder_box: Option<&str>,
+) {
     let entry = contents.session_mut(&key.runner, &key.harness, &key.session);
     entry.moving = None;
     entry.released = Some(Released {
         cut: cut.to_owned(),
         holder: holder.to_owned(),
+        holder_box: holder_box.map(str::to_owned),
     });
 }
 
@@ -53,13 +63,16 @@ fn every_state_refuses_its_session_and_only_its_session() {
     let staged = SessionRef::new("runner", "pi", "staged");
     let activating = SessionRef::new("runner", "pi", "activating");
     let released = SessionRef::new("runner", "pi", "released");
+    let unnamed = SessionRef::new("runner", "pi", "unnamed");
     journal
         .change(|contents| {
             freeze(contents, &frozen, "cut-f", MovingState::Frozen);
             freeze(contents, &staged, "cut-s", MovingState::Staged);
             freeze(contents, &activating, "cut-a", MovingState::Activating);
             freeze(contents, &released, "cut-r", MovingState::Frozen);
-            release(contents, &released, "cut-r", "mac-b");
+            release(contents, &released, "cut-r", "mac-b", Some(BOX));
+            freeze(contents, &unnamed, "cut-u", MovingState::Frozen);
+            release(contents, &unnamed, "cut-u", "mac-b", None);
         })
         .unwrap();
     for (key, cut) in [
@@ -75,11 +88,33 @@ fn every_state_refuses_its_session_and_only_its_session() {
         assert_eq!(refusal.code, SESSION_MOVING);
         assert!(refusal.message.contains(cut), "{}", refusal.message);
     }
+    // A release that named the receiving computer's box is refused naming
+    // that box, never the release's `holder`, which is no address.
     let gated = journal.gate().check(&released).unwrap_err();
     assert_eq!(gated.code, SESSION_MOVED);
     assert_eq!(gated.cut.as_deref(), Some("cut-r"));
-    assert_eq!(gated.detail, Some(json!({"holder": "mac-b"})));
+    assert_eq!(gated.detail, Some(json!({"holder": BOX})));
     assert!(gated.line().starts_with("session_moved: cut cut-r: "));
+    assert!(
+        gated.message.contains(&format!("moved to computer {BOX} ")),
+        "{}",
+        gated.message
+    );
+    assert!(!gated.message.contains("mac-b"), "{}", gated.message);
+    // One that named no box names no computer, and its detail is empty.
+    let gated = journal.gate().check(&unnamed).unwrap_err();
+    assert_eq!(gated.code, SESSION_MOVED);
+    assert_eq!(gated.cut.as_deref(), Some("cut-u"));
+    assert_eq!(gated.detail, Some(json!({})));
+    assert!(
+        gated.message.contains("moved to another computer "),
+        "{}",
+        gated.message
+    );
+    assert!(!gated.message.contains("mac-b"), "{}", gated.message);
+    let refusal = gated.refusal();
+    assert_eq!(refusal.code, SESSION_MOVED);
+    assert_eq!(refusal.detail, Some(json!({})));
     // The same session id under another harness or runner is another session.
     assert_eq!(
         journal
@@ -121,7 +156,7 @@ fn a_move_back_staged_over_a_tombstone_is_moving_and_its_abort_restores_the_tomb
     journal
         .change(|contents| {
             freeze(contents, &key, "out", MovingState::Frozen);
-            release(contents, &key, "out", "mac-b");
+            release(contents, &key, "out", "mac-b", Some(BOX));
             freeze(contents, &key, "back", MovingState::Staged);
         })
         .unwrap();
@@ -135,7 +170,7 @@ fn a_move_back_staged_over_a_tombstone_is_moving_and_its_abort_restores_the_tomb
         .unwrap();
     let gated = journal.gate().check(&key).unwrap_err();
     assert_eq!(gated.code, SESSION_MOVED);
-    assert_eq!(gated.detail, Some(json!({"holder": "mac-b"})));
+    assert_eq!(gated.detail, Some(json!({"holder": BOX})));
 }
 
 #[test]
@@ -319,6 +354,7 @@ fn the_offline_tools_refuse_a_held_session_with_its_code_and_cut() {
                 &SessionRef::new("runner", "pi", "moved"),
                 "cut-r",
                 "mac-b",
+                Some(BOX),
             );
         })
         .unwrap();
@@ -327,7 +363,8 @@ fn the_offline_tools_refuse_a_held_session_with_its_code_and_cut() {
     assert!(error.starts_with("session_moving: cut cut-m: "), "{error}");
     let error = super::refuse_offline(&context, [("pi", "moved")]).unwrap_err();
     assert!(error.starts_with("session_moved: cut cut-r: "), "{error}");
-    assert!(error.contains("mac-b"), "{error}");
+    assert!(error.contains(BOX), "{error}");
+    assert!(!error.contains("mac-b"), "{error}");
 }
 
 #[tokio::test]

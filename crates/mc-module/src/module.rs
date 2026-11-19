@@ -279,7 +279,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         journal: Arc<crate::agent_data::Journal>,
         agent_data: bool,
     ) -> Self {
-        let config = Arc::new(config.into());
+        let client = Arc::new(client);
+        // Every embedding provider these settings resolve to calls Synapse
+        // through this client, and the lane each one uses is chosen once for
+        // the process ([`crate::embedding::synapse`]).
+        let mut config: Config = config.into();
+        config.link_synapse(&crate::embedding::synapse::Link::over(Arc::clone(&client)));
+        let config = Arc::new(config);
         let session_projects = Arc::new(Mutex::new(HashMap::new()));
         let context_read = crate::context_read::ContextRead::new(
             db.as_ref().map(|d| d.path.clone()),
@@ -292,7 +298,6 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             store.as_ref().map(|s| s.path.clone()),
             db.as_ref().map(|d| d.path.clone()),
         );
-        let client = Arc::new(client);
         let search = db
             .as_ref()
             .map(|db| crate::search::background::Background::new(client.clone(), db.path.clone()));
@@ -381,6 +386,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// `agent-data` service and its requests are served.
     pub fn agent_data_enabled(&self) -> bool {
         self.inner.agent_data.enabled()
+    }
+
+    /// Where the module's settings come from.
+    #[cfg(feature = "managed-settings")]
+    pub fn config(&self) -> &Config {
+        &self.inner.config
     }
 
     /// One `agent-data` request from `caller`, the principal the daemon

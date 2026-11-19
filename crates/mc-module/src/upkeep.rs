@@ -84,8 +84,9 @@ const DAY_MS: i64 = 86_400_000;
 pub struct Plan {
     /// `memory.enabled`: embed the project's memories.
     pub memory: bool,
-    /// The configured remote embedding provider; without one no vectors are
-    /// computed, and search uses its word lanes.
+    /// The configured embedding provider; without one, or while it has no
+    /// Synapse lane serving, no vectors are computed and search uses its
+    /// word lanes.
     pub embedding: Option<Provider>,
     /// Commit indexing, when `memory.git_commit_indexing.enabled`.
     pub git: Option<GitIndexing>,
@@ -162,15 +163,22 @@ pub(crate) async fn run_project_scoped(
     owned: &(impl Fn() -> Vec<(String, String)> + Sync),
 ) -> Report {
     let mut report = Report::default();
-    if let (true, Some(provider)) = (plan.memory, &plan.embedding) {
+    // A Synapse provider learns its lane before any id is read, so the ids
+    // this run reads and the vectors it saves come from one lane. With no
+    // lane serving, the run embeds nothing and commits are swept without
+    // vectors.
+    let embedding = match &plan.embedding {
+        Some(provider) if provider.prepare().await => Some(provider),
+        _ => None,
+    };
+    if let (true, Some(provider)) = (plan.memory, embedding) {
         report.memories_embedded = embed_memories(db, project, provider).await;
     }
-    if let Some(provider) = &plan.embedding {
+    if let Some(provider) = embedding {
         report.chunks_embedded = chunks::embed(db, project, provider, clock, owned).await;
     }
     if let Some(git) = plan.git.filter(|_| !missing_root(project, root)) {
-        report.sweep =
-            Some(sweep_commits(db, project, root, git, plan.embedding.as_ref(), clock).await);
+        report.sweep = Some(sweep_commits(db, project, root, git, embedding, clock).await);
     }
     report
 }
