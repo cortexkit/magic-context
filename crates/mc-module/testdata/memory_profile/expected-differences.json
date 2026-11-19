@@ -743,7 +743,7 @@
         "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists."
       ],
       "rendered": [
-        "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists. Also archive a memory, rule or fact, whose subject is gone: every path and code name it cites no longer exists in the checkout. Name one of them in `missing`."
+        "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists. Also archive a memory, rule or fact, whose subject is gone: every path and code name it cites no longer exists in the checkout. Name one of them in `missing`, written exactly as the memory's own text writes it. A backing file the memory's text does not name is not a citation: when the backing files are gone, look for the code names and paths the text states, and name one of those."
       ]
     },
     {
