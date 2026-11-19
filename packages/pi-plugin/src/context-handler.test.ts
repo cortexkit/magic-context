@@ -4848,7 +4848,13 @@ describe("registerPiContextHandler", () => {
 				ordinal: index + 1,
 				id: `msg-${index + 1}`,
 				role: "user",
-				parts: [{ type: "text", text: `meaningful turn ${index + 1}` }],
+				// Exercise a proactive fire on text mass, not on message count.
+				parts: [
+					{
+						type: "text",
+						text: `meaningful turn ${index + 1}${" durable ledger".repeat(280)}`,
+					},
+				],
 			}));
 			for (let i = 1; i <= 20; i++) {
 				insertTag(db, sessionId, `msg-${i}`, "message", 1000, i);

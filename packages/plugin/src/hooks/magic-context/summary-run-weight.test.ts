@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import {
     getAllStatusTagTokenTotalsFlat,
     getOrCreateSessionMeta,
@@ -8,6 +8,7 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { checkCompartmentTrigger } from "./compartment-trigger";
 import { resolveOpenCodeProtectedTailBoundary, selectPerRunCap } from "./protected-tail-boundary";
@@ -159,6 +160,87 @@ test("meaningful history still counts full tool output at the 6000-token thresho
         if (originalEnv === undefined) delete process.env.NODE_ENV;
         else process.env.NODE_ENV = originalEnv;
         db.close();
+    }
+});
+
+function evaluateTwelveMessageHead(headToolOutput = "") {
+    const db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "twelve-message-head";
+    const messages: RawMessage[] = Array.from({ length: 12 }, (_, i) => ({
+        id: `m${i + 1}`,
+        ordinal: i + 1,
+        role: "assistant",
+        parts: [
+            { type: "text", text: `record ${i + 1}: ${"a small change in the ledger ".repeat(6)}` },
+        ],
+    }));
+    if (headToolOutput) messages[11].parts.push(tool("head", headToolOutput));
+    messages.push({
+        id: "m13",
+        ordinal: 13,
+        role: "assistant",
+        parts: [tool("tail", "tail ".repeat(20_000))],
+    });
+    markProtectedTailPolicyV3Seeded(db, sessionId, 1);
+    const usage = { percentage: 68, inputTokens: 68_000 };
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+        return withRawMessageProvider(sessionId, { readMessages: () => messages }, () => {
+            const boundary = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: 100_000,
+                executeThresholdPercentage: 65,
+                usage,
+            });
+            expect(boundary.eligibleEndOrdinal - boundary.offset).toBe(12);
+            const decision = checkCompartmentTrigger(
+                db,
+                sessionId,
+                getOrCreateSessionMeta(db, sessionId),
+                usage,
+                68,
+                65,
+                5_000,
+                10_000,
+                { enabled: false, min_clusters: 3 },
+                undefined,
+                100_000,
+            );
+            return { boundary, decision };
+        });
+    } finally {
+        if (originalEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = originalEnv;
+        db.close();
+    }
+}
+
+test("twelve tiny formatted messages alone do not fire at 68 percent", () => {
+    const { boundary, decision } = evaluateTwelveMessageHead();
+    expect(boundary.trueRawEligibleTokens).toBeLessThan(6_000);
+    expect(decision.shouldFire).toBe(false);
+});
+
+test("a proactive fire logs its true-raw admission and both head sizes", () => {
+    const log = spyOn(logger, "sessionLog");
+    try {
+        const { boundary, decision } = evaluateTwelveMessageHead("result ".repeat(6_500));
+        expect(decision.reason).toBe("projected_headroom");
+        expect(boundary.trueRawEligibleTokens).toBeGreaterThanOrEqual(6_000);
+        const fireLine = log.mock.calls
+            .map(([, line]) => line)
+            .find((line) => line.includes("proactive fire"));
+        expect(fireLine).toContain("admittedBy=true_raw");
+        expect(fireLine).toContain(`trueRawTokens=${boundary.trueRawEligibleTokens}`);
+        const formatted = fireLine?.match(/formattedTokens=(\d+)/)?.[1];
+        expect(Number(formatted)).toBeGreaterThan(0);
+        expect(Number(formatted)).toBeLessThan(6_000);
+    } finally {
+        log.mockRestore();
     }
 });
 

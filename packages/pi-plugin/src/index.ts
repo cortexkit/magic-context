@@ -1221,6 +1221,7 @@ export function resolveHistorianFromConfig(
 		keepReasoningTokens: config.keep_reasoning_tokens,
 		historyBudgetPercentage: config.history_budget_percentage,
 		memoryEnabled: config.memory.enabled,
+		memoryInjectionBudgetTokens: config.memory.injection_budget_tokens,
 		autoPromote: config.memory.auto_promote,
 		userMemoriesEnabled: userObservationCollectionEnabled(config.dreamer),
 		userObservationsRequested: userObservationsRequested(config.dreamer),
@@ -2335,6 +2336,8 @@ async function startPiMagicContextRuntime(
 		),
 		language: bootProjectDeps.config.language,
 		memoryEnabled: bootProjectDeps.config.memory.enabled,
+		memoryInjectionBudgetTokens:
+			bootProjectDeps.config.memory.injection_budget_tokens,
 		autoPromote: bootProjectDeps.config.memory.auto_promote,
 		compactionOff,
 		userMemoriesEnabled: userObservationCollectionEnabled(
@@ -2363,6 +2366,8 @@ async function startPiMagicContextRuntime(
 				...buildPiHistorianCommandOptions(historian, current.config),
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
+				memoryInjectionBudgetTokens:
+					current.config.memory.injection_budget_tokens,
 				autoPromote: fresh.memory.auto_promote,
 				compactionOff,
 				userMemoriesEnabled: userObservationCollectionEnabled(

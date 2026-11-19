@@ -1,4 +1,5 @@
 import { readEnabledProjectMemories } from "../../features/magic-context/memory-enabled";
+import { sessionLog } from "../../shared/logger";
 
 // The historian system prompt is generated from historian-prompt.source.md.
 // Edit that source and run scripts/build-historian-prompt.ts; never hand-edit
@@ -130,19 +131,20 @@ const USER_OBSERVATIONS_DISABLED_TOGGLE =
  *
  * The system prompt (`COMPARTMENT_AGENT_SYSTEM_PROMPT`, from
  * historian-prompt.generated.ts) carries the persona and output contract. This
- * builder lays out the four input blocks in the documented order, then appends
+ * builder puts reusable project memory and seed examples before per-chunk
+ * references and source, then appends
  * the per-run transcript guard after `<new_messages>`. The unbounded v1
  * `existing_state` dump is GONE (v2) — bounded reference blocks replace it.
  */
 export function buildCompartmentAgentPrompt(inputs: CompartmentPromptInputs): string {
     const parts: string[] = [];
-    if (inputs.seedExamples) parts.push(inputs.seedExamples);
-    if (inputs.sessionReferences) parts.push(inputs.sessionReferences);
     parts.push(
         ...readEnabledProjectMemories(inputs.memoryEnabled, () =>
             inputs.projectMemory ? [inputs.projectMemory] : [],
         ),
     );
+    if (inputs.seedExamples) parts.push(inputs.seedExamples);
+    if (inputs.sessionReferences) parts.push(inputs.sessionReferences);
     if (inputs.extractionFree) {
         parts.push(
             "<extraction>disabled</extraction>\nStructural recomp mode: emit compartments and <meta> only. Do NOT emit <facts>, <events>, <user_observations>, or <primer_candidates>.",
@@ -164,4 +166,32 @@ export function buildCompartmentAgentPrompt(inputs: CompartmentPromptInputs): st
     parts.push("</new_messages>");
     parts.push(HISTORIAN_TRANSCRIPT_GUARD);
     return parts.join("\n\n");
+}
+
+/** Measure the prompt at dispatch so repairs and fallbacks are counted too. */
+export function logHistorianPromptSizes(sessionId: string, system: string, prompt: string): void {
+    const sourceStart = prompt.indexOf("<new_messages>\n\n");
+    const sourceEnd = prompt.lastIndexOf(`\n\n</new_messages>\n\n${HISTORIAN_TRANSCRIPT_GUARD}`);
+    const hasSource = sourceStart !== -1 && sourceEnd > sourceStart;
+    const blockBytes = (tag: string) => {
+        if (!hasSource) return 0;
+        const start = prompt.indexOf(`<${tag}>`);
+        const close = `</${tag}>`;
+        const end = prompt.indexOf(close, start + 1);
+        return start >= 0 && end > start && end < sourceStart
+            ? Buffer.byteLength(prompt.slice(start, end + close.length))
+            : 0;
+    };
+    const memoryBytes = blockBytes("project-memory");
+    const seedBytes = blockBytes("compartment_examples_from_other_projects");
+    const referenceBytes = blockBytes("session_references");
+    const newMessageBytes = hasSource
+        ? Buffer.byteLength(prompt.slice(sourceStart, sourceEnd + "\n\n</new_messages>".length))
+        : 0;
+    const systemBytes = Buffer.byteLength(system);
+    const userBytes = Buffer.byteLength(prompt);
+    sessionLog(
+        sessionId,
+        `historian request sizes: systemBytes=${systemBytes} userBytes=${userBytes} memoryBytes=${memoryBytes} seedBytes=${seedBytes} referenceBytes=${referenceBytes} newMessageBytes=${newMessageBytes}`,
+    );
 }

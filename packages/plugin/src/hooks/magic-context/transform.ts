@@ -2472,6 +2472,11 @@ export function createTransform(deps: TransformDeps) {
                     historianChunkTokens:
                         historianRun?.chunkTokens ?? deps.getHistorianChunkTokens?.() ?? 20_000,
                     boundarySnapshot: boundarySnapshot ?? undefined,
+                    recoveryTriggerReason: emergencyRecoveryArmed
+                        ? "overflow_recovery"
+                        : urgent
+                          ? "emergency_95"
+                          : "startup_recovery",
                     currentContextLimit: boundaryContextLimit,
                     historyBudgetTokens,
                     historianTimeoutMs: historianRun?.timeoutMs ?? deps.historianTimeoutMs,
@@ -2490,6 +2495,8 @@ export function createTransform(deps: TransformDeps) {
                     // Issue #44: gate historian-driven memory promotion so users
                     // who disable the feature actually see no memories created.
                     memoryEnabled: deps.memoryConfig?.enabled,
+                    memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
+                    memoryProjectPath: projectIdentity ?? null,
                     autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
                     ensureProjectRegistered: deps.ensureProjectRegistered,
                     // Historian publication invalidates the injection cache AND

@@ -52,7 +52,6 @@ import { modelAcceptsEmptyContent } from "./sentinel";
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
 const POST_DROP_TARGET_RATIO = 0.75;
 const MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE = 6_000;
-const MIN_PROACTIVE_TAIL_MESSAGE_COUNT = 12;
 const DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER = 3;
 const TAIL_SIZE_TRIGGER_MULTIPLIER = 3;
 const BLOCK_UNTIL_DONE_PERCENTAGE = 95;
@@ -313,7 +312,7 @@ interface TailInfo {
     nextStartOrdinal: number;
     hasNewRawHistory: boolean;
     hasProtectedEligibleHead: boolean;
-    isMeaningful: boolean;
+    proactiveAdmission?: "has_more" | "true_raw" | "formatted";
     tokenEstimate: number;
     /**
      * True when the TC chunk scan exhausted its token budget before reaching
@@ -332,7 +331,6 @@ const TAIL_INFO_DEFAULTS: TailInfo = {
     nextStartOrdinal: 1,
     hasNewRawHistory: false,
     hasProtectedEligibleHead: false,
-    isMeaningful: false,
     tokenEstimate: 0,
     chunkHasMore: false,
     trueRawEligibleTokens: 0,
@@ -345,6 +343,27 @@ function resolveBoundaryContextLimit(usage: ContextUsage, fallbackContextLimit?:
         return Math.max(1, Math.round(usage.inputTokens / (usage.percentage / 100)));
     }
     return 128_000;
+}
+
+function scanFormattedHead(
+    db: Database,
+    sessionId: string,
+    triggerBudget: number,
+    offset: number,
+    eligibleEnd: number,
+) {
+    const seed = sessionDecisionCalibration(db, sessionId);
+    const sourceRatio = Math.max(seed.proseRatio, seed.toolsRatio);
+    const scanBudget = Math.floor(
+        Math.max(MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE, triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER) /
+            sourceRatio,
+    );
+    const chunk = readSessionChunk(sessionId, scanBudget, offset, eligibleEnd);
+    return {
+        tokenEstimate: Math.ceil(chunk.tokenEstimate * sourceRatio),
+        chunkHasMore: chunk.hasMore,
+        commitClusterCount: chunk.commitClusterCount,
+    };
 }
 
 function getUnsummarizedTailInfo(
@@ -428,35 +447,28 @@ function getUnsummarizedTailInfo(
                 };
             }
 
-            const seed = sessionDecisionCalibration(db, sessionId);
-            const sourceRatio = Math.max(seed.proseRatio, seed.toolsRatio);
-            const scanBudget = Math.floor(
-                Math.max(
-                    MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE,
-                    triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER,
-                ) / sourceRatio,
-            );
-            const chunk = readSessionChunk(
+            const formatted = scanFormattedHead(
+                db,
                 sessionId,
-                scanBudget,
+                triggerBudget,
                 rawEligibility.offset,
                 boundary.eligibleEndOrdinal,
             );
-            const isMeaningful =
-                chunk.hasMore ||
-                boundary.trueRawEligibleTokens >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
-                Math.ceil(chunk.tokenEstimate * sourceRatio) >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
-                chunk.messageCount >= MIN_PROACTIVE_TAIL_MESSAGE_COUNT;
+            const proactiveAdmission = formatted.chunkHasMore
+                ? "has_more"
+                : boundary.trueRawEligibleTokens >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE
+                  ? "true_raw"
+                  : formatted.tokenEstimate >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE
+                    ? "formatted"
+                    : undefined;
 
             return {
                 nextStartOrdinal: rawEligibility.offset,
                 hasNewRawHistory: true,
                 hasProtectedEligibleHead,
-                isMeaningful,
-                tokenEstimate: Math.ceil(chunk.tokenEstimate * sourceRatio),
-                chunkHasMore: chunk.hasMore,
+                proactiveAdmission,
+                ...formatted,
                 trueRawEligibleTokens: boundary.trueRawEligibleTokens,
-                commitClusterCount: chunk.commitClusterCount,
                 boundarySnapshot: boundary,
             };
         } catch (error) {
@@ -779,11 +791,19 @@ export function checkCompartmentTrigger(
             return { shouldFire: false };
         }
 
-        sessionLog(
-            sessionId,
-            `compartment trigger: force-firing at ${usage.percentage.toFixed(1)}% (projected post-drop ${formatProjectedPostDropPercentage(projectedPostDropPercentage)})`,
-        );
+        const admittedBy = recovery
+            ? "overflow_recovery"
+            : usage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE
+              ? "emergency_95"
+              : "force_band";
+        const logForceFire = (trueRawTokens: number, formattedTokens: number | "unavailable") => {
+            sessionLog(
+                sessionId,
+                `compartment trigger: force-firing at ${usage.percentage.toFixed(1)}% (projected post-drop ${formatProjectedPostDropPercentage(projectedPostDropPercentage)}) admittedBy=${admittedBy} trueRawTokens=${trueRawTokens} formattedTokens=${formattedTokens}`,
+            );
+        };
         if (tailInfo.boundarySnapshot && hasRunnableCompartmentWindow(tailInfo.boundarySnapshot)) {
+            logForceFire(tailInfo.trueRawEligibleTokens, tailInfo.tokenEstimate);
             return {
                 shouldFire: true,
                 reason: "force_band",
@@ -802,7 +822,7 @@ export function checkCompartmentTrigger(
                     absoluteMessageCount: resolvedInMemoryTail.absoluteMessageCount,
                 });
             }
-            return resolveOpenCodeProtectedTailBoundary({
+            const boundary = resolveOpenCodeProtectedTailBoundary({
                 db,
                 sessionId,
                 mode: "trigger",
@@ -813,8 +833,24 @@ export function checkCompartmentTrigger(
                 emergencyTailScale: scale,
                 recovery,
             });
+            if (!hasRunnableCompartmentWindow(boundary)) return null;
+            let formattedTokens: number | "unavailable";
+            try {
+                formattedTokens = scanFormattedHead(
+                    db,
+                    sessionId,
+                    triggerBudget,
+                    boundary.offset,
+                    boundary.eligibleEndOrdinal,
+                ).tokenEstimate;
+            } catch {
+                // A diagnostic scan must not block emergency progress.
+                formattedTokens = "unavailable";
+            }
+            logForceFire(boundary.trueRawEligibleTokens, formattedTokens);
+            return boundary;
         });
-        if (hasRunnableCompartmentWindow(scaledBoundary)) {
+        if (scaledBoundary) {
             return { shouldFire: true, reason: "force_band", boundarySnapshot: scaledBoundary };
         }
         sessionLog(
@@ -835,7 +871,7 @@ export function checkCompartmentTrigger(
     ) {
         sessionLog(
             sessionId,
-            `compartment trigger: commit-cluster fire — ${tailInfo.commitClusterCount} clusters (min=${minClusters}), ~${tailInfo.tokenEstimate} tokens in eligible prefix`,
+            `compartment trigger: commit-cluster fire — ${tailInfo.commitClusterCount} clusters (min=${minClusters}) admittedBy=commit_clusters trueRawTokens=${tailInfo.trueRawEligibleTokens} formattedTokens=${tailInfo.tokenEstimate}`,
         );
         return {
             shouldFire: true,
@@ -865,9 +901,10 @@ export function checkCompartmentTrigger(
         tailInfo.tokenEstimate >= triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER ||
         (tailInfo.chunkHasMore && tailInfo.tokenEstimate > 0)
     ) {
+        const admittedBy = tailInfo.chunkHasMore ? "has_more" : "formatted";
         sessionLog(
             sessionId,
-            `compartment trigger: tail-size fire — ~${tailInfo.tokenEstimate} TC-chunked tokens (hasMore=${tailInfo.chunkHasMore}, true-raw ~${tailInfo.trueRawEligibleTokens}) exceeds ${triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER} budget threshold`,
+            `compartment trigger: tail-size fire — budget threshold ${triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER} admittedBy=${admittedBy} trueRawTokens=${tailInfo.trueRawEligibleTokens} formattedTokens=${tailInfo.tokenEstimate}`,
         );
         return {
             shouldFire: true,
@@ -900,7 +937,7 @@ export function checkCompartmentTrigger(
         return { shouldFire: false };
     }
 
-    if (!tailInfo.hasProtectedEligibleHead || !tailInfo.isMeaningful) {
+    if (!tailInfo.hasProtectedEligibleHead || !tailInfo.proactiveAdmission) {
         let floorOnly = false;
         const boundary = tailInfo.boundarySnapshot;
         const floor = boundary?.diagnostics?.livePromptFloor;
@@ -916,7 +953,9 @@ export function checkCompartmentTrigger(
                 taggerFloor,
                 true,
             );
-            floorOnly = withoutFloor.hasProtectedEligibleHead && withoutFloor.isMeaningful;
+            floorOnly =
+                withoutFloor.hasProtectedEligibleHead &&
+                withoutFloor.proactiveAdmission !== undefined;
             if (
                 floorOnly &&
                 primaryExecute &&
@@ -946,7 +985,7 @@ export function checkCompartmentTrigger(
 
     sessionLog(
         sessionId,
-        `compartment trigger: proactive fire at ${usage.percentage.toFixed(1)}% (floor=${proactiveTriggerPercentage}% projected post-drop=${formatProjectedPostDropPercentage(projectedPostDropPercentage)} target=${relativePostDropTarget.toFixed(1)}%)`,
+        `compartment trigger: proactive fire at ${usage.percentage.toFixed(1)}% (floor=${proactiveTriggerPercentage}% projected post-drop=${formatProjectedPostDropPercentage(projectedPostDropPercentage)} target=${relativePostDropTarget.toFixed(1)}%) admittedBy=${tailInfo.proactiveAdmission} trueRawTokens=${tailInfo.trueRawEligibleTokens} formattedTokens=${tailInfo.tokenEstimate}`,
     );
     return {
         shouldFire: true,

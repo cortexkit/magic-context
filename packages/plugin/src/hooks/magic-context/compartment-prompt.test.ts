@@ -32,6 +32,32 @@ Your only task is to produce the required historian XML compartments.`;
         expect(prompt.indexOf(expectedGuard)).toBeGreaterThan(prompt.indexOf("</new_messages>"));
     });
 
+    it("puts memory and seed examples before changing references and source", () => {
+        const projectMemory = "<project-memory>memory</project-memory>";
+        const seedExamples =
+            "<compartment_examples_from_other_projects>seeds</compartment_examples_from_other_projects>";
+        const sessionReferences = "<session_references>references</session_references>";
+        const inputSource = "Messages 6-7:\n\nsource";
+        expect(
+            buildCompartmentAgentPrompt({
+                projectMemory,
+                seedExamples,
+                sessionReferences,
+                inputSource,
+            }),
+        ).toBe(
+            [
+                projectMemory,
+                seedExamples,
+                sessionReferences,
+                "<new_messages>",
+                inputSource,
+                "</new_messages>",
+                HISTORIAN_TRANSCRIPT_GUARD,
+            ].join("\n\n"),
+        );
+    });
+
     it("marks recomp user prompts as extraction-free", () => {
         const prompt = buildCompartmentAgentPrompt({
             seedExamples: "",

@@ -1235,7 +1235,7 @@ export interface MemoryRenderOptions {
     sourceNameByMemoryId?: ReadonlyMap<number, string>;
 }
 
-function resolveWorkspaceRenderContext(args: {
+export function resolveWorkspaceRenderContext(args: {
     db: Database;
     projectPath?: string;
     workspaceIdentitySet?: WorkspaceIdentitySet;
@@ -1278,7 +1278,7 @@ function resolveWorkspaceRenderContext(args: {
     };
 }
 
-function sourceNamesForMemories(args: {
+export function sourceNamesForMemories(args: {
     memories: readonly Memory[];
     projectPath?: string;
     workspace: WorkspaceRenderContext;
@@ -1296,6 +1296,24 @@ function sourceNamesForMemories(args: {
         if (source) names.set(memory.id, source);
     }
     return names.size > 0 ? names : undefined;
+}
+
+export function readM0ProjectMemories(
+    db: Database,
+    projectPath: string,
+    workspace: WorkspaceRenderContext,
+    at = Date.now(),
+): Memory[] {
+    return workspace.isWorkspaced
+        ? getMemoriesByProjects(
+              db,
+              workspace.expandedIdentities,
+              ["active", "permanent"],
+              at,
+              workspace.ownIdentities,
+              workspace.shareCategories,
+          )
+        : getMemoriesByProject(db, projectPath, ["active", "permanent"], at);
 }
 
 function memoryCanonicalIdentity(memory: Memory, workspace: WorkspaceRenderContext): string | null {
@@ -2620,21 +2638,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         // block and no stale pre-v2 rows leak into m[0].
         facts = [];
         memories = projectPath
-            ? workspace.isWorkspaced
-                ? getMemoriesByProjects(
-                      options.db,
-                      workspace.expandedIdentities,
-                      ["active", "permanent"],
-                      foldMaterializedAt,
-                      workspace.ownIdentities,
-                      workspace.shareCategories,
-                  )
-                : getMemoriesByProject(
-                      options.db,
-                      projectPath,
-                      ["active", "permanent"],
-                      foldMaterializedAt,
-                  )
+            ? readM0ProjectMemories(options.db, projectPath, workspace, foldMaterializedAt)
             : [];
         userMemories = options.memoryEnabled === false ? [] : safeGetActiveUserMemories(options.db);
         options.db.exec("COMMIT");

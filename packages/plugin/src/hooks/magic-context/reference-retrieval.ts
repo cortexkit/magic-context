@@ -97,15 +97,16 @@ function fnv1a(input: string): number {
 
 /**
  * Select 3 seeds from distinct importance bands, deterministically rotating
- * both band order and the picks within each band by (sessionId, chunkStart).
+ * both band order and the picks within each band by session. The same examples
+ * can be cached across requests even as the summarized chunk advances.
  */
 export function selectSeeds(
     sessionId: string,
-    chunkStart: number,
+    _chunkStart: number,
     count = SEED_FLOOR,
 ): ReferenceSeed[] {
     const bands = seedsByBand();
-    const seed = fnv1a(`${sessionId}:${chunkStart}`);
+    const seed = fnv1a(sessionId);
     const picks: ReferenceSeed[] = [];
 
     // Walk bands round-robin so `count` picks spread across the importance range.

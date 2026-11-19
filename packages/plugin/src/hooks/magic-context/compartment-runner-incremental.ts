@@ -16,10 +16,7 @@ import {
     resolveProjectIdentity,
     shouldSkipHomeProjectMemory,
 } from "../../features/magic-context/memory/project-identity";
-import {
-    getMemoriesByProject,
-    ModuleMemoryAuthorityError,
-} from "../../features/magic-context/memory/storage-memory";
+import { ModuleMemoryAuthorityError } from "../../features/magic-context/memory/storage-memory";
 import {
     clearEmergencyDrainLatch,
     clearEmergencyRecovery,
@@ -785,7 +782,14 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             chunkStart: Math.max(1, offset),
             lastOrdinal: eligibleEndOrdinal - 1,
             sessionCompartments: priorCompartments,
-            memories: () => getMemoriesByProject(db, projectPath, ["active", "permanent"]),
+            memoryProject: {
+                db,
+                projectPath:
+                    deps.memoryProjectPath === undefined
+                        ? projectPath
+                        : (deps.memoryProjectPath ?? undefined),
+            },
+            memoryInjectionBudgetTokens: deps.memoryInjectionBudgetTokens,
             memoryEnabled: deps.memoryEnabled !== false,
             userObservationsRequested: deps.userObservationsRequested,
         });
@@ -981,9 +985,15 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // same transform pass's pending-op drain.
         historianRunStarted = true;
         deps.onHistorianRunStarted?.();
+        if (deps.recoveryTriggerReason) {
+            sessionLog(
+                sessionId,
+                `historian recovery fire: admittedBy=${deps.recoveryTriggerReason} trueRawTokens=${boundarySnapshot.trueRawEligibleTokens} formattedChunkTokens=${chunk.tokenEstimate}`,
+            );
+        }
 
         // v2 bounded reference model (replaces the unbounded existing_state dump):
-        //   - 3 rotating seeds + 3 diverse older + 4 recent session compartments
+        //   - 3 session-stable seeds + 3 diverse older + 4 recent session compartments
         //     (no embedding at historian time). Only seeds and diverse references
         //     show scores, preventing recent-score anchoring in one-compartment runs.
         //   - <project-memory> for fact dedup, rendered id-free because the

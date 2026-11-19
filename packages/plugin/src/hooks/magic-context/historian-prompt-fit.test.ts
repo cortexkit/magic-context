@@ -1,8 +1,16 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import {
+    getMemoriesByProject,
+    insertMemory,
+} from "../../features/magic-context/memory/storage-memory";
 import type { Memory } from "../../features/magic-context/memory/types";
+import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
+import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { Database } from "../../shared/sqlite";
 import { buildCompartmentAgentPrompt, COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./compartment-prompt";
 import { calibrationForModelKey, providerMass } from "./decision-calibration";
 import { fitHistorianPrompt, type HistorianPromptFitArgs } from "./historian-prompt-fit";
+import { materializeM0 } from "./inject-compartments";
 import {
     PRODUCER_WINDOW_REFUSAL_MARGIN,
     producerInputTokenLimit,
@@ -47,6 +55,8 @@ function args(overrides: Partial<HistorianPromptFitArgs>): HistorianPromptFitArg
         lastOrdinal: 400,
         sessionCompartments: Array.from({ length: 6 }, (_, index) => compartment(index)),
         memories: Array.from({ length: 300 }, (_, index) => memory(index)),
+        // Most fit tests isolate producer trimming from the injection cap.
+        memoryInjectionBudgetTokens: 100_000,
         memoryEnabled: true,
         ...overrides,
     };
@@ -83,6 +93,67 @@ function limitOf(input: HistorianPromptFitArgs): number {
 }
 
 describe("fitHistorianPrompt", () => {
+    test("memory facts match the main project-memory block under its configured budget", () => {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-memory-budget";
+        const projectPath = "/historian-fixture";
+        const memoryInjectionBudgetTokens = 600;
+        try {
+            for (let i = 0; i < 80; i += 1) {
+                insertMemory(db, {
+                    projectPath,
+                    category: "ARCHITECTURE",
+                    content: memory(i).content,
+                });
+            }
+            const main = materializeM0({
+                db,
+                sessionId,
+                projectPath,
+                projectDirectory: "",
+                state: getOrCreateSessionMeta(db, sessionId),
+                memoryInjectionBudgetTokens,
+            });
+            const input = {
+                ...args({
+                    sessionId,
+                    memories: () => getMemoriesByProject(db, projectPath, ["active", "permanent"]),
+                }),
+                memoryInjectionBudgetTokens,
+                memoryProject: { db, projectPath },
+            };
+            const fit = fitHistorianPrompt(input);
+            if (!fit.ok) throw new Error(fit.reason);
+            const mainBlock = main.m0Text.match(
+                /<project-memory>\n([\s\S]+?)\n<\/project-memory>/,
+            )?.[1];
+            expect(mainBlock).toBeDefined();
+            const mainFacts = [...mainBlock!.matchAll(/^#\d+: (.+)$/gm)].map((match) => match[1]);
+            expect(mainFacts.length).toBeGreaterThan(0);
+            expect(mainFacts.length).toBeLessThan(80);
+            const historianFacts = [...fit.projectMemory.matchAll(/^- (Fact \d+: .+)$/gm)].map(
+                (match) => match[1],
+            );
+            expect(historianFacts).toHaveLength(mainFacts.length);
+            expect(historianFacts.sort()).toEqual(mainFacts.sort());
+        } finally {
+            db.close();
+        }
+    });
+
+    test("the three historian seeds stay byte-identical across starts in one session", () => {
+        const results = [5107, 5113, 5124].map((chunkStart) =>
+            fitHistorianPrompt(args({ chunkStart, lastOrdinal: chunkStart + 5, memories: [] })),
+        );
+        const seedBlocks = results.map((fit) => {
+            if (!fit.ok) throw new Error(fit.reason);
+            expect(fit.kept.seeds).toBe(3);
+            return fit.seedExamples;
+        });
+        expect(new Set(seedBlocks).size).toBe(1);
+    });
+
     test("memory-on loads the lazy pool once and preserves the supplied-array fit", () => {
         const memories = [memory(0), memory(1)];
         const input = args({ memories });
@@ -194,12 +265,20 @@ describe("fitHistorianPrompt", () => {
         });
         const first = fitHistorianPrompt(input);
         const estimate = spyOn(formatting, "estimateTokens");
+        // The memory selector counts individual candidates separately from the
+        // producer fitter's cached system and assembled fixed user prompts.
+        const systemPrefix = COMPARTMENT_AGENT_SYSTEM_PROMPT.slice(0, 100);
+        const fixedPromptCounts = () =>
+            estimate.mock.calls.filter(
+                ([text]) =>
+                    text.startsWith(systemPrefix) || text.includes("\n\n<new_messages>\n\n"),
+            );
         try {
             const repeated = fitHistorianPrompt(structuredClone(input));
-            expect(estimate).toHaveBeenCalledTimes(0);
+            expect(fixedPromptCounts()).toHaveLength(0);
             expect(JSON.stringify(repeated)).toBe(JSON.stringify(first));
             const edited = fitHistorianPrompt({ ...input, systemPrompt: `${input.systemPrompt}!` });
-            expect(estimate.mock.calls.length).toBeGreaterThan(0);
+            expect(fixedPromptCounts().length).toBeGreaterThan(0);
             expect(edited.ok).toBe(true);
         } finally {
             estimate.mockRestore();

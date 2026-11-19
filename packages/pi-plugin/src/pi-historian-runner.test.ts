@@ -340,6 +340,48 @@ function latestHistorianFailureReason(
 }
 
 describe("runPiHistorian", () => {
+	it("logs only exact UTF-8 section sizes for each request, including repair", async () => {
+		const log = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+		const runner = runnerReturning(["not xml", successXml()]);
+		try {
+			const { db } = await runHistorianWith({
+				runner,
+				beforeRun: (db) =>
+					insertMemory(db, {
+						projectPath: resolveProjectIdentity(process.cwd()),
+						category: "CONSTRAINTS",
+						content: "Unicode marker: café 🧭",
+					}),
+			});
+			try {
+				const requests = (
+					runner.run as unknown as {
+						mock: { calls: Array<[Parameters<SubagentRunner["run"]>[0]]> };
+					}
+				).mock.calls;
+				expect(requests).toHaveLength(2);
+				const measured = log.mock.calls
+					.map(([, line]) => line)
+					.filter((line) => line.startsWith("historian request sizes:"));
+				const expected = requests.map(([{ systemPrompt, userMessage }]) => {
+					const size = (tag: string) =>
+						Buffer.byteLength(
+							userMessage?.match(
+								new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`),
+							)?.[0] ?? "",
+						);
+					expect(size("project-memory")).toBeGreaterThan(0);
+					return `historian request sizes: systemBytes=${Buffer.byteLength(systemPrompt)} userBytes=${Buffer.byteLength(userMessage ?? "")} memoryBytes=${size("project-memory")} seedBytes=${size("compartment_examples_from_other_projects")} referenceBytes=${size("session_references")} newMessageBytes=${size("new_messages")}`;
+				});
+				expect(measured).toEqual(expected);
+			} finally {
+				closeQuietly(db);
+			}
+		} finally {
+			log.mockRestore();
+		}
+	});
+
 	it("uses the Pi registry with an empty cache and sends without a window when registry misses", async () => {
 		for (const known of [true, false]) {
 			const runner = runnerReturning([successXml()]);

@@ -38,6 +38,7 @@ import { setRecompStarting, setRecompTerminal } from "./recomp-orchestrator";
 import { sendStatusNotification } from "./send-session-notification";
 
 export interface ManagedWrapupContext extends ManagedRecompContext {
+    memoryInjectionBudgetTokens?: number;
     contextLimit: number;
     executeThresholdPercentage: number;
     hasPendingNaturalBust?: (sessionId: string) => boolean;
@@ -249,6 +250,7 @@ async function runOneWrapupIteration(args: {
         historianTwoPass: ctx.historianTwoPass,
         historianExpandTools: ctx.historianExpandTools,
         memoryEnabled: ctx.memoryEnabled,
+        memoryInjectionBudgetTokens: ctx.memoryInjectionBudgetTokens,
         autoPromote: ctx.autoPromote,
         // User-memory collection is forwarded on the same gate as every other
         // historian surface: wrapup chunks persist user observations exactly when

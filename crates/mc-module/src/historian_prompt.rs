@@ -264,7 +264,7 @@ fn seeds_by_band(corpus: &[ReferenceSeed]) -> Vec<Vec<usize>> {
 fn select_seed_indices(
     corpus: &[ReferenceSeed],
     session_id: &str,
-    chunk_start: i64,
+    _chunk_start: i64,
     count: usize,
 ) -> Vec<usize> {
     if count == 0 || corpus.is_empty() {
@@ -272,7 +272,7 @@ fn select_seed_indices(
     }
 
     let bands = seeds_by_band(corpus);
-    let seed = fnv1a(&format!("{session_id}:{chunk_start}"));
+    let seed = fnv1a(session_id);
     let seed_usize = seed as usize;
     let mut picks = Vec::with_capacity(count.min(corpus.len()));
 
@@ -309,7 +309,7 @@ fn select_seed_indices(
     picks
 }
 
-/// Select deterministic cross-project calibration examples for a historian run.
+/// Select session-stable cross-project calibration examples for a historian run.
 pub fn select_seeds(session_id: &str, chunk_start: i64, count: usize) -> Vec<ReferenceSeed> {
     let corpus = reference_seeds();
     select_seed_indices(corpus, session_id, chunk_start, count)
@@ -569,14 +569,14 @@ pub fn render_historian_memory_block(memories: &[StoredMemory]) -> String {
 
 pub fn build_compartment_agent_prompt(inputs: &CompartmentPromptInputs<'_>) -> String {
     let mut parts = Vec::new();
+    if inputs.memory_enabled && !inputs.project_memory.is_empty() {
+        parts.push(inputs.project_memory.to_string());
+    }
     if !inputs.seed_examples.is_empty() {
         parts.push(inputs.seed_examples.to_string());
     }
     if !inputs.session_references.is_empty() {
         parts.push(inputs.session_references.to_string());
-    }
-    if inputs.memory_enabled && !inputs.project_memory.is_empty() {
-        parts.push(inputs.project_memory.to_string());
     }
     if inputs.extraction_free {
         parts.push(EXTRACTION_FREE_TOGGLE.to_string());

@@ -171,36 +171,23 @@ describe("selectSeeds", () => {
         expect(selectSeeds("ses_a", 1).length).toBe(3);
     });
 
-    it("is deterministic for the same (sessionId, chunkStart)", () => {
-        const a = selectSeeds("ses_a", 42).map((s) => s.importance);
-        const b = selectSeeds("ses_a", 42).map((s) => s.importance);
-        expect(a).toEqual(b);
-    });
-
-    it("rotates: different chunkStart yields a different combination (usually)", () => {
-        // Across many chunk starts we should see more than one distinct combo.
-        const combos = new Set<string>();
+    it("keeps the exact examples across chunk starts of the same session", () => {
+        const first = selectSeeds("ses_a", 1);
         for (let chunk = 1; chunk <= 30; chunk++) {
-            combos.add(
-                selectSeeds("ses_a", chunk)
-                    .map((s) => s.importance)
-                    .sort((x, y) => x - y)
-                    .join(","),
-            );
+            expect(selectSeeds("ses_a", chunk)).toEqual(first);
         }
-        expect(combos.size).toBeGreaterThan(1);
     });
 
     it("covers 3 distinct rotating bands every run", () => {
-        for (let chunk = 1; chunk <= 20; chunk++) {
-            const imps = selectSeeds("ses_x", chunk).map((s) => s.importance);
+        for (let session = 1; session <= 20; session++) {
+            const imps = selectSeeds(`ses_${session}`, 1).map((s) => s.importance);
             expect(new Set(imps.map(band)).size).toBe(3);
         }
     });
 
     it("never returns duplicate seeds within one selection", () => {
-        for (let chunk = 1; chunk <= 20; chunk++) {
-            const picks = selectSeeds("ses_dup", chunk);
+        for (let session = 1; session <= 20; session++) {
+            const picks = selectSeeds(`ses_dup_${session}`, 1);
             expect(new Set(picks).size).toBe(picks.length);
         }
     });

@@ -55,7 +55,6 @@ import {
 	promoteSessionFactsDurable,
 } from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
-import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	clearEmergencyDrainLatch,
 	clearEmergencyRecovery,
@@ -87,6 +86,7 @@ import {
 	buildHistorianEditorPrompt,
 	COMPARTMENT_AGENT_SYSTEM_PROMPT,
 	HISTORIAN_EDITOR_SYSTEM_PROMPT,
+	logHistorianPromptSizes,
 } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import {
 	prepareCompartmentDrops,
@@ -295,6 +295,11 @@ async function runHistorianSubagentWithTransientRetriesGuarded(args: {
 			});
 			if (failure) throw new Error(failure);
 			args.onDispatch?.();
+			logHistorianPromptSizes(
+				args.sessionId,
+				args.options.systemPrompt,
+				args.options.userMessage,
+			);
 			result = await args.runner.run({
 				...args.options,
 				cacheTail:
@@ -467,6 +472,8 @@ export interface PiHistorianDeps {
 	thinkingLevel?: string;
 	/** Cross-session memory feature gate (`memory.enabled`). */
 	memoryEnabled?: boolean;
+	memoryInjectionBudgetTokens?: number;
+	recoveryTriggerReason?: "history_retirement" | "startup_recovery";
 	/** Allow a session started exactly in the canonical home directory only when user-level configuration enables it. */
 	allowHomeProject?: boolean;
 	/** Automatic-promotion gate (`memory.auto_promote`). */
@@ -873,10 +880,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				chunkStart: Math.max(1, offset),
 				lastOrdinal: eligibleEndOrdinal - 1,
 				sessionCompartments: priorCompartments,
-				memories: () =>
-					projectPath
-						? getMemoriesByProject(db, projectPath, ["active", "permanent"])
-						: [],
+				memoryProject: { db, projectPath: projectPath ?? undefined },
+				memoryInjectionBudgetTokens: deps.memoryInjectionBudgetTokens,
 				memoryEnabled: memoryEnabled !== false,
 				userObservationsRequested,
 			});
@@ -1072,6 +1077,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				);
 			}
 
+			if (deps.recoveryTriggerReason) {
+				sessionLog(
+					sessionId,
+					`historian recovery fire: admittedBy=${deps.recoveryTriggerReason} trueRawTokens=${boundarySnapshot.trueRawEligibleTokens} formattedChunkTokens=${chunk.tokenEstimate}`,
+				);
+			}
 			const prompt = buildCompartmentAgentPrompt({
 				seedExamples: promptFit.seedExamples,
 				sessionReferences: promptFit.sessionReferences,

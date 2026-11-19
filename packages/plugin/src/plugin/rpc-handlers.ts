@@ -1866,6 +1866,7 @@ export function registerRpcHandlers(
             : 128_000;
         const ctx = {
             ...(await buildManagedCtx(db)),
+            memoryInjectionBudgetTokens: config.memory?.injection_budget_tokens,
             contextLimit,
             executeThresholdPercentage: resolveExecuteThresholdDetail(
                 config.execute_threshold_percentage ?? 65,

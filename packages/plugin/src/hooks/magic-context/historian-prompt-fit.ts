@@ -29,10 +29,20 @@ import { readEnabledProjectMemories } from "../../features/magic-context/memory-
 import type { ModelInput } from "../../shared/model-resolution";
 import { getSdkOutputLimit } from "../../shared/models-dev-cache";
 import { toModelEntry } from "../../shared/resolve-fallbacks";
+import type { Database } from "../../shared/sqlite";
 import { buildCompartmentAgentPrompt, COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./compartment-prompt";
 import { calibrationForModelKey, providerMass } from "./decision-calibration";
 import { resolveHistorianProducerLimits } from "./derive-budgets";
-import { orderHistorianMemories, renderHistorianMemoryBlock } from "./inject-compartments";
+import {
+    DEFAULT_MEMORY_BUDGET_TOKENS,
+    orderHistorianMemories,
+    readM0ProjectMemories,
+    renderHistorianMemoryBlock,
+    resolveWorkspaceRenderContext,
+    sourceNamesForMemories,
+    trimMemoriesToBudgetV2,
+    trimWorkspaceMemoriesToBudgetV2,
+} from "./inject-compartments";
 import { historianProducerReserve, producerInputTokenLimit } from "./producer-window-guard";
 import { estimateFixedPromptTokens } from "./read-session-formatting";
 import {
@@ -119,13 +129,16 @@ export interface HistorianPromptFitArgs {
     /** Chunk budget the caller would use without a window, in local tokens. */
     requestedChunkTokens: number;
     sessionId: string;
-    /** First ordinal of the chunk; selects the seed examples. */
+    /** First ordinal of the chunk; helps select diverse session references. */
     chunkStart: number;
     /** Highest ordinal the chunk can end at; sizes the `Messages X-Y:` header. */
     lastOrdinal: number;
     sessionCompartments: ReferenceCompartment[];
-    /** Memories for the `<project-memory>` block; empty when there is none. */
-    memories: Memory[] | (() => Memory[]);
+    /** Project and workspace source the main session reads when rebuilding its memory baseline. */
+    memoryProject?: { db: Database; projectPath?: string };
+    /** Preloaded rows when there is no project source. */
+    memories?: Memory[] | (() => Memory[]);
+    memoryInjectionBudgetTokens?: number;
     memoryEnabled: boolean;
     /** Whether the historian is asked for user observations; see buildCompartmentAgentPrompt. */
     userObservationsRequested?: boolean;
@@ -218,11 +231,30 @@ export function fitHistorianPrompt(args: HistorianPromptFitArgs): HistorianPromp
         args.sessionId,
         args.chunkStart,
     );
-    const memories = orderHistorianMemories(
-        readEnabledProjectMemories(args.memoryEnabled, () =>
-            typeof args.memories === "function" ? args.memories() : args.memories,
-        ),
-    );
+    const memories = readEnabledProjectMemories(args.memoryEnabled, () => {
+        const project = args.memoryProject;
+        const projectPath = project?.projectPath;
+        const workspace = project && resolveWorkspaceRenderContext(project);
+        const rows = project
+            ? projectPath && workspace
+                ? readM0ProjectMemories(project.db, projectPath, workspace)
+                : []
+            : ((typeof args.memories === "function" ? args.memories() : args.memories) ?? []);
+        const budget = args.memoryInjectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
+        const { selected } = workspace?.isWorkspaced
+            ? trimWorkspaceMemoriesToBudgetV2(args.sessionId, rows, budget, workspace, {
+                  sourceNameByMemoryId: sourceNamesForMemories({
+                      memories: rows,
+                      projectPath,
+                      workspace,
+                  }),
+              })
+            : trimMemoriesToBudgetV2(args.sessionId, rows, budget);
+        const selectedIds = new Set(selected.map((memory) => memory.id));
+        // Keep the historian's rendering and suffix-trim priority after the
+        // main session's selector decides which facts fit its memory budget.
+        return orderHistorianMemories(rows.filter((memory) => selectedIds.has(memory.id)));
+    });
     const render = (refs: number, memoryCount: number, seedCount: number) => ({
         seedExamples: renderSeedExamplesBlock(seeds.slice(0, seedCount)),
         sessionReferences: renderSessionReferencesBlock(references, refs),
@@ -267,7 +299,7 @@ export function fitHistorianPrompt(args: HistorianPromptFitArgs): HistorianPromp
             (entry): entry is FitLimit =>
                 entry !== undefined && Number.isFinite(entry.mass(0)) && entry.mass(0) > 0,
         );
-    // An unknown window sends the full prompt unguarded.
+    // An unknown window sends the budgeted fixed context without producer trimming.
     const unguarded = (): HistorianPromptFit => ({
         ok: true,
         guarded: false,

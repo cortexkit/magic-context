@@ -522,6 +522,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     };
     const buildManagedWrapupCtx = (sessionId: string): ManagedWrapupContext => ({
         ...buildManagedRecompCtx(sessionId),
+        memoryInjectionBudgetTokens: deps.config.memory?.injection_budget_tokens,
         contextLimit: (() => {
             const model = resolveLiveModel(sessionId);
             return model

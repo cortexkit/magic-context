@@ -449,6 +449,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
 
     function historianRunDeps(
         boundarySnapshot: ProtectedTailBoundarySnapshot | undefined,
+        recoveryTriggerReason: "recovery_chain" | "emergency_95",
     ): Parameters<typeof startCompartmentAgent>[0] {
         return {
             client: args.client,
@@ -458,6 +459,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             sessionId: args.sessionId,
             historianChunkTokens: args.historianChunkTokens,
             boundarySnapshot,
+            recoveryTriggerReason,
             currentContextLimit: args.boundaryContextLimit,
             historyBudgetTokens: args.historyBudgetTokens,
             historianTimeoutMs: args.historianTimeoutMs,
@@ -474,6 +476,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             historianTwoPass: args.historianTwoPass,
             historianExpandTools: args.historianExpandTools,
             memoryEnabled: args.memoryEnabled,
+            memoryInjectionBudgetTokens: args.injectionBudgetTokens,
+            memoryProjectPath: args.projectPath ?? null,
             autoPromote: args.autoPromote,
             onCompartmentStatePublished: args.onCompartmentStatePublished,
             preserveInjectionCacheUntilConsumed: true,
@@ -584,7 +588,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 );
                 return "stopped";
             }
-            startCompartmentAgent(historianRunDeps(boundary));
+            startCompartmentAgent(historianRunDeps(boundary, "recovery_chain"));
             const nextRun = getActiveCompartmentRun(args.sessionId);
             if (!nextRun || nextRun === lastRun) {
                 sessionLog(
@@ -696,6 +700,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                     historianTwoPass: args.historianTwoPass,
                     historianExpandTools: args.historianExpandTools,
                     memoryEnabled: args.memoryEnabled,
+                    memoryInjectionBudgetTokens: args.injectionBudgetTokens,
+                    memoryProjectPath: args.projectPath ?? null,
                     autoPromote: args.autoPromote,
                     onCompartmentStatePublished: args.onCompartmentStatePublished,
                     preserveInjectionCacheUntilConsumed: true,
@@ -738,7 +744,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 `transform: 95% reached (${args.contextUsage.percentage.toFixed(1)}%), force-starting compartment agent and blocking`,
             );
             startCompartmentAgent(
-                historianRunDeps(getBoundarySnapshotForCompartment() ?? undefined),
+                historianRunDeps(getBoundarySnapshotForCompartment() ?? undefined, "emergency_95"),
             );
             activeRun = getActiveCompartmentRun(args.sessionId);
         } else if (!activeRun && hasEligibleHistoryForCompartment()) {

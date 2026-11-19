@@ -198,6 +198,15 @@ export interface CompartmentRunnerDeps<
      * and must NOT generate or store embeddings. Issue #44.
      */
     memoryEnabled?: boolean;
+    memoryInjectionBudgetTokens?: number;
+    /** Main session's memory identity; null means it has none. */
+    memoryProjectPath?: string | null;
+    /** Admission reason for recovery paths that bypass the regular trigger. */
+    recoveryTriggerReason?:
+        | "overflow_recovery"
+        | "emergency_95"
+        | "startup_recovery"
+        | "recovery_chain";
     /**
      * Automatic-promotion gate (`memory.auto_promote` config). When false (and
      * memory is otherwise enabled), tools and search still work, but historian

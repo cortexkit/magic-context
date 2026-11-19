@@ -43,6 +43,7 @@ import {
     buildHistorianEditorPrompt,
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
+    logHistorianPromptSizes,
 } from "./compartment-prompt";
 import type {
     HiddenCompletion,
@@ -782,6 +783,7 @@ async function runHistorianPrompt(args: {
                                     parentSessionId,
                                 });
                                 if (failure) throw new Error(failure);
+                                logHistorianPromptSizes(parentSessionId, system, prompt);
                                 return executor.attempt(opened, request);
                             },
                             { childSessionId: opened.childSessionId },

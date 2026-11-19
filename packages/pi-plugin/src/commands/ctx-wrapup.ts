@@ -66,6 +66,7 @@ export interface RegisterCtxWrapupDeps {
 	historianThinkingLevel?: string;
 	language?: string;
 	memoryEnabled: boolean;
+	memoryInjectionBudgetTokens?: number;
 	autoPromote: boolean;
 	userMemoriesEnabled?: boolean;
 	/** False when the dreamer is not runnable; the historian then skips user observations. */
@@ -498,6 +499,7 @@ export async function runPiWrapup(
 						maxOutputTokens: deps.historianMaxOutputTokens,
 						thinkingLevel: deps.historianThinkingLevel,
 						memoryEnabled: deps.memoryEnabled,
+						memoryInjectionBudgetTokens: deps.memoryInjectionBudgetTokens,
 						autoPromote: deps.autoPromote,
 						userMemoriesEnabled: deps.userMemoriesEnabled,
 						userObservationsRequested: deps.userObservationsRequested,

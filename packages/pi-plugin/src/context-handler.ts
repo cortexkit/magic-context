@@ -1717,6 +1717,7 @@ export interface PiHistorianOptions {
 	thinkingLevel?: string;
 	/** Cross-session memory feature gate (`memory.enabled`). */
 	memoryEnabled?: boolean;
+	memoryInjectionBudgetTokens?: number;
 	/** Allow a session started exactly in the canonical home directory only when user-level configuration enables it. */
 	allowHomeProject?: boolean;
 	/** Automatic-promotion gate (`memory.auto_promote`). */
@@ -8377,6 +8378,7 @@ function spawnPiHistorianRun(args: {
 	) => ProtectedTailBoundarySnapshot;
 	currentContextLimit: number;
 	fallbackModelId?: string;
+	recoveryTriggerReason?: PiHistorianDeps["recoveryTriggerReason"];
 }): void {
 	const {
 		pi,
@@ -8470,6 +8472,8 @@ function spawnPiHistorianRun(args: {
 					expandTools: historian.expandTools,
 					thinkingLevel: historian.thinkingLevel,
 					memoryEnabled: historian.memoryEnabled,
+					memoryInjectionBudgetTokens: historian.memoryInjectionBudgetTokens,
+					recoveryTriggerReason: args.recoveryTriggerReason,
 					allowHomeProject: historian.allowHomeProject,
 					autoPromote: historian.autoPromote,
 					userMemoriesEnabled: historian.userMemoriesEnabled,
@@ -8955,6 +8959,7 @@ function maybeFireHistorian(args: {
 				provider,
 				unregister,
 				boundarySnapshot: snapshot,
+				recoveryTriggerReason: "history_retirement",
 				refreshBoundarySnapshot: resolveRunnablePiBoundarySnapshot,
 				currentContextLimit: boundaryContextLimit,
 				fallbackModelId: modelKey,
@@ -8991,6 +8996,7 @@ function maybeFireHistorian(args: {
 					provider,
 					unregister,
 					boundarySnapshot: prepareRecoveryBoundary,
+					recoveryTriggerReason: "startup_recovery",
 					refreshBoundarySnapshot: resolveRunnablePiBoundarySnapshot,
 					currentContextLimit: boundaryContextLimit,
 					fallbackModelId: modelKey,
