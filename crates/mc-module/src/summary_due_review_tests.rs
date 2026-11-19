@@ -55,6 +55,55 @@ fn host_parts_backfill_invalidates_the_cached_due_check() {
     }
 }
 
+#[test]
+fn audit_historian_read_range_obeys_remaining_drain_quota() {
+    let (_, _, route, mut setup, settings) = fixture();
+    setup.preset = "head".into();
+    let mut session = Session::new(
+        &route,
+        &setup,
+        crate::preset::features("head").unwrap(),
+        None,
+    );
+    let prompt_tokens = 70_000;
+    session.conditions.last_prompt_tokens = Some(prompt_tokens);
+    let window = crate::pass::usable_window(&session.conditions);
+    let usage = prompt_tokens as f64 / window as f64 * 100.0;
+    let threshold = settings.execute_threshold_percentage;
+    let cap = crate::summary::trigger::per_run_cap(window, threshold, usage);
+    let limit = crate::summary::drain::window_budget(
+        usage,
+        (window as f64 * threshold / 100.0).round() as u64,
+        cap,
+    );
+    session.drain.spent = limit - 2_000;
+    let entries = (1..=50).map(|n| {
+        let part = Part::new(
+            "p",
+            PartBody::Text {
+                text: "work ".repeat(800).into(),
+            },
+        );
+        Entry::new(n, format!("m{n}"), Role::User, n, vec![part])
+    });
+    session.index.extend(entries);
+    session.drain.window_started_at = session.clock();
+    let job = session
+        .summary_due(&settings)
+        .expect("a partially funded run was admitted");
+    let reserved = session.reservation.unwrap().tokens;
+    assert_eq!(reserved, 2_000);
+    let requested: u64 = session
+        .index
+        .entries()
+        .iter()
+        .filter(|e| e.ordinal >= job.from && e.ordinal < job.until)
+        .flat_map(|e| e.parts.iter())
+        .map(crate::tokens::removed_by_summary)
+        .sum();
+    assert_eq!(requested, reserved);
+}
+
 struct Rng(u64);
 
 impl Rng {

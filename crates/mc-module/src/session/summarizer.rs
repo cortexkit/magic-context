@@ -267,6 +267,19 @@ impl Session {
             );
             return None;
         };
+        // A partially funded run may read only its grant. Keep the first
+        // present message even if it is larger, including after retired ordinals.
+        if reservation.tokens < requested {
+            let entries = self.index.entries();
+            let first = entries.partition_point(|entry| entry.ordinal < from);
+            until = trigger::cap_run(
+                &entries[first..],
+                entry_removed_tokens,
+                entries[first].ordinal,
+                until,
+                reservation.tokens,
+            );
+        }
         self.reservation = Some(reservation);
         self.note_account_run(admitted, usage);
         self.run_start = Some(RunStart {
