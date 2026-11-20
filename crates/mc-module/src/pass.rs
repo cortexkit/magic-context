@@ -271,7 +271,25 @@ pub(crate) fn heavy_signed_turn_in_view(
         .filter(|entry| entry.role == Role::Assistant && !entry.parts.is_empty())
         .take(HEAVY_REASONING_WINDOW_STEPS)
         .filter(|entry| !signed_floor.is_some_and(|floor| entry.ordinal <= floor))
-        .any(|entry| lanes::step_reasoning_tokens_shown(entry, edited) > HEAVY_REASONING_TOKENS)
+        .any(|entry| {
+            // The step's usage is an aggregate; we can't tell how much of
+            // it belongs to a surviving signed block after a partial drop.
+            let all_signed_removed = edited.is_some_and(|edited| {
+                let mut signed = entry
+                    .parts
+                    .iter()
+                    .filter(|part| {
+                        part.seal == cortexkit_role_compaction::part::Seal::Signed
+                            && matches!(
+                                part.body,
+                                cortexkit_role_compaction::part::PartBody::Reasoning { .. }
+                            )
+                    })
+                    .peekable();
+                signed.peek().is_some() && signed.all(|part| edited.covers(&entry.mid, &part.id))
+            });
+            !all_signed_removed && lanes::step_reasoning_tokens(entry) > HEAVY_REASONING_TOKENS
+        })
 }
 
 /// Where the current turn starts: after the latest non-notice user input,
