@@ -9,7 +9,7 @@ import {
     writeStorageFileAtomicSync,
 } from "../src/shared/storage-permissions";
 import { connectSubcWakeClient, parseAgentDeliverReply, type SubcWakeClientFactory } from "./cache-bust-sentinel";
-import { resolvePrefrontalModuleId } from "./prefrontal-wake-module";
+import { PREFRONTAL_MODULE_ID } from "./prefrontal-wake-module";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -70,11 +70,7 @@ export type FailureSentinelOptions = {
     settleMs?: number;
     now?: () => number;
     wake?: (content: string, deliveryId: string) => Promise<void>;
-    /**
-     * The subc module that delivers the wake. When unset, the run reads the
-     * daemon's module catalog and uses `prefrontal`, or `prefrontal-core` on a
-     * daemon from before the rename.
-     */
+    /** The subc module that delivers the wake; defaults to `prefrontal`. */
     wakeModuleId?: string;
     /** Opens the subc connection a wake is sent on; tests replace it. */
     connect?: SubcWakeClientFactory;
@@ -276,8 +272,7 @@ async function deliver(options: FailureSentinelOptions, content: string, id: str
     if (options.wake) return options.wake(content, id);
     const client = await (options.connect ?? connectSubcWakeClient)({ connectionFile: options.connectionFile, handshakeTimeoutMs: 2_000 });
     try {
-        // A run sends at most one wake, so the module is chosen once per run.
-        const moduleId = options.wakeModuleId ?? await resolvePrefrontalModuleId(client);
+        const moduleId = options.wakeModuleId ?? PREFRONTAL_MODULE_ID;
         const reply = await client.call(moduleId, "agent.deliver", {
             agent_id: AGENT_ID, delivery_id: id,
             body: { kind: "peer_message", from_agent: "mc-subagent-failure-sentinel",

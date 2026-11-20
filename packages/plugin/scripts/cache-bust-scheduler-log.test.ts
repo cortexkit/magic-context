@@ -73,7 +73,7 @@ test("analyzer and sentinel report a rewrite with only a scheduler line as no_mc
     expect(withLog.requests[1]?.divergenceClass).toBe("no_mc_pass_row");
     expect(withLog.requests[1]?.passEvidence).toBe("no pass record for this request; a scheduler line was found");
     const events: string[] = [];
-    await runSentinelOnce({ once: true, send: false, intervalMs: 60000, lookbackMs: 120000, stateFile: join(dir, "state.json"), databasePath: join(dir, "absent.db"), rustStorePath: join(dir, "absent-rust.db"), connectionFile: join(dir, "absent.json"), wakeModuleId: "prefrontal-core", wakeAgentId: "agent_b613e5cf2ee55b8c", wakeFromAgent: "mc-cache-bust-sentinel", anthropicDir: dir, openaiDir: join(dir, "missing"), mcLogPath: logPath }, {
+    await runSentinelOnce({ once: true, send: false, intervalMs: 60000, lookbackMs: 120000, stateFile: join(dir, "state.json"), databasePath: join(dir, "absent.db"), rustStorePath: join(dir, "absent-rust.db"), connectionFile: join(dir, "absent.json"), wakeModuleId: "prefrontal", wakeAgentId: "agent_b613e5cf2ee55b8c", wakeFromAgent: "mc-cache-bust-sentinel", anthropicDir: dir, openaiDir: join(dir, "missing"), mcLogPath: logPath }, {
         now: () => bTime + 1000,
         listActiveSessions: () => [{ sessionId: session, harness: "opencode", projectPath: "fixture", directory: dir, activityMs: bTime }],
         loadDecisions: () => [execute], stdout: line => events.push(line),
@@ -180,7 +180,7 @@ test("the served execute pass raises no sentinel wake for its window", async () 
             databasePath: join(dir, "absent.db"),
             rustStorePath: join(dir, "absent-rust.db"),
             connectionFile: join(dir, "absent.json"),
-            wakeModuleId: "prefrontal-core",
+            wakeModuleId: "prefrontal",
             wakeAgentId: "agent_b613e5cf2ee55b8c",
             wakeFromAgent: "mc-cache-bust-sentinel",
             anthropicDir: dir,
@@ -218,7 +218,7 @@ for (const released of [true, false]) {
         const joined = withSchedulerLogFallback([], session, logPath);
         if (released) expect(joined[0]?.lkgFrozenReleaseReason).toBe("lkg_unsafe_seam;first_changed=historical#2");
         const events: string[] = [];
-        await runSentinelOnce({ once: true, send: false, intervalMs: 60_000, lookbackMs: 120_000, stateFile: join(dir, "state.json"), databasePath: join(dir, "absent.db"), rustStorePath: join(dir, "absent-rust.db"), connectionFile: join(dir, "absent.json"), wakeModuleId: "prefrontal-core", wakeAgentId: "fixture", wakeFromAgent: "fixture", anthropicDir: dir, openaiDir: join(dir, "missing"), mcLogPath: logPath }, {
+        await runSentinelOnce({ once: true, send: false, intervalMs: 60_000, lookbackMs: 120_000, stateFile: join(dir, "state.json"), databasePath: join(dir, "absent.db"), rustStorePath: join(dir, "absent-rust.db"), connectionFile: join(dir, "absent.json"), wakeModuleId: "prefrontal", wakeAgentId: "fixture", wakeFromAgent: "fixture", anthropicDir: dir, openaiDir: join(dir, "missing"), mcLogPath: logPath }, {
             now: () => bTime + 1000,
             listActiveSessions: () => [{ sessionId: session, harness: "opencode", projectPath: "fixture", directory: dir, activityMs: bTime }],
             loadDecisions: () => [], stdout: (line) => events.push(line),

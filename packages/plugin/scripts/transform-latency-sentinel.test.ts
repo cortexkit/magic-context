@@ -277,16 +277,10 @@ const peerStore = (dataDir: string, module: string) => {
     writeFileSync(join(dataDir, "cortexkit", module, "store.db"), "");
     return join(dataDir, "cortexkit", module, "store.db");
 };
-test("the default peer store is the renamed prefrontal store once it exists", () => {
-    peerStore(root, "prefrontal-core");
-    const renamed = peerStore(root, "prefrontal");
-    expect(resolvePeerDbPath(undefined, root)).toBe(renamed);
+test("the default peer store is the prefrontal path even when no store exists", () => {
+    expect(resolvePeerDbPath(undefined, root)).toBe(join(root, "cortexkit/prefrontal/store.db"));
 });
-test("the default peer store falls back to prefrontal-core until the renamed store exists", () => {
-    const legacy = peerStore(root, "prefrontal-core");
-    expect(resolvePeerDbPath(undefined, root)).toBe(legacy);
-});
-test("an explicit peer store wins even when the renamed store exists", () => {
+test("an explicit peer store wins even when the default store exists", () => {
     peerStore(root, "prefrontal");
     expect(resolvePeerDbPath(join(root, "custom.db"), root)).toBe(join(root, "custom.db"));
 });

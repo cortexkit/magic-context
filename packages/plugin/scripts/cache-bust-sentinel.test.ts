@@ -88,7 +88,7 @@ function options(stateFile: string): CacheBustSentinelOptions {
         databasePath: join(stateFile, "missing-context.db"),
         rustStorePath: join(stateFile, "missing-store.db"),
         connectionFile: join(stateFile, "missing-subc.json"),
-        wakeModuleId: "prefrontal-core",
+        wakeModuleId: "prefrontal",
         wakeAgentId: "agent_b613e5cf2ee55b8c",
         wakeFromAgent: "mc-cache-bust-sentinel",
     };
@@ -973,7 +973,7 @@ describe("agent.deliver contract", () => {
         let closed = false;
         const transport = new SubcWakeEventTransport(
             "fixture-connection.json",
-            "prefrontal-core",
+            "prefrontal",
             "agent_fixture",
             "mc-cache-bust-sentinel",
             async () => ({
@@ -1006,7 +1006,7 @@ describe("agent.deliver contract", () => {
 
         expect(calls).toEqual([
             {
-                moduleId: "prefrontal-core",
+                moduleId: "prefrontal",
                 method: "agent.deliver",
                 params: fixture,
                 options: {
@@ -1064,15 +1064,14 @@ describe("agent.deliver contract", () => {
             "--wake-from-agent",
             "agent_sender_override",
             "--wake-module-id",
-            "prefrontal-core",
+            "fixture-module",
         ]);
 
-        // With no module given, each run picks prefrontal or prefrontal-core from
-        // the daemon's module catalog (see prefrontal-wake-module.test.ts).
+        // With no module given, delivery defaults to prefrontal.
         expect(defaults.wakeModuleId).toBeUndefined();
         expect(defaults.wakeAgentId).toBe("agent_b613e5cf2ee55b8c");
         expect(defaults.wakeFromAgent).toBe("mc-cache-bust-sentinel");
-        expect(override.wakeModuleId).toBe("prefrontal-core");
+        expect(override.wakeModuleId).toBe("fixture-module");
         expect(override.wakeAgentId).toBe("agent_override");
         expect(override.wakeFromAgent).toBe("agent_sender_override");
     });

@@ -761,7 +761,7 @@ function sentinelOptions(root: string): CacheBustSentinelOptions {
         rustStorePath: join(root, "missing-rust.db"),
         connectionFile: join(root, "missing-connection.json"),
         runnerDataDir: root,
-        wakeModuleId: "prefrontal-core",
+        wakeModuleId: "prefrontal",
         wakeAgentId: "test-agent",
         wakeFromAgent: "test-sentinel",
     };

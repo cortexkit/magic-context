@@ -19,7 +19,7 @@ function options(): CacheBustSentinelOptions {
     return { once: true, send: true, intervalMs: minute, lookbackMs: 5 * minute,
         stateFile: join(directory, "state.json"), databasePath: join(directory, "missing.db"),
         rustStorePath: join(directory, "missing-rust.db"), connectionFile: join(directory, "missing.json"),
-        wakeModuleId: "prefrontal-core", wakeAgentId: "fixture-agent", wakeFromAgent: "sentinel" };
+        wakeModuleId: "prefrontal", wakeAgentId: "fixture-agent", wakeFromAgent: "sentinel" };
 }
 function request(timestampMs: number, divergenceClass: AnalyzedCacheRequest["divergenceClass"] = "no_mc_pass_row"): AnalyzedCacheRequest {
     return { session: session.sessionId, at: new Date(timestampMs).toISOString(), timestampMs,

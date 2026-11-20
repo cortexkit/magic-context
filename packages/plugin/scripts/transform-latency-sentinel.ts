@@ -10,7 +10,7 @@ import {
     writeStorageFileAtomicSync,
 } from "../src/shared/storage-permissions";
 import { connectSubcWakeClient, parseAgentDeliverReply, type SubcWakeClientFactory } from "./cache-bust-sentinel";
-import { resolvePrefrontalModuleId } from "./prefrontal-wake-module";
+import { PREFRONTAL_MODULE_ID } from "./prefrontal-wake-module";
 import { parseStepAnswer, parseStepRender, type StepAnswer } from "./step-render-log";
 
 const HOUR = 3_600_000;
@@ -32,7 +32,7 @@ type Hold = { at: number; site: string; ms: number };
 type State = { version: 1; files: Record<string, Cursor>; sessions: Record<string, Session>; sent: Record<string, Sent>; busy?: Record<string, Record<string, BusyCounts>>; holds?: Hold[]; pendingBusy?: Record<string, number>; lastSummaryDay?: string };
 export type LatencyAlert = { kind: Kind; sessionId: string; name: string; at: string; detail: string; lkgDeclines: Record<string, number>; count: number; p50: number; p90: number; max: number; moduleP50: number | null; moduleP90: number | null; moduleMax: number | null; runnerP50?: number | null; runnerP90?: number | null; runnerMax?: number | null; worstPass?: Pass; pluginP50: number | null; pluginP90: number | null; pluginMax: number | null; busy?: BusyCounts; lock?: { site: string; count: number; p90: number; max: number }; load: number[]; loadSampledAt: string };
 export type LatencyOptions = { files: string[]; stateFile: string; db: string; peerDb?: string; connectionFile: string; send: boolean; now?: () => number; load?: () => number[]; wake?: (content: string, id: string) => Promise<void>;
-    /** The subc module that delivers the wake. When unset, the run reads the daemon's module catalog and uses `prefrontal`, or `prefrontal-core` on a daemon from before the rename. */
+    /** The subc module that delivers the wake; defaults to `prefrontal`. */
     wakeModuleId?: string;
     /** Opens the subc connection a wake is sent on; tests replace it. */
     connect?: SubcWakeClientFactory;
@@ -209,15 +209,12 @@ function addLine(state: State, line: string, load: () => number[], file: string)
 
 /**
  * The prefrontal store whose agent roster supplies the agent name an alert
- * shows for a session. A path the caller gives is used as is. Otherwise the
- * store is looked for under the data directory: renaming the module from
- * prefrontal-core to prefrontal also moves its data folder, so the new store is
- * used once it exists and the old one until then.
+ * shows for a session. A path the caller gives is used as is; otherwise the
+ * prefrontal store path under the data directory is used.
  */
 export function resolvePeerDbPath(explicit: string | undefined, dataDir = getDataDir()): string {
     if (explicit !== undefined) return explicit;
-    const renamed = join(dataDir, "cortexkit/prefrontal/store.db");
-    return existsSync(renamed) ? renamed : join(dataDir, "cortexkit/prefrontal-core/store.db");
+    return join(dataDir, "cortexkit/prefrontal/store.db");
 }
 
 function names(dbPath: string, peerDbPath: string | undefined, alerts: LatencyAlert[]): void {
@@ -299,8 +296,7 @@ async function deliver(options: LatencyOptions, content: string, id: string, urg
     if (options.wake) return options.wake(content, id);
     const client = await (options.connect ?? connectSubcWakeClient)({ connectionFile: options.connectionFile, handshakeTimeoutMs: 2_000 });
     try {
-        // A run sends at most one wake, so the module is chosen once per run.
-        const moduleId = options.wakeModuleId ?? await resolvePrefrontalModuleId(client);
+        const moduleId = options.wakeModuleId ?? PREFRONTAL_MODULE_ID;
         const reply = await client.call(moduleId, "agent.deliver", {
             agent_id: AGENT_ID, delivery_id: id,
             body: { kind: "peer_message", from_agent: "mc-transform-latency-sentinel", from_session_id: "health-sentinel-mc", from_harness: "magic-context", content, one_way: true }, urgency,
