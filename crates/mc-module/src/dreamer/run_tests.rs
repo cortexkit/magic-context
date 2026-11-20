@@ -479,7 +479,7 @@ async fn three_failed_models_fail_the_run_with_the_last_reason() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, TaskError::Failed(reason, _) if reason.contains("not ok: z") && reason.contains("mc-dream:17:2.0")),
+        matches!(&error, TaskError::Failed { error, unusable_reply: true, .. } if error.contains("not ok: z") && error.contains("mc-dream:17:2.0")),
         "{error:?}"
     );
     assert_eq!(client.selects.lock().unwrap().len(), 3);
@@ -493,7 +493,7 @@ async fn a_waiting_fallback_preserves_the_failed_dreamer_route() {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, TaskError::Failed(reason, _) if reason.contains("bad first reply")),
+            matches!(&error, TaskError::Failed { error, unusable_reply: true, .. } if error.contains("bad first reply")),
             "{error:?}"
         );
         assert_eq!(
@@ -528,7 +528,7 @@ async fn a_model_without_a_harness_or_room_for_the_input_is_passed_over_unsent()
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, TaskError::Failed(reason, _) if reason.contains("doesn't fit")),
+        matches!(&error, TaskError::Failed { error, unusable_reply: false, .. } if error.contains("doesn't fit")),
         "{error:?}"
     );
     assert!(client.sends.lock().unwrap().is_empty());
@@ -688,7 +688,7 @@ async fn unsafe_or_missing_reader_tools_fail_the_run_unsent() {
         let error = run(&client, &verify(), &Task { fits: true })
             .await
             .unwrap_err();
-        assert!(matches!(error, TaskError::Failed(..)), "{error:?}");
+        assert!(matches!(error, TaskError::Failed { .. }), "{error:?}");
         assert!(client.sends.lock().unwrap().is_empty());
         assert_eq!(client.selects.lock().unwrap().len(), 1);
         assert_eq!(*client.reports.lock().unwrap(), ["decision-a cancelled"]);
@@ -934,7 +934,7 @@ async fn an_uncapped_task_takes_a_run_stopped_at_its_step_limit_as_a_failed_mode
         );
         let error = run(&client, &job, &Task { fits: true }).await.unwrap_err();
         assert!(
-            matches!(&error, TaskError::Failed(reason, _) if reason.starts_with("the run ended max_steps: ") && reason.contains("mc-dream:18:2.0")),
+            matches!(&error, TaskError::Failed { error, unusable_reply: false, .. } if error.starts_with("the run ended max_steps: ") && error.contains("mc-dream:18:2.0")),
             "{error:?}"
         );
     }

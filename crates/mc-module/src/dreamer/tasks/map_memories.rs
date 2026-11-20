@@ -7,17 +7,18 @@
 //! and `mc-store/src/dream_memory.rs`), with the identifier search the 0.49
 //! plugin added (`seedIdentifierCandidates` in `map-memories-prompt.ts`).
 //!
-//! A run sends every live memory of the project that has no mapping yet,
-//! then up to twenty memories marked file-independent by the model whose own
-//! text names a file that exists, one memory per message. Before a
+//! A run sends live memories that still need mapping, one memory per message.
+//! It puts untried or edited memories first and waits seven days before
+//! retrying an unchanged memory. It can also repair up to twenty mappings
+//! the model marked file-independent whose text names a file that exists. Before a
 //! message goes out the module lists each memory's likely files: the paths
 //! its text names that the checkout tracks, and for a memory naming none, the
 //! files where a bounded literal search finds the code names it mentions. The
 //! model reads the checkout with a tool provider's read-only tools
 //! ([`super::super::plan`]) for at most [`STEP_CAP`] steps and answers with
 //! one `<mappings>` manifest. A child that reaches the cap is told to answer
-//! with what it has; when that answer is unusable too, the memory stays
-//! unmapped and the run goes on.
+//! with what it has; when that answer is unusable too, the task records the
+//! attempt without changing the mapping, and the run goes on.
 //!
 //! The manifest is checked one entry at a time. An id the batch didn't send,
 //! or a memory changed since the batch read it, is dropped with its reason.
@@ -27,16 +28,16 @@
 //! memory with it. `independent="true"` is stored as the
 //! file-independent mark (one row with an empty path). An entry whose files
 //! all fail, or that maps a directive-shaped project rule to files, is stored
-//! as file-independent too, marked `host_rejected_fallback`, so the memory is
-//! not sent again on every run. A memory the reply leaves out stays unmapped.
+//! as file-independent too, marked `host_rejected_fallback` for verify. A
+//! refusal or an omitted memory records an attempt. Only fallbacks with an
+//! attempt are eligible to retry; older fallbacks remain file-independent.
 //!
 //! The run reads the repository's main checkout, whatever worktree the
 //! session that started it was in ([`crate::dreamer::branches::main_checkout`]):
 //! a worktree may sit on an old base or hold half-finished edits.
 //!
-//! A mapping is not part of what a memory says: writing one leaves the
-//! memory's row and revision alone and keeps no undo-history row. Each
-//! message's writes are recorded as one journal entry keyed by the run,
+//! Mappings and attempts leave the memory's text and undo history alone.
+//! Each message's mapping writes are recorded as one journal entry keyed by the run,
 //! holding every mapped memory's rows before and after, so undoing the run
 //! puts the old mappings back ([`crate::memory_writes::person::undo_run`]).
 
@@ -49,7 +50,9 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::classify::{attribute, body, describe_shape, re};
 use crate::dreamer::branches::main_checkout;
@@ -85,6 +88,11 @@ pub(crate) const MAPPER: &str = "mapper";
 /// The origin of a file-independent mark the module wrote in place of files
 /// it refused.
 pub(crate) const REJECTED: &str = "host_rejected_fallback";
+const ATTEMPT_KEY: &str = "dreamerMappingAttempt";
+const RETRY_AFTER_MS: i64 = 7 * 86_400_000;
+const METADATA_OBJECT: &str = "CASE WHEN json_valid(metadata_json)
+    THEN CASE WHEN json_type(metadata_json) = 'object' THEN metadata_json ELSE '{}' END
+    ELSE '{}' END";
 /// The category whose directive-shaped memories never map to files.
 const PROJECT_RULES: &str = "swe:project-rules";
 /// The extensions a path the memory names must end in when the profile
@@ -120,17 +128,32 @@ pub(crate) struct Memory {
     /// Its mapping rows as (path, origin), by path. Empty when unmapped; the
     /// file-independent mark is the row with the empty path.
     pub mapping: Vec<(String, String)>,
+    attempt: Option<Attempt>,
+}
+
+/// Retry state is not a mapping: verify only sees actual mapping rows.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Attempt {
+    at: i64,
+    commit: String,
+    content_sha256: String,
+}
+
+fn content_sha256(content: &str) -> String {
+    format!("{:x}", Sha256::digest(content.as_bytes()))
 }
 
 /// `project`'s live memories with their mappings, by id.
 pub(crate) fn live_memories(conn: &Connection, project: &str) -> rusqlite::Result<Vec<Memory>> {
     let mut memories: Vec<Memory> = conn
         .prepare(
-            "SELECT id, origin_category, category, content, revision FROM memories
+            "SELECT id, origin_category, category, content, revision, metadata_json FROM memories
               WHERE level = 'project' AND owner_id = ?1 AND status IN ('active', 'permanent')
               ORDER BY id",
         )?
         .query_map(params![project], |row| {
+            let metadata: Option<String> = row.get(5)?;
             Ok(Memory {
                 id: row.get(0)?,
                 tag: row.get(1)?,
@@ -138,6 +161,9 @@ pub(crate) fn live_memories(conn: &Connection, project: &str) -> rusqlite::Resul
                 content: row.get(3)?,
                 revision: row.get(4)?,
                 mapping: Vec::new(),
+                attempt: metadata
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .and_then(|value| Attempt::deserialize(value.get(ATTEMPT_KEY)?).ok()),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -182,41 +208,55 @@ impl Input {
     }
 }
 
-/// What a run maps, in order: every memory with no mapping, then up to
-/// [`MAX_REPAIRS`] memories whose only mapping is a file-independent mark
-/// the model chose although their text names a file that exists. A silent
-/// parse miss in an older dreamer stored such marks for memories with real
-/// files, and a memory marked file-independent is never verified against
-/// code. A mark the module wrote in place of refused files is a decision,
-/// not a miss, and is left alone. `candidates` gives a memory's likely files
-/// from the paths its text names.
-pub(crate) fn select(
+/// Select new and edited memories before unchanged retries. Repair older
+/// model-authored independence marks only when the text names an existing
+/// file: some were written by a parser that missed the model's file list.
+fn select(
     live: &[Memory],
+    now: i64,
     mut candidates: impl FnMut(&Memory) -> Vec<String>,
-) -> Vec<Input> {
-    let mut inputs: Vec<Input> = live
-        .iter()
-        .filter(|memory| memory.mapping.is_empty())
-        .map(|memory| Input::of(memory, candidates(memory)))
-        .collect();
-    let mut repairs = 0;
+) -> (Vec<Input>, usize) {
+    let mut fresh = Vec::new();
+    let mut retries = Vec::new();
+    let mut repairs = Vec::new();
+    let mut recent = 0;
     for memory in live {
-        if repairs >= MAX_REPAIRS {
-            break;
-        }
-        let marked = memory.mapping.iter().any(|(path, _)| path.is_empty());
-        let files = memory.mapping.iter().any(|(path, _)| !path.is_empty());
-        let origin = memory.mapping.first().map(|(_, origin)| origin.as_str());
-        if !marked || files || origin == Some(REJECTED) {
+        let repair = match memory.mapping.as_slice() {
+            [] => false,
+            [(path, origin)] if path.is_empty() && origin != REJECTED => true,
+            [(path, origin)]
+                if path.is_empty() && origin == REJECTED && memory.attempt.is_some() =>
+            {
+                false
+            }
+            _ => continue,
+        };
+        let unchanged = memory
+            .attempt
+            .as_ref()
+            .filter(|attempt| attempt.content_sha256 == content_sha256(&memory.content));
+        if unchanged.is_some_and(|attempt| now.saturating_sub(attempt.at) < RETRY_AFTER_MS) {
+            if !repair || !candidates(memory).is_empty() {
+                recent += 1;
+            }
             continue;
         }
-        let found = candidates(memory);
-        if !found.is_empty() {
-            inputs.push(Input::of(memory, found));
-            repairs += 1;
+        if repair {
+            if repairs.len() < MAX_REPAIRS {
+                let found = candidates(memory);
+                if !found.is_empty() {
+                    repairs.push(Input::of(memory, found));
+                }
+            }
+        } else if unchanged.is_some() {
+            retries.push(Input::of(memory, candidates(memory)));
+        } else {
+            fresh.push(Input::of(memory, candidates(memory)));
         }
     }
-    inputs
+    fresh.extend(retries);
+    fresh.extend(repairs);
+    (fresh, recent)
 }
 
 /// The extensions a likely file may have, from the profile's `map_extensions`.
@@ -384,6 +424,7 @@ pub(crate) struct Checkout {
     pub root: PathBuf,
     pub tracked: HashSet<String>,
     pub committed: HashSet<String>,
+    commit: String,
 }
 
 impl Checkout {
@@ -415,9 +456,14 @@ impl Checkout {
                 .collect()
         };
         let tracked = paths(listed);
+        let commit = run_git(&root, &["rev-parse", "--verify", "HEAD"], LIST_TIMEOUT, 256)
+            .map_err(|error| format!("reading the last commit in {}: {error}", root.display()))?;
+        let commit = String::from_utf8(commit)
+            .map_err(|error| format!("reading the last commit in {}: {error}", root.display()))?;
+        let commit = commit.trim().to_owned();
         let committed = run_git(
             &root,
-            &["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD"],
+            &["ls-tree", "-r", "-z", "--name-only", "--full-tree", &commit],
             LIST_TIMEOUT,
             LIST_MAX_OUTPUT,
         )
@@ -431,6 +477,7 @@ impl Checkout {
             root,
             tracked,
             committed: paths(committed),
+            commit,
         })
     }
 
@@ -762,11 +809,15 @@ impl MapMemories {
         let extensions = extensions(context.declaration);
         let seeds = seeds(context.declaration);
         let pattern = path_pattern(&extensions);
-        let inputs = select(&live, |memory| {
+        let (inputs, recent) = select(&live, now_ms(), |memory| {
             candidate_paths(&memory.content, &pattern, seeds, |path| {
                 checkout.file(path).is_ok()
             })
         });
+        tracing::info!(
+            "ck-mc: dreamer: {} for {project}: skipped {recent} memories tried in the last seven days",
+            context.task_id()
+        );
         let shared = Arc::new(Run {
             profile: context.profile.clone(),
             task_id: context.task_id().to_owned(),
@@ -974,6 +1025,19 @@ impl Batch for MapBatch {
         Some(&self.run.folder)
     }
 
+    fn records_unusable_reply(&self) -> bool {
+        true
+    }
+
+    fn skip(&self, tx: &Transaction<'_>, _run: i64) -> Result<Applied, String> {
+        let now = now_ms();
+        for seen in &self.read {
+            self.record_attempt(tx, seen, now)
+                .map_err(|error| format!("recording a mapping attempt: {error}"))?;
+        }
+        Ok(Applied::default())
+    }
+
     fn memory_ids(&self) -> Vec<i64> {
         self.ids()
     }
@@ -1020,6 +1084,12 @@ pub(crate) fn put_mapping(conn: &Connection, id: i64, rows: &[MappingRow]) -> ru
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, row.file_path, row.verified_at, row.mapped_at, row.mapping_origin],
         )?;
+    }
+    if rows
+        .iter()
+        .any(|row| !row.file_path.is_empty() || row.mapping_origin == MAPPER)
+    {
+        clear_attempt(conn, id)?;
     }
     Ok(())
 }
@@ -1071,6 +1141,25 @@ pub(crate) fn mapping_of_json(value: &Value) -> Option<Vec<MappingRow>> {
 }
 
 impl MapBatch {
+    fn record_attempt(&self, tx: &Transaction<'_>, seen: &Seen, now: i64) -> rusqlite::Result<()> {
+        let attempt = Attempt {
+            at: now,
+            commit: self.run.checkout.commit.clone(),
+            content_sha256: content_sha256(&seen.content),
+        };
+        // A child that saw an older revision must not put the current one
+        // on cooldown. A mapping written while the child ran wins over a miss.
+        tx.execute(
+            &format!("UPDATE memories SET metadata_json = json_set({METADATA_OBJECT}, '$.{ATTEMPT_KEY}', json(?2))
+                      WHERE id = ?1 AND level = 'project' AND owner_id = ?3
+                        AND status IN ('active', 'permanent') AND revision = ?4 AND content = ?5
+                        AND NOT EXISTS (SELECT 1 FROM memory_verifications
+                                         WHERE memory_id = ?1 AND file_path <> '')"),
+            params![seen.id, json!(attempt).to_string(), self.run.project, seen.revision, seen.content],
+        )?;
+        Ok(())
+    }
+
     /// The files and origin `proposal` records for `seen`, each refusal
     /// added to `dropped` with why.
     fn decide(
@@ -1128,6 +1217,11 @@ impl MapBatch {
             ..Applied::default()
         };
         let mut changes: Vec<(i64, Vec<MappingRow>, Vec<MappingRow>)> = Vec::new();
+        for seen in &self.read {
+            if !proposals.iter().any(|proposal| proposal.id == seen.id) {
+                self.record_attempt(tx, seen, now)?;
+            }
+        }
         for proposal in proposals {
             let id = proposal.id;
             let Some(seen) = self.read.iter().find(|memory| memory.id == id) else {
@@ -1161,6 +1255,9 @@ impl MapBatch {
                 }
             }
             let (files, origin) = self.decide(proposal, seen, &mut applied.dropped);
+            if origin == REJECTED {
+                self.record_attempt(tx, seen, now)?;
+            }
             let paths = if files.is_empty() {
                 vec![String::new()]
             } else {
@@ -1177,6 +1274,9 @@ impl MapBatch {
                 .collect();
             let before = mapping_rows(tx, id)?;
             if same_mapping(&before, &wanted) {
+                if origin != REJECTED {
+                    clear_attempt(tx, id)?;
+                }
                 continue;
             }
             put_mapping(tx, id, &wanted)?;
@@ -1188,6 +1288,17 @@ impl MapBatch {
         }
         Ok(applied)
     }
+}
+
+fn clear_attempt(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        &format!(
+            "UPDATE memories SET metadata_json = json_remove(metadata_json, '$.{ATTEMPT_KEY}')
+                  WHERE id = ?1 AND json_type({METADATA_OBJECT}, '$.{ATTEMPT_KEY}') IS NOT NULL"
+        ),
+        [id],
+    )?;
+    Ok(())
 }
 
 /// Record mapping writes as one journal entry under `key`: each memory's

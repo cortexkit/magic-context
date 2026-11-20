@@ -1564,37 +1564,42 @@ impl Engine {
                     purpose: &purpose,
                 }),
             };
-            let written = match run::run(client, &job, batch.as_ref()).await {
+            let result = run::run(client, &job, batch.as_ref()).await;
+            let records_unusable = batch.records_unusable_reply();
+            if result.is_ok()
+                || (records_unusable
+                    && matches!(
+                        result,
+                        Err(TaskError::Skipped(_)
+                            | TaskError::Failed {
+                                unusable_reply: true,
+                                ..
+                            })
+                    ))
+            {
+                // A child may outlast its acting window. Check the roles
+                // again before committing an answer or a mapping attempt.
+                for lease in leases {
+                    lease.refresh().await;
+                }
+            }
+            let window = || still_acting(leases, &gens, &self.clock);
+            let write_fenced = |reply: Option<&TaskReply>| {
+                apply(
+                    db,
+                    locks,
+                    &self.holder,
+                    batch.as_ref(),
+                    reply,
+                    run_id,
+                    &gens,
+                    &window,
+                )
+            };
+            let written = match result {
                 Ok(reply) => {
                     record_batch(end, &reply);
-                    // The model's answer may have taken longer than the
-                    // window left when the batch was sent: each role is
-                    // checked again right before the batch commits.
-                    for lease in leases {
-                        lease.refresh().await;
-                    }
-                    let window = || still_acting(leases, &gens, &self.clock);
-                    match apply(
-                        db,
-                        locks,
-                        &self.holder,
-                        batch.as_ref(),
-                        &reply,
-                        run_id,
-                        &gens,
-                        &window,
-                    ) {
-                        Ok(written) => written,
-                        Err(closed) => {
-                            end.outcome = "lease_lost".into();
-                            end.error = Some(format!(
-                                "{closed}; the batch's answer was discarded; {} of {} batches left unsent",
-                                batches.len() - index - 1,
-                                batches.len()
-                            ));
-                            return;
-                        }
-                    }
+                    write_fenced(Some(&reply))
                 }
                 // The model left the batch undecided at its step cap: it
                 // counts as skipped, and the run goes on to its next batch.
@@ -1614,7 +1619,13 @@ impl Engine {
                             .map_or_else(|| "unreported".to_owned(), |steps| steps.to_string()),
                         skipped.reason
                     );
-                    write_locked(db, locks, &self.holder, |tx| batch.skip(tx, run_id))
+                    if records_unusable {
+                        write_fenced(None)
+                    } else {
+                        Ok(write_locked(db, locks, &self.holder, |tx| {
+                            batch.skip(tx, run_id)
+                        }))
+                    }
                 }
                 Err(TaskError::AccountWait(wait, usage)) => {
                     end.outcome = "waiting".into();
@@ -1626,7 +1637,11 @@ impl Engine {
                     }));
                     return;
                 }
-                Err(TaskError::Failed(error, usage)) => {
+                Err(TaskError::Failed {
+                    mut error,
+                    usage,
+                    unusable_reply,
+                }) => {
                     end.outcome = "failed".into();
                     end.failure_class = Some("model".into());
                     if usage.is_some() {
@@ -1635,12 +1650,26 @@ impl Engine {
                             "error": error, "input_tokens": input, "output_tokens": output,
                         }));
                     }
+                    if records_unusable && unusable_reply {
+                        let write_error = match write_fenced(None) {
+                            Ok(Ok(Some(_))) => None,
+                            Ok(Ok(None)) => {
+                                Some("the project lock passed to another writer".into())
+                            }
+                            Ok(Err(reason)) | Err(reason) => Some(reason),
+                        };
+                        if let Some(reason) = write_error {
+                            error.push_str(&format!(
+                                "; the mapping attempt was not recorded: {reason}"
+                            ));
+                        }
+                    }
                     end.error = Some(error);
                     return;
                 }
             };
             match written {
-                Ok(Some(applied)) => {
+                Ok(Ok(Some(applied))) => {
                     batch.after_commit(db);
                     if applied.applied > 0 && batch.changes_memories() {
                         use crate::app_read::Change;
@@ -1664,7 +1693,7 @@ impl Engine {
                         end.outcome = "applied".into();
                     }
                 }
-                Ok(None) => {
+                Ok(Ok(None)) => {
                     end.outcome = "lock_lost".into();
                     end.error = Some(format!(
                         "{} lock passed to another writer",
@@ -1672,10 +1701,19 @@ impl Engine {
                     ));
                     return;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     end.outcome = "failed".into();
                     end.failure_class = Some("apply".into());
                     end.error = Some(error);
+                    return;
+                }
+                Err(closed) => {
+                    end.outcome = "lease_lost".into();
+                    end.error = Some(format!(
+                        "{closed}; the batch's answer was discarded; {} of {} batches left unsent",
+                        batches.len() - index - 1,
+                        batches.len()
+                    ));
                     return;
                 }
             }
@@ -1683,8 +1721,8 @@ impl Engine {
     }
 }
 
-/// Apply one accepted reply in its own transaction, after checking in that
-/// transaction that this process still holds every lock of `locks`. `None`
+/// Apply an accepted reply or record an unusable one in a transaction that
+/// checks this process still holds every lock of `locks`. `None`
 /// when it doesn't: nothing is written. The changes are captured for the
 /// user's other computers as the dreamer's, with the run's id and `gens`,
 /// the generation of each role lease the batch was sent under. `window` is
@@ -1697,7 +1735,7 @@ fn apply(
     locks: &[OwnerKey],
     holder: &str,
     batch: &dyn Batch,
-    reply: &TaskReply,
+    reply: Option<&TaskReply>,
     run_id: i64,
     gens: &[(String, i64)],
     window: &dyn Fn() -> Result<(), String>,
@@ -1706,7 +1744,10 @@ fn apply(
     let written = write_locked(db, locks, holder, |tx| {
         crate::replica::name_writer(tx, "dreamer", Some(run_id), gens)
             .map_err(|error| error.to_string())?;
-        let applied = batch.apply(tx, reply, run_id)?;
+        let applied = match reply {
+            Some(reply) => batch.apply(tx, reply, run_id),
+            None => batch.skip(tx, run_id),
+        }?;
         crate::replica::unname_writer(tx).map_err(|error| error.to_string())?;
         if let Err(reason) = window() {
             *closed.borrow_mut() = Some(reason.clone());

@@ -171,10 +171,13 @@ pub(crate) trait Batch: TaskInput + Send {
     fn after_commit(&self, db: &ContextDb) {
         let _ = db;
     }
-    /// Write what a batch whose child reached its step cap without a usable
-    /// answer leaves its memories as ([`super::run::TaskError::Skipped`]),
-    /// inside `tx`, naming `run` as [`Batch::apply`] does. The default
-    /// writes nothing: each memory stays as it was.
+    /// Whether to record unusable answers after model fallback fails as well
+    /// as at the step cap, using the same role fence as a normal answer.
+    fn records_unusable_reply(&self) -> bool {
+        false
+    }
+    /// Record what an unusable answer leaves behind, naming `run` as
+    /// [`Batch::apply`] does. The default leaves each memory as it was.
     fn skip(&self, tx: &rusqlite::Transaction<'_>, run: i64) -> Result<Applied, String> {
         let _ = (tx, run);
         Ok(Applied::default())

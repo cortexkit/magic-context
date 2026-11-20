@@ -129,7 +129,13 @@ pub struct TaskReply {
 pub enum TaskError {
     /// Routing or the runner named a time to ask again. Not a failure.
     AccountWait(AccountWait, Option<Box<StepUsage>>),
-    Failed(String, Option<StepUsage>),
+    Failed {
+        error: String,
+        usage: Option<StepUsage>,
+        /// A child returned an unusable answer and no fallback succeeded.
+        /// Failures to start or reach a model don't count as answers.
+        unusable_reply: bool,
+    },
     /// The child's run reached its step cap ([`TaskInput::step_cap`]) and
     /// its answer to the finalize message can't be used. No other model is tried:
     /// the batch counts as skipped, and the run goes on to its next batch.
@@ -151,7 +157,7 @@ impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AccountWait(wait, _) => write!(f, "waiting on an account: {}", wait.code),
-            Self::Failed(error, _) => f.write_str(error),
+            Self::Failed { error, .. } => f.write_str(error),
             Self::Skipped(skipped) => write!(f, "skipped at the step cap: {}", skipped.reason),
         }
     }
@@ -167,6 +173,7 @@ pub async fn run<C: RunnerClient + Router>(
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
     let mut paid_failure: Option<String> = None;
+    let mut unusable_reply = false;
     let mut total = None;
     for attempt in 0..=MAX_FALLBACKS {
         let answer = match client
@@ -182,12 +189,13 @@ pub async fn run<C: RunnerClient + Router>(
                         return Err(TaskError::AccountWait(wait, total.map(Box::new)));
                     }
                 }
-                return Err(TaskError::Failed(
-                    paid_failure
+                return Err(TaskError::Failed {
+                    error: paid_failure
                         .or(failure)
                         .unwrap_or_else(|| error.to_string()),
-                    total,
-                ));
+                    usage: total,
+                    unusable_reply,
+                });
             }
         };
         tried.push(answer.route.route_key());
@@ -224,10 +232,12 @@ pub async fn run<C: RunnerClient + Router>(
         let plan = if job.demand.reads_code {
             let Some(reader) = job.reader else {
                 report(Outcome::Cancelled, None).await;
-                return Err(TaskError::Failed(
-                    "the task reads code, and no tool provider was chosen to read it with".into(),
-                    total,
-                ));
+                return Err(TaskError::Failed {
+                    error: "the task reads code, and no tool provider was chosen to read it with"
+                        .into(),
+                    usage: total,
+                    unusable_reply,
+                });
             };
             let child = Child {
                 session: SessionRef::new(
@@ -253,7 +263,11 @@ pub async fn run<C: RunnerClient + Router>(
                 // model would get further.
                 Err(ReaderPlan::Tools(problem)) => {
                     report(Outcome::Cancelled, None).await;
-                    return Err(TaskError::Failed(problem, total));
+                    return Err(TaskError::Failed {
+                        error: problem,
+                        usage: total,
+                        unusable_reply,
+                    });
                 }
             }
         } else {
@@ -318,7 +332,12 @@ pub async fn run<C: RunnerClient + Router>(
                         Ok(answered) => answered,
                         Err(wait) => {
                             report(Outcome::Cancelled, usage.as_ref()).await;
-                            return Err(waiting(wait, paid_failure, batch_usage(usage)));
+                            return Err(waiting(
+                                wait,
+                                paid_failure,
+                                batch_usage(usage),
+                                unusable_reply,
+                            ));
                         }
                     };
                     let reply = TaskReply {
@@ -355,10 +374,11 @@ pub async fn run<C: RunnerClient + Router>(
             };
             match sent {
                 Ok(reply) if reply.length_capped => {
+                    unusable_reply = true;
                     break Err(format!(
                         "the reply hit its output limit (child {})",
                         child.session.session
-                    ))
+                    ));
                 }
                 Ok(reply) => match task.accepts(&reply.text) {
                     Ok(()) => {
@@ -372,15 +392,21 @@ pub async fn run<C: RunnerClient + Router>(
                         })
                     }
                     Err(problem) => {
+                        unusable_reply = true;
                         break Err(format!(
                             "the reply can't be used: {problem} (child {})",
                             child.session.session
-                        ))
+                        ));
                     }
                 },
                 Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
                     report(Outcome::Cancelled, usage.as_ref()).await;
-                    return Err(waiting(wait, paid_failure, batch_usage(usage)));
+                    return Err(waiting(
+                        wait,
+                        paid_failure,
+                        batch_usage(usage),
+                        unusable_reply,
+                    ));
                 }
                 Err(SummaryError::Failed(error)) if retry < MAX_RETRIES && retryable(&error) => {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -405,16 +431,26 @@ pub async fn run<C: RunnerClient + Router>(
             }
         }
     }
-    Err(TaskError::Failed(
-        paid_failure.or(failure).unwrap_or_default(),
-        total,
-    ))
+    Err(TaskError::Failed {
+        error: paid_failure.or(failure).unwrap_or_default(),
+        usage: total,
+        unusable_reply,
+    })
 }
 
-fn waiting(wait: AccountWait, failed: Option<String>, usage: Option<StepUsage>) -> TaskError {
+fn waiting(
+    wait: AccountWait,
+    failed: Option<String>,
+    usage: Option<StepUsage>,
+    unusable_reply: bool,
+) -> TaskError {
     failed.map_or_else(
         || TaskError::AccountWait(wait, usage.map(Box::new)),
-        |error| TaskError::Failed(error, usage),
+        |error| TaskError::Failed {
+            error,
+            usage,
+            unusable_reply,
+        },
     )
 }
 

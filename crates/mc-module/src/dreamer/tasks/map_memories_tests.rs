@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use cortexkit_role_compaction::setup::ModelRef;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::context_db::ContextDb;
@@ -308,6 +309,100 @@ fn manifest(entries: &[(i64, &str)]) -> String {
 
 fn ids(batch: &MapBatch) -> Vec<i64> {
     batch.read.iter().map(|memory| memory.id).collect()
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+fn attempt_metadata(db: &ContextDb, id: i64) -> Value {
+    let text: Option<String> = db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT metadata_json FROM memories WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    text.map_or(Value::Null, |text| serde_json::from_str(&text).unwrap())
+}
+
+fn seed_attempt(store: &Store, id: i64, age_days: i64) {
+    store.db.with_connection(|conn| {
+        let content: String = conn
+            .query_row("SELECT content FROM memories WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "UPDATE memories SET metadata_json = ?2 WHERE id = ?1",
+            params![
+                id,
+                json!({"dreamerMappingAttempt": {
+                    "at": now_ms() - age_days * DAY_MS,
+                    "commit": "0123456789abcdef0123456789abcdef01234567",
+                    "contentSha256": format!("{:x}", Sha256::digest(content.as_bytes())),
+                }})
+                .to_string()
+            ],
+        )
+        .unwrap();
+    });
+}
+
+#[test]
+fn retry_planning_skips_an_unchanged_memory_tried_within_seven_days() {
+    let store = store(&[row(1), row(2)]);
+    seed_attempt(&store, 1, 6);
+    assert_eq!(
+        store.batches().iter().flat_map(ids).collect::<Vec<_>>(),
+        [2]
+    );
+}
+
+#[test]
+fn retry_planning_selects_an_edited_memory_even_with_a_recent_attempt() {
+    let store = store(&[row(1), row(2)]);
+    store.map(1, &[mapped("", REJECTED)]);
+    seed_attempt(&store, 1, 1);
+    // An exact-text fingerprint must notice even an edit that the dedup hash ignores.
+    store.execute("UPDATE memories SET content = 'FACT 1.', revision = revision + 1 WHERE id = 1");
+    let batches = store.batches();
+    assert_eq!(batches.iter().flat_map(ids).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(batches[0].named_inputs()[0].content, "FACT 1.");
+}
+
+#[test]
+fn retry_planning_selects_memories_tried_eight_days_ago_after_untried_ones() {
+    let store = store(&[row(1), row(2), row(3)]);
+    store.map(2, &[mapped("", REJECTED)]);
+    seed_attempt(&store, 1, 8);
+    seed_attempt(&store, 2, 8);
+    assert_eq!(
+        store.batches().iter().flat_map(ids).collect::<Vec<_>>(),
+        [3, 1, 2]
+    );
+}
+
+#[test]
+fn a_refused_mapping_keeps_the_fallback_until_a_later_mapping_clears_the_attempt() {
+    let store = store(&[row(1)]);
+    store.execute("UPDATE memories SET metadata_json = '{\"dreamerCheckedAt\":42}' WHERE id = 1");
+    let batch = store.batches().remove(0);
+    let rejected = store.apply(&batch, &manifest(&[(1, "files=\"src/scratch.rs\"")]), 1);
+    assert_eq!(rejected.applied, 1);
+    assert_eq!(store.mapped(1), [mapped("", REJECTED)]);
+    assert!(attempt_metadata(&store.db, 1)["dreamerMappingAttempt"].is_object());
+    assert!(store.batches().is_empty());
+
+    store.execute("UPDATE memories SET content = 'Use src/view.rs.', revision = 2 WHERE id = 1");
+    let retry = store.batches().remove(0);
+    let accepted = store.apply(&retry, &manifest(&[(1, "files=\"src/view.rs\"")]), 2);
+    assert_eq!(accepted.applied, 1);
+    assert_eq!(store.mapped(1), [mapped("src/view.rs", MAPPER)]);
+    assert_eq!(
+        attempt_metadata(&store.db, 1),
+        json!({"dreamerCheckedAt": 42})
+    );
 }
 
 #[test]
@@ -954,10 +1049,15 @@ impl Ran {
                 conn.query_row(
                     "SELECT error, batches_json FROM dream_task_runs",
                     [],
-                    |row| Ok((row.get(0)?, row.get::<_, String>(1)?)),
+                    |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?)),
                 )
             })
-            .map(|(error, batches)| (error, serde_json::from_str(&batches).unwrap()))
+            .map(|(error, batches)| {
+                (
+                    error,
+                    batches.map_or(Value::Null, |text| serde_json::from_str(&text).unwrap()),
+                )
+            })
             .unwrap()
     }
 }
@@ -998,6 +1098,67 @@ async fn through_engine(store: Store, ends: &[Ends], settings: &Settings) -> Ran
 /// A reply's text that lives as long as the scripted runner needs it.
 fn leaked(text: String) -> &'static str {
     Box::leak(text.into_boxed_str())
+}
+
+#[tokio::test]
+async fn retry_a_step_capped_child_records_when_and_what_it_tried() {
+    let store = store(&[row(1)]);
+    store.execute("UPDATE memories SET metadata_json = '{\"dreamerCheckedAt\":42}' WHERE id = 1");
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(store.repo.root())
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let before = now_ms();
+    let ran = through_engine(
+        store,
+        &[
+            Ends::StepCapped(STEP_CAP),
+            Ends::Reply("I couldn't decide."),
+        ],
+        &Settings::default(),
+    )
+    .await;
+
+    assert_eq!(ran.run.0, "nothing_to_do");
+    assert!(ran.mapped(1).is_empty());
+    let metadata = attempt_metadata(&ran.db, 1);
+    assert_eq!(metadata["dreamerCheckedAt"], 42);
+    let attempt = &metadata["dreamerMappingAttempt"];
+    assert_eq!(
+        attempt["commit"],
+        String::from_utf8(head.stdout).unwrap().trim()
+    );
+    assert_eq!(
+        attempt["contentSha256"],
+        format!("{:x}", Sha256::digest(b"Fact 1."))
+    );
+    let at = attempt["at"].as_i64().unwrap();
+    assert!((before..=now_ms()).contains(&at));
+    let next = with_context(&ran.db, Path::new(&ran.root), |context| {
+        MapMemories.plan_batches(context).unwrap()
+    });
+    assert!(next.is_empty());
+}
+
+#[tokio::test]
+async fn an_invalid_final_reply_records_the_attempt_but_still_fails_the_run() {
+    let ran = through_engine(
+        store(&[row(1), row(2)]),
+        &[Ends::Reply("I did not return a mappings manifest.")],
+        &Settings::default(),
+    )
+    .await;
+
+    assert_eq!(ran.run.0, "failed");
+    assert!(ran.record().0.unwrap().contains("the reply can't be used"));
+    assert!(ran.mapped(1).is_empty());
+    assert!(attempt_metadata(&ran.db, 1)["dreamerMappingAttempt"].is_object());
+    assert!(
+        attempt_metadata(&ran.db, 2).is_null(),
+        "the second batch was never sent"
+    );
 }
 
 /// A whole run through the engine: the project's schedule comes due, the
@@ -1087,6 +1248,7 @@ async fn a_due_run_maps_each_memory_in_a_child_of_its_own_through_the_engine() {
     assert_eq!(ran.mapped(1), [mapped("src/view.rs", MAPPER)]);
     assert_eq!(ran.mapped(2), [mapped("", MAPPER)]);
     assert!(ran.mapped(3).is_empty());
+    assert!(attempt_metadata(&ran.db, 3)["dreamerMappingAttempt"].is_object());
     // One journal entry for each message that mapped something.
     let journal: Vec<(String, String)> = ran
         .db
@@ -1323,8 +1485,17 @@ fn a_run_from_a_worktree_maps_to_files_the_main_checkouts_last_commit_holds() {
 #[test]
 fn applying_queues_one_outbox_row_per_mapped_memory() {
     use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
-    let (store, batch) = apply_store();
+    let store = store(&[
+        row(1),
+        row(2),
+        Row {
+            content: "The entry point is in `web/app.tsx`.".into(),
+            ..row(5)
+        },
+    ]);
     store.map(5, &[mapped("", MAPPER)]);
+    let batch = store.several().remove(0);
+    assert_eq!(ids(&batch), [1, 2, 5]);
     let before = store.db.with_connection(|conn| {
         mark_sent(conn);
         state(conn)
@@ -1342,4 +1513,22 @@ fn applying_queues_one_outbox_row_per_mapped_memory() {
         .db
         .with_connection(|conn| assert_changes_captured(conn, &before));
     assert_eq!(changed, ["memory:1", "memory:2", "memory:5"]);
+}
+
+#[test]
+fn an_attempt_without_a_mapping_queues_only_its_memory_in_the_outbox() {
+    use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
+    let store = store(&[row(1), row(2)]);
+    let batch = store.batches().remove(0);
+    let before = store.db.with_connection(|conn| {
+        mark_sent(conn);
+        state(conn)
+    });
+    assert_eq!(store.apply(&batch, &manifest(&[]), 41), Applied::default());
+    assert!(store.mapped(1).is_empty());
+    assert!(store.journal().is_empty());
+    let changed = store
+        .db
+        .with_connection(|conn| assert_changes_captured(conn, &before));
+    assert_eq!(changed, ["memory:1"]);
 }
