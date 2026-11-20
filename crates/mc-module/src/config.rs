@@ -1,8 +1,9 @@
 //! Magic Context's configuration, read the way the plugin reads it.
 //!
-//! Two files: the user's (`MAGIC_CONTEXT_CONFIG_PATH`, else `magic-context.jsonc` in `$XDG_CONFIG_HOME/cortexkit`,
-//! else `~/.config/cortexkit`) and the project's (`.cortexkit/magic-context.jsonc`
-//! in the project folder). Both may be JSON with comments.
+//! Two files: the user's (`MAGIC_CONTEXT_CONFIG_PATH`, else `magic-context.jsonc`
+//! in the shared CortexKit config directory) and the project's
+//! (`.cortexkit/magic-context.jsonc` in the project folder). Both may be JSON
+//! with comments.
 //!
 //! A project file comes with a cloned repository, so it may not make a session
 //! spend more or send private text somewhere else. The plugin's trust rules
@@ -37,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use cortexkit_paths::{EnvSource, SystemEnv};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -223,22 +225,13 @@ pub struct Loader {
 }
 
 impl Loader {
-    /// The user file chosen the way the plugin chooses it.
+    /// Choose the user file from the shared config directory unless overridden.
     pub fn from_environment() -> Self {
-        Self::from_paths(
-            std::env::var_os("MAGIC_CONTEXT_CONFIG_PATH"),
-            std::env::var_os("XDG_CONFIG_HOME"),
-            home_dir(),
-        )
-        .expect("invalid Magic Context user config path")
+        Self::from_env(&SystemEnv).expect("invalid Magic Context user config path")
     }
 
-    fn from_paths(
-        explicit: Option<std::ffi::OsString>,
-        xdg: Option<std::ffi::OsString>,
-        home: Option<PathBuf>,
-    ) -> Result<Self, &'static str> {
-        let path = match explicit {
+    fn from_env(env: &impl EnvSource) -> Result<Self, String> {
+        let path = match env.var_os("MAGIC_CONTEXT_CONFIG_PATH") {
             Some(path) => {
                 let path = PathBuf::from(
                     path.to_str()
@@ -246,14 +239,19 @@ impl Loader {
                         .trim(),
                 );
                 if !path.is_absolute() {
-                    return Err("MAGIC_CONTEXT_CONFIG_PATH must be an absolute path to a user config file (not blank)");
+                    return Err("MAGIC_CONTEXT_CONFIG_PATH must be an absolute path to a user config file (not blank)".into());
                 }
                 if !path.exists() {
                     tracing::info!("ck-mc: MAGIC_CONTEXT_CONFIG_PATH file not found: {}; continuing without user config (no XDG or legacy fallback)", path.display());
                 }
                 path
             }
-            None => user_config_path(xdg, home),
+            None => {
+                let folder = cortexkit_paths::with_env(env)
+                    .cortexkit_config_dir()
+                    .map_err(|error| error.to_string())?;
+                detect_config_file(&folder)
+            }
         };
         Ok(Self::with_user_path(path))
     }
@@ -1160,16 +1158,6 @@ fn expand_user_with(
         _ => {}
     }
     value
-}
-
-/// `XDG_CONFIG_HOME` counts only as an absolute path, as in the plugin;
-/// otherwise `<home>/.config`.
-fn user_config_path(xdg: Option<std::ffi::OsString>, home: Option<PathBuf>) -> PathBuf {
-    let base = xdg
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.unwrap_or_else(|| PathBuf::from(".")).join(".config"));
-    detect_config_file(&base.join("cortexkit"))
 }
 
 /// `magic-context.jsonc`, or `magic-context.json` when only that exists.

@@ -1647,6 +1647,7 @@ dependencies = [
  "cortexkit-claustrum-client",
  "cortexkit-compaction-view",
  "cortexkit-log",
+ "cortexkit-paths",
  "cortexkit-persona",
  "cortexkit-project-identity",
  "cortexkit-role-agent-data",

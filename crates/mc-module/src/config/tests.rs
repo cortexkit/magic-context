@@ -3,6 +3,17 @@ use serde_json::json;
 
 const OPUS: &str = "anthropic/claude-opus-5-5";
 
+struct TestEnv<const N: usize>([(&'static str, PathBuf); N]);
+
+impl<const N: usize> EnvSource for TestEnv<N> {
+    fn var_os(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.0
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.as_os_str().to_owned())
+    }
+}
+
 #[test]
 fn explicit_user_path_wins_without_fallback() {
     let root = temp_config("path");
@@ -15,11 +26,10 @@ fn explicit_user_path_wins_without_fallback() {
     )
     .unwrap();
     fs::write(&explicit, r#"{"execute_threshold_percentage":80}"#).unwrap();
-    let loader = Loader::from_paths(
-        Some(explicit.clone().into_os_string()),
-        Some(xdg.clone().into_os_string()),
-        Some(root.clone()),
-    )
+    let loader = Loader::from_env(&TestEnv([
+        ("MAGIC_CONTEXT_CONFIG_PATH", explicit.clone()),
+        ("XDG_CONFIG_HOME", xdg.clone()),
+    ]))
     .unwrap();
     assert_eq!(
         loader
@@ -34,9 +44,12 @@ fn explicit_user_path_wins_without_fallback() {
             .execute_threshold_percentage,
         65.0
     );
-    assert!(Loader::from_paths(Some("".into()), None, None).is_err());
-    assert!(Loader::from_paths(Some("relative.jsonc".into()), None, None).is_err());
-    let loader = Loader::from_paths(None, Some(xdg.into_os_string()), Some(root.clone())).unwrap();
+    for invalid in ["", "relative.jsonc"] {
+        assert!(
+            Loader::from_env(&TestEnv([("MAGIC_CONTEXT_CONFIG_PATH", invalid.into())])).is_err()
+        );
+    }
+    let loader = Loader::from_env(&TestEnv([("XDG_CONFIG_HOME", xdg)])).unwrap();
     assert_eq!(
         loader
             .resolve(None, OPUS, 100_000)
@@ -44,6 +57,49 @@ fn explicit_user_path_wins_without_fallback() {
         70.0
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_default_user_path_keeps_the_xdg_layout() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().to_path_buf();
+    let folder = home.join(".config").join("cortexkit");
+    let jsonc = folder.join("magic-context.jsonc");
+    let json = folder.join("magic-context.json");
+    let env = TestEnv([
+        ("HOME", home),
+        ("XDG_CONFIG_HOME", "relative-config".into()),
+    ]);
+
+    assert_eq!(Loader::from_env(&env).unwrap().user_path(), jsonc);
+    fs::create_dir_all(folder).unwrap();
+    fs::write(&json, "{}").unwrap();
+    assert_eq!(Loader::from_env(&env).unwrap().user_path(), json);
+    fs::write(&jsonc, "{}").unwrap();
+    assert_eq!(Loader::from_env(&env).unwrap().user_path(), jsonc);
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_home_does_not_select_settings_from_the_working_directory() {
+    let env = TestEnv([("HOME", ".".into())]);
+    assert!(Loader::from_env(&env).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_default_user_path_uses_roaming_appdata() {
+    let root = tempfile::tempdir().unwrap();
+    let appdata = root.path().join("roaming");
+    let expected = appdata.join("cortexkit").join("magic-context.jsonc");
+    let env = TestEnv([
+        ("USERPROFILE", root.path().join("profile")),
+        ("APPDATA", appdata),
+        ("LOCALAPPDATA", root.path().join("local")),
+    ]);
+
+    assert_eq!(Loader::from_env(&env).unwrap().user_path(), expected);
 }
 
 #[test]
