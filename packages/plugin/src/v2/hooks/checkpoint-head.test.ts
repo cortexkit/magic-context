@@ -510,3 +510,16 @@ test("generate admits an unseeded checkpoint when only the fit margin exceeds th
         await f.close();
     }
 });
+
+test("generate refuses an unseeded checkpoint whose local count alone dwarfs the window", async () => {
+    const f = await fixture();
+    try {
+        const draft = f.draft();
+        const text = `<conversation-checkpoint><summary>${"checkpoint summary ".repeat(40000)}</summary></conversation-checkpoint>`;
+        draft.messages[0]!.content[0]!.text = text;
+        expect(estimateTokens(text)).toBeGreaterThan(2 * draft.model.limit!.context!);
+        await expect(f.hooks.get("generate")!(draft)).rejects.toThrow("Context full");
+    } finally {
+        await f.close();
+    }
+});

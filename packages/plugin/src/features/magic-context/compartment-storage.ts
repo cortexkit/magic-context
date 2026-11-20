@@ -10,6 +10,8 @@ import { queueM0Mutation } from "./storage-m0-mutation-log";
 import { clearCachedM0M1 } from "./storage-meta-shared";
 import { getTableColumnNames } from "./storage-schema-helpers";
 
+export { CACHED_TRIM_PARTIAL_SQL } from "./storage-meta-shared";
+
 const insertCompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const insertFactStatements = new WeakMap<Database, PreparedStatement>();
 
@@ -956,14 +958,6 @@ export function getUncoveredCompartmentEndsThrough(
         successorStartMessage: row.successor_start,
     }));
 }
-
-/** Read whether the cached summary covers only part of its final message, in the same SELECT as the summary. */
-export const CACHED_TRIM_PARTIAL_SQL = `EXISTS (
-    SELECT 1 FROM compartments
-    WHERE compartments.session_id = session_meta.session_id
-      AND compartments.end_message_id = session_meta.cached_m0_last_baseline_end_message_id
-      AND compartments.end_block_index IS NOT NULL
-)`;
 
 export function isPartialCompartmentEnd(
     db: Database,

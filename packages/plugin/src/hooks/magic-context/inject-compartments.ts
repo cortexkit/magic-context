@@ -95,6 +95,7 @@ export interface PreparedCompartmentInjection {
     block: string;
     compartmentEndMessage: number;
     compartmentEndMessageId: string | null;
+    compartmentEndMessagePartial?: boolean;
     compartmentCount: number;
     skippedVisibleMessages: number;
     factCount: number;
@@ -460,7 +461,7 @@ export function prepareCompartmentInjection(
     projectPath?: string,
     injectionBudgetTokens?: number,
     temporalAwareness?: boolean,
-    frozenBaseline?: { hasCachedM0: boolean; boundary: string | null },
+    frozenBaseline?: CachedBaselineBoundary,
 ): PreparedCompartmentInjection | null {
     // On defer (cache-safe) passes, replay the cached injection result so that
     // historian publications between passes do not bust the prompt-cache prefix.
@@ -478,7 +479,15 @@ export function prepareCompartmentInjection(
     }
     const usableCached = cached?.db === db ? cached : undefined;
 
-    if (!isCacheBusting && usableCached) {
+    if (
+        !isCacheBusting &&
+        usableCached &&
+        (!frozenBaseline?.hasCachedM0 ||
+            (usableCached.kind === "empty"
+                ? frozenBaseline.boundary === null
+                : usableCached.injection.compartmentEndMessageId ===
+                  (frozenBaseline.boundary ?? "")))
+    ) {
         if (usableCached.kind === "empty") {
             return null;
         }
@@ -500,10 +509,10 @@ export function prepareCompartmentInjection(
                     cutCoveredPrefix(
                         messages,
                         cutoffIndex +
-                            (isPartialCompartmentEnd(
-                                db,
-                                sessionId,
-                                prepared.compartmentEndMessageId,
+                            ((
+                                frozenBaseline?.hasCachedM0
+                                    ? frozenBaseline.partial
+                                    : prepared.compartmentEndMessagePartial
                             )
                                 ? 0
                                 : 1),
@@ -656,6 +665,9 @@ export function prepareCompartmentInjection(
     // no m0 baseline retain their existing latest-compartment trim behavior.
     let trimEndMessageId = lastEndMessageId;
     const baseline = frozenBaseline ?? readCachedBaselineState(db, sessionId);
+    let trimEndMessagePartial = compartments.some(
+        (row) => row.endMessageId === lastEndMessageId && row.endBlockIndex != null,
+    );
     if (!isCacheBusting || baseline.hasCachedM0) {
         // A modern prefix is only a candidate for refresh here. Keep its raw
         // boundary frozen until the off-wire renderer has actually chosen bytes.
@@ -664,6 +676,7 @@ export function prepareCompartmentInjection(
             // to what the replayed cached m[1] actually covers.
             if (baseline.boundary) {
                 trimEndMessageId = baseline.boundary;
+                trimEndMessagePartial = baseline.partial;
             } else {
                 // hasCachedM0 but null boundary: m[0]/m[1] was materialized BEFORE
                 // any compartment boundary existed (the common new-session case — a
@@ -708,15 +721,16 @@ export function prepareCompartmentInjection(
     let needsFreshMaterialization = false;
     let resultEndMessage: number = lastEnd;
     let resultEndMessageId: string | null = null;
+    let resultEndMessagePartial = false;
     const cutoffIndex = findBoundaryIndex(sessionId, messages, trimEndMessageId);
     if (cutoffIndex >= 0) {
         // Natural boundary is visible — normal splice, and any degraded-mode
         // bookkeeping from earlier passes is cleared.
         clearDegradedRebuild(sessionId);
-        skippedVisibleMessages =
-            cutoffIndex + (isPartialCompartmentEnd(db, sessionId, trimEndMessageId) ? 0 : 1);
+        skippedVisibleMessages = cutoffIndex + (trimEndMessagePartial ? 0 : 1);
         cutCoveredPrefix(messages, skippedVisibleMessages, coveredInstructions);
         resultEndMessageId = trimEndMessageId;
+        resultEndMessagePartial = trimEndMessagePartial;
     } else {
         // Degraded: the natural boundary message is not in the visible window.
         const degradedCount = noteDegradedRebuild(sessionId);
@@ -745,11 +759,12 @@ export function prepareCompartmentInjection(
                     reAnchorCompartment.endMessageId,
                 );
                 if (reAnchorCutoff >= 0) {
-                    skippedVisibleMessages =
-                        reAnchorCutoff +
-                        (isPartialCompartmentEnd(db, sessionId, reAnchorCompartment.endMessageId)
-                            ? 0
-                            : 1);
+                    resultEndMessagePartial = compartments.some(
+                        (row) =>
+                            row.endMessageId === reAnchorCompartment.endMessageId &&
+                            row.endBlockIndex != null,
+                    );
+                    skippedVisibleMessages = reAnchorCutoff + (resultEndMessagePartial ? 0 : 1);
                     cutCoveredPrefix(messages, skippedVisibleMessages, coveredInstructions);
                     resultEndMessage = reAnchorCompartment.endMessage;
                     resultEndMessageId = reAnchorCompartment.endMessageId;
@@ -782,6 +797,7 @@ export function prepareCompartmentInjection(
         block,
         compartmentEndMessage: resultEndMessage,
         compartmentEndMessageId: resultEndMessageId,
+        compartmentEndMessagePartial: resultEndMessagePartial,
         compartmentCount: compartments.length,
         skippedVisibleMessages,
         factCount: facts.length,
@@ -809,19 +825,24 @@ export function prepareCompartmentInjection(
  * compartments), and treating it as "fall back to latest" reintroduced the very
  * history-loss the cold-rebuild trim exists to prevent.
  */
-function readCachedBaselineState(
-    db: Database,
-    sessionId: string,
-): { hasCachedM0: boolean; boundary: string | null } {
+interface CachedBaselineBoundary {
+    hasCachedM0: boolean;
+    boundary: string | null;
+    partial: boolean;
+}
+
+function readCachedBaselineState(db: Database, sessionId: string): CachedBaselineBoundary {
     const row = db
         .prepare(
-            "SELECT cached_m0_bytes AS m0, cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
+            `SELECT cached_m0_bytes AS m0, cached_m0_last_baseline_end_message_id AS boundary,
+                ${CACHED_TRIM_PARTIAL_SQL} AS partial FROM session_meta WHERE session_id = ?`,
         )
-        .get(sessionId) as { m0: unknown; boundary: string | null } | undefined;
+        .get(sessionId) as { m0: unknown; boundary: string | null; partial: number } | undefined;
     const boundary = row?.boundary;
     return {
         hasCachedM0: row?.m0 != null,
         boundary: boundary && boundary.length > 0 ? boundary : null,
+        partial: row?.partial === 1,
     };
 }
 
@@ -974,6 +995,7 @@ export interface M0M1State {
     cachedM0Bytes: Buffer | null;
     cachedM1Bytes: Buffer | null;
     cachedM0TrimBoundaryId?: string | null;
+    cachedM0TrimBoundaryPartial?: boolean;
     cachedM0ProjectMemoryEpoch: number | null;
     cachedM0WorkspaceFingerprint: string | null;
     cachedM0ProjectUserProfileVersion: number | null;
@@ -2752,6 +2774,9 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         snapshotMarkers.toolDefinitionsHash ?? null,
     );
     const baselineEndMessageId = lastCompartmentBoundaryId(compartments);
+    const baselineEndPartial = compartments.some(
+        (row) => row.endMessageId === baselineEndMessageId && row.endBlockIndex != null,
+    );
     steps.mark("pre_metadata");
     const commitFold = options.onFoldPrepare?.();
     steps.mark("pre_onFoldPrepare");
@@ -2914,6 +2939,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         options.state.cachedM0MuralDataUrl = frozenMuralDataUrl;
         options.state.cachedM0MuralHash = frozenMuralHash;
         options.state.cachedM0TrimBoundaryId = baselineEndMessageId;
+        options.state.cachedM0TrimBoundaryPartial = baselineEndPartial;
     } catch (error) {
         try {
             options.db.exec("ROLLBACK");
@@ -3351,6 +3377,7 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
     state.cachedM0MuralHash = row.cached_m0_mural_hash ?? null;
     state.cachedM1Bytes = toBuffer(row.cached_m1_bytes);
     state.cachedM0TrimBoundaryId = row.cached_m0_last_baseline_end_message_id || null;
+    state.cachedM0TrimBoundaryPartial = row.cached_trim_partial === 1;
     state.cachedM0ProjectMemoryEpoch = markers.projectMemoryEpoch;
     state.cachedM0WorkspaceFingerprint = markers.workspaceFingerprint;
     state.cachedM0ProjectUserProfileVersion = markers.projectUserProfileVersion;
@@ -3404,7 +3431,7 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
             // (still self-consistent) row, which is correct. Wrapping a single
             // SELECT in BEGIN/COMMIT would add write-lock contention on this hot
             // path (every cache-busting pass) for zero consistency gain.
-            const sibling = readCachedM0M1Row(options.db, options.sessionId);
+            const sibling = readCachedM0M1Row(options.db, options.sessionId, true);
             if (!sibling) throw new RenderM1InvalidMarkersError(options.sessionId);
             applyCachedRowToState(options.state, sibling);
             return {
@@ -3427,6 +3454,9 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
         const m1Bytes = Buffer.from(rendered.text, "utf8");
         const visibleIdsJson = JSON.stringify(visibleMemoryIds);
         const baselineEndMessageId = getLastCompartmentEndMessageId(options.db, options.sessionId);
+        const baselineEndPartial =
+            baselineEndMessageId != null &&
+            isPartialCompartmentEnd(options.db, options.sessionId, baselineEndMessageId);
         steps.mark("m1Render");
 
         options.db
@@ -3459,6 +3489,7 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
         );
         options.state.cachedM1Bytes = m1Bytes;
         options.state.cachedM0TrimBoundaryId = baselineEndMessageId;
+        options.state.cachedM0TrimBoundaryPartial = baselineEndPartial;
         options.state.cachedM0UpgradeState = withCachedM0MemoryIds(
             row.cached_m0_upgrade_state,
             renderedM0Ids,
@@ -4373,7 +4404,6 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
 
     const completePairAtEntry =
         options.state.cachedM0Bytes != null && options.state.cachedM1Bytes != null;
-    let replayBoundaryPartial: boolean | undefined;
 
     const decision = mustMaterialize({
         db: options.db,
@@ -4424,12 +4454,12 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
                     options.state.cachedM0Bytes = Buffer.from(captured.m0Bytes);
                     options.state.cachedM1Bytes = Buffer.from(captured.m1Text, "utf8");
                     options.state.cachedM0TrimBoundaryId = captured.preparedTrimBoundaryId ?? null;
-                    replayBoundaryPartial = captured.preparedTrimBoundaryPartial;
+                    options.state.cachedM0TrimBoundaryPartial =
+                        captured.preparedTrimBoundaryPartial;
                 } else {
                     const persisted = readCachedM0M1Row(options.db, options.sessionId, true);
                     if (persisted?.cached_m0_bytes && persisted.cached_m1_bytes) {
                         applyCachedRowToState(options.state, persisted);
-                        replayBoundaryPartial = persisted.cached_trim_partial === 1;
                     }
                 }
             }
@@ -4594,9 +4624,17 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m0Text = stripMemoryMuralBlock(m0Text);
     }
 
+    const freshContentionFallback = contentionExhausted && freshFallbackRenderedMemoryIds !== null;
+    const persistedBoundary =
+        !options.compactionOff &&
+        !freshContentionFallback &&
+        !contentionExhausted &&
+        options.state.cachedM0TrimBoundaryId === undefined
+            ? readCachedBaselineState(options.db, options.sessionId)
+            : undefined;
     const preparedTrimBoundaryId = options.compactionOff
         ? null
-        : contentionExhausted && freshFallbackRenderedMemoryIds !== null
+        : freshContentionFallback
           ? ((
                 options.db
                     .prepare(
@@ -4610,13 +4648,17 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             ? options.state.cachedM0TrimBoundaryId
             : contentionExhausted
               ? (options.contentionFallbackPrefix?.preparedTrimBoundaryId ?? null)
-              : readCachedBaselineState(options.db, options.sessionId).boundary;
+              : (persistedBoundary?.boundary ?? null);
     // A rendered summary can be installed later in the pass. Carry its trim
     // decision so replacing a compartment meanwhile cannot remove a suffix
     // that the prepared summary did not cover.
     const preparedTrimBoundaryPartial = preparedTrimBoundaryId
-        ? (replayBoundaryPartial ??
-          isPartialCompartmentEnd(options.db, options.sessionId, preparedTrimBoundaryId))
+        ? freshContentionFallback
+            ? isPartialCompartmentEnd(options.db, options.sessionId, preparedTrimBoundaryId)
+            : (options.state.cachedM0TrimBoundaryPartial ??
+              persistedBoundary?.partial ??
+              options.contentionFallbackPrefix?.preparedTrimBoundaryPartial ??
+              true)
         : false;
     const preparedMessages: MessageLike[] = [];
     const muralForWire = options.state.cachedM0MuralDataUrl

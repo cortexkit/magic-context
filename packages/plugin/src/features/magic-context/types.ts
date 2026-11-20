@@ -95,6 +95,7 @@ export interface SessionMeta {
     cachedM0MuralHash: string | null;
     cachedM1Bytes: Buffer | null;
     cachedM0TrimBoundaryId?: string | null;
+    cachedM0TrimBoundaryPartial?: boolean;
     cachedM0ProjectMemoryEpoch: number | null;
     cachedM0WorkspaceFingerprint: string | null;
     cachedM0ProjectUserProfileVersion: number | null;

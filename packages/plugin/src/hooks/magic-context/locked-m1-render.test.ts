@@ -1,5 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
-import { appendCompartments } from "../../features/magic-context/compartment-storage";
+import {
+    appendCompartments,
+    replaceAllCompartmentState,
+} from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
     createLockedDeltaFixture,
@@ -11,6 +14,7 @@ import {
     injectM0M1,
     materializeM0,
     prepareCachedM0M1Replay,
+    prepareCompartmentInjection,
     renderM1,
 } from "./inject-compartments";
 import * as formatting from "./read-session-formatting";
@@ -66,6 +70,78 @@ function rawHistory(sessionID: string) {
         parts: [{ type: "text", text: `original raw ${n}` }],
     }));
 }
+
+for (const cached of [false, true]) {
+    test(`ordinary OpenCode ${cached ? "cached" : "cold"} pre-trim preserves a partial boundary after recomp`, () => {
+        const f = createLockedDeltaFixture(`oc-pre-trim-partial-${cached}`);
+        try {
+            appendCompartments(f.db, f.sessionId, [historyRange(0, 0, 2, 0)]);
+            injectM0M1(options(f, {}));
+            const state = getOrCreateSessionMeta(f.db, f.sessionId);
+            const baseline = {
+                hasCachedM0: state.cachedM0Bytes !== null,
+                boundary: state.cachedM0TrimBoundaryId ?? null,
+                partial: state.cachedM0TrimBoundaryPartial ?? false,
+            };
+            const prepare = (messages: ReturnType<typeof rawHistory>) =>
+                prepareCompartmentInjection(
+                    f.db,
+                    f.sessionId,
+                    messages,
+                    false,
+                    [],
+                    undefined,
+                    undefined,
+                    undefined,
+                    baseline,
+                );
+            if (cached) prepare(rawHistory(f.sessionId));
+            replaceAllCompartmentState(f.sibling, f.sessionId, [historyRange(0, 0, 2)], []);
+            const messages = rawHistory(f.sessionId);
+            messages[2]!.parts.push({ type: "text", text: "UNCOVERED_SUFFIX" });
+            expect(prepare(messages)?.rebuiltFromDb).toBe(!cached);
+            expect(messages.map((message) => message.info.id)).toEqual(["m2", "m3"]);
+            expect(JSON.stringify(messages)).toContain("UNCOVERED_SUFFIX");
+        } finally {
+            f.close();
+        }
+    });
+}
+
+test("ordinary OpenCode head replay preserves a partial boundary after recomp", () => {
+    const f = createLockedDeltaFixture("oc-defer-partial-recomp");
+    try {
+        const render = () => ({ ...options(f, {}), projectPath: undefined });
+        appendCompartments(f.db, f.sessionId, [historyRange(0, 0, 2, 0)]);
+        const first = injectM0M1(render());
+        const messages = rawHistory(f.sessionId);
+        messages[2]!.parts.push({ type: "text", text: "UNCOVERED_SUFFIX" });
+        let replaced = false;
+        const replay = injectM0M1({
+            ...render(),
+            messages,
+            get isCacheBustingPass() {
+                // The normal fold decision is already made when replay chooses m[1].
+                if (!replaced) {
+                    replaceAllCompartmentState(f.sibling, f.sessionId, [historyRange(0, 0, 2)], []);
+                    replaced = true;
+                }
+                return false;
+            },
+        });
+        expect(replaced).toBe(true);
+        expect(replay.decision.value).toBe(false);
+        expect(replay.m0Bytes).toEqual(first.m0Bytes);
+        expect(replay.m1Text).toEqual(first.m1Text);
+        expect(messages.slice(replay.prependedMessageCount).map((m) => m.info.id)).toEqual([
+            "m2",
+            "m3",
+        ]);
+        expect(JSON.stringify(messages)).toContain("UNCOVERED_SUFFIX");
+    } finally {
+        f.close();
+    }
+});
 
 test("a defer does not tokenize frozen history to check refold drift", () => {
     const f = createLockedDeltaFixture("defer-drift-sizing");

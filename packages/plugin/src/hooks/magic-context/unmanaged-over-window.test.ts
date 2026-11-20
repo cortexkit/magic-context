@@ -2,7 +2,11 @@
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { createScheduler } from "../../features/magic-context/scheduler";
-import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
+import {
+    closeDatabase,
+    openDatabase,
+    updateSessionMeta,
+} from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
     __resetToolDefinitionMeasurements,
@@ -10,9 +14,13 @@ import {
 } from "../../features/magic-context/tool-definition-tokens";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
-import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import {
+    clearModelsDevCache,
+    refreshModelLimitsFromApi,
+    setOutputReserveConfig,
+} from "../../shared/models-dev-cache";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
-import { resolveTrustedContextLimit } from "./event-resolvers";
+import { resolveContextWindowGeometry, resolveTrustedContextLimit } from "./event-resolvers";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import { createTransform } from "./transform";
@@ -141,6 +149,7 @@ function measureToolSet(
 async function knownWindowTransform(
     sessionId: string,
     usage?: Map<string, { usage: ContextUsage; updatedAt: number; hasUsageTokens: boolean }>,
+    modelID = MODEL,
 ) {
     const { dir } = createTestTempDir("mc-unmanaged-over-window-");
     tempDirs.push(dir);
@@ -153,7 +162,7 @@ async function knownWindowTransform(
                     providers: [
                         {
                             id: PROVIDER,
-                            models: { [MODEL]: { limit: { context: WINDOW, output: 1_024 } } },
+                            models: { [modelID]: { limit: { context: WINDOW, output: 1_024 } } },
                         },
                     ],
                 },
@@ -173,7 +182,7 @@ async function knownWindowTransform(
         clearReasoningAge: 50,
         protectedTokens: 0,
         historianRunnable: false,
-        liveModelBySession: new Map([[sessionId, { providerID: PROVIDER, modelID: MODEL }]]),
+        liveModelBySession: new Map([[sessionId, { providerID: PROVIDER, modelID }]]),
     });
     const handler = createMessagesTransformHandler({
         magicContext: { "experimental.chat.messages.transform": transform },
@@ -230,6 +239,53 @@ it("checks a warm defer whose newly appended user prompt dwarfs the window", asy
         return undefined;
     });
     if (output) expect(historyTokens(output)).toBeLessThanOrEqual(limit);
+}, 30_000);
+
+it("serves a warm defer unchanged when an append exceeds the reserve but fits the hard window", async () => {
+    const sessionId = "ses-warm-defer-output-reserve";
+    const modelID = "gpt-5.5";
+    const usage = new Map<
+        string,
+        { usage: ContextUsage; updatedAt: number; hasUsageTokens: boolean }
+    >();
+    const serve = await knownWindowTransform(sessionId, usage, modelID);
+    const initial = () =>
+        history(sessionId, 0, 0).map((message) => ({
+            ...message,
+            info: { ...message.info, model: { providerID: PROVIDER, modelID } },
+        }));
+    setOutputReserveConfig(18_000);
+    try {
+        const warm = await serve(initial());
+        measureToolSet(PROVIDER, modelID, 2, sessionId);
+        updateSessionMeta(openDatabase()!, sessionId, { systemPromptTokens: 100 });
+        const geometry = resolveContextWindowGeometry(PROVIDER, modelID)!;
+        usage.set(sessionId, {
+            usage: { inputTokens: 1000, percentage: (1000 / geometry.usableSoft) * 100 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        const messages: Message[] = initial();
+        messages.push({
+            info: { ...messages[0]!.info, id: "new-paste" },
+            parts: [{ type: "text", text: LINE.repeat(1800) }],
+        });
+        const estimate = estimateFinalWireInputTokens({
+            messages: messages as never,
+            systemPromptTokens: 100,
+            providerID: PROVIDER,
+            modelID,
+            sessionId,
+        });
+        expect(estimate.refusalGrade).toBe(true);
+        expect(estimate.refusalTokens!).toBeGreaterThan(geometry.usableSoft);
+        expect(estimate.refusalTokens!).toBeLessThan(geometry.usableHard);
+        const served = await serve(messages);
+        expect(served.slice(0, warm.length)).toEqual(warm);
+        expect(served.at(-1)?.parts[0]?.text).toContain(LINE.repeat(1800));
+    } finally {
+        setOutputReserveConfig(undefined);
+    }
 }, 30_000);
 
 describe("a first pass with no Magic Context state and a history over the window", () => {

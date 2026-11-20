@@ -4,6 +4,14 @@ import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { type Database, prepareCachedStatement, type Statement } from "../../shared/sqlite";
 import type { SessionMeta } from "./types";
 
+/** Read the boundary's coverage in the same SELECT as the cached summary. */
+export const CACHED_TRIM_PARTIAL_SQL = `EXISTS (
+    SELECT 1 FROM compartments
+    WHERE compartments.session_id = session_meta.session_id
+      AND compartments.end_message_id = session_meta.cached_m0_last_baseline_end_message_id
+      AND compartments.end_block_index IS NOT NULL
+)`;
+
 export interface SessionMetaRow {
     session_id: string;
     last_response_time: number | null;
@@ -33,6 +41,7 @@ export interface SessionMetaRow {
     cached_m0_mural_hash: string | null;
     cached_m1_bytes: Buffer | Uint8Array | null;
     cached_m0_last_baseline_end_message_id: string | null;
+    cached_trim_partial?: number;
     cached_m0_project_memory_epoch: number | null;
     cached_m0_workspace_fingerprint: string | null;
     cached_m0_project_user_profile_version: number | null;
@@ -335,6 +344,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0MuralHash: null,
         cachedM1Bytes: null,
         cachedM0TrimBoundaryId: null,
+        cachedM0TrimBoundaryPartial: false,
         cachedM0ProjectMemoryEpoch: null,
         cachedM0WorkspaceFingerprint: null,
         cachedM0ProjectUserProfileVersion: null,
@@ -473,6 +483,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0MuralHash: stringOrNull(row.cached_m0_mural_hash),
         cachedM1Bytes: toBufferOrNull(row.cached_m1_bytes),
         cachedM0TrimBoundaryId: row.cached_m0_last_baseline_end_message_id || null,
+        cachedM0TrimBoundaryPartial: row.cached_trim_partial === 1,
         cachedM0ProjectMemoryEpoch: numOrNull(row.cached_m0_project_memory_epoch),
         cachedM0WorkspaceFingerprint: stringOrNull(row.cached_m0_workspace_fingerprint),
         cachedM0ProjectUserProfileVersion: numOrNull(row.cached_m0_project_user_profile_version),

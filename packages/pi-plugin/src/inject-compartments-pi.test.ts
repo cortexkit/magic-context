@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	appendCompartments,
+	replaceAllCompartmentState,
+} from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	archiveMemory,
@@ -3730,6 +3733,74 @@ it("prepared Pi replay keeps an uncovered block after recomp", () => {
 			)
 			.run(sessionId);
 		expect(replay()).toBe(original);
+	} finally {
+		closeQuietly(sibling);
+		closeQuietly(db);
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+it("ordinary Pi head replay preserves a partial boundary after recomp", () => {
+	const dir = createTestTempDirFromPath(
+		join(tmpdir(), "mc-pi-ordinary-partial-"),
+	);
+	const path = join(dir, "context.db");
+	const db = createTestDb(path);
+	const sibling = createTestDb(path);
+	const sessionId = "pi-ordinary-partial";
+	const state = { sessionId, injectDocs: false };
+	const compartment = {
+		sequence: 0,
+		startMessage: 1,
+		endMessage: 2,
+		startMessageId: "old",
+		endMessageId: "cut",
+		title: "Partial",
+		content: "Only the first block was summarized.",
+	};
+	try {
+		appendCompartments(db, sessionId, [{ ...compartment, endBlockIndex: 0 }]);
+		materializeM0Pi(state, db);
+		const snapshot = createPiM0M1PassSnapshot({
+			db,
+			sessionId,
+			compactionOff: false,
+		});
+		const replay = () => {
+			const messages = [
+				userMessage("old", 1),
+				assistant([], "UNCOVERED_SUFFIX"),
+				userMessage("tail", 3),
+			];
+			const result = injectM0M1Pi(
+				{ ...state },
+				db,
+				messages,
+				["old", "cut", "tail"],
+				false,
+				snapshot,
+			);
+			expect(result.m0Materialized).toBe(false);
+			return JSON.stringify(messages);
+		};
+		const expected = replay();
+		expect(expected).toContain("UNCOVERED_SUFFIX");
+		const cached = snapshot.cachedRow;
+		if (!cached) throw new Error("the fixture must have a cached head");
+		const m1 = cached.cached_m1_bytes;
+		let replaced = false;
+		Object.defineProperty(cached, "cached_m1_bytes", {
+			get() {
+				// Reading the cached delta comes after the ordinary fold decision.
+				if (!replaced) {
+					replaceAllCompartmentState(sibling, sessionId, [compartment], []);
+					replaced = true;
+				}
+				return m1;
+			},
+		});
+		expect(replay()).toBe(expected);
+		expect(replaced).toBe(true);
 	} finally {
 		closeQuietly(sibling);
 		closeQuietly(db);

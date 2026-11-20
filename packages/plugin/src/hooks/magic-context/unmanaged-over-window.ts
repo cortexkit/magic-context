@@ -27,8 +27,8 @@ export function isClearlyOverWindow(tokens: number, contextLimit: number | undef
     return tokens > contextLimit * UNMANAGED_OVER_WINDOW_FACTOR;
 }
 
-/** Sample only the new tail. The latest assistant may now carry tool results
- * that were absent when the provider reported its input count. */
+/** Sample only user input after the last assistant. In-turn tool results are
+ * handled by the normal tool-loop fit and provider recovery paths. */
 export function appendedTailMayExceedWindow(
     messages: readonly MessageLike[],
     previousInputTokens: number,
@@ -38,9 +38,10 @@ export function appendedTailMayExceedWindow(
     for (let i = messages.length - 1; i >= 0; --i) {
         const message = messages[i];
         if (!message) continue;
+        if (message.info.role === "assistant") break;
+        if (message.info.role !== "user") continue;
         const size = wireContentBytes([message], remainingBytes, 0.5);
         if (!size || size.bytes >= remainingBytes) return true;
-        if (message.info.role === "assistant") break;
         remainingBytes -= size.bytes;
     }
     return false;
