@@ -295,8 +295,8 @@ pub(crate) struct TestBus {
     pub opened: AtomicUsize,
     /// The bucket names watches were opened on.
     pub watched: Mutex<Vec<String>>,
-    /// Bumped to end every watch open now.
-    cut: tokio::sync::watch::Sender<u64>,
+    /// Signalled to end every watch open now; `true` ends it with a panic.
+    cut: tokio::sync::watch::Sender<bool>,
 }
 
 impl TestBus {
@@ -311,13 +311,18 @@ impl TestBus {
             down: AtomicBool::new(false),
             opened: AtomicUsize::new(0),
             watched: Mutex::new(Vec::new()),
-            cut: tokio::sync::watch::channel(0).0,
+            cut: tokio::sync::watch::channel(false).0,
         })
     }
 
     /// End every watch open now, as a lost connection does.
     pub(crate) fn cut_watches(&self) {
-        self.cut.send_modify(|cuts| *cuts += 1);
+        self.cut.send_replace(false);
+    }
+
+    /// Unwind each watch from its next poll, as a bus client panic does.
+    pub(crate) fn panic_watches(&self) {
+        self.cut.send_replace(true);
     }
 
     /// The module's bus over this one.
@@ -409,7 +414,7 @@ impl Registers for TestRegisters {
 /// An in-memory watch that ends when the test bus cuts its watches.
 struct TestWatch {
     watch: cortexkit_bus_inmemory::InMemoryRegisterWatch,
-    cut: tokio::sync::watch::Receiver<u64>,
+    cut: tokio::sync::watch::Receiver<bool>,
 }
 
 #[async_trait]
@@ -417,7 +422,10 @@ impl RegisterWatch for TestWatch {
     async fn next(&mut self) -> cortexkit_bus_trait::BusResult<cortexkit_bus_trait::WatchEvent> {
         tokio::select! {
             event = self.watch.next() => event,
-            _ = self.cut.changed() => Err(BusError::unavailable("register watch cut")),
+            _ = self.cut.changed() => {
+                assert!(!*self.cut.borrow_and_update(), "register watch panicked");
+                Err(BusError::unavailable("register watch cut"))
+            }
         }
     }
 
@@ -467,11 +475,16 @@ async fn every_user_of_the_bus_shares_one_session() {
     assert_eq!(publisher.round(&db, wakes.take()).await.len(), 1);
     // The watch on Entorhinal's changes opens its watch on it.
     let state = Arc::new(crate::entorhinal_changes::WatchState::default());
-    let follow = tokio::spawn(crate::entorhinal_changes::run(bus.clone(), state, || {}));
+    let follow = crate::entorhinal_changes::spawn_marker(
+        bus.clone(),
+        state,
+        crate::entorhinal_changes::KEY,
+        || {},
+    );
     while test_bus.watched.lock().unwrap().is_empty() {
         tokio::task::yield_now().await;
     }
-    follow.abort();
+    drop(follow);
     // The docs notices publish on it.
     let (fixture, id) = proposed();
     DocsNotices::over(bus).publish(&fixture.db).await;

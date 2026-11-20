@@ -154,7 +154,7 @@ async fn a_registry_change_reads_each_folder_again_and_wakes_a_legacy_round() {
 
     let test_bus = TestBus::new();
     test_bus.kv.put(KEY, marker(7)).await.unwrap();
-    module.spawn_entorhinal_follow(test_bus.bus());
+    let _watch = module.spawn_entorhinal_follow(test_bus.bus());
     // One read per folder, not per session, and one legacy round.
     asked(&client, "context.project", before + 2).await;
     assert!(
@@ -178,21 +178,18 @@ async fn a_registry_change_reads_each_folder_again_and_wakes_a_legacy_round() {
     assert_eq!(client.asked("context.project"), before + 4);
 }
 
-/// Count the changes `run` reports, with the watch's state.
-fn follow(test_bus: &Arc<TestBus>) -> (Arc<AtomicUsize>, Arc<WatchState>) {
+/// Count the changes the marker watch reports, with the watch's state.
+fn follow(test_bus: &Arc<TestBus>) -> (MarkerTask, Arc<AtomicUsize>, Arc<WatchState>) {
     let changes = Arc::new(AtomicUsize::new(0));
     let state = Arc::new(WatchState::default());
     let bus = test_bus.bus();
-    tokio::spawn({
-        let (changes, state) = (Arc::clone(&changes), Arc::clone(&state));
-        async move {
-            run(bus, state, move || {
-                changes.fetch_add(1, Ordering::SeqCst);
-            })
-            .await
+    let watch = spawn_marker(bus, Arc::clone(&state), KEY, {
+        let changes = Arc::clone(&changes);
+        move || {
+            changes.fetch_add(1, Ordering::SeqCst);
         }
     });
-    (changes, state)
+    (watch, changes, state)
 }
 
 #[tokio::test(start_paused = true)]
@@ -202,7 +199,7 @@ async fn without_the_bus_nothing_is_read_again_until_the_watch_comes_back_and_ca
     test_bus
         .down
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    let (changes, state) = follow(&test_bus);
+    let (_watch, changes, state) = follow(&test_bus);
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!state.is_up());
     assert_eq!(changes.load(Ordering::SeqCst), 0, "no watch, no reads");
@@ -243,4 +240,71 @@ async fn without_the_bus_nothing_is_read_again_until_the_watch_comes_back_and_ca
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert!(state.is_up());
     assert_eq!(changes.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_panicked_marker_watch_reopens_after_backoff() {
+    let test_bus = TestBus::new();
+    let module = Module::new(Client::default(), Settings::default(), None, None);
+    let _watch = module.spawn_entorhinal_follow(test_bus.bus());
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(module.entorhinal_watch_up());
+
+    test_bus.panic_watches();
+    tokio::time::sleep(RETRY_FIRST - Duration::from_millis(100)).await;
+    assert_eq!(
+        test_bus.watched.lock().unwrap().len(),
+        1,
+        "do not reopen early"
+    );
+    test_bus.kv.put(KEY, marker(1)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        test_bus.watched.lock().unwrap().len(),
+        2,
+        "reopen after backoff"
+    );
+    assert!(module.legacy_wake().woken(Duration::from_millis(1)).await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_a_marker_watch_prevents_it_from_reopening() {
+    for cut_before_stop in [false, true] {
+        let test_bus = TestBus::new();
+        let module = Module::new(Client::default(), Settings::default(), None, None);
+        let watch = module.spawn_entorhinal_follow(test_bus.bus());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(module.entorhinal_watch_up());
+
+        if cut_before_stop {
+            test_bus.cut_watches();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert!(!module.entorhinal_watch_up());
+        }
+        drop(watch);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        test_bus.cut_watches();
+        tokio::time::sleep(RETRY_FIRST + Duration::from_secs(1)).await;
+        assert_eq!(
+            test_bus.watched.lock().unwrap().len(),
+            1,
+            "stop prevents reopening (already in backoff: {cut_before_stop})"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_panicked_marker_watch_is_down_during_backoff() {
+    let test_bus = TestBus::new();
+    let module = Module::new(Client::default(), Settings::default(), None, None);
+    let _watch = module.spawn_entorhinal_follow(test_bus.bus());
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(module.entorhinal_watch_up());
+
+    test_bus.panic_watches();
+    tokio::time::sleep(RETRY_FIRST / 2).await;
+    assert!(
+        !module.entorhinal_watch_up(),
+        "panicked watch must read down"
+    );
 }

@@ -166,11 +166,12 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     mc_module::bus::spawn_run_end_reader(Arc::clone(&bus), run_end_waits);
     module.spawn_dreamer();
     module.spawn_legacy_projects();
-    module.spawn_entorhinal_follow(bus);
+    let registry_watch = module.spawn_entorhinal_follow(bus);
     // An install a move started before a crash is finished in every build:
     // its sessions are refused until it is.
     module.spawn_move_recovery();
     let result = serve.await;
+    drop(registry_watch);
     if let Some(replica) = replica {
         replica.stop().await;
     }
