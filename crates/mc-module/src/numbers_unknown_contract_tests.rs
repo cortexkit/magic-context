@@ -258,7 +258,7 @@ fn audit_views_invalid_cut_does_not_discard_independent_edits() {
 }
 
 #[tokio::test]
-async fn audit_views_non_summarized_numbers_coverage_commits_cut() {
+async fn review_probe_numbers_only_cut_preserves_pending_stamp_on_restore() {
     let dir = scratch("coverage-cut");
     let (_, marked_notice) = transition();
     let mut entries = vec![marked_notice];
@@ -269,13 +269,20 @@ async fn audit_views_non_summarized_numbers_coverage_commits_cut() {
         session.numbers_covered.as_ref().map(|floor| floor.ordinal),
         Some(1)
     );
+    let key = ("m4".to_owned(), "p".to_owned());
+    session.queued.insert(key.clone());
     let view = session.build(&settings, None, false, None).0.unwrap();
     assert_eq!(cut_through(&view), Some("message-a"));
     session.accept(view.clone());
-    session.settle_unconfirmed(Some(&view.applied()), &[]);
-    assert_eq!(session.cut, Some(1));
-    assert!(!session.head_stale);
-    assert!(!session.numbers_view_due());
+    assert!(!session.queued.contains(&key));
+    let saved = session.durable();
+    session.restore(saved);
+    assert_eq!(
+        session.latest.as_ref().map(|v| &v.checksum),
+        Some(&view.checksum)
+    );
+    session.ride_undelivered(view.version);
+    assert!(session.queued.contains(&key));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
