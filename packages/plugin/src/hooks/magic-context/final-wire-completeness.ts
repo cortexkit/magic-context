@@ -1,4 +1,5 @@
 import { sessionLog } from "../../shared/logger";
+import { isInlineNativeMediaImage } from "./image-token-estimate";
 import type { MessageLike } from "./transform-operations";
 
 /** Field names only: never return the value of an uncounted provider part. */
@@ -52,6 +53,8 @@ export function incompleteWirePartFields(part: unknown): string[] {
             );
         case "step-start":
         case "step-finish":
+        // OpenCode 2 uses effort to select a reasoning setting, not prompt content.
+        case "effort":
             return [];
         // Inline images have a bounded pixel-based estimate; other attachments do not.
         case "file":
@@ -59,6 +62,8 @@ export function incompleteWirePartFields(part: unknown): string[] {
                 typeof p.url === "string" && p.url.startsWith("data:image/"),
                 "url (data:image/)",
             );
+        case "media":
+            return missing(isInlineNativeMediaImage(p), "media (inline image)");
         default:
             return ["supported type"];
     }

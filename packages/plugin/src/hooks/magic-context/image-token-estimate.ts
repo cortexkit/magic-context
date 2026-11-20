@@ -7,6 +7,8 @@
 // (50x over-estimate for a typical screenshot), so we parse PNG/JPEG headers
 // directly to read real pixel dimensions.
 
+import { isRecord } from "../../shared/record-type-guard";
+
 const IMAGE_TOKEN_DIVISOR = 750;
 const IMAGE_FALLBACK_TOKENS = 1200; // ~ 950×950 mid-size image
 const IMAGE_TOKEN_CAP = 4500; // Anthropic's max for a single image
@@ -18,9 +20,10 @@ const IMAGE_TOKEN_CAP = 4500; // Anthropic's max for a single image
 export function estimateImageTokensFromDataUrl(url: string): number {
     const comma = url.indexOf(",");
     if (comma < 0) return IMAGE_FALLBACK_TOKENS;
-    const header = url.slice(0, comma);
-    const payload = url.slice(comma + 1);
+    return estimateImageTokensFromBase64(url.slice(0, comma), url.slice(comma + 1));
+}
 
+function estimateImageTokensFromBase64(header: string, payload: string): number {
     // Only decode the first 512 base64 characters (384 bytes): enough for the
     // PNG IHDR, GIF and WebP headers. JPEG reads further on demand below,
     // because an EXIF block before the frame header can run to 64 KiB.
@@ -34,11 +37,21 @@ export function estimateImageTokensFromDataUrl(url: string): number {
         return IMAGE_FALLBACK_TOKENS;
     }
 
+    return estimateImageTokensFromHeader(header, bytes, () =>
+        createBase64ByteReader(payload, bytes),
+    );
+}
+
+function estimateImageTokensFromHeader(
+    header: string,
+    bytes: Uint8Array,
+    jpegReader: () => (offset: number) => number | undefined,
+): number {
     if (header.includes("image/png")) {
         const dims = parsePngDimensions(bytes);
         if (dims) return clampImageTokens(Math.ceil((dims.w * dims.h) / IMAGE_TOKEN_DIVISOR));
     } else if (header.includes("image/jpeg") || header.includes("image/jpg")) {
-        const dims = parseJpegDimensions(createBase64ByteReader(payload, bytes));
+        const dims = parseJpegDimensions(jpegReader());
         if (dims) return clampImageTokens(Math.ceil((dims.w * dims.h) / IMAGE_TOKEN_DIVISOR));
     } else if (header.includes("image/webp")) {
         const dims = parseWebpDimensions(bytes);
@@ -48,6 +61,33 @@ export function estimateImageTokensFromDataUrl(url: string): number {
         if (dims) return clampImageTokens(Math.ceil((dims.w * dims.h) / IMAGE_TOKEN_DIVISOR));
     }
 
+    return IMAGE_FALLBACK_TOKENS;
+}
+
+/** Read the OpenCode 2 Media.Asset shape without cloning or encoding its bytes. */
+function nativeMediaImage(part: Record<string, unknown>) {
+    if (part.type !== "media" || !isRecord(part.media)) return undefined;
+    const { mediaType, source } = part.media;
+    if (typeof mediaType !== "string" || !mediaType.startsWith("image/")) return undefined;
+    let inline: string | Uint8Array | undefined;
+    if (isRecord(source)) {
+        const { type, data } = source;
+        if (type === "base64" && typeof data === "string" && data.length > 0) inline = data;
+        if (type === "bytes" && data instanceof Uint8Array && data.byteLength > 0) inline = data;
+    }
+    return { mediaType, inline };
+}
+
+export function isInlineNativeMediaImage(part: Record<string, unknown>): boolean {
+    return nativeMediaImage(part)?.inline !== undefined;
+}
+
+export function estimateNativeMediaImageTokens(part: Record<string, unknown>): number {
+    const image = nativeMediaImage(part);
+    if (!image) return 0;
+    const { mediaType, inline } = image;
+    if (typeof inline === "string") return estimateImageTokensFromBase64(mediaType, inline);
+    if (inline) return estimateImageTokensFromHeader(mediaType, inline, () => (i) => inline[i]);
     return IMAGE_FALLBACK_TOKENS;
 }
 

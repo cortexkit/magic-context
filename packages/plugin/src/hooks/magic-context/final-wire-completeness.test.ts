@@ -5,7 +5,7 @@ import {
     incompleteWirePartFields,
     incompleteWireParts,
 } from "./final-wire-completeness";
-import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
+import { estimateFinalWireInputTokens, wireContentBytes } from "./final-wire-token-estimate";
 import type { MessageLike } from "./tag-messages";
 
 it.each([
@@ -22,7 +22,24 @@ it.each([
     [{ type: "tool-result" }, ["result"]],
     [{ type: "tool_result" }, ["result"]],
     [{ type: "file", url: "file:///private/attachment.pdf" }, ["url (data:image/)"]],
-    [{ type: "media", data: "private content" }, ["supported type"]],
+    [{ type: "media", data: "private content" }, ["media (inline image)"]],
+    [
+        {
+            type: "media",
+            media: { mediaType: "application/pdf", source: { type: "base64", data: "AA==" } },
+        },
+        ["media (inline image)"],
+    ],
+    [
+        {
+            type: "media",
+            media: {
+                mediaType: "image/png",
+                source: { type: "url", url: "https://example.invalid/image.png" },
+            },
+        },
+        ["media (inline image)"],
+    ],
 ] as const)("names missing fields without changing the untrusted policy (%#)", (part, fields) => {
     expect(incompleteWirePartFields(part)).toEqual([...fields]);
     expect(
@@ -58,6 +75,52 @@ it.each([
             toolDefinitionTokens: 0,
         }).trusted,
     ).toBe(true);
+});
+
+it("OpenCode 2 effort controls do not add tokens or invalidate the estimate", () => {
+    const messages: MessageLike[] = [
+        { info: { role: "user" }, parts: [{ type: "text", text: "Continue the review" }] },
+    ];
+    const control: MessageLike = {
+        info: { role: "system" },
+        parts: [{ type: "effort", effort: "high", previous: "low" }],
+    };
+    const input = { systemPromptTokens: 100, toolDefinitionTokens: 0 };
+    const baseline = estimateFinalWireInputTokens({ ...input, messages });
+    expect(baseline.trusted).toBe(true);
+    expect(estimateFinalWireInputTokens({ ...input, messages: [control, ...messages] })).toEqual(
+        baseline,
+    );
+});
+
+it("OpenCode 2 inline media uses the same pixel cost as a file image", () => {
+    // A PNG header declares a 1024 x 768 image; its payload size is not its provider token cost.
+    const png = Buffer.from("89504e470d0a1a0a0000000d494844520000040000000300", "hex");
+    const payload = png.toString("base64");
+    const mediaType = "image/png";
+    class HostAsset {
+        readonly mediaType = mediaType;
+        constructor(readonly source: { type: string; data: string | Uint8Array }) {}
+    }
+    const input = { systemPromptTokens: 100, toolDefinitionTokens: 0 };
+    const file = { type: "file", mime: mediaType, url: `data:${mediaType};base64,${payload}` };
+    const estimate = (part: unknown) => {
+        const messages: MessageLike[] = [{ info: { role: "user" }, parts: [part] }];
+        return {
+            estimate: estimateFinalWireInputTokens({ ...input, messages }),
+            bytes: wireContentBytes(messages, Number.POSITIVE_INFINITY, 4),
+        };
+    };
+    const baseline = estimate(file);
+    expect(baseline.estimate.trusted).toBe(true);
+    expect(baseline.estimate.messageTokens.conversation).toBe(1049);
+    expect(baseline.bytes?.bytes).toBe(4196);
+    for (const source of [
+        { type: "base64", data: payload },
+        { type: "bytes", data: png },
+    ]) {
+        expect(estimate({ type: "media", media: new HostAsset(source) })).toEqual(baseline);
+    }
 });
 
 it("logs only incomplete part metadata once per pass, never content", () => {

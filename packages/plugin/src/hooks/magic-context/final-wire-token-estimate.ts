@@ -12,6 +12,7 @@ import {
 import { incompleteWirePartFields } from "./final-wire-completeness";
 import {
     estimateImageTokensFromDataUrl,
+    estimateNativeMediaImageTokens,
     estimateToolAttachmentImageTokens,
 } from "./image-token-estimate";
 import {
@@ -78,7 +79,7 @@ type WireBucket = keyof MessageTokenEstimate;
 
 /** Price native image parts and tool attachments identically for wire and distance accounting. */
 export function estimatePartImageTokens(raw: unknown): number {
-    if (!raw || typeof raw !== "object") return 0;
+    if (!isRecord(raw)) return 0;
     const part = raw as {
         type?: string;
         ignored?: boolean;
@@ -87,6 +88,7 @@ export function estimatePartImageTokens(raw: unknown): number {
         state?: unknown;
     };
     if (part.ignored) return 0;
+    if (part.type === "media") return estimateNativeMediaImageTokens(raw);
     if (part.type === "file" && part.mime?.startsWith("image/")) {
         return typeof part.url === "string" && part.url.startsWith("data:")
             ? estimateImageTokensFromDataUrl(part.url)
@@ -206,6 +208,7 @@ function visitWireContent(
                 opaque();
                 break;
             case "file":
+            case "media":
                 visit.image("conversation", estimatePartImageTokens(part));
                 break;
             case "tool":
