@@ -2735,9 +2735,9 @@ dependencies = [
 
 [[package]]
 name = "subc-config"
-version = "0.1.1"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f5bd0130cdf088277a309ee2786940a04bd37af17f7a95b5b21e62b75c2f67"
+checksum = "4b1c7e045035226b4ae17ef997e0c0e9cdc909c03e091f4d9df1c8102750a20e"
 dependencies = [
  "regex",
  "ryu",
