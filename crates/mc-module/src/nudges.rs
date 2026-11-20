@@ -2,10 +2,10 @@
 //! channels (`ctx-reduce-nudge.ts`, `docs/architecture/nudges.md`).
 //!
 //! Both read one measurement of what the model sees after the history head:
-//! `T`, the content mass that counts (text the model or a person wrote, tool
-//! calls and results, files), and `U`, the part of `T` the model could still
-//! drop: tagged, not dropped or already asked for, and outside the protected
-//! tail. The share `U/T` picks a band:
+//! `T`, the content mass that counts (conversation, notices, tool calls and
+//! results, files), and `U`, the mass the model is encouraged to stamp: tools,
+//! files and notices that are tagged, neither dropped nor queued, and outside
+//! the protected tail. The share `U/T` picks a band:
 //!
 //! | Band      | When                                            |
 //! |-----------|-------------------------------------------------|
@@ -302,11 +302,6 @@ pub fn measure(
     let mut measurement = Measurement::default();
     let mut candidates: Vec<(u8, u64, PartRef)> = Vec::new();
     for entry in context.index.entries() {
-        // Reminders and other notices are the runner's or a module's, not
-        // content the model could act on.
-        if entry.notice.is_some() {
-            continue;
-        }
         for part in crate::neutral::authored_parts(entry) {
             if context.edited.covers(&entry.mid, &part.id) {
                 continue;
@@ -317,17 +312,20 @@ pub fn measure(
                 _ => continue,
             };
             measurement.t += weight;
+            // Conversation takes up space, but ctx_reduce guidance asks the
+            // model to keep it. Only runner-marked notices are stampable text.
+            if matches!(&part.body, PartBody::Text { .. }) && entry.notice.is_none() {
+                continue;
+            }
+            let Some(tag) = part.tag else {
+                continue;
+            };
             let key = {
                 let _timing = crate::notice_cost_timing::span("nudges.part_key");
                 (entry.mid.clone(), part.id.clone())
             };
-            let protected = match (part.tag, protected_from) {
-                (Some(tag), Some(from)) => tag >= from,
-                _ => false,
-            } || protected_tools.contains(&key);
-            let Some(tag) = part.tag else {
-                continue;
-            };
+            let protected =
+                protected_from.is_some_and(|from| tag >= from) || protected_tools.contains(&key);
             if protected || queued.contains(&key) || Some(entry.mid.as_str()) == first {
                 continue;
             }
@@ -529,6 +527,108 @@ fn reminder(kind: &str, measurement: &Measurement) -> TemplateUse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cortexkit_role_compaction::part::{Seal, ToolPart, ToolStatus};
+    use cortexkit_role_compaction::read::NoticeOrigin;
+    use cortexkit_role_compaction::tokens::PartTokens;
+
+    fn counted_entry(number: u64, role: Role, body: PartBody, count: PartTokens) -> Entry {
+        let mut part = crate::neutral::part("p", Some(number), Seal::None, body);
+        part.tokens = Some(count);
+        Entry::new(number, format!("m{number}"), role, 0, vec![part])
+    }
+
+    fn counted_text(number: u64, role: Role, text: &str, count: u64) -> Entry {
+        counted_entry(
+            number,
+            role,
+            PartBody::Text { text: text.into() },
+            PartTokens::count(count),
+        )
+    }
+
+    fn counted_tool(number: u64, name: &str, output: u64) -> Entry {
+        counted_entry(
+            number,
+            Role::Assistant,
+            PartBody::Tool(ToolPart::new("c", name, json!({}), ToolStatus::Completed)),
+            PartTokens::tool(10, output),
+        )
+    }
+
+    fn measure_entries(entries: Vec<Entry>, edited: &lanes::Edited) -> Measurement {
+        let mut index = crate::index::Index::default();
+        index.extend_counted(entries, Some("test"));
+        measure(
+            &Context {
+                index: &index,
+                edited,
+                protected_tools: &BTreeMap::new(),
+                keep_first_message: true,
+                signed_floor: None,
+            },
+            None,
+            &BTreeSet::new(),
+        )
+    }
+
+    #[test]
+    fn conversation_heavy_tail_is_quiet_after_its_tools_are_reduced() {
+        let entries = vec![
+            counted_text(1, Role::User, "Initial task", 20_000),
+            counted_tool(2, "read", 40_000),
+            counted_text(
+                3,
+                Role::User,
+                "<system-reminder>Quoted text</system-reminder>",
+                25_000,
+            ),
+            counted_text(4, Role::Assistant, "My progress so far", 20_000),
+        ];
+        let edited = lanes::Edited::default().including(&[("m2".into(), "p".into())]);
+        let measurement = measure_entries(entries, &edited);
+
+        assert_eq!(measurement.t, 65_000);
+        assert_eq!(measurement.level(), None);
+        assert_eq!(measurement.u, 0);
+        assert_eq!(measurement.outputs, 0);
+        assert!(measurement.hints.is_empty());
+    }
+
+    #[test]
+    fn a_tool_heavy_tail_still_counts_and_names_spent_outputs() {
+        let entries = vec![
+            counted_text(1, Role::User, "Initial task", 5_000),
+            counted_tool(2, "read", 42_000),
+            counted_tool(3, "read", 21_000),
+        ];
+        let measurement = measure_entries(entries, &lanes::Edited::default());
+
+        assert_eq!(measurement.t, 68_020);
+        assert_eq!(measurement.u, 63_020);
+        assert_eq!(measurement.level(), Some(Level::Urgent));
+        assert!(measurement.at_ceiling());
+        assert_eq!(measurement.outputs, 2);
+        assert_eq!(
+            measurement.hints,
+            [PartRef::new("m2", "p"), PartRef::new("m3", "p")]
+        );
+    }
+
+    #[test]
+    fn a_runner_marked_notice_counts_but_is_not_named_as_a_tool_output() {
+        let entries = vec![
+            counted_text(1, Role::User, "Initial task", 20_000),
+            counted_text(2, Role::User, "Peer update", 40_000)
+                .with_notice(NoticeOrigin::new("peer")),
+        ];
+        let measurement = measure_entries(entries, &lanes::Edited::default());
+
+        assert_eq!(measurement.t, 60_000);
+        assert_eq!(measurement.u, 40_000);
+        assert_eq!(measurement.level(), Some(Level::Urgent));
+        assert_eq!(measurement.outputs, 0);
+        assert!(measurement.hints.is_empty());
+    }
 
     fn at(u: u64, t: u64) -> Measurement {
         Measurement {

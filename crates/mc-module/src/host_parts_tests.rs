@@ -39,17 +39,19 @@ fn host_parts_do_not_become_the_prompt_or_floor_mark() {
 #[tokio::test]
 async fn host_parts_session_reminder_counts_only_actionable_turns() {
     let (mut session, client, _, _, settings) = fixture();
-    let mut prompt = text(1, "prompt");
-    prompt.parts[0] = Part::new(
-        "p",
-        PartBody::Text {
-            text: "work ".repeat(80_000).into(),
-        },
-    );
-    prompt.parts[0].tag = Some(1);
-    session
-        .index
-        .extend(vec![prompt, marked(text(2, "Continue…"))]);
+    session.index.extend([
+        text(1, "prompt"),
+        marked(text(2, "Continue…")),
+        Entry::new(
+            3,
+            "outputs",
+            Role::Assistant,
+            3,
+            (3..=9)
+                .map(|tag| output_part(&format!("p{tag}"), tag))
+                .collect(),
+        ),
+    ]);
     session.remind(&client, &settings, false, false).await;
     assert_eq!(session.nudges.last_fire_turn, Some(1));
 }

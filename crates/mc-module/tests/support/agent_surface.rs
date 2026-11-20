@@ -124,6 +124,19 @@ fn tool(number: u64, name: &str) -> Entry {
     )
 }
 
+fn ceiling_tail() -> impl Iterator<Item = Entry> {
+    // The newest three results fill the protected tail; the oldest result is
+    // large enough by itself to put the reclaimable share above the ceiling.
+    std::iter::once(text(1, Role::User, "task")).chain((2..=5).map(|number| {
+        let mut entry = tool(number, "read");
+        let PartBody::Tool(tool) = &mut entry.parts[0].body else {
+            unreachable!("tool entries carry a tool part");
+        };
+        tool.output_bytes = Some(if number == 2 { 300_000 } else { 28_000 });
+        entry
+    }))
+}
+
 #[tokio::test]
 async fn surface_reduce_uses_plugin_reply_cases() {
     let cases: Value = serde_json::from_str(include_str!(
@@ -210,10 +223,7 @@ async fn surface_reminder_ids_survive_saved_state_and_setup_notice_resets() {
     let settings = Settings::default();
     let mut first = session("worker");
     first.set_store(Some(store.clone()));
-    first.index.extend([
-        text(1, Role::User, "task"),
-        text(2, Role::Assistant, &"x".repeat(300_000)),
-    ]);
+    first.index.extend(ceiling_tail());
     first.seq = 3;
     first.remind(&client, &settings, false, false).await;
     first.nudges = Default::default();
@@ -222,10 +232,7 @@ async fn surface_reminder_ids_survive_saved_state_and_setup_notice_resets() {
     let saved = serde_json::to_string(&store.load(&first.key).unwrap()).unwrap();
     let mut restarted = session("worker");
     restarted.restore(serde_json::from_str(&saved).unwrap());
-    restarted.index.extend([
-        text(1, Role::User, "task"),
-        text(2, Role::Assistant, &"x".repeat(300_000)),
-    ]);
+    restarted.index.extend(ceiling_tail());
     restarted.nudges = Default::default();
     restarted.seq = 3;
     restarted.remind(&client, &settings, false, false).await;
@@ -244,10 +251,7 @@ async fn surface_failed_ceiling_send_is_retried_in_the_same_cycle() {
         ..Client::default()
     };
     let mut session = session("worker");
-    session.index.extend([
-        text(1, Role::User, "task"),
-        text(2, Role::Assistant, &"x".repeat(300_000)),
-    ]);
+    session.index.extend(ceiling_tail());
     session
         .remind(&client, &Settings::default(), false, false)
         .await;
