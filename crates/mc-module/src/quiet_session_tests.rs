@@ -127,6 +127,7 @@ fn text(ordinal: u64, mid: &str) -> Entry {
 struct Fixture {
     module: Module<Client>,
     route: Route,
+    setup: SetupRequest,
     conditions: Conditions,
     _hold: Option<crate::agent_data::busy::RunGuard>,
     _dir: tempfile::TempDir,
@@ -170,13 +171,14 @@ impl Fixture {
         setup.statement_seq = Some(1);
         *module.inner.client.entries.lock().unwrap() = entries;
         let hold = hold.then(|| module.inner.runs.start(&route.session));
-        module.setup(route.clone(), setup).unwrap();
+        module.setup(route.clone(), setup.clone()).unwrap();
         module.idle_foreground(&route.session).await.unwrap();
         let mut conditions = Conditions::new(model, 100_000, 1000, rules);
         conditions.statement_epoch = Some("epoch".into());
         Self {
             module,
             route,
+            setup,
             conditions,
             _hold: hold,
             _dir: dir,
@@ -356,6 +358,46 @@ async fn quiet_a_freed_session_answers_its_next_jobs_as_one_never_freed() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn quiet_an_expired_carry_restores_the_same_view_bytes_on_setup() {
+    let kept = Fixture::new("worker", true).await;
+    let expired = Fixture::new("worker", false).await;
+    for f in [&kept, &expired] {
+        f.drop_tag(2, 1, 70_000).await;
+    }
+    let saved = expired.saved();
+    expired.wait_quiet_time().await;
+    assert!(expired.quiet());
+    expired.module.spawn_quiet_carry_sweep();
+    settle().await;
+    tokio::time::advance(Duration::from_secs(2 * 60 * 60)).await;
+    settle().await;
+    assert!(!expired
+        .module
+        .inner
+        .workers
+        .lock()
+        .unwrap()
+        .contains_key(expired.key()));
+    assert_eq!(
+        expired.saved(),
+        saved,
+        "eviction leaves the checkpoint alone"
+    );
+
+    let reads = *expired.client().reads.lock().unwrap();
+    for f in [&kept, &expired] {
+        let mut setup = f.setup.clone();
+        setup.statement_seq = Some(4);
+        f.module.setup(f.route.clone(), setup).unwrap();
+        f.module.idle_foreground(f.key()).await.unwrap();
+        f.drop_tag(3, 4, 72_000).await;
+    }
+    assert!(*expired.client().reads.lock().unwrap() > reads);
+    let views = |f: &Fixture| serde_json::to_vec(&*f.client().offered.lock().unwrap()).unwrap();
+    assert_eq!(views(&expired), views(&kept));
+}
+
+#[tokio::test(start_paused = true)]
 async fn quiet_a_busy_session_is_never_freed() {
     let f = Fixture::new("worker", false).await;
     // A view the runner took but has not reported applying.
@@ -431,6 +473,7 @@ async fn quiet_a_notice_sent_as_the_quiet_time_ends_runs_once_on_the_worker() {
                 saved: &quiet.saved,
                 subagent: quiet.subagent,
                 quiet_for: QUIET_AFTER,
+                idle_since: tokio::time::Instant::now(),
             },
             ready,
         )

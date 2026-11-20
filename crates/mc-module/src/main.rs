@@ -149,6 +149,7 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Registered, so the connection the vault reads go over can be bound.
     vault.start();
     module.spawn_upkeep();
+    module.spawn_quiet_carry_sweep();
     // One connection to the bus, through ck-bus, which revokes a module's
     // credential when it issues another: the dreamer's rounds announce new
     // docs proposals on it, memory changes wake other modules, Entorhinal's

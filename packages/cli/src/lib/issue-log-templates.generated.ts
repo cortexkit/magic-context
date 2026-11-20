@@ -1613,6 +1613,7 @@ const TEMPLATE_DATA = [
 "Subagent temperature omitted for \x01: no host or models.dev metadata\x020m",
 "compartment trigger: force-firing at \x01% (projected post-drop none)",
 "historian trigger eval: usage=\x01% (\x01 tokens) [\x01], checking trigger...",
+"ck-mc: session \x01/\x01/\x01: dropped its quiet carry after \x01 s without a job",
 "[dreamer] domain lease busy (maintain-docs:\x01) — deferring \x01 task(s)",
 "[dreamer] domain lease busy (user-memories:\x01) — deferring \x01 task(s)",
 "[magic-context] slow write transaction: site=host_runner_\x01 held=\x01ms",
