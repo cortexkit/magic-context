@@ -344,6 +344,60 @@ fn audit_views_invalid_cut_does_not_discard_independent_edits() {
 }
 
 #[tokio::test]
+async fn review_probe_over_limit_reselects_after_cut_refusal() {
+    let dir = scratch("cut-credit");
+    let part = |id: &str, status, bytes| {
+        let mut part: Part = serde_json::from_value(serde_json::json!({
+            "id":id, "kind":"tool", "call_id":id, "name":"read", "input":{"path":id},
+            "status":status, "output_bytes":bytes, "digest":""
+        }))
+        .unwrap();
+        part.tag = Some(if id == "big" { 2 } else { 4 });
+        part
+    };
+    let entries = vec![
+        text(1, "task"),
+        Entry::new(
+            2,
+            "archive",
+            Role::Assistant,
+            0,
+            vec![part("big", "completed", 300_000)],
+        ),
+        text(3, "final-user"),
+        Entry::new(
+            4,
+            "system",
+            Role::System,
+            0,
+            vec![part("running", "running", 0)],
+        ),
+    ];
+    let (mut session, _, settings) = head(&dir, entries, &[((1, "task"), (4, "system"))]).await;
+    // The running system entry makes the history candidate retreat to the
+    // final user entry. Validation refuses that cut, and it would have
+    // appeared to cover the large result without an emergency drop.
+    assert_eq!(session.history_ops(&settings, false).1, Some(3));
+    let ride = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    )
+    .with_request_tokens(100_000);
+    let view = session
+        .ride(&settings, &ride)
+        .expect("the no-cut ride can still reclaim");
+    assert_eq!(cut_through(&view), None);
+    assert!(
+        view.edits.iter().any(|edit| matches!(&edit.op,
+            EditOp::Drop { mid, part: Some(part) } if mid == "archive" && part == "big"
+        )),
+        "the proposed cut must not get credit for removing the large tool result"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn review_probe_numbers_only_cut_preserves_pending_stamp_on_restore() {
     let dir = scratch("coverage-cut");
     let (_, marked_notice) = transition();

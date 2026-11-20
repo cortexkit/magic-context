@@ -2,6 +2,11 @@
 
 use super::*;
 
+enum Sealed {
+    Done(Option<View>),
+    RetryWithoutCut,
+}
+
 impl Session {
     /// A ride: the runner is about to send a request whose bytes before the
     /// conversation change anyway, or that would not fit, or whose cache the
@@ -330,7 +335,44 @@ impl Session {
             "execute"
         }
         .into();
-        let (history, cut) = self.history_ops(settings, flush);
+        let (mut history, cut) = self.history_ops(settings, flush);
+        let latched = self.emergency_latched;
+        let (sealed, freed) = self.build_lanes(settings, over_limit, prefix_changes, &history, cut);
+        match sealed {
+            Sealed::Done(view) => (view, freed),
+            Sealed::RetryWithoutCut => {
+                // A cut affects lane eligibility and how much the emergency
+                // lane still needs to free. Re-plan before sealing again.
+                self.emergency_latched = latched;
+                history.retain(|op| !matches!(op, EditOp::Cut { .. }));
+                if let Some(previous) = self
+                    .latest
+                    .iter()
+                    .flat_map(|view| &view.edits)
+                    .find(|edit| matches!(edit.op, EditOp::Cut { .. }))
+                {
+                    history.push(previous.op.clone());
+                }
+                let (sealed, freed) =
+                    self.build_lanes(settings, over_limit, prefix_changes, &history, None);
+                let Sealed::Done(view) = sealed else {
+                    unreachable!("the retry proposes no new cut")
+                };
+                (view, freed)
+            }
+        }
+    }
+
+    fn build_lanes(
+        &mut self,
+        settings: &Settings,
+        over_limit: Option<u64>,
+        prefix_changes: bool,
+        history: &[EditOp],
+        cut: Option<u64>,
+    ) -> (Sealed, u64) {
+        let keep = self.next_keep.as_ref();
+        let flush = self.next_flush;
         let lanes_timing = crate::notice_cost_timing::span("build.lanes");
         let edited = self.edited(cut);
         let (context, usable, cutoff) = Self::lane_context(
@@ -414,7 +456,7 @@ impl Session {
                 .cloned()
                 .collect();
             let (queued_ops, queued_covered) = lanes::drop_ops(&context, &queued_for_emergency);
-            let removed_tokens = self.emergency_removed_tokens(&history, &queued_ops);
+            let removed_tokens = self.emergency_removed_tokens(history, &queued_ops);
             let emergency = lanes::Emergency {
                 prompt_tokens: self.pressure().last_prompt_tokens.unwrap_or(0),
                 request_tokens: over_limit,
@@ -547,6 +589,7 @@ impl Session {
         // another writer saved changes only the history head's second
         // message: it waits for a pass that rewrites anyway, as the plugin's
         // history refresh rides a rewrite and never starts one.
+        let shown;
         let history = if !flush
             && ops.is_empty()
             && !prefix_changes
@@ -554,17 +597,18 @@ impl Session {
             && keep.is_none()
             && !self.summary_unshown
             && !self.head_stale
-            && self.only_m1_changes(&history)
+            && self.only_m1_changes(history)
         {
-            self.head_as_shown(
+            shown = self.head_as_shown(
                 "only memories in m[1] changed; they wait for a pass that rewrites anyway",
-            )
+            );
+            &shown
         } else {
             history
         };
-        ops.extend(history);
+        ops.extend(history.iter().cloned());
         drop(lanes_timing);
-        (self.seal(ops, &covered), freed)
+        (self.seal_candidate(ops, &covered, true, false), freed)
     }
 
     /// Commands and rebuilds use the same tail boundary, so queued work is
@@ -594,31 +638,50 @@ impl Session {
 
     /// Turn a pass's edits into the next view, and forget the queued drops
     /// it covers.
-    pub(super) fn seal(
+    #[cfg(test)]
+    pub(super) fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
+        let remaining = ops
+            .iter()
+            .filter(|op| !matches!(op, EditOp::Cut { .. }))
+            .cloned()
+            .collect();
+        match self.seal_candidate(ops, covered, true, false) {
+            Sealed::Done(view) => view,
+            Sealed::RetryWithoutCut => {
+                let Sealed::Done(view) = self.seal_candidate(remaining, covered, false, true)
+                else {
+                    unreachable!("the retry proposes no new cut")
+                };
+                view
+            }
+        }
+    }
+
+    fn seal_candidate(
         &mut self,
         mut ops: Vec<EditOp>,
         covered: &[lanes::PartKey],
-    ) -> Option<View> {
+        retry_cut: bool,
+        keep_old_cut: bool,
+    ) -> Sealed {
         if self.recovery_in_flight() {
-            return None;
+            return Sealed::Done(None);
         }
         let _timing = crate::notice_cost_timing::span("build.seal");
         let version = self.version + 1;
         ops.retain(|op| !self.render_failed.excludes(op));
         let covered = self.renderable_covered(&ops, covered);
         let is_cut = |op: &EditOp| matches!(op, EditOp::Cut { .. });
-        let without_new_cut = ops
-            .iter()
-            .any(|op| {
+        let has_new_cut = retry_cut
+            && ops.iter().any(|op| {
                 is_cut(op)
                     && !self
                         .latest
                         .iter()
                         .flat_map(|view| &view.edits)
                         .any(|e| e.op == *op)
-            })
-            .then(|| ops.iter().filter(|op| !is_cut(op)).cloned().collect());
-        let mut build = |ops: Vec<EditOp>, keep_old_cut| {
+            });
+        let built = {
             let retire = retired_history(self.summaries.is_empty(), &ops);
             let full = self.with_replaced_outputs(&ops);
             view_builder::next_view_cached(
@@ -647,26 +710,18 @@ impl Session {
                 &mut self.view_validation,
             )
         };
-        let mut built = build(ops, false);
-        // A bad proposed cut must not discard independent edits. Keep the
-        // previous cut and validate the rest of the batch as a new candidate.
-        if let (Err(_), Some(remaining)) = (&built, without_new_cut) {
-            if let Ok(view) = build(remaining, true) {
-                built = Ok(view);
-            }
-        }
-        match built {
+        Sealed::Done(match built {
             Ok(Some(view)) => {
                 if self.repeats_failed_edits(&view) {
                     self.discard_held_view();
-                    return None;
+                    return Sealed::Done(None);
                 }
                 // Provider-rule companion drops of signed reasoning remain
                 // allowed on an excluded message: without them, edits before
                 // that reasoning would produce a request the provider refuses.
                 if self.repeats_failed_reasoning_drop(&view) {
                     self.discard_held_view();
-                    return None;
+                    return Sealed::Done(None);
                 }
                 // A moved session's view must cut at or after its move floor
                 // (see `move_floor`). One that doesn't stays here, and the
@@ -674,7 +729,7 @@ impl Session {
                 if let Some(why) = self.move_floor_breach(&view) {
                     self.discard_held_view();
                     self.hold_below_move_floor(&why);
-                    return None;
+                    return Sealed::Done(None);
                 }
                 self.release_move_floor_hold();
                 // Nor may any view cut before history the runner serves
@@ -683,7 +738,7 @@ impl Session {
                     self.discard_held_view();
                     self.log_running_call_below_numbers_floor();
                     self.hold_below_numbers_floor(&why);
-                    return None;
+                    return Sealed::Done(None);
                 }
                 self.release_numbers_floor_hold();
                 self.version = version;
@@ -713,6 +768,7 @@ impl Session {
             // A lane's bug. Its work is forgotten, queued drops and the parts
             // automatic lanes chose alike, so the same failure does not repeat
             // on every pass.
+            Err(_) if has_new_cut => return Sealed::RetryWithoutCut,
             Err(refusal) => {
                 self.commit_bookmark();
                 self.forget_queued(&covered);
@@ -725,7 +781,7 @@ impl Session {
                 );
                 None
             }
-        }
+        })
     }
 
     /// Tests only: the next view with `ops` added, without ck-mc's checks.
