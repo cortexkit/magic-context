@@ -6,8 +6,7 @@
 use serde_json::{json, Value};
 use subc_client_rs::config::{Layer, LayerValue, ValidationContext};
 
-use super::convert::convert_0_49;
-use super::edit::applied;
+use super::convert_tests::convert;
 use super::UserTier;
 use crate::pass::Settings;
 use crate::vault::Vault;
@@ -100,8 +99,7 @@ fn equivalent_files_resolve_to_the_same_settings_in_both_builds() {
     let vault = Vault::none();
     let path = std::path::Path::new("/settings/magic-context.jsonc");
     for (name, file) in super::convert_tests::corpus() {
-        let (edits, _) = convert_0_49(&file);
-        let converted = applied(&file, &edits).unwrap();
+        let (converted, _) = convert(&file);
         let readers = [
             ("as delivered", delivered(&converted)),
             (
@@ -163,7 +161,7 @@ fn a_number_keep_reasoning_tokens_survives_a_projects_map_once_converted() {
     let project = json!({"keep_reasoning_tokens": {"anthropic/*": 8000}});
     let today = super::resolve_tiers(Some(&file), Some(&project), "openai/gpt-5", 200_000, &vault);
     assert_eq!(today.keep_reasoning_tokens, 10_000);
-    let converted = delivered(&applied(&file, &convert_0_49(&file).0).unwrap());
+    let converted = delivered(&convert(&file).0);
     let managed = super::resolve_tiers(
         Some(converted.value()),
         Some(&project),
@@ -191,7 +189,7 @@ fn whether_the_person_set_a_threshold_shows_the_same_in_both_builds() {
         json!({"execute_threshold_percentage": 65}),
         json!({"execute_threshold_percentage": {"anthropic/claude-opus-5-5": 80}}),
     ] {
-        let converted = applied(&file, &convert_0_49(&file).0).unwrap();
+        let (converted, _) = convert(&file);
         let tier = delivered(&converted);
         for model in MODELS {
             assert_eq!(

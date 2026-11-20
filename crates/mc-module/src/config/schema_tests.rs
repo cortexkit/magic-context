@@ -452,14 +452,16 @@ fn ranges_are_the_ranges_the_readers_accept() {
         let integer = node["type"] == "integer";
         let maximum = node["maximum"].as_f64();
         let at = |value: f64| {
-            let mut file = json!({});
+            let mut file = "{}".to_owned();
             let number = if integer {
                 json!(value as i64)
             } else {
                 json!(value)
             };
-            super::edit::apply(&mut file, &super::edit::Edit::set(&path, number)).unwrap();
-            file
+            let keys = super::edit::keys(&path).unwrap();
+            let path: Vec<_> = keys.iter().map(String::as_str).collect();
+            subc_jsonc::set_member(&mut file, &path, &number).unwrap();
+            serde_json::from_str::<Value>(&file).unwrap()
         };
         let step = if integer { 1.0 } else { 0.001 };
         let mut inside = vec![minimum];

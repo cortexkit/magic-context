@@ -4,12 +4,16 @@
 use serde_json::{json, Value};
 
 use super::convert::convert_0_49;
-use super::edit::{applied, Edit};
+use super::edit::{apply, Edit};
 
 /// The file after conversion, and the notes.
-fn convert(file: &Value) -> (Value, Vec<String>) {
+pub(super) fn convert(file: &Value) -> (Value, Vec<String>) {
     let (edits, notes) = convert_0_49(file);
-    (applied(file, &edits).expect("the edits apply"), notes)
+    let text = apply(&file.to_string(), &edits).expect("the edits apply");
+    (
+        serde_json::from_str(&text).expect("the result is JSON"),
+        notes,
+    )
 }
 
 /// Real-looking 0.49 user files, by name. Each is something a person could
@@ -480,6 +484,9 @@ fn the_converted_text_keeps_the_comments_of_a_real_looking_file() {
   "embedding": {
     "provider": "local" // runs on this machine
   },
+  "rerank": {
+    "provider": "off" // use vector scores as-is
+  },
   "dreamer": {
     /* Off while I travel. */
     "disable": true,
@@ -489,17 +496,22 @@ fn the_converted_text_keeps_the_comments_of_a_real_looking_file() {
 "#;
     let parsed = super::jsonc::parse(text);
     let (edits, _) = convert_0_49(&parsed.value);
-    let converted = super::jsonc::edit(text, &edits).expect("the rewrite applies");
+    let converted = apply(text, &edits).expect("the rewrite applies");
     assert_eq!(
         converted,
         r#"{
   // Summarize a little later than the default.
-  "execute_threshold_percentage": { "default": 70 },
+  "execute_threshold_percentage": {
+    "default": 70
+  },
   // Tell me the time every hour; false turns it off.
   "clock_note": "off",
-   // obsolete in 0.50
+  // obsolete in 0.50
   "embedding": {
     "provider": "synapse" // runs on this machine
+  },
+  "rerank": {
+    "enabled": false // use vector scores as-is
   },
   "dreamer": {
     /* Off while I travel. */
@@ -508,5 +520,16 @@ fn the_converted_text_keeps_the_comments_of_a_real_looking_file() {
   }
 }
 "#
+    );
+}
+
+#[test]
+fn the_last_value_is_converted_and_the_bom_and_crlf_are_kept() {
+    let text =
+        "\u{feff}{\r\n  \"clock_note\": \"1h\",\r\n  \"clock_note\": false // quiet\r\n}\r\n";
+    let (edits, _) = convert_0_49(&super::jsonc::parse(text).value);
+    assert_eq!(
+        apply(text, &edits).unwrap(),
+        "\u{feff}{\r\n  \"clock_note\": \"1h\",\r\n  \"clock_note\": \"off\" // quiet\r\n}\r\n"
     );
 }

@@ -260,7 +260,7 @@ fn the_rewrite_converts_once_keeps_the_comments_and_saves_the_old_bytes() {
     };
     assert_eq!(
         read(&home.user),
-        "{\n  // Summarize later.\n  \"execute_threshold_percentage\": { \"default\": 70 },\n  \"clock_note\": \"off\" // quiet\n}\n"
+        "{\n  // Summarize later.\n  \"execute_threshold_percentage\": {\n    \"default\": 70\n  },\n  \"clock_note\": \"off\" // quiet\n}\n"
     );
     assert!(saved.starts_with(home.data.join(BACKUP_FOLDER)));
     assert_eq!(read(&saved), old);
@@ -305,6 +305,37 @@ fn a_file_with_nothing_to_convert_or_a_syntax_issue_is_left_untouched() {
     assert!(why.contains("syntax issue at 3:"), "{why}");
     fs::remove_file(&home.user).unwrap();
     assert_eq!(rewrite_0_49(&home.user, &home.data), Rewrite::Missing);
+}
+
+#[test]
+fn a_repeated_key_to_remove_or_rename_refuses_the_whole_rewrite() {
+    let home = home(&json!({}));
+    for (text, key) in [
+        (
+            r#"{"$schema":"old","cache_ttl":"5m","cache_ttl":"1h"}"#,
+            "/cache_ttl",
+        ),
+        (
+            r#"{"$schema":"old","dreamer":{"disable":false,"disable":true}}"#,
+            "/dreamer/disable",
+        ),
+    ] {
+        fs::write(&home.user, text).unwrap();
+        let rewrite = rewrite_0_49(&home.user, &home.data);
+        let Rewrite::Refused(why) = rewrite else {
+            panic!("expected a refusal for {key}, got {rewrite:?}");
+        };
+        assert!(
+            why.contains(&format!("{key} is written more than once")),
+            "{why}"
+        );
+        assert!(
+            why.contains("Remove the extra copies and restart Magic Context"),
+            "{why}"
+        );
+        assert_eq!(read(&home.user), text);
+        assert!(!home.data.join(BACKUP_FOLDER).exists());
+    }
 }
 
 #[cfg(unix)]

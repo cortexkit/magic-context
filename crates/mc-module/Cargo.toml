@@ -29,7 +29,7 @@ memory-replica = []
 # nothing. No build turns it on yet: it waits until the daemon supports
 # converting old settings files, and then turns on in one build together with
 # ck-mc's own conversion.
-managed-settings = []
+managed-settings = ["dep:subc-jsonc"]
 # Opt-in heap attribution for the `heap_profile` test (allocation sites with
 # backtraces). Only that test target requires it; no build of ck-mc turns it on.
 heap-profile = ["dep:dhat"]
@@ -53,6 +53,7 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true }
 subc-client-rs = { workspace = true }
+subc-jsonc = { version = "=0.1.5", optional = true }
 subc-protocol = { workspace = true }
 # Only the registration live suite's helper binaries use it directly; ck-mc
 # reaches it through subc-client-rs.
@@ -138,6 +139,7 @@ cortexkit-bus-inmemory = "=0.3.2"
 # daemon that supervises the real ck-mc binary, the wire it is driven over,
 # and scratch homes fenced away from the operator's own.
 subc-daemon = { workspace = true }
+subc-jsonc = "=0.1.5"
 subc-control = { workspace = true }
 subc-transport = { workspace = true }
 cortexkit-test-support = "=0.1.14"

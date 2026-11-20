@@ -380,7 +380,7 @@ fn rewrite_file(user_path: &Path, data_dir: &Path) -> Rewrite {
     if edits.is_empty() {
         return Rewrite::Unchanged;
     }
-    let converted = match super::jsonc::edit(&text, &edits) {
+    let converted = match super::edit::apply(&text, &edits) {
         Ok(converted) => converted,
         Err(why) => return Rewrite::Refused(why),
     };

@@ -1223,8 +1223,6 @@ mod convert_tests;
 #[cfg(test)]
 mod equivalence_tests;
 #[cfg(test)]
-mod jsonc_edit_tests;
-#[cfg(test)]
 mod review_tests;
 #[cfg(test)]
 mod schema_tests;

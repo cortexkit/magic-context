@@ -1680,6 +1680,7 @@ dependencies = [
  "subc-client-rs",
  "subc-control",
  "subc-daemon",
+ "subc-jsonc",
  "subc-os",
  "subc-protocol",
  "subc-transport",
@@ -2791,9 +2792,9 @@ dependencies = [
 
 [[package]]
 name = "subc-jsonc"
-version = "0.1.3"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3e08ea5f235659538702975b865583bdde9d303ebfa658585565d9f3c2af4e6"
+checksum = "379816808ce1cb008c7d56055ca0227ad7242463c7ab097c0ec201baea8e37d7"
 dependencies = [
  "serde_json",
 ]

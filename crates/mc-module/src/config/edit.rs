@@ -2,10 +2,11 @@
 //! the conversion of a 0.49 settings file produces them
 //! ([`super::convert::convert_0_49`]).
 //!
-//! [`apply`] changes a parsed value; [`super::jsonc::edit`] makes the same
-//! change to the file's text, keeping its comments and layout.
+//! [`apply`] sends the plan to `subc_jsonc`, which keeps comments and layout
+//! outside the edited members.
 
-use serde_json::{Map, Value};
+use serde_json::Value;
+use subc_jsonc::Edit as JsoncEdit;
 
 /// One change to the settings.
 #[derive(Clone, Debug, PartialEq)]
@@ -15,9 +16,12 @@ pub enum Edit {
     Set { pointer: String, value: Value },
     /// Remove the member at `pointer`; nothing happens when it is absent.
     Remove { pointer: String },
-    /// Give the member at `pointer` the key `to` in the same object, keeping
-    /// its value (and, in a file, the comments around it).
-    Rename { pointer: String, to: String },
+    /// Change the key and value in place, keeping the comments around it.
+    RenameAndSet {
+        pointer: String,
+        to: String,
+        value: Value,
+    },
 }
 
 impl Edit {
@@ -34,19 +38,20 @@ impl Edit {
         }
     }
 
-    pub fn rename(pointer: impl Into<String>, to: impl Into<String>) -> Self {
-        Self::Rename {
+    pub fn rename_and_set(pointer: impl Into<String>, to: impl Into<String>, value: Value) -> Self {
+        Self::RenameAndSet {
             pointer: pointer.into(),
             to: to.into(),
+            value,
         }
     }
 
     /// The pointer the edit starts from.
-    pub fn pointer(&self) -> &str {
+    fn pointer(&self) -> &str {
         match self {
-            Self::Set { pointer, .. } | Self::Remove { pointer } | Self::Rename { pointer, .. } => {
-                pointer
-            }
+            Self::Set { pointer, .. }
+            | Self::Remove { pointer }
+            | Self::RenameAndSet { pointer, .. } => pointer,
         }
     }
 }
@@ -70,68 +75,65 @@ pub fn child(parent: &str, key: &str) -> String {
     format!("{parent}/{}", key.replace('~', "~0").replace('/', "~1"))
 }
 
-/// Make `edit` on `value`, an object.
-pub fn apply(value: &mut Value, edit: &Edit) -> Result<(), String> {
-    let keys = keys(edit.pointer())?;
-    let Some((last, parents)) = keys.split_last() else {
-        return Err("an edit must name a member, not the whole file".into());
-    };
-    match edit {
-        Edit::Set { value: new, .. } => {
-            let mut object = as_object(value, edit.pointer())?;
-            for key in parents {
-                let entry = object
-                    .entry(key.clone())
-                    .or_insert_with(|| Value::Object(Map::new()));
-                object = as_object(entry, edit.pointer())?;
-            }
-            object.insert(last.clone(), new.clone());
-        }
-        Edit::Remove { .. } => {
-            if let Some(object) = parent_object(value, parents) {
-                object.remove(last);
-            }
-        }
-        Edit::Rename { to, .. } => {
-            let object = parent_object(value, parents)
-                .ok_or_else(|| format!("{} does not exist", edit.pointer()))?;
-            if object.contains_key(to) {
-                return Err(format!("{} already has a member {to:?}", edit.pointer()));
-            }
-            let moved = object
-                .remove(last)
-                .ok_or_else(|| format!("{} does not exist", edit.pointer()))?;
-            object.insert(to.clone(), moved);
-        }
-    }
-    Ok(())
-}
-
-/// Make every edit, in order, on a copy of `value`.
-pub fn applied(value: &Value, edits: &[Edit]) -> Result<Value, String> {
-    let mut value = value.clone();
+/// Return converted text only if the entire plan succeeds.
+pub(super) fn apply(text: &str, edits: &[Edit]) -> Result<String, String> {
+    // The shared JSONC tokenizer does not accept a leading UTF-8 byte order mark.
+    let bom = '\u{feff}';
+    let mut document = text.strip_prefix(bom).unwrap_or(text).to_owned();
     for edit in edits {
-        apply(&mut value, edit)?;
+        let keys = keys(edit.pointer())?;
+        let path: Vec<_> = keys.iter().map(String::as_str).collect();
+        match edit {
+            Edit::Set { value, .. } => subc_jsonc::set_member(&mut document, &path, value)?,
+            Edit::Remove { .. } => {
+                subc_jsonc::remove_member(&mut document, &path).map_err(|reason| {
+                    if reason.ends_with(" is written more than once") {
+                        repeated_key(edit.pointer())
+                    } else {
+                        reason
+                    }
+                })?;
+            }
+            Edit::RenameAndSet { to, value, .. } => {
+                let mut target = path.clone();
+                let last = target.last_mut().ok_or("an edit must name a member")?;
+                *last = to;
+                subc_jsonc::apply_edits(
+                    &mut document,
+                    &[
+                        JsoncEdit::RenameMember {
+                            path: &path,
+                            key: to,
+                        },
+                        JsoncEdit::SetMember {
+                            path: &target,
+                            value,
+                        },
+                    ],
+                )
+                .map_err(|reason| {
+                    // The planner only renames to an absent key, so a conflict
+                    // means the old key occurs more than once.
+                    if reason.ends_with(" has a conflicting key") {
+                        repeated_key(edit.pointer())
+                    } else {
+                        reason
+                    }
+                })?;
+            }
+        }
     }
-    Ok(value)
+    if text.starts_with(bom) {
+        document.insert(0, bom);
+    }
+    if let Some(issue) = super::jsonc::parse(&document).issue {
+        return Err(format!(
+            "the converted text would have a syntax issue at {issue}"
+        ));
+    }
+    Ok(document)
 }
 
-fn as_object<'a>(
-    value: &'a mut Value,
-    pointer: &str,
-) -> Result<&'a mut Map<String, Value>, String> {
-    value
-        .as_object_mut()
-        .ok_or_else(|| format!("{pointer} passes through a value that is not an object"))
-}
-
-fn parent_object<'a>(
-    value: &'a mut Value,
-    parents: &[String],
-) -> Option<&'a mut Map<String, Value>> {
-    let mut object = value.as_object_mut()?;
-    for key in parents {
-        object = object.get_mut(key)?.as_object_mut()?;
-    }
-    Some(object)
+fn repeated_key(pointer: &str) -> String {
+    format!("{pointer} is written more than once; the conversion left the file unchanged. Remove the extra copies and restart Magic Context.")
 }

@@ -3,7 +3,7 @@
 //!
 //! [`convert_0_49`] is pure: it reads the parsed file and says what to
 //! change, and the one-time rewrite makes those changes to the file's text
-//! ([`super::jsonc::edit`]). Every conversion keeps today's meaning:
+//! ([`super::edit::apply`]). Every conversion keeps today's meaning:
 //! - a reshaped setting is written in its new shape (`clock_note: false`
 //!   becomes `"off"`, a number threshold becomes `{"default": n}`, and so on);
 //! - a value ck-mc ignores today, so that the default applies, is removed,
@@ -413,13 +413,7 @@ impl Converter {
             "provider" => match value.as_str() {
                 // `"off"` becomes `enabled: false`, on the provider's own line.
                 Some("off") if !expansion(value) => {
-                    let enabled = at.replace("/provider", "/enabled");
-                    if has_enabled {
-                        this.edits.push(Edit::remove(at));
-                    } else {
-                        this.edits.push(Edit::rename(at, "enabled"));
-                    }
-                    this.edits.push(Edit::set(enabled, json!(false)));
+                    this.renamed(at, "enabled", has_enabled, json!(false));
                 }
                 _ => this.leaf(at, value, |v| match v.as_str() {
                     Some("synapse" | "remote") => Keep,
@@ -508,14 +502,24 @@ impl Converter {
             match key.as_str() {
                 "disable" => match disabled {
                     Some(disabled) => {
-                        self.renamed(&member_at, "enabled", map, json!(!disabled));
+                        self.renamed(
+                            &member_at,
+                            "enabled",
+                            map.contains_key("enabled"),
+                            json!(!disabled),
+                        );
                     }
                     None => self.drop_value(&member_at, "not true or false"),
                 },
                 "enabled" if disabled.is_some() => {}
                 "enabled" => self.leaf(&member_at, value, boolean),
                 "maxTokens" => match budget {
-                    Some(budget) => self.renamed(&member_at, "max_tokens", map, json!(budget)),
+                    Some(budget) => self.renamed(
+                        &member_at,
+                        "max_tokens",
+                        map.contains_key("max_tokens"),
+                        json!(budget),
+                    ),
                     None => self.drop_value(&member_at, "not a whole number above 0"),
                 },
                 "max_tokens" if budget.is_some() => {}
@@ -529,14 +533,14 @@ impl Converter {
 
     /// Move the member at `at` to `to` in the same object with `value`:
     /// renamed in place when `to` is free, else written there and removed.
-    fn renamed(&mut self, at: &str, to: &str, map: &Map<String, Value>, value: Value) {
-        let target = format!("{}/{to}", &at[..at.rfind('/').unwrap_or(0)]);
-        if map.contains_key(to) {
+    fn renamed(&mut self, at: &str, to: &str, target_exists: bool, value: Value) {
+        if target_exists {
+            let (parent, _) = at.rsplit_once('/').expect("a pointer to a member");
             self.edits.push(Edit::remove(at));
+            self.edits.push(Edit::set(child(parent, to), value));
         } else {
-            self.edits.push(Edit::rename(at, to));
+            self.edits.push(Edit::rename_and_set(at, to, value));
         }
-        self.edits.push(Edit::set(target, value));
     }
 
     fn tasks(&mut self, at: &str, value: &Value) {
