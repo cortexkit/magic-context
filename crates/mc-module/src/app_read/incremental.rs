@@ -1051,8 +1051,8 @@ impl Session {
             if !self.queued.contains(&key)
                 && !self
                     .unconfirmed
-                    .first()
-                    .is_some_and(|pending| pending.before.queued.contains(&key))
+                    .iter()
+                    .any(|pending| pending.before.queued.contains(&key))
             {
                 self.app.stamps.remove(&key);
             }

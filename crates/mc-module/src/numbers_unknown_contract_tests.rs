@@ -102,6 +102,68 @@ fn cut_through(view: &View) -> Option<&str> {
 }
 
 #[tokio::test]
+async fn review_probe_refused_cut_restores_stamp_pruned_by_next_notice() {
+    check_refused_cut_restores_stamps(false).await;
+}
+
+#[tokio::test]
+async fn review_probe_refused_cumulative_cut_restores_stamp_from_second_offer() {
+    check_refused_cut_restores_stamps(true).await;
+}
+
+async fn check_refused_cut_restores_stamps(cumulative: bool) {
+    let dir = scratch("cut-stamps");
+    let entries: Vec<_> = (1..=8).map(|n| text(n, &format!("m{n}"))).collect();
+    let (mut session, client, settings) =
+        head(&dir, entries.clone(), &[((1, "m1"), (3, "m3"))]).await;
+    let stamp = |tag| serde_json::json!({"drop": tag});
+    assert_eq!(
+        session.ctx_reduce(&client, &stamp("2")).await.unwrap(),
+        "1 tag stamped."
+    );
+    let first = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&first), Some("m3"));
+    assert!(session.publish(&client, first.clone()).await);
+    assert!(session.index.find_tag(2).is_none());
+    let n = notice(&session, 1, entries.last().map(cursor));
+    session.notice(&client, &settings, n).await;
+
+    if cumulative {
+        assert_eq!(
+            session.ctx_reduce(&client, &stamp("4")).await.unwrap(),
+            "1 tag stamped."
+        );
+        summary(session.db.as_ref().unwrap(), 2, (4, "m4"), (5, "m5"));
+        session.load_summaries();
+        let second = session.build(&settings, None, false, None).0.unwrap();
+        assert_eq!(cut_through(&second), Some("m5"));
+        assert!(session.publish(&client, second).await);
+        assert!(session.index.find_tag(4).is_none());
+        let n = notice(&session, 2, entries.last().map(cursor));
+        session.notice(&client, &settings, n).await;
+    }
+    let mut n = notice(&session, 3, entries.last().map(cursor));
+    n.events = vec![Event::ViewRefused {
+        version: first.version,
+        refusal: ViewRefusal::BadSince,
+    }];
+    session.notice(&client, &settings, n).await;
+    if cumulative {
+        assert!(
+            session.queued.contains(&("m4".into(), "p".into())),
+            "the second cut hid its later stamp"
+        );
+        assert!(session.app.stamps.contains_key(&("m4".into(), "p".into())));
+    }
+    assert!(
+        session.queued.contains(&("m2".into(), "p".into())),
+        "refusing the cut hid a stamp from the restored queue"
+    );
+    assert!(session.app.stamps.contains_key(&("m2".into(), "p".into())));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn audit_views_adopt_older_cut_reindexes_visible_tail() {
     let dir = scratch("older-cut");
     let entries: Vec<_> = (1..=10).map(|n| text(n, &format!("m{n}"))).collect();

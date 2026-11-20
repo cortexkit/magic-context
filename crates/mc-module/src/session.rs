@@ -417,6 +417,10 @@ pub struct Unconfirmed {
     pub view: View,
     /// The queued drops the view carried.
     covered: Vec<lanes::PartKey>,
+    /// Queued parts hidden by the cut, not by an individual edit. Refusing
+    /// the cut restores these parts without blaming their queued drops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cut_covered: Vec<lanes::PartKey>,
     before: Before,
     /// The ordinal of the newest entry the index held when the view was
     /// built. A refusal naming a part beyond it names an entry the view

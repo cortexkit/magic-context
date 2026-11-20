@@ -392,6 +392,21 @@ impl Session {
         let _timing = crate::notice_cost_timing::span("publish.accept");
         self.app_record_view(&view);
         let covered = std::mem::take(&mut self.next_covered);
+        let mut cut_covered = Vec::new();
+        // A cut also fulfills drops it never needs to name in the view.
+        // Record them before applying the cut prunes their index entries.
+        if let Some(cut) = move_floor::cut_of(&view).and_then(|mid| self.index.ordinal_of(mid)) {
+            for key in &self.queued {
+                if self
+                    .index
+                    .ordinal_of(&key.0)
+                    .is_some_and(|ordinal| ordinal <= cut)
+                    && !covered.contains(key)
+                {
+                    cut_covered.push(key.clone());
+                }
+            }
+        }
         let before = Before {
             head_stale: self.head_stale,
             latest: self.latest.clone(),
@@ -415,6 +430,7 @@ impl Session {
         self.unconfirmed.push(Unconfirmed {
             view: view.clone(),
             covered: covered.clone(),
+            cut_covered: cut_covered.clone(),
             before,
             built_through: self.index.cursor().map(|cursor| cursor.ordinal),
             accepted: false,
@@ -423,6 +439,7 @@ impl Session {
             handed_over_ms: None,
         });
         self.forget_queued(&covered);
+        self.forget_queued(&cut_covered);
         if std::mem::take(&mut self.next_latch) {
             self.emergency_latched = true;
         } else if std::mem::take(&mut self.next_rearm) {
@@ -495,10 +512,8 @@ impl Session {
                 .iter()
                 .position(|pending| same(applied, &pending.view))
             {
-                let stamp_keys: Vec<_> = self
-                    .unconfirmed
-                    .first()
-                    .into_iter()
+                let stamp_keys: Vec<_> = self.unconfirmed[..=at]
+                    .iter()
                     .flat_map(|first| first.before.queued.iter().cloned())
                     .collect();
                 if let Some(first) = self.unconfirmed.first() {
@@ -688,7 +703,7 @@ impl Session {
         // contain parts added after the first view was handed over; a later
         // undone view may already have covered some of those parts too.
         for pending in &undone {
-            for part in &pending.covered {
+            for part in pending.covered.iter().chain(&pending.cut_covered) {
                 if pending.before.queued.contains(part) {
                     self.queued.insert(part.clone());
                     self.app_projection.dirty.insert(part.0.clone());
