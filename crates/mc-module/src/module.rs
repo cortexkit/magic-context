@@ -298,9 +298,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             store.as_ref().map(|s| s.path.clone()),
             db.as_ref().map(|d| d.path.clone()),
         );
-        let search = db
-            .as_ref()
-            .map(|db| crate::search::background::Background::new(client.clone(), db.path.clone()));
+        let search = db.as_ref().map(|db| {
+            crate::search::background::Background::new(
+                client.clone(),
+                db.path.clone(),
+                db.message_index.clone(),
+            )
+        });
         let dreamer = db.as_ref().map(|_| {
             // A project's dreamer run embeds text with the provider the
             // person's settings configure for its folder, read when the run

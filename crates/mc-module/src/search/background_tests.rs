@@ -251,7 +251,7 @@ impl Fixture {
         }
     }
     fn worker(&self) -> Background {
-        Background::new(self.client.clone(), self.path.clone())
+        Background::new(self.client.clone(), self.path.clone(), Arc::default())
     }
     fn assert_rows(&self, expected: usize) {
         let conn = Connection::open(&self.path).unwrap();
@@ -443,6 +443,7 @@ async fn runner_activity_uses_the_newest_entry_actually_indexed_in_the_batch() {
     assert!(batch(
         f.client.as_ref(),
         &mut conn,
+        &Default::default(),
         &f.key,
         &mut mark,
         &mut activity
@@ -465,6 +466,7 @@ async fn runner_activity_throttles_batches_for_sixty_seconds_and_keeps_pending_a
     batch(
         f.client.as_ref(),
         &mut conn,
+        &Default::default(),
         &f.key,
         &mut f.client.mark(None),
         &mut activity,
@@ -482,6 +484,7 @@ async fn runner_activity_throttles_batches_for_sixty_seconds_and_keeps_pending_a
     batch(
         f.client.as_ref(),
         &mut conn,
+        &Default::default(),
         &f.key,
         &mut f.client.mark(None),
         &mut activity,
@@ -556,6 +559,7 @@ async fn runner_activity_is_monotonic_and_scoped_to_the_harness_and_session() {
     batch(
         f.client.as_ref(),
         &mut conn,
+        &Default::default(),
         &f.key,
         &mut f.client.mark(None),
         &mut activity,
@@ -578,6 +582,7 @@ async fn runner_activity_is_monotonic_and_scoped_to_the_harness_and_session() {
     batch(
         f.client.as_ref(),
         &mut conn,
+        &Default::default(),
         &f.key,
         &mut mark,
         &mut activity,
@@ -601,6 +606,7 @@ async fn runner_activity_is_monotonic_and_scoped_to_the_harness_and_session() {
     batch(
         f.client.as_ref(),
         &mut conn,
+        &Default::default(),
         &collision,
         &mut mark,
         &mut other,

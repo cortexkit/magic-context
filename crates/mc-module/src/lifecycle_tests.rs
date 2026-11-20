@@ -844,8 +844,11 @@ async fn lifecycle_revert_removes_summary_rows_and_raw_search_rows() {
     session.notice(&client, &settings, request).await;
     // Notice invalidates summary state immediately; raw search cleanup now
     // runs on the independent indexer and is fenced only for this assertion.
-    let search =
-        crate::search::background::Background::new(Arc::new(client), dir.join("context.db"));
+    let search = crate::search::background::Background::new(
+        Arc::new(client),
+        dir.join("context.db"),
+        session.db.as_ref().unwrap().message_index.clone(),
+    );
     let key = session.key().clone();
     search.mark(&key, session.search_mark());
     search.idle(&key).await.unwrap();

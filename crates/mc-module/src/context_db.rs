@@ -273,6 +273,7 @@ pub struct ContextDb {
     replica_wake: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     /// Read-only connections for searches, opened when first needed.
     readers: readers::Readers,
+    pub(crate) message_index: Arc<crate::search::messages::IndexGeneration>,
     #[cfg(feature = "context-db-timing")]
     timing: timing::Timing,
     #[cfg(test)]
@@ -444,6 +445,7 @@ impl ContextDb {
             attribution_wake: std::sync::OnceLock::new(),
             replica_wake: std::sync::OnceLock::new(),
             readers: readers::Readers::default(),
+            message_index: Arc::default(),
             #[cfg(feature = "context-db-timing")]
             timing,
             #[cfg(test)]
@@ -755,7 +757,9 @@ impl ContextDb {
     ) -> T {
         if let Some(mut lease) = self.readers.lease(&self.path) {
             let (conn, coverage) = lease.parts();
-            if begin_read(conn) {
+            let (generation, began) = self.message_index.snapshot(|| begin_read(conn));
+            if began {
+                coverage.for_snapshot(generation);
                 #[cfg(test)]
                 self.pause_search_read();
                 let value = read(conn, coverage);

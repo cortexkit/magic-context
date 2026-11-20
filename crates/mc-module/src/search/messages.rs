@@ -90,7 +90,14 @@ mod attribution_tests {
         // The index has already seen the bytes before the runner serves host facts.
         super::index(&mut conn, "mock", "s", std::slice::from_ref(&entry)).unwrap();
         entry.host_parts = vec![HostPart::new("host")];
-        super::reconcile(&mut conn, "mock", "s", std::slice::from_ref(&entry)).unwrap();
+        super::reconcile(
+            &mut conn,
+            &Default::default(),
+            "mock",
+            "s",
+            std::slice::from_ref(&entry),
+        )
+        .unwrap();
         assert_eq!(super::content_of(&entry), "actual instruction");
         assert!(super::app_page(&conn, "s", "hostmarker", 0, 10).is_empty());
         assert_eq!(super::app_page(&conn, "s", "instruction", 0, 10).len(), 1);
@@ -136,13 +143,13 @@ pub(crate) fn watermark(conn: &Connection, session: &str) -> rusqlite::Result<i6
         .unwrap_or(0))
 }
 
-fn delete_from(conn: &Connection, session: &str, from_number: i64) -> rusqlite::Result<()> {
-    conn.execute(
+fn delete_from(conn: &Connection, session: &str, from_number: i64) -> rusqlite::Result<bool> {
+    let fts = conn.execute(
         "DELETE FROM message_history_fts
           WHERE session_id = ?1 AND CAST(message_ordinal AS INTEGER) >= ?2",
         params![session, from_number],
     )?;
-    conn.execute(
+    let map = conn.execute(
         "DELETE FROM message_fts_rowid_map WHERE session_id = ?1 AND message_ordinal >= ?2",
         params![session, from_number],
     )?;
@@ -150,7 +157,7 @@ fn delete_from(conn: &Connection, session: &str, from_number: i64) -> rusqlite::
         "DELETE FROM message_history_source WHERE session_id = ?1 AND message_ordinal >= ?2",
         params![session, from_number],
     )?;
-    Ok(())
+    Ok(fts + map > 0)
 }
 
 fn set_watermark(
@@ -171,14 +178,15 @@ fn set_watermark(
 
 /// A partially backfilled map cannot reach every legacy FTS row. Match the
 /// plugin's rowid-watermark sweep as well as deleting the mapped rows.
+/// Return whether legacy rows remain and whether any FTS row was deleted.
 pub(super) fn delete_fts_range(
     conn: &Connection,
     session: &str,
     from: i64,
     through: i64,
     limit: i64,
-) -> rusqlite::Result<bool> {
-    conn.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3)",params![session,from,through])?;
+) -> rusqlite::Result<(bool, bool)> {
+    let mapped = conn.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3)",params![session,from,through])?;
     let (watermark, completed): (i64, bool) = conn
         .query_row(
             "SELECT watermark_rowid,completed FROM message_fts_rowid_map_backfill_state WHERE id=1",
@@ -188,16 +196,18 @@ pub(super) fn delete_fts_range(
         .optional()?
         .unwrap_or((0, false));
     if completed {
-        return Ok(false);
+        return Ok((false, mapped > 0));
     }
-    conn.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT rowid FROM message_history_fts WHERE rowid>?1 AND session_id=?2 AND CAST(message_ordinal AS INTEGER) BETWEEN ?3 AND ?4 LIMIT ?5)",params![watermark,session,from,through,limit])?;
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM message_history_fts WHERE rowid>?1 AND session_id=?2 AND CAST(message_ordinal AS INTEGER) BETWEEN ?3 AND ?4)",params![watermark,session,from,through],|r|r.get(0))
+    let legacy = conn.execute("DELETE FROM message_history_fts WHERE rowid IN (SELECT rowid FROM message_history_fts WHERE rowid>?1 AND session_id=?2 AND CAST(message_ordinal AS INTEGER) BETWEEN ?3 AND ?4 LIMIT ?5)",params![watermark,session,from,through,limit])?;
+    let remains = conn.query_row("SELECT EXISTS(SELECT 1 FROM message_history_fts WHERE rowid>?1 AND session_id=?2 AND CAST(message_ordinal AS INTEGER) BETWEEN ?3 AND ?4)",params![watermark,session,from,through],|r|r.get(0))?;
+    Ok((remains, mapped + legacy > 0))
 }
 
 /// Setup checks the supplied entries after a restart without rebuilding unchanged
 /// rows. Changes to an older tool's result still refresh its source digest.
 pub(super) fn reconcile(
     conn: &mut Connection,
+    generation: &IndexGeneration,
     harness: &str,
     session: &str,
     entries: &[Entry],
@@ -218,20 +228,21 @@ pub(super) fn reconcile(
         return Ok(());
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut index_changed = false;
     for entry in changed {
         let number = entry.ordinal as i64;
-        delete_fts_range(&tx, session, number, number, -1)?;
-        tx.execute(
+        index_changed |= delete_fts_range(&tx, session, number, number, -1)?.1;
+        index_changed |= tx.execute(
             "DELETE FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal=?2",
             params![session, number],
-        )?;
+        )? > 0;
         tx.execute(
             "DELETE FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",
             params![session, number],
         )?;
-        insert(&tx, harness, session, entry, &content_of(entry))?;
+        index_changed |= insert(&tx, harness, session, entry, &content_of(entry))?;
     }
-    tx.commit()
+    generation.commit(tx, index_changed)
 }
 
 fn insert(
@@ -240,7 +251,7 @@ fn insert(
     session: &str,
     entry: &Entry,
     content: &str,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let number = entry.ordinal as i64;
     let role = role_name(&entry.role);
     let source_timing = crate::notice_cost_timing::span("search.source_insert");
@@ -256,7 +267,7 @@ fn insert(
     )?;
     drop(source_timing);
     if content.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let fts_timing = crate::notice_cost_timing::span("search.fts_insert");
     conn.execute(
@@ -271,7 +282,7 @@ fn insert(
          VALUES (?1, ?2, ?3, ?4)",
         params![session, number, conn.last_insert_rowid(), entry.written_at as i64],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 /// Bring the session's index level with `entries` (the session's messages
@@ -284,6 +295,16 @@ pub fn index(
     session: &str,
     entries: &[Entry],
 ) -> rusqlite::Result<()> {
+    index_with_generation(conn, &IndexGeneration::default(), harness, session, entries)
+}
+
+pub(super) fn index_with_generation(
+    conn: &mut Connection,
+    generation: &IndexGeneration,
+    harness: &str,
+    session: &str,
+    entries: &[Entry],
+) -> rusqlite::Result<()> {
     let _timing = crate::notice_cost_timing::span("search.index");
     let mark = watermark(conn, session)?;
     let start = entries.partition_point(|entry| (entry.ordinal as i64) < mark);
@@ -291,6 +312,7 @@ pub fn index(
     let mut stopped = false;
     for batch in pending.chunks(INDEX_BATCH) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut index_changed = false;
         let mut mark = watermark(&tx, session)?;
         for entry in batch {
             let number = entry.ordinal as i64;
@@ -319,14 +341,14 @@ pub fn index(
                 if stored == Some((entry.mid.clone(), content_hash(&content))) {
                     continue;
                 }
-                delete_from(&tx, session, number)?;
+                index_changed |= delete_from(&tx, session, number)?;
             }
-            insert(&tx, harness, session, entry, &content)?;
+            index_changed |= insert(&tx, harness, session, entry, &content)?;
             mark = number;
         }
         set_watermark(&tx, harness, session, mark)?;
         let _timing = crate::notice_cost_timing::span("search.commit");
-        tx.commit()?;
+        generation.commit(tx, index_changed)?;
         if stopped {
             break;
         }
@@ -349,6 +371,42 @@ pub fn forget_from(
         set_watermark(&tx, harness, session, from_number - 1)?;
     }
     tx.commit()
+}
+
+/// One generation for a single ck-mc process's index writers and readers.
+/// The schema fence keeps older plugin hosts from writing the store. Live
+/// session moves leave the index alone; the separate offline session mover
+/// can rewrite it and must not run while the module is serving the store.
+/// Pair each change at commit with the reader's first SQLite read, so a WAL
+/// snapshot cannot cache a proof under a generation it didn't actually see.
+#[derive(Default)]
+pub(crate) struct IndexGeneration(std::sync::Mutex<u64>);
+
+impl IndexGeneration {
+    pub(crate) fn snapshot<T>(&self, read_first: impl FnOnce() -> T) -> (u64, T) {
+        let generation = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (*generation, read_first())
+    }
+
+    pub(super) fn commit(
+        &self,
+        tx: rusqlite::Transaction<'_>,
+        changed: bool,
+    ) -> rusqlite::Result<()> {
+        if !changed {
+            return tx.commit();
+        }
+        let mut generation = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tx.commit()?;
+        *generation += 1;
+        Ok(())
+    }
 }
 
 /// One message hit.
@@ -471,21 +529,18 @@ const UNMAPPED_LIMIT: usize = 10_000;
 /// store of two million messages; here the map's rowids are sorted and
 /// merged with the row-size table's rowids, which are already in order.
 ///
-/// A proof is reused until the connection sees another connection's commit
-/// (`PRAGMA data_version`) or makes a change itself (`total_changes()`), and
-/// only on a read-only connection: a connection that writes could hold a
-/// change that a rollback undoes without moving either number. Ask it only
-/// inside a read transaction that has already read the store, so the proof
-/// and the reads it permits see the same snapshot.
+/// A proof is reused only for snapshots from the same index generation.
+/// Compute a new proof if the reader did not capture an index generation
+/// when it acquired its SQLite snapshot.
 #[derive(Default)]
 pub struct Coverage {
+    generation: Option<u64>,
     proof: Option<Proof>,
     scans: u64,
 }
 
 struct Proof {
-    /// `total_changes()` and `data_version` when the proof was made.
-    stamp: (i64, i64),
+    generation: Option<u64>,
     incomplete: Incomplete,
 }
 
@@ -493,12 +548,15 @@ enum Incomplete {
     /// The rowids the map lacks, in ascending order, by the session whose
     /// row each is.
     Sessions(HashMap<String, Arc<[i64]>>),
-    /// No proof for any session: too many unmapped rows, or the store could
-    /// not be read as expected (for example, without a row-size table).
+    /// Too many unmapped rows to prove coverage for any session.
     All,
 }
 
 impl Coverage {
+    pub(crate) fn for_snapshot(&mut self, generation: u64) {
+        self.generation = Some(generation);
+    }
+
     /// Whether every full-text row of `session` has its rowid in the map.
     pub fn complete(&mut self, conn: &Connection, session: &str) -> bool {
         self.unmapped(conn, session)
@@ -509,21 +567,16 @@ impl Coverage {
     /// ascending order (empty when the map has them all), or `None` when no
     /// proof could be made.
     pub fn unmapped(&mut self, conn: &Connection, session: &str) -> Option<Arc<[i64]>> {
-        let Ok(stamp) = conn.query_row(
-            "SELECT total_changes(), data_version FROM pragma_data_version",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        ) else {
-            return None;
-        };
-        let reusable = conn
-            .is_readonly(rusqlite::DatabaseName::Main)
-            .unwrap_or(false);
-        if !reusable || self.proof.as_ref().is_none_or(|proof| proof.stamp != stamp) {
+        if self.generation.is_none()
+            || self
+                .proof
+                .as_ref()
+                .is_none_or(|proof| proof.generation != self.generation)
+        {
             self.scans += 1;
-            self.proof = Some(Proof {
-                stamp,
-                incomplete: unmapped_sessions(conn),
+            self.proof = unmapped_sessions(conn).ok().map(|incomplete| Proof {
+                generation: self.generation,
+                incomplete,
             });
         }
         match self.proof.as_ref().map(|proof| &proof.incomplete) {
@@ -544,51 +597,46 @@ impl Coverage {
 }
 
 /// The full-text rows whose rowid the map lacks, by the session owning each.
-fn unmapped_sessions(conn: &Connection) -> Incomplete {
-    let scan = || -> rusqlite::Result<Incomplete> {
-        let mut mapped: Vec<i64> = conn
-            .prepare("SELECT fts_rowid FROM message_fts_rowid_map")?
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        mapped.sort_unstable();
-        let mut mapped = mapped.into_iter().peekable();
-        // FTS5 keeps one row-size entry per physical row, keyed by its rowid.
-        let mut statement =
-            conn.prepare("SELECT id FROM message_history_fts_docsize ORDER BY id")?;
-        let mut rows = statement.query([])?;
-        let mut missing = Vec::new();
-        while let Some(row) = rows.next()? {
-            let id: i64 = row.get(0)?;
-            while mapped.next_if(|rowid| *rowid < id).is_some() {}
-            if mapped.peek() != Some(&id) {
-                if missing.len() == UNMAPPED_LIMIT {
-                    return Ok(Incomplete::All);
-                }
-                missing.push(id);
+fn unmapped_sessions(conn: &Connection) -> rusqlite::Result<Incomplete> {
+    let mut mapped: Vec<i64> = conn
+        .prepare("SELECT fts_rowid FROM message_fts_rowid_map")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    mapped.sort_unstable();
+    let mut mapped = mapped.into_iter().peekable();
+    // FTS5 keeps one row-size entry per physical row, keyed by its rowid.
+    let mut statement = conn.prepare("SELECT id FROM message_history_fts_docsize ORDER BY id")?;
+    let mut rows = statement.query([])?;
+    let mut missing = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        while mapped.next_if(|rowid| *rowid < id).is_some() {}
+        if mapped.peek() != Some(&id) {
+            if missing.len() == UNMAPPED_LIMIT {
+                return Ok(Incomplete::All);
             }
+            missing.push(id);
         }
-        drop(rows);
-        let mut owner =
-            conn.prepare("SELECT session_id FROM message_history_fts WHERE rowid = ?1")?;
-        let mut sessions: HashMap<String, Vec<i64>> = HashMap::new();
-        // `missing` is in ascending order, so each session's list is too.
-        for id in missing {
-            let session: Option<rusqlite::types::Value> =
-                owner.query_row(params![id], |row| row.get(0)).optional()?;
-            // Searches bind the session as text, which never equals a stored
-            // value of another type.
-            if let Some(rusqlite::types::Value::Text(session)) = session {
-                sessions.entry(session).or_default().push(id);
-            }
+    }
+    drop(rows);
+    let mut owner = conn.prepare("SELECT session_id FROM message_history_fts WHERE rowid = ?1")?;
+    let mut sessions: HashMap<String, Vec<i64>> = HashMap::new();
+    // `missing` is in ascending order, so each session's list is too.
+    for id in missing {
+        let session: Option<rusqlite::types::Value> =
+            owner.query_row(params![id], |row| row.get(0)).optional()?;
+        // Searches bind the session as text, which never equals a stored
+        // value of another type.
+        if let Some(rusqlite::types::Value::Text(session)) = session {
+            sessions.entry(session).or_default().push(id);
         }
-        Ok(Incomplete::Sessions(
-            sessions
-                .into_iter()
-                .map(|(session, rowids)| (session, Arc::from(rowids)))
-                .collect(),
-        ))
-    };
-    scan().unwrap_or(Incomplete::All)
+    }
+    Ok(Incomplete::Sessions(
+        sessions
+            .into_iter()
+            .map(|(session, rowids)| (session, Arc::from(rowids)))
+            .collect(),
+    ))
 }
 
 /// How the message lane reaches `session`'s rows. A dated read joins the

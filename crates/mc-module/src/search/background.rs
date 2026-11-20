@@ -137,7 +137,11 @@ impl Drop for Background {
 }
 
 impl Background {
-    pub fn new<C: RunnerClient>(client: Arc<C>, path: PathBuf) -> Self {
+    pub fn new<C: RunnerClient>(
+        client: Arc<C>,
+        path: PathBuf,
+        index: Arc<super::messages::IndexGeneration>,
+    ) -> Self {
         // Client reconnects spawn reader/writer tasks on the current runtime.
         // They must belong to the module's continuously driven runtime, not
         // a private runtime parked whenever this thread waits for more work.
@@ -181,6 +185,7 @@ impl Background {
                             runtime.block_on(batch(
                                 client.as_ref(),
                                 conn,
+                                &index,
                                 &key,
                                 &mut mark,
                                 &mut activity,
@@ -363,11 +368,12 @@ impl Drop for SessionGuard<'_> {
 async fn batch<C: RunnerClient>(
     client: &C,
     conn: &mut Connection,
+    index: &super::messages::IndexGeneration,
     key: &SessionRef,
     mark: &mut Mark,
     activity: &mut Activity,
 ) -> Result<bool, String> {
-    let more = index_batch(client, conn, key, mark, activity).await?;
+    let more = index_batch(client, conn, index, key, mark, activity).await?;
     activity
         .publish(conn, key, mark.is_subagent, Instant::now())
         .map_err(|e| e.to_string())?;
@@ -377,6 +383,7 @@ async fn batch<C: RunnerClient>(
 async fn index_batch<C: RunnerClient>(
     client: &C,
     conn: &mut Connection,
+    index: &super::messages::IndexGeneration,
     key: &SessionRef,
     mark: &mut Mark,
     activity: &mut Activity,
@@ -406,7 +413,7 @@ async fn index_batch<C: RunnerClient>(
         .min()
     {
         for _ in 0..PAGES_PER_BATCH {
-            if truncate_chunk(conn, key, from).map_err(|e| e.to_string())? {
+            if truncate_chunk(conn, index, key, from).map_err(|e| e.to_string())? {
                 break;
             }
         }
@@ -435,7 +442,7 @@ async fn index_batch<C: RunnerClient>(
     if let Some(from) = mark.reconcile.take() {
         let start = mark.entries.partition_point(|entry| entry.ordinal < from);
         if let Err(error) =
-            super::messages::reconcile(conn, &key.harness, session, &mark.entries[start..])
+            super::messages::reconcile(conn, index, &key.harness, session, &mark.entries[start..])
         {
             mark.reconcile = Some(from);
             return Err(error.to_string());
@@ -457,7 +464,7 @@ async fn index_batch<C: RunnerClient>(
             let end = cached
                 .partition_point(|entry| entry.ordinal <= newest)
                 .min(PAGE_ENTRIES as usize);
-            index_page(conn, key, &cached[..end], activity)?
+            index_page(conn, index, key, &cached[..end], activity)?
         } else {
             // Only a missing durable range can require older transcript I/O.
             // Limit the read to that gap, stopping before the cached window.
@@ -497,7 +504,7 @@ async fn index_batch<C: RunnerClient>(
                     return Err("search gap read contains an ordinal gap".into());
                 }
             }
-            index_page(conn, key, &entries, activity)?
+            index_page(conn, index, key, &entries, activity)?
         };
         if updated <= watermark {
             return Err("search index made no progress".into());
@@ -509,11 +516,13 @@ async fn index_batch<C: RunnerClient>(
 
 fn index_page(
     conn: &mut Connection,
+    index: &super::messages::IndexGeneration,
     key: &SessionRef,
     entries: &[Entry],
     activity: &mut Activity,
 ) -> Result<u64, String> {
-    super::messages::index(conn, &key.harness, &key.session, entries).map_err(|e| e.to_string())?;
+    super::messages::index_with_generation(conn, index, &key.harness, &key.session, entries)
+        .map_err(|e| e.to_string())?;
     let watermark = super::messages::watermark(conn, &key.session)
         .map_err(|e| e.to_string())?
         .max(0) as u64;
@@ -525,12 +534,17 @@ fn index_page(
 
 /// Invalidation itself is bounded, not just subsequent inserts. The durable
 /// dirty floor survives a process stopping between deletion chunks.
-fn truncate_chunk(conn: &mut Connection, key: &SessionRef, from: u64) -> rusqlite::Result<bool> {
+fn truncate_chunk(
+    conn: &mut Connection,
+    index: &super::messages::IndexGeneration,
+    key: &SessionRef,
+    from: u64,
+) -> rusqlite::Result<bool> {
     let from = from.max(1);
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute("INSERT INTO message_history_index (session_id,last_indexed_ordinal,dirty_floor_ordinal,updated_at,harness) VALUES (?1,0,?2,0,?3) ON CONFLICT(session_id) DO UPDATE SET last_indexed_ordinal=MIN(last_indexed_ordinal,excluded.dirty_floor_ordinal-1), dirty_floor_ordinal=excluded.dirty_floor_ordinal", params![key.session, from as i64, key.harness])?;
     let end: Option<i64> = tx.query_row("SELECT MAX(message_ordinal) FROM (SELECT message_ordinal FROM message_history_source WHERE session_id=?1 AND message_ordinal>=?2 ORDER BY message_ordinal LIMIT ?3)", params![key.session,from as i64,PAGE_ENTRIES], |r| r.get(0))?;
-    let legacy_remains = super::messages::delete_fts_range(
+    let (legacy_remains, mut index_changed) = super::messages::delete_fts_range(
         &tx,
         &key.session,
         from as i64,
@@ -538,7 +552,7 @@ fn truncate_chunk(conn: &mut Connection, key: &SessionRef, from: u64) -> rusqlit
         PAGE_ENTRIES as i64,
     )?;
     if let Some(end) = end {
-        tx.execute("DELETE FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3", params![key.session,from as i64,end])?;
+        index_changed |= tx.execute("DELETE FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3", params![key.session,from as i64,end])? > 0;
         tx.execute("DELETE FROM message_history_source WHERE session_id=?1 AND message_ordinal BETWEEN ?2 AND ?3", params![key.session,from as i64,end])?;
     }
     let remains: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM message_history_source WHERE session_id=?1 AND message_ordinal>=?2)", params![key.session,from as i64], |r|r.get(0))?;
@@ -548,7 +562,7 @@ fn truncate_chunk(conn: &mut Connection, key: &SessionRef, from: u64) -> rusqlit
             [&key.session],
         )?;
     }
-    tx.commit()?;
+    index.commit(tx, index_changed)?;
     Ok(!remains && !legacy_remains)
 }
 
