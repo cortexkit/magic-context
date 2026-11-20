@@ -24,6 +24,15 @@ const tool = (extra: Record<string, unknown> = {}) => ({
 const parts = (source: StoreRow, target = model) =>
     restoreRow(source, target).flatMap((m) => m.content);
 
+test("raw replay marks stored synthetic rows without marking ordinary user or skill rows", () => {
+    const stored = { id: "u", session_id: "s", seq: 1, data: { text: "input" } };
+    expect(parts({ ...stored, type: "user" })).toEqual([{ type: "text", text: "input" }]);
+    expect(parts({ ...stored, type: "skill" })).toEqual([{ type: "text", text: "input" }]);
+    expect(parts({ ...stored, type: "synthetic" })).toEqual([
+        { type: "text", text: "input", synthetic: true },
+    ]);
+});
+
 test("raw replay normalizes native and legacy fields with upstream precedence", () => {
     const source = row([
         {

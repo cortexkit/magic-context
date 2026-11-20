@@ -150,9 +150,14 @@ export function restoreRow(
     // Magic Context's own storage notices are for the user and are dropped from
     // every request the context hook serves, so a restored copy is dropped too, and
     // boundary lookups see the row as one the request never carries.
-    if (row.type === "synthetic" && isStorageNoticeText(data.text)) return [];
-    if (["synthetic", "skill"].includes(row.type))
-        return [make("user", [{ type: "text", text: data.text ?? "" }])];
+    if (row.type === "synthetic") {
+        if (isStorageNoticeText(data.text)) return [];
+        // OpenCode stores this as a distinct row type. Mark the restored text so
+        // turn counting does not treat it as a human prompt. The payload adapter
+        // removes this internal flag before handing the request to the host.
+        return [make("user", [{ type: "text", text: data.text ?? "", synthetic: true }])];
+    }
+    if (row.type === "skill") return [make("user", [{ type: "text", text: data.text ?? "" }])];
     if (row.type === "location-switched")
         return [
             make("user", [
