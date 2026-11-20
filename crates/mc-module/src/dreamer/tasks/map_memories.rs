@@ -28,8 +28,10 @@
 //! memory with it. `independent="true"` is stored as the
 //! file-independent mark (one row with an empty path). An entry whose files
 //! all fail, or that maps a directive-shaped project rule to files, is stored
-//! as file-independent too, marked `host_rejected_fallback` for verify. A
-//! refusal or an omitted memory records an attempt. Only fallbacks with an
+//! as file-independent too, with the row's origin set to
+//! `host_rejected_fallback` so mapping can tell this fallback from the model's
+//! own `independent="true"` answer; verify treats both as file-independent.
+//! A refusal or an omitted memory records an attempt. Only fallbacks with an
 //! attempt are eligible to retry; older fallbacks remain file-independent.
 //!
 //! The run reads the repository's main checkout, whatever worktree the
