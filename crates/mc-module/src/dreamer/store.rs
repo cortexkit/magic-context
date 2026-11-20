@@ -371,6 +371,61 @@ pub fn start_run(
     Ok(conn.last_insert_rowid())
 }
 
+/// The previous waiting run and the total already spent in this occurrence.
+/// A retry before the next cron slot belongs to the waiting run; the next
+/// cron slot itself starts with a fresh budget.
+pub(super) fn resumed_budget(
+    conn: &Connection,
+    due: &Due,
+    run: i64,
+) -> rusqlite::Result<Option<(i64, u64)>> {
+    if due.schedule.is_empty() {
+        return Ok(None);
+    }
+    let previous: Option<(i64, String, i64)> = conn
+        .query_row(
+            "SELECT r.id, COALESCE(r.outcome, ''), COALESCE(r.ended_at, 0)
+               FROM dream_schedules s JOIN dream_task_runs r USING (level, owner_id, task)
+              WHERE s.level = ?1 AND s.owner_id = ?2 AND s.task = ?3 AND r.id < ?4
+                AND s.last_status = 'waiting' AND s.schedule = ?5 AND s.next_due_at = ?6
+              ORDER BY r.id DESC LIMIT 1",
+            params![
+                due.owner.level,
+                due.owner.owner_id,
+                due.task,
+                run,
+                due.schedule,
+                due.next_due_at
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((prior, outcome, ended_at)) = previous else {
+        return Ok(None);
+    };
+    if outcome != "waiting"
+        || cron::next_due(&due.schedule, ended_at).is_some_and(|slot| due.next_due_at >= slot)
+    {
+        return Ok(None);
+    }
+    // Each waiting run keeps its own usage in the journal. Follow the chain
+    // of waits rather than counting the same tokens again in each run's row.
+    let carried = conn.query_row(
+        "WITH RECURSIVE waiting(id, spent, resumed_run) AS (
+             SELECT id, input_tokens + output_tokens, json_extract(batches_json, '$[#-1].resumed_run')
+               FROM dream_task_runs WHERE id = ?1
+             UNION ALL
+             SELECT r.id, r.input_tokens + r.output_tokens, json_extract(r.batches_json, '$[#-1].resumed_run')
+               FROM waiting w JOIN dream_task_runs r ON r.id = w.resumed_run
+              WHERE r.id < w.id AND r.outcome = 'waiting'
+                AND r.level = ?2 AND r.owner_id = ?3 AND r.task = ?4
+         ) SELECT SUM(spent) FROM waiting",
+        params![prior, due.owner.level, due.owner.owner_id, due.task],
+        |row| row.get(0),
+    )?;
+    Ok(Some((prior, carried)))
+}
+
 /// The schedule row of `task` for `owner`, due or not.
 pub fn schedule_of(
     conn: &Connection,

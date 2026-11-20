@@ -73,7 +73,8 @@ pub struct Settings {
     /// Each task kind's schedule, `""` for one switched off. A kind not
     /// listed runs on its default schedule.
     pub schedules: HashMap<String, String>,
-    /// The most input and output tokens one run may spend.
+    /// The input and output token budget for a scheduled occurrence,
+    /// including any retries after account waits.
     pub budget_tokens: u64,
     /// The projects the dreamer runs for, by id; `None` for every project
     /// with a session in this process. The dreamer then acts as if only
@@ -93,7 +94,7 @@ impl Default for Settings {
     }
 }
 
-/// The most tokens one task run may spend, counting every step's whole
+/// The token budget for one task occurrence, counting every step's whole
 /// prompt (cache reads included) and its output. A task that reads code runs
 /// a tool loop whose prompt grows with each step, so it adds up quickly: in
 /// the month before 0.50, the plugin's dreamer (Magic Context 0.49, which ran
@@ -1509,6 +1510,26 @@ impl Engine {
     ) {
         let name = run_id.to_string();
         end.outcome = "nothing_to_do".into();
+        let (resumed_run, carried) = match db
+            .with_connection(|conn| store::resumed_budget(conn, due, run_id))
+        {
+            Ok(Some((prior, tokens))) => {
+                tracing::info!(
+                        "ck-mc: dreamer: run {run_id} {} for {}: carrying over {tokens} tokens from account waits",
+                        due.task,
+                        due.owner.owner_id
+                    );
+                (Some(prior), tokens)
+            }
+            Ok(None) => (None, 0),
+            Err(error) => {
+                end.outcome = "failed".into();
+                end.error = Some(format!(
+                    "reading the scheduled occurrence's token spend: {error}"
+                ));
+                return;
+            }
+        };
         // The run's children are attributed to the task, and to the project
         // when a project owns the run; a workspace's or the person's run
         // serves no one project.
@@ -1517,11 +1538,14 @@ impl Engine {
             (due.owner.level == "project").then_some(due.owner.owner_id.as_str()),
         );
         for (index, batch) in batches.iter().enumerate() {
-            if end.input_tokens + end.output_tokens >= settings.budget_tokens {
+            let used = carried
+                .saturating_add(end.input_tokens)
+                .saturating_add(end.output_tokens);
+            if used >= settings.budget_tokens {
                 end.outcome = "budget_stopped".into();
                 end.error = Some(format!(
                     "used {} of {} tokens; {} of {} batches left unsent",
-                    end.input_tokens + end.output_tokens,
+                    used,
                     settings.budget_tokens,
                     batches.len() - index,
                     batches.len()
@@ -1634,6 +1658,7 @@ impl Engine {
                     end.batches.push(json!({
                         "wait_until": wait.until_ms, "code": wait.code,
                         "input_tokens": input, "output_tokens": output,
+                        "resumed_run": resumed_run,
                     }));
                     return;
                 }

@@ -1506,6 +1506,7 @@ const TEMPLATE_DATA = [
 "v2 response boundary unavailable; no system delivery acknowledgement",
 "ck-mc: session \x01: skipping \x01 saved view decisions with no view version",
 "ck-mc: session \x01: unknown notice event \x01; reading the transcript again",
+"ck-mc: dreamer: run \x01 \x01 for \x01: carrying over \x01 tokens from account waits",
 "historian no-op: stored compartments still invalid (\"\x01\"); backing off",
 "historian pre-flight: truncated formatted input for \x01-\x01 to fit \x01 tokens",
 "[magic-context] slow write transaction: site=git_sweep_lease held=\x01ms",

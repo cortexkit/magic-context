@@ -385,6 +385,63 @@ async fn fallback_and_unsuccessful_batches_count_in_the_run_total() {
 }
 
 #[tokio::test]
+async fn account_waits_share_the_scheduled_occurrences_token_budget() {
+    use chrono::Timelike;
+
+    let (_dir, db) = store();
+    let engine = engine(3);
+    // Leave enough time before the next cron slot for the account to reset.
+    let hour = (chrono::Local::now().hour() + 2) % 24;
+    let settings = Settings {
+        budget_tokens: 20_000_000,
+        schedules: [("classify-memories".into(), format!("0 {hour} * * *"))].into(),
+        ..Settings::default()
+    };
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &settings, 1);
+    make_due(&db);
+    let spent = || {
+        db.with_connection(|conn| {
+            conn.prepare(
+                "SELECT outcome, input_tokens + output_tokens FROM dream_task_runs ORDER BY id",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap()
+    };
+
+    let now = now_ms();
+    let reset = now + 5 * 60_000;
+    let client = Arc::new(Client::new(
+        &["p/a"],
+        &[Ends::SpentFull(reset as u64, 12_000_000)],
+    ));
+    engine.tick(&db, &client, &settings, now);
+    settled(&engine).await;
+    assert_eq!(spent(), [("waiting".into(), 12_000_000)]);
+    assert_eq!(schedule(&db).3, Some(reset));
+
+    let client = Arc::new(Client::new(
+        &["p/a"],
+        &[
+            Ends::Spent("ok", 8_000_000),
+            Ends::Spent("ok", 8_000_000),
+            Ends::Spent("ok", 8_000_000),
+        ],
+    ));
+    engine.tick(&db, &client, &settings, schedule(&db).3.unwrap());
+    settled(&engine).await;
+    let expected = [
+        ("waiting".into(), 12_000_000),
+        ("budget_stopped".into(), 8_000_000),
+    ];
+    assert_eq!(spent(), expected);
+    assert_eq!(client.children().len(), 1);
+}
+
+#[tokio::test]
 async fn a_curate_run_stopped_by_its_budget_resumes_at_its_next_part() {
     let (_dir, db) = store();
     // Sixty-one rules make two parts of their category; one name makes a

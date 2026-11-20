@@ -318,6 +318,77 @@ fn a_run_record_holds_its_end_and_a_stopped_process_leaves_none_open() {
     );
 }
 
+#[test]
+fn a_second_account_wait_keeps_earlier_spend_but_the_next_cron_slot_does_not() {
+    let conn = ContextDb::fresh_in_memory();
+    let owner = OwnerKey::project("pj-a");
+    let task = "swe:verify";
+    ensure_schedule(&conn, &owner, task, "0 6 * * *", local(11, 5)).unwrap();
+    let start = |now| start_run(&conn, &owner, task, "verify", "swe", now).unwrap();
+    let due_at_now = || schedule_of(&conn, &owner, task).unwrap().unwrap();
+    let wait = |run, ended, until, resumed: Option<i64>, input, output| {
+        finish_run(
+            &conn,
+            run,
+            &RunEnd {
+                outcome: "waiting".into(),
+                input_tokens: input,
+                output_tokens: output,
+                batches: vec![json!({"wait_until": until, "resumed_run": resumed})],
+                ..RunEnd::default()
+            },
+            ended,
+        )
+        .unwrap();
+        settle(
+            &conn,
+            &owner,
+            task,
+            &Settled::Waiting {
+                until,
+                reason: "account wait".into(),
+            },
+            None,
+            ended,
+        )
+        .unwrap();
+    };
+
+    let first = start(local(11, 6));
+    wait(first, local(11, 6), local(11, 7), None, 12_000_000, 0);
+    let second = start(local(11, 7));
+    assert_eq!(
+        resumed_budget(&conn, &due_at_now(), second).unwrap(),
+        Some((first, 12_000_000))
+    );
+    wait(
+        second,
+        local(11, 7),
+        local(11, 8),
+        Some(first),
+        3_000_000,
+        1_000_000,
+    );
+    let third = start(local(11, 8));
+    assert_eq!(
+        resumed_budget(&conn, &due_at_now(), third).unwrap(),
+        Some((second, 16_000_000))
+    );
+
+    wait(
+        third,
+        local(11, 8),
+        local(12, 7),
+        Some(second),
+        4_000_000,
+        0,
+    );
+    let next_due = due_at_now();
+    assert_eq!(next_due.next_due_at, local(12, 6));
+    let next_slot = start(next_due.next_due_at);
+    assert_eq!(resumed_budget(&conn, &next_due, next_slot).unwrap(), None);
+}
+
 /// Each lock row, in the order the rows were written: level, owner and
 /// holder.
 fn locks(conn: &Connection) -> Vec<(String, String, String)> {
