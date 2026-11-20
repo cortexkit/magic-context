@@ -164,6 +164,92 @@ async fn check_refused_cut_restores_stamps(cumulative: bool) {
 }
 
 #[tokio::test]
+async fn review_probe_older_no_cut_reindexes_visible_tail() {
+    let dir = scratch("older-no-cut");
+    let entries: Vec<_> = (1..=8).map(|n| text(n, &format!("m{n}"))).collect();
+    let (mut session, client, settings) = head(&dir, entries.clone(), &[]).await;
+    let old = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&old), None);
+    session.accept(old.clone());
+    session.settle_unconfirmed(Some(&old.applied()), &[]);
+    summary(session.db.as_ref().unwrap(), 1, (1, "m1"), (5, "m5"));
+    session.load_summaries();
+    let new = session.build(&settings, None, false, None).0.unwrap();
+    session.accept(new.clone());
+    session.settle_unconfirmed(Some(&new.applied()), &[]);
+    assert_eq!(session.index.base(), 5);
+
+    *client.applied.lock().unwrap() = Some(AppliedViewAnswer::new().with_view(old.clone()));
+    let mut n = notice(&session, 1, entries.last().map(cursor));
+    n.applied_view = Some(old.applied());
+    session.notice(&client, &settings, n).await;
+    assert_eq!(session.latest.as_ref().unwrap().checksum, old.checksum);
+    assert_eq!(session.cut, None);
+    assert_eq!(session.index.base(), 1);
+    assert_eq!(
+        session
+            .ctx_reduce(&client, &serde_json::json!({"drop":"1-4"}))
+            .await
+            .unwrap(),
+        "4 tags stamped."
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn review_probe_missing_cut_backs_off_until_runner_can_place_it() {
+    let dir = scratch("missing-endpoint");
+    let entries: Vec<_> = (1..=8).map(|n| text(n, &format!("m{n}"))).collect();
+    let (mut session, client, settings) =
+        head(&dir, entries.clone(), &[((1, "m1"), (5, "m5"))]).await;
+    let newer = session.build(&settings, None, false, None).0.unwrap();
+    session.accept(newer.clone());
+    session.settle_unconfirmed(Some(&newer.applied()), &[]);
+    let reported = View::seal(
+        1,
+        vec![cortexkit_role_compaction::view::Edit::new(
+            1,
+            EditOp::Cut {
+                through: "m2".into(),
+            },
+        )],
+    );
+    *client.applied.lock().unwrap() = Some(AppliedViewAnswer::new().with_view(reported.clone()));
+    client.entries.lock().unwrap().retain(|e| e.ordinal >= 5);
+
+    let report = |session: &Session, seq| {
+        let mut n = notice(session, seq, entries.last().map(cursor));
+        n.applied_view = Some(reported.applied());
+        n.conditions.last_prompt_tokens = Some(95_000);
+        n
+    };
+    let n = report(&session, 1);
+    session.notice(&client, &settings, n).await;
+    assert!(session.latest_unknown && !session.index_ready);
+    let reads = client.reads.lock().unwrap().len();
+    for seq in 2..=4 {
+        let n = report(&session, seq);
+        session.notice(&client, &settings, n).await;
+    }
+    assert_eq!(
+        client.reads.lock().unwrap().len(),
+        reads,
+        "repeated reports retried the missing cut without waiting"
+    );
+    assert!(client.offered.lock().unwrap().is_empty());
+
+    *client.entries.lock().unwrap() = entries.clone();
+    tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+    let mut n = report(&session, 5);
+    n.conditions.last_prompt_tokens = Some(10_000);
+    session.notice(&client, &settings, n).await;
+    assert!(!session.latest_unknown && session.index_ready);
+    assert_eq!(session.cut, Some(2));
+    assert_eq!(session.latest.as_ref().unwrap().checksum, reported.checksum);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn audit_views_adopt_older_cut_reindexes_visible_tail() {
     let dir = scratch("older-cut");
     let entries: Vec<_> = (1..=10).map(|n| text(n, &format!("m{n}"))).collect();

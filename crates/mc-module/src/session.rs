@@ -184,6 +184,8 @@ pub struct Session {
     /// After a restart, until the view the runner applies is read back:
     /// ck-mc doesn't know which edits the next view must carry.
     latest_unknown: bool,
+    /// Retry an unresolved view read without polling the runner every step.
+    adoption_retry: Option<(tokio::time::Instant, u8)>,
     /// Summaries a head render found missing from `context.db`; the next
     /// build reads the session's summaries from there again
     /// ([`Session::reload_changed_summaries`]).

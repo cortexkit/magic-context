@@ -113,6 +113,9 @@ impl Session {
     /// a Setup or a resume ([`Session::judge_acceptance_afresh`]), not when
     /// an ordinary notice offers a waiting view again.
     pub(super) async fn offer_unconfirmed_again<C: RunnerClient>(&mut self, client: &C) {
+        if self.adoption_retry.is_some() {
+            return;
+        }
         self.reoffer_pending = false;
         let Some(view) = self.unconfirmed.last().map(|pending| pending.view.clone()) else {
             return;
@@ -785,6 +788,9 @@ impl Session {
     /// Take the view the runner applies as ck-mc's own: after a refusal, or
     /// when ck-mc's copy is missing or older (for example after a restore).
     pub(super) async fn adopt_runner_view<C: RunnerClient>(&mut self, client: &C) {
+        if self.waiting_for_adoption() {
+            return;
+        }
         self.runner_reads
             .applied_view
             .fetch_add(1, Ordering::Relaxed);
@@ -794,15 +800,16 @@ impl Session {
                     .applied_by
                     .as_deref()
                     .is_none_or(|id| id == crate::MODULE_ID);
-                if own {
-                    if let Some(through) = answer.view.as_ref().and_then(move_floor::cut_of) {
-                        if !self.index_adopted_cut(client, through).await {
-                            self.latest_unknown = true;
-                            self.index_ready = false;
-                            return;
-                        }
+                if let Some(view) = answer.view.as_ref().filter(|_| own) {
+                    if !self
+                        .index_adopted_cut(client, move_floor::cut_of(view))
+                        .await
+                    {
+                        self.defer_adoption();
+                        return;
                     }
                 }
+                self.adoption_retry = None;
                 self.keep_spent_reading_for(&answer);
                 // The runner's own answer is what it applies now. It replaces
                 // the newest version rather than raising it: a runner whose
@@ -836,32 +843,65 @@ impl Session {
                     .applied_view_failed
                     .fetch_add(1, Ordering::Relaxed);
                 self.runner_call_failed("session.applied_view", &error);
+                if self.adoption_retry.is_some() {
+                    self.defer_adoption();
+                }
             }
         }
     }
 
     /// A runner restored to an earlier cut serves entries that the newer
     /// cut let us prune. Load them before making its view our current one.
-    async fn index_adopted_cut<C: RunnerClient>(&mut self, client: &C, through: &str) -> bool {
-        if self.index.base() <= 1 || self.index.ordinal_of(through).is_some() {
-            return true;
-        }
-        let move_floor::Placed::At(ordinal) = self.place(client, through).await else {
-            return false;
+    async fn index_adopted_cut<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        through: Option<&str>,
+    ) -> bool {
+        let base = match through {
+            Some(mid) => {
+                if self.index.ordinal_of(mid).is_some() {
+                    return true;
+                }
+                let move_floor::Placed::At(ordinal) = self.place(client, mid).await else {
+                    return false;
+                };
+                ordinal
+            }
+            None => self.move_floor.as_ref().map_or(1, |floor| floor.ordinal),
         };
-        if ordinal >= self.index.base() {
+        if base >= self.index.base() && through.is_none() {
+            self.cut = None;
             return true;
         }
-        let before = std::mem::replace(&mut self.index, Index::starting_at(ordinal));
-        let cut = self.cut.replace(ordinal);
+        let before = std::mem::replace(&mut self.index, Index::starting_at(base));
+        let cut = self.cut;
+        self.cut = through.map(|_| base);
         let ready = self.read_until(client, None, true).await
-            && self.index.ordinal_of(through) == Some(ordinal);
-        self.cut = cut;
+            && through.is_none_or(|mid| self.index.ordinal_of(mid) == Some(base));
         if !ready {
+            self.cut = cut;
             self.index = before;
             return false;
         }
+        if through.is_some() {
+            self.cut = cut;
+        }
         self.app_projection.render_changed();
         true
+    }
+
+    pub(super) fn waiting_for_adoption(&self) -> bool {
+        self.adoption_retry
+            .is_some_and(|(due, _)| due > tokio::time::Instant::now())
+    }
+
+    pub(super) fn defer_adoption(&mut self) {
+        self.latest_unknown = true;
+        self.index_ready = false;
+        let attempt = self
+            .adoption_retry
+            .map_or(0, |(_, attempt)| (attempt + 1).min(5));
+        let delay = std::time::Duration::from_millis(250 << attempt);
+        self.adoption_retry = Some((tokio::time::Instant::now() + delay, attempt));
     }
 }
