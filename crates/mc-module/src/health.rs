@@ -29,6 +29,12 @@ impl Health {
         // Store constructors check or set the exact schema versions before
         // returning a handle. The schema cannot change while ck-mc serves it.
         let metrics = json!({
+            "headline": ["session_count", "bus_connected", "context_db_schema_version", "mode3_db_schema_version", "dreamer_enabled"],
+            "session_count": self.session_count,
+            "bus_connected": self.bus_connected,
+            "context_db_schema_version": self.context_open.then_some(crate::context_db::SCHEMA_VERSION),
+            "mode3_db_schema_version": self.mode3_open.then_some(crate::store::SCHEMA_VERSION),
+            "dreamer_enabled": self.dreamer_enabled,
             "store": {
                 "opened": self.context_open && self.mode3_open,
                 "context_db_schema_version": self.context_open.then_some(crate::context_db::SCHEMA_VERSION),
@@ -42,6 +48,11 @@ impl Health {
         let metrics = {
             let mut metrics = metrics;
             metrics["replica"] = replica(self.replica.as_deref(), &mut reasons);
+            metrics["replica_unsent_count"] = metrics["replica"]["unsent_count"].clone();
+            metrics["replica_epoch_holds"] = metrics["replica"]["epoch_holds"]["count"].clone();
+            let headline = metrics["headline"].as_array_mut().expect("headline array");
+            headline.push(json!("replica_unsent_count"));
+            headline.push(json!("replica_epoch_holds"));
             metrics
         };
 

@@ -38,6 +38,31 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
     assert_eq!(metrics["sessions"], json!({"count": 1}));
     assert_eq!(metrics["dreamer"], json!({"enabled": false}));
     assert_eq!(metrics["bus"], json!({"connected": false}));
+    let headline = vec![
+        "session_count",
+        "bus_connected",
+        "context_db_schema_version",
+        "mode3_db_schema_version",
+        "dreamer_enabled",
+    ];
+    #[cfg(feature = "memory-replica")]
+    let headline = [
+        headline,
+        vec!["replica_unsent_count", "replica_epoch_holds"],
+    ]
+    .concat();
+    assert_eq!(metrics["headline"], json!(headline));
+    assert_eq!(metrics["session_count"], 1);
+    assert_eq!(metrics["bus_connected"], false);
+    assert_eq!(
+        metrics["context_db_schema_version"],
+        crate::context_db::SCHEMA_VERSION
+    );
+    assert_eq!(
+        metrics["mode3_db_schema_version"],
+        crate::store::SCHEMA_VERSION
+    );
+    assert_eq!(metrics["dreamer_enabled"], false);
     #[cfg(feature = "memory-replica")]
     assert_eq!(metrics["replica"]["enabled"], false);
     #[cfg(not(feature = "memory-replica"))]
@@ -60,6 +85,7 @@ async fn health_hook_degrades_when_a_store_was_not_opened() {
     let metrics = report.metrics.unwrap();
     assert_eq!(metrics["store"]["opened"], false);
     assert_eq!(metrics["store"]["context_db_schema_version"], Value::Null);
+    assert_eq!(metrics["context_db_schema_version"], Value::Null);
     assert_eq!(
         metrics["store"]["mode3_db_schema_version"],
         crate::store::SCHEMA_VERSION

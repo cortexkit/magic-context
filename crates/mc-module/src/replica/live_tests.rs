@@ -668,8 +668,11 @@ async fn replica_health_reports_an_old_hold_and_unsent_count_before_the_hub_conn
         report.detail.as_deref(),
         Some("replica stream held for fleet epoch 7 for over an hour")
     );
+    let metrics = report.metrics.unwrap();
+    assert_eq!(metrics["replica_unsent_count"], 1);
+    assert_eq!(metrics["replica_epoch_holds"], 1);
     assert_eq!(
-        report.metrics.unwrap()["replica"],
+        metrics["replica"],
         json!({
             "enabled": true,
             "sample_age_seconds": 0,

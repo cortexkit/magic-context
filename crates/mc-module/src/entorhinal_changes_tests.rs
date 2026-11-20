@@ -243,6 +243,28 @@ async fn without_the_bus_nothing_is_read_again_until_the_watch_comes_back_and_ca
 }
 
 #[tokio::test(start_paused = true)]
+async fn bucket_reset_reopens_the_watch_and_reads_the_new_snapshot() {
+    let test_bus = TestBus::new();
+    test_bus.kv.put(KEY, marker(1)).await.unwrap();
+    let (_watch, changes, state) = follow(&test_bus);
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(state.is_up());
+    assert_eq!(changes.load(Ordering::SeqCst), 1);
+
+    test_bus.reset_watches();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(!state.is_up());
+    test_bus.kv.put(KEY, marker(2)).await.unwrap();
+    tokio::time::sleep(RETRY_FIRST - Duration::from_millis(100)).await;
+    assert_eq!(test_bus.watched.lock().unwrap().len(), 1);
+    assert_eq!(changes.load(Ordering::SeqCst), 1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(test_bus.watched.lock().unwrap().len(), 2);
+    assert!(state.is_up());
+    assert_eq!(changes.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_panicked_marker_watch_reopens_after_backoff() {
     let test_bus = TestBus::new();
     let module = Module::new(Client::default(), Settings::default(), None, None);

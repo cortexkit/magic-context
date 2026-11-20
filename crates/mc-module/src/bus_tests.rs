@@ -295,8 +295,15 @@ pub(crate) struct TestBus {
     pub opened: AtomicUsize,
     /// The bucket names watches were opened on.
     pub watched: Mutex<Vec<String>>,
-    /// Signalled to end every watch open now; `true` ends it with a panic.
-    cut: tokio::sync::watch::Sender<bool>,
+    /// Signalled to end every watch open now.
+    cut: tokio::sync::watch::Sender<WatchEnd>,
+}
+
+#[derive(Clone, Copy)]
+enum WatchEnd {
+    Cut,
+    Panic,
+    BucketReset,
 }
 
 impl TestBus {
@@ -311,18 +318,23 @@ impl TestBus {
             down: AtomicBool::new(false),
             opened: AtomicUsize::new(0),
             watched: Mutex::new(Vec::new()),
-            cut: tokio::sync::watch::channel(false).0,
+            cut: tokio::sync::watch::channel(WatchEnd::Cut).0,
         })
     }
 
     /// End every watch open now, as a lost connection does.
     pub(crate) fn cut_watches(&self) {
-        self.cut.send_replace(false);
+        self.cut.send_replace(WatchEnd::Cut);
     }
 
     /// Unwind each watch from its next poll, as a bus client panic does.
     pub(crate) fn panic_watches(&self) {
-        self.cut.send_replace(true);
+        self.cut.send_replace(WatchEnd::Panic);
+    }
+
+    /// End each watch as if its bucket was deleted and recreated.
+    pub(crate) fn reset_watches(&self) {
+        self.cut.send_replace(WatchEnd::BucketReset);
     }
 
     /// The module's bus over this one.
@@ -414,7 +426,7 @@ impl Registers for TestRegisters {
 /// An in-memory watch that ends when the test bus cuts its watches.
 struct TestWatch {
     watch: cortexkit_bus_inmemory::InMemoryRegisterWatch,
-    cut: tokio::sync::watch::Receiver<bool>,
+    cut: tokio::sync::watch::Receiver<WatchEnd>,
 }
 
 #[async_trait]
@@ -423,8 +435,11 @@ impl RegisterWatch for TestWatch {
         tokio::select! {
             event = self.watch.next() => event,
             _ = self.cut.changed() => {
-                assert!(!*self.cut.borrow_and_update(), "register watch panicked");
-                Err(BusError::unavailable("register watch cut"))
+                match *self.cut.borrow_and_update() {
+                    WatchEnd::Cut => Err(BusError::unavailable("register watch cut")),
+                    WatchEnd::Panic => panic!("register watch panicked"),
+                    WatchEnd::BucketReset => Err(BusError::unavailable("register watch bucket CK_BOX_TEST_ENTORHINAL_CHANGES reset")),
+                }
             }
         }
     }
