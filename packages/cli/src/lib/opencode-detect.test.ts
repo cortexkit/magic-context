@@ -17,10 +17,12 @@ function deps(
     platform: NodeJS.Platform = "darwin",
     onPath: (b: string) => string | null = () => null,
     executable: Set<string> = existing,
+    children: Map<string, string[]> = new Map(),
 ): DetectDeps {
     return {
         exists: (p) => existing.has(p),
         isExecutable: (p) => executable.has(p),
+        readdir: (p) => children.get(p) ?? [],
         home: HOME,
         platform,
         env: {
@@ -177,5 +179,51 @@ describe("detectOpenCode", () => {
             join(HOME, "AppData", "Roaming", "ai.opencode.desktop", "opencode.settings"),
         );
         expect(detectOpenCode(deps(new Set([marker]), "win32")).kind).toBe("desktop");
+    });
+
+    it("finds the OpenCode CLI sidecar bundled with Windows Desktop", () => {
+        const cliRoot = join(HOME, "AppData", "Roaming", "ai.opencode.desktop", "cli");
+        const bin = join(cliRoot, "2.2.5-x64", "opencode-cli.exe");
+        const installations = detectOpenCodeInstallations(
+            deps(
+                new Set([bin]),
+                "win32",
+                () => null,
+                new Set([bin]),
+                new Map([[cliRoot, ["2.2.5-x64"]]]),
+            ),
+        );
+        expect(installations).toEqual([{ path: bin, source: "desktop-cli", kind: "cli" }]);
+        expect(
+            detectOpenCode(
+                deps(
+                    new Set([bin]),
+                    "win32",
+                    () => null,
+                    new Set([bin]),
+                    new Map([[cliRoot, ["2.2.5-x64"]]]),
+                ),
+            ),
+        ).toEqual({
+            kind: "cli",
+            binary: bin,
+        });
+    });
+
+    it("prefers the newest Desktop sidecar version and ignores non-executable ones", () => {
+        const cliRoot = join(HOME, "AppData", "Roaming", "ai.opencode.desktop", "cli");
+        const newest = join(cliRoot, "2.2.10-x64", "opencode-cli.exe");
+        const middle = join(cliRoot, "2.2.9-x64", "opencode-cli.exe");
+        const staleOnly = join(cliRoot, "2.2.8-x64", "opencode-cli.exe");
+        const installations = detectOpenCodeInstallations(
+            deps(
+                new Set([newest, middle, staleOnly]),
+                "win32",
+                () => null,
+                new Set([newest, middle]),
+                new Map([[cliRoot, ["2.2.8-x64", "2.2.10-x64", "2.2.9-x64"]]]),
+            ),
+        );
+        expect(installations.map((installation) => installation.path)).toEqual([newest, middle]);
     });
 });
