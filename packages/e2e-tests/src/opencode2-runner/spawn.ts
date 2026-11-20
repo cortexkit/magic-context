@@ -707,36 +707,44 @@ export function inspectOpenFiles(
 		if (!pids.length) throw new Error("v2 process group disappeared before fd inspection");
 		return spawnSync("lsof", ["-p", pids.join(","), "-Fin"], { encoding: "utf8", windowsHide: true });
 	};
-	// A short-lived group member can exit between ps and lsof. Resample the whole
-	// live group, but still require a successful inventory and the database inode.
-	const result = resampleTransientInventory(sample);
-	if (result.status !== 0)
-		throw new Error(`Cannot inspect v2 open files: ${result.stderr}`);
-	let fd = "";
-	const paths: string[] = [];
-	const writable: string[] = [];
-	for (const line of result.stdout.split("\n")) {
-		if (line.startsWith("f")) fd = line.slice(1);
-		if (!line.startsWith("n")) continue;
-		const path = line.slice(1);
-		paths.push(path);
-		// lsof's fd suffix is r, w or u (read/write). Program text, cwd,
-		// shared libraries and TUI source files are read-only inputs, not leaks.
-		if (/[0-9]+[wu]$/.test(fd)) writable.push(path);
-	}
-	// Mapped libraries and terminal-interface source files are read-only inputs.
-	// Check database/config paths even when their descriptors are read-only.
-	assertOpenPaths(paths, root, [], writable);
+	// A single sample can catch the child at a moment when it holds no open
+	// connection to its database (seen in CI shortly after startup), so the
+	// "database is open" check resamples for up to five seconds. Every sample is
+	// still checked for forbidden paths.
 	const db = join(env.XDG_DATA_HOME!, "opencode", env.OPENCODE_DB!);
-	const expected = statSync(db);
-	let inode: number | undefined;
-	const placements = result.stdout.split("\n").some((line) => {
-		if (line.startsWith("i")) inode = Number(line.slice(1));
-		return line === `n${db}` && inode === expected.ino;
-	});
-	if (!placements)
-		throw new Error(
-			`v2 child did not open its throwaway XDG_DATA_HOME database: expected ${db}; open paths=${JSON.stringify(paths)}`,
-		);
-	return paths;
+	const deadline = Date.now() + 5_000;
+	for (;;) {
+		// A short-lived group member can exit between ps and lsof. Resample the whole
+		// live group, but still require a successful inventory and the database inode.
+		const result = resampleTransientInventory(sample);
+		if (result.status !== 0)
+			throw new Error(`Cannot inspect v2 open files: ${result.stderr}`);
+		let fd = "";
+		const paths: string[] = [];
+		const writable: string[] = [];
+		for (const line of result.stdout.split("\n")) {
+			if (line.startsWith("f")) fd = line.slice(1);
+			if (!line.startsWith("n")) continue;
+			const path = line.slice(1);
+			paths.push(path);
+			// lsof's fd suffix is r, w or u (read/write). Program text, cwd,
+			// shared libraries and TUI source files are read-only inputs, not leaks.
+			if (/[0-9]+[wu]$/.test(fd)) writable.push(path);
+		}
+		// Mapped libraries and terminal-interface source files are read-only inputs.
+		// Check database/config paths even when their descriptors are read-only.
+		assertOpenPaths(paths, root, [], writable);
+		const expected = statSync(db);
+		let inode: number | undefined;
+		const placements = result.stdout.split("\n").some((line) => {
+			if (line.startsWith("i")) inode = Number(line.slice(1));
+			return line === `n${db}` && inode === expected.ino;
+		});
+		if (placements) return paths;
+		if (Date.now() >= deadline)
+			throw new Error(
+				`v2 child did not open its throwaway XDG_DATA_HOME database: expected ${db}; open paths=${JSON.stringify(paths)}`,
+			);
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+	}
 }
