@@ -346,13 +346,14 @@ describe("doctor OpenCode 2 database path", () => {
 
 describe("doctor npm registry", () => {
     it("asks the registry OpenCode installs from", () => {
-        expect(resolveNpmRegistryUrl({})).toBe("https://registry.npmjs.org");
-        expect(resolveNpmRegistryUrl({ npm_config_registry: "http://127.0.0.1:4873/" })).toBe(
-            "http://127.0.0.1:4873",
-        );
-        expect(resolveNpmRegistryUrl({ NPM_CONFIG_REGISTRY: "https://mirror.example" })).toBe(
-            "https://mirror.example",
-        );
+        const noFiles = { readFile: () => null };
+        expect(resolveNpmRegistryUrl({}, noFiles)).toBe("https://registry.npmjs.org");
+        expect(
+            resolveNpmRegistryUrl({ npm_config_registry: "http://127.0.0.1:4873/" }, noFiles),
+        ).toBe("http://127.0.0.1:4873");
+        expect(
+            resolveNpmRegistryUrl({ NPM_CONFIG_REGISTRY: "https://mirror.example" }, noFiles),
+        ).toBe("https://mirror.example");
     });
 });
 
@@ -981,37 +982,145 @@ describe("doctor OpenCode pinned plugin schema fence", () => {
         );
     });
 
-    it("falls back to the npm tarball when the pinned package is not installed", async () => {
+    it("uses the configured registry and tarball when the pinned package is not installed", async () => {
         const root = makeTempDir("mc-pinned-fence-");
         configurePinnedPlugin(root, `${OPENCODE_PLUGIN_NAME}@0.36.1`);
         configurePinnedPlugin(root, `${OPENCODE_PLUGIN_NAME}@0.36.1`, "tui");
         originalXdgCacheHome = process.env.XDG_CACHE_HOME;
         process.env.XDG_CACHE_HOME = root;
-        let requestCount = 0;
-
-        const findings = await inspectPinnedOpenCodePluginSchemaFences(
-            { directory: root, databaseVersion: 78 },
-            {
-                fetch: async () => {
-                    requestCount++;
-                    if (requestCount === 1) {
-                        return Response.json({
-                            version: "0.36.1",
-                            dist: { tarball: "https://registry.npmjs.org/plugin-0.36.1.tgz" },
-                        });
-                    }
-                    return new Response(createNpmTarballWithFence(77));
+        const previousRegistry = process.env.npm_config_registry;
+        const previousUserConfig = process.env.NPM_CONFIG_USERCONFIG;
+        const previousLowerUserConfig = process.env.npm_config_userconfig;
+        delete process.env.npm_config_userconfig;
+        process.env.npm_config_registry = "https://mirror.example/npm/";
+        process.env.NPM_CONFIG_USERCONFIG = join(root, "absent.npmrc");
+        const requested: string[] = [];
+        try {
+            const findings = await inspectPinnedOpenCodePluginSchemaFences(
+                { directory: root, databaseVersion: 78 },
+                {
+                    fetch: async (url) => {
+                        requested.push(String(url));
+                        if (requested.length === 1) {
+                            return Response.json({
+                                version: "0.36.1",
+                                dist: { tarball: "https://mirror.example/npm/plugin-0.36.1.tgz" },
+                            });
+                        }
+                        return new Response(createNpmTarballWithFence(77));
+                    },
                 },
-            },
-        );
+            );
+            expect(requested).toEqual([
+                "https://mirror.example/npm/%40cortexkit/opencode-magic-context/0.36.1",
+                "https://mirror.example/npm/plugin-0.36.1.tgz",
+            ]);
+            expect(findings).toContainEqual(
+                expect.objectContaining({
+                    status: "fail",
+                    source: "npm-tarball",
+                    supportedVersion: 77,
+                }),
+            );
+        } finally {
+            if (previousRegistry === undefined) delete process.env.npm_config_registry;
+            else process.env.npm_config_registry = previousRegistry;
+            if (previousUserConfig === undefined) delete process.env.NPM_CONFIG_USERCONFIG;
+            else process.env.NPM_CONFIG_USERCONFIG = previousUserConfig;
+            if (previousLowerUserConfig !== undefined)
+                process.env.npm_config_userconfig = previousLowerUserConfig;
+        }
+    });
 
-        expect(requestCount).toBe(2);
-        expect(findings).toContainEqual(
-            expect.objectContaining({
-                status: "fail",
-                source: "npm-tarball",
-                supportedVersion: 77,
-            }),
+    async function inspectThroughRegistry(
+        registry: string,
+        tarball: string,
+    ): Promise<{ requested: string[]; status: string | undefined }> {
+        const root = makeTempDir("mc-pinned-fence-");
+        configurePinnedPlugin(root, `${OPENCODE_PLUGIN_NAME}@0.36.1`);
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = root;
+        const previousRegistry = process.env.npm_config_registry;
+        const previousUserConfig = process.env.NPM_CONFIG_USERCONFIG;
+        const previousLowerUserConfig = process.env.npm_config_userconfig;
+        delete process.env.npm_config_userconfig;
+        process.env.npm_config_registry = registry;
+        process.env.NPM_CONFIG_USERCONFIG = join(root, "absent.npmrc");
+        const requested: string[] = [];
+        try {
+            const findings = await inspectPinnedOpenCodePluginSchemaFences(
+                { directory: root, databaseVersion: 78 },
+                {
+                    fetch: async (url) => {
+                        requested.push(String(url));
+                        if (requested.length === 1) {
+                            return Response.json({ version: "0.36.1", dist: { tarball } });
+                        }
+                        return new Response(createNpmTarballWithFence(77));
+                    },
+                },
+            );
+            return { requested, status: findings[0]?.status };
+        } finally {
+            if (previousRegistry === undefined) delete process.env.npm_config_registry;
+            else process.env.npm_config_registry = previousRegistry;
+            if (previousUserConfig === undefined) delete process.env.NPM_CONFIG_USERCONFIG;
+            else process.env.NPM_CONFIG_USERCONFIG = previousUserConfig;
+            if (previousLowerUserConfig !== undefined)
+                process.env.npm_config_userconfig = previousLowerUserConfig;
+        }
+    }
+
+    it("downloads tarballs from an explicitly selected HTTP registry", async () => {
+        const result = await inspectThroughRegistry(
+            "http://127.0.0.1:4873/",
+            "http://127.0.0.1:4873/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1.tgz",
+        );
+        expect(result.requested).toEqual([
+            "http://127.0.0.1:4873/%40cortexkit/opencode-magic-context/0.36.1",
+            "http://127.0.0.1:4873/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1.tgz",
+        ]);
+        expect(result.status).toBe("fail");
+    });
+
+    it("moves an upstream tarball URL onto the selected registry", async () => {
+        const result = await inspectThroughRegistry(
+            "https://mirror.example/npm/",
+            "https://registry.npmjs.org/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1.tgz",
+        );
+        expect(result.requested[1]).toBe(
+            "https://mirror.example/npm/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1.tgz",
+        );
+        expect(result.status).toBe("fail");
+    });
+
+    it("moves a tarball for a SemVer build-metadata version onto the selected registry", async () => {
+        const result = await inspectThroughRegistry(
+            "https://mirror.example/npm/",
+            "https://registry.npmjs.org/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1+build.4.tgz",
+        );
+        expect(result.requested[1]).toBe(
+            "https://mirror.example/npm/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1+build.4.tgz",
+        );
+        expect(result.status).toBe("fail");
+    });
+
+    it("never fetches a non-standard tarball URL from another host", async () => {
+        const result = await inspectThroughRegistry(
+            "https://mirror.example/npm/",
+            "https://elsewhere.example/download/plugin.tgz",
+        );
+        expect(result.requested).toHaveLength(1);
+        expect(result.status).toBe("unknown");
+    });
+
+    it("does not let an HTTPS registry be downgraded to an HTTP tarball", async () => {
+        const result = await inspectThroughRegistry(
+            "https://mirror.example/npm/",
+            "http://mirror.example/npm/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1.tgz",
+        );
+        expect(result.requested[1]).toBe(
+            "https://mirror.example/npm/@cortexkit/opencode-magic-context/-/opencode-magic-context-0.36.1.tgz",
         );
     });
 

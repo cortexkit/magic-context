@@ -6,6 +6,7 @@ import * as logger from "../../shared/logger";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 const PACKAGE_NAME = "@cortexkit/opencode-magic-context";
+const originalNpmRegistry = process.env.npm_config_registry;
 const hasExplicitNonExactPluginVersion = (spec: string) =>
     spec.startsWith(`${PACKAGE_NAME}@`) &&
     !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(
@@ -69,6 +70,8 @@ function makeTempStorageDir(): string {
 
 afterEach(() => {
     mock.restore();
+    if (originalNpmRegistry === undefined) delete process.env.npm_config_registry;
+    else process.env.npm_config_registry = originalNpmRegistry;
     while (tempDirs.length > 0) {
         const dir = tempDirs.pop();
         if (!dir) continue;
@@ -85,6 +88,34 @@ afterEach(() => {
 });
 
 describe("auto-update-checker/index", () => {
+    test("passes the configured registry through the legacy hook", async () => {
+        process.env.npm_config_registry = "https://mirror.example/npm/";
+        checkerMocks.findPluginEntry.mockImplementation(() => ({
+            entry: PACKAGE_NAME,
+            isPinned: false,
+            pinnedVersion: null,
+            configPath: "/test/opencode.json",
+        }));
+        checkerMocks.getCachedVersion.mockImplementation(() => "0.15.6");
+        const { createAutoUpdateCheckerHook } = await freshIndexImport();
+        const { ctx } = createCtx();
+        const controller = new AbortController();
+        try {
+            createAutoUpdateCheckerHook(ctx as never, {
+                initDelayMs: 0,
+                showStartupToast: false,
+                signal: controller.signal,
+            });
+            await waitForCalls(checkerMocks.getLatestVersion);
+            expect(checkerMocks.getLatestVersion).toHaveBeenCalledWith(
+                "latest",
+                expect.objectContaining({ registryUrl: "https://mirror.example/npm" }),
+            );
+        } finally {
+            controller.abort();
+        }
+    });
+
     beforeEach(() => {
         checkerMocks.extractChannel.mockReset();
         checkerMocks.extractChannel.mockImplementation(() => "latest");
