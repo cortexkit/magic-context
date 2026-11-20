@@ -42,10 +42,8 @@ pub(crate) const STATE: &str = "docs_proposals.state";
 pub(crate) const FLOW_ROUTE_METHODS: &[&str] = &[EVENTS_GET, STATE];
 /// The module that carries every flow's calls to other modules.
 const FLOW_CARRIER: &str = "basal";
-/// The module that owns flow scopes and is authorized to set their
-/// attributes: prefrontal, under either of its two module ids
-/// ([`crate::prefrontal`]). A scope owned by either has the same powers.
-const FLOW_SCOPE_OWNERS: &[&str] = crate::prefrontal::MODULE_IDS;
+/// The module that owns flow scopes and is authorized to set their attributes.
+const FLOW_SCOPE_OWNER: &str = crate::prefrontal::MODULE_ID;
 
 fn reserved(principal: &Principal, module: &str) -> bool {
     matches!(principal, Principal::Reserved { module_id } if module_id == module)
@@ -94,17 +92,9 @@ pub(crate) fn authorize_caller(
     let Some(scope) = scope else {
         return Err(format!("{method} needs a daemon scope stamp"));
     };
-    if !FLOW_SCOPE_OWNERS
-        .iter()
-        .any(|owner| reserved(&scope.owner, owner))
-    {
-        let owners = FLOW_SCOPE_OWNERS
-            .iter()
-            .map(|owner| format!("reserved:{owner}"))
-            .collect::<Vec<_>>()
-            .join(" or ");
+    if !reserved(&scope.owner, FLOW_SCOPE_OWNER) {
         return Err(format!(
-            "{method} needs a scope owned by {owners}, got {:?}",
+            "{method} needs a scope owned by reserved:{FLOW_SCOPE_OWNER}, got {:?}",
             scope.owner
         ));
     }

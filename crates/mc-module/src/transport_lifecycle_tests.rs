@@ -65,7 +65,7 @@ async fn an_unbound_tool_route_answers_the_catalog_and_refuses_tool_calls() {
         BindIdentity::new(MODULE_LEVEL_HARNESS, "catalog"),
     );
     request.principal = Some(Principal::Reserved {
-        module_id: "prefrontal-core".into(),
+        module_id: "prefrontal".into(),
     });
     request.role_versions = Some(std::collections::BTreeMap::from([(
         TOOL_ROLE.0.into(),
@@ -133,7 +133,7 @@ async fn cores_management_route_reads_the_step_transform_declaration() {
         BindIdentity::new("opencode2", "ses_head"),
     );
     request.principal = Some(Principal::Reserved {
-        module_id: "prefrontal-core".into(),
+        module_id: "prefrontal".into(),
     });
     let accepted = handler.on_bind(&request).await;
     assert!(
@@ -211,7 +211,7 @@ async fn cores_management_route_reads_the_step_transform_declaration() {
     request.handle = RouteHandle::detached(12, 1);
     request.scope = Some(subc_protocol::scope::ScopeStamp::new(
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         "head-scope",
         1,

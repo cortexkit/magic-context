@@ -319,12 +319,11 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn door_stream(&self) -> String {
         format!("reserved:{}", crate::MODULE_ID)
     }
-    /// One call to the management surface of core (the `prefrontal` module,
-    /// installed as `prefrontal-core` before its rename; either id answers,
-    /// see [`crate::prefrontal`]) under this module's own principal, given at
+    /// One call to the management surface of core (the `prefrontal` module)
+    /// under this module's own principal, given at
     /// most `deadline`: `persona.workspace_document`, for the workspace
     /// guidance the curate tasks show. The answer is the reply's JSON. A
-    /// refusal carries core's code; a core installed under neither id is
+    /// refusal carries core's code; a missing prefrontal module is
     /// `unknown_module`, and one that can't be reached or answers no JSON is
     /// `unavailable`. Without a daemon core is not installed, which is the
     /// default here.
@@ -338,8 +337,8 @@ pub trait RunnerClient: Send + Sync + 'static {
     }
 }
 
-/// Core refused a call, or could not be reached: `unknown_module` when it is
-/// installed under neither of its module ids, `unavailable` for any other
+/// Core refused a call, or could not be reached: `unknown_module` when
+/// prefrontal is not installed, `unavailable` for any other
 /// failure to get an answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreRefusal {
@@ -352,7 +351,7 @@ impl CoreRefusal {
     pub fn not_installed() -> Self {
         Self {
             code: "unknown_module".to_owned(),
-            message: "core is not installed as prefrontal or prefrontal-core".to_owned(),
+            message: "core is not installed as prefrontal".to_owned(),
             detail: None,
         }
     }

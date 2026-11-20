@@ -1,16 +1,14 @@
 //! The workspace guidance the curate tasks show: the text core (the
-//! `prefrontal` module, installed as `prefrontal-core` before its rename)
+//! `prefrontal` module)
 //! puts inside `<workspace-guidance>` for the agents of a workspace, from the
 //! guidance file in the workspace's root folder. A memory that repeats a line
 //! of it adds nothing, so curate may archive it as a duplicate that quotes
 //! the line.
 //!
 //! The engine asks core once per curate run, before the run is planned,
-//! with `persona.workspace_document` on core's management surface. A daemon
-//! may have core installed under either name, so the call goes to whichever
-//! the daemon has ([`crate::prefrontal`]); core counts as not installed only
-//! when neither is. Core reads the file afresh on every call. A run shows
-//! the guidance only when core serves it (`served`) and its audience
+//! with `persona.workspace_document` on the `prefrontal` management surface
+//! ([`crate::prefrontal`]). Core reads the file afresh on every call. A run
+//! shows the guidance only when core serves it (`served`) and its audience
 //! includes head agents ([`HEAD`]): curate keeps the memories head agents
 //! read beside it. In every other case (the workspace has no root folder or
 //! no file, core refuses the file or the call, or core is not installed or

@@ -255,8 +255,6 @@ pub struct SubcRunnerClient {
     /// The waits on summary and dreamer child runs, which the bus's run-end
     /// reader wakes ([`crate::bus::spawn_run_end_reader`]).
     run_ends: Arc<crate::run_ends::RunEnds>,
-    /// The id prefrontal's management surface last answered under.
-    prefrontal: crate::prefrontal::ManagementIds,
 }
 
 /// ck-mc's connection to the daemon as a consumer, made on first use and
@@ -295,7 +293,6 @@ impl SubcRunnerClient {
             runner_capabilities: Default::default(),
             routing_capabilities: Default::default(),
             run_ends: Arc::default(),
-            prefrontal: Default::default(),
         }
     }
 
@@ -1033,12 +1030,7 @@ impl RunnerClient for SubcRunnerClient {
             .map_err(|_| DoorRefusal::unavailable(format!("{method} answer has no result")))
     }
 
-    /// On the management surface of core (prefrontal), under whichever of
-    /// its two module ids this daemon has installed ([`crate::prefrontal`]):
-    /// the id that answered last, and the other only when the daemon refuses
-    /// that one as not installed. The SDK refuses a route to an absent module
-    /// at once rather than retrying it, so trying the other id costs one
-    /// round trip, not a retry deadline. Both attempts share `deadline`.
+    /// On the management surface of core (`prefrontal`).
     /// Core admits the call by the route's attested caller, this module's
     /// own principal (`reserved:magic-context`), so the bind identity grants
     /// nothing and only says what the call is for.
@@ -1050,26 +1042,24 @@ impl RunnerClient for SubcRunnerClient {
     ) -> Result<Value, crate::client::CoreRefusal> {
         use crate::client::CoreRefusal;
         let consumer = self.consumer().await.map_err(CoreRefusal::unavailable)?;
-        let started = Instant::now();
         let params = &params;
-        self.prefrontal
-            .call(|module_id| async move {
-                let reply = consumer
-                    .call(
-                        RouteTarget::ManagementSurface {
-                            module_id: module_id.to_owned(),
-                        },
-                        BindIdentity::new("magic-context", "dreamer"),
-                        wire::encode(method, params),
-                        CallOptions {
-                            timeout: deadline.saturating_sub(started.elapsed()),
-                            ..CallOptions::default()
-                        },
-                    )
-                    .await;
-                core_attempt(method, reply)
-            })
-            .await
+        crate::prefrontal::call(|module_id| async move {
+            let reply = consumer
+                .call(
+                    RouteTarget::ManagementSurface {
+                        module_id: module_id.to_owned(),
+                    },
+                    BindIdentity::new("magic-context", "dreamer"),
+                    wire::encode(method, params),
+                    CallOptions {
+                        timeout: deadline,
+                        ..CallOptions::default()
+                    },
+                )
+                .await;
+            core_attempt(method, reply)
+        })
+        .await
     }
 
     fn door_stream(&self) -> String {
@@ -1256,11 +1246,8 @@ fn engram_result(mut value: Value) -> Result<Value, String> {
     }
 }
 
-/// How one call to core's management surface under one module id ended
-/// ([`crate::prefrontal::Attempt`]). Only the daemon's refusal to open the
-/// route, because no module of that id is installed, lets the caller try
-/// core's other id; a refusal core itself sends keeps its code, whatever
-/// that code is.
+/// Decode a call to core's management surface. A refusal core sends keeps
+/// its code, including `unknown_module`.
 fn core_attempt(
     method: &str,
     reply: Result<Vec<u8>, subc_client_rs::CallError>,
@@ -1323,10 +1310,9 @@ mod core_attempt_tests {
     use subc_protocol::ErrorBody;
 
     /// A refusal core sends itself is core's answer, even one coded
-    /// `unknown_module`: only the daemon's refusal to open the route sends
-    /// the call on to core's other id.
+    /// `unknown_module`.
     #[test]
-    fn only_a_refused_route_lets_the_call_try_cores_other_id() {
+    fn core_refusals_and_failures_keep_their_meaning() {
         let own = ErrorBody::new("unknown_module", "core's own refusal");
         match core_attempt("persona.workspace_document", Err(CallError::Module(own))) {
             Attempt::Settled(Err(refusal)) => {
@@ -3506,7 +3492,7 @@ mod flow_tests {
     fn flow_scope() -> ScopeStamp {
         let mut scope = ScopeStamp::new(
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
             "flow-scope",
             1,
@@ -3695,38 +3681,30 @@ mod flow_tests {
         scope
     }
 
-    /// Prefrontal owns flow scopes under its current module id, `prefrontal`,
-    /// and under the one it had before, `prefrontal-core`; a scope owned by
-    /// either reaches both flow operations.
+    /// A prefrontal-owned scope reaches both flow operations.
     #[tokio::test]
-    async fn a_flow_scope_owned_by_either_prefrontal_id_reaches_the_flow_operations() {
+    async fn a_flow_scope_owned_by_prefrontal_reaches_the_flow_operations() {
         let dir = tempfile::tempdir().unwrap();
         let handler = handler(dir.path());
         let management = || RouteTarget::ManagementSurface {
             module_id: crate::MODULE_ID.into(),
         };
         let state = || json!({"method": "docs_proposals.state", "params": {"proposal_id": 1}});
-        for (channel, owner) in [(60, "prefrontal"), (61, "prefrontal-core")] {
-            bind(
-                &handler,
-                channel,
-                management(),
-                None,
-                basal(),
-                owned_by(owner),
-            )
-            .await;
-            assert_eq!(
-                call(&handler, channel, events_get()).await.0,
-                "ok",
-                "{owner}"
-            );
-            assert_eq!(call(&handler, channel, state()).await.0, "ok", "{owner}");
-        }
+        bind(
+            &handler,
+            60,
+            management(),
+            None,
+            basal(),
+            owned_by("prefrontal"),
+        )
+        .await;
+        assert_eq!(call(&handler, 60, events_get()).await.0, "ok");
+        assert_eq!(call(&handler, 60, state()).await.0, "ok");
     }
 
     /// A flow scope any other module owns is refused, and the refusal names
-    /// both of prefrontal's ids.
+    /// prefrontal as the required owner.
     #[tokio::test]
     async fn a_flow_scope_owned_by_another_module_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -3734,8 +3712,11 @@ mod flow_tests {
         let management = || RouteTarget::ManagementSurface {
             module_id: crate::MODULE_ID.into(),
         };
-        let body = serde_json::to_vec(&events_get()).unwrap();
-        for (channel, owner) in [(62, "callosum"), (63, "prefrontal-legacy")] {
+        for (channel, owner) in [
+            (61, "prefrontal-core"),
+            (62, "callosum"),
+            (63, "prefrontal-legacy"),
+        ] {
             bind(
                 &handler,
                 channel,
@@ -3745,15 +3726,21 @@ mod flow_tests {
                 owned_by(owner),
             )
             .await;
-            match handler.flow_request(channel, &body).await {
-                Some(HandlerOutcome::Error { code, message }) => {
-                    assert_eq!(code, "caller_forbidden", "{owner}");
-                    assert!(
-                        message.contains("reserved:prefrontal or reserved:prefrontal-core"),
-                        "{message}"
-                    );
+            for request in [
+                events_get(),
+                json!({"method": "docs_proposals.state", "params": {"proposal_id": 1}}),
+            ] {
+                let body = serde_json::to_vec(&request).unwrap();
+                match handler.flow_request(channel, &body).await {
+                    Some(HandlerOutcome::Error { code, message }) => {
+                        assert_eq!(code, "caller_forbidden", "{owner}");
+                        assert!(
+                            message.contains("needs a scope owned by reserved:prefrontal, got"),
+                            "{message}"
+                        );
+                    }
+                    other => panic!("{owner}: {other:?}"),
                 }
-                other => panic!("{owner}: {other:?}"),
             }
         }
     }
