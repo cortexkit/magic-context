@@ -931,6 +931,7 @@ export function createTransform(deps: TransformDeps) {
     const transform = async (
         _input: Record<string, never>,
         output: { messages: unknown[] },
+        warmFitRetry?: { tokens: number; limit: number },
     ): Promise<void> => {
         const startTime = performance.now();
         const historianRun = deps.resolveHistorianRun?.();
@@ -1932,19 +1933,6 @@ export function createTransform(deps: TransformDeps) {
                   sessionID: sessionId,
               })
             : undefined;
-        const warmAppendFitLimit =
-            !compactionOff &&
-            !isFirstTransformPassForSession &&
-            resolvedContextLimit !== undefined &&
-            resolvedContextLimit > 0 &&
-            contextUsageEarly.inputTokens < resolvedContextLimit &&
-            appendedTailMayExceedWindow(
-                messages,
-                contextUsageEarly.inputTokens,
-                resolvedContextLimit,
-            )
-                ? resolvedContextLimit
-                : undefined;
         const hostEstimate = deps.hostInputEstimate?.(sessionId);
         // Text an OpenCode 2 host adds after this transform (its checkpoint
         // message wraps the history head); a recovery pass counts it too.
@@ -1990,9 +1978,10 @@ export function createTransform(deps: TransformDeps) {
         // Sessions with compartments or drops are not checked here: their
         // incoming array still holds the history and tool output the pass is
         // about to replace, so its size says nothing about the request.
-        let unmanagedOverWindowPass: { tokens: number; limit: number } | null = null;
+        let unmanagedOverWindowPass = warmFitRetry ?? null;
         const unmanagedOverWindowCarried = unmanagedOverWindowSessions.has(sessionId);
         if (
+            !warmFitRetry &&
             fullFeatureMode &&
             !compactionOff &&
             typeof resolvedContextLimit === "number" &&
@@ -2049,6 +2038,13 @@ export function createTransform(deps: TransformDeps) {
                     `transform: over-window first-pass check could not estimate the incoming history: ${getErrorMessage(error)}`,
                 );
             }
+        }
+        if (warmFitRetry) {
+            contextUsageEarly = {
+                inputTokens: warmFitRetry.tokens,
+                percentage: (warmFitRetry.tokens / warmFitRetry.limit) * 100,
+            };
+            usagePercentageSynthetic = true;
         }
         const emergencyUsagePercentageEarly = usagePercentageSynthetic
             ? Math.max(95, contextUsageEarly.percentage)
@@ -2328,6 +2324,21 @@ export function createTransform(deps: TransformDeps) {
                   deps.getModelKey?.(sessionId),
                   resolvedContextLimit,
               );
+        const hardFitLimit = windowGeometry?.usableHard ?? resolvedContextLimit;
+        // A new user paste may outrun the previous provider reading. The byte
+        // sample only selects passes to size after replay; it does not change
+        // the scheduler's pressure reading.
+        // Tool-loop steps and execute passes keep their existing fit paths.
+        const warmAppendFit =
+            schedulerDecision === "defer" &&
+            !compactionOff &&
+            !isFirstTransformPassForSession &&
+            !unmanagedOverWindowPass &&
+            hardFitLimit !== undefined &&
+            hardFitLimit > contextUsageEarly.inputTokens &&
+            appendedTailMayExceedWindow(messages, contextUsageEarly.inputTokens, hardFitLimit)
+                ? { limit: hardFitLimit, input: structuredClone(entryOrderForThinkingFit) }
+                : undefined;
         // True only when the saved reading turned a deferred pass into an
         // execute pass.
         const executeFromSavedReading =
@@ -2840,6 +2851,7 @@ export function createTransform(deps: TransformDeps) {
                     : {
                           hasCachedM0: sessionMeta.cachedM0Bytes !== null,
                           boundary: sessionMeta.cachedM0TrimBoundaryId,
+                          partial: sessionMeta.cachedM0TrimBoundaryPartial ?? true,
                       },
             );
             if (messagesBeforeInitialPrepare) {
@@ -4350,6 +4362,37 @@ export function createTransform(deps: TransformDeps) {
                     );
                 }
             }
+            if (warmAppendFit) {
+                const served = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                    sessionId,
+                });
+                const localTokens = served.toolDefinitionsMeasured
+                    ? (served.rawTokens ?? served.tokens)
+                    : Math.max(0, sessionMeta.systemPromptTokens) +
+                      served.messageTokens.conversation +
+                      served.messageTokens.toolCall;
+                const provenTokens = served.refusalGrade ? served.refusalTokens : undefined;
+                if (
+                    provenTokens !== undefined
+                        ? provenTokens > warmAppendFit.limit
+                        : isClearlyOverWindow(localTokens, warmAppendFit.limit)
+                ) {
+                    // The replayed request does not fit. Re-enter the fit path
+                    // with the original host input so normal reclaim runs before
+                    // its final admission check.
+                    messages.splice(0, messages.length, ...warmAppendFit.input);
+                    await transform({}, output, {
+                        tokens: provenTokens ?? localTokens,
+                        limit: warmAppendFit.limit,
+                    });
+                    return;
+                }
+            }
             // The pass began clearly over the window with nothing to replace the
             // history (see the check before the scheduler decision). Whatever
             // this pass reclaimed, a request still over the window does not go
@@ -4373,11 +4416,15 @@ export function createTransform(deps: TransformDeps) {
                 // history stay in, so a carried session whose host-cut history
                 // shrank while the request is still over the window is still
                 // refused.
-                const servedTokens = served.toolDefinitionsMeasured
+                const localTokens = served.toolDefinitionsMeasured
                     ? (served.rawTokens ?? served.tokens)
                     : Math.max(0, sessionMeta.systemPromptTokens) +
                       served.messageTokens.conversation +
                       served.messageTokens.toolCall;
+                const servedTokens =
+                    warmFitRetry && served.refusalGrade
+                        ? (served.refusalTokens ?? localTokens)
+                        : localTokens;
                 if (
                     !Number.isFinite(servedTokens) ||
                     servedTokens > unmanagedOverWindowPass.limit
@@ -4393,34 +4440,6 @@ export function createTransform(deps: TransformDeps) {
                     sessionId,
                     `over-window first pass reduced: the request is about ${servedTokens} tokens (history started at ${unmanagedOverWindowPass.tokens}), under the ${unmanagedOverWindowPass.limit}-token window`,
                 );
-            }
-            if (warmAppendFitLimit !== undefined && !unmanagedOverWindowPass) {
-                // Tail bytes only select a fit check. Counting after replay
-                // avoids forcing reductions on a request that already fits.
-                const served = estimateFinalWireInputTokens({
-                    messages,
-                    systemPromptTokens: sessionMeta.systemPromptTokens,
-                    providerID: modelForBudget?.providerID,
-                    modelID: modelForBudget?.modelID,
-                    agentName: notificationParams.agent,
-                    sessionId,
-                });
-                const localTokens = served.toolDefinitionsMeasured
-                    ? (served.rawTokens ?? served.tokens)
-                    : Math.max(0, sessionMeta.systemPromptTokens) +
-                      served.messageTokens.conversation +
-                      served.messageTokens.toolCall;
-                const provenTokens = served.refusalGrade ? served.refusalTokens : undefined;
-                if (
-                    provenTokens !== undefined
-                        ? provenTokens > warmAppendFitLimit
-                        : isClearlyOverWindow(localTokens, warmAppendFitLimit)
-                ) {
-                    throw new UnmanagedOverWindowError(
-                        provenTokens ?? localTokens,
-                        warmAppendFitLimit,
-                    );
-                }
             }
             const timedOutHistorianFailure = compartmentPhase.historianJoinTimedOut
                 ? historianJoinFailClosedMessage({

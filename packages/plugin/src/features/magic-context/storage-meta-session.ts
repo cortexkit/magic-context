@@ -24,6 +24,7 @@ import {
 } from "./storage-meta-persisted";
 import {
     BOOLEAN_META_KEYS,
+    CACHED_TRIM_PARTIAL_SQL,
     ensureSessionMetaRow,
     getDefaultSessionMeta,
     isSessionMetaRow,
@@ -32,6 +33,7 @@ import {
     SESSION_META_SELECT_COLUMNS,
     toSessionMeta,
 } from "./storage-meta-shared";
+import { getTableColumnNames } from "./storage-schema-helpers";
 import { deleteSessionScopedRows } from "./storage-session-tables";
 import type { SessionMeta } from "./types";
 
@@ -87,10 +89,16 @@ function getSessionMetaSelectColumns(db: Database): string {
             (column) => column.name,
         ),
     );
-    const projection = SESSION_META_SELECT_COLUMNS.map((column) => {
+    const columns = SESSION_META_SELECT_COLUMNS.map((column) => {
         if (existingColumns.has(column)) return column;
         return SESSION_META_FALLBACK_SELECTS[column] ?? `0 AS ${column}`;
-    }).join(", ");
+    });
+    if (
+        existingColumns.has("cached_m0_last_baseline_end_message_id") &&
+        getTableColumnNames(db, "compartments").has("end_block_index")
+    )
+        columns.push(`${CACHED_TRIM_PARTIAL_SQL} AS cached_trim_partial`);
+    const projection = columns.join(", ");
     sessionMetaSelectColumnsCache.set(db, projection);
     return projection;
 }

@@ -26,10 +26,7 @@
  */
 
 import { MEMORY_MURAL_BLOCK } from "@magic-context/core/agents/magic-context-prompt";
-import {
-	CACHED_TRIM_PARTIAL_SQL,
-	isPartialCompartmentEnd,
-} from "@magic-context/core/features/magic-context/compartment-storage";
+import { CACHED_TRIM_PARTIAL_SQL } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	getMaxMemoryIdForProjects,
 	getMemoriesByProject,
@@ -704,6 +701,7 @@ export interface PiM0SnapshotMarkers {
 	/** Records the renderer used by cached bytes; written on a natural HARD but never triggers one. */
 	memoryRenderEpoch: string | null;
 	lastBaselineEndMessageId: string | null;
+	lastBaselineEndPartial: boolean;
 	// HARD-bust markers (parity with OpenCode M0SnapshotMarkers) are captured
 	// from PiM0HardSignals. Pi has no tool-set hash because it has no equivalent
 	// tool-definition hook.
@@ -1102,6 +1100,7 @@ function getCachedMarkers(
 		// The boundary that was persisted WITH these cached m[0] bytes (may be
 		// null for a legitimately-boundaryless baseline — see the guard above).
 		lastBaselineEndMessageId: cachedBoundary,
+		lastBaselineEndPartial: cachedRowOverride?.cached_trim_partial === 1,
 		systemHash: meta.cachedM0SystemHash ?? "",
 		modelKey: meta.cachedM0ModelKey ?? "",
 		projectIdentity: meta.cachedM0ProjectIdentity ?? null,
@@ -1118,6 +1117,18 @@ function lastBaselineEndMessageId(
 	return last?.endMessageId && last.endMessageId.length > 0
 		? last.endMessageId
 		: null;
+}
+
+function isPartialBoundary(
+	compartments: readonly PiCompartment[],
+	id: string | null,
+): boolean {
+	return (
+		id !== null &&
+		compartments.some(
+			(row) => row.endMessageId === id && row.endBlockIndex != null,
+		)
+	);
 }
 
 function readCurrentMarkers(
@@ -1196,6 +1207,10 @@ function readCurrentMarkersFromCompartments(
 		compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
 		memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
 		lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
+		lastBaselineEndPartial: isPartialBoundary(
+			compartments,
+			lastBaselineEndMessageId(compartments),
+		),
 		systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 		modelKey: piModelRefToCanonical(
 			(state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
@@ -1695,6 +1710,10 @@ function readFrozenM0InputsPi(
 			compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
 			memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
 			lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
+			lastBaselineEndPartial: isPartialBoundary(
+				compartments,
+				lastBaselineEndMessageId(compartments),
+			),
 			systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 			modelKey: piModelRefToCanonical(
 				(state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
@@ -2481,6 +2500,7 @@ function markersFromCachedPiRow(
 			row.cached_m0_last_baseline_end_message_id.length > 0
 				? row.cached_m0_last_baseline_end_message_id
 				: null,
+		lastBaselineEndPartial: row.cached_trim_partial === 1,
 		systemHash: row.cached_m0_system_hash ?? "",
 		modelKey: row.cached_m0_model_key ?? "",
 		projectIdentity: row.cached_m0_project_identity ?? null,
@@ -2715,7 +2735,13 @@ function softRefreshCachedM1Pi(args: {
 		return {
 			m0: decodeCachedM0(row.cached_m0_bytes) ?? "",
 			m1: rendered.text,
-			markers: { ...markers, lastBaselineEndMessageId: advancedBoundary },
+			markers: {
+				...markers,
+				lastBaselineEndMessageId: advancedBoundary,
+				lastBaselineEndPartial: latest?.endMessageId
+					? isPartialBoundary(compartments, advancedBoundary)
+					: markers.lastBaselineEndPartial,
+			},
 			memoryUpdateCount: rendered.memoryUpdateCount,
 			recomputed: true,
 		};
@@ -2822,9 +2848,7 @@ function replayCompletePiPrefix(
 				trimBoundaryId,
 				false,
 				state.sessionId,
-				compartments.some(
-					(c) => c.endMessageId === trimBoundaryId && c.endBlockIndex != null,
-				),
+				row.cached_trim_partial === 1,
 				(ids) =>
 					queueAutoSearchHintDecisionRetirement(db, state.sessionId, ids),
 			)
@@ -3204,9 +3228,7 @@ export function injectM0M1Pi(
 			};
 		}
 	}
-	const trimBoundaryPartial =
-		trimBoundaryId != null &&
-		isPartialCompartmentEnd(db, state.sessionId, trimBoundaryId);
+	const trimBoundaryPartial = markers.lastBaselineEndPartial;
 	const skippedVisibleMessages = trimBoundaryId
 		? trimPiMessagesToBoundary(
 				piMessages,

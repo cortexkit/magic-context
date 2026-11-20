@@ -117,7 +117,10 @@ import {
 import { retirePendingSystemPromptDelivery } from "../../hooks/magic-context/system-prompt-delivery";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
-import { UnmanagedOverWindowError } from "../../hooks/magic-context/unmanaged-over-window";
+import {
+    isClearlyOverWindow,
+    UnmanagedOverWindowError,
+} from "../../hooks/magic-context/unmanaged-over-window";
 import { UnresolvedHistoryBoundaryError } from "../../hooks/magic-context/unresolved-history-boundary";
 import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
 import { createDreamTimerModuleClient } from "../../plugin/dream-timer-module-client";
@@ -3527,13 +3530,15 @@ export async function registerContext(context: V2Context) {
                 cause,
             });
         }
-        if (
-            estimate.refusalGrade !== true ||
-            estimate.refusalTokens === undefined ||
-            !Number.isFinite(estimate.refusalTokens) ||
-            estimate.refusalTokens <= limit
-        )
-            return;
+        const measured = estimate.refusalGrade ? estimate.refusalTokens : undefined;
+        // Without measured counts for this provider and model, the widened
+        // estimate alone does not show overflow. Still stop a checkpoint whose
+        // unscaled count is clearly over the window.
+        const oversized =
+            measured !== undefined && Number.isFinite(measured)
+                ? measured > limit
+                : isClearlyOverWindow(estimate.rawTokens ?? 0, limit);
+        if (!oversized) return;
         await refuseBeforeProvider(context.session, draft.sessionID, "checkpoint-over-window");
         throw new V2ContextRefusal("Magic Context refused an oversized host checkpoint.");
     };
