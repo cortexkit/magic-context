@@ -3514,7 +3514,8 @@ export async function registerContext(context: V2Context) {
         const limit = draft.model.limit?.input ?? draft.model.limit?.context;
         // Removing a checkpoint's duplicated transcript does not ensure the request
         // fits: a generate hook can append a large user question after replay.
-        // Size every request that contains a checkpoint, even without recent-context.
+        // Size every request that contains a checkpoint, whether or not it also
+        // carries the duplicated transcript block.
         if (!hasCheckpoint || !limit) return;
         let estimate: ReturnType<typeof estimateCheckpointRequest>;
         try {
