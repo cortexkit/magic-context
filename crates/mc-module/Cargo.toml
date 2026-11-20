@@ -90,12 +90,12 @@ semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # The module publishes its bus events itself, as Plexus does (`bus.rs`): a
 # NATS credential from ck-bus, a JetStream publish, the fleet's subject names.
-cortexkit-bus-nats = "=0.4.0"
+cortexkit-bus-nats = "=0.5.5"
 cortexkit-bus-trait = "=0.3.1"
 cortexkit-bus-naming = "=0.5.4"
 # The computer's box id (`BusClient::box_id`), which names every memory this
 # computer shares with the user's other computers (`replica/`).
-cortexkit-bus-client = "=0.1.8"
+cortexkit-bus-client = "=0.1.10"
 # API keys the user names as `{vault:<credential id>}` are read from the
 # CortexKit vault over ck-mc's own SDK consumer (`vault.rs`), and shared
 # memories are sealed and opened under the fleet epoch key with its typed
