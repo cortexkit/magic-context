@@ -62,6 +62,8 @@ interface MessageStructure {
 	resultNames?: string[];
 	timestamp?: number;
 	exactText?: string;
+	/** Other exact bodies the host can derive from the same prepared orphan. */
+	exactTextAlternatives?: readonly string[];
 	systemText?: readonly string[];
 	exactImages?: readonly string[];
 	wireContent?: unknown;
@@ -144,6 +146,9 @@ const dateReminderPlans = new WeakMap<
 
 const MAX_MESSAGES = 100_000;
 const ORPHAN_NOTE = Symbol("prepared orphan tool result");
+const ORPHAN_NOTE_ALTERNATIVES = Symbol("prepared orphan tool result variants");
+const OMP_PROVIDER_ERROR_REPLAY_TEXT =
+	"Tool call was not executed because the provider stream ended with an error before the tool could run.";
 const rowDiagnostics = new WeakMap<MessageStructure, PiDispatchRowDiagnostic>();
 const preparedSources = new WeakMap<
 	PiPreparedStructure,
@@ -260,6 +265,8 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 	if (ORPHAN_NOTE in message && typeof message.content === "string") {
 		if (message.content.length > 32 * 1024 * 1024) return undefined;
 		row.exactText = message.content;
+		const alternatives = Reflect.get(message, ORPHAN_NOTE_ALTERNATIVES);
+		if (Array.isArray(alternatives)) row.exactTextAlternatives = alternatives;
 	}
 	if (typeof message.timestamp === "number") row.timestamp = message.timestamp;
 	if (role === "toolResult") {
@@ -616,7 +623,18 @@ function projectMissingToolResults(
 		});
 		if (!parts.length) continue;
 		const error = message.isError ? ' is-error="true"' : "";
-		const note = `<stale-tool-result tool="${message.toolName}" id="${message.toolCallId}"${error}>\n${parts.join("\n")}\n</stale-tool-result>`;
+		const staleNote = (text: string) =>
+			`<stale-tool-result tool="${message.toolName}" id="${message.toolCallId}"${error}>\n${text}\n</stale-tool-result>`;
+		const note = staleNote(parts.join("\n"));
+		const details = object(message.details);
+		// Oh My Pi 19.0.1's provider replay policy replaces this result's body
+		// before transformMessages, using only its structured synthetic-error
+		// marker. Oh My Pi 18.22.0 sends the prepared body, and the model has no
+		// host-version field, so both exact notes must remain valid for this orphan.
+		const replayNote =
+			details?.__synthetic === true && details.source === "assistant_stop_error"
+				? staleNote(OMP_PROVIDER_ERROR_REPLAY_TEXT)
+				: undefined;
 		projected.push({
 			role: "user",
 			content:
@@ -625,6 +643,9 @@ function projectMissingToolResults(
 					: new TextDecoder().decode(new TextEncoder().encode(note)),
 			timestamp: message.timestamp,
 			[ORPHAN_NOTE]: true,
+			...(replayNote !== undefined && replayNote !== note
+				? { [ORPHAN_NOTE_ALTERNATIVES]: [replayNote] }
+				: {}),
 		});
 	}
 	flush();
@@ -2288,6 +2309,15 @@ function preparedStructureMismatch(
 							prepared?.api,
 							responses,
 							google || body.inferenceConfig !== undefined,
+						) &&
+						!expected.exactTextAlternatives?.some((text) =>
+							matchesUserText(
+								actual.wireContent,
+								text,
+								prepared?.api,
+								responses,
+								google || body.inferenceConfig !== undefined,
+							),
 						)) ||
 					(expected.exactImages !== undefined &&
 						!piMatchesChatImages(actual.wireContent, expected.exactImages))
