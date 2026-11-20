@@ -6,9 +6,10 @@ use tokio::time::Instant;
 
 use crate::context_db::ContextDb;
 
-/// The replica loop samples the store at its existing wakeups. A 0.50 store
-/// has one ck-mc writer process, and 0.49 plugins refuse its schema, so no
-/// other process can change these rows behind the replica loop's back.
+/// The replica loop samples the store at its existing wakeups. Only one
+/// ck-mc process serves a store, and the older TypeScript plugins refuse to
+/// open a store at this schema version, so no other process can change these
+/// rows behind the replica loop's back.
 pub(crate) struct Health {
     pub(crate) started: Instant,
     sample: Mutex<Option<Sample>>,
