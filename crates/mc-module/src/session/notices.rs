@@ -198,6 +198,12 @@ impl Session {
             self.search_reconcile_from =
                 Some(self.search_reconcile_from.map_or(from, |old| old.min(from)));
         }
+        // The events above may be reported only once. Take them even while
+        // an unresolved view is waiting for its next transcript read.
+        if self.waiting_for_adoption() {
+            self.index_ready = false;
+            return None;
+        }
         // No newest entry: the transcript is empty, and the read empties the
         // index.
         let extended = self
@@ -237,6 +243,9 @@ impl Session {
             self.index_ready = self.sync_from_changeable(client, newest).await;
         }
         if !self.index_ready {
+            if self.adoption_retry.is_some() {
+                self.defer_adoption();
+            }
             self.log_render_location(&notice.events);
             return None;
         }

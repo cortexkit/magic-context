@@ -696,25 +696,13 @@ pub const UNKNOWN_REASONING_STEP_TOKENS: u64 = 1_000;
 /// thinking a rebuild would invalidate (`pass.rs`), so it measures how hard
 /// the model just thought, not what sending the reasoning again costs.
 pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
-    step_reasoning_tokens_shown(entry, None)
-}
-
-pub(crate) fn step_reasoning_tokens_shown(entry: &Entry, edited: Option<&Edited>) -> u64 {
-    let mut reasoning: Vec<&Part> = entry
+    let reasoning: Vec<&Part> = entry
         .parts
         .iter()
         .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
         .collect();
-    let generated_parts = reasoning.len();
-    if let Some(edited) = edited {
-        reasoning.retain(|part| !edited.covers(&entry.mid, &part.id));
-    }
     if reasoning.is_empty() {
         return 0;
-    }
-    if reasoning.len() != generated_parts {
-        // A step's aggregate usage includes reasoning that is no longer sent.
-        return visible_cost(&reasoning);
     }
     generated_cost(entry)
         .or_else(|| entry.reasoning_tokens.map(|counted| counted.count))
@@ -1447,13 +1435,14 @@ pub fn emergency_drop(
         (prompt, fixed) = account(request);
     }
     let mut ceiling = emergency.ceiling_tokens as f64;
+    let fit_target = emergency.over_limit && fixed >= ceiling;
     if emergency.over_limit {
         if fixed >= emergency.usable_tokens.saturating_sub(EMERGENCY_MIN_TOKENS) as f64 {
             // Even dropping the whole indexed transcript would leave less
             // than the safety margin for estimation error.
             return Vec::new();
         }
-        if fixed >= ceiling {
+        if fit_target {
             ceiling = emergency.usable_tokens as f64;
         }
     }
@@ -1463,7 +1452,7 @@ pub fn emergency_drop(
     }
     let target = fixed + EMERGENCY_TARGET_FRACTION * (ceiling - fixed);
     let reclaim = (prompt - target).round();
-    if reclaim <= 0.0 || (!emergency.over_limit && reclaim <= EMERGENCY_MIN_TOKENS as f64) {
+    if reclaim <= 0.0 || (!fit_target && reclaim <= EMERGENCY_MIN_TOKENS as f64) {
         return Vec::new();
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
@@ -1526,7 +1515,7 @@ pub fn emergency_drop(
             }
         }
     }
-    if !emergency.over_limit && !emergency.priced && reclaimed < EMERGENCY_MIN_TOKENS {
+    if !fit_target && !emergency.priced && reclaimed < EMERGENCY_MIN_TOKENS {
         return Vec::new();
     }
     selected

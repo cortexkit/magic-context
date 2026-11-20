@@ -79,6 +79,7 @@ impl Session {
             next_rearm: false,
             summary_unshown: false,
             latest_unknown: false,
+            adoption_retry: None,
             summaries_missing: None,
             next_keep: None,
             failed_parts: BTreeSet::new(),
@@ -590,6 +591,10 @@ impl Session {
         self.agent_id = route.agent_id.clone();
         self.seq = 0;
         self.note_transcript_growth(request.newest.as_ref());
+        if self.waiting_for_adoption() {
+            self.index_ready = false;
+            return;
+        }
         // Before anything is offered, settled or read: a transcript that no
         // longer holds the summaries' history holds the session here, with
         // its state as it was.
@@ -631,6 +636,9 @@ impl Session {
             .read_until_from(client, request.newest.as_ref(), force, after)
             .await;
         if !self.index_ready {
+            if self.adoption_retry.is_some() {
+                self.defer_adoption();
+            }
             return;
         }
         // The floor names an entry, so it is taken once the read holds it.

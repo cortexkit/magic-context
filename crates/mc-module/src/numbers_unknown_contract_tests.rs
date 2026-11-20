@@ -102,6 +102,154 @@ fn cut_through(view: &View) -> Option<&str> {
 }
 
 #[tokio::test]
+async fn review_probe_refused_cut_restores_stamp_pruned_by_next_notice() {
+    check_refused_cut_restores_stamps(false).await;
+}
+
+#[tokio::test]
+async fn review_probe_refused_cumulative_cut_restores_stamp_from_second_offer() {
+    check_refused_cut_restores_stamps(true).await;
+}
+
+async fn check_refused_cut_restores_stamps(cumulative: bool) {
+    let dir = scratch("cut-stamps");
+    let entries: Vec<_> = (1..=8).map(|n| text(n, &format!("m{n}"))).collect();
+    let (mut session, client, settings) =
+        head(&dir, entries.clone(), &[((1, "m1"), (3, "m3"))]).await;
+    let stamp = |tag| serde_json::json!({"drop": tag});
+    assert_eq!(
+        session.ctx_reduce(&client, &stamp("2")).await.unwrap(),
+        "1 tag stamped."
+    );
+    let first = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&first), Some("m3"));
+    assert!(session.publish(&client, first.clone()).await);
+    assert!(session.index.find_tag(2).is_none());
+    let n = notice(&session, 1, entries.last().map(cursor));
+    session.notice(&client, &settings, n).await;
+
+    if cumulative {
+        assert_eq!(
+            session.ctx_reduce(&client, &stamp("4")).await.unwrap(),
+            "1 tag stamped."
+        );
+        summary(session.db.as_ref().unwrap(), 2, (4, "m4"), (5, "m5"));
+        session.load_summaries();
+        let second = session.build(&settings, None, false, None).0.unwrap();
+        assert_eq!(cut_through(&second), Some("m5"));
+        assert!(session.publish(&client, second).await);
+        assert!(session.index.find_tag(4).is_none());
+        let n = notice(&session, 2, entries.last().map(cursor));
+        session.notice(&client, &settings, n).await;
+    }
+    let mut n = notice(&session, 3, entries.last().map(cursor));
+    n.events = vec![Event::ViewRefused {
+        version: first.version,
+        refusal: ViewRefusal::BadSince,
+    }];
+    session.notice(&client, &settings, n).await;
+    if cumulative {
+        assert!(
+            session.queued.contains(&("m4".into(), "p".into())),
+            "the second cut hid its later stamp"
+        );
+        assert!(session.app.stamps.contains_key(&("m4".into(), "p".into())));
+    }
+    assert!(
+        session.queued.contains(&("m2".into(), "p".into())),
+        "refusing the cut hid a stamp from the restored queue"
+    );
+    assert!(session.app.stamps.contains_key(&("m2".into(), "p".into())));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn review_probe_older_no_cut_reindexes_visible_tail() {
+    let dir = scratch("older-no-cut");
+    let entries: Vec<_> = (1..=8).map(|n| text(n, &format!("m{n}"))).collect();
+    let (mut session, client, settings) = head(&dir, entries.clone(), &[]).await;
+    let old = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&old), None);
+    session.accept(old.clone());
+    session.settle_unconfirmed(Some(&old.applied()), &[]);
+    summary(session.db.as_ref().unwrap(), 1, (1, "m1"), (5, "m5"));
+    session.load_summaries();
+    let new = session.build(&settings, None, false, None).0.unwrap();
+    session.accept(new.clone());
+    session.settle_unconfirmed(Some(&new.applied()), &[]);
+    assert_eq!(session.index.base(), 5);
+
+    *client.applied.lock().unwrap() = Some(AppliedViewAnswer::new().with_view(old.clone()));
+    let mut n = notice(&session, 1, entries.last().map(cursor));
+    n.applied_view = Some(old.applied());
+    session.notice(&client, &settings, n).await;
+    assert_eq!(session.latest.as_ref().unwrap().checksum, old.checksum);
+    assert_eq!(session.cut, None);
+    assert_eq!(session.index.base(), 1);
+    assert_eq!(
+        session
+            .ctx_reduce(&client, &serde_json::json!({"drop":"1-4"}))
+            .await
+            .unwrap(),
+        "4 tags stamped."
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn review_probe_missing_cut_backs_off_until_runner_can_place_it() {
+    let dir = scratch("missing-endpoint");
+    let entries: Vec<_> = (1..=8).map(|n| text(n, &format!("m{n}"))).collect();
+    let (mut session, client, settings) =
+        head(&dir, entries.clone(), &[((1, "m1"), (5, "m5"))]).await;
+    let newer = session.build(&settings, None, false, None).0.unwrap();
+    session.accept(newer.clone());
+    session.settle_unconfirmed(Some(&newer.applied()), &[]);
+    let reported = View::seal(
+        1,
+        vec![cortexkit_role_compaction::view::Edit::new(
+            1,
+            EditOp::Cut {
+                through: "m2".into(),
+            },
+        )],
+    );
+    *client.applied.lock().unwrap() = Some(AppliedViewAnswer::new().with_view(reported.clone()));
+    client.entries.lock().unwrap().retain(|e| e.ordinal >= 5);
+
+    let report = |session: &Session, seq| {
+        let mut n = notice(session, seq, entries.last().map(cursor));
+        n.applied_view = Some(reported.applied());
+        n.conditions.last_prompt_tokens = Some(95_000);
+        n
+    };
+    let n = report(&session, 1);
+    session.notice(&client, &settings, n).await;
+    assert!(session.latest_unknown && !session.index_ready);
+    let reads = client.reads.lock().unwrap().len();
+    for seq in 2..=4 {
+        let n = report(&session, seq);
+        session.notice(&client, &settings, n).await;
+    }
+    assert_eq!(
+        client.reads.lock().unwrap().len(),
+        reads,
+        "repeated reports retried the missing cut without waiting"
+    );
+    assert!(client.offered.lock().unwrap().is_empty());
+
+    *client.entries.lock().unwrap() = entries.clone();
+    tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+    let mut n = report(&session, 5);
+    n.conditions.last_prompt_tokens = Some(10_000);
+    session.notice(&client, &settings, n).await;
+    assert!(!session.latest_unknown && session.index_ready);
+    assert_eq!(session.cut, Some(2));
+    assert_eq!(session.latest.as_ref().unwrap().checksum, reported.checksum);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn audit_views_adopt_older_cut_reindexes_visible_tail() {
     let dir = scratch("older-cut");
     let entries: Vec<_> = (1..=10).map(|n| text(n, &format!("m{n}"))).collect();
@@ -196,7 +344,61 @@ fn audit_views_invalid_cut_does_not_discard_independent_edits() {
 }
 
 #[tokio::test]
-async fn audit_views_non_summarized_numbers_coverage_commits_cut() {
+async fn review_probe_over_limit_reselects_after_cut_refusal() {
+    let dir = scratch("cut-credit");
+    let part = |id: &str, status, bytes| {
+        let mut part: Part = serde_json::from_value(serde_json::json!({
+            "id":id, "kind":"tool", "call_id":id, "name":"read", "input":{"path":id},
+            "status":status, "output_bytes":bytes, "digest":""
+        }))
+        .unwrap();
+        part.tag = Some(if id == "big" { 2 } else { 4 });
+        part
+    };
+    let entries = vec![
+        text(1, "task"),
+        Entry::new(
+            2,
+            "archive",
+            Role::Assistant,
+            0,
+            vec![part("big", "completed", 300_000)],
+        ),
+        text(3, "final-user"),
+        Entry::new(
+            4,
+            "system",
+            Role::System,
+            0,
+            vec![part("running", "running", 0)],
+        ),
+    ];
+    let (mut session, _, settings) = head(&dir, entries, &[((1, "task"), (4, "system"))]).await;
+    // The running system entry makes the history candidate retreat to the
+    // final user entry. Validation refuses that cut, and it would have
+    // appeared to cover the large result without an emergency drop.
+    assert_eq!(session.history_ops(&settings, false).1, Some(3));
+    let ride = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    )
+    .with_request_tokens(100_000);
+    let view = session
+        .ride(&settings, &ride)
+        .expect("the no-cut ride can still reclaim");
+    assert_eq!(cut_through(&view), None);
+    assert!(
+        view.edits.iter().any(|edit| matches!(&edit.op,
+            EditOp::Drop { mid, part: Some(part) } if mid == "archive" && part == "big"
+        )),
+        "the proposed cut must not get credit for removing the large tool result"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn review_probe_numbers_only_cut_preserves_pending_stamp_on_restore() {
     let dir = scratch("coverage-cut");
     let (_, marked_notice) = transition();
     let mut entries = vec![marked_notice];
@@ -207,13 +409,20 @@ async fn audit_views_non_summarized_numbers_coverage_commits_cut() {
         session.numbers_covered.as_ref().map(|floor| floor.ordinal),
         Some(1)
     );
+    let key = ("m4".to_owned(), "p".to_owned());
+    session.queued.insert(key.clone());
     let view = session.build(&settings, None, false, None).0.unwrap();
     assert_eq!(cut_through(&view), Some("message-a"));
     session.accept(view.clone());
-    session.settle_unconfirmed(Some(&view.applied()), &[]);
-    assert_eq!(session.cut, Some(1));
-    assert!(!session.head_stale);
-    assert!(!session.numbers_view_due());
+    assert!(!session.queued.contains(&key));
+    let saved = session.durable();
+    session.restore(saved);
+    assert_eq!(
+        session.latest.as_ref().map(|v| &v.checksum),
+        Some(&view.checksum)
+    );
+    session.ride_undelivered(view.version);
+    assert!(session.queued.contains(&key));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

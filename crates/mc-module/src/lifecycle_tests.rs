@@ -493,6 +493,58 @@ async fn audit_views_no_hold_for_already_dropped_thinking() {
 }
 
 #[tokio::test]
+async fn review_probe_held_signed_block_survives_an_applied_partial_drop() {
+    use cortexkit_role_compaction::part::Seal;
+    use cortexkit_role_compaction::read::StepUsage;
+
+    let (mut session, _, _, _, settings) = fixture();
+    session.conditions.rules.signed_parts = SignedParts::Bound;
+    session.conditions.last_prompt_tokens = Some(70_000);
+    let signed = |id| {
+        Part::new(
+            id,
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(4),
+            },
+        )
+        .with_seal(Seal::Signed)
+    };
+    let mut thinking = Entry::new(
+        2,
+        "think",
+        Role::Assistant,
+        0,
+        vec![signed("first"), signed("kept")],
+    );
+    let mut usage = StepUsage::new();
+    usage.reasoning_tokens = Some(3_000);
+    thinking.usage = Some(usage);
+    let mut last = text(3, "last");
+    last.role = Role::Assistant;
+    session.index.extend([text(1, "task"), thinking, last]);
+    let view = session
+        .seal(
+            vec![EditOp::Drop {
+                mid: "think".into(),
+                part: Some("first".into()),
+            }],
+            &[],
+        )
+        .unwrap();
+    assert!(!view
+        .edits
+        .iter()
+        .any(|edit| matches!(&edit.op, EditOp::Drop { part: Some(part), .. } if part == "kept")));
+    session.accept(view.clone());
+    session.settle_unconfirmed(Some(&view.applied()), &[]);
+    assert!(
+        !session.rebuild_permitted(&settings),
+        "the applied view still serves a signed block from the heavy step"
+    );
+}
+
+#[tokio::test]
 async fn audit_views_ordinary_rebuild_and_defer_keep_wire_bytes() {
     use cortexkit_role_compaction::view::Edit;
 
