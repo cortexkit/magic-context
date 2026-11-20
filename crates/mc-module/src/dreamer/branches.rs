@@ -76,14 +76,18 @@ pub(crate) fn main_checkout(folder: &Path) -> Result<PathBuf, String> {
 /// as it is: a run checks that its folder exists before it starts, and
 /// skips naming the folder that is gone. `None` only when `roots` is empty.
 pub(crate) fn project_folder(roots: &[String]) -> Option<String> {
-    project_folder_outside(roots, &crate::storage_paths::cortexkit_data_root())
+    project_folder_outside(
+        roots,
+        crate::storage_paths::cortexkit_data_root().as_deref(),
+    )
 }
 
 /// [`project_folder`] with `data_root` as the CortexKit data root, compared
-/// resolved as [`Refs::live_outside`] compares it.
-fn project_folder_outside(roots: &[String], data_root: &Path) -> Option<String> {
+/// resolved as [`Refs::live_outside`] compares it. If the root is unknown,
+/// no checkout is treated as internal.
+fn project_folder_outside(roots: &[String], data_root: Option<&Path>) -> Option<String> {
     let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
-    let data_root = real(data_root);
+    let data_root = data_root.map(real);
     // Ordered by: git could not place the folder, the folder is inside the
     // data root, the folder's path. The first entry is the answer.
     let mut found: BTreeSet<(bool, bool, PathBuf)> = BTreeSet::new();
@@ -96,7 +100,9 @@ fn project_folder_outside(roots: &[String], data_root: &Path) -> Option<String> 
             Ok(main) => (false, main),
             Err(_) => (true, folder.to_owned()),
         };
-        let inside = real(&folder).starts_with(&data_root);
+        let inside = data_root
+            .as_ref()
+            .is_some_and(|root| real(&folder).starts_with(root));
         found.insert((unplaced, inside, folder));
     }
     match found.into_iter().next() {
@@ -249,22 +255,28 @@ impl Refs {
     /// runs, whatever commits it has. The main checkout is never left out.
     /// `Err` when git fails or runs out of time on one of the checks.
     pub(crate) fn live_in(&self, repo: &Path) -> Result<Vec<LiveBranch>, String> {
-        self.live_outside(repo, &crate::storage_paths::cortexkit_data_root())
+        self.live_outside(repo, crate::storage_paths::cortexkit_data_root().as_deref())
     }
 
     /// [`Refs::live_in`] with `data_root` as the CortexKit data root. Paths
     /// are compared resolved, so a symlinked home or macOS's `/private/var`
     /// still matches; a folder equal to the root or inside it counts, a
-    /// sibling such as `cortexkit-scratch` does not.
-    fn live_outside(&self, repo: &Path, data_root: &Path) -> Result<Vec<LiveBranch>, String> {
+    /// sibling such as `cortexkit-scratch` does not. If the root is unknown,
+    /// no worktree is excluded based on its location.
+    fn live_outside(
+        &self,
+        repo: &Path,
+        data_root: Option<&Path>,
+    ) -> Result<Vec<LiveBranch>, String> {
         let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
-        let root = real(data_root);
+        let root = data_root.map(real);
         let main = real(repo);
         let live = self.live_of(self.worktrees.iter().enumerate().filter_map(
             |(index, worktree)| {
                 let path = real(&worktree.path);
                 let main_checkout = index == 0 || path == main;
-                (main_checkout || !path.starts_with(&root)).then_some(worktree)
+                let internal = root.as_ref().is_some_and(|root| path.starts_with(root));
+                (main_checkout || !internal).then_some(worktree)
             },
         ));
         let Some(default) = live

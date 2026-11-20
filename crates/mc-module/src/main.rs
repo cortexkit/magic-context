@@ -88,7 +88,7 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODULE_ID.to_owned());
-    let context_path = context_db_path();
+    let context_path = context_db_path()?;
     // With managed settings, a 0.49-shaped user file is converted once,
     // before ck-mc connects to the daemon or reads its settings.
     #[cfg(feature = "managed-settings")]
@@ -182,7 +182,7 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let context_path = context_db_path();
+    let context_path = context_db_path()?;
     // A move installs a head into the store its summaries already live in;
     // a machine without one has nothing to move into.
     if !context_path.exists() {
@@ -236,7 +236,7 @@ fn rekey_runner() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
     let request = mc_module::rekey::Request::parse(args)?;
-    let context = context_db_path();
+    let context = context_db_path()?;
     mc_module::agent_data::refuse_offline(
         &context,
         request
@@ -278,7 +278,7 @@ fn tag_floor() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     let harness = harness.unwrap_or_else(|| usage());
     let session = session.unwrap_or_else(|| usage());
-    let path = context_db_path();
+    let path = context_db_path()?;
     if !path.try_exists()? {
         return Err(MISSING_STORE.into());
     }

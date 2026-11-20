@@ -265,7 +265,7 @@ fn worktrees_inside_the_cortexkit_data_root_are_not_live() {
     let (_outer, feature) = repo.worktree("feature");
     commit_at(&feature, &[("a.rs", "feature\n")], "feature");
     let refs = Refs::read(repo.path()).unwrap();
-    let live = |refs: &Refs, root: &Path| -> Vec<String> {
+    let live = |refs: &Refs, root: Option<&Path>| -> Vec<String> {
         let mut names: Vec<String> = refs
             .live_outside(repo.path(), root)
             .unwrap()
@@ -275,25 +275,26 @@ fn worktrees_inside_the_cortexkit_data_root_are_not_live() {
         names.sort();
         names
     };
-    assert_eq!(live(&refs, &root), ["feature", "master", "scratch"]);
+    assert_eq!(live(&refs, Some(&root)), ["feature", "master", "scratch"]);
     // With the data root elsewhere every head with commits of its own counts.
     assert_eq!(
-        live(&refs, &data.path().join("elsewhere")),
+        live(&refs, Some(&data.path().join("elsewhere"))),
         ["feature", "master", "scratch", "task"]
     );
+    assert_eq!(live(&refs, None), ["feature", "master", "scratch", "task"]);
     // The root reached through a symlink still matches.
     #[cfg(unix)]
     {
         let link = data.path().join("link");
         std::os::unix::fs::symlink(&root, &link).unwrap();
-        assert_eq!(live(&refs, &link), ["feature", "master", "scratch"]);
+        assert_eq!(live(&refs, Some(&link)), ["feature", "master", "scratch"]);
     }
     // The main checkout is never left out, even when it is the root itself.
     git_at(repo.path(), &["checkout", "-q", "-b", "own"]);
     commit_at(repo.path(), &[("b.rs", "own\n")], "own");
     let refs = Refs::read(repo.path()).unwrap();
     assert_eq!(
-        live(&refs, repo.path()),
+        live(&refs, Some(repo.path())),
         ["feature", "master", "own", "scratch", "task"]
     );
 }
@@ -317,7 +318,7 @@ fn a_projects_tasks_run_in_the_main_checkout_of_a_folder_that_still_exists() {
     );
     let (_outer, feature) = repo.worktree("feature");
     let chosen = |roots: &[String]| {
-        project_folder_outside(roots, &root).map(|folder| canonical(Path::new(&folder)))
+        project_folder_outside(roots, Some(&root)).map(|folder| canonical(Path::new(&folder)))
     };
     let roots = [text(&task), text(&feature)];
     assert_eq!(chosen(&roots), Some(canonical(repo.path())));
@@ -333,8 +334,11 @@ fn a_projects_tasks_run_in_the_main_checkout_of_a_folder_that_still_exists() {
         text(&data.path().join("gone-a")),
         text(&data.path().join("gone-b")),
     ];
-    assert_eq!(project_folder_outside(&gone, &root), Some(gone[0].clone()));
-    assert_eq!(project_folder_outside(&[], &root), None);
+    assert_eq!(
+        project_folder_outside(&gone, Some(&root)),
+        Some(gone[0].clone())
+    );
+    assert_eq!(project_folder_outside(&[], Some(&root)), None);
 }
 
 /// Of several main checkouts, one outside the CortexKit data root comes
@@ -343,7 +347,7 @@ fn a_projects_tasks_run_in_the_main_checkout_of_a_folder_that_still_exists() {
 #[test]
 fn a_main_checkout_outside_the_data_root_comes_first_then_the_first_by_path() {
     let data = tempfile::tempdir().unwrap();
-    let root = data.path().join("cortexkit");
+    let root = data.path().join("a-cortexkit");
     let repository = |path: PathBuf| {
         std::fs::create_dir_all(&path).unwrap();
         git_at(&path, &["init", "-q"]);
@@ -357,11 +361,19 @@ fn a_main_checkout_outside_the_data_root_comes_first_then_the_first_by_path() {
             .iter()
             .map(|path| path.to_str().unwrap().to_owned())
             .collect();
-        project_folder_outside(&roots, &root).map(|folder| canonical(Path::new(&folder)))
+        project_folder_outside(&roots, Some(&root)).map(|folder| canonical(Path::new(&folder)))
     };
     assert_eq!(chosen(&[&inside, &b, &a]), Some(canonical(&a)));
     assert_eq!(chosen(&[&b, &inside]), Some(canonical(&b)));
     assert_eq!(chosen(&[&inside]), Some(canonical(&inside)));
+    assert_eq!(
+        project_folder_outside(
+            &[inside.to_str().unwrap().into(), b.to_str().unwrap().into()],
+            None
+        )
+        .map(|folder| canonical(Path::new(&folder))),
+        Some(canonical(&inside))
+    );
     // The root reached through a symlink still matches.
     #[cfg(unix)]
     {
@@ -372,7 +384,7 @@ fn a_main_checkout_outside_the_data_root_comes_first_then_the_first_by_path() {
             b.to_str().unwrap().to_owned(),
         ];
         assert_eq!(
-            project_folder_outside(&roots, &link).map(|folder| canonical(Path::new(&folder))),
+            project_folder_outside(&roots, Some(&link)).map(|folder| canonical(Path::new(&folder))),
             Some(canonical(&b))
         );
     }
