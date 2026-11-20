@@ -61,26 +61,31 @@ fn a_manifest_gives_each_memory_one_verdict_with_its_fields() {
 }
 
 #[test]
-fn missing_is_read_only_on_an_archive() {
+fn missing_is_read_on_an_archive_or_rewrite_and_blank_is_ignored() {
     let verdicts = parse_manifest(
-        r#"<verify><skip id="1" missing="x_name"/><archive id="2" missing="  "/></verify>"#,
-        &[1, 2],
+        r#"<verify><skip id="1" missing="x_name"/><archive id="2" missing="  "/><update id="3" missing=" old_name ">new_name</update></verify>"#,
+        &[1, 2, 3],
     )
     .unwrap();
-    assert_eq!(verdicts[0].missing, None);
-    assert_eq!(verdicts[1].missing, None);
+    let read: Vec<_> = verdicts
+        .iter()
+        .map(|verdict| (verdict.id, verdict.missing.as_deref()))
+        .collect();
+    assert_eq!(read, [(3, Some("old_name")), (2, None), (1, None)]);
 }
 
 #[test]
-fn cites_and_derive_are_read_on_a_confirmation_only_and_never_refuse_the_reply() {
+fn spans_and_arithmetic_are_left_for_verdict_checks() {
     let verdicts = parse_manifest(
         r#"<verify>
 <verified id="1" files="src/a.rs" cites="src/a.rs:120-128;src/b.rs:40-41" derive="150 s = 10 × 15_000 ms"/>
 <verified id="2" files="src/a.rs" cites="not a span"/>
 <verified id="3" files="src/a.rs"/>
+<update id="5" cites="src/a.rs:1" derive="2 = 1 + 1">new content</update>
+<archive id="6" cites="src/a.rs:2" derive="1 = 1"/>
 <skip id="4" cites="src/a.rs:1-2" derive="1 = 1"/>
 </verify>"#,
-        &[1, 2, 3, 4],
+        &[1, 2, 3, 4, 5, 6],
     )
     .unwrap();
     let read: Vec<(Option<&str>, Option<&str>)> = verdicts
@@ -98,6 +103,8 @@ fn cites_and_derive_are_read_on_a_confirmation_only_and_never_refuse_the_reply()
             ),
             (Some("not a span"), None),
             (None, None),
+            (Some("src/a.rs:1"), Some("2 = 1 + 1")),
+            (Some("src/a.rs:2"), None),
             (None, None),
         ]
     );

@@ -51,9 +51,9 @@ pub(crate) struct Verdict {
     pub reason: String,
     /// An update that shortens the memory on purpose.
     pub consolidation: bool,
-    /// An archive's path or code name that is gone from the checkout.
+    /// The old path or code name an archive or rewrite says is gone.
     pub missing: Option<String>,
-    /// A confirmation's cited lines, as written ([`super::spans`]).
+    /// The lines a confirmation, positive contradiction or rewrite cites.
     pub cites: Option<String>,
     /// A confirmation's arithmetic for a number no cited line holds as
     /// written ([`super::numbers::derivations`]).
@@ -140,15 +140,15 @@ pub(crate) fn parse_manifest(text: &str, expected: &[i64]) -> Result<Vec<Verdict
                 reason: attribute(&entry[1], "reason").unwrap_or_default(),
                 consolidation: attribute(&entry[1], "consolidation")
                     .is_some_and(|value| value.to_lowercase() == "true"),
-                missing: (*decision == Decision::Archive)
+                missing: matches!(decision, Decision::Archive | Decision::Update)
                     .then(|| attribute(&entry[1], "missing"))
                     .flatten()
                     .map(|value| js_trim(&value).to_owned())
                     .filter(|value| !value.is_empty()),
-                cites: (*decision == Decision::Verified)
+                cites: (*decision != Decision::Skip)
                     .then(|| attribute(&entry[1], "cites"))
                     .flatten(),
-                derive: (*decision == Decision::Verified)
+                derive: matches!(decision, Decision::Verified | Decision::Update)
                     .then(|| attribute(&entry[1], "derive"))
                     .flatten(),
             });

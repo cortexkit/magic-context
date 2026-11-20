@@ -1157,50 +1157,6 @@ pub(crate) enum Absence {
     Undecided(String),
 }
 
-/// Whether what `cite` names is in the checkout: a path among the tracked
-/// files and folders, a code name as literal text, searching no further than
-/// `limits`.
-fn look_for(checkout: &Checkout, cite: &Cite, limits: &Limits) -> Absence {
-    let missing = match cite {
-        Cite::Path(path) => {
-            return match checkout.has_path(path) {
-                Some(true) => Absence::Present,
-                Some(false) => Absence::Absent,
-                None => Absence::Undecided(format!("{path} is not a path inside the checkout")),
-            };
-        }
-        Cite::Name(name) => name.as_str(),
-    };
-    let search = checkout.search(&[missing], limits);
-    if search.found[0] {
-        Absence::Present
-    } else if search.cut {
-        Absence::Undecided(format!(
-            "the search for {missing} stopped after {} files, before it read every tracked file",
-            search.files
-        ))
-    } else {
-        Absence::Absent
-    }
-}
-
-/// Whether what `cite` names, already absent from the checkout, was ever in
-/// its checked-out history: a path some commit touched, a code name some
-/// commit added or removed. [`Absence::Absent`] when it was, so it was
-/// removed; [`Absence::Never`] when not; undecided when git fails or runs
-/// past `timeout`.
-fn in_history(checkout: &Checkout, cite: &Cite, timeout: Duration) -> Absence {
-    let held = match cite {
-        Cite::Path(path) => checkout.path_in_history(path, timeout),
-        Cite::Name(name) => checkout.text_in_history(name, timeout),
-    };
-    match held {
-        Ok(true) => Absence::Absent,
-        Ok(false) => Absence::Never,
-        Err(why) => Absence::Undecided(format!("searching the history for it failed: {why}")),
-    }
-}
-
 /// One message of a verify run.
 pub(crate) struct VerifyBatch {
     declared: Arc<Declared>,
@@ -1235,7 +1191,7 @@ pub(crate) struct VerifyBatch {
     /// checkout holds it and, when not, whether its history ever did. The
     /// lookups run when the reply is accepted, before the store's write lock
     /// is taken, and the write reads the answer from here.
-    absence: Mutex<HashMap<Cite, Absence>>,
+    absence: Mutex<HashMap<(Cite, Vec<String>), Absence>>,
     /// Recent unmerged branches are checked for archives before the write.
     archive_branches: apply::ArchiveBranches,
     /// Each confirmation's check, by memory and the `cites` and `derive` the
@@ -1280,21 +1236,71 @@ impl VerifyBatch {
         self.read.iter().map(|read| read.id).collect()
     }
 
-    fn absence(&self, cite: &Cite) -> Absence {
-        if let Some(known) = self.absence.lock().expect("absence cache").get(cite) {
+    fn absence(&self, cite: &Cite, files: &[String]) -> Absence {
+        let key = (cite.clone(), files.to_vec());
+        if let Some(known) = self.absence.lock().expect("absence cache").get(&key) {
             return known.clone();
         }
-        let mut found = look_for(&self.checkout, cite, &SEARCH_LIMITS);
-        // Only what the history once held can have been removed. Git is
-        // asked only here, for a proposed archive, never while planning.
-        if found == Absence::Absent {
-            found = in_history(&self.checkout, cite, self.history_timeout);
-        }
+        let found = self
+            .prove_removal(cite, files)
+            .unwrap_or_else(Absence::Undecided);
         self.absence
             .lock()
             .expect("absence cache")
-            .insert(cite.clone(), found.clone());
+            .insert(key, found.clone());
         found
+    }
+
+    /// A removal needs both a complete search of the checked scope and
+    /// historical evidence from that same scope. A short read can prove neither.
+    fn prove_removal(&self, cite: &Cite, files: &[String]) -> Result<Absence, String> {
+        let checkout = &self.checkout;
+        let timeout = self.history_timeout;
+        let held = match cite {
+            Cite::Path(path) => {
+                if checkout.committed_has_path(path)? {
+                    return Ok(Absence::Present);
+                }
+                checkout.path_in_history(path, timeout)
+            }
+            Cite::Name(name) if files.is_empty() => {
+                if checkout.committed_has_text(name)? {
+                    return Ok(Absence::Present);
+                }
+                checkout.text_in_history(name, timeout)
+            }
+            Cite::Name(name) => {
+                let mut paths = BTreeSet::new();
+                for file in files {
+                    let (path, text) = self
+                        .committed(file)?
+                        .ok_or_else(|| format!("{file} is not a file at the checked commit"))?;
+                    if text.contains(name) {
+                        return Ok(Absence::Present);
+                    }
+                    paths.insert(path);
+                }
+                let mut held = false;
+                for path in paths {
+                    match checkout.text_in_file_history(name, Some(&path), timeout) {
+                        Ok(true) => {
+                            held = true;
+                            break;
+                        }
+                        Ok(false) => (),
+                        Err(why) => {
+                            return Err(format!("searching the history for it failed: {why}"))
+                        }
+                    }
+                }
+                Ok(held)
+            }
+        };
+        match held {
+            Ok(true) => Ok(Absence::Absent),
+            Ok(false) => Ok(Absence::Never),
+            Err(why) => Err(format!("searching the history for it failed: {why}")),
+        }
     }
 
     /// The cited lines confirmation `verdict` rests on, or why it counts as
@@ -1363,15 +1369,15 @@ impl TaskInput for VerifyBatch {
         self.warm_gate(&verdicts);
         for verdict in &verdicts {
             match verdict.decision {
-                Decision::Archive => {
+                Decision::Archive | Decision::Update => {
                     if let Some(read) = self.read.iter().find(|read| read.id == verdict.id) {
-                        self.warm_archive(verdict, read);
+                        self.warm_change(verdict, read);
                     }
                 }
                 Decision::Verified => {
                     let _ = self.confirmation(verdict);
                 }
-                Decision::Update | Decision::Skip => {}
+                Decision::Skip => {}
             }
         }
         Ok(())

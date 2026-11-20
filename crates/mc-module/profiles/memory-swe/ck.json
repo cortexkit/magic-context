@@ -145,8 +145,8 @@
     },
     {
       "path": "prompts/dreamer/verify/system.md",
-      "sha256": "34d43c2789f9aa3e41e6568522f439292e535d77823a786c051be3927c867cf7",
-      "bytes": 5189
+      "sha256": "c0a77dbe9adc4cbf2dd7252e4533f2f4499016eae7ff5ae39afe5c312e49fe2e",
+      "bytes": 5509
     },
     {
       "path": "prompts/dreamer/verify/user.diff-evidence.md",

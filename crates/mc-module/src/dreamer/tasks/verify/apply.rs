@@ -23,8 +23,10 @@
 //!   with `missing` it needs that path or name to be one of the memory's
 //!   citations as [`super::cites`] reads them, the checkout not to hold it,
 //!   and some commit of the checked-out history to have held it, so it was
-//!   removed rather than never here; without it, it needs evidence in
-//!   `reason`, and is refused for a directive-shaped rule. Either form is
+//!   removed rather than never here; without it, it needs committed lines
+//!   naming the memory's subject and is refused for a directive-shaped rule.
+//!   Updates check their corrected claim against committed lines and use the
+//!   same removal proof when they name a missing subject. Either archive form is
 //!   refused when the unmerged history of a recent local branch changed a
 //!   citation, or when that check cannot finish.
 //!
@@ -57,7 +59,8 @@ use regex::Regex;
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
-use super::cites::{cites, Cite};
+use super::cites::{cites, cites_all, code_cites, Cite};
+use super::confirm::{check_claim, read_cited};
 use super::manifest::{js_trim, Decision, Verdict};
 use super::spans::{Confirmation, STORED_KEY};
 use super::{Absence, Read, VerifyBatch};
@@ -325,6 +328,7 @@ impl VerifyBatch {
         };
         let refusal = refusal
             .or_else(|| self.check_lines(verdict, read))
+            .or_else(|| self.check_change_evidence(verdict, &current.content).err())
             .or_else(|| {
                 if verdict.decision != Decision::Archive {
                     return None;
@@ -376,18 +380,16 @@ impl VerifyBatch {
         }
     }
 
-    /// Read the archive evidence before taking the store's write lock.
-    pub(super) fn warm_archive(&self, verdict: &Verdict, read: &Read) {
-        let cited = cites(&read.content, self.checkout.top_level());
-        let has_evidence = match &verdict.missing {
-            Some(missing) => cited
-                .iter()
-                .find(|cite| cite.text() == missing)
-                .is_some_and(|cite| self.absence(cite) == Absence::Absent),
-            None => !js_trim(&verdict.reason).is_empty(),
-        };
-        if has_evidence && self.check_lines(verdict, read).is_none() {
-            self.archive_branches.refusal(&self.checkout, cited);
+    /// Read change evidence before taking the store's write lock.
+    pub(super) fn warm_change(&self, verdict: &Verdict, read: &Read) {
+        if self.check_lines(verdict, read).is_none()
+            && self.check_change_evidence(verdict, &read.content).is_ok()
+            && verdict.decision == Decision::Archive
+        {
+            self.archive_branches.refusal(
+                &self.checkout,
+                cites(&read.content, self.checkout.top_level()),
+            );
         }
     }
 
@@ -434,35 +436,69 @@ impl VerifyBatch {
     }
 
     fn check_archive(&self, verdict: &Verdict, current: &MemoryRow) -> Option<String> {
-        let Some(missing) = &verdict.missing else {
-            if directive(current) {
-                return Some(
-                    "a project rule that reads as a behavioural directive is archived only with missing=, once everything it cites is gone"
-                        .into(),
-                );
-            }
-            return js_trim(&verdict.reason)
-                .is_empty()
-                .then(|| "an archive without missing= needs the code's evidence in reason".into());
-        };
-        // Only something the module itself reads as a citation of this
-        // memory can be gone: text that merely occurs in it may be English.
-        let Some(cite) = cites(&current.content, self.checkout.top_level())
-            .into_iter()
-            .find(|cite| cite.text() == missing)
-        else {
-            return Some(format!(
-                "missing={missing:?} is not a path or name the memory cites"
-            ));
-        };
-        match self.absence(&cite) {
-            Absence::Absent => None,
-            Absence::Present => Some(format!("{missing} is still in the checkout")),
-            Absence::Never => Some(format!("{missing} was never in this repository")),
-            Absence::Undecided(why) => {
-                Some(format!("whether {missing} is gone is undecided: {why}"))
-            }
+        (verdict.missing.is_none() && directive(current)).then(|| {
+            "a project rule that reads as a behavioural directive is archived only with missing=, once everything it cites is gone".into()
+        })
+    }
+
+    fn check_change_evidence(&self, verdict: &Verdict, old: &str) -> Result<(), String> {
+        if !matches!(verdict.decision, Decision::Archive | Decision::Update) {
+            return Ok(());
         }
+        let missing = verdict.missing.as_deref();
+        if let Some(missing) = missing {
+            let cite = cites_all(old, self.checkout.top_level())
+                .into_iter()
+                .find(|cite| cite.text() == missing)
+                .or_else(|| quoted_literal(old, missing).then(|| Cite::Name(missing.into())))
+                .ok_or_else(|| {
+                    format!("missing={missing:?} is not a path or name the memory cites")
+                })?;
+            let files = match cite {
+                Cite::Name(_) => verdict.files.as_slice(),
+                Cite::Path(_) => &[],
+            };
+            match self.absence(&cite, files) {
+                Absence::Absent => (),
+                Absence::Present => return Err(format!("{missing} is still in the checkout")),
+                Absence::Never => return Err(format!("{missing} was never in this repository")),
+                Absence::Undecided(why) => {
+                    return Err(format!("whether {missing} is gone is undecided: {why}"))
+                }
+            }
+            if verdict.decision == Decision::Archive {
+                return Ok(());
+            }
+        } else if claims_removal(&verdict.reason) || claims_removal(&verdict.content) {
+            return Err("a removal claim needs missing= and whole-file or whole-tree proof".into());
+        }
+        let cites = verdict
+            .cites
+            .as_deref()
+            .filter(|cites| !cites.trim().is_empty())
+            .ok_or("an archive or rewrite needs cites for the code's evidence")?;
+        let (_, spans) = read_cited(cites, self.commit(), &|path| self.committed(path))?;
+        if verdict.decision == Decision::Update {
+            return check_claim(
+                &verdict.content,
+                self.checkout.top_level(),
+                verdict.derive.as_deref(),
+                &spans,
+                missing,
+            );
+        }
+        if js_trim(&verdict.reason).is_empty() {
+            return Err("a positive contradiction needs a reason saying what the code does".into());
+        }
+        if !code_cites(old, self.checkout.top_level())
+            .iter()
+            .any(|cite| spans.iter().any(|span| span.text.contains(cite.text())))
+        {
+            return Err(
+                "none of the cited lines names a path or code name the memory cites".into(),
+            );
+        }
+        Ok(())
     }
 
     /// The tracked files among `named`, in order and once each.
@@ -740,6 +776,36 @@ impl VerifyBatch {
         )?;
         Ok(())
     }
+}
+
+/// A quoted diagnostic can be a removal subject even though it is not an
+/// identifier. Requiring the exact quotation prevents arbitrary prose from
+/// becoming the subject of a search.
+fn quoted_literal(content: &str, literal: &str) -> bool {
+    literal.contains(' ')
+        && !literal.contains(['\n', '\r'])
+        && ['"', '\'', '`']
+            .iter()
+            .any(|quote| content.contains(&format!("{quote}{literal}{quote}")))
+}
+
+/// A few common ways a reply can describe only an absence despite citing
+/// lines. Positive contradictions should say what the cited code does.
+fn claims_removal(text: &str) -> bool {
+    static REMOVAL: OnceLock<Regex> = OnceLock::new();
+    REMOVAL
+        .get_or_init(|| {
+            Regex::new(
+                r"(?ix)\b(?:
+                    no\s+longer
+                    | (?:is|are|was|were)\s+(?:gone|absent|missing|removed|deleted|not\s+(?:present|found|defined))
+                    | (?:does|do|did)(?:\s+not|n't)\s+exist
+                    | (?:has|have)\s+been\s+(?:removed|deleted)
+                )\b",
+            )
+            .expect("a fixed removal pattern")
+        })
+        .is_match(text)
 }
 
 /// The journal operation of the mappings a batch's verifications replaced.

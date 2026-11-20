@@ -191,12 +191,12 @@ fn cites_up_to(content: &str, top_level: &BTreeSet<String>, limit: usize) -> Vec
         covered.push(inner.range());
         found.push((inner.start(), cite));
     }
-    for token in re(&PATH, r"[A-Za-z0-9_.@+/-]+").find_iter(content) {
+    for token in re(&PATH, r"(?:[A-Za-z0-9_.@+/*?-]|\[[A-Za-z0-9!^_-]+\])+").find_iter(content) {
         let range = token.range();
         if overlaps(&covered, &range) {
             continue;
         }
-        let text = token.as_str().trim_end_matches(['.', '-']);
+        let text = token.as_str().trim_end_matches(['.', '-', '?']);
         // A run that follows `~` or `:` is a home-folder path or a URL.
         let before = content[..range.start].chars().next_back();
         if matches!(before, Some('~' | ':' | '\\')) || !bare_path(text, top_level) {
@@ -286,7 +286,7 @@ fn span_cite(raw: &str) -> Option<Cite> {
     let text = span_text(raw);
     if text.chars().count() < MIN_LEN
         || text.chars().any(char::is_whitespace)
-        || ["<", ">", "*", "{", "}", "…", "..."]
+        || ["<", ">", "{", "}", "…", "..."]
             .iter()
             .any(|mark| text.contains(mark))
         || !text.chars().any(|ch| ch.is_ascii_alphabetic())
@@ -297,7 +297,9 @@ fn span_cite(raw: &str) -> Option<Cite> {
     if path_shaped(text) {
         return Some(Cite::Path(text.to_owned()));
     }
-    if text.contains('/') || text.starts_with('~') || COMMON.contains(&text.to_lowercase().as_str())
+    if text.contains(['/', '*', '?', '['])
+        || text.starts_with('~')
+        || COMMON.contains(&text.to_lowercase().as_str())
     {
         return None;
     }

@@ -737,23 +737,17 @@
     {
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
-      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
-      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
+      "ruling": "Dreamer verify evidence §1: confirmations and rewrites cite lines that support the resulting claim; archives cite a positive contradiction or name a subject whose removal can be proved.",
+      "why": "An unchecked archive reason can mistake an incomplete read for evidence that the code is gone.",
       "today": [
+        "- VERIFIED — still accurate. Keep it as-is.",
+        "- UPDATE — a CODE FACT is still true but a file-falsifiable DETAIL drifted (a renamed symbol, moved file, changed number/name). Provide corrected content in terse present tense (\"X uses Y\", not \"X was changed to Y\"). Only update for genuine drift, not style. If a legitimate update intentionally consolidates the old claim into much shorter content, set consolidation=\"true\" explicitly.",
         "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists."
       ],
       "rendered": [
-        "- ARCHIVE — a CODE FACT is positively falsified: the code clearly contradicts it, or the API/symbol/path it describes no longer exists. Also archive a memory, rule or fact, whose subject is gone: every path and code name it cites no longer exists in the checkout. Name one of them in `missing`, written exactly as the memory's own text writes it. A backing file the memory's text does not name is not a citation: when the backing files are gone, look for the code names and paths the text states, and name one of those."
-      ]
-    },
-    {
-      "document": "dreamer/swe:verify/system",
-      "class": "ruling",
-      "ruling": "dreamer cleanup design §2 (03b-cleanup-tasks.md), approved by Ufuk 2026-11-13 (ask_a0ff68d975ba1b60): verify reaches unmapped memories by searching for what they cite, and may archive a memory whose cited paths and names are all gone.",
-      "why": "0.49 verify only checked memories mapped to files (48 of 2,374 in Magic Context's pool), so rules about removed features were never checked.",
-      "today": [],
-      "rendered": [
-        "<archive id=\"G\" reason=\"the module this rule is about was removed\" missing=\"src/old/module.rs\"/>"
+        "- VERIFIED — the code you read states the claim, and you cite the lines that state it (see \"Citing evidence\"). Keep it as-is.",
+        "- UPDATE — a CODE FACT is still true but a file-falsifiable DETAIL drifted (a renamed symbol, moved file, changed number/name). Provide corrected content in terse present tense (\"X uses Y\", not \"X was changed to Y\") and cite lines that support it. Only update for genuine drift, not style. If a legitimate update intentionally consolidates the old claim into much shorter content, set consolidation=\"true\" explicitly.",
+        "- ARCHIVE — a CODE FACT is positively falsified, or the API/symbol/path it describes is gone. For a positive contradiction, state what the code does in `reason` and use `cites` for lines that show it; at least one of those lines must contain a path or code name from the memory. A reason alone is not evidence. For a removed subject, use `missing` instead."
       ]
     },
     {
@@ -944,18 +938,6 @@
     {
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
-      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: a confirmation must cite the code.",
-      "why": "The first live verify run (16 Nov 2026) confirmed all 271 memories it was given; an audit found 49 loose, 5 false and 7 confirmed from the wrong code line, because a confirmation named only files and needed no evidence.",
-      "today": [
-        "- VERIFIED — still accurate. Keep it as-is."
-      ],
-      "rendered": [
-        "- VERIFIED — the code you read states the claim, and you cite the lines that state it (see \"Citing evidence\"). Keep it as-is."
-      ]
-    },
-    {
-      "document": "dreamer/swe:verify/system",
-      "class": "ruling",
       "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1 and §3: other programs' behaviour and numbers code cannot hold are skipped.",
       "why": "Most of the loose confirmations in the first live run were facts about OpenCode, Pi, providers or subc, confirmed from Magic Context code that only reacts to them, and numbers no code holds (a measured latency, a runtime size).",
       "today": [
@@ -970,13 +952,13 @@
     {
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
-      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: a confirmation lists the spans it rests on, and the module reads them and checks every name and number the memory states against them.",
-      "why": "The first live verify run (16 Nov 2026) confirmed all 271 memories it was given; an audit found 49 loose, 5 false and 7 confirmed from the wrong code line, because a confirmation named only files and needed no evidence.",
+      "ruling": "Dreamer verify evidence §1: the module checks the cited lines at the checked commit, including the names and numbers in a confirmation or rewrite.",
+      "why": "A file name or line range alone does not substantiate a claim.",
       "today": [
         "BE CONSERVATIVE ABOUT ARCHIVING. Wrong archival of a TRUE memory is the worst possible outcome — far worse than leaving a slightly-stale memory. If you cannot find the code, or you are unsure, or it might still be true somewhere you didn't look: mark it VERIFIED or SKIPPED, never archived. Archive ONLY when you have positive evidence the code contradicts a code fact."
       ],
       "rendered": [
-        "Citing evidence. A VERIFIED verdict lists in `cites` every span of lines the claim rests on, as `path:start-end` with the line numbers the read tool showed, separated by `;`: the constant, the config default, the place they are combined, in as many files as the claim needs, up to 16 spans of at most 150 lines each. Cite the lines that state the claim, not the file around them. Do not copy code into the verdict; the module reads the cited lines itself and checks them:",
+        "Citing evidence. In `cites`, list spans as `path:start-end` with the line numbers the read tool showed, separated by `;`, up to 16 spans of at most 150 lines each. Cite the lines that state the claim, not the file around them. Do not copy code into the verdict; the module reads the cited lines itself. For VERIFIED and UPDATE, it checks that:",
         "- every code name the memory states (an identifier, a path, a config key) appears in some cited span;",
         "- every number the memory states appears in some cited span, in any equal form (64k = 64_000, 5% = 0.05, 15 s = 15_000 ms, 1 h = 3_600_000 ms), or is computed in `derive` from numbers in the cited spans, for example derive=\"150 s = 10 × 15_000 ms\".",
         "A VERIFIED verdict whose cited lines fail these checks counts as a skip. A name that appears only in a comment saying the code does not use it is not evidence for a claim that the code uses it."
@@ -985,12 +967,14 @@
     {
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
-      "ruling": "Cleanup design §2 (03b-cleanup-tasks.md) and the dreamer task rule (Ufuk, ask_eb52c10882a5e248), below the sections dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1 adds: a directive whose subject is gone is archived with missing, uncertainty means skip, and only the final message's manifest is read.",
-      "why": "Each line here is the text its earlier ruling introduced; the line diff joins them into one block now that the citing rules come before them.",
+      "ruling": "Cleanup design §2 and Dreamer verify evidence §1: a removal uses missing and must be proved from the whole file or tree. Uncertainty means skip, and only the final message's manifest is read.",
+      "why": "A partial read cannot decide whether the subject still exists elsewhere in the file or tree.",
       "today": [
         "Output ONE XML manifest and NOTHING else — no narration or reasoning. Open <verify> before investigating and emit each complete verdict immediately before investigating the next memory, so interruption preserves finished work. Close </verify> when done:"
       ],
       "rendered": [
+        "Proving removal. If an UPDATE or ARCHIVE depends on something being gone or no longer present, set `missing` to the exact path, code name or quoted diagnostic from the old memory. Use `files` to name whole files to check for a missing name, or omit `files` to search the tree. A missing path is always checked against the tree; a glob is present if it matches any tracked file. The module checks the whole scope and its git history, not just the cited lines. Do not combine independent removal claims in one verdict: SKIP if you cannot justify the change by proving one removal.",
+        "",
         "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify, such as an API that no longer exists, a path that moved, or a constant that changed. Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED, with one exception: a directive whose subject is gone, because every path and code name it cites no longer exists in the checkout, is archived with `missing`. A named path inside a directive does not make the directive a code fact, and a file's failure to corroborate a behavioral rule is never grounds to update or archive it.",
         "",
         "BE CONSERVATIVE ABOUT ARCHIVING. Wrong archival of a TRUE memory is the worst possible outcome — far worse than leaving a slightly-stale memory. If you cannot find the code, or you are unsure, or it might still be true somewhere you didn't look: mark it SKIPPED, never archived. Archive ONLY when you have positive evidence the code contradicts a code fact.",
@@ -1001,14 +985,22 @@
     {
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
-      "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: the verified verdict carries cites (path:start-end spans) and an optional derive for a computed number.",
-      "why": "The first live verify run (16 Nov 2026) confirmed all 271 memories it was given; an audit found 49 loose, 5 false and 7 confirmed from the wrong code line, because a confirmation named only files and needed no evidence.",
+      "ruling": "Dreamer verify evidence §1: examples distinguish cited claims and positive contradictions from removal proofs.",
+      "why": "The evidence the module can check is explicit in each verdict.",
       "today": [
-        "<verified id=\"N\" files=\"path/a.ts,path/b.ts\"/>"
+        "<verified id=\"N\" files=\"path/a.ts,path/b.ts\"/>",
+        "<update id=\"M\" files=\"path/c.ts\">corrected present-tense content</update>",
+        "<update id=\"C\" files=\"path/d.ts\" consolidation=\"true\">intentionally consolidated content</update>",
+        "<archive id=\"K\" reason=\"specific evidence the code contradicts it\"/>"
       ],
       "rendered": [
         "<verified id=\"N\" files=\"path/a.ts,path/b.ts\" cites=\"path/a.ts:120-128;path/b.ts:40-41\"/>",
-        "<verified id=\"P\" files=\"path/e.ts\" cites=\"path/e.ts:10-14\" derive=\"150 s = 10 × 15_000 ms\"/>"
+        "<verified id=\"P\" files=\"path/e.ts\" cites=\"path/e.ts:10-14\" derive=\"150 s = 10 × 15_000 ms\"/>",
+        "<update id=\"M\" files=\"path/c.ts\" cites=\"path/c.ts:20-24\">corrected present-tense content</update>",
+        "<update id=\"C\" files=\"path/d.ts\" cites=\"path/d.ts:30-33\" consolidation=\"true\">intentionally consolidated content</update>",
+        "<update id=\"R\" files=\"path/c.ts\" cites=\"path/c.ts:20-24\" missing=\"removedSymbol\">corrected present-tense content after a removal</update>",
+        "<archive id=\"K\" reason=\"what the code does instead\" cites=\"path/e.ts:15-19\"/>",
+        "<archive id=\"G\" reason=\"the module this rule is about was removed\" missing=\"src/old/module.rs\"/>"
       ]
     },
     {

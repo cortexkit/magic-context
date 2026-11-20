@@ -116,7 +116,7 @@ fn a_memory_learned_on_a_branch_is_checked_on_a_copy_of_its_newest_commit() {
     // A rewrite records the branch it was checked on, at that commit.
     let applied = fixture.apply(
         copy,
-        &manifest(r#"<update id="1" files="src/a.rs">`new_name` in src/a.rs builds the prompt's head.</update>"#),
+        &manifest(r#"<update id="1" files="src/a.rs" cites="src/a.rs:1">`new_name` in src/a.rs builds the prompt's head.</update>"#),
     );
     assert_eq!(
         (applied.applied, applied.dropped.len()),
@@ -133,7 +133,7 @@ fn a_memory_learned_on_a_branch_is_checked_on_a_copy_of_its_newest_commit() {
     // So does one checked on the default branch in the main checkout.
     let applied = fixture.apply(
         &batches[0],
-        &manifest(r#"<update id="3" files="src/a.rs">`old_name` in src/a.rs builds the head block of the prompt.</update>"#),
+        &manifest(r#"<update id="3" files="src/a.rs" cites="src/a.rs:1">`old_name` in src/a.rs builds the head block of the prompt.</update>"#),
     );
     assert_eq!(applied.applied, 1, "{applied:?}");
     assert_eq!(
@@ -157,7 +157,7 @@ fn agreed_file(second: bool) -> (Fixture, Option<(tempfile::TempDir, PathBuf)>) 
     let fixture = Fixture::on(
         "master",
         &[
-            ("src/b.rs", "fn beta() {}\n"),
+            ("src/b.rs", "fn beta(x: u8) {}\n"),
             ("src/other.rs", "fn other() {}\n"),
         ],
     );
@@ -188,7 +188,7 @@ fn an_old_memory_is_never_archived_while_there_are_two_live_branches() {
     let batch = fixture.batches(true).remove(0);
     let applied = fixture.apply(
         &batch,
-        &manifest(r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now"/>"#),
+        &manifest(r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now" cites="src/b.rs:1"/>"#),
     );
     assert_eq!(applied.applied, 0, "{applied:?}");
     assert_eq!(applied.dropped, [OLDER_ON_TWO_BRANCHES]);
@@ -219,7 +219,7 @@ fn an_old_memory_is_archived_when_there_is_one_live_branch() {
     let batch = fixture.batches(true).remove(0);
     let applied = fixture.apply(
         &batch,
-        &manifest(r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now"/>"#),
+        &manifest(r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now" cites="src/b.rs:1"/>"#),
     );
     assert_eq!(
         (applied.applied, applied.dropped.len()),
@@ -260,7 +260,7 @@ fn a_memory_that_names_its_branch_is_archived_while_there_are_two_live_branches(
     let applied = fixture.apply(
         &batch,
         &manifest(
-            r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now"/>
+            r#"<archive id="2" files="src/b.rs" reason="beta takes an argument now" cites="src/b.rs:1"/>
 <archive id="3" files="src/other.rs" reason="other takes an argument on feature"/>"#,
         ),
     );
@@ -356,7 +356,7 @@ fn a_single_branch_repository_changes_old_memories_as_before() {
     let batch = fixture.batches(true).remove(0);
     let applied = fixture.apply(
         &batch,
-        &manifest(r#"<update id="2" files="src/b.rs">`beta` in src/b.rs takes one byte argument.</update>"#),
+        &manifest(r#"<update id="2" files="src/b.rs" cites="src/b.rs:1">`beta` in src/b.rs takes one byte argument.</update>"#),
     );
     assert_eq!(
         (applied.applied, applied.dropped.len()),

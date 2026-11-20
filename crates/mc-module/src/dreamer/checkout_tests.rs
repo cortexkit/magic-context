@@ -209,6 +209,7 @@ fn the_history_holds_what_some_commit_added_or_removed() {
         "./src/dreamer/gone.rs:4",
         "crates/old",
         "old/src/",
+        "dreamer/gone.rs*",
     ] {
         assert_eq!(
             checkout.path_in_history(removed, wait),
@@ -216,7 +217,7 @@ fn the_history_holds_what_some_commit_added_or_removed() {
             "{removed}"
         );
     }
-    for never in ["src/gone.rs", "ask.rs", "crates/new", "old/sr", "gone.rs*"] {
+    for never in ["src/gone.rs", "ask.rs", "crates/new", "old/sr", "other.rs*"] {
         assert_eq!(checkout.path_in_history(never, wait), Ok(false), "{never}");
     }
     assert!(checkout.path_in_history("/etc/passwd", wait).is_err());

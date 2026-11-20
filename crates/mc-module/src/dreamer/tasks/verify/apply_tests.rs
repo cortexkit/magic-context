@@ -1,9 +1,6 @@
 use serde_json::{json, Value};
 
-use super::super::cites::Cite;
 use super::super::tests::{row, Fixture, Row};
-use super::super::{look_for, Absence};
-use crate::dreamer::checkout::Limits;
 
 /// A checkout with one live source file and one removed in a later commit,
 /// and a store holding memory 1 (an architecture fact citing
@@ -158,7 +155,7 @@ fn an_update_drops_the_lines_an_earlier_confirmation_cited() {
     let applied = fixture.apply(
         &batch,
         &manifest(
-            r#"<update id="1" files="src/live.rs">`live_function` in src/live.rs takes no arguments and returns unit.</update>"#,
+            r#"<update id="1" files="src/live.rs" cites="src/live.rs:1">`live_function` in src/live.rs takes no arguments and returns unit.</update>"#,
         ),
     );
     assert_eq!(applied.applied, 1, "{applied:?}");
@@ -263,7 +260,7 @@ fn an_update_keeps_the_plugins_rules_and_records_history_naming_the_run() {
     let applied = fixture.apply(
         &batch,
         &manifest(
-            r#"<update id="1" files="src/live.rs" consolidation="true">live_function takes one argument.</update>
+            r#"<update id="1" files="src/live.rs" consolidation="true" cites="src/live.rs:1">live_function takes one argument.</update>
 <skip id="2"/>"#,
         ),
     );
@@ -325,6 +322,95 @@ fn an_archive_naming_what_is_missing_needs_it_cited_and_gone() {
 }
 
 #[test]
+fn a_fast_gate_archive_cannot_prove_removal_with_prose_a_short_read_or_a_live_glob() {
+    let gate = format!(
+        "{}printf '%s\\n' 'preparing scripts/gate.sh'\n{}\ncase \"$stage\" in\n  fast) step 'Pinned vector Python prerequisite' require_vector_python ;;\nesac\n",
+        "\n".repeat(116),
+        "\n".repeat(270)
+    );
+    let fixture = Fixture::new(&[
+        ("scripts/gate.sh", &gate),
+        ("vectors/fed-pairing-v1/requirements.txt", ""),
+        ("vectors/another-v1/requirements.txt", ""),
+    ]);
+    fixture.insert(&[row(
+        1,
+        "Every new scratch worktree needs the pinned vector Python before any landing script runs `scripts/gate.sh fast`: `python3 -m venv target/gate-python && for r in vectors/*/requirements.txt; do …`. Without it the fast gate fails \"Pinned vector Python prerequisite\".",
+    )]);
+    let batch = plan_one(&fixture);
+    for proposal in [
+        r#"<archive id="1" reason="scripts/gate.sh fast() (lines 117-150) no longer checks for target/gate-python or 'Pinned vector Python prerequisite', and vectors/*/requirements.txt does not exist in the repository"/>"#,
+        r#"<archive id="1" reason="the prerequisite is not present" cites="scripts/gate.sh:117-150"/>"#,
+        r#"<archive id="1" files="scripts/gate.sh" cites="scripts/gate.sh:117-150" missing="Pinned vector Python prerequisite"/>"#,
+        r#"<archive id="1" missing="vectors/*/requirements.txt"/>"#,
+    ] {
+        let applied = fixture.apply(&batch, &manifest(proposal));
+        assert_eq!(applied.applied, 0, "accepted {proposal}");
+        assert_eq!(fixture.memory(1).0, "active");
+        if proposal.contains("missing=") {
+            assert!(
+                applied.dropped[0].contains("still"),
+                "{:?}",
+                applied.dropped
+            );
+        }
+    }
+}
+
+#[test]
+fn a_removed_glob_can_prove_an_archive() {
+    let fixture = Fixture::new(&[("vectors/README.md", "Vectors are checked in.\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("vectors/old-v1/requirements.txt", "")]);
+    fixture.insert(&[row(
+        1,
+        "The vector checks install `vectors/*/requirements.txt`.",
+    )]);
+    let applied = fixture.apply(
+        &plan_one(&fixture),
+        &manifest(r#"<archive id="1" missing="vectors/*/requirements.txt"/>"#),
+    );
+    assert_eq!(applied.applied, 1, "{applied:?}");
+    assert_eq!(fixture.memory(1).0, "archived");
+}
+
+#[test]
+fn a_rewrite_checks_the_new_claim_and_looks_for_removed_names_outside_the_cites() {
+    let fixture = Fixture::new(&[(
+        "src/gate.rs",
+        "const old_limit: u64 = 10;\nconst still_used: u64 = 20;\n",
+    )]);
+    fixture.repo.write(&[(
+        "src/gate.rs",
+        "const new_limit: u64 = 10;\nconst still_used: u64 = 20;\n",
+    )]);
+    fixture.repo.commit("replace the old limit");
+    fixture.insert(&[
+        row(1, "`old_limit` is 10, the cap on batch work."),
+        row(2, "`still_used` is 20, the cap on batch work."),
+    ]);
+    let batch = plan_one(&fixture);
+    let applied = fixture.apply(&batch, &manifest(
+        r#"<update id="1" files="src/gate.rs" cites="src/gate.rs:1" missing="old_limit">`new_limit` is 11, the cap on batch work.</update>
+<update id="2" files="src/gate.rs" cites="src/gate.rs:1" missing="still_used">`new_limit` is 10, the cap on batch work.</update>"#,
+    ));
+    assert_eq!(applied.applied, 0);
+    assert_eq!(applied.dropped, [
+        "memory 1: the number 11 the memory states is in none of the cited lines, in any equal form",
+        "memory 2: still_used is still in the checkout",
+    ]);
+    let applied = fixture.apply(&batch, &manifest(
+        r#"<update id="1" files="src/gate.rs" cites="src/gate.rs:1" missing="old_limit">`new_limit` is 10, the cap on batch work.</update>"#,
+    ));
+    assert_eq!(applied.applied, 1, "{applied:?}");
+    assert_eq!(
+        fixture.memory(1).1,
+        "`new_limit` is 10, the cap on batch work."
+    );
+}
+
+#[test]
 fn a_recent_unmerged_branch_without_a_worktree_refuses_both_archive_forms() {
     let fixture = Fixture::on("main", &[("src/live.rs", "fn live_function() {}\n")]);
     let branch = "campaign/local-secret-delivery-b17";
@@ -342,14 +428,17 @@ fn a_recent_unmerged_branch_without_a_worktree_refuses_both_archive_forms() {
     fixture.repo.git(&["rm", "-q", "src/job.rs"]);
     fixture.repo.commit("remove job from main");
     fixture.insert(&[
-        row(1, "`WindowsJob` is revoked synchronously."),
+        row(
+            1,
+            "`WindowsJob` is revoked synchronously by `live_function`.",
+        ),
         row(2, "`WindowsJob` is revoked at task completion."),
     ]);
 
     let applied = fixture.apply(
         &plan_one(&fixture),
         &manifest(
-            r#"<archive id="1" reason="main never revokes the job"/>
+            r#"<archive id="1" reason="the live function does no cleanup" cites="src/live.rs:1"/>
 <archive id="2" missing="WindowsJob"/>"#,
         ),
     );
@@ -437,7 +526,7 @@ fn old_or_merged_local_branches_do_not_refuse_an_archive() {
 
 #[test]
 fn a_recent_branch_search_timeout_refuses_the_archive_as_undecided() {
-    let fixture = Fixture::on("main", &[("src/live.rs", "fn live_function() {}\n")]);
+    let fixture = Fixture::on("main", &[("src/live.rs", "struct WindowsJob;\n")]);
     fixture.repo.git(&["checkout", "-qb", "campaign"]);
     fixture.repo.commit("campaign work");
     fixture.repo.git(&["checkout", "-q", "main"]);
@@ -447,7 +536,9 @@ fn a_recent_branch_search_timeout_refuses_the_archive_as_undecided() {
 
     let applied = fixture.apply(
         &batch,
-        &manifest(r#"<archive id="1" reason="main does not hold the job"/>"#),
+        &manifest(
+            r#"<archive id="1" reason="WindowsJob is a unit struct" cites="src/live.rs:1"/>"#,
+        ),
     );
     assert_eq!(
         applied.dropped,
@@ -458,7 +549,13 @@ fn a_recent_branch_search_timeout_refuses_the_archive_as_undecided() {
 
 #[test]
 fn archives_search_all_recent_tips_even_when_they_need_several_log_calls() {
-    let fixture = Fixture::on("main", &[("src/live.rs", "fn live_function() {}\n")]);
+    let fixture = Fixture::on(
+        "main",
+        &[(
+            "src/live.rs",
+            "struct WindowsJob;\nconst CACHE_SIZE: usize = 4;\nstruct RemovedWorker;\n",
+        )],
+    );
     let repo = &fixture.repo;
     repo.git(&["checkout", "-qb", "keeper"]);
     repo.write(&[("src/job.rs", "struct WindowsJob;\n")]);
@@ -482,16 +579,16 @@ fn archives_search_all_recent_tips_even_when_they_need_several_log_calls() {
     }
     fixture.insert(&[
         row(1, "`WindowsJob` runs cleanup."),
-        row(2, "The cache holds ten entries."),
+        row(2, "`CACHE_SIZE` is ten."),
         row(3, "`RemovedWorker` shows the queue."),
     ]);
 
     let applied = fixture.apply(
         &plan_one(&fixture),
         &manifest(
-            r#"<archive id="1" reason="main does not hold the job"/>
-<archive id="2" reason="the cache is gone"/>
-<archive id="3" reason="main has no queue"/>"#,
+            r#"<archive id="1" reason="WindowsJob is a unit struct" cites="src/live.rs:1"/>
+<archive id="2" reason="the cache holds four entries" cites="src/live.rs:2"/>
+<archive id="3" reason="RemovedWorker is a unit struct" cites="src/live.rs:3"/>"#,
         ),
     );
     assert_eq!(
@@ -561,29 +658,19 @@ fn a_missing_name_that_is_not_one_of_the_memorys_citations_is_refused() {
 }
 
 #[test]
-fn a_name_whose_search_was_cut_is_undecided() {
+fn an_uncommitted_deletion_does_not_prove_removal() {
     let fixture = fixture();
-    let checkout = fixture.repo.checkout();
-    let cut = Limits {
-        max_files: 0,
-        max_time: std::time::Duration::from_secs(60),
-    };
-    assert!(matches!(
-        look_for(&checkout, &Cite::Name("gone_function".into()), &cut),
-        Absence::Undecided(why) if why.contains("stopped after 0 files")
-    ));
-    assert_eq!(
-        look_for(
-            &checkout,
-            &Cite::Name("gone_function".into()),
-            &crate::dreamer::checkout::SEARCH_LIMITS
-        ),
-        Absence::Absent
+    let batch = plan_one(&fixture);
+    fixture.repo.git(&["rm", "-f", "src/live.rs"]);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(r#"<archive id="1" missing="live_function"/>"#),
     );
     assert_eq!(
-        look_for(&checkout, &Cite::Path("src/live.rs".into()), &cut),
-        Absence::Present
+        applied.dropped,
+        ["memory 1: live_function is still in the checkout"]
     );
+    assert_eq!(fixture.memory(1).0, "active");
 }
 
 #[test]
@@ -658,14 +745,17 @@ fn an_archive_whose_history_search_runs_out_of_time_is_dropped() {
 }
 
 #[test]
-fn an_archive_without_missing_needs_a_reason_and_is_refused_for_a_directive() {
-    let fixture = Fixture::new(&[("a.rs", "\n")]);
+fn an_archive_without_missing_needs_cited_subject_lines_and_is_refused_for_a_directive() {
+    let fixture = Fixture::new(&[(
+        "a.rs",
+        "const CACHE_SIZE: usize = 40;\nconst QUEUE_SIZE: usize = 40;\n",
+    )]);
     fixture
         .repo
         .add_then_remove(&[("gone_settings.toml", "x = 1\n")]);
     fixture.insert(&[
         row(1, "The cache holds ten entries."),
-        row(2, "The cache holds twenty entries."),
+        row(2, "`CACHE_SIZE` sets the cache to twenty entries."),
         Row {
             tag: "PROJECT_RULES",
             ..row(3, "Never edit `gone_config.toml` by hand.")
@@ -676,11 +766,19 @@ fn an_archive_without_missing_needs_a_reason_and_is_refused_for_a_directive() {
         },
     ]);
     let batch = plan_one(&fixture);
+    let unrelated = fixture.apply(
+        &batch,
+        &manifest(r#"<skip id="1"/><archive id="2" reason="the cache holds forty entries" cites="a.rs:2"/>"#),
+    );
+    assert_eq!(
+        unrelated.dropped,
+        ["memory 2: none of the cited lines names a path or code name the memory cites"]
+    );
     let applied = fixture.apply(
         &batch,
         &manifest(
             r#"<archive id="1" reason=" "/>
-<archive id="2" reason="a.rs holds no cache"/>
+<archive id="2" reason="the cache holds forty entries" cites="a.rs:1"/>
 <archive id="3" reason="the file is gone"/>
 <archive id="4" missing="gone_settings.toml"/>"#,
         ),
@@ -688,7 +786,7 @@ fn an_archive_without_missing_needs_a_reason_and_is_refused_for_a_directive() {
     assert_eq!(
         applied.dropped,
         [
-            "memory 1: an archive without missing= needs the code's evidence in reason",
+            "memory 1: an archive or rewrite needs cites for the code's evidence",
             "memory 3: a project rule that reads as a behavioural directive is archived only with missing=, once everything it cites is gone",
         ]
     );
@@ -702,7 +800,7 @@ fn an_archive_without_missing_needs_a_reason_and_is_refused_for_a_directive() {
     assert_eq!(
         reasons,
         [
-            json!([2, "a.rs holds no cache"]),
+            json!([2, "the cache holds forty entries"]),
             json!([4, "gone_settings.toml is gone from the checkout"])
         ]
     );
@@ -741,7 +839,7 @@ fn a_protected_memory_is_never_archived_but_may_be_verified_updated_or_skipped()
         r#"<archive id="1" missing="gone_guard"/>
 <archive id="2" reason="the helper was removed" missing="gone_helper"/>
 <archive id="3" missing="gone_other"/>
-<update id="4" files="src/live.rs">live_function has exactly two callers.</update>
+<update id="4" files="src/live.rs" cites="src/live.rs:1">live_function has exactly two callers.</update>
 <verified id="5" files="src/live.rs" cites="src/live.rs:1-1"/>
 <skip id="6"/>"#,
     );
@@ -809,7 +907,7 @@ fn undoing_a_verify_run_puts_back_its_rows_and_the_mappings_it_replaced() {
         &manifest(
             r#"<verified id="1" files="src/live.rs" cites="src/live.rs:1-1"/>
 <verified id="4" files="src/live.rs" cites="src/live.rs:1-1"/>
-<update id="3" files="src/live.rs">live_function takes one argument.</update>
+<update id="3" files="src/live.rs" cites="src/live.rs:1">live_function takes one argument.</update>
 <archive id="2" missing="gone_function"/>"#,
         ),
     );
@@ -867,8 +965,8 @@ fn each_verdict_queues_one_outbox_row_per_memory() {
     for reply in [
         r#"<verified id="1" files="src/live.rs" cites="src/live.rs:1-1"/>
 <skip id="2" reason="code can't decide it"/>"#,
-        r#"<update id="1" files="src/live.rs">`live_function` in src/live.rs takes no arguments and returns unit.</update>
-<archive id="2" reason="contradicted"/>"#,
+        r#"<update id="1" files="src/live.rs" cites="src/live.rs:1">`live_function` in src/live.rs takes no arguments and returns unit.</update>
+<archive id="2" missing="gone_function"/>"#,
     ] {
         let fixture = fixture();
         let batch = plan_one(&fixture);

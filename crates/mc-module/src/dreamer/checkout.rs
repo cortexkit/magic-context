@@ -90,6 +90,7 @@ pub(crate) struct Checkout {
     /// The names at the top of the checkout (see [`Checkout::top_level`]).
     top_level: BTreeSet<String>,
     head: Option<String>,
+    committed_files: OnceLock<Result<BTreeSet<String>, String>>,
     /// Every tracked file and folder under each name it can be cited by,
     /// built on first use (see [`Checkout::has_path`]).
     cited_paths: OnceLock<HashSet<String>>,
@@ -177,6 +178,7 @@ impl Checkout {
             tracked,
             top_level,
             head,
+            committed_files: OnceLock::new(),
             cited_paths: OnceLock::new(),
         }
     }
@@ -225,6 +227,9 @@ impl Checkout {
     /// path at all.
     pub(crate) fn has_path(&self, cited: &str) -> Option<bool> {
         let path = clean_path(cited)?;
+        if is_glob(&path) {
+            return self.committed_has_path(cited).ok();
+        }
         let known = self.cited_paths.get_or_init(|| {
             let mut known = HashSet::new();
             for file in &self.tracked {
@@ -242,6 +247,58 @@ impl Checkout {
         Some(known.contains(&path))
     }
 
+    /// Compare the checked commit to an empty tree so Git matches the same
+    /// pathspec against all tracked paths, including files with no content.
+    pub(crate) fn committed_has_path(&self, cited: &str) -> Result<bool, String> {
+        let head = self.head().ok_or("the checkout has no commit")?;
+        let [itself, inside] = history_pathspec(cited)?;
+        let empty = run_git(&self.repo, &["hash-object", "-t", "tree", "--stdin"])?;
+        let output = run_git_output(
+            &self.repo,
+            &[
+                "diff-tree",
+                "--quiet",
+                "--no-renames",
+                "-r",
+                empty.trim(),
+                head,
+                "--",
+                &itself,
+                &inside,
+            ],
+            GIT_TIMEOUT,
+        )?;
+        match output.code {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(format!("git diff-tree: {}", output.stderr.trim())),
+        }
+    }
+
+    /// Search whole blobs at the checked commit, not the worktree or index.
+    pub(crate) fn committed_has_text(&self, text: &str) -> Result<bool, String> {
+        let head = self.head().ok_or("the checkout has no commit")?;
+        let output = run_git_output(
+            &self.repo,
+            &[
+                "grep",
+                "--quiet",
+                "--fixed-strings",
+                "--no-textconv",
+                "-e",
+                text,
+                head,
+                "--",
+            ],
+            GIT_TIMEOUT,
+        )?;
+        match output.code {
+            Some(0) => Ok(true),
+            Some(1) if output.stderr.is_empty() => Ok(false),
+            _ => Err(format!("git grep: {}", output.stderr.trim())),
+        }
+    }
+
     /// Whether some commit of the checked-out history touched a file at the
     /// path `cited` or under it, the path matched whole or by its end as
     /// [`Checkout::has_path`] matches it. `Err` when `cited` holds no path,
@@ -249,7 +306,7 @@ impl Checkout {
     pub(crate) fn path_in_history(&self, cited: &str, timeout: Duration) -> Result<bool, String> {
         let [itself, inside] = history_pathspec(cited)?;
         let mut args = vec!["log", "--format=%H", "-1"];
-        args.extend(self.at.as_deref());
+        args.push(self.head().ok_or("the checkout has no commit")?);
         args.extend(["--", itself.as_str(), inside.as_str()]);
         run_git_within(&self.repo, &args, timeout).map(|listed| names_a_commit(&listed))
     }
@@ -258,6 +315,15 @@ impl Checkout {
     /// `text` as literal text in a file (git's pickaxe, `git log -S`).
     /// `Err` when git fails or runs longer than `timeout`.
     pub(crate) fn text_in_history(&self, text: &str, timeout: Duration) -> Result<bool, String> {
+        self.text_in_file_history(text, None, timeout)
+    }
+
+    pub(crate) fn text_in_file_history(
+        &self,
+        text: &str,
+        file: Option<&str>,
+        timeout: Duration,
+    ) -> Result<bool, String> {
         let pickaxe = format!("-S{text}");
         let mut args = vec![
             "log",
@@ -267,7 +333,10 @@ impl Checkout {
             "--format=%H",
             "-1",
         ];
-        args.extend(self.at.as_deref());
+        args.push(self.head().ok_or("the checkout has no commit")?);
+        let pathspec = file.map(|path| format!(":(top,literal){path}"));
+        args.push("--");
+        args.extend(pathspec.as_deref());
         run_git_within(&self.repo, &args, timeout).map(|listed| names_a_commit(&listed))
     }
 
@@ -519,19 +588,42 @@ impl Checkout {
         let Some(path) = clean_path(cited.strip_prefix(inside.as_str()).unwrap_or(cited)) else {
             return Ok(None);
         };
-        let path = if self.tracked.contains(&path) {
+        // For a live checkout the index can differ from the checked commit.
+        // It cannot disambiguate a relative citation to a committed file.
+        let files = if self.at.is_some() {
+            &self.tracked
+        } else {
+            self.committed_files
+                .get_or_init(|| {
+                    run_git(
+                        &self.repo,
+                        &["ls-tree", "-r", "-z", "--name-only", "--full-tree", head],
+                    )
+                    .map(|files| {
+                        files
+                            .split('\0')
+                            .filter(|path| !path.is_empty())
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                })
+                .as_ref()
+                .map_err(Clone::clone)?
+        };
+        let path = if files.contains(&path) {
             path
         } else {
             let end = format!("/{path}");
-            let mut ending = self.tracked.iter().filter(|file| file.ends_with(&end));
+            let mut ending = files.iter().filter(|file| file.ends_with(&end));
             match (ending.next(), ending.next()) {
                 (Some(only), None) => only.clone(),
                 _ => return Ok(None),
             }
         };
+        let pathspec = format!(":(top,literal){path}");
         let listed = run_git(
             &self.repo,
-            &["ls-tree", "-z", "--full-tree", head, "--", path.as_str()],
+            &["ls-tree", "-z", "--full-tree", head, "--", &pathspec],
         )?;
         // `<mode> blob <object>\t<path>`
         let object = listed.split('\0').find_map(|entry| {
@@ -578,17 +670,11 @@ pub(crate) fn clean_path(cited: &str) -> Option<String> {
 /// Match the path itself or files in the named folder at any depth.
 fn history_pathspec(cited: &str) -> Result<[String; 2], String> {
     let path = clean_path(cited).ok_or_else(|| format!("{cited} is not a path"))?;
-    let mut escaped = String::with_capacity(path.len());
-    for ch in path.chars() {
-        if matches!(ch, '*' | '?' | '[' | '\\') {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    Ok([
-        format!(":(glob)**/{escaped}"),
-        format!(":(glob)**/{escaped}/**"),
-    ])
+    Ok([format!(":(glob)**/{path}"), format!(":(glob)**/{path}/**")])
+}
+
+fn is_glob(path: &str) -> bool {
+    path.contains(['*', '?', '['])
 }
 
 pub(crate) fn is_commit(text: &str) -> bool {

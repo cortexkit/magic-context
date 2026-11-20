@@ -45,9 +45,25 @@ pub(crate) fn confirm(
     read: &ReadFile<'_>,
 ) -> Result<Confirmation, String> {
     let cites = cites
-        .map(str::trim)
-        .filter(|cites| !cites.is_empty())
+        .filter(|cites| !cites.trim().is_empty())
         .ok_or("a verified verdict needs cites, the lines that state the claim")?;
+    let (commit, cited) = read_cited(cites, commit, read)?;
+    check_claim(content, top_level, derive, &cited, None)?;
+    Ok(Confirmation {
+        commit: commit.to_owned(),
+        spans: cited,
+        derive: derive
+            .map(str::trim)
+            .filter(|derive| !derive.is_empty())
+            .map(str::to_owned),
+    })
+}
+
+pub(super) fn read_cited<'a>(
+    cites: &str,
+    commit: Option<&'a str>,
+    read: &ReadFile<'_>,
+) -> Result<(&'a str, Vec<Cited>), String> {
     let spans = parse_cites(cites)?;
     let commit = commit.ok_or("the checkout has no commit to read the cited lines at")?;
     let mut cited: Vec<Cited> = Vec::new();
@@ -68,20 +84,23 @@ pub(crate) fn confirm(
             text,
         });
     }
-    check_names(content, top_level, &cited)?;
-    let derive = derive.map(str::trim).filter(|derive| !derive.is_empty());
-    check_numbers(content, derive, &cited)?;
-    Ok(Confirmation {
-        commit: commit.to_owned(),
-        spans: cited,
-        derive: derive.map(str::to_owned),
-    })
+    Ok((commit, cited))
 }
 
 /// Every path `content` states, and every name in it that looks like code,
-/// appears in some span of `cited`; `Err` names the first that doesn't.
-fn check_names(content: &str, top_level: &BTreeSet<String>, cited: &[Cited]) -> Result<(), String> {
-    for cite in code_cites(content, top_level) {
+/// appears in some span of `cited`, except a subject proved gone separately.
+/// The same spans must back every number in the claim.
+pub(super) fn check_claim(
+    content: &str,
+    top_level: &BTreeSet<String>,
+    derive: Option<&str>,
+    cited: &[Cited],
+    missing: Option<&str>,
+) -> Result<(), String> {
+    for cite in code_cites(content, top_level)
+        .into_iter()
+        .filter(|cite| Some(cite.text()) != missing)
+    {
         let found = match &cite {
             Cite::Name(name) => cited
                 .iter()
@@ -98,7 +117,11 @@ fn check_names(content: &str, top_level: &BTreeSet<String>, cited: &[Cited]) -> 
             ));
         }
     }
-    Ok(())
+    check_numbers(
+        content,
+        derive.map(str::trim).filter(|derive| !derive.is_empty()),
+        cited,
+    )
 }
 
 /// Every number `content` states appears in some span of `cited` in an
