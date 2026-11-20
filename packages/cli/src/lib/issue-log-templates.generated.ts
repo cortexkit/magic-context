@@ -1186,6 +1186,7 @@ const TEMPLATE_DATA = [
 "note-nudge: deferring — current user message \x01 is same as trigger-time message\x020i",
 "note-nudge: deferring — current user message \x01 is same as trigger-time message",
 "historian deferred: exact ordinals not ready (\x01); a later pass starts it again",
+"ck-mc: entorhinal changes: marker task for \x01 ended (\x01); reopening after backoff",
 "[magic-context] slow write transaction: site=message_index_reconcile held=\x01ms ",
 "[magic-context] slow write transaction: site=apply_pending_operations held=\x01ms",
 "[magic-context] slow write transaction: site=historian-publish:recomp held=\x01ms",

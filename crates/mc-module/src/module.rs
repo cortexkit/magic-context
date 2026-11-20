@@ -31,6 +31,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::client::RunnerClient;
 use crate::config::Config;
 use crate::context_db::ContextDb;
+use crate::entorhinal_changes;
+pub use crate::entorhinal_changes::MarkerTask;
 use crate::pass::Settings;
 use crate::pre_user::Addition;
 use crate::preset;
@@ -1077,12 +1079,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// Follow Entorhinal's change markers on `bus`
     /// ([`crate::entorhinal_changes`]): each change reads every live
     /// session's workspace again and wakes a legacy project round.
-    pub fn spawn_entorhinal_follow(&self, bus: Arc<crate::bus::Bus>) {
+    /// Keep the returned handle until shutdown to keep following the registry.
+    pub fn spawn_entorhinal_follow(&self, bus: Arc<crate::bus::Bus>) -> MarkerTask {
         let module = self.clone();
         let state = Arc::clone(&self.inner.entorhinal_watch);
-        tokio::spawn(async move {
-            crate::entorhinal_changes::run(bus, state, move || module.registry_changed()).await;
-        });
+        entorhinal_changes::spawn_marker(bus, state, entorhinal_changes::KEY, move || {
+            module.registry_changed();
+        })
     }
 
     /// Whether the watch on Entorhinal's change markers is up.

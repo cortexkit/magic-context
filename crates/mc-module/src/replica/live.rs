@@ -48,6 +48,7 @@ use super::nats::{HubStream, JetStream, NatsHub};
 use super::seal::Sealer;
 use super::Replica;
 use crate::context_db::ContextDb;
+use crate::entorhinal_changes::{self, MarkerTask, WatchState};
 
 /// How long the task waits between rounds that found nothing to do, when
 /// no message and no local change wakes it first.
@@ -177,7 +178,7 @@ pub struct ReplicaTask {
     stop: watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
     /// The watch on Entorhinal's fleet epoch marker, ended with the task.
-    marker: Option<tokio::task::JoinHandle<()>>,
+    marker: Option<MarkerTask>,
 }
 
 impl ReplicaTask {
@@ -192,9 +193,7 @@ impl ReplicaTask {
 
     /// Stop the task and wait for it to end, at most [`STOP_WAIT`].
     pub async fn stop(self) {
-        if let Some(marker) = &self.marker {
-            marker.abort();
-        }
+        drop(self.marker);
         let _ = self.stop.send(true);
         let mut handle = self.handle;
         if tokio::time::timeout(STOP_WAIT, &mut handle).await.is_err() {
@@ -220,21 +219,17 @@ pub fn start(
     let sealer = super::seal::Claustrum::over(consumer.clone());
     let epochs = super::epochs::EntorhinalEpochs::over(consumer.clone());
     let epoch_wake = Arc::new(Notify::new());
-    let marker = {
-        let bus = Arc::clone(&bus);
-        let wake = Arc::clone(&epoch_wake);
-        tokio::spawn(async move {
-            crate::entorhinal_changes::run_marker(
-                bus,
-                Arc::new(crate::entorhinal_changes::WatchState::for_marker(
-                    "a shared memory waiting for its fleet epoch is read again",
-                )),
-                super::epochs::EPOCH_MARKER,
-                move || wake.notify_one(),
-            )
-            .await;
-        })
-    };
+    let marker = entorhinal_changes::spawn_marker(
+        Arc::clone(&bus),
+        Arc::new(WatchState::for_marker(
+            "a shared memory waiting for its fleet epoch is read again",
+        )),
+        super::epochs::EPOCH_MARKER,
+        {
+            let wake = Arc::clone(&epoch_wake);
+            move || wake.notify_one()
+        },
+    );
     let mut task = ReplicaTask::spawn(Live {
         connect: Arc::new(Ckbus { consumer, bus }),
         db,

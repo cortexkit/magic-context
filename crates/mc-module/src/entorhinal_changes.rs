@@ -3,8 +3,8 @@
 //! holds `{"generation": N, "incarnation": "…"}` and changes whenever a
 //! project, workspace, root, binding, approval or placement changes.
 //!
-//! [`run`] watches that key. Each new value makes ck-mc read again what it
-//! reads from Entorhinal: each live session's `context.project`, for the
+//! [`spawn_marker`] watches that key. Each new value makes ck-mc read again
+//! what it reads from Entorhinal: each live session's `context.project`, for the
 //! workspace its project is in now ([`crate::session::Session::follow_workspace`]),
 //! and a round of the move of 0.49 project rows ([`crate::legacy_projects`]).
 //! A watch delivers the key's current value when it starts, so a value that
@@ -14,12 +14,15 @@
 //! lost connection) everything runs as it does anyway: the workspace is read
 //! at each Setup, and the legacy rounds run at start, on a new project id and
 //! hourly. A watch that can't start or ends is tried again after a growing
-//! pause, and each change between up and down is logged once at INFO.
+//! pause. Ordinary connection changes are logged at INFO; an unexpected
+//! task exit is logged at WARN before restarting the task.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cortexkit_bus_trait::{RegisterUpdate, RegisterWatch, WatchEvent};
+use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 
 use crate::bus::Bus;
 
@@ -33,11 +36,28 @@ pub(crate) const KEY: &str = "registry";
 pub(crate) const RETRY_FIRST: Duration = Duration::from_secs(5);
 pub(crate) const RETRY_CAP: Duration = Duration::from_secs(5 * 60);
 
-/// Whether the watch is up, as last logged.
+/// The watch's progress survives even when its task unwinds.
+struct Progress {
+    /// `None` until the first try; then whether the watch is up.
+    up: Option<bool>,
+    last: Option<Vec<u8>>,
+    retry: Duration,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            up: None,
+            last: None,
+            retry: RETRY_FIRST,
+        }
+    }
+}
+
+/// Whether the watch is up, and where to resume if it goes down.
 #[derive(Default)]
 pub(crate) struct WatchState {
-    /// `None` until the first try; then whether the watch is up.
-    up: Mutex<Option<bool>>,
+    progress: Mutex<Progress>,
     /// What the log lines say a change of the marker does, for a marker
     /// other than [`KEY`]; `None` for the registry marker.
     effect: Option<&'static str>,
@@ -48,20 +68,25 @@ impl WatchState {
     /// does `effect` (said in the log lines).
     pub(crate) fn for_marker(effect: &'static str) -> Self {
         Self {
-            up: Mutex::new(None),
             effect: Some(effect),
+            ..Self::default()
         }
     }
 
     /// Whether the watch is up now.
     #[cfg(test)]
     pub(crate) fn is_up(&self) -> bool {
-        *self.up.lock().expect("watch state") == Some(true)
+        self.progress.lock().expect("watch state").up == Some(true)
     }
 
     /// The watch is up.
     fn up(&self) {
-        if self.up.lock().expect("watch state").replace(true) != Some(true) {
+        let previous = {
+            let mut progress = self.progress.lock().expect("watch state");
+            progress.retry = RETRY_FIRST;
+            progress.up.replace(true)
+        };
+        if previous != Some(true) {
             match self.effect {
                 None => tracing::info!(
                     "ck-mc: entorhinal changes: watching the registry marker; workspaces and legacy project rows are read again when it changes"
@@ -75,7 +100,7 @@ impl WatchState {
 
     /// The watch couldn't start or ended, because of `why`.
     fn down(&self, why: &str) {
-        if self.up.lock().expect("watch state").replace(false) != Some(false) {
+        if self.mark_down() != Some(false) {
             match self.effect {
                 None => tracing::info!(
                     "ck-mc: entorhinal changes: no watch on the registry marker ({why}); workspaces are read at each Setup and legacy project rounds run hourly, and the watch is tried again"
@@ -85,6 +110,14 @@ impl WatchState {
                 ),
             }
         }
+    }
+
+    fn mark_down(&self) -> Option<bool> {
+        self.progress.lock().expect("watch state").up.replace(false)
+    }
+
+    fn next_retry(&self) -> Duration {
+        backoff(&mut self.progress.lock().expect("watch state").retry)
     }
 }
 
@@ -104,31 +137,64 @@ async fn open(bus: &Bus, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
     }
 }
 
-/// Follow [`KEY`] through `bus` for good, calling `changed` for each value
-/// that differs from the last one seen, the first one included. `state`
-/// tells whether the watch is up.
-pub(crate) async fn run(bus: Arc<Bus>, state: Arc<WatchState>, changed: impl Fn() + Send + Sync) {
-    run_marker(bus, state, KEY, changed).await;
+/// Owns a marker watch. Dropping the handle stops it, including any pending reopen.
+#[must_use = "dropping this handle stops the marker watch"]
+pub struct MarkerTask {
+    _stop: oneshot::Sender<()>,
 }
 
-/// Follow marker `key` of the bucket as [`run`] follows [`KEY`].
-pub(crate) async fn run_marker(
+/// Follow `key`, calling `changed` when the value differs from the last one seen.
+/// The supervisor joins the watch task so it can recover even from a panic.
+pub(crate) fn spawn_marker(
     bus: Arc<Bus>,
     state: Arc<WatchState>,
-    key: &str,
-    changed: impl Fn() + Send + Sync,
-) {
-    let mut last: Option<Vec<u8>> = None;
-    let mut retry = RETRY_FIRST;
+    key: &'static str,
+    changed: impl Fn() + Send + Sync + 'static,
+) -> MarkerTask {
+    let (stop, mut stopped) = oneshot::channel();
+    let changed = Arc::new(changed);
+    tokio::spawn(async move {
+        let mut tasks = JoinSet::new();
+        while matches!(stopped.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+            tasks.spawn({
+                let (bus, state, changed) = (bus.clone(), state.clone(), changed.clone());
+                async move { run_marker(&bus, &state, key, &*changed).await }
+            });
+            // Shutdown wins if the stop and the task's exit arrive together.
+            let result = tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                result = tasks.join_next() => result.expect("one marker task"),
+            };
+            let reason = match result {
+                Ok(()) => "returned ()".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            state.mark_down();
+            tracing::warn!(
+                "ck-mc: entorhinal changes: marker task for {key} ended ({reason}); reopening after backoff"
+            );
+            tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                _ = tokio::time::sleep(state.next_retry()) => {}
+            }
+        }
+        tasks.shutdown().await;
+        state.mark_down();
+    });
+    MarkerTask { _stop: stop }
+}
+
+async fn run_marker(bus: &Bus, state: &WatchState, key: &str, changed: &(impl Fn() + Sync)) {
     loop {
-        match open(&bus, key).await {
+        match open(bus, key).await {
             Err(error) => state.down(&error),
             Ok(mut watch) => {
                 let ended = loop {
                     let value = match watch.next().await {
                         Ok(WatchEvent::Snapshot { entries, .. }) => {
                             state.up();
-                            retry = RETRY_FIRST;
                             entries
                                 .into_iter()
                                 .find(|entry| entry.key == key)
@@ -140,8 +206,15 @@ pub(crate) async fn run_marker(
                         Ok(WatchEvent::Update(_)) => None,
                         Err(_) => break "register watch ended",
                     };
-                    if let Some(value) = value.filter(|value| last.as_ref() != Some(value)) {
-                        last = Some(value);
+                    let is_new = value.is_some_and(|value| {
+                        let mut progress = state.progress.lock().expect("watch state");
+                        if progress.last.as_ref() == Some(&value) {
+                            return false;
+                        }
+                        progress.last = Some(value);
+                        true
+                    });
+                    if is_new {
                         changed();
                     }
                 };
@@ -150,7 +223,7 @@ pub(crate) async fn run_marker(
                 state.down(ended);
             }
         }
-        tokio::time::sleep(backoff(&mut retry)).await;
+        tokio::time::sleep(state.next_retry()).await;
     }
 }
 
