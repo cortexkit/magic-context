@@ -280,8 +280,10 @@ impl Session {
             );
             return None;
         };
-        // A partially funded run may read only its grant. Keep the first
-        // present message even if it is larger, including after retired ordinals.
+        // A partially funded run may read only as much history as the drain
+        // granted. It still keeps the first message that is present, even if
+        // that message alone is larger, and even when earlier ordinals are
+        // gone from the transcript.
         if reservation.tokens < requested {
             let entries = self.index.entries();
             let first = entries.partition_point(|entry| entry.ordinal < from);
@@ -738,8 +740,9 @@ impl Session {
             "ck-mc: session {}: held summary publication recovered",
             self.key.session
         );
-        // Store first; the incoming job checks the runner's view, context
-        // usage and signed-thinking hold before changing the prompt.
+        // Store first; the incoming job decides whether the prompt may change,
+        // from the runner's view, the context usage, and whether recent signed
+        // thinking must be kept byte for byte.
         self.accept_publication(publication.result, now_ms)
     }
 

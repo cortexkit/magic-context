@@ -87,8 +87,9 @@ impl Replica {
             }
         };
         // The app can show legacy rows even if the index has no record of
-        // progress for this session. Use a screen only if it can include
-        // every row for the session, including any missing from the map.
+        // progress for this session. Narrow the search to the session's rows
+        // through the rowid map only when the map is known to hold every row
+        // of the session; otherwise search unscreened.
         let reach = messages::screened_reach(conn, &mut coverage, &key.session);
         let hits = messages::app_page_with_reach(conn, &key.session, query, offset, 51, &reach);
         let more = hits.len() > 50;

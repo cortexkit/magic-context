@@ -1030,7 +1030,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         });
     }
 
-    /// Evict parked carries even when no new operation arrives.
+    /// Drop the in-memory state kept for quiet sessions (their transcript
+    /// index and last view) once it has gone unused too long, even when no
+    /// new operation arrives to trigger the check.
     pub fn spawn_quiet_carry_sweep(&self) {
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {

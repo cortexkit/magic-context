@@ -396,7 +396,9 @@ impl Session {
         self.app_record_view(&view);
         let covered = std::mem::take(&mut self.next_covered);
         let mut cut_covered = Vec::new();
-        // A cut also fulfills drops it never needs to name in the view.
+        // A cut removes everything before it from the request, so it also
+        // carries out queued drops of parts behind it without naming them
+        // in the view. Record those, so a refused cut can restore them.
         // Record them before applying the cut prunes their index entries.
         if let Some(cut) = move_floor::cut_of(&view).and_then(|mid| self.index.ordinal_of(mid)) {
             for key in &self.queued {
