@@ -32,7 +32,7 @@ type Hold = { at: number; site: string; ms: number };
 type State = { version: 1; files: Record<string, Cursor>; sessions: Record<string, Session>; sent: Record<string, Sent>; busy?: Record<string, Record<string, BusyCounts>>; holds?: Hold[]; pendingBusy?: Record<string, number>; lastSummaryDay?: string };
 export type LatencyAlert = { kind: Kind; sessionId: string; name: string; at: string; detail: string; lkgDeclines: Record<string, number>; count: number; p50: number; p90: number; max: number; moduleP50: number | null; moduleP90: number | null; moduleMax: number | null; runnerP50?: number | null; runnerP90?: number | null; runnerMax?: number | null; worstPass?: Pass; pluginP50: number | null; pluginP90: number | null; pluginMax: number | null; busy?: BusyCounts; lock?: { site: string; count: number; p90: number; max: number }; load: number[]; loadSampledAt: string };
 export type LatencyOptions = { files: string[]; stateFile: string; db: string; peerDb?: string; connectionFile: string; send: boolean; now?: () => number; load?: () => number[]; wake?: (content: string, id: string) => Promise<void>;
-    /** The subc module that delivers the wake; defaults to `prefrontal`. */
+    /** The CortexKit daemon module that delivers the wake; defaults to `prefrontal`. */
     wakeModuleId?: string;
     /** Opens the subc connection a wake is sent on; tests replace it. */
     connect?: SubcWakeClientFactory;

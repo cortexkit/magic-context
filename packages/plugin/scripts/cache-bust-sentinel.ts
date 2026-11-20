@@ -109,7 +109,7 @@ export interface CacheBustSentinelOptions {
     databasePath: string;
     rustStorePath: string;
     connectionFile: string;
-    /** The subc module that delivers wakes; defaults to `prefrontal`. */
+    /** The CortexKit daemon module that delivers wakes; defaults to `prefrontal`. */
     wakeModuleId?: string;
     wakeAgentId: string;
     wakeFromAgent: string;
@@ -1234,7 +1234,7 @@ export function parseAgentDeliverReply(
     return { ...reply, accepted: true, contractViolation: true };
 }
 
-/** A subc client as the wake transport uses it. */
+/** A CortexKit daemon (subc) client, as the wake transport uses it. */
 export interface SubcWakeClient {
     call(
         moduleId: string,

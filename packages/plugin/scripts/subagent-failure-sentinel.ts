@@ -70,7 +70,7 @@ export type FailureSentinelOptions = {
     settleMs?: number;
     now?: () => number;
     wake?: (content: string, deliveryId: string) => Promise<void>;
-    /** The subc module that delivers the wake; defaults to `prefrontal`. */
+    /** The CortexKit daemon module that delivers the wake; defaults to `prefrontal`. */
     wakeModuleId?: string;
     /** Opens the subc connection a wake is sent on; tests replace it. */
     connect?: SubcWakeClientFactory;

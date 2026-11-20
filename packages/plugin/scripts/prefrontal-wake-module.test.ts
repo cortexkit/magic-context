@@ -19,7 +19,7 @@ function temporaryDirectory(label: string): string {
     return directory;
 }
 
-/** A subc client stand-in that rejects unnecessary catalog reads. */
+/** A stand-in for the CortexKit daemon (subc) client that rejects unnecessary catalog reads. */
 function fakeClient() {
     const calls: string[] = [];
     let catalogReads = 0;
