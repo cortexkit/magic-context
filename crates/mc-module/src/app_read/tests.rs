@@ -78,6 +78,8 @@ pub(super) fn replica(context: Option<Connection>) -> Replica {
         snapshots: HashMap::from([(s.key.clone(), s)]),
         store: None,
         context,
+        message_index: None,
+        message_coverage: Default::default(),
         watches: watch::Hub::new(),
         heads: HashMap::new(),
         idle_heads: Default::default(),
@@ -303,6 +305,56 @@ fn search_db() -> (tempfile::TempDir, Connection) {
     )
     .unwrap();
     (dir, conn)
+}
+
+#[test]
+fn search_screened_and_fallback_pages_have_identical_bytes() {
+    static SCREENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    use std::sync::atomic::Ordering::Relaxed;
+    let (dir, mut conn) = search_db();
+    conn.trace(Some(|sql| {
+        if sql.contains("+message_history_fts.rowid IN") && sql.contains(" MATCH ") {
+            SCREENED.fetch_add(1, Relaxed);
+        }
+    }));
+    let mut reader = replica(Some(conn));
+    let pages = |reader: &mut Replica| {
+        let mut p =
+            json!({"query":"needle nomatch","scope":{"session":key()},"sources":["message"]});
+        let mut first = reader.read("context.search", &p).unwrap();
+        assert_eq!(first["hits"].as_array().unwrap().len(), 50);
+        p["cursor"] = first["next_cursor"].clone();
+        let mut second = reader.read("context.search", &p).unwrap();
+        assert_eq!(second["hits"].as_array().unwrap().len(), 5);
+        // The envelope stamps the wall clock on every reply, not the page.
+        first["as_of_ms"] = Value::Null;
+        second["as_of_ms"] = Value::Null;
+        serde_json::to_vec(&[first, second]).unwrap()
+    };
+    let screened = pages(&mut reader);
+    assert!(
+        SCREENED.load(Relaxed) > 0,
+        "the mapped session must use the rowid screen"
+    );
+
+    // Exceed the coverage scan's limit on unmapped rows to force an
+    // unscreened read without changing what matches in the test session.
+    Connection::open(dir.path().join("context.db"))
+        .unwrap()
+        .execute(
+            "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10001)
+         INSERT INTO message_history_fts(session_id, message_ordinal, message_id, role, content)
+         SELECT 'other', i, i, 'user', 'été 🦀 haystack' FROM n",
+            [],
+        )
+        .unwrap();
+    SCREENED.store(0, Relaxed);
+    assert_eq!(pages(&mut reader), screened);
+    assert_eq!(
+        SCREENED.load(Relaxed),
+        0,
+        "an incomplete proof must fall back"
+    );
 }
 
 #[test]

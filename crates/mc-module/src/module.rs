@@ -294,9 +294,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             session_projects.clone(),
             journal.gate().clone(),
         );
-        let app_read = crate::app_read::AppRead::new(
+        let app_read = crate::app_read::AppRead::with_message_index(
             store.as_ref().map(|s| s.path.clone()),
             db.as_ref().map(|d| d.path.clone()),
+            db.as_ref().map(|d| d.message_index.clone()),
         );
         let search = db.as_ref().map(|db| {
             crate::search::background::Background::new(

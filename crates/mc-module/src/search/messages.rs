@@ -663,6 +663,10 @@ pub fn reach(
     if dates.is_some() {
         return Reach::Mapped;
     }
+    screened_reach(conn, coverage, session)
+}
+
+pub(crate) fn screened_reach(conn: &Connection, coverage: &mut Coverage, session: &str) -> Reach {
     match coverage.unmapped(conn, session) {
         Some(rowids) if rowids.is_empty() => Reach::Mapped,
         Some(rowids) => Reach::Partly(rowids),
@@ -785,12 +789,23 @@ pub fn app_page(
     offset: usize,
     limit: usize,
 ) -> Vec<MessageHit> {
+    app_page_with_reach(conn, session, text, offset, limit, &Reach::Unmapped)
+}
+
+pub(crate) fn app_page_with_reach(
+    conn: &Connection,
+    session: &str,
+    text: &str,
+    offset: usize,
+    limit: usize,
+    reach: &Reach,
+) -> Vec<MessageHit> {
     let within = Within {
         session,
         cutoff: i64::MAX,
         dates: None,
         visible: None,
-        reach: &Reach::Unmapped,
+        reach,
     };
     let base = sanitize_fts_query(text.trim());
     let mut rows = query_rows_page(conn, within, &base, (limit, offset));
