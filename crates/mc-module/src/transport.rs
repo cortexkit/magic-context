@@ -1337,6 +1337,7 @@ mod core_attempt_tests {
 /// Serves the provider ops for the daemon.
 pub struct Handler {
     module: Module<SubcRunnerClient>,
+    bus: Option<Arc<crate::bus::Bus>>,
     /// Every bound route, by channel: what the daemon said about it at bind.
     bound: Mutex<HashMap<u16, Bound>>,
     app_bound: Mutex<HashMap<u16, AppCaller>>,
@@ -1673,6 +1674,7 @@ impl Handler {
     pub fn new(module: Module<SubcRunnerClient>) -> Self {
         Self {
             module,
+            bus: None,
             bound: Mutex::default(),
             app_bound: Mutex::default(),
             command_bound: Mutex::default(),
@@ -1681,6 +1683,11 @@ impl Handler {
             flow_bound: Mutex::default(),
             answer_routes: Mutex::default(),
         }
+    }
+
+    pub fn with_bus(mut self, bus: Arc<crate::bus::Bus>) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     /// A request on a flow-scoped route: the flow operation's answer, or the
@@ -2151,6 +2158,11 @@ fn refusal(error: ModuleError) -> Refusal {
 
 #[async_trait]
 impl ModuleHandler for Handler {
+    async fn health(&self) -> subc_client_rs::HealthReport {
+        self.module
+            .health(self.bus.as_ref().is_some_and(|bus| bus.is_connected()))
+    }
+
     /// With managed settings, ck-mc declares its user settings to the
     /// daemon ([`crate::config::managed`]); otherwise it declares nothing
     /// and reads its files.

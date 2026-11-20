@@ -73,6 +73,7 @@ pub(crate) mod entorhinal_changes;
 pub mod expand;
 /// The memories a history head may show, and the one selection that picks them.
 pub mod head_memories;
+mod health;
 pub mod index;
 pub mod injection;
 pub mod js_text;

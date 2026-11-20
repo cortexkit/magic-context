@@ -137,6 +137,14 @@ impl Config {
         }
     }
 
+    /// The startup setting, before the first scheduled dreamer round reads it again.
+    pub(crate) fn initial_dreamer_enabled(&self) -> bool {
+        match self {
+            Self::Fixed(_) => true,
+            Self::Files(loader) => loader.initial_dreamer_enabled,
+        }
+    }
+
     /// The loader that reads the settings files, when settings come from
     /// them.
     pub fn loader(&self) -> Option<&Loader> {
@@ -153,14 +161,10 @@ impl Config {
 /// it runs for (every project when absent). Only the user's file is read: a
 /// project's file can't make the person's machine spend more.
 fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Settings> {
-    let dreamer = user.and_then(|user| user.get("dreamer"));
-    if dreamer
-        .and_then(|dreamer| dreamer.get("disable"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if !dreamer_enabled(user) {
         return None;
     }
+    let dreamer = user.and_then(|user| user.get("dreamer"));
     let mut settings = crate::dreamer::engine::Settings::default();
     if let Some(budget) = dreamer
         .and_then(|dreamer| dreamer.get("maxTokens"))
@@ -201,6 +205,12 @@ fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Sett
     Some(settings)
 }
 
+fn dreamer_enabled(user: Option<&Value>) -> bool {
+    user.and_then(|user| user.pointer("/dreamer/disable"))
+        .and_then(Value::as_bool)
+        != Some(true)
+}
+
 #[derive(Default)]
 struct Cached {
     initialized: bool,
@@ -213,6 +223,7 @@ struct Cached {
 pub struct Loader {
     user_path: PathBuf,
     cache: Mutex<HashMap<PathBuf, Cached>>,
+    initial_dreamer_enabled: bool,
     /// Where `{vault:…}` keys in the user file are read.
     vault: std::sync::Arc<Vault>,
     /// How a Synapse embedding provider calls Synapse; `None` outside the
@@ -260,6 +271,7 @@ impl Loader {
         Self {
             user_path,
             cache: Mutex::new(HashMap::new()),
+            initial_dreamer_enabled: true,
             vault: Vault::none(),
             synapse: None,
             #[cfg(feature = "managed-settings")]
@@ -280,6 +292,7 @@ impl Loader {
     pub fn with_vault(mut self, vault: std::sync::Arc<Vault>) -> Self {
         if let Some(user) = self.user_tier_now() {
             register_vault_keys(&user, &vault);
+            self.initial_dreamer_enabled = dreamer_enabled(Some(user.value()));
         }
         self.vault = vault;
         self

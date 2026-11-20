@@ -177,6 +177,8 @@ impl Link for HubLink {
 pub struct ReplicaTask {
     stop: watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
+    #[cfg(feature = "memory-replica")]
+    pub(crate) health: Arc<super::health::Health>,
     /// The watch on Entorhinal's fleet epoch marker, ended with the task.
     marker: Option<MarkerTask>,
 }
@@ -186,6 +188,8 @@ impl ReplicaTask {
         let (stop, stopped) = watch::channel(false);
         Self {
             stop,
+            #[cfg(feature = "memory-replica")]
+            health: Arc::clone(&live.health),
             handle: tokio::spawn(live.run(stopped)),
             marker: None,
         }
@@ -237,6 +241,8 @@ pub fn start(
         epochs,
         wake,
         epoch_wake,
+        #[cfg(feature = "memory-replica")]
+        health: Arc::default(),
     });
     task.marker = Some(marker);
     Some(task)
@@ -253,6 +259,8 @@ pub(crate) struct Live {
     pub(crate) wake: Arc<Notify>,
     /// Signalled when Entorhinal's fleet epoch marker changes.
     pub(crate) epoch_wake: Arc<Notify>,
+    #[cfg(feature = "memory-replica")]
+    pub(crate) health: Arc<super::health::Health>,
 }
 
 /// Where the task stands, for logging each change once.
@@ -368,6 +376,8 @@ impl Live {
         let mut box_id: Option<String> = None;
         let mut attempt = 0;
         loop {
+            #[cfg(feature = "memory-replica")]
+            self.health.refresh(&self.db);
             let refusal = match unless_stopped(&mut stop, self.connect(&mut box_id)).await {
                 None => return,
                 Some(Err(refusal)) => refusal,
@@ -470,6 +480,8 @@ impl Live {
         };
         let mut failures = 0;
         loop {
+            #[cfg(feature = "memory-replica")]
+            self.health.refresh(&self.db);
             let outcome = tokio::select! {
                 biased;
                 () = stopped(stop) => return Ended::Stopped,

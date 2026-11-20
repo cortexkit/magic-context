@@ -513,3 +513,13 @@ async fn a_lost_connection_forgets_only_the_session_it_was_on() {
     drop(bus.session().await.unwrap());
     assert_eq!(test_bus.opened.load(Ordering::Relaxed), 3, "reopened");
 }
+
+#[tokio::test]
+async fn health_bus_state_is_readable_with_a_session_in_use() {
+    let bus = TestBus::new().bus();
+    assert!(!bus.is_connected());
+    let session = bus.session().await.unwrap();
+    assert!(bus.is_connected());
+    session.discard();
+    assert!(!bus.is_connected());
+}

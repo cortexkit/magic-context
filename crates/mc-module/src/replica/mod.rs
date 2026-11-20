@@ -50,6 +50,8 @@
 
 pub mod apply;
 pub mod epochs;
+#[cfg(feature = "memory-replica")]
+pub(crate) mod health;
 pub mod hub;
 pub mod live;
 pub mod nats;

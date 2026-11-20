@@ -133,6 +133,11 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         journal,
         agent_data,
     );
+    // Share one bus connection: ck-bus revokes the module's old credential
+    // whenever it issues a new credential. The dreamer announces docs proposals,
+    // memory changes wake other modules, Entorhinal sends change markers, and
+    // runners announce run ends on this connection.
+    let bus = Arc::new(mc_module::bus::Bus::through_ckbus(connection_file.clone()));
     // Register before any background work starts. Under a daemon that hands
     // ck-mc a registration channel, every outbound connection is bound with a
     // claim minted on this registration, so a connection opened before it
@@ -141,7 +146,7 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (handle, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
         manifest_for(&module_id, agent_data),
-        Handler::new(module.clone()),
+        Handler::new(module.clone()).with_bus(Arc::clone(&bus)),
     )
     .await?;
     // ck-mc's child scopes are published through its serving connection.
@@ -150,12 +155,6 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     vault.start();
     module.spawn_upkeep();
     module.spawn_quiet_carry_sweep();
-    // One connection to the bus, through ck-bus, which revokes a module's
-    // credential when it issues another: the dreamer's rounds announce new
-    // docs proposals on it, memory changes wake other modules, Entorhinal's
-    // change markers are followed, and the runners' run-end events wake the
-    // waits on summary and dreamer runs.
-    let bus = Arc::new(mc_module::bus::Bus::through_ckbus(connection_file.clone()));
     module.publish_docs_notices_with(mc_module::bus::DocsNotices::over(Arc::clone(&bus)));
     // Each child session ck-mc starts is attributed in context.db, and the
     // fact goes out on the bus for Astrocyte.

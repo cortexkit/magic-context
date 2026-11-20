@@ -381,6 +381,8 @@ fn start(fake: &Arc<Fake>, db: &Arc<ContextDb>, wake: &Arc<Notify>) -> ReplicaTa
         epochs: Arc::new(super::epochs::UnknownEpochs),
         wake: Arc::clone(wake),
         epoch_wake: Arc::new(Notify::new()),
+        #[cfg(feature = "memory-replica")]
+        health: Arc::default(),
     })
 }
 
@@ -600,6 +602,8 @@ async fn a_held_message_is_read_again_when_the_epoch_marker_changes() {
         epochs: Arc::new(super::epochs::UnknownEpochs),
         wake: Arc::new(Notify::new()),
         epoch_wake: Arc::clone(&epoch_wake),
+        #[cfg(feature = "memory-replica")]
+        health: Arc::default(),
     });
     // Four failed rounds: the next would wait sixteen seconds.
     until(|| vault.opens.load(Ordering::SeqCst) >= 4).await;
@@ -614,4 +618,99 @@ async fn a_held_message_is_read_again_when_the_epoch_marker_changes() {
         marked.elapsed()
     );
     task.stop().await;
+}
+
+#[cfg(feature = "memory-replica")]
+fn health_report(health: Arc<super::health::Health>) -> subc_client_rs::HealthReport {
+    crate::health::Health {
+        context_open: true,
+        mode3_open: true,
+        session_count: Some(0),
+        dreamer_enabled: false,
+        bus_connected: false,
+        replica: Some(health),
+    }
+    .report()
+}
+
+#[cfg(feature = "memory-replica")]
+#[tokio::test(start_paused = true)]
+async fn replica_health_reports_an_old_hold_and_unsent_count_before_the_hub_connects() {
+    use serde_json::json;
+    use subc_client_rs::HealthStatus;
+
+    let server = Server::new();
+    let fake = Fake::new(&server, vec![Refusal::NotGranted]);
+    let (db, _dir) = store();
+    remember(&db, "Waiting to send.");
+    let acknowledged = "Acknowledged but not followed yet.";
+    remember(&db, acknowledged);
+    let since = crate::memory_writes::now_ms() - 61 * 60 * 1000;
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE replica_outbox SET state = 'published'
+               WHERE kind = 'memory' AND local_id = (SELECT id FROM memories WHERE content = ?)",
+            [acknowledged],
+        )
+        .unwrap();
+        super::record_hold(conn, 7, "missing key").unwrap();
+        conn.execute(
+            "UPDATE replica_state SET held_since = ? WHERE id = 1",
+            [since],
+        )
+        .unwrap();
+    });
+    let task = start(&fake, &db, &Arc::new(Notify::new()));
+    until(|| fake.asks() == 1).await;
+    let report = health_report(Arc::clone(&task.health));
+    assert_eq!(report.status, HealthStatus::Degraded);
+    assert_eq!(
+        report.detail.as_deref(),
+        Some("replica stream held for fleet epoch 7 for over an hour")
+    );
+    assert_eq!(
+        report.metrics.unwrap()["replica"],
+        json!({
+            "enabled": true,
+            "sample_age_seconds": 0,
+            "unsent_count": 1,
+            "epoch_holds": {"count": 1, "oldest_held_at_ms": since, "epochs": [7]},
+        })
+    );
+    task.stop().await;
+}
+
+#[cfg(feature = "memory-replica")]
+#[tokio::test(start_paused = true)]
+async fn replica_health_degrades_when_the_store_read_fails() {
+    use subc_client_rs::HealthStatus;
+
+    let server = Server::new();
+    let fake = Fake::new(&server, vec![Refusal::NotGranted]);
+    let (db, _dir) = store();
+    db.with_connection(|conn| conn.execute_batch("DROP TABLE replica_outbox").unwrap());
+    let task = start(&fake, &db, &Arc::new(Notify::new()));
+    until(|| fake.asks() == 1).await;
+    let health = Arc::clone(&task.health);
+    let report = health_report(health.clone());
+    assert_eq!(report.status, HealthStatus::Degraded);
+    let detail = report.detail.unwrap();
+    assert!(
+        detail.starts_with("context.db replica read failed:"),
+        "{detail}"
+    );
+    assert!(detail.contains("replica_outbox"), "{detail}");
+    assert!(report.metrics.unwrap()["replica"]["unsent_count"].is_null());
+    task.stop().await;
+
+    tokio::time::advance(Duration::from_secs(600)).await;
+    let report = health_report(health);
+    assert!(report
+        .detail
+        .unwrap()
+        .contains("replica health snapshot is stale"));
+    assert_eq!(
+        report.metrics.unwrap()["replica"]["sample_age_seconds"],
+        600
+    );
 }

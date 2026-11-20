@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -117,6 +118,9 @@ struct Inner<C> {
     /// The dreamer, which runs scheduled memory tasks for the projects this
     /// process has sessions of. `None` without `context.db`.
     dreamer: Option<Arc<crate::dreamer::engine::Engine>>,
+    dreamer_enabled: AtomicBool,
+    #[cfg(feature = "memory-replica")]
+    replica_health: std::sync::OnceLock<Arc<crate::replica::health::Health>>,
     /// Wakes the rounds that move a 0.49 store's project rows when a Setup
     /// names a project id this process hasn't seen.
     legacy_wake: Arc<crate::legacy_projects::Wake>,
@@ -339,6 +343,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             config: config.clone(),
             dreamer: dreamer.clone(),
         });
+        let dreamer_enabled = dreamer.is_some() && config.initial_dreamer_enabled();
         let module = Self {
             inner: Arc::new(Inner {
                 app_read,
@@ -357,6 +362,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 session_projects,
                 active_projects: Mutex::new(HashMap::new()),
                 dreamer,
+                dreamer_enabled: AtomicBool::new(dreamer_enabled),
+                #[cfg(feature = "memory-replica")]
+                replica_health: std::sync::OnceLock::new(),
                 legacy_wake: Arc::default(),
                 docs_notices: std::sync::OnceLock::new(),
                 attribution_events: std::sync::OnceLock::new(),
@@ -381,6 +389,24 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 })
             }));
         module
+    }
+
+    pub(crate) fn health(&self, bus_connected: bool) -> subc_client_rs::HealthReport {
+        crate::health::Health {
+            context_open: self.inner.db.is_some(),
+            mode3_open: self.inner.store.is_some(),
+            session_count: self
+                .inner
+                .set_up
+                .try_lock()
+                .ok()
+                .map(|sessions| sessions.len()),
+            dreamer_enabled: self.inner.dreamer_enabled.load(Ordering::Relaxed),
+            bus_connected,
+            #[cfg(feature = "memory-replica")]
+            replica: self.inner.replica_health.get().cloned(),
+        }
+        .report()
     }
 
     /// App requests read an independent projection, never a session job.
@@ -1129,7 +1155,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         bus: Arc<crate::bus::Bus>,
     ) -> Option<crate::replica::live::ReplicaTask> {
         let db = self.inner.db.clone()?;
-        crate::replica::live::start(db, consumer, bus)
+        let task = crate::replica::live::start(db, consumer, bus)?;
+        #[cfg(feature = "memory-replica")]
+        let _ = self.inner.replica_health.set(Arc::clone(&task.health));
+        Some(task)
     }
 
     /// Follow Entorhinal's change markers on `bus`
@@ -1203,7 +1232,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         tokio::spawn(async move {
             tokio::time::sleep(crate::upkeep::BOOT_QUIET).await;
             loop {
-                if let Some(settings) = module.inner.config.dreamer() {
+                let settings = module.inner.config.dreamer();
+                module
+                    .inner
+                    .dreamer_enabled
+                    .store(settings.is_some(), Ordering::Relaxed);
+                if let Some(settings) = settings {
                     let now = now_ms();
                     engine.retain_projects(&settings);
                     // Finding each project's folder runs git, so it runs off
@@ -2784,6 +2818,10 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
+
+#[cfg(test)]
+#[path = "module_health_tests.rs"]
+mod health_tests;
 
 #[cfg(test)]
 #[path = "app_read/deadline_tests.rs"]

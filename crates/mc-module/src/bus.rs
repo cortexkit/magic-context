@@ -773,6 +773,9 @@ pub(crate) fn box_of_account(account: &str) -> Result<String, String> {
 pub struct Bus {
     factory: Arc<dyn SessionFactory>,
     session: tokio::sync::Mutex<Option<BusSession>>,
+    /// Whether a session was opened and has not been discarded. The health
+    /// hook must not wait for a publisher holding the session across I/O.
+    connected: AtomicBool,
     /// Advances each time the session gets a new connection, opened or
     /// renewed, so the run-end reader can tell that it is bound on an older
     /// one.
@@ -780,7 +783,10 @@ pub struct Bus {
 }
 
 /// The bus's open session, held until dropped.
-pub(crate) struct SessionGuard<'a>(tokio::sync::MutexGuard<'a, Option<BusSession>>);
+pub(crate) struct SessionGuard<'a>(
+    tokio::sync::MutexGuard<'a, Option<BusSession>>,
+    &'a AtomicBool,
+);
 
 impl std::ops::Deref for SessionGuard<'_> {
     type Target = BusSession;
@@ -795,6 +801,7 @@ impl SessionGuard<'_> {
     /// fresh one.
     pub(crate) fn discard(mut self) {
         *self.0 = None;
+        self.1.store(false, Ordering::Relaxed);
     }
 }
 
@@ -809,8 +816,13 @@ impl Bus {
         Self {
             factory,
             session: tokio::sync::Mutex::new(None),
+            connected: AtomicBool::new(false),
             generation: AtomicU64::new(0),
         }
+    }
+
+    pub(crate) fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 
     /// The open session: opened first when there is none, and renewed when
@@ -842,9 +854,13 @@ impl Bus {
         }
         .await;
         match ready {
-            Ok(()) => Ok(SessionGuard(session)),
+            Ok(()) => {
+                self.connected.store(true, Ordering::Relaxed);
+                Ok(SessionGuard(session, &self.connected))
+            }
             Err(error) => {
                 *session = None;
+                self.connected.store(false, Ordering::Relaxed);
                 Err(error)
             }
         }
@@ -853,7 +869,9 @@ impl Bus {
     /// Drop the current session, so the next caller opens a fresh one: a
     /// watch on it ended, so its connection may be gone.
     pub(crate) async fn discard(&self) {
-        *self.session.lock().await = None;
+        let mut session = self.session.lock().await;
+        *session = None;
+        self.connected.store(false, Ordering::Relaxed);
     }
 
     /// This computer's box id, as ck-bus names it in the module's bus
@@ -872,6 +890,7 @@ impl Bus {
         let mut session = self.session.lock().await;
         if self.generation.load(Ordering::SeqCst) == generation {
             *session = None;
+            self.connected.store(false, Ordering::Relaxed);
         }
     }
 }
