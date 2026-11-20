@@ -81,7 +81,8 @@ pub(crate) fn cortexkit_data_root() -> Option<PathBuf> {
     cortexkit_paths::cortexkit_data_dir().ok()
 }
 
-/// Where older ck-mc builds looked. This path is only checked for a warning;
+/// Where this module looked for its store before it used the shared path
+/// resolver. This path is only checked for a warning;
 /// it must never select where ck-mc opens a store.
 fn legacy_default_context_db_path(
     env: &impl EnvSource,
