@@ -125,6 +125,108 @@ fn populate(connection: &Connection) {
 }
 
 #[test]
+fn migration_106_retires_live_category_aliases_into_the_lowest_live_id() {
+    let mut connection = plugin_store();
+    let groups: &[(&str, &[&str])] = &[
+        (
+            "swe:architecture",
+            &["ARCHITECTURE_DECISIONS", "ARCHITECTURE"],
+        ),
+        (
+            "swe:project-rules",
+            &[
+                "PROJECT_RULES",
+                "USER_DIRECTIVES",
+                "USER_PREFERENCES",
+                "WORKFLOW_RULES",
+            ],
+        ),
+        (
+            "swe:config-values",
+            &["CONFIG_VALUES", "CONFIG_DEFAULTS", "ENVIRONMENT"],
+        ),
+        ("swe:constraints", &["CONSTRAINTS", "KNOWN_ISSUES"]),
+        ("mc:unmapped", &["CUSTOM_ONE", "CUSTOM_TWO"]),
+    ];
+    let mut expected = Vec::new();
+    for (group, &(category, tags)) in groups.iter().enumerate() {
+        let id = (group as i64 + 1) * 10;
+        for (index, tag) in tags.iter().enumerate().rev() {
+            let status = if index == 0 { "permanent" } else { "active" };
+            insert_memory(
+                &connection,
+                id + index as i64,
+                "pj-one",
+                tag,
+                "Duplicate text",
+                status,
+            );
+        }
+        for (index, &tag) in tags.iter().enumerate() {
+            let (status, into) = if index == 0 {
+                ("permanent", None)
+            } else {
+                ("archived", Some(id))
+            };
+            expected.push((
+                id + index as i64,
+                category.to_owned(),
+                tag.to_owned(),
+                status.to_owned(),
+                into,
+            ));
+        }
+    }
+    insert_memory(
+        &connection,
+        1,
+        "pj-two",
+        "ARCHITECTURE",
+        "Duplicate text",
+        "active",
+    );
+    insert_memory(
+        &connection,
+        2,
+        "pj-one",
+        "ARCHITECTURE_RETIRED",
+        "Duplicate text",
+        "archived",
+    );
+    expected.insert(
+        0,
+        (
+            2,
+            "mc:unmapped".into(),
+            "ARCHITECTURE_RETIRED".into(),
+            "archived".into(),
+            None,
+        ),
+    );
+    expected.insert(
+        0,
+        (
+            1,
+            "swe:architecture".into(),
+            "ARCHITECTURE".into(),
+            "active".into(),
+            None,
+        ),
+    );
+
+    let found = version(&connection);
+    upgrade(&mut connection, found).unwrap();
+    let actual = connection
+        .prepare("SELECT id, category, origin_category, status, superseded_by_memory_id FROM memories ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn a_plugin_store_migrates_to_the_leveled_memory_schema() {
     let mut connection = plugin_store();
     populate(&connection);
@@ -346,6 +448,65 @@ fn search_after_the_migration_finds_the_same_memories() {
         .unwrap();
     assert!(matches(&connection, "parser").is_empty());
     assert_eq!(matches(&connection, "lexer"), vec![1]);
+}
+
+#[test]
+fn migration_106_archives_live_alias_duplicates_without_deleting_rows() {
+    let mut conn = plugin_store();
+    let groups: &[&[&str]] = &[
+        &["ARCHITECTURE_DECISIONS", "ARCHITECTURE"],
+        &["KNOWN_ISSUES", "CONSTRAINTS"],
+        &["CONFIG_DEFAULTS", "ENVIRONMENT", "CONFIG_VALUES"],
+        &[
+            "USER_DIRECTIVES",
+            "USER_PREFERENCES",
+            "WORKFLOW_RULES",
+            "PROJECT_RULES",
+        ],
+    ];
+    for (group, tags) in groups.iter().enumerate() {
+        let project = format!("project-{group}");
+        let survivor = 10 * group as i64 + 1;
+        for (i, tag) in tags.iter().enumerate().rev() {
+            insert_memory(
+                &conn,
+                survivor + i as i64,
+                &project,
+                tag,
+                "Keep this same fact.",
+                if i == 0 { "permanent" } else { "active" },
+            );
+        }
+    }
+
+    upgrade_through(&mut conn, i64::from(PLUGIN_SCHEMA_VERSION), 106).unwrap();
+    for (group, tags) in groups.iter().enumerate() {
+        let project = format!("project-{group}");
+        let survivor = 10 * group as i64 + 1;
+        let mut stmt = conn
+            .prepare("SELECT id, status, superseded_by_memory_id, origin_category FROM memories WHERE owner_id = ?1 ORDER BY id")
+            .unwrap();
+        let found: Vec<(i64, String, Option<i64>, String)> = stmt
+            .query_map([project], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let wanted: Vec<_> = tags
+            .iter()
+            .enumerate()
+            .map(|(i, tag)| {
+                (
+                    survivor + i as i64,
+                    if i == 0 { "permanent" } else { "archived" }.to_owned(),
+                    (i != 0).then_some(survivor),
+                    (*tag).to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(found, wanted);
+    }
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use super::*;
 use crate::search::messages;
+use rusqlite::OptionalExtension;
 
 impl Replica {
     pub(super) fn search(&mut self, p: &Map<String, Value>) -> Result<Value, Refusal> {
@@ -29,13 +30,28 @@ impl Replica {
             ));
         }
         let conn = self.context.as_ref().ok_or_else(unavailable)?;
-        let indexed_harness: Option<String> = conn
-            .query_row(
+        let tx = conn.unchecked_transaction().map_err(|_| unavailable())?;
+        let read_harness = || {
+            tx.query_row(
                 "SELECT harness FROM message_history_index WHERE session_id=?1",
                 [&key.session],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
-            .ok();
+            .optional()
+            .map(Option::flatten)
+            .map_err(|_| unavailable())
+        };
+        // Pin the page's SQLite snapshot and coverage generation together.
+        let mut coverage = self.message_coverage.borrow_mut();
+        let indexed_harness = if let Some(index) = &self.message_index {
+            let (generation, harness) = index.snapshot(read_harness);
+            let harness = harness?;
+            coverage.for_snapshot(generation);
+            harness
+        } else {
+            read_harness()?
+        };
+        let conn = &*tx;
         if indexed_harness.as_ref().is_some_and(|h| h != &key.harness) {
             return Err(error(
                 "session_ambiguous",
@@ -70,7 +86,11 @@ impl Replica {
                     .ok_or_else(|| invalid("cursor"))?
             }
         };
-        let hits = messages::app_page(conn, &key.session, query, offset, 51);
+        // The app can show legacy rows even if the index has no record of
+        // progress for this session. Use a screen only if it can include
+        // every row for the session, including any missing from the map.
+        let reach = messages::screened_reach(conn, &mut coverage, &key.session);
+        let hits = messages::app_page_with_reach(conn, &key.session, query, offset, 51, &reach);
         let more = hits.len() > 50;
         let hits: Vec<Value> = hits.into_iter().take(50).map(|hit| {
             let at_ms: Option<i64> = conn.query_row("SELECT message_time_ms FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal=?2", params![key.session, hit.number], |row| row.get(0)).ok().flatten();

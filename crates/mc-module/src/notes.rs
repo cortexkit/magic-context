@@ -195,6 +195,21 @@ fn write_reply(id: i64, active: &[StoredNote], now_ms: i64) -> String {
     }
 }
 
+fn save_note(
+    insert: impl FnOnce() -> Result<i64, String>,
+    read_active: impl FnOnce() -> Result<Vec<StoredNote>, String>,
+    now_ms: i64,
+) -> Result<String, String> {
+    let id = insert()?;
+    // The note is committed; failing to read the receipt's counts must not
+    // tell the caller to retry the write.
+    let active = read_active().unwrap_or_else(|error| {
+        tracing::warn!("ck-mc: could not read active notes after saving note #{id}: {error}");
+        Vec::new()
+    });
+    Ok(write_reply(id, &active, now_ms))
+}
+
 /// `note_ids` for the actions that take them: one for update, 1–50 for
 /// dismiss and a targeted read.
 fn note_ids(action: &str, value: Option<&Value>) -> Result<Vec<i64>, String> {
@@ -264,8 +279,11 @@ pub fn run(
         "write" => {
             let content = text(args, "content")
                 .ok_or("Error: 'content' is required when action is 'write'.")?;
-            let id = db.add_session_note(scope, content, anchor, now_ms)?;
-            let reply = write_reply(id, &db.session_notes(scope, &["active"])?, now_ms);
+            let reply = save_note(
+                || db.add_session_note(scope, content, anchor, now_ms),
+                || db.session_notes(scope, &["active"]),
+                now_ms,
+            )?;
             Ok(if text(args, "surface_condition").is_some() {
                 format!("{reply}\n{SMART_NOTE_REPLY}")
             } else {
@@ -380,6 +398,28 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_confirmation_read_still_acknowledges_the_committed_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+        let scope = NoteScope {
+            harness: "mock".into(),
+            session: "s1".into(),
+            project: None,
+        };
+        let reply = save_note(
+            || db.add_session_note(&scope, "Review the tests", Some(2), 10),
+            || {
+                let saved = db.session_notes(&scope, &["active"]).unwrap();
+                assert_eq!(saved.len(), 1);
+                assert_eq!(saved[0].content, "Review the tests");
+                Err("injected confirmation read error".into())
+            },
+            10,
+        );
+        assert_eq!(reply, Ok("Saved session note #1.".into()));
+    }
 
     fn note(id: i64, status: &str, content: &str, updated_at: i64) -> StoredNote {
         StoredNote {

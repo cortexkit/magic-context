@@ -219,6 +219,9 @@ const QUIET_AFTER: Duration = Duration::from_secs(10 * 60);
 /// without a summarizer (a worker or reader) ended: such a session rarely
 /// has another job after its run.
 const QUIET_AFTER_RUN_END: Duration = Duration::from_secs(60);
+/// After this long without a job, a quiet session keeps only its durable state.
+const QUIET_CARRY_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+const QUIET_CARRY_SWEEP: Duration = Duration::from_secs(30);
 
 /// A session's place in the module.
 enum Slot {
@@ -232,6 +235,7 @@ enum Slot {
 /// What a worker keeps of the session it freed.
 struct Quiet {
     carry: crate::session::QuietCarry,
+    idle_since: tokio::time::Instant,
     /// The state last saved to `mode3.db`, so the next worker saves only a
     /// change.
     saved: Option<crate::store::Durable>,
@@ -296,13 +300,18 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             session_projects.clone(),
             journal.gate().clone(),
         );
-        let app_read = crate::app_read::AppRead::new(
+        let app_read = crate::app_read::AppRead::with_message_index(
             store.as_ref().map(|s| s.path.clone()),
             db.as_ref().map(|d| d.path.clone()),
+            db.as_ref().map(|d| d.message_index.clone()),
         );
-        let search = db
-            .as_ref()
-            .map(|db| crate::search::background::Background::new(client.clone(), db.path.clone()));
+        let search = db.as_ref().map(|db| {
+            crate::search::background::Background::new(
+                client.clone(),
+                db.path.clone(),
+                db.message_index.clone(),
+            )
+        });
         let dreamer = db.as_ref().map(|_| {
             // A project's dreamer run embeds text with the provider the
             // person's settings configure for its folder, read when the run
@@ -1021,6 +1030,51 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         });
     }
 
+    /// Evict parked carries even when no new operation arrives.
+    pub fn spawn_quiet_carry_sweep(&self) {
+        let inner = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(QUIET_CARRY_SWEEP).await;
+                let Some(inner) = inner.upgrade() else { break };
+                Self::expire_quiet(&inner, tokio::time::Instant::now());
+            }
+        });
+    }
+
+    fn expire_quiet(inner: &Inner<C>, now: tokio::time::Instant) {
+        let expired = {
+            let mut workers = inner.workers.lock().expect("worker map");
+            let keys: Vec<_> = workers
+                .iter()
+                .filter_map(|(key, slot)| match slot {
+                    Slot::Quiet(quiet)
+                        if now.duration_since(quiet.idle_since) >= QUIET_CARRY_TTL =>
+                    {
+                        Some(key.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| workers.remove(&key).map(|slot| (key, slot)))
+                .collect::<Vec<_>>()
+        };
+        // Drop the transcript and view outside the worker lock.
+        for (key, slot) in expired {
+            let Slot::Quiet(quiet) = slot else {
+                unreachable!("only parked carries expire")
+            };
+            tracing::info!(
+                "ck-mc: session {}/{}/{}: dropped its quiet carry after {} s without a job",
+                key.runner,
+                key.harness,
+                key.session,
+                now.duration_since(quiet.idle_since).as_secs()
+            );
+        }
+    }
+
     /// Publish the docs-upkeep proposals' bus notices through `notices` in
     /// the dreamer's rounds ([`crate::bus`]). Only the first call takes
     /// effect; a module without one publishes none.
@@ -1493,10 +1547,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             // When each recent job started, so a slow tool call can name the
             // jobs it waited behind.
             let mut jobs_run = crate::tool_timing::WorkerJobs::default();
+            let mut idle_since = None;
             loop {
                 let job = match ready.pop_front() {
                     Some(job) => job,
                     None => {
+                        let now = tokio::time::Instant::now();
+                        let idle_at = *idle_since.get_or_insert(now);
                         // The quiet time counts from when the worker ran out
                         // of jobs, or from the run-end event if that came later.
                         let quiet_after = if run_ended {
@@ -1504,7 +1561,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         } else {
                             QUIET_AFTER
                         };
-                        let quiet_at = tokio::time::Instant::now() + quiet_after;
+                        let quiet_at = now + quiet_after;
                         let ended = async {
                             match &run_end {
                                 Some(watch) => watch.ended().await,
@@ -1542,6 +1599,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                             saved: &saved,
                                             subagent,
                                             quiet_for: quiet_after,
+                                            idle_since: idle_at,
                                         },
                                         &mut ready,
                                     );
@@ -1555,6 +1613,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                 };
                 let mut job = job;
+                idle_since = None;
                 let taken = std::time::Instant::now();
                 jobs_run.started(job_kind(&job), taken);
                 if let Job::Tool { timing, .. } = &mut job {
@@ -2359,6 +2418,7 @@ struct Freed<'a> {
     saved: &'a Option<crate::store::Durable>,
     subagent: bool,
     quiet_for: Duration,
+    idle_since: tokio::time::Instant,
 }
 
 /// Free the session of a worker whose queue stayed empty for its quiet
@@ -2440,6 +2500,7 @@ fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
     };
     let quiet = Box::new(Quiet {
         carry: kept,
+        idle_since: freed.idle_since,
         saved: freed.saved.clone(),
         subagent: freed.subagent,
     });

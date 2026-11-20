@@ -409,6 +409,18 @@ fn memory_levels_106(tx: &Transaction) -> rusqlite::Result<()> {
 
     move_user_memories(tx)?;
 
+    // Distinct legacy tags (or placements) can give identical live memories
+    // the same new key. Preserve their ids and use the existing merge link to
+    // point each archived duplicate at the lowest live id.
+    tx.execute_batch(&format!(
+        "WITH live_rows AS MATERIALIZED (
+             SELECT id, MIN(id) OVER (PARTITION BY level, owner_id, category, normalized_hash) AS survivor
+               FROM memories_v106 WHERE {LIVE}
+         )
+         UPDATE memories_v106 SET status = 'archived', superseded_by_memory_id = live_rows.survivor
+           FROM live_rows WHERE memories_v106.id = live_rows.id AND live_rows.id <> live_rows.survivor;"
+    ))?;
+
     tx.execute_batch(&format!(
         "DROP TABLE memories;
          ALTER TABLE memories_v106 RENAME TO memories;

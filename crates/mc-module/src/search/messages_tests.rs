@@ -175,6 +175,7 @@ fn reach_follows_the_rowid_map_coverage() {
     let conn = store.read_only();
     conn.execute_batch("BEGIN").unwrap();
     let mut coverage = Coverage::default();
+    coverage.for_snapshot(0);
     let reached: Vec<Reach> = SESSIONS
         .iter()
         .map(|session| reach(&conn, &mut coverage, session, None))
@@ -482,24 +483,88 @@ fn a_session_with_nothing_indexed_reads_no_messages() {
 }
 
 #[test]
-fn a_read_only_connection_reuses_its_proof_until_the_store_changes() {
+fn an_unrelated_memory_retrieval_commit_does_not_rescan_message_coverage() {
     let store = Store::new();
-    let conn = store.read_only();
-    let mut coverage = Coverage::default();
-    let ask = |coverage: &mut Coverage, session: &str| {
-        conn.execute_batch("BEGIN").unwrap();
-        let complete = coverage.complete(&conn, session);
-        conn.execute_batch("COMMIT").unwrap();
-        complete
+    let db = &store._db;
+    db.with_connection(|conn| {
+        conn.execute("INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('project', 'p', 'swe:architecture', 'ARCHITECTURE', 'Memory', 'hash', 1, 1, 1, 1)", []).unwrap();
+    });
+    let ask = || {
+        db.with_search_reader(|conn, coverage| {
+            assert!(coverage.complete(conn, "mapped"));
+            coverage.scans()
+        })
     };
-    assert!(ask(&mut coverage, "neighbour"));
-    assert!(!ask(&mut coverage, "partly"));
-    assert_eq!(coverage.scans(), 1);
-    // Another connection adds a row the map lacks to a covered session.
-    let writer = Connection::open(&store.path).unwrap();
-    write(&writer, "neighbour", 51, "alpha beta", false);
-    assert!(!ask(&mut coverage, "neighbour"));
-    assert_eq!(coverage.scans(), 2);
+    assert_eq!(ask(), 1);
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE memories SET retrieval_count = retrieval_count + 1 WHERE owner_id = 'p'",
+            [],
+        )
+        .unwrap();
+    });
+    assert_eq!(
+        ask(),
+        1,
+        "the retrieval count did not change the message index"
+    );
+}
+
+#[test]
+fn an_index_commit_refreshes_a_read_only_coverage_proof() {
+    let store = Store::new();
+    let db = &store._db;
+    let ask = |session: &str| {
+        db.with_search_reader(|conn, coverage| (coverage.complete(conn, session), coverage.scans()))
+    };
+    assert_eq!(ask("neighbour"), (true, 1));
+    assert_eq!(ask("partly"), (false, 1));
+
+    let mut writer = Connection::open(&store.path).unwrap();
+    let entry = Entry::new(
+        51,
+        "neighbour-51",
+        cortexkit_role_compaction::read::Role::User,
+        51_000,
+        vec![cortexkit_role_compaction::part::Part::new(
+            "p",
+            cortexkit_role_compaction::part::PartBody::Text {
+                text: "alpha beta".into(),
+            },
+        )],
+    );
+    index_with_generation(
+        &mut writer,
+        &db.message_index,
+        "mock",
+        "neighbour",
+        std::slice::from_ref(&entry),
+    )
+    .unwrap();
+    assert_eq!(ask("neighbour"), (true, 2));
+    index_with_generation(
+        &mut writer,
+        &db.message_index,
+        "mock",
+        "neighbour",
+        &[entry],
+    )
+    .unwrap();
+    assert_eq!(
+        ask("neighbour"),
+        (true, 2),
+        "a watermark-only write is not an index change"
+    );
+    // A write during this read leaves its old snapshot and proof intact.
+    // The next call to with_search_reader must see the new unmapped row.
+    db.with_search_reader(|conn, coverage| {
+        let tx = writer.transaction().unwrap();
+        write(&tx, "neighbour", 52, "alpha beta", false);
+        db.message_index.commit(tx, true).unwrap();
+        assert!(coverage.complete(conn, "neighbour"));
+        assert_eq!(coverage.scans(), 2);
+    });
+    assert_eq!(ask("neighbour"), (false, 3));
     // A connection that can write proves again on every read.
     let mut own = Coverage::default();
     writer.execute_batch("BEGIN").unwrap();

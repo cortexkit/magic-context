@@ -499,6 +499,8 @@ struct Replica {
     load_failed: bool,
     store: Option<Connection>,
     context: Option<Connection>,
+    message_index: Option<Arc<crate::search::messages::IndexGeneration>>,
+    message_coverage: std::cell::RefCell<crate::search::messages::Coverage>,
     watches: watch::Hub,
     heads: HashMap<SessionRef, head::ReadState>,
     idle_heads: std::cell::RefCell<HashMap<SessionRef, idle::KeptHead>>,
@@ -507,7 +509,16 @@ struct Replica {
 }
 
 impl AppRead {
+    #[cfg(test)]
     pub(crate) fn new(store: Option<PathBuf>, context: Option<PathBuf>) -> Self {
+        Self::with_message_index(store, context, None)
+    }
+
+    pub(crate) fn with_message_index(
+        store: Option<PathBuf>,
+        context: Option<PathBuf>,
+        message_index: Option<Arc<crate::search::messages::IndexGeneration>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("mc-app-read".into())
@@ -534,6 +545,8 @@ impl AppRead {
                     load_failed: store_expected && store.is_none(),
                     store,
                     context,
+                    message_index,
+                    message_coverage: Default::default(),
                     watches: watch::Hub::new(),
                     heads: HashMap::new(),
                     idle_heads: Default::default(),
