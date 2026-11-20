@@ -1435,13 +1435,14 @@ pub fn emergency_drop(
         (prompt, fixed) = account(request);
     }
     let mut ceiling = emergency.ceiling_tokens as f64;
+    let fit_target = emergency.over_limit && fixed >= ceiling;
     if emergency.over_limit {
         if fixed >= emergency.usable_tokens.saturating_sub(EMERGENCY_MIN_TOKENS) as f64 {
             // Even dropping the whole indexed transcript would leave less
             // than the safety margin for estimation error.
             return Vec::new();
         }
-        if fixed >= ceiling {
+        if fit_target {
             ceiling = emergency.usable_tokens as f64;
         }
     }
@@ -1451,7 +1452,7 @@ pub fn emergency_drop(
     }
     let target = fixed + EMERGENCY_TARGET_FRACTION * (ceiling - fixed);
     let reclaim = (prompt - target).round();
-    if reclaim <= 0.0 || (!emergency.over_limit && reclaim <= EMERGENCY_MIN_TOKENS as f64) {
+    if reclaim <= 0.0 || (!fit_target && reclaim <= EMERGENCY_MIN_TOKENS as f64) {
         return Vec::new();
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
@@ -1514,7 +1515,7 @@ pub fn emergency_drop(
             }
         }
     }
-    if !emergency.over_limit && !emergency.priced && reclaimed < EMERGENCY_MIN_TOKENS {
+    if !fit_target && !emergency.priced && reclaimed < EMERGENCY_MIN_TOKENS {
         return Vec::new();
     }
     selected

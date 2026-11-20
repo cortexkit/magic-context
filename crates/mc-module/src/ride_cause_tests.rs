@@ -172,6 +172,29 @@ fn audit_views_fit_reclaim_above_execute_fixed_cost() {
 }
 
 #[test]
+fn review_probe_over_limit_below_execute_fixed_cost_keeps_minimum_batch() {
+    let (mut session, _, _, _, settings) = fixture();
+    session.index.extend([
+        text(1, "task"),
+        tools(2, "tools", &[("a", 2), ("b", 3), ("c", 4)]),
+        text(3, "next"),
+    ]);
+    // The indexed transcript is larger than the supplied count, so fixed
+    // cost is zero. The target is then 30% of the 64,350-token execute
+    // ceiling, only 695 tokens below the ride's estimate.
+    let ride = RideRequest::new(
+        vec![RideCause::OverLimit],
+        1_000,
+        session.conditions.clone(),
+    )
+    .with_request_tokens(20_000);
+    assert!(
+        session.ride(&settings, &ride).is_none(),
+        "the old target still requires a meaningful batch"
+    );
+}
+
+#[test]
 fn audit_views_emergency_excludes_previously_refused_tool() {
     let (mut session, settings) = head_with_unmeasured_growth();
     let ride = RideRequest::new(
