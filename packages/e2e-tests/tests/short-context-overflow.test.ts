@@ -4,9 +4,9 @@
  * Short-context emergency-drop regression test.
  *
  * Scenario: 128K context, fast main agent, slow historian (3s delay), no user
- * pauses between turns — the autonomous-loop scenario that previously caused
- * silent overflow. Each turn adds ~8KB of assistant text plus tool-like content
- * so that heuristic cleanup and compartment drops have something to reclaim.
+ * pauses between turns. Each turn reads a distinct ~20KB file, so the force-band
+ * drop has actual tool results to reclaim. Assistant prose isn't a candidate,
+ * and the mock never asks Magic Context to drop anything via ctx_reduce.
  *
  * ## What this verifies
  *
@@ -23,7 +23,7 @@
  *
  * ## Expected behavior
  *
- *   - Drops materialize promptly once pressure crosses 85%
+ *   - Automatic tool drops materialize while the historian is slow
  *   - Peak request stays under 100% of context
  *   - Session survives 20+ back-to-back turns with slow historian
  *
@@ -37,6 +37,8 @@
  */
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
     createScenarioHarness,
     forEachHost,
@@ -53,8 +55,12 @@ function isHistorian(body: Record<string, unknown>): boolean {
     return asString.includes(HISTORIAN_MARKER);
 }
 
-function bigReplyText(turn: number, targetBytes: number): string {
-    const header = `turn-${turn}-reply: `;
+function readMarker(turn: number): string {
+    return `fixture output for turn ${turn}:`;
+}
+
+function bigFileText(turn: number, targetBytes: number): string {
+    const header = `${readMarker(turn)}\n`;
     // Unique records carry real content mass without tripping OMP's repeated-cycle guard.
     const records: string[] = [];
     let length = header.length;
@@ -114,23 +120,34 @@ forEachHost(import.meta.url, "short context accumulating overflow", (host) => {
                 };
             });
 
-            let mainCalls = 0;
+            let activeTurn:
+                | { number: number; prompt: string; file: string; readIssued: boolean }
+                | undefined;
             h.mock.addMatcher((body) => {
                 if (isHistorian(body)) return null;
-                mainCalls++;
                 const approxInputTokens = Math.floor(JSON.stringify(body).length / 4);
-                // ~20KB per turn — enough growth to cross 85% within 25 turns
-                // so the emergency bypass path is actually exercised.
-                const reply = bigReplyText(mainCalls, 20_000);
-                return {
-                    text: reply,
-                    usage: {
-                        input_tokens: approxInputTokens,
-                        output_tokens: Math.floor(reply.length / 4),
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                    },
-                };
+                const usage = { input_tokens: approxInputTokens, output_tokens: 20 };
+                const tools = Array.isArray(body.tools) ? (body.tools as Array<{ name: string }>) : [];
+                const read = tools.find(({ name }) => name === "read" || name === "_read");
+                if (
+                    activeTurn && !activeTurn.readIssued && read &&
+                    JSON.stringify(body.messages)?.includes(activeTurn.prompt)
+                ) {
+                    activeTurn.readIssued = true;
+                    return {
+                        content: [{
+                            type: "tool_use",
+                            id: `toolu_overflow_read_${activeTurn.number}`,
+                            name: read.name,
+                            input: host === "opencode"
+                                ? { filePath: activeTurn.file }
+                                : { path: activeTurn.file },
+                        }],
+                        stop_reason: "tool_use",
+                        usage,
+                    };
+                }
+                return { text: "Continuing.", usage };
             });
 
             const sessionId = await h.createSession();
@@ -138,9 +155,13 @@ forEachHost(import.meta.url, "short context accumulating overflow", (host) => {
             const turnErrors: Array<{ turn: number; error: string }> = [];
             const TURNS = 30;
             for (let i = 1; i <= TURNS; i++) {
+                const prompt = `user turn ${i}: continue.`;
+                const file = join(h.workdir, `fixture-log-${i}.txt`);
+                writeFileSync(file, bigFileText(i, 20_000));
+                activeTurn = { number: i, prompt, file, readIssued: false };
                 const reqBefore = h.mock.requests().length;
                 try {
-                    await h.sendPrompt(sessionId, `user turn ${i}: continue.`, {
+                    await h.sendPrompt(sessionId, prompt, {
                         timeoutMs: 60_000,
                     });
                 } catch (err) {
@@ -154,10 +175,14 @@ forEachHost(import.meta.url, "short context accumulating overflow", (host) => {
                     });
                 }
                 const reqs = h.mock.requests().slice(reqBefore);
-                const mainReq = reqs.find((r) => !isHistorian(r.body) &&
-                    JSON.stringify(r.body.messages).includes(`user turn ${i}: continue.`));
-                if (!mainReq) turnErrors.push({ turn: i, error: "No mock provider request for submitted user turn" });
-                const observed = mainReq ? Math.floor(JSON.stringify(mainReq.body).length / 4) : 0;
+                const mainReqs = reqs.filter((r) => !isHistorian(r.body) &&
+                    JSON.stringify(r.body.messages)?.includes(prompt));
+                if (!mainReqs.some((r) => JSON.stringify(r.body.messages).includes(readMarker(i)))) {
+                    turnErrors.push({ turn: i, error: "No mock provider request carried the read result" });
+                }
+                // The request immediately after the read can be larger than the
+                // first request of the turn, so measure both steps.
+                const observed = Math.max(0, ...mainReqs.map((r) => Math.floor(JSON.stringify(r.body).length / 4)));
                 turnUsage.push(Math.round((observed / 128_000) * 1000) / 10);
             }
 
@@ -182,21 +207,21 @@ forEachHost(import.meta.url, "short context accumulating overflow", (host) => {
             expect(h.mock.requests().filter((r) => isHistorian(r.body)).length).toBeGreaterThan(0);
             h.assertHistorianRequestsUseMock();
 
-            // Verify drops actually materialized in the DB — this is the core
-            // fix: pending ops apply even when compartmentRunning at emergency.
+            // An arbitrary dropped tag could just be a stripped system reminder.
+            // Require an actual tool result from this session to have been dropped.
             const ctx = h.contextDb();
             const row = ctx
-                .prepare("SELECT COUNT(*) AS c FROM tags WHERE status='dropped'")
-                .get() as { c: number } | undefined;
+                .prepare("SELECT COUNT(*) AS c FROM tags WHERE session_id = ? AND harness = ? AND type = 'tool' AND status = 'dropped'")
+                .get(sessionId, h.harnessId) as { c: number } | undefined;
             const droppedCount = row?.c ?? 0;
-            console.log(`[OVERFLOW-GUARD] dropped tags: ${droppedCount}`);
+            console.log(`[OVERFLOW-GUARD] dropped tool tags: ${droppedCount}`);
             expect(droppedCount).toBeGreaterThan(0);
 
-            // Peak should stay under context limit with a margin.
+            // No measured request may reach the context limit.
             expect(peakObservedPct).toBeLessThan(100);
         },
         // Bumped from 240s → 600s for CI: this test does ~30 escalating-load
-        // turns to drive a 128K-context session past 95% pressure. On idle local
+        // turns to drive a 128K-context session into the force band. On idle local
         // hardware this finishes in ~30s, but on GitHub-hosted runners with CPU
         // contention it can take longer.
         600_000,
