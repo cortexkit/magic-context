@@ -6,6 +6,7 @@ import { rememberCurrentToolOutputCount } from "@magic-context/core/hooks/magic-
 import {
 	compareMeasuredTailPrefix,
 	freezeTailHygieneMeasurement,
+	reclaimableTailTokens,
 	stripChannel1ReminderSpans,
 	type TailHygieneBaseline,
 	type TailHygieneMeasurement,
@@ -803,13 +804,13 @@ function finalizeParts(
 		const queuedForDrop = draft.tag
 			? pendingDropTagNumbers.has(draft.tag.tagNumber)
 			: false;
-		const uTokens =
-			draft.tag?.status === "active" &&
-			!protectedPart &&
-			!queuedForDrop &&
-			draft.kind !== "excluded"
-				? tokens
-				: 0;
+		const uTokens = reclaimableTailTokens({
+			kind: draft.kind,
+			tokens,
+			tagStatus: draft.tag?.status,
+			protected: protectedPart,
+			queuedForDrop,
+		});
 		t += tokens;
 		u += uTokens;
 		return {

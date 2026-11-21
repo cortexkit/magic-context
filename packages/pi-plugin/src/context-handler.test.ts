@@ -2720,17 +2720,34 @@ describe("registerPiContextHandler", () => {
 				event: { messages: never[] },
 				ctx: never,
 			) => Promise<{ messages: never[] }>;
+			// Prose is not in U (#954), so the queued drop is an old tool output.
+			// Three newer, larger outputs keep it outside the protection window.
 			const runDeferPass = async () => {
 				const messages = [
 					userMessage("keep user", 1),
-					assistantMessage("queued drop stays pending", 2),
+					assistantToolCall("call-queued", "read", { path: "queued" }, 2),
+					toolResultMessage("call-queued", "queued output ".repeat(300), 3),
+					...[1, 2, 3].flatMap((index) => [
+						assistantToolCall(
+							`call-fresh-${index}`,
+							"read",
+							{ path: `fresh-${index}` },
+							2 + index * 2,
+						),
+						toolResultMessage(
+							`call-fresh-${index}`,
+							"fresh output ".repeat(8_000),
+							3 + index * 2,
+						),
+					]),
+					userMessage("next", 10),
 				] as never[];
 				return handler(
 					{ messages },
 					fakeContext(
 						sessionId,
 						process.cwd(),
-						["entry-user", "entry-assistant"],
+						messages.map((_, index) => `entry-${index}`),
 						messages as never,
 					) as never,
 				);
@@ -2741,9 +2758,9 @@ describe("registerPiContextHandler", () => {
 			const baselineBytes = JSON.stringify(baseline.messages);
 			const baselineHygiene = getPiChannel1Baseline(sessionId);
 			const pendingTag = getTagsBySession(db, sessionId).find(
-				(tag) => tag.type === "message" && tag.tagNumber === 2,
+				(tag) => tag.type === "tool" && tag.messageId === "call-queued",
 			);
-			if (!pendingTag) throw new Error("expected assistant tag to queue");
+			if (!pendingTag) throw new Error("expected tool tag to queue");
 			queuePendingOp(db, sessionId, pendingTag.tagNumber, "drop");
 			updateSessionMeta(db, sessionId, {
 				lastResponseTime: Date.now(),
