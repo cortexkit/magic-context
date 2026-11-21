@@ -237,8 +237,10 @@ fn part_measurement(
     let content_hash = crate::digest::hex(&hash.finalize());
     profile_end!(perf_hash);
     let active = tag_number.is_some() && !queued_for_drop;
-    // The ctx_reduce reminder asks the agent to clear spent tool output and files,
-    // not to drop messages from the conversation.
+    // The reminder that asks the agent to call its `ctx_reduce` tool (which
+    // queues tagged parts for removal) names spent tool output and files, and
+    // the tool's guidance tells the agent to keep conversation text, so only
+    // those kinds count as reclaimable.
     let reclaimable = matches!(
         kind,
         TailHygienePartKind::ToolInput
