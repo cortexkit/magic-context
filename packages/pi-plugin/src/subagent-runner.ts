@@ -77,7 +77,10 @@ import {
 } from "./pi-zen-free-tier";
 import { readSubagentStartupError } from "./subagent-startup";
 import { SubagentTelemetry, subagentStepCap } from "./subagent-telemetry";
-import { OMP_CHILD_TOOL_CONFIG } from "./subagent-tool-boundary";
+import {
+	OMP_CHILD_TOOL_CONFIG,
+	OMP_CHILD_TOOL_ENV,
+} from "./subagent-tool-boundary";
 
 const PI_CODING_AGENT_MODULE = "@earendil-works/pi-coding-agent";
 /**
@@ -1914,6 +1917,9 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 							// Context's full entry; it must not replace the process env.
 							env: {
 								...parentEnv,
+								...(this.invocation.targetHarness === "omp"
+									? OMP_CHILD_TOOL_ENV
+									: {}),
 								[MAGIC_CONTEXT_PI_SUBAGENT_ENV]: "1",
 								MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE: systemPromptPath,
 								[HISTORIAN_CACHE_TAIL_ENV]:
@@ -3701,6 +3707,7 @@ function terminateChild(child: ReturnType<typeof childProcess.spawn>) {
 export const __test = {
 	buildArgs,
 	OMP_CHILD_TOOL_CONFIG,
+	OMP_CHILD_TOOL_ENV,
 	extractFinalAssistant,
 	isGenericRuntimeExecutable,
 	isPiCliScript,

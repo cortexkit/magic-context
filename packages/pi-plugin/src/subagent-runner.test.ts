@@ -2314,6 +2314,38 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		}
 	});
 
+	it("forces Auto-QA off only in OMP child processes", async () => {
+		const previous = process.env.PI_AUTO_QA;
+		process.env.PI_AUTO_QA = "1";
+		try {
+			for (const targetHarness of ["omp", "pi"] as const) {
+				const child = createMockChild();
+				const { runner, spawnImpl } = runnerWith(child, {
+					invocation: { command: targetHarness, prefixArgs: [], targetHarness },
+				});
+				const resultPromise = runner.run(baseOptions);
+				await nextTick();
+				child.writeStdoutLine(
+					agentEnd([
+						{
+							role: "assistant",
+							content: [{ type: "text", text: "done" }],
+							stopReason: "stop",
+						},
+					]),
+				);
+				child.emitClose(0);
+				expect((await resultPromise).ok).toBe(true);
+				const env = spawnImpl.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
+				expect(env.PI_AUTO_QA).toBe(targetHarness === "omp" ? "0" : "1");
+				expect(process.env.PI_AUTO_QA).toBe("1");
+			}
+		} finally {
+			if (previous === undefined) delete process.env.PI_AUTO_QA;
+			else process.env.PI_AUTO_QA = previous;
+		}
+	});
+
 	it("spawns pi, parses stdout, trims assistant text, and captures stderr", async () => {
 		const child = createMockChild();
 		const { runner, spawnImpl } = runnerWith(child, { piBinary: "custom-pi" });
