@@ -5,7 +5,7 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
   {
     "collapsed": null,
     "frame": [
-      " ▼ MAGIC CONTEXT                  v0.49.52",
+      " ▼ MAGIC CONTEXT                  v<version>",
       "                                          ",
       "Context                                   ",
       "ctx ██████░░░░ 45% left          483K/872K",
@@ -92,7 +92,7 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
         {
           "attributes": 0,
           "fg": "#888888",
-          "text": "v0.49.52",
+          "text": "v<version>",
         },
       ],
       [
@@ -673,7 +673,7 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
   {
     "collapsed": null,
     "frame": [
-      " ▼ MAGIC CONTEXT                  v0.49.52",
+      " ▼ MAGIC CONTEXT                  v<version>",
       "                                          ",
       "Context                                   ",
       "ctx ██████░░░░ 45% left          483K/872K",
@@ -760,7 +760,7 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
         {
           "attributes": 0,
           "fg": "#888888",
-          "text": "v0.49.52",
+          "text": "v<version>",
         },
       ],
       [

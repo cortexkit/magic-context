@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import packageJson from "../../package.json";
 import type { SidebarSnapshot } from "../shared/rpc-types";
 import { createTestTempDir } from "../shared/test-temp-dir";
 
@@ -285,8 +286,12 @@ describe("option B sidebar", () => {
             expect(results[index]!.frame).toContain("Rebuild fixture reason");
     });
     test("preserves the expanded and incident render output", () => {
-        expect(
+        // The header shows the package version; keep it out of the snapshot so a release bump does not fail it.
+        const rendered = JSON.stringify(
             results.slice(0, 2).map((result) => ({ ...result, frame: result.frame.split("\n") })),
+        );
+        expect(
+            JSON.parse(rendered.split(`v${packageJson.version}`).join("v<version>")),
         ).toMatchSnapshot();
     });
     test("collapses an account-less panel to the Option B summary rows", () => {
