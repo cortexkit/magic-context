@@ -628,6 +628,7 @@ fn health_report(health: Arc<super::health::Health>) -> subc_client_rs::HealthRe
         session_count: Some(0),
         dreamer_enabled: false,
         bus_connected: false,
+        settings_source: crate::config::SettingsSource::Unmanaged,
         replica: Some(health),
     }
     .report()

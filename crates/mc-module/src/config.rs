@@ -76,6 +76,41 @@ pub enum Config {
     Files(Loader),
 }
 
+/// The current source of the user settings, as reported to the daemon.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum SettingsSource {
+    Unmanaged,
+    #[cfg(feature = "managed-settings")]
+    Waiting,
+    #[cfg(feature = "managed-settings")]
+    View,
+    #[cfg(feature = "managed-settings")]
+    SavedView,
+    #[cfg(feature = "managed-settings")]
+    Defaults,
+    #[cfg(feature = "managed-settings")]
+    File,
+}
+
+impl SettingsSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unmanaged => "unmanaged",
+            #[cfg(feature = "managed-settings")]
+            Self::Waiting => "waiting",
+            #[cfg(feature = "managed-settings")]
+            Self::View => "view",
+            #[cfg(feature = "managed-settings")]
+            Self::SavedView => "saved_view",
+            #[cfg(feature = "managed-settings")]
+            Self::Defaults => "defaults",
+            #[cfg(feature = "managed-settings")]
+            Self::File => "file",
+        }
+    }
+}
+
 impl From<Settings> for Config {
     fn from(settings: Settings) -> Self {
         Self::Fixed(Box::new(settings))
@@ -143,6 +178,15 @@ impl Config {
             Self::Fixed(_) => true,
             Self::Files(loader) => loader.initial_dreamer_enabled,
         }
+    }
+
+    /// Read the settings source without resolving settings or waiting for them.
+    pub(crate) fn settings_source(&self) -> SettingsSource {
+        #[cfg(feature = "managed-settings")]
+        if let Some(loader) = self.loader() {
+            return loader.settings_source();
+        }
+        SettingsSource::Unmanaged
     }
 
     /// The loader that reads the settings files, when settings come from

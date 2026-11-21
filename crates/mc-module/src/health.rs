@@ -3,12 +3,15 @@
 use serde_json::json;
 use subc_client_rs::{HealthReport, HealthStatus};
 
+use crate::config::SettingsSource;
+
 pub(crate) struct Health {
     pub(crate) context_open: bool,
     pub(crate) mode3_open: bool,
     pub(crate) session_count: Option<usize>,
     pub(crate) dreamer_enabled: bool,
     pub(crate) bus_connected: bool,
+    pub(crate) settings_source: SettingsSource,
     #[cfg(feature = "memory-replica")]
     pub(crate) replica: Option<std::sync::Arc<crate::replica::health::Health>>,
 }
@@ -25,16 +28,21 @@ impl Health {
         if self.session_count.is_none() {
             reasons.push("session count unavailable".into());
         }
+        #[cfg(feature = "managed-settings")]
+        if self.settings_source == SettingsSource::Defaults {
+            reasons.push("running default settings until they are approved".into());
+        }
 
         // Store constructors check or set the exact schema versions before
         // returning a handle. The schema cannot change while ck-mc serves it.
         let metrics = json!({
-            "headline": ["session_count", "bus_connected", "context_db_schema_version", "mode3_db_schema_version", "dreamer_enabled"],
+            "headline": ["session_count", "bus_connected", "context_db_schema_version", "mode3_db_schema_version", "dreamer_enabled", "settings_source"],
             "session_count": self.session_count,
             "bus_connected": self.bus_connected,
             "context_db_schema_version": self.context_open.then_some(crate::context_db::SCHEMA_VERSION),
             "mode3_db_schema_version": self.mode3_open.then_some(crate::store::SCHEMA_VERSION),
             "dreamer_enabled": self.dreamer_enabled,
+            "settings_source": self.settings_source.as_str(),
             "store": {
                 "opened": self.context_open && self.mode3_open,
                 "context_db_schema_version": self.context_open.then_some(crate::context_db::SCHEMA_VERSION),

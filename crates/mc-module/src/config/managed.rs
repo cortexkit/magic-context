@@ -28,7 +28,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,7 @@ use subc_client_rs::config::{
     ConfigView, Layer,
 };
 
-use super::{Loader, UserTier};
+use super::{Loader, SettingsSource, UserTier};
 
 /// How long the first run's settings resolution waits for the daemon's
 /// first answer before it serves the defaults.
@@ -69,9 +69,27 @@ enum State {
     Files,
 }
 
+impl State {
+    fn source(&self) -> SettingsSource {
+        match self {
+            Self::Waiting { .. } => SettingsSource::Waiting,
+            Self::View {
+                delivered: true, ..
+            } => SettingsSource::View,
+            Self::View {
+                delivered: false, ..
+            } => SettingsSource::SavedView,
+            Self::Defaults { .. } => SettingsSource::Defaults,
+            Self::Files => SettingsSource::File,
+        }
+    }
+}
+
 /// The user tier's source under managed settings.
 pub struct Managed {
     state: Mutex<State>,
+    // Health probes cannot wait for settings resolution or view delivery.
+    source: AtomicU8,
     changed: Condvar,
     /// Where an applied view is saved.
     view_path: PathBuf,
@@ -99,6 +117,7 @@ impl Managed {
             }
         };
         Self {
+            source: AtomicU8::new(state.source() as u8),
             state: Mutex::new(state),
             changed: Condvar::new(),
             view_path,
@@ -109,6 +128,23 @@ impl Managed {
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set_state(&self, current: &mut State, next: State) {
+        *current = next;
+        self.source.store(current.source() as u8, Ordering::Relaxed);
+        self.changed.notify_all();
+    }
+
+    fn source(&self) -> SettingsSource {
+        match self.source.load(Ordering::Relaxed) {
+            value if value == SettingsSource::Waiting as u8 => SettingsSource::Waiting,
+            value if value == SettingsSource::View as u8 => SettingsSource::View,
+            value if value == SettingsSource::SavedView as u8 => SettingsSource::SavedView,
+            value if value == SettingsSource::Defaults as u8 => SettingsSource::Defaults,
+            value if value == SettingsSource::File as u8 => SettingsSource::File,
+            _ => unreachable!("only a managed settings state can publish its source"),
+        }
     }
 
     /// The user tier for a resolution, waiting first if this is the first
@@ -128,9 +164,12 @@ impl Managed {
             };
             let now = Instant::now();
             if now >= deadline {
-                *state = State::Defaults {
-                    why: "the daemon gave no answer within 5 s",
-                };
+                self.set_state(
+                    &mut state,
+                    State::Defaults {
+                        why: "the daemon gave no answer within 5 s",
+                    },
+                );
                 break;
             }
             state = blocking(|| {
@@ -212,19 +251,20 @@ impl Managed {
                 self.view_path.display()
             )]
         })?;
-        *self.lock() = State::View {
-            tier: tier.clone(),
-            generation: view.generation,
-            delivered: true,
-        };
-        self.changed.notify_all();
+        self.set_state(
+            &mut self.lock(),
+            State::View {
+                tier: tier.clone(),
+                generation: view.generation,
+                delivered: true,
+            },
+        );
         Ok(tier)
     }
 
     /// The daemon has no config gate: read the user file.
     fn use_files(&self) {
-        *self.lock() = State::Files;
-        self.changed.notify_all();
+        self.set_state(&mut self.lock(), State::Files);
     }
 
     /// A refusal that leaves no approved view ends the first run's wait with
@@ -248,10 +288,12 @@ impl Managed {
         );
         let mut current = self.lock();
         if refused && matches!(*current, State::Waiting { .. }) {
-            *current = State::Defaults {
-                why: "the daemon refused the settings and none were approved",
-            };
-            self.changed.notify_all();
+            self.set_state(
+                &mut current,
+                State::Defaults {
+                    why: "the daemon refused the settings and none were approved",
+                },
+            );
         }
     }
 }
@@ -408,6 +450,12 @@ fn rewrite_file(user_path: &Path, data_dir: &Path) -> Rewrite {
 }
 
 impl Loader {
+    pub(super) fn settings_source(&self) -> SettingsSource {
+        self.managed
+            .as_ref()
+            .map_or(SettingsSource::File, |managed| managed.source())
+    }
+
     /// Take the user tier from the daemon's managed settings, saving each
     /// applied view in `data_dir`.
     pub fn managed(mut self, data_dir: &Path) -> Self {
