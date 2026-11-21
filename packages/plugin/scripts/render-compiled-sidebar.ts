@@ -13,6 +13,8 @@ type RenderCase = {
     preferences?: Record<string, unknown>;
     toggleHeader?: boolean;
     now?: number;
+    // Move the clock forward by this many ms after the first frame and fire the one-minute timers.
+    advanceMs?: number;
     matchingBadgeColors?: boolean;
 };
 
@@ -77,6 +79,12 @@ const inputs = JSON.parse(await Bun.stdin.text()) as RenderCase[];
 const results = [];
 for (const entry of inputs) {
     const realNow = Date.now;
+    const realSetInterval = globalThis.setInterval;
+    const minuteTimers: Array<() => void> = [];
+    globalThis.setInterval = ((callback: () => void, delay?: number, ...rest: unknown[]) => {
+        if (delay === 60_000) minuteTimers.push(callback);
+        return realSetInterval(callback, delay, ...rest);
+    }) as typeof setInterval;
     const fixtureNow = entry.now;
     if (fixtureNow !== undefined) Date.now = () => fixtureNow;
     snapshot = entry.snapshot;
@@ -120,6 +128,12 @@ for (const entry of inputs) {
             ),
         ]);
         for (let pass = 0; pass < 4; pass++) await setup.renderOnce();
+        if (entry.advanceMs !== undefined) {
+            const later = (fixtureNow ?? realNow()) + entry.advanceMs;
+            Date.now = () => later;
+            for (const tick of minuteTimers) tick();
+            for (let pass = 0; pass < 3; pass++) await setup.renderOnce();
+        }
         if (entry.toggleHeader) {
             await setup.mockMouse.click(2, 0);
             for (let pass = 0; pass < 3; pass++) await setup.renderOnce();
@@ -141,6 +155,7 @@ for (const entry of inputs) {
         results.push({ error: error instanceof Error ? error.stack : String(error) });
     } finally {
         Date.now = realNow;
+        globalThis.setInterval = realSetInterval;
         slot.dispose();
     }
 }

@@ -74,6 +74,10 @@ const off = {
     compaction_enabled: false,
     archivedCompartmentCount: 491,
 };
+const recent: SidebarSnapshot = {
+    ...healthy,
+    historianRun: { ...healthy.historianRun!, finishedAt: now - 30_000 },
+};
 const hidden = {
     "magic-context": {
         header: { label: "CUSTOM" },
@@ -171,8 +175,16 @@ const cases = [
         toggleHeader: true,
         preferences: { "magic-context": { rememberCollapsed: true } },
     },
+    { snapshot: recent, advanceMs: 120_000 },
+    {
+        snapshot: recent,
+        advanceMs: 120_000,
+        preferences: { "magic-context": { startCollapsed: true } },
+    },
     { snapshot: { ...healthy, queuedDropCount: 2, queuedDropTokens: undefined } },
 ];
+const AGED = cases.length - 3;
+const AGED_COLLAPSED = cases.length - 2;
 type Result = {
     frame: string;
     error?: string;
@@ -256,6 +268,13 @@ describe("option B sidebar", () => {
     test("shows the queued-drop count without a token estimate when none is reported", () => {
         row(cases.length - 1, "Queued drops", "2 · no reading");
     });
+    test("ages relative times on an idle session without a new snapshot", () => {
+        row(AGED, "Last run", "2m ago · ok");
+        row(AGED_COLLAPSED, "Historian", "idle · 2m ●");
+    });
+    test("labels post-cache memories by their scope, not as new project memories", () => {
+        row(0, "Memories", "225 · 7 since cache");
+    });
     test("does not credit a later primary model for cumulative fallback runs", () => {
         row(23, "Fallback", "finished 2 runs");
     });
@@ -307,7 +326,6 @@ describe("option B sidebar", () => {
         row(0, "Cache built", "29h ago");
         row(0, "Since then", "6 summaries · 7 memories");
         row(0, "Queued drops", "151 · ≈49K at rebuild");
-        row(0, "Memories", "225 · 7 new");
         row(0, "Notes", "4 · 1 smart waiting");
         row(0, "Last run", "2h30m ago · ok");
         expect(results[0]!.frame).toContain("ctx ██████░░░░ 45% left");

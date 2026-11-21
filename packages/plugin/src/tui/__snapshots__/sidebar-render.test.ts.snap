@@ -23,7 +23,7 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
       "Queued drops         151 · ≈49K at rebuild",
       "                                          ",
       "Knowledge                                 ",
-      "Memories                       225 · 7 new",
+      "Memories               225 · 7 since cache",
       "Notes                  4 · 1 smart waiting",
       "                                          ",
       "Dreamer                                   ",
@@ -348,12 +348,12 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
         {
           "attributes": 0,
           "fg": "#ffffff",
-          "text": "                       ",
+          "text": "               ",
         },
         {
           "attributes": 1,
           "fg": "#ffffff",
-          "text": "225 · 7 new",
+          "text": "225 · 7 since cache",
         },
       ],
       [
@@ -691,7 +691,7 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
       "Queued drops         151 · ≈49K at rebuild",
       "                                          ",
       "Knowledge                                 ",
-      "Memories                       225 · 7 new",
+      "Memories               225 · 7 since cache",
       "Notes                  4 · 1 smart waiting",
       "                                          ",
       "Dreamer                                   ",
@@ -1016,12 +1016,12 @@ exports[`option B sidebar preserves the expanded and incident render output 1`] 
         {
           "attributes": 0,
           "fg": "#ffffff",
-          "text": "                       ",
+          "text": "               ",
         },
         {
           "attributes": 1,
           "fg": "#ffffff",
-          "text": "225 · 7 new",
+          "text": "225 · 7 since cache",
         },
       ],
       [

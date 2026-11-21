@@ -169,6 +169,11 @@ const SidebarContent = (props: {
                     data?.recompProgress?.phase === "migration",
             ),
     });
+    // The scheduler reads nothing while the session is idle, so the relative times need their own
+    // clock. The tick is local and does not cause an RPC read.
+    const [minute, setMinute] = createSignal(0);
+    const minuteTimer = setInterval(() => setMinute((value) => value + 1), 60_000);
+    onCleanup(() => clearInterval(minuteTimer));
     const refresh = () => scheduler.refresh();
     const scheduleRefresh = () => scheduler.event();
     activeRecompPollKick = refresh;
@@ -246,6 +251,7 @@ const SidebarContent = (props: {
         return `at ${formatThresholdPercent(data.proactiveFloor)}% · +${compactTokens(remaining)}`;
     };
     const values = createMemo(() => {
+        minute();
         const data = s();
         const run = data?.historianRun;
         const cacheAt = data?.cachedM0MaterializedAt;
@@ -268,7 +274,7 @@ const SidebarContent = (props: {
                     : `${data?.queuedDropCount} · no reading`
                 : "—",
             memories: present(data?.memoryCount)
-                ? `${data?.memoryCount} · ${present(data?.memoriesSinceCache) ? data?.memoriesSinceCache : "—"} new`
+                ? `${data?.memoryCount} · ${present(data?.memoriesSinceCache) ? data?.memoriesSinceCache : "—"} since cache`
                 : "—",
             notes:
                 present(data?.sessionNoteCount) && present(data?.readySmartNoteCount)
@@ -368,6 +374,7 @@ const SidebarContent = (props: {
             : "no reading ●";
     };
     const collapsedHistorian = () => {
+        minute();
         const data = s();
         if (!data) return "no reading ●";
         const run = data.historianRun;

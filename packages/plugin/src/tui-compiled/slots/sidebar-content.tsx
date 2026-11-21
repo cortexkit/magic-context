@@ -118,6 +118,11 @@ const SidebarContent = props => {
     },
     isRunning: data => Boolean(data?.historianRunning || data?.dreamerProgress || data?.recompProgress?.phase === "recomp" || data?.recompProgress?.phase === "migration")
   });
+  // The scheduler reads nothing while the session is idle, so the relative times need their own
+  // clock. The tick is local and does not cause an RPC read.
+  const [minute, setMinute] = createSignal(0);
+  const minuteTimer = setInterval(() => setMinute(value => value + 1), 60_000);
+  onCleanup(() => clearInterval(minuteTimer));
   const refresh = () => scheduler.refresh();
   const scheduleRefresh = () => scheduler.event();
   activeRecompPollKick = refresh;
@@ -165,6 +170,7 @@ const SidebarContent = props => {
     return `at ${formatThresholdPercent(data.proactiveFloor)}% · +${compactTokens(remaining)}`;
   };
   const values = createMemo(() => {
+    minute();
     const data = s();
     const run = data?.historianRun;
     const cacheAt = data?.cachedM0MaterializedAt;
@@ -177,7 +183,7 @@ const SidebarContent = props => {
       cacheBuilt: present(cacheAt) ? relativeTime(cacheAt) : "—",
       sinceThen: present(data?.summariesSinceCache) && present(data?.memoriesSinceCache) ? `${data?.summariesSinceCache} summaries · ${data?.memoriesSinceCache} memories` : "—",
       drops: present(data?.queuedDropCount) ? present(drops) ? `${data?.queuedDropCount} · ≈${compactTokens(drops)} at rebuild` : `${data?.queuedDropCount} · no reading` : "—",
-      memories: present(data?.memoryCount) ? `${data?.memoryCount} · ${present(data?.memoriesSinceCache) ? data?.memoriesSinceCache : "—"} new` : "—",
+      memories: present(data?.memoryCount) ? `${data?.memoryCount} · ${present(data?.memoriesSinceCache) ? data?.memoriesSinceCache : "—"} since cache` : "—",
       notes: present(data?.sessionNoteCount) && present(data?.readySmartNoteCount) ? `${data?.sessionNoteCount} · ${data?.readySmartNoteCount} smart waiting` : "—",
       dreamerLastRun: present(lastDream) ? `${relativeTime(lastDream)} · ${data?.dreamerFailures?.length ? "failed" : "ok"}` : "—",
       nativeRows: data ? compactionOffSidebarRows(data).filter(row => row.label === "Memories" ? sections().memory : sections().status) : []
@@ -261,6 +267,7 @@ const SidebarContent = props => {
     return present(used) ? `${Math.round(100 - Math.max(0, Math.min(100, used)))}% left ●` : "no reading ●";
   };
   const collapsedHistorian = () => {
+    minute();
     const data = s();
     if (!data) return "no reading ●";
     const run = data.historianRun;
