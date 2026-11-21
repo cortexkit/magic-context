@@ -9,6 +9,7 @@ const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceRoot = join(pluginRoot, "src/tui");
 const outputRoot = join(pluginRoot, "src/tui-compiled");
 const runtimeSpecifiers: Set<string> = new Set(TUI_RUNTIME_SPECIFIERS);
+const sidebarBundleName = "quota-sidebar.js";
 
 type TransformSolidSource = (
     code: string,
@@ -22,7 +23,6 @@ type TransformSolidSource = (
 type SolidTransformModule = {
     transformSolidSource?: TransformSolidSource;
 };
-
 
 /**
  * The Solid transform emits every runtime helper AND every control-flow builtin
@@ -103,7 +103,9 @@ function redirectBuiltinImports(
 
 function asTransformSolidSource(mod: SolidTransformModule, from: string): TransformSolidSource {
     if (typeof mod.transformSolidSource !== "function") {
-        throw new Error(`@opentui/solid transform loaded from ${from} without transformSolidSource`);
+        throw new Error(
+            `@opentui/solid transform loaded from ${from} without transformSolidSource`,
+        );
     }
     return mod.transformSolidSource;
 }
@@ -120,7 +122,9 @@ async function resolveSolidTransformPath(): Promise<string> {
         const packageJsonUrl = import.meta.resolve(packageJsonSpecifier);
         return join(dirname(fileURLToPath(packageJsonUrl)), "scripts/solid-transform.js");
     } catch (error) {
-        errors.push(`import.meta.resolve: ${error instanceof Error ? error.message : String(error)}`);
+        errors.push(
+            `import.meta.resolve: ${error instanceof Error ? error.message : String(error)}`,
+        );
     }
 
     try {
@@ -155,7 +159,7 @@ function isShippedSourceFile(filePath: string): boolean {
     return filePath.endsWith(".tsx") || filePath.endsWith(".ts");
 }
 
-async function listSourceFiles(dir: string): Promise<string[]> {
+async function listSourceFiles(dir: string, includeJavaScript = false): Promise<string[]> {
     const entries = await readdir(dir, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -163,8 +167,11 @@ async function listSourceFiles(dir: string): Promise<string[]> {
     for (const entry of entries) {
         const entryPath = join(dir, entry.name);
         if (entry.isDirectory()) {
-            files.push(...(await listSourceFiles(entryPath)));
-        } else if (entry.isFile() && isShippedSourceFile(entryPath)) {
+            files.push(...(await listSourceFiles(entryPath, includeJavaScript)));
+        } else if (
+            entry.isFile() &&
+            (isShippedSourceFile(entryPath) || (includeJavaScript && entryPath.endsWith(".js")))
+        ) {
             files.push(entryPath);
         }
     }
@@ -196,6 +203,61 @@ const transformSolidSource = await loadTransformSolidSource();
 const runtimeExportSets = await loadRuntimeExportSets();
 const files = await listSourceFiles(sourceRoot);
 
+// OpenTUI does not transform dependency TSX. The two entry paths must ship the
+// frame without a second copy of the host's Solid or OpenTUI runtime.
+async function bundleSidebar(hostRuntime: boolean): Promise<boolean> {
+    const outputFile = join(hostRuntime ? outputRoot : sourceRoot, sidebarBundleName);
+    const result = await Bun.build({
+        entrypoints: [fileURLToPath(import.meta.resolve("@cortexkit/opencode-sidebar"))],
+        target: "bun",
+        format: "esm",
+        external: [...runtimeSpecifiers],
+        plugins: [
+            {
+                name: "quota-sidebar-solid",
+                setup(build) {
+                    build.onResolve({ filter: /^opentui:runtime-module:/ }, (args) => ({
+                        path: args.path,
+                        external: true,
+                    }));
+                    build.onLoad({ filter: /\.tsx$/ }, async (args) => {
+                        const compiled = await transformSolidSource(
+                            await readFile(args.path, "utf8"),
+                            {
+                                filename: args.path,
+                                moduleName: runtimeModuleId("@opentui/solid"),
+                                resolvePath: (specifier) =>
+                                    runtimeSpecifiers.has(specifier)
+                                        ? runtimeModuleId(specifier)
+                                        : null,
+                            },
+                        );
+                        const redirected = redirectBuiltinImports(
+                            compiled,
+                            runtimeExportSets,
+                            args.path,
+                        );
+                        return {
+                            contents: hostRuntime
+                                ? redirected
+                                : redirected.replace(
+                                      /opentui:runtime-module:([^"']+)/g,
+                                      (_, id: string) => decodeURIComponent(id),
+                                  ),
+                            loader: "ts",
+                        };
+                    });
+                },
+            },
+        ],
+    });
+    if (!result.success) throw new AggregateError(result.logs, "Shared sidebar build failed");
+    const output = result.outputs[0];
+    if (result.outputs.length !== 1 || !output)
+        throw new Error("Expected one shared sidebar bundle");
+    return writeIfChanged(outputFile, await output.text());
+}
+
 // Regenerate in place rather than removing the output tree first. Consumers
 // read this directory live: a Parallels VM sharing the checkout caches
 // directory lookups, and an rm-then-recreate left it holding a stale negative
@@ -204,6 +266,10 @@ const files = await listSourceFiles(sourceRoot);
 // inode; only outputs whose source is gone are removed.
 const expectedOutputs = new Set<string>();
 let written = 0;
+const sidebarOutput = join(outputRoot, sidebarBundleName);
+expectedOutputs.add(sidebarOutput);
+if (await bundleSidebar(true)) written++;
+const rawSidebarWritten = await bundleSidebar(false);
 
 for (const sourceFile of files) {
     const relativePath = relative(sourceRoot, sourceFile);
@@ -217,19 +283,20 @@ for (const sourceFile of files) {
         // the sidebar freezes on its first paint. The virtual ids are required so
         // the compiled package binds the host process's single OpenTUI/Solid
         // runtime instead of loading a second copy from the plugin package.
-        if (await compileTsx(transformSolidSource, sourceFile, outputFile, runtimeExportSets)) written++;
+        if (await compileTsx(transformSolidSource, sourceFile, outputFile, runtimeExportSets))
+            written++;
     } else {
         if (await copyPlainTypeScript(sourceFile, outputFile)) written++;
     }
 }
 
 let stale = 0;
-for (const existing of await listSourceFiles(outputRoot)) {
+for (const existing of await listSourceFiles(outputRoot, true)) {
     if (expectedOutputs.has(existing)) continue;
     await rm(existing, { force: true });
     stale += 1;
 }
 
 console.log(
-    `build-tui: checked ${files.length} file(s), wrote ${written}, unchanged ${files.length - written} in ${relative(pluginRoot, outputRoot)}${stale ? ` (removed ${stale} stale)` : ""}`,
+    `build-tui: checked ${files.length + 1} file(s), wrote ${written}, unchanged ${files.length + 1 - written} in ${relative(pluginRoot, outputRoot)}; raw sidebar wrote ${Number(rawSidebarWritten)}${stale ? ` (removed ${stale} stale)` : ""}`,
 );

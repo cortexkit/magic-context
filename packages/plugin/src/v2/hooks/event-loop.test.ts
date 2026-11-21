@@ -22,6 +22,10 @@ import {
 import { autoSearchTestSnapshot } from "../../hooks/magic-context/auto-search-snapshot.fixture";
 import { queueAutoSearchBackfill } from "../../hooks/magic-context/auto-search-worker-client";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
+import {
+    rememberWaitingMessages,
+    sidebarObservations,
+} from "../../hooks/magic-context/sidebar-observations";
 import * as transformModule from "../../hooks/magic-context/transform";
 import { _resetDreamTimerForTests } from "../../plugin/dream-timer";
 import * as logger from "../../shared/logger";
@@ -271,6 +275,7 @@ test("v2 session.deleted removes summaries, raw history, tag revisions and every
         consumed = true;
     });
     const id = deleted.data.sessionID;
+    rememberWaitingMessages(id, 12);
     const epochs = () =>
         f.db
             .prepare(
@@ -285,6 +290,7 @@ test("v2 session.deleted removes summaries, raw history, tag revisions and every
         ready.resolve();
         await until(() => consumed);
         expect(epochs()).toEqual([]);
+        expect(sidebarObservations(id).waitingMessages).toBeUndefined();
         for (const [table, rows] of Object.entries(snapshotSessionRows(f.db, id))) {
             expect(rows, `${table} retained deleted session data`).toEqual([]);
         }

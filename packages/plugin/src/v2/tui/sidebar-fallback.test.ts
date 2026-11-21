@@ -10,7 +10,10 @@
  * `opentui:runtime-module:*` virtual modules, so the compiled component's
  * imports do not resolve here.
  */
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import type { SidebarSnapshot } from "../../shared/rpc-types";
+import * as contextDb from "../../tui/data/context-db";
+import type { RefreshClock } from "../../tui/data/refresh-scheduler";
 import { setupWithJsx, sidebarText } from "./index";
 import { loadCompiledSidebar } from "./load-compiled-sidebar.mjs";
 import { isMissingOpenTuiRuntime, mountV1Sidebar } from "./sidebar-mount";
@@ -96,5 +99,96 @@ test("the sidebar.content claim renders the text projection when the component c
         expect(sidebarText(undefined)).toBe("Magic Context · loading…");
     } finally {
         cleanup();
+    }
+});
+
+test("v2 fallback render does no reads; scheduled reads do not overlap and back off after failure", async () => {
+    const { context, claims } = fixture();
+    let now = 0;
+    let nextId = 0;
+    const timers = new Map<number, { at: number; run: () => void }>();
+    const clock: RefreshClock = {
+        now: () => now,
+        setTimeout: (run, delay) => {
+            const id = ++nextId;
+            timers.set(id, { at: now + delay, run });
+            return id;
+        },
+        clearTimeout: (id) => {
+            timers.delete(id as number);
+        },
+    };
+    const advance = async (ms: number) => {
+        const end = now + ms;
+        for (;;) {
+            await Promise.resolve();
+            await Promise.resolve();
+            const due = [...timers.entries()]
+                .filter(([, t]) => t.at <= end)
+                .sort((a, b) => a[1].at - b[1].at)[0];
+            if (!due) break;
+            now = due[1].at;
+            timers.delete(due[0]);
+            due[1].run();
+        }
+        now = end;
+        await Promise.resolve();
+        await Promise.resolve();
+    };
+    const releases: {
+        resolve: (snapshot: SidebarSnapshot) => void;
+        reject: (error: Error) => void;
+    }[] = [];
+    const read = spyOn(contextDb, "loadSidebarSnapshot").mockImplementation(
+        () => new Promise((resolve, reject) => releases.push({ resolve, reject })),
+    );
+    let listener: ((event: { details: unknown }) => void) | undefined;
+    const testContext: V2TuiContext = {
+        ...context,
+        data: {
+            ...context.data,
+            listen: (callback) => {
+                listener = callback;
+                return () => {};
+            },
+        },
+    };
+    const cleanup = await setupWithJsx(testContext, (type, props) => ({ type, props }), clock);
+    try {
+        const claim = claims.find((entry) => entry.append === "sidebar.content");
+        if (claim?.append !== "sidebar.content") throw new Error("expected sidebar claim");
+        const before = read.mock.calls.length;
+        claim.render({ sessionID: "ses-fallback" });
+        claim.render({ sessionID: "ses-fallback" });
+        expect(read.mock.calls.length).toBe(before);
+        await advance(0);
+        expect(read).toHaveBeenCalledTimes(1);
+        listener?.({ details: { type: "message.updated", data: { sessionID: "ses-fallback" } } });
+        await advance(5000);
+        expect(read).toHaveBeenCalledTimes(1);
+        releases[0].resolve({
+            sessionId: "ses-fallback",
+            historianRunning: false,
+            inputTokens: 7,
+            usagePercentage: 1,
+        } as SidebarSnapshot);
+        await advance(1000);
+        expect(read).toHaveBeenCalledTimes(2);
+        const good = claim.render({ sessionID: "ses-fallback" });
+        releases[1].reject(new Error("offline"));
+        await advance(0);
+        listener?.({ details: { type: "message.updated", data: { sessionID: "ses-fallback" } } });
+        await advance(29999);
+        expect(read).toHaveBeenCalledTimes(2);
+        expect(claim.render({ sessionID: "ses-fallback" })).toEqual(good);
+        await advance(1);
+        expect(read).toHaveBeenCalledTimes(3);
+        releases[2].resolve({
+            sessionId: "ses-fallback",
+            historianRunning: false,
+        } as SidebarSnapshot);
+    } finally {
+        cleanup();
+        read.mockRestore();
     }
 });
