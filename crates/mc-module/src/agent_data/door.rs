@@ -13,10 +13,9 @@
 //! Replies are read tolerantly: a member this build does not know is
 //! ignored, so a newer door never fails a move by saying more.
 //!
-//! Every refusal is answered by [`answer`], one table keyed by op and door
-//! code, which follows Engram's contract: a refusal it says to retry is
-//! answered `unavailable`, so the driver sends the same request again; one
-//! it says to stop on is answered with a code the driver aborts on.
+//! The refusal tables follow Engram's contract: the source uses [`answer`]
+//! and cut-bound reads use [`cut_answer`]. The driver retries temporary
+//! failures and aborts the move when `import` reports a final read refusal.
 
 use std::time::Duration;
 
@@ -101,9 +100,8 @@ use Answer::{Fault, Handoff, Unavailable, UnknownRef};
 /// refusal table for `session.read` with a `cutId`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CutAnswer {
-    /// `cut_not_ready`: the door cannot serve the cut yet, because its
-    /// manifest is not published or not in the cloud yet. The driver
-    /// retries within the step.
+    /// `cut_not_ready`: the receiving door has not imported the stream yet.
+    /// The driver retries within the step while takeover progresses.
     NotReady,
     /// `unavailable`: the same request may succeed later.
     Unavailable,
@@ -112,19 +110,45 @@ pub enum CutAnswer {
     Mismatch,
     /// A fault on this machine that retrying cannot clear.
     Fault(&'static str),
+    /// The move cannot use this cut here. `import` stops the move with
+    /// `participant_failed`; `diverged` can only report `unavailable`.
+    Rejected(&'static str),
 }
 
-/// Per door code, what the receiver answers for a cut-bound read. A code
-/// the table does not name is answered `unavailable`, as on the source.
+/// A cloud move reaches the receiver only after the cut is published. A
+/// missing manifest is not a propagation delay: cloud manifest reads are
+/// strongly consistent, and a verified manifest cannot gain a missing
+/// stream. Unlisted codes are answered `unavailable`, as on the source.
 const CUT_ANSWERS: &[(&str, CutAnswer)] = &[
-    ("not_found", CutAnswer::NotReady),
-    ("cut_not_published", CutAnswer::NotReady),
+    // Older doors used `not_found` for the same missing cut.
+    (
+        "not_found",
+        CutAnswer::Rejected("The cut is not published or its ID is wrong; start the move again"),
+    ),
+    (
+        "cut_not_published",
+        CutAnswer::Rejected("The cut is not published or its ID is wrong; start the move again"),
+    ),
+    ("cut_import_pending", CutAnswer::NotReady),
+    (
+        "cut_takeover_closed",
+        CutAnswer::Rejected(
+            "The receiving computer's takeover failed before importing the stream; start a new move instead of retrying this cut",
+        ),
+    ),
+    (
+        "cut_range_not_local",
+        CutAnswer::Rejected(
+            "This computer no longer holds the cut's full stream range; read it on the receiving computer once it has imported the cut",
+        ),
+    ),
+    (
+        "cut_item_missing",
+        CutAnswer::Rejected("The cut does not include this session's stream; use a cut that includes it"),
+    ),
     ("unavailable", CutAnswer::Unavailable),
     ("lease_unavailable", CutAnswer::Unavailable),
     ("lease_acquiring", CutAnswer::Unavailable),
-    // The source's prepare named this session's stream in the cut, so a
-    // manifest without it is one the door may still be catching up on.
-    ("cut_item_missing", CutAnswer::Unavailable),
     ("verify_failed", CutAnswer::Mismatch),
     ("stream_digest_mismatch", CutAnswer::Mismatch),
     (

@@ -597,7 +597,13 @@ fn cut_refusal(op: Op, error: &DoorError) -> ErrorBody {
             ParticipantFailedDetail::new(format!("session_door:{} at none", error.code)),
             format!("{said}. Fix this on this machine before the session can move here: {fix}."),
         ),
-        CutAnswer::Fault(fix) => unavailable(format!("{said}. {fix}.")),
+        CutAnswer::Rejected(reason) if op == Op::Import => ErrorBody::with_participant_failed_detail(
+            ParticipantFailedDetail::new(format!("session_door:{} at none", error.code)),
+            format!("{said}. {reason}."),
+        ),
+        CutAnswer::Fault(reason) | CutAnswer::Rejected(reason) => {
+            unavailable(format!("{said}. {reason}."))
+        }
         CutAnswer::Mismatch | CutAnswer::Unavailable => unavailable(error.message.clone()),
     }
 }

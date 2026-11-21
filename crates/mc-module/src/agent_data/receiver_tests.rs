@@ -43,6 +43,7 @@ mod samples;
 struct Door {
     streams: HashMap<String, Vec<u8>>,
     sealed: HashMap<(String, String), (usize, String)>,
+    cut_read_refusal: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -149,9 +150,12 @@ impl RunnerClient for Mover {
                         "streamEnd": stream.len(),
                     }));
                 };
+                if let Some(code) = door.cut_read_refusal {
+                    return Err(refusal(code));
+                }
                 let Some((end, digest)) = door.sealed.get(&(cut.to_owned(), session)).cloned()
                 else {
-                    return Err(refusal("not_found"));
+                    return Err(refusal("cut_import_pending"));
                 };
                 let bytes = &stream[from..end.min(from + limit)];
                 Ok(json!({
@@ -762,6 +766,48 @@ async fn diverged_answers_each_state_from_this_machines_rows() {
         )
         .unwrap();
     assert_eq!(f.diverged(CUT, &["s1"]).await.unwrap(), ["advanced"]);
+}
+
+async fn final_cut_refusal(door_code: &'static str) {
+    let (_, b) = machines(&["s1"]);
+    b.shared.door.lock().unwrap().cut_read_refusal = Some(door_code);
+
+    let import = b.op("import", CUT, &["s1"]).await.unwrap_err();
+    assert_eq!(code(&import), "participant_failed");
+    assert_eq!(
+        import.participant_failed_detail().unwrap().unwrap().reason,
+        Some(format!("session_door:{door_code} at none"))
+    );
+    assert!(!import.message.contains("Fix this on this machine"));
+
+    let diverged = b.diverged(CUT, &["s1"]).await.unwrap_err();
+    assert_eq!(code(&diverged), "unavailable");
+    assert!(diverged.message.contains(door_code));
+}
+
+#[tokio::test]
+async fn final_cut_refusal_legacy_not_found() {
+    final_cut_refusal("not_found").await;
+}
+
+#[tokio::test]
+async fn final_cut_refusal_not_published() {
+    final_cut_refusal("cut_not_published").await;
+}
+
+#[tokio::test]
+async fn final_cut_refusal_item_missing() {
+    final_cut_refusal("cut_item_missing").await;
+}
+
+#[tokio::test]
+async fn final_cut_refusal_takeover_closed() {
+    final_cut_refusal("cut_takeover_closed").await;
+}
+
+#[tokio::test]
+async fn final_cut_refusal_range_not_local() {
+    final_cut_refusal("cut_range_not_local").await;
 }
 
 /// `import` is `busy` while the session runs here, and is not for a
