@@ -39768,7 +39768,7 @@ pub(crate) mod tests {
                 // This cache-delivery control seeds legacy arithmetic directly; calibrated
                 // floor behavior is covered by the dedicated Fable hygiene test.
                 baseline.hygiene_units_version = 1;
-                baseline.baseline_u = CHANNEL1_FLOOR_TOKENS - 1;
+                baseline.baseline_u = CHANNEL1_FLOOR_TOKENS + 100;
                 baseline.baseline_t = 100_000;
                 baseline.turn_delta_u = 0;
                 baseline.turn_delta_t = 0;
@@ -39815,9 +39815,10 @@ pub(crate) mod tests {
                 bare_result,
                 "a band crossing on defer cannot rewrite an already-served result"
             );
-            assert!(!s
-                .load("channel1-defer-hold")
-                .unwrap()
+            let held = s.load("channel1-defer-hold").unwrap();
+            let (u, t) = effective_tail_hygiene(held.meta.tail_hygiene_baseline.as_ref().unwrap());
+            assert_eq!(crate::tail_hygiene::hygiene_band(u, t), HygieneBand::Gentle);
+            assert!(!held
                 .core
                 .frozen_units
                 .iter()
@@ -39867,20 +39868,54 @@ pub(crate) mod tests {
             let priced_first_serve = run(&s, &priced_request, &spine());
             assert!(!tail_bytes(&priced_first_serve, "priced-result").contains("<system-reminder>"));
             let mut priced_bust_messages = priced_messages;
-            priced_bust_messages.push(assistant_text(
-                "priced-assistant-text",
-                3,
-                &"word ".repeat(80_000),
-            ));
-            priced_bust_messages.push(item("priced-next-user", 4, "continue"));
+            let mut backlog_call = assistant_tool_call("priced-backlog-call", 3, "backlog");
+            let call_block = &mut backlog_call.ck.content[0];
+            let ck_wire::CkKind::ToolCall { input, .. } = &mut call_block.kind else {
+                unreachable!("fixture must be a tool call");
+            };
+            *input = json!({ "path": "backlog.json" });
+            call_block.mark_modified();
+            let backlog = tool_result_with_output(
+                "priced-backlog-result",
+                4,
+                "backlog",
+                ck_wire::CkOutputKind::Json {
+                    value: json!({ "output": "word ".repeat(80_000) }),
+                },
+            );
+            // The hard pass prunes older text tool output before measuring the tail.
+            // Seed attribution for fresh JSON output: it cannot carry the reminder,
+            // and a non-tool tag keeps it outside the tool-result protection window.
+            s.seed_tags_for_test(
+                "channel1-priced",
+                &[TagMintInput {
+                    block_id: "priced-backlog-result#0".to_string(),
+                    kind: "message".to_string(),
+                    token_count: 80_000,
+                    source_bytes: serde_json::to_vec(&backlog.ck.content[0]).unwrap(),
+                }],
+                1,
+            )
+            .unwrap();
+            priced_bust_messages.extend([backlog_call, backlog]);
+            priced_bust_messages.push(item("priced-next-user", 5, "continue"));
             let priced_bust_request = with_usage(
                 active_cc_req("channel1-priced", "cfg1", priced_bust_messages),
                 100,
                 1024,
             );
-
             let priced = run(&s, &priced_bust_request, &spine());
             assert_eq!(priced.action, "HARD");
+            let priced_meta = s.load("channel1-priced").unwrap().meta;
+            let measured_backlog = priced_meta
+                .tail_hygiene_baseline
+                .unwrap()
+                .baseline_parts
+                .into_iter()
+                .find(|part| part.key == "priced-backlog-result#0\0tool_result")
+                .expect("priced pass must measure the backlog");
+            assert!(!measured_backlog.protected);
+            assert!(measured_backlog.u_tokens > CHANNEL1_FLOOR_TOKENS);
             assert!(tail_bytes(&priced, "priced-result").contains("<system-reminder>"));
             let priced_hash = canonical_response_hash(&priced);
             let reminder_bytes = s

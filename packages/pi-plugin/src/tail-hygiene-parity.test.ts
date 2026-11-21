@@ -271,14 +271,36 @@ function tolerance(expected: number): number {
 	return Math.max(12, Math.ceil(Math.abs(expected) * 0.03));
 }
 
-/**
- * The golden still counts tagged prose in U; its generator and the Rust leg
- * change together (#954). Until then, a case with message tags proves only T
- * and an upper bound on U against the golden, and the two TypeScript legs must
- * still agree with each other on U.
- */
-function hasProseTags(fixture: Fixture): boolean {
-	return fixture.tags.some((tag) => tag.kind === "message");
+function measureLegs(
+	fixture: Fixture,
+	protectedNumbers = protectedTagNumbers(fixture),
+) {
+	const pendingDropTagNumbers = new Set(fixture.pending_drop_tag_numbers ?? []);
+	const core = measureTailHygiene({
+		messages: toCoreMessages(fixture),
+		tags: toTags(fixture),
+		protectedTagNumbers: protectedNumbers,
+		pendingDropTagNumbers,
+	});
+	const pi = measurePiTailHygiene({
+		messages: toPiMessages(fixture),
+		tags: toTags(fixture, true),
+		protectedTagNumbers: protectedNumbers,
+		pendingDropTagNumbers,
+		stableId: (message) =>
+			typeof (message as { _mid?: unknown })._mid === "string"
+				? (message as { _mid: string })._mid
+				: undefined,
+	});
+	return { core, pi, protectedNumbers };
+}
+
+function liveIncidentFixture(): Fixture {
+	const fixture = golden.cases.find(
+		(entry) => entry.id === "live-incident-mixed-tail",
+	);
+	if (!fixture) throw new Error("missing live-incident parity fixture");
+	return fixture;
 }
 
 function assertLeg(
@@ -286,26 +308,18 @@ function assertLeg(
 	leg: "TypeScript" | "Pi",
 	actual: { u: number; t: number },
 	expected: Fixture["expected"],
-	proseTags: boolean,
 ): void {
-	if (proseTags) {
-		expect(
-			actual.u - expected.u,
-			`${caseId} ${leg} U above prose-inclusive golden`,
-		).toBeLessThanOrEqual(tolerance(expected.u));
-	} else {
-		expect(
-			Math.abs(actual.u - expected.u),
-			`${caseId} ${leg} U drift`,
-		).toBeLessThanOrEqual(tolerance(expected.u));
-		expect(band(actual.u, actual.t), `${caseId} ${leg} band drift`).toBe(
-			expected.band,
-		);
-	}
+	expect(
+		Math.abs(actual.u - expected.u),
+		`${caseId} ${leg} U drift`,
+	).toBeLessThanOrEqual(tolerance(expected.u));
 	expect(
 		Math.abs(actual.t - expected.t),
 		`${caseId} ${leg} T drift`,
 	).toBeLessThanOrEqual(tolerance(expected.t));
+	expect(band(actual.u, actual.t), `${caseId} ${leg} band drift`).toBe(
+		expected.band,
+	);
 	expect(actual.u, `${caseId} ${leg} violated U subset T`).toBeLessThanOrEqual(
 		actual.t,
 	);
@@ -318,29 +332,9 @@ describe("nudge hygiene three-leg differential corpus", () => {
 		expect(golden.cases.length).toBeGreaterThanOrEqual(12);
 
 		for (const fixture of golden.cases) {
-			const protectedNumbers = protectedTagNumbers(fixture);
-			const pendingDropTagNumbers = new Set(
-				fixture.pending_drop_tag_numbers ?? [],
-			);
-			const core = measureTailHygiene({
-				messages: toCoreMessages(fixture),
-				tags: toTags(fixture),
-				protectedTagNumbers: protectedNumbers,
-				pendingDropTagNumbers,
-			});
-			const pi = measurePiTailHygiene({
-				messages: toPiMessages(fixture),
-				tags: toTags(fixture, true),
-				protectedTagNumbers: protectedNumbers,
-				pendingDropTagNumbers,
-				stableId: (message) =>
-					typeof (message as { _mid?: unknown })._mid === "string"
-						? (message as { _mid: string })._mid
-						: undefined,
-			});
-			const proseTags = hasProseTags(fixture);
-			assertLeg(fixture.id, "TypeScript", core, fixture.expected, proseTags);
-			assertLeg(fixture.id, "Pi", pi, fixture.expected, proseTags);
+			const { core, pi, protectedNumbers } = measureLegs(fixture);
+			assertLeg(fixture.id, "TypeScript", core, fixture.expected);
+			assertLeg(fixture.id, "Pi", pi, fixture.expected);
 			expect(
 				Math.abs(core.u - pi.u),
 				`${fixture.id} TypeScript/Pi U drift`,
@@ -366,13 +360,60 @@ describe("nudge hygiene three-leg differential corpus", () => {
 		}
 	});
 
-	it("keeps the 0.651 flagship fixture in the urgent band", () => {
-		const flagship = golden.cases.find(
-			(fixture) => fixture.id === "live-incident-mixed-tail",
-		);
-		if (!flagship) throw new Error("missing flagship parity fixture");
-		expect(flagship.expected.u / flagship.expected.t).toBeCloseTo(0.651, 3);
-		expect(flagship.expected.band).toBe("urgent");
+	it("keeps the live incident quiet when only prose and protected tools remain", () => {
+		const fixture = liveIncidentFixture();
+		expect(fixture.expected).toEqual({ u: 0, t: 464_203, band: "quiet" });
+		const { core, pi } = measureLegs(fixture);
+		for (const { u, t } of [core, pi]) {
+			expect(u).toBe(0);
+			expect(t).toBe(464_203);
+			expect(band(u, t)).toBe("quiet");
+		}
+	});
+
+	it("still reaches urgent when the live-incident tail carries unprotected tool backlog", () => {
+		const fixture = liveIncidentFixture();
+		// Every earlier above-quiet case reached that band through prose. Add tool
+		// output outside the protection window to exercise real reclaimable mass.
+		const withBacklog: Fixture = {
+			...fixture,
+			messages: [
+				...fixture.messages,
+				{
+					mid: "extra-owner",
+					ordinal: 4,
+					role: "assistant",
+					blocks: [{ type: "tool_call", id: "extra", name: "read", input: {} }],
+				},
+				{
+					mid: "extra-result",
+					ordinal: 5,
+					role: "user",
+					blocks: [
+						{
+							type: "tool_result",
+							id: "extra",
+							name: "read",
+							unit: "output ",
+							repeat: 400_000,
+						},
+					],
+				},
+			],
+			tags: [
+				...fixture.tags,
+				{
+					tag_number: 2,
+					block_id: "extra-result#0",
+					kind: "tool",
+					token_count: 400_001,
+				},
+			],
+		};
+		const { core, pi } = measureLegs(withBacklog, new Set());
+		for (const { u, t } of [core, pi]) {
+			expect(band(u, t)).toBe("urgent");
+		}
 	});
 });
 

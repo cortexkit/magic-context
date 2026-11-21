@@ -1084,26 +1084,19 @@ describe("TS/Pi/module differential hygiene corpus", () => {
 				protectedTagNumbers,
 				pendingDropTagNumbers: new Set(fixture.pending_drop_tag_numbers ?? []),
 			});
-			// The golden still counts tagged prose in U until its generator and the
-			// Rust leg change (#954): cases with message tags bound U from above only.
-			const proseTags = fixture.tags.some((entry) => entry.kind === "message");
 			for (const [label, actual, expected] of [
 				["U", measured.u, fixture.expected.u],
 				["T", measured.t, fixture.expected.t],
 			] as const) {
 				const tolerance = Math.max(12, Math.ceil(Math.abs(expected) * 0.03));
 				expect(
-					label === "U" && proseTags
-						? actual - expected
-						: Math.abs(actual - expected),
+					Math.abs(actual - expected),
 					`${fixture.id} ${label}`,
 				).toBeLessThanOrEqual(tolerance);
 			}
-			if (!proseTags) {
-				expect(measuredBand(measured.u, measured.t), `${fixture.id} band`).toBe(
-					fixture.expected.band,
-				);
-			}
+			expect(measuredBand(measured.u, measured.t), `${fixture.id} band`).toBe(
+				fixture.expected.band,
+			);
 			expect(measured.u).toBeLessThanOrEqual(measured.t);
 		}
 	});

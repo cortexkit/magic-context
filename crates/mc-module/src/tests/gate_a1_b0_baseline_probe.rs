@@ -21,8 +21,9 @@ const BASELINE_SERVED_DIGEST: &str =
 const BASELINE_META_DIGEST: &str =
     "6d9f28bd0253565e8175ad3d26a4f7e490b01d577f188c8299b0321ee502caeb";
 // Metadata length with last_execute_ordinal=0 (no output was distant yet),
-// excluding the additional fields checked below.
-const BASELINE_META_BYTES: usize = 22_403;
+// excluding the additional fields checked below. With prose no longer counted
+// as reclaimable, its per-part and aggregate reclaimable counts serialize as zero.
+const BASELINE_META_BYTES: usize = 22_235;
 const ATTEMPT_FIELD: &str = ",\"producer_attempt\":0";
 // The saved nudge baseline includes the default keep counts for ctx_reduce and
 // todowrite. This fragment includes the comma that follows the first field.

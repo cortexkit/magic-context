@@ -384,11 +384,9 @@ const cases = fixtures.map((fixture) => {
 if (cases.length < 12) throw new Error(`nudge hygiene parity corpus has only ${cases.length} fixtures`);
 const flagship = cases.find((fixture) => fixture.id === "live-incident-mixed-tail");
 if (!flagship) throw new Error("missing flagship live-incident fixture");
-const flagshipSeverity = flagship.expected.u / Math.max(flagship.expected.t, 1);
-if (flagship.expected.band !== "urgent" || Math.abs(flagshipSeverity - 0.651) > 0.002) {
-    throw new Error(
-        `flagship positive control drifted: severity=${flagshipSeverity.toFixed(3)} band=${flagship.expected.band}`,
-    );
+const { u, t, band: flagshipBand } = flagship.expected;
+if (u !== 0 || t !== 464_203 || flagshipBand !== "quiet") {
+    throw new Error(`live incident must stay quiet with prose and protected tools: U=${u} T=${t} band=${flagshipBand}`);
 }
 
 const canonical = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
