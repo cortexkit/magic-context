@@ -192,19 +192,20 @@ if (!args.includes("--no-rules")) {
 for (const flag of ["--no-prompt-templates", "--no-context-files"]) {
     if (args.includes(flag)) throw new Error(`resolved OMP argv includes ${flag}`);
 }
+for (const [key, value] of Object.entries(__test.OMP_CHILD_TOOL_ENV)) {
+    console.log(`${key}=${value}`);
+}
 for (const arg of [invocation.command, ...invocation.prefixArgs, ...args]) {
     console.log(arg);
 }
 NODE
 mapfile -t OMP_SUBAGENT_INVOCATION < /tmp/omp-subagent-invocation
-OMP_SUBAGENT_COMMAND="${OMP_SUBAGENT_INVOCATION[0]}"
-OMP_SUBAGENT_ARGS=("${OMP_SUBAGENT_INVOCATION[@]:1}")
 printf 'OMP resolved subagent invocation:'
-printf ' %q' "$OMP_SUBAGENT_COMMAND" "${OMP_SUBAGENT_ARGS[@]}"
+printf ' %q' "${OMP_SUBAGENT_INVOCATION[@]}"
 printf '\n'
 set +e
 MAGIC_CONTEXT_PI_SUBAGENT=1 timeout --signal=KILL 60 \
-    "$OMP_SUBAGENT_COMMAND" "${OMP_SUBAGENT_ARGS[@]}" > /tmp/omp-subagent.log 2>&1
+    env "${OMP_SUBAGENT_INVOCATION[@]}" > /tmp/omp-subagent.log 2>&1
 OMP_SUBAGENT_EXIT=$?
 set -e
 echo "OMP subagent exit: $OMP_SUBAGENT_EXIT"

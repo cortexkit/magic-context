@@ -90,8 +90,11 @@ it("rejects malformed child selections before setting tools", async () => {
 	}
 });
 
-it("refuses a host that adds tools outside the child selection", async () => {
-	const f = fixture("[]", [], ["write"]);
+it.each([
+	"write",
+	"report_issue",
+])("refuses a host that adds %s outside the child selection", async (name) => {
+	const f = fixture("[]", [], [name]);
 	await expect(f.start()).rejects.toThrow("child exited");
 	expect(exit).toHaveBeenCalledWith(1);
 	expect(diagnostic).toContain("outside the Magic Context child allowlist");

@@ -4,6 +4,13 @@ export const SUBAGENT_TOOL_ALLOWLIST_FLAG = "magic-context-tool-allowlist";
 export const OMP_CHILD_TOOL_CONFIG =
 	"tools:\n  xdev: false\nplan:\n  enabled: false\n  defaultOnStartup: false\n";
 
+// OMP 19.1 moved Auto-QA from the write transport to `report_issue`, a
+// special tool restored by setActiveTools even with --no-tools. Turn it off
+// before the host builds its tool registry, not by allowing it in the guard.
+// https://github.com/can1357/oh-my-pi/blob/v19.1.0/packages/coding-agent/src/tools/resolve.ts#L397-L400
+// Older OMP only exposes Auto-QA through `write`, which children never have.
+export const OMP_CHILD_TOOL_ENV = { PI_AUTO_QA: "0" } as const;
+
 /** Select child tools without disabling extensions that supply model providers. */
 export function registerSubagentToolBoundary(pi: ExtensionAPI): void {
 	pi.registerFlag(SUBAGENT_TOOL_ALLOWLIST_FLAG, {
