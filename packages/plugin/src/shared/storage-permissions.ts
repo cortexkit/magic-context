@@ -26,17 +26,27 @@ import {
 } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { open as openAsync, writeFile as writeFileAsync } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 let enforcePrivateStoragePermissions = true;
 const STORAGE_PERMISSIONS_POLICY_VERSION = 1;
 const STORAGE_PERMISSIONS_MARKER = `.storage-permissions-v${STORAGE_PERMISSIONS_POLICY_VERSION}`;
 const LEGACY_FENCE_TEMP_MIN_AGE_MS = 10 * 60_000;
 
+/**
+ * Storage roots that this process checked with tightenStorageTreeSync. Only a
+ * root has a marker. Each database open checks its root, so a process that
+ * writes storage files knows its root.
+ */
+const storagePermissionRoots = new Set<string>();
+
 function invalidateStoragePermissionMarkers(directory: string): void {
-    for (let current = directory; ; current = dirname(current)) {
+    // Stop at the storage root: an ancestor of the root has no applicable marker.
+    // A directory that is not in a known root continues to the file system
+    // root, because a marker that stays can keep the approval of a loose tree.
+    for (let current = resolve(directory); ; current = dirname(current)) {
         rmSync(join(current, STORAGE_PERMISSIONS_MARKER), { force: true });
-        if (dirname(current) === current) return;
+        if (storagePermissionRoots.has(current) || dirname(current) === current) return;
     }
 }
 
@@ -242,6 +252,7 @@ export function tightenStorageTreeSync(
     if (process.platform === "win32") {
         return { tightened: 0, failures: 0 };
     }
+    storagePermissionRoots.add(resolve(root));
     const marker = join(root, STORAGE_PERMISSIONS_MARKER);
     let tightened = 0;
     let failures = 0;

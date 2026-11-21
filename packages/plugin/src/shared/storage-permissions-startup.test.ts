@@ -206,6 +206,24 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         expect(fs.existsSync(join(root, markerName))).toBe(false);
     });
 
+    it("stops marker invalidation at the storage root", () => {
+        const root = fixture();
+        const parent = join(root, "..");
+        const decoy = join(parent, markerName);
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.existsSync(join(root, markerName))).toBe(true);
+        fs.writeFileSync(decoy, "1\n", { mode: 0o600 });
+        try {
+            const directory = join(root, "lkg-recovery-fences");
+            fs.chmodSync(directory, 0o755);
+            ensurePrivateStorageDirectorySync(directory);
+            expect(fs.existsSync(join(root, markerName))).toBe(false);
+            expect(fs.existsSync(decoy)).toBe(true);
+        } finally {
+            fs.rmSync(decoy, { force: true });
+        }
+    });
+
     it("removes certification while enforcement is off before a later private open", () => {
         const root = fixture();
         fs.writeFileSync(join(root, markerName), "1\n", { mode: 0o600 });
