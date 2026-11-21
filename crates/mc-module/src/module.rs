@@ -403,6 +403,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .map(|sessions| sessions.len()),
             dreamer_enabled: self.inner.dreamer_enabled.load(Ordering::Relaxed),
             bus_connected,
+            settings_source: self.inner.config.settings_source(),
             #[cfg(feature = "memory-replica")]
             replica: self.inner.replica_health.get().cloned(),
         }

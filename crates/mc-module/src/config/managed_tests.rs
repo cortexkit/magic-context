@@ -85,6 +85,7 @@ fn a_saved_view_is_served_at_once_until_this_runs_view_arrives() {
     let next = Loader::with_user_path(home.user.clone()).managed(&home.data);
     let started = Instant::now();
     assert_eq!(threshold(&next), 70.0);
+    assert_eq!(next.settings_source().as_str(), "saved_view");
     assert!(started.elapsed() < Duration::from_secs(1));
     // A refusal leaves the approved view in force.
     next.on_config_state(&refusal(ConfigAvailability::NoApprovedConfig));
@@ -136,6 +137,8 @@ fn a_refusal_with_no_approved_view_serves_the_defaults_not_the_file() {
     assert_eq!(threshold(&loader), 65.0);
     assert!(started.elapsed() < FIRST_STATE_WAIT);
     daemon.join().unwrap();
+    // Even a read whose values were discarded would populate the file cache.
+    assert!(!loader.cache.lock().unwrap().contains_key(&home.user));
     // A view approved later replaces the defaults.
     loader
         .config_apply(&view(
@@ -153,6 +156,8 @@ fn no_answer_within_the_wait_serves_the_defaults() {
     let started = Instant::now();
     assert_eq!(threshold(&loader), 65.0);
     assert!(started.elapsed() >= FIRST_STATE_WAIT);
+    assert_eq!(loader.settings_source().as_str(), "defaults");
+    assert!(!loader.cache.lock().unwrap().contains_key(&home.user));
     // It waits once: later resolutions don't wait again.
     let again = Instant::now();
     assert_eq!(threshold(&loader), 65.0);
@@ -164,6 +169,7 @@ fn a_daemon_without_a_config_gate_has_the_user_file_read() {
     let home = home(&json!({"execute_threshold_percentage": {"default": 80}, "clock_note": "off"}));
     let loader = Loader::with_user_path(home.user.clone()).managed(&home.data);
     loader.config_files();
+    assert_eq!(loader.settings_source().as_str(), "file");
     let settings = loader.resolve(None, OPUS, 200_000);
     assert_eq!(settings.execute_threshold_percentage, 80.0);
     // The file is read in the managed shape: `clock_note: "off"` switches

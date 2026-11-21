@@ -44,6 +44,7 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
         "context_db_schema_version",
         "mode3_db_schema_version",
         "dreamer_enabled",
+        "settings_source",
     ];
     #[cfg(feature = "memory-replica")]
     let headline = [
@@ -63,6 +64,10 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
         crate::store::SCHEMA_VERSION
     );
     assert_eq!(metrics["dreamer_enabled"], false);
+    #[cfg(feature = "managed-settings")]
+    assert_eq!(metrics["settings_source"], "file");
+    #[cfg(not(feature = "managed-settings"))]
+    assert_eq!(metrics["settings_source"], "unmanaged");
     #[cfg(feature = "memory-replica")]
     assert_eq!(metrics["replica"]["enabled"], false);
     #[cfg(not(feature = "memory-replica"))]
@@ -90,6 +95,96 @@ async fn health_hook_degrades_when_a_store_was_not_opened() {
         metrics["store"]["mode3_db_schema_version"],
         crate::store::SCHEMA_VERSION
     );
+}
+
+#[cfg(feature = "managed-settings")]
+#[tokio::test]
+async fn health_hook_degrades_on_managed_defaults_and_recovers_when_a_view_arrives() {
+    use subc_client_rs::config::{ConfigAvailability, ConfigState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = managed_test_module(dir.path());
+    let handler = Handler::new(module);
+    let waiting = handler.health().await;
+    assert_eq!(waiting.status, HealthStatus::Ok);
+    assert_eq!(waiting.detail, None);
+    assert_eq!(waiting.metrics.unwrap()["settings_source"], "waiting");
+
+    handler
+        .on_config_state(ConfigState::ConfigGated {
+            view: ConfigAvailability::NoApprovedConfig,
+            refusal: subc_protocol::ErrorBody::new(
+                "config_gated",
+                "the settings wait for approval",
+            ),
+        })
+        .await;
+    let defaults = handler.health().await;
+    assert_eq!(defaults.status, HealthStatus::Degraded);
+    assert_eq!(
+        defaults.detail.as_deref(),
+        Some("running default settings until they are approved")
+    );
+    assert_eq!(defaults.metrics.unwrap()["settings_source"], "defaults");
+
+    handler.config_apply(approved_test_view()).await.unwrap();
+    let approved = handler.health().await;
+    assert_eq!(approved.status, HealthStatus::Ok);
+    assert_eq!(approved.detail, None);
+    assert_eq!(approved.metrics.unwrap()["settings_source"], "view");
+}
+
+#[cfg(feature = "managed-settings")]
+#[tokio::test]
+async fn declaration_pending_view_is_served_on_first_apply() {
+    use subc_client_rs::config::{ConfigDeclarationPending, ConfigState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = managed_test_module(dir.path());
+    let handler = Handler::new(module.clone());
+    let mut active = approved_test_view();
+    // A pending declaration does not make the approved settings pending.
+    active.declaration_pending = Some(ConfigDeclarationPending::default());
+    handler.config_apply(active.clone()).await.unwrap();
+    assert_eq!(
+        handler.health().await.metrics.unwrap()["settings_source"],
+        "view"
+    );
+    handler.on_config_state(ConfigState::Active(active)).await;
+
+    let settings = module
+        .config()
+        .resolve(None, "anthropic/claude-opus-5-5", 200_000);
+    assert_eq!(settings.execute_threshold_percentage, 70.0);
+    assert_eq!(settings.clock_note, Settings::default().clock_note);
+}
+
+#[cfg(feature = "managed-settings")]
+fn approved_test_view() -> subc_client_rs::config::ConfigView {
+    use subc_client_rs::config::{ConfigStatus, ConfigView, Layer};
+
+    ConfigView::new(
+        1,
+        json!({"execute_threshold_percentage": {"default": 70}}),
+        [("/execute_threshold_percentage/default".into(), Layer::User)].into(),
+        vec![],
+        ConfigStatus::Active,
+    )
+}
+
+#[cfg(feature = "managed-settings")]
+fn managed_test_module(dir: &std::path::Path) -> Module<SubcRunnerClient> {
+    let user = dir.join("magic-context.jsonc");
+    std::fs::write(
+        &user,
+        r#"{"execute_threshold_percentage":{"default":80},"clock_note":"off"}"#,
+    )
+    .unwrap();
+    test_module(
+        Config::Files(Loader::with_user_path(user).managed(dir)),
+        Some(ContextDb::create_for_tests(&dir.join("context.db")).unwrap()),
+        Some(Store::open(&dir.join("mode3.db")).unwrap()),
+    )
 }
 
 fn test_module(
