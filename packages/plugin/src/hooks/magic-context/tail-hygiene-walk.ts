@@ -536,6 +536,28 @@ function buildTagAttribution(args: {
     return { protectedNumbers, messageTags, toolTagsByPart };
 }
 
+/**
+ * Tokens this part adds to the reclaimable share U. Prose (`text`) stays in the
+ * tail total T but never in U: U is tool output and files that are not yet
+ * reduced, as a share of the tail. Both TypeScript walks (OpenCode and Pi) use
+ * this one rule, so a full walk, a defer pass and the two hosts agree.
+ */
+export function reclaimableTailTokens(part: {
+    kind: TailHygienePartKind;
+    tokens: number;
+    tagStatus: TagEntry["status"] | null | undefined;
+    protected: boolean;
+    queuedForDrop: boolean;
+}): number {
+    return part.tagStatus === "active" &&
+        !part.protected &&
+        !part.queuedForDrop &&
+        part.kind !== "excluded" &&
+        part.kind !== "text"
+        ? part.tokens
+        : 0;
+}
+
 function snapshot(args: {
     key: string;
     kind: TailHygienePartKind;
@@ -549,10 +571,13 @@ function snapshot(args: {
     const tag = args.tag;
     const isProtected = tag ? args.protectedNumbers.has(tag.tagNumber) : false;
     const queuedForDrop = tag ? args.pendingDropTagNumbers.has(tag.tagNumber) : false;
-    const uTokens =
-        tag?.status === "active" && !isProtected && !queuedForDrop && args.kind !== "excluded"
-            ? args.tokens
-            : 0;
+    const uTokens = reclaimableTailTokens({
+        kind: args.kind,
+        tokens: args.tokens,
+        tagStatus: tag?.status,
+        protected: isProtected,
+        queuedForDrop,
+    });
     return {
         key: args.key,
         contentHash: memo.hash,
@@ -804,13 +829,13 @@ function measureWithReplay(
                             : undefined;
                 const protectedPart = tag ? attribution.protectedNumbers.has(tag.tagNumber) : false;
                 const queuedForDrop = tag ? pendingDropTagNumbers.has(tag.tagNumber) : false;
-                const uTokens =
-                    tag?.status === "active" &&
-                    !protectedPart &&
-                    !queuedForDrop &&
-                    prior.kind !== "excluded"
-                        ? prior.tokens
-                        : 0;
+                const uTokens = reclaimableTailTokens({
+                    kind: prior.kind,
+                    tokens: prior.tokens,
+                    tagStatus: tag?.status,
+                    protected: protectedPart,
+                    queuedForDrop,
+                });
                 const measured =
                     prior.tagNumber === (tag?.tagNumber ?? null) &&
                     prior.tagStatus === (tag?.status ?? null) &&

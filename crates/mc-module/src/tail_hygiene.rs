@@ -237,12 +237,26 @@ fn part_measurement(
     let content_hash = crate::digest::hex(&hash.finalize());
     profile_end!(perf_hash);
     let active = tag_number.is_some() && !queued_for_drop;
+    // The reminder that asks the agent to call its `ctx_reduce` tool (which
+    // queues tagged parts for removal) names spent tool output and files, and
+    // the tool's guidance tells the agent to keep conversation text, so only
+    // those kinds count as reclaimable.
+    let reclaimable = matches!(
+        kind,
+        TailHygienePartKind::ToolInput
+            | TailHygienePartKind::ToolOutput
+            | TailHygienePartKind::File
+    );
     TailHygienePartMeasurement {
         key,
         content_hash,
         kind,
         tokens,
-        u_tokens: if active && !protected { tokens } else { 0 },
+        u_tokens: if reclaimable && active && !protected {
+            tokens
+        } else {
+            0
+        },
         tag_number,
         tag_status: tag_number.map(|_| "active".to_string()),
         protected,
@@ -1038,12 +1052,12 @@ mod tests {
 
     #[test]
     fn streamed_part_hash_matches_concatenated_reference_for_every_kind() {
-        for (kind, name) in [
-            (TailHygienePartKind::Text, "text"),
-            (TailHygienePartKind::ToolInput, "toolInput"),
-            (TailHygienePartKind::ToolOutput, "toolOutput"),
-            (TailHygienePartKind::File, "file"),
-            (TailHygienePartKind::Excluded, "excluded"),
+        for (kind, name, expected_u) in [
+            (TailHygienePartKind::Text, "text", 0),
+            (TailHygienePartKind::ToolInput, "toolInput", 3),
+            (TailHygienePartKind::ToolOutput, "toolOutput", 3),
+            (TailHygienePartKind::File, "file", 3),
+            (TailHygienePartKind::Excluded, "excluded", 0),
         ] {
             for content in ["", "\0", "\"\\\n\r", "é漢字🙂§17§", "[dropped §1§]"] {
                 let reference = format!("{name}\0{content}");
@@ -1052,7 +1066,7 @@ mod tests {
                     part_measurement("key".into(), kind, content, 3, Some(1), false, false);
                 assert_eq!(actual.content_hash, expected);
                 assert_eq!(actual.tokens, 3);
-                assert_eq!(actual.u_tokens, 3);
+                assert_eq!(actual.u_tokens, expected_u, "{name}");
             }
         }
     }
@@ -1142,6 +1156,20 @@ mod tests {
             vec![CkKind::Text {
                 text: value.to_string(),
             }],
+        )
+    }
+
+    fn file(mid: &str, ordinal: u64, value: &str) -> CkIngressMessage {
+        message(
+            mid,
+            ordinal,
+            "user",
+            vec![CkKind::Media(MediaBlock {
+                kind: MediaKind::File,
+                media_type: "text/plain".to_string(),
+                filename: None,
+                source: Value::String(value.to_string()),
+            })],
         )
     }
 
@@ -1529,7 +1557,7 @@ mod tests {
     #[test]
     fn defer_delta_and_boundary_advance_are_additive() {
         let base = vec![
-            text("old", 1, &"old mass ".repeat(2_000)),
+            file("old", 1, &"old mass ".repeat(2_000)),
             text("recent", 2, "recent"),
         ];
         let tags = vec![tag(1, "old#0"), tag(2, "recent#0")];
@@ -1667,8 +1695,8 @@ mod tests {
     #[test]
     fn queued_drop_mass_uses_a_defer_delta_without_changing_t_or_the_frozen_baseline() {
         let messages = vec![
-            text("queued", 1, &"mass ".repeat(25_000)),
-            text("remaining", 2, &"mass ".repeat(45_000)),
+            file("queued", 1, &"mass ".repeat(25_000)),
+            file("remaining", 2, &"mass ".repeat(45_000)),
             text("untagged", 3, &"mass ".repeat(30_000)),
         ];
         let tags = vec![tag(1, "queued#0"), tag(2, "remaining#0")];
@@ -2247,7 +2275,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_mutant_changes_neither_term_but_tagged_text_mutant_reddens() {
+    fn reasoning_changes_neither_term_and_tagged_prose_only_changes_t() {
         let tags = vec![tag(1, "visible#0")];
         let base = vec![
             text("visible", 1, "kept text"),
@@ -2296,7 +2324,8 @@ mod tests {
             0,
             &HashSet::new(),
         );
-        assert_ne!((text_measured.u, text_measured.t), (measured.u, measured.t));
+        assert_eq!((text_measured.u, measured.u), (0, 0));
+        assert!(text_measured.t > measured.t);
     }
 
     #[test]
@@ -2405,8 +2434,7 @@ mod tests {
             0,
             &HashSet::new(),
         );
-        let tagged_text_tokens = estimated_tokens("before") + estimated_tokens("after");
-        assert_eq!(measured.u, tagged_text_tokens);
-        assert!(measured.t > measured.u);
+        assert_eq!(measured.u, 0);
+        assert!(measured.t > estimated_tokens("before") + estimated_tokens("after"));
     }
 }

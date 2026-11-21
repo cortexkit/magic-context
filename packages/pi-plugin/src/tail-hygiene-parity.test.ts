@@ -7,8 +7,16 @@ import {
 	evaluateChannel2,
 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/tag-messages";
-import { measureTailHygiene } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
-import { measurePiTailHygiene } from "./tail-hygiene-walk-pi";
+import {
+	effectiveTailHygiene,
+	measureTailHygiene,
+	refreshTailHygieneBaseline,
+} from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
+import {
+	effectivePiTailHygiene,
+	measurePiTailHygiene,
+	refreshPiTailHygieneBaseline,
+} from "./tail-hygiene-walk-pi";
 
 type TextBlock = { type: "text"; unit: string; repeat: number };
 type ReasoningBlock = { type: "reasoning"; unit: string; repeat: number };
@@ -263,6 +271,38 @@ function tolerance(expected: number): number {
 	return Math.max(12, Math.ceil(Math.abs(expected) * 0.03));
 }
 
+function measureLegs(
+	fixture: Fixture,
+	protectedNumbers = protectedTagNumbers(fixture),
+) {
+	const pendingDropTagNumbers = new Set(fixture.pending_drop_tag_numbers ?? []);
+	const core = measureTailHygiene({
+		messages: toCoreMessages(fixture),
+		tags: toTags(fixture),
+		protectedTagNumbers: protectedNumbers,
+		pendingDropTagNumbers,
+	});
+	const pi = measurePiTailHygiene({
+		messages: toPiMessages(fixture),
+		tags: toTags(fixture, true),
+		protectedTagNumbers: protectedNumbers,
+		pendingDropTagNumbers,
+		stableId: (message) =>
+			typeof (message as { _mid?: unknown })._mid === "string"
+				? (message as { _mid: string })._mid
+				: undefined,
+	});
+	return { core, pi, protectedNumbers };
+}
+
+function liveIncidentFixture(): Fixture {
+	const fixture = golden.cases.find(
+		(entry) => entry.id === "live-incident-mixed-tail",
+	);
+	if (!fixture) throw new Error("missing live-incident parity fixture");
+	return fixture;
+}
+
 function assertLeg(
 	caseId: string,
 	leg: "TypeScript" | "Pi",
@@ -292,28 +332,17 @@ describe("nudge hygiene three-leg differential corpus", () => {
 		expect(golden.cases.length).toBeGreaterThanOrEqual(12);
 
 		for (const fixture of golden.cases) {
-			const protectedNumbers = protectedTagNumbers(fixture);
-			const pendingDropTagNumbers = new Set(
-				fixture.pending_drop_tag_numbers ?? [],
-			);
-			const core = measureTailHygiene({
-				messages: toCoreMessages(fixture),
-				tags: toTags(fixture),
-				protectedTagNumbers: protectedNumbers,
-				pendingDropTagNumbers,
-			});
-			const pi = measurePiTailHygiene({
-				messages: toPiMessages(fixture),
-				tags: toTags(fixture, true),
-				protectedTagNumbers: protectedNumbers,
-				pendingDropTagNumbers,
-				stableId: (message) =>
-					typeof (message as { _mid?: unknown })._mid === "string"
-						? (message as { _mid: string })._mid
-						: undefined,
-			});
+			const { core, pi, protectedNumbers } = measureLegs(fixture);
 			assertLeg(fixture.id, "TypeScript", core, fixture.expected);
 			assertLeg(fixture.id, "Pi", pi, fixture.expected);
+			expect(
+				Math.abs(core.u - pi.u),
+				`${fixture.id} TypeScript/Pi U drift`,
+			).toBeLessThanOrEqual(tolerance(core.u));
+			expect(
+				band(core.u, core.t),
+				`${fixture.id} TypeScript/Pi band drift`,
+			).toBe(band(pi.u, pi.t));
 			if (fixture.id === "queued-tool-arc-full-mass") {
 				expect(core.u).toBe(fixture.expected.u);
 				expect(pi.u).toBe(fixture.expected.u);
@@ -331,12 +360,254 @@ describe("nudge hygiene three-leg differential corpus", () => {
 		}
 	});
 
-	it("keeps the 0.651 flagship fixture in the urgent band", () => {
-		const flagship = golden.cases.find(
-			(fixture) => fixture.id === "live-incident-mixed-tail",
+	it("keeps the live incident quiet when only prose and protected tools remain", () => {
+		const fixture = liveIncidentFixture();
+		expect(fixture.expected).toEqual({ u: 0, t: 464_203, band: "quiet" });
+		const { core, pi } = measureLegs(fixture);
+		for (const { u, t } of [core, pi]) {
+			expect(u).toBe(0);
+			expect(t).toBe(464_203);
+			expect(band(u, t)).toBe("quiet");
+		}
+	});
+
+	it("still reaches urgent when the live-incident tail carries unprotected tool backlog", () => {
+		const fixture = liveIncidentFixture();
+		// Every earlier above-quiet case reached that band through prose. Add tool
+		// output outside the protection window to exercise real reclaimable mass.
+		const withBacklog: Fixture = {
+			...fixture,
+			messages: [
+				...fixture.messages,
+				{
+					mid: "extra-owner",
+					ordinal: 4,
+					role: "assistant",
+					blocks: [{ type: "tool_call", id: "extra", name: "read", input: {} }],
+				},
+				{
+					mid: "extra-result",
+					ordinal: 5,
+					role: "user",
+					blocks: [
+						{
+							type: "tool_result",
+							id: "extra",
+							name: "read",
+							unit: "output ",
+							repeat: 400_000,
+						},
+					],
+				},
+			],
+			tags: [
+				...fixture.tags,
+				{
+					tag_number: 2,
+					block_id: "extra-result#0",
+					kind: "tool",
+					token_count: 400_001,
+				},
+			],
+		};
+		const { core, pi } = measureLegs(withBacklog, new Set());
+		for (const { u, t } of [core, pi]) {
+			expect(band(u, t)).toBe("urgent");
+		}
+	});
+});
+
+describe("prose stays in T but not in U on both TypeScript walks (#954)", () => {
+	const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+	const proseFixture = (extra: FixtureMessage[] = []): Fixture => {
+		const messages: FixtureMessage[] = [
+			{
+				mid: "u1",
+				ordinal: 1,
+				role: "user",
+				blocks: [{ type: "text", unit: "read the schema ", repeat: 40 }],
+			},
+			{
+				mid: "a1",
+				ordinal: 2,
+				role: "assistant",
+				blocks: [
+					{ type: "text", unit: "reading it now ", repeat: 20 },
+					{
+						type: "tool_call",
+						id: "call-schema",
+						name: "read",
+						input: { path: "schema.sql" },
+					},
+				],
+			},
+			{
+				mid: "r1",
+				ordinal: 3,
+				role: "user",
+				blocks: [
+					{
+						type: "tool_result",
+						id: "call-schema",
+						name: "read",
+						unit: "create table ",
+						repeat: 120,
+					},
+				],
+			},
+			{
+				mid: "u2",
+				ordinal: 4,
+				role: "user",
+				blocks: [{ type: "file", mime: "image/png", url: image }],
+			},
+			{
+				mid: "a2",
+				ordinal: 5,
+				role: "assistant",
+				blocks: [{ type: "text", unit: "the schema has tables ", repeat: 40 }],
+			},
+			...extra,
+		];
+		const tags: FixtureTag[] = [
+			{ tag_number: 1, block_id: "u1#0", kind: "message", token_count: 1 },
+			{ tag_number: 2, block_id: "a1#0", kind: "message", token_count: 1 },
+			{ tag_number: 3, block_id: "r1#0", kind: "tool", token_count: 1 },
+			{ tag_number: 4, block_id: "u2#0", kind: "file", token_count: 1 },
+			{ tag_number: 5, block_id: "a2#0", kind: "message", token_count: 1 },
+			...extra.map((message, index) => ({
+				tag_number: 6 + index,
+				block_id: `${message.mid}#0`,
+				kind: "message" as const,
+				token_count: 1,
+			})),
+		];
+		return {
+			id: "prose-outside-u",
+			protected_tags: 0,
+			protected_tokens_effective: 0,
+			messages,
+			tags,
+			expected: { u: 0, t: 0, band: "quiet" },
+		};
+	};
+	const stableId = (message: unknown) =>
+		typeof (message as { _mid?: unknown })._mid === "string"
+			? (message as { _mid: string })._mid
+			: undefined;
+	const nonProseTokens = (
+		parts: ReturnType<typeof measureTailHygiene>["parts"],
+	): number =>
+		parts
+			.filter((part) => part.kind !== "text" && part.kind !== "excluded")
+			.reduce((sum, part) => sum + part.tokens, 0);
+
+	it("gives the same prose-free U and the same T on the OpenCode and Pi walks", () => {
+		const fixture = proseFixture();
+		const core = measureTailHygiene({
+			messages: toCoreMessages(fixture),
+			tags: toTags(fixture),
+			protectedTagNumbers: new Set(),
+		});
+		const pi = measurePiTailHygiene({
+			messages: toPiMessages(fixture),
+			tags: toTags(fixture, true),
+			protectedTagNumbers: new Set(),
+			stableId,
+		});
+
+		for (const [leg, measured] of [
+			["TypeScript", core],
+			["Pi", pi],
+		] as const) {
+			const prose = measured.parts.filter((part) => part.kind === "text");
+			expect(prose.length, `${leg} prose parts`).toBe(3);
+			expect(
+				prose.every((part) => part.tokens > 0 && part.uTokens === 0),
+				`${leg} prose U`,
+			).toBe(true);
+			expect(measured.u, `${leg} U`).toBe(nonProseTokens(measured.parts));
+			expect(measured.u, `${leg} U positive`).toBeGreaterThan(0);
+			expect(measured.t, `${leg} T`).toBeGreaterThan(measured.u);
+		}
+		expect(pi.t - pi.u).toBe(core.t - core.u);
+		expect(Math.abs(pi.u - core.u)).toBeLessThanOrEqual(tolerance(core.u));
+	});
+
+	it("keeps a defer pass after appended prose equal to a full walk on both legs", () => {
+		const before = proseFixture();
+		const after = proseFixture([
+			{
+				mid: "u3",
+				ordinal: 6,
+				role: "user",
+				blocks: [{ type: "text", unit: "now add an index ", repeat: 30 }],
+			},
+			{
+				mid: "a3",
+				ordinal: 7,
+				role: "assistant",
+				blocks: [{ type: "text", unit: "index added ", repeat: 30 }],
+			},
+		]);
+		const coreFirst = refreshTailHygieneBaseline({
+			messages: toCoreMessages(before),
+			tags: toTags(before),
+			protectedTagNumbers: new Set(),
+			cacheBusting: true,
+		});
+		const coreDeferred = refreshTailHygieneBaseline({
+			messages: toCoreMessages(after),
+			tags: toTags(after),
+			protectedTagNumbers: new Set(),
+			cacheBusting: false,
+			previous: coreFirst,
+		});
+		const coreFull = refreshTailHygieneBaseline({
+			messages: toCoreMessages(after),
+			tags: toTags(after),
+			protectedTagNumbers: new Set(),
+			cacheBusting: true,
+		});
+		const piFirst = refreshPiTailHygieneBaseline({
+			messages: toPiMessages(before),
+			tags: toTags(before, true),
+			protectedTagNumbers: new Set(),
+			stableId,
+			cacheBusting: true,
+		});
+		const piDeferred = refreshPiTailHygieneBaseline({
+			messages: toPiMessages(after),
+			tags: toTags(after, true),
+			protectedTagNumbers: new Set(),
+			stableId,
+			cacheBusting: false,
+			previous: piFirst,
+		});
+		const piFull = refreshPiTailHygieneBaseline({
+			messages: toPiMessages(after),
+			tags: toTags(after, true),
+			protectedTagNumbers: new Set(),
+			stableId,
+			cacheBusting: true,
+		});
+
+		expect(coreDeferred.lastPrefixMismatch).toBeUndefined();
+		expect(piDeferred.lastPrefixMismatch).toBeUndefined();
+		expect(effectiveTailHygiene(coreDeferred)).toEqual(
+			effectiveTailHygiene(coreFull),
 		);
-		if (!flagship) throw new Error("missing flagship parity fixture");
-		expect(flagship.expected.u / flagship.expected.t).toBeCloseTo(0.651, 3);
-		expect(flagship.expected.band).toBe("urgent");
+		expect(effectivePiTailHygiene(piDeferred)).toEqual(
+			effectivePiTailHygiene(piFull),
+		);
+		expect(effectiveTailHygiene(coreDeferred).u).toBe(
+			effectiveTailHygiene(coreFirst).u,
+		);
+		expect(effectivePiTailHygiene(piDeferred).u).toBe(
+			effectivePiTailHygiene(piFirst).u,
+		);
+		expect(effectivePiTailHygiene(piDeferred).u).toBe(
+			effectiveTailHygiene(coreDeferred).u,
+		);
 	});
 });

@@ -29,6 +29,11 @@ function textMessage(id: string, text: string, role: "user" | "assistant" = "use
     return message(id, role, [{ type: "text", text }]);
 }
 
+/** A text attachment: prose leaves U (#954), so U fixtures use file parts as reclaimable mass. */
+function fileMessage(id: string, content: string): MessageLike {
+    return message(id, "user", [{ type: "file", mime: "text/plain", content }]);
+}
+
 function tag(
     tagNumber: number,
     messageId: string,
@@ -117,8 +122,8 @@ describe("tail hygiene single-walk instrument", () => {
             16_000,
         ).tagNumberSet.tagNumbers;
         const emptyWindowMeasured = measureTailHygiene({
-            messages: [textMessage("message", "still reclaimable")],
-            tags: [tag(5, "message:p0", "message")],
+            messages: [fileMessage("message", "still reclaimable")],
+            tags: [tag(5, "message:file0", "file")],
             protectedTagNumbers: emptyProtectedTagNumbers,
         });
         expect(emptyProtectedTagNumbers).toEqual(new Set());
@@ -348,19 +353,19 @@ describe("tail hygiene single-walk instrument", () => {
 
     it("treats multiple NULL-owner rows for one callID as ambiguous", () => {
         const messages = [
-            textMessage("before", "before"),
+            fileMessage("before", "before"),
             nativeTool("legacy-owner", "call-ambiguous", { n: 1 }, "legacy output"),
-            textMessage("after", "after"),
+            fileMessage("after", "after"),
         ];
         const tags = [
-            tag(9, "before:p0", "message"),
+            tag(9, "before:file0", "file"),
             tag(10, "call-ambiguous", "tool", { toolOwnerMessageId: null }),
             tag(10_000, "call-ambiguous", "tool", { toolOwnerMessageId: null }),
-            tag(11, "after:p0", "message"),
+            tag(11, "after:file0", "file"),
         ];
 
         const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
-        // The neighboring tagged prose still contributes U even though both orphan rows are rejected.
+        // The neighboring tagged files still contribute U even though both orphan rows are rejected.
         expect(measured.u).toBeGreaterThan(0);
         const textOnly = measureTailHygiene({
             messages: [messages[0], messages[2]],
@@ -397,11 +402,11 @@ describe("tail hygiene baseline and defer-window deltas", () => {
 
     it("subtracts queued-drop mass through the defer delta without changing T or the frozen baseline", () => {
         const messages = [
-            textMessage("queued", "mass ".repeat(25_000)),
-            textMessage("remaining", "mass ".repeat(45_000)),
+            fileMessage("queued", "mass ".repeat(25_000)),
+            fileMessage("remaining", "mass ".repeat(45_000)),
             textMessage("untagged", "mass ".repeat(30_000)),
         ];
-        const tags = [tag(1, "queued:p0", "message"), tag(2, "remaining:p0", "message")];
+        const tags = [tag(1, "queued:file0", "file"), tag(2, "remaining:file0", "file")];
         const initial = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const queuedMass = measureTailHygiene({
             messages: [messages[0]],
@@ -574,10 +579,10 @@ describe("tail hygiene baseline and defer-window deltas", () => {
 
     it("adds exactly persisted mass when the protection boundary advances", () => {
         const before = [
-            textMessage("old", "old reclaimable mass ".repeat(100)),
-            textMessage("protected", "still protected ".repeat(100)),
+            fileMessage("old", "old reclaimable mass ".repeat(100)),
+            fileMessage("protected", "still protected ".repeat(100)),
         ];
-        const beforeTags = [tag(1, "old:p0", "message"), tag(2, "protected:p0", "message")];
+        const beforeTags = [tag(1, "old:file0", "file"), tag(2, "protected:file0", "file")];
         const baseline = refreshTailHygieneBaseline({
             messages: before,
             tags: beforeTags,
@@ -589,10 +594,10 @@ describe("tail hygiene baseline and defer-window deltas", () => {
             tags: [beforeTags[0]],
             protectedTagNumbers: new Set(),
         }).t;
-        const appended = textMessage("newest", "newest protected ".repeat(100));
+        const appended = fileMessage("newest", "newest protected ".repeat(100));
         const defer = refreshTailHygieneBaseline({
             messages: [...before, appended],
-            tags: [...beforeTags, tag(3, "newest:p0", "message")],
+            tags: [...beforeTags, tag(3, "newest:file0", "file")],
             protectedTagNumbers: new Set([2, 3]),
             cacheBusting: false,
             previous: baseline,
@@ -1213,5 +1218,144 @@ describe("tail baseline replay memo", () => {
         });
         expect(rebuilt.generationInvalidated).toBe(false);
         expect(effectiveTailHygiene(rebuilt).u).toBe(0);
+    });
+});
+
+describe("prose stays in T but not in U (#954)", () => {
+    const reclaimableKinds = new Set(["toolInput", "toolOutput", "file"]);
+
+    function toolAndFileTokens(parts: ReturnType<typeof measureTailHygiene>["parts"]): number {
+        return parts
+            .filter((part) => reclaimableKinds.has(part.kind) && part.tagStatus === "active")
+            .reduce((sum, part) => sum + part.tokens, 0);
+    }
+
+    it("reads U = 0 for a tail of user and assistant prose with fully reduced tool output", () => {
+        const messages = [
+            textMessage("u1", "please look at the parser ".repeat(40)),
+            nativeTool("a1", "call-dropped", { path: "parser.ts" }, "[dropped §2§]"),
+            textMessage("a2", "the parser splits on commas ".repeat(40), "assistant"),
+        ];
+        const tags = [
+            tag(1, "u1:p0", "message"),
+            tag(2, "call-dropped", "tool", { toolOwnerMessageId: "a1" }),
+            tag(3, "a2:p0", "message"),
+        ];
+
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
+
+        expect(measured.t).toBeGreaterThan(0);
+        expect(measured.u).toBe(0);
+        expect(measured.parts.filter((part) => part.kind === "text")).toHaveLength(2);
+        expect(
+            measured.parts
+                .filter((part) => part.kind === "text")
+                .every((part) => part.uTokens === 0),
+        ).toBe(true);
+    });
+
+    it("counts only tool input, tool output and files in U of a mixed tail", () => {
+        const messages = [
+            textMessage("u1", "read the config file ".repeat(30)),
+            nativeTool("a1", "call-read", { path: "config.json" }, "config body ".repeat(60)),
+            message("u2", "user", [
+                { type: "text", text: "here is the attachment" },
+                {
+                    type: "file",
+                    mime: "text/plain",
+                    url: "file://notes.txt",
+                    content: "note ".repeat(50),
+                },
+            ]),
+            textMessage("a2", "the config sets three keys ".repeat(30), "assistant"),
+        ];
+        const tags = [
+            tag(1, "u1:p0", "message"),
+            tag(2, "call-read", "tool", { toolOwnerMessageId: "a1" }),
+            tag(3, "u2:p0", "message"),
+            tag(4, "u2:file1", "file"),
+            tag(5, "a2:p0", "message"),
+        ];
+
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
+        const textTokens = measured.parts
+            .filter((part) => part.kind === "text")
+            .reduce((sum, part) => sum + part.tokens, 0);
+
+        expect(textTokens).toBeGreaterThan(0);
+        expect(measured.parts.some((part) => part.kind === "file" && part.uTokens > 0)).toBe(true);
+        expect(measured.u).toBe(toolAndFileTokens(measured.parts));
+        expect(measured.t).toBe(measured.u + textTokens);
+    });
+
+    it("keeps a defer pass after appended prose equal to a full walk", () => {
+        const base = [
+            textMessage("u1", "start the migration ".repeat(30)),
+            nativeTool("a1", "call-1", { path: "schema.sql" }, "create table ".repeat(80)),
+            textMessage("a2", "the schema has two tables ".repeat(30), "assistant"),
+        ];
+        const baseTags = [
+            tag(1, "u1:p0", "message"),
+            tag(2, "call-1", "tool", { toolOwnerMessageId: "a1" }),
+            tag(3, "a2:p0", "message"),
+        ];
+        const first = refreshTailHygieneBaseline({
+            messages: base,
+            tags: baseTags,
+            protectedTagNumbers: new Set(),
+            cacheBusting: true,
+        });
+        const firstFull = measureTailHygiene({
+            messages: base,
+            tags: baseTags,
+            protectedTagNumbers: new Set(),
+        });
+        expect(effectiveTailHygiene(first).u).toBe(toolAndFileTokens(firstFull.parts));
+
+        const appended = [
+            ...base,
+            textMessage("u3", "now add an index ".repeat(30)),
+            textMessage("a4", "the index is on the id column ".repeat(30), "assistant"),
+        ];
+        const appendedTags = [...baseTags, tag(4, "u3:p0", "message"), tag(5, "a4:p0", "message")];
+        const deferred = refreshTailHygieneBaseline({
+            messages: appended,
+            tags: appendedTags,
+            protectedTagNumbers: new Set(),
+            cacheBusting: false,
+            previous: first,
+        });
+        const full = refreshTailHygieneBaseline({
+            messages: appended,
+            tags: appendedTags,
+            protectedTagNumbers: new Set(),
+            cacheBusting: true,
+        });
+
+        expect(deferred.lastPrefixMismatch).toBeUndefined();
+        expect(deferred.baselineGeneration).toBe(first.baselineGeneration);
+        expect(effectiveTailHygiene(deferred)).toEqual(effectiveTailHygiene(full));
+        expect(effectiveTailHygiene(deferred).u).toBe(effectiveTailHygiene(first).u);
+        expect(effectiveTailHygiene(deferred).t).toBeGreaterThan(effectiveTailHygiene(first).t);
+
+        // A second defer pass replays the unchanged prose messages from the memo.
+        const again = [...appended, textMessage("u5", "thanks ".repeat(20))];
+        const againTags = [...appendedTags, tag(6, "u5:p0", "message")];
+        const replayed = refreshTailHygieneBaseline({
+            messages: again,
+            tags: againTags,
+            protectedTagNumbers: new Set(),
+            cacheBusting: false,
+            previous: deferred,
+        });
+        const replayedFull = refreshTailHygieneBaseline({
+            messages: again,
+            tags: againTags,
+            protectedTagNumbers: new Set(),
+            cacheBusting: true,
+        });
+        expect(replayed.lastPrefixMismatch).toBeUndefined();
+        expect(effectiveTailHygiene(replayed)).toEqual(effectiveTailHygiene(replayedFull));
+        expect(effectiveTailHygiene(replayed).u).toBe(effectiveTailHygiene(first).u);
     });
 });

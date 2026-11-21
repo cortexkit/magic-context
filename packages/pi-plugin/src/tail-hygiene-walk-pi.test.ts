@@ -100,6 +100,20 @@ function toolArc(
 	};
 }
 
+/** Reclaimable mass: prose leaves U (#954), so U fixtures use tool output. */
+function toolMass(
+	ownerId: string,
+	output: string,
+	tagNumber: number,
+): { messages: object[]; ids: string[]; tag: TagEntry } {
+	const arc = toolArc(ownerId, `call-${ownerId}`, "read", {}, output);
+	return {
+		messages: arc.messages,
+		ids: [ownerId, `${ownerId}-result`],
+		tag: { ...arc.tag, tagNumber },
+	};
+}
+
 function measuredBand(u: number, t: number): string {
 	const baseline = {
 		baselineU: u,
@@ -343,20 +357,19 @@ describe("Pi rendered-tail hygiene walk", () => {
 	});
 
 	it("enforces MIN_T on measurements from Pi entries", () => {
-		const underMessages = [textMessage("user", "token ".repeat(59_000))];
-		const overMessages = [textMessage("user", "token ".repeat(61_000))];
-		const tags = [tag(1, "tail:p0", "message")];
+		const underArc = toolMass("tail", "token ".repeat(59_000), 1);
+		const overArc = toolMass("tail", "token ".repeat(61_000), 1);
 		const under = measurePiTailHygiene({
-			messages: underMessages,
-			tags,
+			messages: underArc.messages,
+			tags: [underArc.tag],
 			protectedTagNumbers: new Set(),
-			stableId: withStableIds(underMessages, ["tail"]),
+			stableId: withStableIds(underArc.messages, underArc.ids),
 		});
 		const over = measurePiTailHygiene({
-			messages: overMessages,
-			tags,
+			messages: overArc.messages,
+			tags: [overArc.tag],
 			protectedTagNumbers: new Set(),
-			stableId: withStableIds(overMessages, ["tail"]),
+			stableId: withStableIds(overArc.messages, overArc.ids),
 		});
 		expect(under.t).toBeLessThan(60_000);
 		expect(over.t).toBeGreaterThan(60_000);
@@ -387,18 +400,17 @@ describe("Pi rendered-tail hygiene walk", () => {
 
 describe("Pi baseline persistence and defer deltas", () => {
 	it("subtracts queued-drop mass through the defer delta without changing T or the frozen baseline", () => {
+		const queuedArc = toolMass("queued", "mass ".repeat(25_000), 1);
+		const remainingArc = toolMass("remaining", "mass ".repeat(45_000), 2);
 		const messages = [
-			textMessage("user", "mass ".repeat(25_000)),
-			textMessage("user", "mass ".repeat(45_000)),
+			...queuedArc.messages,
+			...remainingArc.messages,
 			textMessage("user", "mass ".repeat(30_000)),
 		];
-		const tags = [
-			tag(1, "queued:p0", "message"),
-			tag(2, "remaining:p0", "message"),
-		];
+		const tags = [queuedArc.tag, remainingArc.tag];
 		const stableId = withStableIds(messages, [
-			"queued",
-			"remaining",
+			...queuedArc.ids,
+			...remainingArc.ids,
 			"untagged",
 		]);
 		const initial = measurePiTailHygiene({
@@ -408,10 +420,10 @@ describe("Pi baseline persistence and defer deltas", () => {
 			stableId,
 		});
 		const queuedMass = measurePiTailHygiene({
-			messages: [messages[0]],
-			tags: [tags[0]],
+			messages: queuedArc.messages,
+			tags: [queuedArc.tag],
 			protectedTagNumbers: new Set(),
-			stableId: withStableIds([messages[0]], ["queued"]),
+			stableId: withStableIds(queuedArc.messages, queuedArc.ids),
 		}).u;
 		const baseline = refreshPiTailHygieneBaseline({
 			messages,
@@ -601,34 +613,31 @@ describe("Pi baseline persistence and defer deltas", () => {
 	});
 
 	it("advances the protection boundary additively without changing generation", () => {
-		const before = [
-			textMessage("user", "old mass ".repeat(2_000)),
-			textMessage("assistant", "recent mass ".repeat(2_000)),
-		];
-		const beforeTags = [
-			tag(1, "old:p0", "message"),
-			tag(2, "recent:p0", "message"),
-		];
+		const oldArc = toolMass("old", "old mass ".repeat(2_000), 1);
+		const recentArc = toolMass("recent", "recent mass ".repeat(2_000), 2);
+		const newestArc = toolMass("newest", "newest mass ".repeat(2_000), 3);
+		const before = [...oldArc.messages, ...recentArc.messages];
+		const beforeIds = [...oldArc.ids, ...recentArc.ids];
+		const beforeTags = [oldArc.tag, recentArc.tag];
 		const baseline = refreshPiTailHygieneBaseline({
 			messages: before,
 			tags: beforeTags,
 			protectedTagNumbers: new Set([1, 2]),
-			stableId: withStableIds(before, ["old", "recent"]),
+			stableId: withStableIds(before, beforeIds),
 			cacheBusting: true,
 		});
 		const oldMass = measurePiTailHygiene({
-			messages: [before[0]],
-			tags: [beforeTags[0]],
+			messages: oldArc.messages,
+			tags: [oldArc.tag],
 			protectedTagNumbers: new Set(),
-			stableId: withStableIds([before[0]], ["old"]),
+			stableId: withStableIds(oldArc.messages, oldArc.ids),
 		}).t;
-		const newest = textMessage("user", "newest mass ".repeat(2_000));
-		const messages = [...before, newest];
+		const messages = [...before, ...newestArc.messages];
 		const defer = refreshPiTailHygieneBaseline({
 			messages,
-			tags: [...beforeTags, tag(3, "newest:p0", "message")],
+			tags: [...beforeTags, newestArc.tag],
 			protectedTagNumbers: new Set([2, 3]),
-			stableId: withStableIds(messages, ["old", "recent", "newest"]),
+			stableId: withStableIds(messages, [...beforeIds, ...newestArc.ids]),
 			cacheBusting: false,
 			previous: baseline,
 		});
