@@ -15,6 +15,7 @@ import {
 import { clearCompressionDepthRange } from "../../features/magic-context/compression-depth-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import {
+    clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
     getPendingCompactionMarkerState,
     updateSessionMeta,
@@ -330,6 +331,15 @@ export async function executePartialRecompInternal(
 
             // Clear partial-range marker — staging is now empty.
             for (const finish of sidebarRuns.splice(0)) finish(true);
+            // A published rebuild proves the historian works, as an incremental publish does.
+            // The rebuild is already committed, so a failure here must not fail it.
+            try {
+                clearHistorianFailureState(db, sessionId);
+            } catch (error) {
+                log(
+                    `[magic-context] partial recomp could not clear historian failure state: ${error}`,
+                );
+            }
             setRecompPartialRange(db, sessionId, null);
             // Reset depth counters for rebuilt range so fresh compartments start
             // at depth 0. Prior/tail depth is preserved.

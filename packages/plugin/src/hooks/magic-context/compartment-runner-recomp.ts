@@ -18,6 +18,7 @@ import {
 } from "../../features/magic-context/storage-historian-runs";
 import {
     clearCachedM0M1,
+    clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
     getPendingCompactionMarkerState,
     updateSessionMeta,
@@ -305,6 +306,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
             if (!promoted) return null;
             for (const finish of sidebarRuns.splice(0)) finish(true);
+            // A published rebuild proves the historian works, as an incremental publish does.
+            afterPublish("historian-failure-state", () =>
+                clearHistorianFailureState(db, sessionId),
+            );
 
             // Full recomp rebuilds every compartment from message 1 onward, so
             // all pre-existing compression-depth rows are stale — the compressor
@@ -687,6 +692,8 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             return "## Magic Recomp — Skipped\n\nAnother process acquired the compartment-state lease before recomp could publish. No state was written.";
         }
         for (const finish of sidebarRuns.splice(0)) finish(true);
+        // A published rebuild proves the historian works, as an incremental publish does.
+        afterPublish("historian-failure-state", () => clearHistorianFailureState(db, sessionId));
         // Full recomp rebuilds every compartment, so all pre-existing depth
         // rows are stale. Matches partial recomp's behavior for rebuilt ranges.
         afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
