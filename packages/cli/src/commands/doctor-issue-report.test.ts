@@ -72,6 +72,27 @@ describe("doctor --issue --report dispatch", () => {
     });
 });
 
+describe("doctor --fix dispatch", () => {
+    it("forwards --fix to the Pi doctor without --force", async () => {
+        const pi = spyOn(piDoctor, "doctor").mockResolvedValue(0);
+        restores.push(() => pi.mockRestore());
+
+        await dispatchDoctor({ kind: "pi" }, { fix: true });
+
+        expect(pi).toHaveBeenCalledWith(["--fix"]);
+    });
+
+    it("forwards --fix to the Oh My Pi doctor without --force", async () => {
+        const omp = spyOn(ompDoctor, "runDoctor").mockResolvedValue(0);
+        restores.push(() => omp.mockRestore());
+
+        await dispatchDoctor({ kind: "omp" }, { fix: true });
+
+        expect(omp).toHaveBeenCalledWith(expect.objectContaining({ fix: true }));
+        expect(omp.mock.calls[0]?.[0]?.force).toBeUndefined();
+    });
+});
+
 function fakeReport(root: string, opencodeVersion = "1.0.0"): DiagnosticReport {
     const logPath = join(root, "opencode.log");
     writeFileSync(logPath, "INFO started\n");

@@ -89,6 +89,7 @@ interface DoctorDeps {
 
 export interface RunOmpDoctorOptions {
     force?: boolean;
+    fix?: boolean;
     issue?: boolean;
     /** With `issue`, write the report here without prompting (relative to `cwd`). */
     report?: string;
@@ -639,6 +640,15 @@ export async function runDoctor(options: RunOmpDoctorOptions = {}): Promise<numb
     prompts.intro("Magic Context for Oh My Pi (OMP) Doctor");
     const first = await runHealthChecks({ cwd, prompts, deps });
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
+    if (options.fix || options.force) {
+        // Changed extension modules need a restart: https://omp.sh/docs/plugins#reload-an-active-session
+        prompts.log.info(
+            `Doctor does not upgrade the installed Oh My Pi plugin. Run \`omp plugin install ${OMP_PLUGIN_PACKAGE}@latest\`, then restart running Oh My Pi sessions.`,
+        );
+    }
+    if (options.fix && !options.force) {
+        prompts.log.info("Oh My Pi config repairs need --force.");
+    }
     if (!options.force) return first.fail === 0 ? 0 : 1;
     if (first.fail === 0 && !first.repairPlan.writeUserConfig) return 0;
     if (migrationRefused && first.repairPlan.writeUserConfig) {

@@ -248,6 +248,7 @@ function baseOptions(root: string, cwd: string, prompts: MockPrompts): RunDoctor
                 throw new Error("gh unavailable");
             },
             spawnSync: () => ({ status: 1, stdout: "", stderr: "not expected" }) as never,
+            probeCacheUse: () => ({ status: "free" }),
         },
     };
 }
@@ -1047,6 +1048,122 @@ describe("Pi doctor", () => {
         ).toBe(false);
     });
 
+    it("clears only stale Pi caches with --fix and also clears current caches with --force", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const stale = writePiCachePackage(join(root, ".pi", "cache"), "0.0.9");
+        const current = writePiCachePackage(join(root, ".cache", "pi"), "0.1.0");
+        const options = baseOptions(root, cwd, new MockPrompts());
+
+        await runDoctor(options);
+        expect(existsSync(stale)).toBe(true);
+        await runDoctor({ ...options, ...parseDoctorArgs(["--fix"]) });
+        expect(existsSync(stale)).toBe(false);
+        expect(existsSync(current)).toBe(true);
+        await runDoctor({ ...options, ...parseDoctorArgs(["--force"]) });
+        expect(existsSync(current)).toBe(false);
+    });
+
+    it("keeps unverifiable Pi caches with --fix when npm is unavailable", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const cache = writePiCachePackage(join(root, ".pi", "cache"), "0.0.9");
+        writeFileSync(join(cache, "package.json"), '{"name":"@cortexkit/pi-magic-context"}');
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+
+        await runDoctor({
+            ...options,
+            ...parseDoctorArgs(["--fix"]),
+            deps: { ...options.deps, getLatestNpmVersion: () => null },
+        });
+
+        expect(existsSync(cache)).toBe(true);
+        expect(prompts.messages.join("\n")).toContain(
+            "Pi extension cache version check unavailable",
+        );
+    });
+
+    it.each([
+        ["cache file", null, "/usr/bin/node", "node"],
+        ["Pi database", "Pi", "node\u0000/bin/pi\u0000", "Pi"],
+        ["Oh My Pi database", "Oh My Pi", "/usr/bin/omp", "Oh My Pi"],
+    ])("keeps Pi caches when a %s is in use", async (_target, dbHost, command, name) => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const cache = writePiCachePackage(join(root, ".pi", "cache"), "0.0.9");
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+        const db = join(root, ".local", "share", "cortexkit", "magic-context", "context.db");
+
+        await runDoctor({
+            ...options,
+            force: true,
+            deps: {
+                ...options.deps,
+                probeCacheUse: (targets) => {
+                    if (targets.directories.length) {
+                        expect(targets).toEqual({ files: [], directories: [cache] });
+                        return dbHost ? { status: "free" } : { status: "in_use", pids: [1234] };
+                    }
+                    expect(targets).toEqual({
+                        files: [db, `${db}-wal`, `${db}-shm`],
+                        directories: [],
+                    });
+                    return { status: "in_use", pids: [1234] };
+                },
+                readProcessCommand: () => command,
+            },
+        });
+
+        expect(existsSync(cache)).toBe(true);
+        expect(prompts.messages.join("\n")).toContain(`${name} (PID 1234)`);
+        expect(prompts.messages.join("\n")).toContain("Quit Pi");
+    });
+
+    it.each([
+        "OpenCode holder",
+        "unavailable lsof",
+    ])("handles an %s without mistaking it for a running Pi", async (scenario) => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const cache = writePiCachePackage(join(root, ".pi", "cache"), "0.0.9");
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+        const unavailable = scenario === "unavailable lsof";
+        const lookedUpPids: number[] = [];
+
+        await runDoctor({
+            ...options,
+            force: true,
+            deps: {
+                ...options.deps,
+                probeCacheUse: ({ files }) => {
+                    if (!files.length) return { status: "free" };
+                    return unavailable
+                        ? { status: "unknown", reason: "could not run lsof (ENOENT)" }
+                        : { status: "in_use", pids: [4321] };
+                },
+                readProcessCommand: (pid) => {
+                    lookedUpPids.push(pid);
+                    return "/usr/bin/opencode serve";
+                },
+            },
+        });
+
+        expect(existsSync(cache)).toBe(unavailable);
+        expect(lookedUpPids).toEqual(unavailable ? [] : [4321]);
+        if (unavailable) expect(prompts.messages.join("\n")).toContain("could not run lsof");
+    });
+
     it("clears stale caches under PI_CODING_AGENT_DIR's parent without touching HOME/.pi/cache", async () => {
         const root = makeTempRoot();
         const home = join(root, "home");
@@ -1074,7 +1191,7 @@ describe("Pi doctor", () => {
         expect(existsSync(isolatedCachePlugin)).toBe(false);
         expect(existsSync(homeCachePlugin)).toBe(true);
         expect(prompts.messages.join("\n")).toContain(
-            `Cleared stale Pi extension cache: ${isolatedCachePlugin}`,
+            `Cleared Pi extension cache: ${isolatedCachePlugin}`,
         );
     });
 

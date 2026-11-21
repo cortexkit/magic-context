@@ -156,6 +156,7 @@ export async function dispatchDoctor(
         case "pi": {
             const piArgs: string[] = [];
             if (options.force) piArgs.push("--force");
+            if (options.fix) piArgs.push("--fix");
             if (options.issue) piArgs.push("--issue");
             if (options.report) piArgs.push("--report", options.report);
             return runPiDoctor(piArgs);
@@ -163,6 +164,7 @@ export async function dispatchDoctor(
         case "omp":
             return runOmpDoctor({
                 force: options.force,
+                fix: options.fix,
                 issue: options.issue,
                 report: options.report,
             });

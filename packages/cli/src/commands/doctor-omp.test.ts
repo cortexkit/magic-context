@@ -62,7 +62,11 @@ afterEach(() => {
 });
 
 describe("OMP doctor", () => {
-    it("accepts a healthy OMP installation", async () => {
+    it.each([
+        "without flags",
+        "--fix",
+        "--force",
+    ])("accepts a healthy OMP installation %s", async (mode) => {
         const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-doctor-"));
         roots.push(root);
         const agentDir = join(root, ".omp", "agent");
@@ -87,6 +91,8 @@ describe("OMP doctor", () => {
         const code = await runDoctor({
             cwd: root,
             prompts,
+            fix: mode === "--fix",
+            force: mode === "--force",
             deps: {
                 detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
                 getOmpVersion: () => "17.1.7",
@@ -100,7 +106,10 @@ describe("OMP doctor", () => {
                 ],
                 getOmpSetting: ((_path: string, key: string) =>
                     key === "compaction.enabled" ? false : "off") as never,
-                runOmpCommand: () => ({ ok: true, stdout: `${agentDir}/./`, stderr: "" }),
+                runOmpCommand: (_path, args) => {
+                    expect(args).toEqual(["config", "path"]);
+                    return { ok: true, stdout: `${agentDir}/./`, stderr: "" };
+                },
             },
         });
 
@@ -110,6 +119,14 @@ describe("OMP doctor", () => {
             `warn:WARN Magic Context storage is at ${join(root, ".local", "share", "cortexkit", "magic-context")}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`,
         );
         expect(prompts.messages.join("\n")).toContain("FAIL 0");
+        const guidance = prompts.messages.find((message) =>
+            message.includes("omp plugin install @cortexkit/pi-magic-context@latest"),
+        );
+        if (mode === "without flags") expect(guidance).toBeUndefined();
+        else expect(guidance).toContain("restart running Oh My Pi sessions");
+        expect(
+            prompts.messages.some((message) => message.includes("config repairs need --force")),
+        ).toBe(mode === "--fix");
     });
 
     it("does not fail or run OMP checks when Magic Context is not installed", async () => {

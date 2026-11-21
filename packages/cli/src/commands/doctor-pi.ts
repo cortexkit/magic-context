@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { resolveCortexKitProjectConfigPath } from "@magic-context/core/config/migrate-config-location";
 import {
     dropInheritedEmbeddingKeyOnRedirect,
@@ -41,6 +41,8 @@ import {
     parseJsoncRecovering,
     sanitizeParsedJson,
 } from "@magic-context/core/shared/jsonc-parser";
+import { piHarnessKindFromExecutable } from "@magic-context/core/shared/pi-executable";
+import { classifyProcessKind, readProcessCommand } from "@magic-context/core/shared/rpc-utils";
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import {
     findEmptyPiModelChains,
@@ -105,6 +107,11 @@ import {
     readStorageVersions,
 } from "../lib/storage-versions";
 import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
+import {
+    type HostUseProbe,
+    type HostUseProbeTargets,
+    probeHostProcessesUsing,
+} from "./doctor-opencode2-cache";
 import { removeDeprecatedReasoningAge } from "./reasoning-config-migration";
 import { writePiSettingsPackage } from "./setup-pi";
 
@@ -148,6 +155,8 @@ interface DoctorDeps {
     selfVersion: () => string;
     probeEmbeddingEndpoint: typeof probeEmbeddingEndpoint;
     openExistingContextDatabase: typeof openExistingContextDatabase;
+    probeCacheUse: (targets: HostUseProbeTargets) => HostUseProbe;
+    readProcessCommand: typeof readProcessCommand;
     now: () => Date;
     execFileSync: typeof execFileSync;
     spawnSync: typeof spawnSync;
@@ -155,6 +164,7 @@ interface DoctorDeps {
 
 export interface RunDoctorOptions extends V22BackfillCommandArgs {
     force?: boolean;
+    fix?: boolean;
     issue?: boolean;
     report?: string;
     help?: boolean;
@@ -173,6 +183,8 @@ const DEFAULT_DEPS: DoctorDeps = {
     selfVersion,
     probeEmbeddingEndpoint,
     openExistingContextDatabase,
+    probeCacheUse: probeHostProcessesUsing,
+    readProcessCommand,
     now: () => new Date(),
     execFileSync,
     spawnSync,
@@ -193,7 +205,12 @@ function printDoctorHelp(): void {
     console.log("");
     console.log("  Usage:");
     console.log("    magic-context-pi doctor          Run health checks");
-    console.log("    magic-context-pi doctor --force  Repair safe issues, then re-check");
+    console.log(
+        "    magic-context-pi doctor --fix    Repair config and clear stale caches, then re-check",
+    );
+    console.log(
+        "    magic-context-pi doctor --force  Repair config and clear caches even if current",
+    );
     console.log("    magic-context-pi doctor --issue  Create a sanitized bug report");
     console.log(
         "    magic-context-pi doctor --issue --report <path>  Write a report without prompting",
@@ -1072,12 +1089,18 @@ async function runHealthChecks(options: {
             expectedPluginVersion,
             options.force === true,
         );
-        if (staleCaches.length > 0) {
+        if (!expectedPluginVersion && !options.force) {
+            add(
+                results,
+                "warn",
+                "Pi extension cache version check unavailable; preserving cached packages. Use doctor --force to clear them.",
+            );
+        } else if (staleCaches.length > 0) {
             repairPlan.clearCachePaths = staleCaches.map((entry) => entry.path);
             add(
                 results,
                 "warn",
-                `Stale Pi extension cache found: ${staleCaches.map((entry) => `${entry.path}${entry.version ? ` (v${entry.version})` : ""}`).join(", ")}`,
+                `${options.force ? "Pi extension cache selected for clearing" : "Stale Pi extension cache found"}: ${staleCaches.map((entry) => `${entry.path}${entry.version ? ` (v${entry.version})` : ""}`).join(", ")}`,
             );
         } else {
             add(results, "pass", "Pi extension cache clean (no stale cached package found)");
@@ -1183,7 +1206,53 @@ function writeDefaultMagicContextConfig(path: string): void {
     writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`, { ownerOnly: true });
 }
 
-function repair(plan: RepairPlan, prompts: PromptIO): number {
+function cacheHolderName(command: string | null): string {
+    const [executable, script] = command?.replaceAll("\u0000", " ").trim().split(/\s+/, 2) ?? [];
+    if (classifyProcessKind(command) === "Pi") {
+        return piHarnessKindFromExecutable(executable) === "omp" ||
+            piHarnessKindFromExecutable(script) === "omp" ||
+            script?.includes("/@oh-my-pi/")
+            ? "Oh My Pi"
+            : "Pi";
+    }
+    // Report an executable name, never the command line (which can hold credentials).
+    const name = basename(executable?.replaceAll("\\", "/") ?? "");
+    return /^[\w.-]+$/.test(name) ? name : "process";
+}
+
+function piCacheClearBlocker(paths: string[], deps: DoctorDeps): string | undefined {
+    const cache = deps.probeCacheUse({ files: [], directories: paths });
+    if (cache.status === "unknown") return cache.reason;
+    if (cache.status === "in_use") {
+        const holders = cache.pids.map(
+            (pid) => `${cacheHolderName(deps.readProcessCommand(pid))} (PID ${pid})`,
+        );
+        return `cache files are in use by ${holders.join(", ")}`;
+    }
+
+    // Loaded extension files need not stay open, but Magic Context keeps the
+    // database open until Pi exits. OpenCode also uses this database, but it
+    // does not load the Pi cache.
+    const db = join(getMagicContextStorageDir(), "context.db");
+    const use = deps.probeCacheUse({ files: [db, `${db}-wal`, `${db}-shm`], directories: [] });
+    if (use.status === "unknown") return use.reason;
+    if (use.status === "free") return undefined;
+    const holders: string[] = [];
+    for (const pid of use.pids) {
+        const command = deps.readProcessCommand(pid);
+        if (!command?.trim()) return `could not identify shared database holder (PID ${pid})`;
+        if (classifyProcessKind(command) === "Pi") {
+            holders.push(`${cacheHolderName(command)} (PID ${pid})`);
+        }
+    }
+    if (holders.length) return `shared database is in use by ${holders.join(", ")}`;
+}
+
+function repair(
+    plan: RepairPlan,
+    prompts: PromptIO,
+    deps: DoctorDeps,
+): { fixed: number; cacheBlocked: boolean } {
     let fixed = 0;
     for (const path of plan.reasoningAgeConfigPaths) {
         const content = readFileSync(path, "utf8");
@@ -1229,10 +1298,19 @@ function repair(plan: RepairPlan, prompts: PromptIO): number {
         }
     }
 
+    if (plan.clearCachePaths.length === 0) return { fixed, cacheBlocked: false };
+    const blocker = piCacheClearBlocker(plan.clearCachePaths, deps);
+    if (blocker !== undefined) {
+        prompts.log.warn(
+            `Pi extension cache was not cleared: ${blocker}. Quit Pi or Oh My Pi and rerun doctor.`,
+        );
+        return { fixed, cacheBlocked: true };
+    }
+
     for (const path of plan.clearCachePaths) {
         try {
             rmSync(path, { recursive: true, force: true });
-            prompts.log.success(`Cleared stale Pi extension cache: ${path}`);
+            prompts.log.success(`Cleared Pi extension cache: ${path}`);
             fixed += 1;
         } catch (error) {
             console.error(
@@ -1241,7 +1319,7 @@ function repair(plan: RepairPlan, prompts: PromptIO): number {
         }
     }
 
-    return fixed;
+    return { fixed, cacheBlocked: false };
 }
 
 function runGhCommandWithDeps(deps: DoctorDeps, args: string[]): GhCommandResult {
@@ -1434,8 +1512,8 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
     console.log("");
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
 
-    if (options.force) {
-        const fixed = repair(first.repairPlan, prompts);
+    if (options.fix || options.force) {
+        const { fixed, cacheBlocked } = repair(first.repairPlan, prompts, deps);
         console.log("");
         prompts.log.message(
             `Repair attempted; ${fixed} item(s) changed. Re-running health checks.`,
@@ -1451,10 +1529,11 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
         prompts.log.message(
             `Summary: PASS ${second.pass} / WARN ${second.warn} / FAIL ${second.fail}`,
         );
+        const failed = second.fail > 0 || cacheBlocked;
         prompts.outro(
-            second.fail > 0 ? "Doctor found failures after repair" : "Doctor repair complete",
+            failed ? "Doctor found issues that need manual attention" : "Doctor repair complete",
         );
-        return second.fail > 0 ? 1 : 0;
+        return failed ? 1 : 0;
     }
 
     prompts.outro(first.fail > 0 ? "Doctor found failures" : "Doctor complete");
@@ -1478,6 +1557,7 @@ export function parseDoctorArgs(args: string[]): RunDoctorOptions {
     const report = valueAfter(args, "--report");
     return {
         force: args.includes("--force"),
+        fix: args.includes("--fix"),
         issue: args.includes("--issue") || report !== null,
         ...(report !== null ? { report } : {}),
         help: args.includes("--help") || args.includes("-h"),
