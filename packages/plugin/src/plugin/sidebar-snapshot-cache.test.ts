@@ -181,6 +181,30 @@ describe("applyStickySnapshotCache", () => {
         expect(result.conversationTokens).toBe(100_000);
     });
 
+    test("keeps the native-window percentage with the cached tokens during the zero window", () => {
+        applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({
+                inputTokens: 475_000,
+                usagePercentage: 47.5,
+                native_context_usage_percentage: 47.5,
+                compaction_enabled: false,
+            }),
+        );
+        // A fresh build in the zero window divides 0 tokens by the native window.
+        const result = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({
+                inputTokens: 0,
+                native_context_usage_percentage: 0,
+                compaction_enabled: false,
+                compartmentInProgress: true,
+            }),
+        );
+        expect(result.inputTokens).toBe(475_000);
+        expect(result.native_context_usage_percentage).toBe(47.5);
+    });
+
     test("sticks when compartment work is explicitly in progress", () => {
         applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
         const result = applyStickySnapshotCache(

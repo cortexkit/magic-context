@@ -63,10 +63,6 @@ test("N4 sums only this session's queued drop tokens with indexed lookups", () =
     expect(sql).toBeDefined();
     prepared.mockRestore();
     const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(session) as { detail: string }[];
-    console.log(
-        "N4",
-        plan.map((row) => row.detail),
-    );
     expect(plan.every((row) => !/SCAN (?:p|t|pending_ops|tags)\b/.test(row.detail))).toBe(true);
     expect(plan.some((row) => /idx_pending_ops_session_tag_id/.test(row.detail))).toBe(true);
 });
@@ -104,17 +100,13 @@ test("N5 counts post-cache compartments and visible unexpired active or permanen
     expect(snapshot.memoriesSinceCache).toBe(2);
     const queries = prepared.mock.calls.map(([sql]) => sql);
     prepared.mockRestore();
-    for (const [label, pattern, params] of [
+    for (const [, pattern, params] of [
         ["N5 summaries", /COUNT\(\*\).*compartments.*sequence\s*>/s, [session, 0]],
         ["N5 memories", /SELECT.*FROM memories.*id\s*>/s, [project, 1, Date.now()]],
     ] as const) {
         const sql = queries.find((sql) => pattern.test(sql));
         expect(sql).toBeDefined();
         const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as { detail: string }[];
-        console.log(
-            label,
-            plan.map((row) => row.detail),
-        );
         expect(plan.some((row) => /SEARCH .*USING (?:COVERING )?INDEX/.test(row.detail))).toBe(
             true,
         );
@@ -148,5 +140,67 @@ test("N5 uses workspace sharing and classification from the render policy", () =
     insert.run("git:foreign", "CONSTRAINTS", "private", "active", 0, "project");
     insert.run("git:foreign", "ARCHITECTURE", "not-shared", "active", 1, "ecosystem");
     insert.run("git:foreign", "CONSTRAINTS", "session-only", "active", 1, "session");
+    db.prepare("UPDATE session_meta SET cached_m0_materialized_at = 1 WHERE session_id = ?").run(
+        session,
+    );
     expect(buildSidebarSnapshot(db, session, directory).memoriesSinceCache).toBe(3);
+});
+
+function seedHistoryAndMemory(db: Database, project: string, session: string) {
+    appendCompartments(db, session, [
+        { sequence: 0, startMessage: 1, endMessage: 1, title: "History", content: "History" },
+    ]);
+    db.prepare(`INSERT INTO memories(project_path, category, content, normalized_hash,
+        status, first_seen_at, last_seen_at, created_at, updated_at)
+        VALUES (?, 'CONSTRAINTS', 'memory', 'seed', 'active', 1, 1, 1, 1)`).run(project);
+}
+
+test("N5 leaves the post-cache counts unknown before the first m[0] is built", () => {
+    const { db, directory, project, session } = fixture();
+    seedHistoryAndMemory(db, project, session);
+    const prepared = spyOn(db, "prepare");
+    const snapshot = buildSidebarSnapshot(db, session, directory);
+    const queries = prepared.mock.calls.map(([sql]) => sql);
+    prepared.mockRestore();
+    expect(snapshot.cachedM0MaterializedAt).toBeNull();
+    expect(snapshot.summariesSinceCache).toBeUndefined();
+    expect(snapshot.memoriesSinceCache).toBeUndefined();
+    expect(queries.some((sql) => /FROM memories[\s\S]*id\s*>/.test(sql))).toBe(false);
+});
+
+test("N5 leaves the cache rows unknown in Rust mode, where the TypeScript m[0] columns are not written", () => {
+    const { db, directory, project, session } = fixture();
+    seedHistoryAndMemory(db, project, session);
+    db.prepare(`UPDATE session_meta SET cached_m0_materialized_at = 1234,
+        cached_m0_max_compartment_seq = -1, cached_m0_max_memory_id = 0 WHERE session_id = ?`).run(
+        session,
+    );
+    const snapshot = buildSidebarSnapshot(db, session, directory, undefined, undefined, {
+        transform_mode: "rust",
+    });
+    expect(snapshot.cachedM0MaterializedAt).toBeNull();
+    expect(snapshot.summariesSinceCache).toBeUndefined();
+    expect(snapshot.memoriesSinceCache).toBeUndefined();
+});
+
+test("N4 leaves the drop estimate unknown when a queued drop has no token count", () => {
+    const { db, directory, session } = fixture();
+    const insert = db.prepare(
+        "INSERT INTO tags(session_id, message_id, tag_number, type, byte_size, token_count) VALUES (?, ?, ?, 'message', 10, ?)",
+    );
+    insert.run(session, "m1", 101, 123);
+    insert.run(session, "m2", 102, null);
+    for (const tag of getTagsBySession(db, session))
+        expect(queuePendingDropForUnchangedTag(db, session, tag)).toBe(true);
+    const snapshot = buildSidebarSnapshot(db, session, directory);
+    expect(snapshot.queuedDropCount).toBe(2);
+    expect(snapshot.queuedDropTokens).toBeUndefined();
+});
+
+test("reports the persisted historian failure count, which survives a restart", () => {
+    const { db, directory, session } = fixture();
+    db.prepare("UPDATE session_meta SET historian_failure_count = 2 WHERE session_id = ?").run(
+        session,
+    );
+    expect(buildSidebarSnapshot(db, session, directory).historianFailureCount).toBe(2);
 });

@@ -106,6 +106,8 @@ export function applyStickySnapshotCache(
         ...fresh,
         usagePercentage: cached.snapshot.usagePercentage,
         inputTokens: cached.snapshot.inputTokens,
+        // The fresh value is 0 tokens over the native window; the gauge shows it beside the cached tokens.
+        native_context_usage_percentage: cached.snapshot.native_context_usage_percentage,
         systemPromptTokens: cached.snapshot.systemPromptTokens,
         compartmentTokens: cached.snapshot.compartmentTokens,
         factTokens: cached.snapshot.factTokens,
