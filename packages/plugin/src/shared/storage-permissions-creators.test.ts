@@ -177,7 +177,9 @@ try {
     const lstat = spyOn(fs, 'lstatSync');
     try {
         expect(tightenStorageTreeSync(root)).toEqual({ tightened: 5, failures: 0 });
-        expect(lstat.mock.calls.length).toBeLessThanOrEqual(11);
+        // The bounded check (11 calls) plus one full walk of this small tree,
+        // because the bounded check tightened entries.
+        expect(lstat.mock.calls.length).toBeLessThanOrEqual(18);
     } finally { lstat.mockRestore(); }
     expect(fs.lstatSync(cache).mode & 0o777).toBe(0o700);
     expect(fs.lstatSync(file).mode & 0o777).toBe(0o600);

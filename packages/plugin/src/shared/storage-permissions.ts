@@ -335,6 +335,10 @@ export function tightenStorageTreeSync(
         visit(join(root, "models"), true, true);
         // The Rust logger does not use the storage helpers.
         visit(join(root, "logs"), true, true);
+        // A loose entry here shows that the tree changed after certification.
+        // A process with a working directory in the tree keeps its access
+        // through the root's mode, so this call tightens all entries, not the next start.
+        if (tightened > 0) visit(root);
         if (tightened > 0 || failures > 0) removeMarker();
     } else {
         visit(root);

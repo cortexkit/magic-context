@@ -194,6 +194,18 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         expect(fs.lstatSync(directory).mode & 0o777).toBe(0o700);
     });
 
+    it("walks the full tree in the same call when a certified start finds a loose root", () => {
+        const root = fixture();
+        fs.writeFileSync(join(root, markerName), "1\n", { mode: 0o600 });
+        const deep = join(root, "lkg-recovery-fences", "5.json");
+        fs.chmodSync(deep, 0o644);
+        fs.chmodSync(root, 0o755);
+        expect(tightenStorageTreeSync(root)).toMatchObject({ tightened: 2, failures: 0 });
+        expect(fs.lstatSync(root).mode & 0o777).toBe(0o700);
+        expect(fs.lstatSync(deep).mode & 0o777).toBe(0o600);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+    });
+
     it("removes certification while enforcement is off before a later private open", () => {
         const root = fixture();
         fs.writeFileSync(join(root, markerName), "1\n", { mode: 0o600 });
