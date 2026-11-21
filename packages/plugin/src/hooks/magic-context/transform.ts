@@ -772,6 +772,7 @@ export interface TransformDeps {
         /** From the user-level `language` setting; English word rules when absent. */
         wordRules?: CavemanWordRules;
     };
+    autoDrop?: import("./auto-drop").AutoDropConfig;
     /** Fire-and-forget active-session embed backfill after transform returns. */
     maybeAutoEmbedSession?: (sessionId: string) => void;
     /**
@@ -3990,6 +3991,7 @@ export function createTransform(deps: TransformDeps) {
             // equivalent recovery path and their context is already curated by
             // the primary agent that spawned them.
             cavemanTextCompression: !reducedMode ? deps.cavemanTextCompression : undefined,
+            autoDrop: deps.autoDrop,
             smartDrops: deps.smartDrops === true,
             protectedTools: deps.protectedTools,
             // Pass the single resolved provider through to postprocess so every

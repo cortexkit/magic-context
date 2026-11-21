@@ -183,6 +183,10 @@ export interface MagicContextDeps {
             enabled: boolean;
             min_chars: number;
         };
+        auto_drop?: {
+            reread: boolean;
+            retried_errors: boolean;
+        };
         transform_mode?: ResolvedTransformMode;
         /** Path to the subc daemon's connection file. Threaded to the module
          *  transport so a host that publishes it outside the default data-dir
@@ -786,6 +790,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     wordRules: cavemanWordRulesForLanguage(deps.config.language),
                 }
               : undefined,
+        autoDrop:
+            compactionOff || !deps.config.auto_drop
+                ? undefined
+                : {
+                      reread: deps.config.auto_drop.reread,
+                      retriedErrors: deps.config.auto_drop.retried_errors,
+                  },
         maybeAutoEmbedSession,
         transformMode: deps.config.transform_mode,
         promptSurface: deps.config.prompt_surface,

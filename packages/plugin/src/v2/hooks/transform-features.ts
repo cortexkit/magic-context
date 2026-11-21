@@ -50,6 +50,13 @@ export function createV2TransformFeatureDeps(
                     wordRules: cavemanWordRulesForLanguage(config.language),
                 }
               : undefined,
+        autoDrop:
+            compactionOff || !config.auto_drop
+                ? undefined
+                : {
+                      reread: config.auto_drop.reread,
+                      retriedErrors: config.auto_drop.retried_errors,
+                  },
     } satisfies Partial<TransformDeps>;
 }
 
