@@ -226,6 +226,15 @@ fn write_config_atomic(
         Some(root) => format!("project-{}", project_hash(root)),
         None => "user".to_string(),
     };
+    // Hold the lock of this config's backup set from before the read of the
+    // current config until after the replace. Two saves that overlap could
+    // otherwise both copy the same old version, and the version between them
+    // would have no copy.
+    let scope_mutex = in_process_scope_lock(&backup_dir, &backup_scope);
+    let _in_process = scope_mutex
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _cross_process = lock_backup_scope(&backup_dir, &backup_scope, CONFIG_LOCK_WAIT)?;
     let parent = path
         .parent()
         .ok_or_else(|| "Config path has no parent directory".to_string())?;
@@ -292,6 +301,110 @@ fn resolve_symlinked_config(path: &Path) -> Result<PathBuf, String> {
     Err("Config path has too many levels of symlinks".to_string())
 }
 
+/// The longest time that a save waits for a different dashboard process to end
+/// its save of the same config.
+const CONFIG_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The lock file of one backup set: `.<scope>.lock` in the backup folder.
+fn backup_scope_lock_path(backup_dir: &Path, scope: &str) -> PathBuf {
+    backup_dir.join(format!(".{scope}.lock"))
+}
+
+/// One mutex for each backup set in this process. The file lock alone does not
+/// serialize threads on platforms that have no `flock`, and saves of different
+/// configs do not wait for each other.
+fn in_process_scope_lock(backup_dir: &Path, scope: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    Arc::clone(
+        locks
+            .entry(backup_scope_lock_path(backup_dir, scope))
+            .or_default(),
+    )
+}
+
+/// Take the exclusive lock of one backup set, so that a save in a different
+/// dashboard process waits. The lock stays until the returned file closes.
+/// If the lock is not free in `wait`, the save is refused, as when no copy can
+/// be made.
+#[cfg(unix)]
+fn lock_backup_scope(
+    backup_dir: &Path,
+    scope: &str,
+    wait: std::time::Duration,
+) -> Result<Option<std::fs::File>, String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::io::AsRawFd;
+
+    let refuse = |e: std::io::Error| {
+        format!(
+            "Refusing to save config: cannot lock the backup folder {}: {e}",
+            backup_dir.display()
+        )
+    };
+    ensure_private_backup_directory(backup_dir).map_err(|e| {
+        format!(
+            "Refusing to save config: cannot use the backup folder {}: {e}",
+            backup_dir.display()
+        )
+    })?;
+    // O_NOFOLLOW: a symlink at the lock path must not open a different file.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(backup_scope_lock_path(backup_dir, scope))
+        .map_err(refuse)?;
+    let metadata = file.metadata().map_err(refuse)?;
+    if !metadata.is_file() {
+        return Err(refuse(std::io::Error::other(
+            "the lock path is not a regular file",
+        )));
+    }
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(refuse)?;
+    }
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(file));
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(code) if code == libc::EWOULDBLOCK => {}
+            _ => return Err(refuse(error)),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(refuse(std::io::Error::other(
+                "a different save of this config did not end in time",
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Without `flock`, only the in-process mutex serializes saves. Saves in
+/// different dashboard processes can then overlap.
+#[cfg(not(unix))]
+fn lock_backup_scope(
+    _backup_dir: &Path,
+    _scope: &str,
+    _wait: std::time::Duration,
+) -> Result<Option<std::fs::File>, String> {
+    Ok(None)
+}
+
 /// Number of copies kept for each config in the backup folder.
 const CONFIG_BACKUP_LIMIT: usize = 5;
 
@@ -353,6 +466,8 @@ fn back_up_current_config(path: &Path, backup_dir: &Path, scope: &str) -> Result
     else {
         return Ok(());
     };
+    #[cfg(test)]
+    run_after_backup_read_hook(path);
     ensure_private_backup_directory(backup_dir).map_err(|e| {
         format!(
             "Refusing to save config: cannot use the backup folder {}: {e}",
@@ -379,6 +494,26 @@ fn back_up_current_config(path: &Path, backup_dir: &Path, scope: &str) -> Result
     })?;
     prune_config_backups(backup_dir, &prefix, &suffix);
     Ok(())
+}
+
+/// A test can stop a save after it reads the current config, to make two saves
+/// overlap at the point where a lost backup can occur.
+#[cfg(test)]
+type BackupReadHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(test)]
+static AFTER_BACKUP_READ_HOOK: std::sync::Mutex<Option<BackupReadHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn run_after_backup_read_hook(path: &Path) {
+    let hook = AFTER_BACKUP_READ_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(path);
+    }
 }
 
 fn read_current_config_no_follow(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
@@ -1023,6 +1158,34 @@ mod tests {
         names
     }
 
+    /// The config copies in a backup folder, without the lock files.
+    fn backup_copies(dir: &Path) -> Vec<String> {
+        sorted_names(dir)
+            .into_iter()
+            .filter(|name| !name.ends_with(".lock"))
+            .collect()
+    }
+
+    /// Remove the read hook also when the test fails.
+    struct BackupReadHookGuard;
+
+    impl BackupReadHookGuard {
+        fn set(hook: BackupReadHook) -> Self {
+            *AFTER_BACKUP_READ_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+            Self
+        }
+    }
+
+    impl Drop for BackupReadHookGuard {
+        fn drop(&mut self) {
+            *AFTER_BACKUP_READ_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = None;
+        }
+    }
+
     fn user_config_in(root: &Path, content: &str) -> PathBuf {
         let path = root.join("config/cortexkit/magic-context.jsonc");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1042,7 +1205,7 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "{ \"version\": 1 }\n"
         );
-        let names = sorted_names(&backups);
+        let names = backup_copies(&backups);
         assert_eq!(names.len(), 1, "copies: {names:?}");
         assert!(
             names[0].starts_with("magic-context.user.") && names[0].ends_with(".jsonc"),
@@ -1069,7 +1232,7 @@ mod tests {
         write_config(&path, "{}\n").expect("save");
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
-        assert!(sorted_names(&backups).is_empty());
+        assert!(backup_copies(&backups).is_empty());
     }
 
     #[test]
@@ -1133,7 +1296,7 @@ mod tests {
 
         write_config(&path, "v1").expect("save");
 
-        assert_eq!(sorted_names(&storage.join("config-backups")).len(), 1);
+        assert_eq!(backup_copies(&storage.join("config-backups")).len(), 1);
         assert!(sorted_names(&xdg_backups).is_empty());
     }
 
@@ -1159,7 +1322,7 @@ mod tests {
         let digest = Sha256::digest(canonical_project.to_string_lossy().as_bytes());
         let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         let prefix = format!("magic-context.project-{}.", &hash[..12]);
-        let names = sorted_names(&backups);
+        let names = backup_copies(&backups);
         assert_eq!(names.len(), 1, "copies: {names:?}");
         assert!(
             names[0].starts_with(&prefix),
@@ -1189,7 +1352,7 @@ mod tests {
 
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&backups), 0o700);
-        let names = sorted_names(&backups);
+        let names = backup_copies(&backups);
         assert_eq!(names.len(), 1, "copies: {names:?}");
         assert_eq!(mode(&backups.join(&names[0])), 0o600);
     }
@@ -1212,6 +1375,146 @@ mod tests {
         assert!(err.contains("backup"), "unexpected error: {err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "v0");
         assert!(sorted_names(&elsewhere).is_empty());
+    }
+
+    /// Two saves that overlap must not both copy the same old bytes: the
+    /// save that runs second must copy what the first save wrote.
+    #[test]
+    fn overlapping_saves_back_up_each_replaced_version() {
+        use std::sync::{Arc, Condvar, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "A");
+        // After it reads the current config, each save waits until the other
+        // save also read it, or until the timeout. Without serialization, both
+        // saves read "A". With serialization, the second save cannot read
+        // before the first save replaced the file, so the first wait ends at
+        // the timeout and the result does not depend on thread timing.
+        let arrivals = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let hook_arrivals = Arc::clone(&arrivals);
+        let hook_path = path.clone();
+        let _hook = BackupReadHookGuard::set(Arc::new(move |read_path: &Path| {
+            if read_path != hook_path {
+                return;
+            }
+            let (count, ready) = &*hook_arrivals;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            ready.notify_all();
+            let _ = ready
+                .wait_timeout_while(count, std::time::Duration::from_secs(2), |count| *count < 2)
+                .unwrap();
+        }));
+
+        let savers: Vec<_> = ["B", "C"]
+            .into_iter()
+            .map(|content| {
+                let path = path.clone();
+                std::thread::spawn(move || write_config(&path, content))
+            })
+            .collect();
+        for saver in savers {
+            saver.join().unwrap().expect("save");
+        }
+
+        let last = std::fs::read_to_string(&path).unwrap();
+        let first = if last == "B" { "C" } else { "B" };
+        let contents: Vec<String> = backup_copies(&backups)
+            .iter()
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(contents, vec!["A".to_string(), first.to_string()]);
+    }
+
+    /// Open the lock file of a backup scope and lock it, as a save in a
+    /// different dashboard process does.
+    #[cfg(unix)]
+    fn hold_scope_lock(backups: &Path, scope: &str) -> std::fs::File {
+        use std::os::unix::io::AsRawFd;
+
+        ensure_private_backup_directory(backups).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(backups.join(format!(".{scope}.lock")))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        file
+    }
+
+    /// A save waits while a different process holds the lock, and then copies
+    /// what that process wrote.
+    #[cfg(unix)]
+    #[test]
+    fn save_waits_for_a_scope_lock_held_by_another_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "A");
+        let holder = hold_scope_lock(&backups, "user");
+
+        let saver = {
+            let path = path.clone();
+            std::thread::spawn(move || write_config(&path, "B"))
+        };
+        // A save that does not wait finishes in this time and copies "A".
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(&path, "X").unwrap();
+        drop(holder);
+        saver.join().unwrap().expect("save");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "B");
+        let contents: Vec<String> = backup_copies(&backups)
+            .iter()
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(contents, vec!["X".to_string()]);
+    }
+
+    /// If a different process holds the lock for longer than the wait, the
+    /// save is refused.
+    #[cfg(unix)]
+    #[test]
+    fn scope_lock_held_past_the_wait_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = dir.path().join("config-backups");
+        let _holder = hold_scope_lock(&backups, "user");
+
+        let err = lock_backup_scope(&backups, "user", std::time::Duration::ZERO)
+            .expect_err("a held lock must refuse");
+
+        assert!(err.contains("cannot lock the backup folder"), "{err}");
+        // A different backup set does not wait for this lock.
+        assert!(
+            lock_backup_scope(&backups, "project-0123456789ab", std::time::Duration::ZERO).is_ok()
+        );
+    }
+
+    /// A symlink at the lock path refuses the save and does not touch the file
+    /// that the link points at.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_lock_file_refuses_the_save() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        ensure_private_backup_directory(&backups).unwrap();
+        let elsewhere = dir.path().join("elsewhere.txt");
+        std::fs::write(&elsewhere, "keep").unwrap();
+        symlink(&elsewhere, backups.join(".user.lock")).unwrap();
+        let path = user_config_in(dir.path(), "v0");
+
+        let err = write_config(&path, "v1").expect_err("symlinked lock must be refused");
+
+        assert!(err.contains("cannot lock the backup folder"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v0");
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "keep");
     }
 
     // ── discover_project_configs_with_db tests ─────────────────────
