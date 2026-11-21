@@ -215,6 +215,10 @@ fn write_config_atomic(
     // to the file it points at. Project configs never get here as symlinks:
     // they are untrusted repository content and the project validation
     // refuses a symlinked target.
+    // The backup copies get the name of the config path, not of the link
+    // target, so that a link that changes to a different file keeps one set
+    // of copies, which pruning keeps at its limit.
+    let logical_path = path;
     let path = if project_root.is_none() {
         resolve_symlinked_config(path)?
     } else {
@@ -267,7 +271,7 @@ fn write_config_atomic(
     }
     // Make the copy before the rename replaces the file. If there is no copy,
     // do not save.
-    if let Err(e) = back_up_current_config(path, &backup_dir, &backup_scope) {
+    if let Err(e) = back_up_current_config(path, logical_path, &backup_dir, &backup_scope) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(e);
     }
@@ -457,9 +461,16 @@ fn project_hash(canonical_project: &Path) -> String {
     digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
-/// Copy the current config into the backup folder, then remove the oldest
-/// copies of the same config. If there is no config, there is no copy.
-fn back_up_current_config(path: &Path, backup_dir: &Path, scope: &str) -> Result<(), String> {
+/// Copy the current config at `path` into the backup folder, then remove the
+/// oldest copies of the same config. The copy names come from `logical_path`,
+/// the config path before symlinks resolve. If there is no config, there is
+/// no copy.
+fn back_up_current_config(
+    path: &Path,
+    logical_path: &Path,
+    backup_dir: &Path,
+    scope: &str,
+) -> Result<(), String> {
     let Some(current) = read_current_config_no_follow(path).map_err(|e| {
         format!("Refusing to save config: cannot read the current config for a backup copy: {e}")
     })?
@@ -475,12 +486,12 @@ fn back_up_current_config(path: &Path, backup_dir: &Path, scope: &str) -> Result
         )
     })?;
 
-    let stem = path
+    let stem = logical_path
         .file_stem()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("magic-context");
-    let suffix = path
+    let suffix = logical_path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| format!(".{ext}"))
@@ -1474,6 +1485,48 @@ mod tests {
             .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
             .collect();
         assert_eq!(contents, vec!["X".to_string()]);
+    }
+
+    /// Copies of a symlinked user config get the name of the config, not of
+    /// the file that the link points at, so that one set of copies is pruned
+    /// also after the link changes to a different file.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_user_config_copies_use_the_config_name() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let dotfiles = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::write(dotfiles.join("other-name.jsonc"), "v0").unwrap();
+        std::fs::write(dotfiles.join("third-name.jsonc"), "w0").unwrap();
+        let config_dir = dir.path().join("config/cortexkit");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let link = config_dir.join("magic-context.jsonc");
+        symlink(dotfiles.join("other-name.jsonc"), &link).unwrap();
+
+        for version in 1..=3 {
+            write_config(&link, &format!("v{version}")).expect("save");
+        }
+        std::fs::remove_file(&link).unwrap();
+        symlink(dotfiles.join("third-name.jsonc"), &link).unwrap();
+        for version in 1..=3 {
+            write_config(&link, &format!("w{version}")).expect("save");
+        }
+
+        let names = backup_copies(&backups);
+        assert!(
+            names
+                .iter()
+                .all(|name| name.starts_with("magic-context.user.") && name.ends_with(".jsonc")),
+            "copies: {names:?}"
+        );
+        let contents: Vec<String> = names
+            .iter()
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(contents, vec!["v1", "v2", "w0", "w1", "w2"]);
     }
 
     /// If a different process holds the lock for longer than the wait, the
