@@ -120,18 +120,18 @@ const ParamsShape = {
 	),
 	content: Type.String({
 		description:
-			"The memory text — one standalone fact (write, update, merge).",
+			"Required on every call — the memory text for write, update and merge; pass an empty string for archive and get.",
 	}),
 	category: Type.Union(
 		V2_MEMORY_CATEGORIES.map((c) => Type.Literal(c)),
 		{
 			description:
-				"Kind of fact (required for write; on update/merge, pass the memory's current category to keep it).",
+				"Required on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it.",
 		},
 	),
 	ids: Type.Array(Type.Number(), {
 		description:
-			"Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
+			"Required on every call — one id for update, one or more for archive, two or more for merge, 1–20 for get; write takes an empty list.",
 	}),
 	reason: Type.Optional(
 		Type.String({

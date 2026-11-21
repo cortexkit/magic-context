@@ -18988,10 +18988,11 @@ Your active memories are already in <project-memory> as `#id: fact` lines. Write
 
 Actions:
 - write: new memory (content + category).
-- update: rewrite one memory whose fact changed (ids: [one], content; category optional to recategorize).
+- update: rewrite one memory whose fact changed (ids: [one], content; category required — the current one to keep, a new one to recategorize).
 - archive: retire wrong or obsolete memories (ids: [one or more], optional reason).
 - merge: collapse duplicates into one (ids: [two or more], content).
 - get: fetch by id (ids: 1–20), readable in every status.
+Every call must carry action, content, category and ids: argument-dropping providers only emit required fields. For get and archive pass content="" and any valid category; for write pass ids=[].
 Examples: category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode" · category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale""#.to_string()
 }
 
@@ -19059,12 +19060,12 @@ fn ctx_memory_schema() -> Value {
             },
             "category": {
                 "type": "string",
-                "description": "Kind of fact (required for write; on update/merge optional, omitted keeps the current category)."
+                "description": "Required on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it."
             },
             "content": {
                 "type": "string",
                 "maxLength": 65536,
-                "description": "The memory text — one standalone fact (write, update, merge)."
+                "description": "Required on every call — the memory text for write, update and merge; pass an empty string for archive and get."
             },
             "id": {
                 "type": "integer",
@@ -19075,7 +19076,7 @@ fn ctx_memory_schema() -> Value {
                 "type": "array",
                 "maxItems": 100,
                 "items": { "type": "integer", "minimum": 1 },
-                "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get."
+                "description": "Required on every call — one id for update, one or more for archive, two or more for merge, 1–20 for get; write takes an empty list."
             },
             "target_id": {
                 "type": "integer",

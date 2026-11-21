@@ -2958,6 +2958,19 @@ describe("createCtxMemoryTools", () => {
             expect(jsonSchema.required?.sort()).toEqual(["action", "category", "content", "ids"]);
         });
 
+        it("describes the required filler for action-inapplicable arguments", () => {
+            const jsonSchema = tool.schema.toJSONSchema(
+                tool.schema.object(tools.ctx_memory.args ?? {}),
+            ) as { properties?: Record<string, { description?: string }> };
+            for (const field of ["content", "category", "ids"]) {
+                expect(jsonSchema.properties?.[field]?.description).toContain(
+                    "Required on every call",
+                );
+            }
+            expect(jsonSchema.properties?.content?.description).toContain("empty string");
+            expect(jsonSchema.properties?.ids?.description).toContain("empty list");
+        });
+
         it("accepts an empty ids list at the provider-schema level", () => {
             // ctx_memory ids carries no minimum: a model that correctly sends
             // ids: [] on write must pass host schema validation.
