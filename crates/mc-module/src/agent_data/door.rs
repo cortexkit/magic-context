@@ -111,7 +111,10 @@ pub enum CutAnswer {
     /// A fault on this machine that retrying cannot clear.
     Fault(&'static str),
     /// The move cannot use this cut here. `import` stops the move with
-    /// `participant_failed`; `diverged` can only report `unavailable`.
+    /// `participant_failed`. `diverged` (the driver's check, before import,
+    /// of whether this computer's rows changed since the cut) may only
+    /// refuse with `cut_not_ready`, `incompatible_version` or `unavailable`
+    /// under the agent-data contract, so there it answers `unavailable`.
     Rejected(&'static str),
 }
 
