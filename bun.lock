@@ -144,6 +144,7 @@
       "name": "@cortexkit/opencode-magic-context",
       "version": "0.49.56",
       "dependencies": {
+        "@cortexkit/opencode-sidebar": "^0.2.0",
         "@cortexkit/subc-client": "0.11.1",
         "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
         "@opencode-ai/plugin": "^1.17.11",
@@ -451,6 +452,8 @@
     "@cortexkit/opencode-magic-context": ["@cortexkit/opencode-magic-context@workspace:packages/plugin"],
 
     "@cortexkit/opencode-magic-context-e2e": ["@cortexkit/opencode-magic-context-e2e@workspace:packages/e2e-tests"],
+
+    "@cortexkit/opencode-sidebar": ["@cortexkit/opencode-sidebar@0.2.0", "", { "peerDependencies": { "@opentui/core": ">=0.4.5", "@opentui/solid": ">=0.4.5", "solid-js": ">=1.9.12 <2" } }, "sha512-jSLsnLbdBPYQgJZCJSN4LbzxYh8wZv4gAaM4D1mm3pqF0QaBvq7CKpYH7VeUn1u3zxxuHbzRkXC46DR/b7W/+g=="],
 
     "@cortexkit/pi-magic-context": ["@cortexkit/pi-magic-context@workspace:packages/pi-plugin"],
 
