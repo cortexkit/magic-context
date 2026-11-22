@@ -54,7 +54,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use cortexkit_bus_naming::AccountNames;
-use cortexkit_bus_nats::{ConnectConfig, NatsConnection, NatsStreamCursor};
+use cortexkit_bus_nats::{ConnectConfig, NatsConnection, NatsStreamCursor, Pulled};
 use cortexkit_bus_trait::{
     BusError, ContentDigest, DurableOwner, Headers, PublishReceipt, Register, RegisterWatch,
     Stream, StreamCursor,
@@ -1208,25 +1208,52 @@ impl run_ends::Cursor for RunEndCursor {
 impl RunEndCursor {
     /// Pull a delivery, using the shared connection's request timeout.
     async fn pull(&mut self) -> Result<Option<run_ends::Delivery>, String> {
-        // A delivery from our own durable that can't be decoded (for
-        // example, missing its message-id or digest header) fails the pull
-        // and the server delivers it again after the ack wait. The
-        // `cortexkit-bus-nats` release after the pinned one adds
-        // `next_or_undecodable`, which hands such a message back so it can be
-        // settled with `term`; switch to it then, so one bad event can't keep
-        // coming back.
-        let delivery = self.binding.cursor.next().await.map_err(|error| {
-            match error {
-                BusError::Absent { .. } => "nats_delivery_headers_missing",
-                _ => "nats_pull_failed",
+        loop {
+            let pulled = self
+                .binding
+                .cursor
+                .next_or_undecodable()
+                .await
+                .map_err(|_| "nats_pull_failed".to_owned())?;
+            match pulled {
+                None => return Ok(None),
+                Some(Pulled::Delivery(delivery)) => {
+                    return Ok(Some(run_ends::Delivery {
+                        id: Some(delivery.message.id),
+                        subject: delivery.message.subject,
+                        headers: delivery.message.headers,
+                    }));
+                }
+                // The cursor has already checked that this message came from
+                // our own durable, but its bus headers (message id, content
+                // digest) can't be decoded, so no wait can match it. Left
+                // unsettled, the server would deliver it again after every
+                // ack wait; terminating it stops that, and the next pull
+                // moves on. A wait it might have woken still ends on the
+                // polling backstop.
+                Some(Pulled::Undecodable(undecodable)) => {
+                    tracing::warn!(
+                        "ck-mc: run ends: terminating undecodable event {} on {} (delivered {} time(s)): {}",
+                        undecodable.stream_seq,
+                        undecodable.subject,
+                        undecodable.delivery_count,
+                        undecodable.error
+                    );
+                    self.binding
+                        .cursor
+                        .term(Some("undecodable bus headers"))
+                        .await
+                        .map_err(|_| "nats_term_failed".to_owned())?;
+                }
+                // `Pulled` may grow variants this build doesn't know. Hand
+                // such a message back for redelivery a minute later rather
+                // than settle it for good, and report the pull as failed.
+                Some(_) => {
+                    let _ = self.binding.cursor.nak(Duration::from_secs(60)).await;
+                    return Err("nats_pull_unrecognized".to_owned());
+                }
             }
-            .to_owned()
-        })?;
-        Ok(delivery.map(|delivery| run_ends::Delivery {
-            id: Some(delivery.message.id),
-            subject: delivery.message.subject,
-            headers: delivery.message.headers,
-        }))
+        }
     }
 }
 

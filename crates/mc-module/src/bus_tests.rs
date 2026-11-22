@@ -509,13 +509,70 @@ async fn every_user_of_the_bus_shares_one_session() {
 
 #[tokio::test]
 async fn run_ends_does_not_ack_a_delivery_for_another_durable() {
+    let account = account();
+    let stream = account.streams().event.clone();
+    let filter = format!("ck.{}.{}", account.account(), run_ends::SUBJECTS[0]);
+    let durable = run_ends::DURABLE;
+    let (delivery, acks, connection) = pull_one_run_end(vec![
+        PeerDelivery::new(&filter, "other_durable", true),
+        PeerDelivery::new(
+            &format!("ck.{}.event.broca.run.started.v1", account.account()),
+            durable,
+            true,
+        ),
+        PeerDelivery::new(&filter, durable, true),
+    ])
+    .await;
+
+    assert_eq!(
+        acks.iter()
+            .map(|(subject, _)| subject.as_str())
+            .collect::<Vec<_>>(),
+        [format!("$JS.ACK.{stream}.{durable}.1.3.3.0.0")],
+        "only the delivery matching both the bound durable and its filter may be acknowledged"
+    );
+    assert_eq!(delivery.id.as_deref(), Some("event-3"));
+    assert_eq!(connection.forged_deliveries_dropped(), 2);
+}
+
+#[tokio::test]
+async fn run_ends_terminates_an_undecodable_event_from_its_own_durable_and_reads_on() {
+    let account = account();
+    let stream = account.streams().event.clone();
+    let filter = format!("ck.{}.{}", account.account(), run_ends::SUBJECTS[0]);
+    let durable = run_ends::DURABLE;
+    let (delivery, acks, connection) = pull_one_run_end(vec![
+        PeerDelivery::new(&filter, durable, false),
+        PeerDelivery::new(&filter, durable, true),
+    ])
+    .await;
+
+    assert_eq!(acks.len(), 2, "{acks:?}");
+    assert_eq!(acks[0].0, format!("$JS.ACK.{stream}.{durable}.1.1.1.0.0"));
+    assert!(
+        acks[0].1.starts_with("+TERM"),
+        "the undecodable event is terminated, so the server stops redelivering it: {acks:?}"
+    );
+    assert_eq!(acks[1].0, format!("$JS.ACK.{stream}.{durable}.1.2.2.0.0"));
+    assert!(!acks[1].1.starts_with("+TERM"), "{acks:?}");
+    assert_eq!(delivery.id.as_deref(), Some("event-2"));
+    assert_eq!(connection.forged_deliveries_dropped(), 0);
+}
+
+/// Bind the real run-end cursor against a local peer that hands out
+/// `deliveries`, one per pull, then pull one delivery and acknowledge it.
+/// Returns that delivery, every `$JS.ACK` publish the peer saw with its
+/// payload, and the connection (for its forged-delivery count).
+async fn pull_one_run_end(
+    deliveries: Vec<PeerDelivery>,
+) -> (run_ends::Delivery, Vec<(String, String)>, NatsConnection) {
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(run_end_pull_peer(listener));
+    let server = tokio::spawn(run_end_pull_peer(listener, deliveries));
     let connection = NatsConnection::connect(
         addr.to_string(),
         async_nats::ConnectOptions::new(),
@@ -537,20 +594,36 @@ async fn run_ends_does_not_ack_a_delivery_for_another_durable() {
         .unwrap()
         .unwrap();
     cursor.ack().await.unwrap();
-
-    let stream = account().streams().event.clone();
-    assert_eq!(
-        server.await.unwrap(),
-        format!("$JS.ACK.{stream}.{}.1.3.3.0.0", run_ends::DURABLE),
-        "only the delivery matching both the bound durable and its filter may be acknowledged"
-    );
-    assert_eq!(delivery.id.as_deref(), Some("event-3"));
-    assert_eq!(connection.forged_deliveries_dropped(), 2);
+    (delivery, server.await.unwrap(), connection)
 }
 
-/// A local peer supplies three deliveries and records the reader's first ACK.
-/// No NATS service, credentials, or store are needed to exercise the real cursor.
-async fn run_end_pull_peer(listener: tokio::net::TcpListener) -> String {
+/// One message the local peer hands out on a pull: its subject, the durable
+/// its ack reply names, and whether it carries the bus headers (message id
+/// and content digest) the cursor needs to decode it.
+struct PeerDelivery {
+    subject: String,
+    consumer: String,
+    decodable: bool,
+}
+
+impl PeerDelivery {
+    fn new(subject: &str, consumer: &str, decodable: bool) -> Self {
+        Self {
+            subject: subject.to_owned(),
+            consumer: consumer.to_owned(),
+            decodable,
+        }
+    }
+}
+
+/// A local peer hands out `deliveries`, one per pull, and records every
+/// `$JS.ACK` publish with its payload until the first one that isn't a
+/// terminate. No NATS service, credentials, or store are needed to exercise
+/// the real cursor.
+async fn run_end_pull_peer(
+    listener: tokio::net::TcpListener,
+    deliveries: Vec<PeerDelivery>,
+) -> Vec<(String, String)> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     let (socket, _) = listener.accept().await.unwrap();
@@ -576,6 +649,7 @@ async fn run_end_pull_peer(listener: tokio::net::TcpListener) -> String {
     .to_string();
     let mut subscriptions = BTreeMap::new();
     let mut pulls = 0;
+    let mut acks = Vec::new();
     let mut line = String::new();
     loop {
         line.clear();
@@ -590,6 +664,21 @@ async fn run_end_pull_peer(listener: tokio::net::TcpListener) -> String {
             ["PING"] => write.write_all(b"PONG\r\n").await.unwrap(),
             ["SUB", subject, sid] => {
                 subscriptions.insert((*subject).to_owned(), (*sid).to_owned());
+            }
+            // A settle published without a reply inbox.
+            ["PUB", subject, len] => {
+                let mut payload = vec![0; len.parse::<usize>().unwrap() + 2];
+                read.read_exact(&mut payload).await.unwrap();
+                assert!(
+                    subject.starts_with("$JS.ACK."),
+                    "unexpected publish on {subject}"
+                );
+                let payload = String::from_utf8_lossy(&payload).trim_end().to_owned();
+                let settled = !payload.starts_with("+TERM");
+                acks.push(((*subject).to_owned(), payload));
+                if settled {
+                    return acks;
+                }
             }
             ["PUB", subject, reply, len] => {
                 let mut payload = vec![0; len.parse::<usize>().unwrap() + 2];
@@ -615,18 +704,19 @@ async fn run_end_pull_peer(listener: tokio::net::TcpListener) -> String {
                         .unwrap();
                 } else if *subject == pull_subject {
                     pulls += 1;
-                    let (subject, consumer) = match pulls {
-                        1 => (filters[0].clone(), "other_durable"),
-                        2 => (
-                            format!("ck.{}.event.broca.run.started.v1", account.account()),
-                            durable,
-                        ),
-                        3 => (filters[0].clone(), durable),
-                        _ => panic!("unexpected additional pull"),
-                    };
+                    let next = deliveries
+                        .get(pulls - 1)
+                        .unwrap_or_else(|| panic!("unexpected pull {pulls}"));
+                    let (subject, consumer) = (&next.subject, &next.consumer);
                     let ack = format!("$JS.ACK.{stream}.{consumer}.1.{pulls}.{pulls}.0.0");
                     let digest = ContentDigest::of_bytes(b"");
-                    let headers = format!("NATS/1.0\r\nNats-Msg-Id: event-{pulls}\r\nCk-Content-Digest: {digest}\r\nsession_ref: test\r\n\r\n");
+                    let headers = if next.decodable {
+                        format!("NATS/1.0\r\nNats-Msg-Id: event-{pulls}\r\nCk-Content-Digest: {digest}\r\nsession_ref: test\r\n\r\n")
+                    } else {
+                        format!(
+                            "NATS/1.0\r\nNats-Msg-Id: event-{pulls}\r\nsession_ref: test\r\n\r\n"
+                        )
+                    };
                     let len = headers.len();
                     write
                         .write_all(
@@ -644,7 +734,12 @@ async fn run_end_pull_peer(listener: tokio::net::TcpListener) -> String {
                         .write_all(format!("MSG {reply} {sid} 0\r\n\r\n").as_bytes())
                         .await
                         .unwrap();
-                    return (*subject).to_owned();
+                    let payload = String::from_utf8_lossy(&payload).trim_end().to_owned();
+                    let settled = !payload.starts_with("+TERM");
+                    acks.push(((*subject).to_owned(), payload));
+                    if settled {
+                        return acks;
+                    }
                 }
             }
             _ => panic!("unexpected peer command: {line:?}"),
