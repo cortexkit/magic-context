@@ -232,18 +232,46 @@ export interface DocsSectionChange {
     reason: string;
 }
 
-function sections(text: string): { heading: string; text: string; start: number; end: number }[] {
-    const lines = text.split("\n");
-    const result: { heading: string; text: string; start: number; end: number }[] = [];
-    let fenced = false;
+interface Section {
+    heading: string;
+    level: number;
+    start: number;
+    end: number;
+}
+
+const ATX_HEADING = /^ {0,3}(#{1,6})(?=[ \t]|$)/;
+
+function sections(lines: string[]): Section[] {
+    const result: Section[] = [];
+    const open: Section[] = [];
+    let fence: string | undefined;
     for (let i = 0; i < lines.length; i++) {
-        if (/^\s*(```|~~~)/.test(lines[i])) fenced = !fenced;
-        if (!fenced && /^#{1,6} \S/.test(lines[i])) {
-            if (result.length) result[result.length - 1].end = i;
-            result.push({ heading: lines[i], text: "", start: i, end: lines.length });
+        const heading = lines[i].replace(/\r$/, "");
+        const marker = heading.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        if (fence) {
+            if (marker?.[1].startsWith(fence) && !marker[2].trim()) fence = undefined;
+            continue;
         }
+        if (marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
+            fence = marker[1];
+            continue;
+        }
+        const match = heading.match(ATX_HEADING);
+        if (!match) continue;
+        const level = match[1].length;
+        // Only siblings and ancestors end a section; deeper headings stay in its range.
+        for (
+            let previous = open.at(-1);
+            previous && previous.level >= level;
+            previous = open.at(-1)
+        ) {
+            previous.end = i;
+            open.pop();
+        }
+        const section = { heading, level, start: i, end: lines.length };
+        result.push(section);
+        open.push(section);
     }
-    for (const section of result) section.text = lines.slice(section.start, section.end).join("\n");
     return result;
 }
 
@@ -276,32 +304,112 @@ function diff(name: string, before: string, after: string): string {
     }
 }
 
-// Validate only the model's output here so malformed proposals can use a fallback.
-// Applying changes and checking the current docs remain host-side responsibilities.
-export function parseDocsProposalOutput(output: string): DocsSectionChange[] {
-    const match = output.match(/```json\s*([\s\S]*?)```/);
-    const parsed: unknown = JSON.parse(match?.[1] ?? output);
+// Only a non-array reply triggers a model retry. Check each array entry later so a bad one does not discard valid changes.
+export function parseDocsProposalOutput(output: string): unknown[] {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(output);
+    } catch (error) {
+        const match =
+            output.match(/```json[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```(?=\s|$)/) ??
+            output.match(/```json\s*([\s\S]*?)```/);
+        if (!match) throw error;
+        parsed = JSON.parse(match[1]);
+    }
     if (!Array.isArray(parsed)) throw new Error("proposal must be a JSON array");
-    const changes = parsed as DocsSectionChange[];
-    if (changes.some((item) => !item || !FILES.includes(item.file)))
-        throw new Error("unknown proposal file");
+    return parsed;
+}
+
+function readChange(item: unknown): DocsSectionChange | string {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return "expected an object";
+    const { file, action, heading, text, reason } = item as Record<string, unknown>;
+    if (file !== "ARCHITECTURE.md" && file !== "STRUCTURE.md") return "unknown proposal file";
+    if (action !== "replace" && action !== "add" && action !== "remove") return "invalid action";
+    if (typeof heading !== "string" || /[\r\n]/.test(heading) || !ATX_HEADING.test(heading))
+        return "invalid section heading";
+    if (typeof text !== "string") return "section text must be a string";
+    if (typeof reason !== "string" || !reason.trim() || /[\r\n]/.test(reason))
+        return "expected a one-line reason";
+    return { file, action, heading, text, reason };
+}
+
+function applyChange(before: string, change: DocsSectionChange): { after: string } | string {
+    const lines = before.split("\n");
+    const existing = sections(lines);
+    const index = existing.findIndex((item) => item.heading === change.heading);
+    const replacement = change.action === "remove" ? [] : change.text.trimEnd().split("\n");
+    const inserted = sections(replacement);
+    const wholeSection =
+        inserted[0]?.heading === change.heading &&
+        inserted[0].start === 0 &&
+        inserted[0].end === replacement.length;
+    const expectedHeadings = existing.map((item) => item.heading);
+    const insertedHeadings = inserted.map((item) => item.heading);
+    let after: string;
+    if (change.action === "add") {
+        if (index !== -1 || !wholeSection) return `invalid addition ${change.heading}`;
+        after = `${before.endsWith("\n") ? before : `${before}\n`}\n${replacement.join("\n")}\n`;
+        expectedHeadings.push(...insertedHeadings);
+    } else {
+        if (index === -1) return `missing section ${change.heading}`;
+        if (change.action === "replace" && !wholeSection)
+            return `invalid replacement ${change.heading}`;
+        const section = existing[index];
+        const affected = existing.filter(
+            (item) => item.start >= section.start && item.start < section.end,
+        );
+        expectedHeadings.splice(index, affected.length, ...insertedHeadings);
+        if (change.action === "replace" && section.end === lines.length && before.endsWith("\n"))
+            replacement.push("");
+        lines.splice(section.start, section.end - section.start, ...replacement);
+        after = lines.join("\n");
+    }
+    if (JSON.stringify(protectedBytes(before)) !== JSON.stringify(protectedBytes(after)))
+        return `protected region changed in ${change.file}`;
+    if (
+        JSON.stringify(sections(after.split("\n")).map((item) => item.heading)) !==
+        JSON.stringify(expectedHeadings)
+    )
+        return `markdown structure changed in ${change.file}`;
+    if (after === before) return "no doc changes proposed";
+    return { after };
+}
+
+interface DroppedDocsChange {
+    index: number;
+    reason: string;
+}
+
+function applyChanges(
+    items: unknown[],
+    originals: Record<DocsSectionChange["file"], string>,
+    overBudget: ReadonlyMap<number, string>,
+) {
+    const docs = { ...originals };
+    const kept: { index: number; change: DocsSectionChange; grew: boolean }[] = [];
+    const dropped: DroppedDocsChange[] = [];
     const seen = new Set<string>();
-    for (const change of changes) {
+    for (const [index, item] of items.entries()) {
+        const change = overBudget.get(index) ?? readChange(item);
+        if (typeof change === "string") {
+            dropped.push({ index, reason: change });
+            continue;
+        }
         const key = `${change.file}:${change.heading}`;
-        if (
-            !(["replace", "add", "remove"] as unknown[]).includes(change.action) ||
-            typeof change.heading !== "string" ||
-            !/^#{1,6} [^\r\n]+$/.test(change.heading) ||
-            typeof change.text !== "string" ||
-            typeof change.reason !== "string" ||
-            !change.reason.trim() ||
-            /[\r\n]/.test(change.reason) ||
-            seen.has(key)
-        )
-            throw new Error(`invalid section change in ${change.file}`);
+        const before = docs[change.file];
+        const result = seen.has(key)
+            ? `duplicate section change ${change.heading}`
+            : applyChange(before, change);
+        if (typeof result === "string") {
+            dropped.push({ index, reason: result });
+            continue;
+        }
+        kept.push({ index, change, grew: result.after.length > before.length });
+        docs[change.file] = result.after;
         seen.add(key);
     }
-    return changes;
+    const tokens = FILES.reduce((sum, file) => sum + Math.ceil(docs[file].length / 3.5), 0);
+    return { docs, kept, dropped, tokens };
 }
 
 export function validateDocsProposal(
@@ -309,72 +417,42 @@ export function validateDocsProposal(
     output: string,
     budget: number,
     expected: Record<string, string>,
-): { changes: DocsSectionChange[]; tokens: number; diffs: string } {
+): { changes: DocsSectionChange[]; dropped: DroppedDocsChange[]; tokens: number; diffs: string } {
+    const readDoc = (file: DocsSectionChange["file"]) => {
+        const path = join(projectDir, file);
+        return existsSync(path) ? readFileSync(path, "utf8") : "";
+    };
+    const originals = {
+        "ARCHITECTURE.md": readDoc("ARCHITECTURE.md"),
+        "STRUCTURE.md": readDoc("STRUCTURE.md"),
+    };
     if (
-        Object.entries(expected).some(([name, value]) => docsBaseHashes(projectDir)[name] !== value)
+        Object.keys(expected).some(
+            (name) =>
+                !FILES.some((file) => file === name && hash(originals[file]) === expected[name]),
+        )
     )
         throw new Error("base drifted");
-    const changes = parseDocsProposalOutput(output);
-    if (!changes.length) throw new Error("empty proposal");
-    let tokens = 0;
-    let diffs = "";
-    for (const file of FILES) {
-        const before = existsSync(join(projectDir, file))
-            ? readFileSync(join(projectDir, file), "utf8")
-            : "";
-        let after = before;
-        for (const change of changes.filter((item) => item.file === file)) {
-            const section = sections(after).find((item) => item.heading === change.heading);
-            if (change.action === "add") {
-                if (section || !change.text.startsWith(`${change.heading}\n`))
-                    throw new Error(`invalid addition ${change.heading}`);
-                after += `${after.endsWith("\n") ? "" : "\n"}\n${change.text.trimEnd()}\n`;
-            } else {
-                if (!section) throw new Error(`missing section ${change.heading}`);
-                if (
-                    change.action === "replace" &&
-                    (!change.text.startsWith(`${change.heading}\n`) ||
-                        sections(change.text).length !== 1)
-                )
-                    throw new Error(`invalid replacement ${change.heading}`);
-                const lines = after.split("\n");
-                lines.splice(
-                    section.start,
-                    section.end - section.start,
-                    ...(change.action === "remove" ? [] : change.text.trimEnd().split("\n")),
-                );
-                after = lines.join("\n");
-            }
-        }
-        if (JSON.stringify(protectedBytes(before)) !== JSON.stringify(protectedBytes(after)))
-            throw new Error(`protected region changed in ${file}`);
-        const originalHeadings = sections(before).map((item) => item.heading);
-        const expectedHeadings = originalHeadings
-            .filter(
-                (heading) =>
-                    !changes.some(
-                        (item) =>
-                            item.file === file &&
-                            item.action === "remove" &&
-                            item.heading === heading,
-                    ),
-            )
-            .concat(
-                changes
-                    .filter((item) => item.file === file && item.action === "add")
-                    .map((item) => item.heading),
-            );
-        if (
-            JSON.stringify(sections(after).map((item) => item.heading)) !==
-            JSON.stringify(expectedHeadings)
-        )
-            throw new Error(`markdown structure changed in ${file}`);
-        tokens += Math.ceil(after.length / 3.5);
-        if (after !== before) diffs += diff(file, before, after);
+    const items = parseDocsProposalOutput(output);
+    const overBudget = new Map<number, string>();
+    let result = applyChanges(items, originals, overBudget);
+    while (result.tokens > budget && result.kept.length) {
+        const reason = `over budget: ${result.tokens} > ${budget}`;
+        const latestGrowth = [...result.kept].reverse().find((item) => item.grew);
+        if (latestGrowth) overBudget.set(latestGrowth.index, reason);
+        else for (const item of result.kept) overBudget.set(item.index, reason);
+        // Replay in proposal order: later changes may target a section we just dropped.
+        result = applyChanges(items, originals, overBudget);
     }
-    if (tokens > budget) throw new Error(`over budget: ${tokens} > ${budget}`);
-    if (!diffs) throw new Error("no doc changes proposed");
-    return { changes, tokens, diffs };
+    const diffs = FILES.filter((file) => originals[file] !== result.docs[file])
+        .map((file) => diff(file, originals[file], result.docs[file]))
+        .join("");
+    return {
+        changes: result.kept.map((item) => item.change),
+        dropped: result.dropped,
+        tokens: result.tokens,
+        diffs,
+    };
 }
 
 export function writeDocsProposal(
@@ -383,8 +461,9 @@ export function writeDocsProposal(
     budget: number,
     expected: Record<string, string>,
     head: string,
-): string {
+): { path: string | null; dropped: DroppedDocsChange[] } {
     const result = validateDocsProposal(projectDir, output, budget, expected);
+    if (!result.diffs) return { path: null, dropped: result.dropped };
     const dir = proposalDir(projectDir);
     mkdirSync(join(dir, "superseded"), { recursive: true });
     ensureCortexKitArtifactGitignore(projectDir);
@@ -395,5 +474,5 @@ export function writeDocsProposal(
     for (const old of listPendingDocsProposals(projectDir))
         if (old !== path)
             renameSync(old, join(dir, "superseded", old.split("/").at(-1) ?? "proposal.md"));
-    return path;
+    return { path, dropped: result.dropped };
 }

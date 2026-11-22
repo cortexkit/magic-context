@@ -2324,25 +2324,21 @@ async function runAgenticTask(
 
         if (task === "maintain-docs" && docsHashes && changes) {
             try {
-                if (parseDocsProposalOutput(String(run.validated)).length === 0) {
-                    helpers.recordRun("completed", null, { progress: "no corrections proposed" });
-                    return {
-                        status: "completed",
-                        detail: "no corrections proposed",
-                        schedulePatch: { taskStateJson: JSON.stringify({ head: changes.head }) },
-                    };
-                }
-                const path = writeDocsProposal(
+                const { path, dropped } = writeDocsProposal(
                     docsDir,
                     String(run.validated),
                     config.docsMaxTokens ?? 12000,
                     docsHashes,
                     changes.head,
                 );
-                helpers.recordRun("completed", null, { progress: `proposal: ${path}` });
+                const outcome = path ? `proposal: ${path}` : "no corrections proposed";
+                const detail = dropped.length
+                    ? `${outcome}; dropped ${dropped.map(({ index, reason }) => `entry ${index + 1}: ${reason}`).join("; ")}`
+                    : outcome;
+                helpers.recordRun("completed", null, { progress: detail });
                 return {
                     status: "completed",
-                    detail: `proposal: ${path}`,
+                    detail,
                     schedulePatch: { taskStateJson: JSON.stringify({ head: changes.head }) },
                 };
             } catch (error) {

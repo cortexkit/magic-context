@@ -39,19 +39,176 @@ const replacement = JSON.stringify([
     },
 ]);
 
+function liveFixture(
+    architecture = "# Architecture\n\n## Live\n\n### A\nOld text.\n\n### B\nOther text.\n",
+) {
+    const dir = fixture();
+    writeFileSync(join(dir, "ARCHITECTURE.md"), architecture);
+    return dir;
+}
+
+function liveChange(heading: string, text: string, action = "replace") {
+    return { file: "ARCHITECTURE.md", action, heading, text, reason: "update A" };
+}
+
+function validateLive(dir: string, ...changes: unknown[]) {
+    return validateDocsProposal(dir, JSON.stringify(changes), 12000, docsBaseHashes(dir));
+}
+
 describe("docs proposals", () => {
+    test("replaces the Live section with both nested subsections", () => {
+        const dir = liveFixture();
+        const change = liveChange("## Live", "## Live\n\n### A\nNew text.\n\n### B\nOther text.\n");
+        const result = validateLive(dir, change);
+        expect(result.changes).toEqual([change]);
+        expect(result.diffs).toContain("-Old text.");
+        expect(result.diffs).toContain("+New text.");
+        expect(result.diffs).not.toContain("-### B");
+    });
+
+    test("replaces a nested subsection without replacing the next subsection", () => {
+        const dir = liveFixture();
+        const change = liveChange("### A", "### A\nNew text.\n");
+        const result = validateLive(dir, change);
+        expect(result.changes).toEqual([change]);
+        expect(result.diffs).toContain("-Old text.");
+        expect(result.diffs).toContain("+New text.");
+        expect(result.diffs).not.toContain("-### B");
+        expect(result.diffs).not.toContain("-Other text.");
+    });
+
+    test("removes the Live heading and its subsections but not the next section", () => {
+        const dir = liveFixture(
+            "# Architecture\n\n## Live\n\n### A\nOne.\n\n### B\nTwo.\n\n## Next\nKeep me.\n",
+        );
+        const change = liveChange("## Live", "", "remove");
+        const result = validateLive(dir, change);
+        expect(result.changes).toEqual([change]);
+        expect(result.diffs).toContain("-### A\n-One.");
+        expect(result.diffs).toContain("-### B\n-Two.");
+        expect(result.diffs).not.toContain("-## Next");
+    });
+
+    test.each([
+        "## Not part of Live",
+        "# Higher level",
+        "  ##  Also a heading",
+    ])("drops a replacement containing a second top-level section: %s", (heading) => {
+        const dir = liveFixture();
+        const change = liveChange("## Live", `## Live\nNew.\n\n${heading}\nExtra.\n`);
+        const result = validateLive(dir, change);
+        expect(result.changes).toEqual([]);
+        expect(result.diffs).toBe("");
+        expect(result.dropped).toEqual([{ index: 0, reason: "invalid replacement ## Live" }]);
+    });
+
+    test("headings inside code fences do not split a section", () => {
+        const dir = liveFixture(
+            "# Architecture\n\n## Live\n````markdown\n```\n## Sample\n```\n````\n\n## Next\nKeep me.\n",
+        );
+        const change = liveChange("## Live", "## Live\n~~~markdown\n```\n## Example\n```\n~~~\n");
+        const result = validateDocsProposal(
+            dir,
+            `\`\`\`json\n${JSON.stringify([change])}\n\`\`\``,
+            12000,
+            docsBaseHashes(dir),
+        );
+        expect(result.changes).toEqual([change]);
+        expect(result.diffs).toContain("-## Sample");
+        expect(result.diffs).toContain("+## Example");
+        expect(result.diffs).not.toContain("-## Next");
+    });
+
+    test("keeps nested protected bytes unchanged and rejects removing their parent", () => {
+        const protectedText =
+            "<!-- mc:protected START -->\nHand authored\n<!-- mc:protected END -->";
+        const dir = liveFixture(`# Architecture\n\n## Live\nOld.\n\n### A\n${protectedText}\n`);
+        const removal = liveChange("## Live", "", "remove");
+        const dropped = validateLive(dir, removal);
+        expect(dropped.changes).toEqual([]);
+        expect(dropped.dropped).toEqual([
+            { index: 0, reason: "protected region changed in ARCHITECTURE.md" },
+        ]);
+
+        const rewrite = liveChange("## Live", `## Live\nNew.\n\n### A\n${protectedText}\n`);
+        const kept = validateLive(dir, rewrite);
+        expect(kept.changes).toEqual([rewrite]);
+        expect(kept.diffs).toContain("+New.");
+        expect(kept.diffs).not.toContain("-Hand authored");
+    });
+
+    test("applies ordered changes to an added section and its subsection", () => {
+        const dir = liveFixture();
+        const add = liveChange("## New", "## New\n\n### C\nDraft.\n", "add");
+        const replace = liveChange("### C", "### C\nFinal.");
+        const result = validateLive(dir, add, replace);
+        expect(result.changes).toEqual([add, replace]);
+        expect(result.dropped).toEqual([]);
+        expect(result.diffs).toContain("+## New\n+\n+### C\n+Final.");
+        expect(result.diffs).not.toContain("Draft.");
+    });
+
+    test("drops later growth first and revalidates changes that depended on it", () => {
+        const dir = liveFixture();
+        const hashes = docsBaseHashes(dir);
+        const first = liveChange("### A", "### A\nSmall clarification.");
+        const second = liveChange(
+            "## New",
+            `## New\n${"Long ".repeat(40)}\n\n### C\nDraft.`,
+            "add",
+        );
+        const third = liveChange("### C", "", "remove");
+        const budget = validateLive(dir, first).tokens;
+        const result = validateDocsProposal(
+            dir,
+            JSON.stringify([first, second, third]),
+            budget,
+            hashes,
+        );
+        expect(result.changes).toEqual([first]);
+        expect(result.tokens).toBe(budget);
+        expect(result.dropped).toEqual([
+            { index: 1, reason: expect.stringContaining("over budget") },
+            { index: 2, reason: "missing section ### C" },
+        ]);
+        expect(result.diffs).not.toContain("+## New");
+    });
+
+    test("keeps multiple reductions that bring oversized docs back under budget", () => {
+        const dir = liveFixture(
+            `# Architecture\n\n## Live\n\n### A\n${"A".repeat(200)}\n\n### B\n${"B".repeat(200)}\n`,
+        );
+        const hashes = docsBaseHashes(dir);
+        const first = liveChange("### A", "### A\nShort A.");
+        const second = liveChange("### B", "### B\nShort B.");
+        expect(validateDocsProposal(dir, JSON.stringify([first]), 50, hashes).diffs).toBe("");
+        const result = validateDocsProposal(dir, JSON.stringify([first, second]), 50, hashes);
+        expect(result.changes).toEqual([first, second]);
+        expect(result.dropped).toEqual([]);
+        expect(result.tokens).toBeLessThanOrEqual(50);
+    });
+
     test.each([
         "not JSON",
         "{}",
-        "[null]",
-        JSON.stringify([{ file: "README.md" }]),
-        JSON.stringify([{ ...JSON.parse(replacement)[0], action: "edit" }]),
-        JSON.stringify([{ ...JSON.parse(replacement)[0], heading: "no heading" }]),
-        JSON.stringify([{ ...JSON.parse(replacement)[0], text: null }]),
-        JSON.stringify([{ ...JSON.parse(replacement)[0], reason: "\n" }]),
-        JSON.stringify([...JSON.parse(replacement), ...JSON.parse(replacement)]),
-    ])("rejects malformed proposal output %j without reading docs", (output) => {
+    ])("rejects an unusable proposal envelope %j without reading docs", (output) => {
         expect(() => parseDocsProposalOutput(output)).toThrow();
+    });
+
+    test.each([
+        [null, "expected an object"],
+        [{ file: "README.md" }, "unknown proposal file"],
+        [{ ...JSON.parse(replacement)[0], action: "edit" }, "invalid action"],
+        [{ ...JSON.parse(replacement)[0], heading: "no heading" }, "invalid section heading"],
+        [{ ...JSON.parse(replacement)[0], text: null }, "section text must be a string"],
+        [{ ...JSON.parse(replacement)[0], reason: "\n" }, "expected a one-line reason"],
+        [JSON.parse(replacement)[0], "duplicate section change ## Core"],
+    ])("drops malformed or duplicate entry %j without losing the valid entry", (entry, reason) => {
+        const dir = fixture();
+        const valid = JSON.parse(replacement)[0];
+        const result = validateLive(dir, valid, entry);
+        expect(result.changes).toEqual([valid]);
+        expect(result.dropped).toEqual([{ index: 1, reason }]);
     });
 
     test("parses fenced changes and permits the same heading in different files", () => {
@@ -64,7 +221,7 @@ describe("docs proposals", () => {
         ).toEqual(changes);
     });
 
-    test("rejects protected changes, budget overflow and base drift without writing docs", () => {
+    test("drops protected changes or budget overflow and fails on base drift without writing docs", () => {
         const dir = fixture();
         const before = readFileSync(join(dir, "ARCHITECTURE.md"));
         const hashes = docsBaseHashes(dir);
@@ -77,10 +234,14 @@ describe("docs proposals", () => {
                 reason: "wrong",
             },
         ]);
-        expect(() => writeDocsProposal(dir, protectedChange, 12000, hashes, "head")).toThrow(
-            "protected region",
-        );
-        expect(() => writeDocsProposal(dir, replacement, 1, hashes, "head")).toThrow("over budget");
+        expect(writeDocsProposal(dir, protectedChange, 12000, hashes, "head")).toEqual({
+            path: null,
+            dropped: [{ index: 0, reason: "protected region changed in ARCHITECTURE.md" }],
+        });
+        expect(writeDocsProposal(dir, replacement, 1, hashes, "head")).toEqual({
+            path: null,
+            dropped: [{ index: 0, reason: expect.stringContaining("over budget") }],
+        });
         writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\n## Layout\nDrifted.\n");
         expect(() => writeDocsProposal(dir, replacement, 12000, hashes, "head")).toThrow(
             "base drifted",
@@ -95,13 +256,13 @@ describe("docs proposals", () => {
         const first = writeDocsProposal(dir, replacement, 12000, hashes, "head");
         expect(hasCurrentDocsProposal(dir)).toBe(true);
         const second = writeDocsProposal(dir, replacement, 12000, hashes, "head");
-        expect(listPendingDocsProposals(dir)).toEqual([second]);
+        expect(listPendingDocsProposals(dir)).toEqual([second.path]);
         expect(
             readFileSync(
                 join(
                     dir,
                     ".cortexkit/magic-context/docs-update-proposals/superseded",
-                    first.split("/").at(-1)!,
+                    first.path!.split("/").at(-1)!,
                 ),
                 "utf8",
             ),
@@ -117,7 +278,7 @@ describe("docs proposals", () => {
         mkdirSync(join(dir, ".cortexkit"));
         writeFileSync(join(dir, ".cortexkit/magic-context.jsonc"), "{}\n");
         const proposal = writeDocsProposal(dir, replacement, 12000, docsBaseHashes(dir), "head");
-        expect(readFileSync(proposal, "utf8")).toContain("# Docs update proposal");
+        expect(readFileSync(proposal.path!, "utf8")).toContain("# Docs update proposal");
         expect(readFileSync(join(dir, ".cortexkit/magic-context/.gitignore"), "utf8")).toBe("*\n");
         expect(existsSync(join(dir, ".cortexkit/.gitignore"))).toBe(false);
         expect(git("status", "--porcelain", "--untracked-files=all", "--", ".cortexkit")).toBe(
@@ -129,7 +290,7 @@ describe("docs proposals", () => {
         const dir = fixture();
         mkdirSync(join(dir, ".cortexkit/magic-context/.gitignore"), { recursive: true });
         const proposal = writeDocsProposal(dir, replacement, 12000, docsBaseHashes(dir), "head");
-        expect(readFileSync(proposal, "utf8")).toContain("# Docs update proposal");
+        expect(readFileSync(proposal.path!, "utf8")).toContain("# Docs update proposal");
     });
 
     test("host changeset omits docs, tests and lockfiles and prompt never requests bash", () => {
@@ -169,6 +330,9 @@ describe("docs proposals", () => {
         expect(prompt).toContain("500");
         expect(prompt).toContain("src.ts");
         expect(prompt).toContain("Current ARCHITECTURE.md");
+        expect(prompt).toContain(
+            "the next heading of the same or a higher level outside code fences",
+        );
         expect(docsChangeSet(dir, git("rev-parse", "HEAD"))?.unchanged).toBe(true);
         expect(prompt).not.toContain("git log");
         expect(prompt).not.toContain("find .");

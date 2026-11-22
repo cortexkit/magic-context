@@ -11,6 +11,7 @@ import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { listPendingDocsProposals } from "./docs-proposals";
 import { acquireLease } from "./lease";
+import { getDreamRuns } from "./storage-dream-runs";
 import { writeTaskStateJson } from "./storage-task-schedule";
 import { createDreamTaskExecutor } from "./task-executor";
 import { leaseKeyFor } from "./task-registry";
@@ -183,10 +184,27 @@ test("maintain-docs retries non-JSON prose with the fallback and writes only a p
     expect(readFileSync(join(dir, "STRUCTURE.md"))).toEqual(structureBefore);
 });
 
+test("maintain-docs records a dropped entry and checkpoints the remaining proposal", async () => {
+    const { run, models, file, before, git } = retryFixture([JSON.stringify([null, validChange])]);
+    const result = await run();
+    expect(models).toEqual([primary]);
+    expect(result.status).toBe("completed");
+    expect(result.detail).toContain("entry 1");
+    expect(result.detail).toContain("expected an object");
+    expect(JSON.parse(getDreamRuns(db, dir)[0]!.tasks_json)[0].progress).toBe(result.detail);
+    expect(JSON.parse(result.schedulePatch?.taskStateJson ?? "null")).toEqual({
+        head: git("rev-parse", "HEAD"),
+    });
+    const pending = listPendingDocsProposals(dir);
+    expect(pending).toHaveLength(1);
+    expect(readFileSync(pending[0]!, "utf8")).toContain("+Current sentence.");
+    expect(readFileSync(file)).toEqual(before);
+});
+
 test("maintain-docs fails exhausted invalid output without an anchor or proposal", async () => {
     const { run, models, file, before, structureBefore } = retryFixture([
         "I could not produce the proposal.",
-        JSON.stringify([{ ...validChange, reason: "" }]),
+        JSON.stringify(validChange),
     ]);
     const result = await run();
     expect(models).toEqual([primary, fallback]);
@@ -218,34 +236,47 @@ test.each([
 });
 
 test.each([
+    ["one-line reason", { reason: "" }],
     ["protected region", { text: "## Core\nRemoved hand authored text." }],
-    ["base drifted", {}],
     ["over budget", {}],
-    ["markdown structure", { action: "add", heading: "## Extra", text: "## Extra\n### Sneaked\n" }],
+    ["invalid addition", { action: "add", heading: "## Extra", text: "## Extra\n## Sneaked\n" }],
     ["invalid replacement", { text: "## Wrong heading\nCurrent sentence." }],
-] as const)("maintain-docs rejects %s host validation without retrying", async (failure, change) => {
-    const { run, models, file, before, structureBefore } = retryFixture(
-        [JSON.stringify([{ ...validChange, ...change }]), "[]"],
+] as const)("maintain-docs records %s and checkpoints even with no applicable entries", async (failure, change) => {
+    const { run, models, file, before, structureBefore, git } = retryFixture(
+        [JSON.stringify([{ ...validChange, ...change }])],
         {
             architecture:
                 failure === "protected region"
                     ? "# Architecture\n\n## Core\n<!-- mc:protected START -->\nHand authored\n<!-- mc:protected END -->\n"
                     : undefined,
             docsMaxTokens: failure === "over budget" ? 1 : undefined,
-            onPrompt:
-                failure === "base drifted"
-                    ? () => writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nDrifted.\n")
-                    : undefined,
         },
     );
     const result = await run();
     expect(models).toEqual([primary]);
+    expect(result.status).toBe("completed");
+    expect(result.detail).toContain(`no corrections proposed; dropped entry 1:`);
+    expect(result.detail).toContain(failure);
+    expect(JSON.parse(getDreamRuns(db, dir)[0]!.tasks_json)[0].progress).toBe(result.detail);
+    expect(JSON.parse(result.schedulePatch?.taskStateJson ?? "null")).toEqual({
+        head: git("rev-parse", "HEAD"),
+    });
+    expect(listPendingDocsProposals(dir)).toEqual([]);
+    expect(readFileSync(file)).toEqual(before);
+    expect(readFileSync(join(dir, "STRUCTURE.md"))).toEqual(structureBefore);
+});
+
+test("maintain-docs fails closed on base drift without retrying or checkpointing", async () => {
+    const drifted = "# Structure\n\nDrifted.\n";
+    const { run, models, file, before } = retryFixture([proposal], {
+        onPrompt: () => writeFileSync(join(dir, "STRUCTURE.md"), drifted),
+    });
+    const result = await run();
+    expect(models).toEqual([primary]);
     expect(result.status).toBe("failed");
-    expect(result.error).toContain(failure);
+    expect(result.error).toContain("base drifted");
     expect(result.schedulePatch?.taskStateJson).toBeUndefined();
     expect(listPendingDocsProposals(dir)).toEqual([]);
     expect(readFileSync(file)).toEqual(before);
-    expect(readFileSync(join(dir, "STRUCTURE.md"))).toEqual(
-        failure === "base drifted" ? Buffer.from("# Structure\n\nDrifted.\n") : structureBefore,
-    );
+    expect(readFileSync(join(dir, "STRUCTURE.md"), "utf8")).toBe(drifted);
 });

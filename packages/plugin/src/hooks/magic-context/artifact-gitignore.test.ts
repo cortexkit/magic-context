@@ -108,8 +108,8 @@ test.each([
             reason: "Describe the core",
         },
     ]);
-    const proposal = writeDocsProposal(dir, changes, 12000, docsBaseHashes(dir), "head");
-    expect(readFileSync(proposal, "utf8")).toContain("# Docs update proposal");
+    const { path: proposal } = writeDocsProposal(dir, changes, 12000, docsBaseHashes(dir), "head");
+    expect(readFileSync(proposal!, "utf8")).toContain("# Docs update proposal");
     const status = () => git("status", "--porcelain", "--untracked-files=all");
     expect(status()).toBe("?? .cortexkit/magic-context.jsonc\n");
     expect(readFileSync(join(dir, ".cortexkit/magic-context/.gitignore"), "utf8")).toBe("*\n");
