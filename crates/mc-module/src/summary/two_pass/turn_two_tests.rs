@@ -334,20 +334,31 @@ async fn check_children_are_kept_as_the_first_turn_chose() {
 
 /// A store holding one committed publication with two candidate facts, as a
 /// first turn leaves it for its second turn.
-fn store_with_candidates() -> (tempfile::TempDir, ContextDb) {
+fn store_with_candidates() -> (tempfile::TempDir, ContextDb, Job) {
     let dir = tempfile::tempdir().unwrap();
     let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
-    db.with_connection(|conn| {
-        conn.execute_batch(
+    let mut job = job("pi");
+    // Recovery claims stage keys process-wide, even for separate test databases.
+    job.continuation.publication_id = format!(
+        "turn-two-test-{}",
+        dir.path().file_name().unwrap().to_string_lossy()
+    );
+    db.with_connection(|conn| -> rusqlite::Result<()> {
+        conn.execute(
             "INSERT INTO memory_publications(publication_id, project_path, source_session_id, commit_order, committed_at)
-                 VALUES ('publication', 'project', 'head', 1, 0);
-             INSERT INTO memory_pending_facts(project_path, publication_id, fact_index, category, content)
-                 VALUES ('project', 'publication', 0, 'CONSTRAINTS', 'Releases need two reviewers.'),
-                        ('project', 'publication', 1, 'NAMING', 'Crates are named mc-*.');",
-        )
+                 VALUES (?1, 'project', 'head', 1, 0)",
+            [&job.continuation.publication_id],
+        )?;
+        conn.execute(
+            "INSERT INTO memory_pending_facts(project_path, publication_id, fact_index, category, content)
+                 VALUES ('project', ?1, 0, 'CONSTRAINTS', 'Releases need two reviewers.'),
+                        ('project', ?1, 1, 'NAMING', 'Crates are named mc-*.')",
+            [&job.continuation.publication_id],
+        )?;
+        Ok(())
     })
     .unwrap();
-    (dir, db)
+    (dir, db, job)
 }
 
 /// Each candidate fact's state, attempts and reserving stage.
@@ -386,9 +397,9 @@ fn untouched() -> FactLedger {
 async fn account_wait_turn_two_revokes_its_stage_without_spending_attempts() {
     use crate::summary::run::account_wait_send_tests::{Answer, Client};
     for answer in [Answer::RefuseSend, Answer::RunEndsRefused] {
-        let (_dir, db) = store_with_candidates();
+        let (_dir, db, job) = store_with_candidates();
         let client = Client::new(answer);
-        let outcome = run(&client, &db, &job("pi")).await;
+        let outcome = run(&client, &db, &job).await;
         let Outcome::AccountWait(wait) = outcome else {
             panic!("not an account wait: {outcome:?}");
         };
@@ -402,6 +413,14 @@ async fn account_wait_turn_two_revokes_its_stage_without_spending_attempts() {
 #[tokio::test(start_paused = true)]
 async fn never_ran_turn_two_and_recovery_return_facts_without_spending_attempts() {
     use crate::summary::run::never_ran_tests::{active, handover, not_delivered, Client};
+    let (_other_dir, other_db, other_job) = store_with_candidates();
+    let other_client = Client::new(vec![active()], vec![handover("host_unreachable")]);
+    let outcome = run(&other_client, &other_db, &other_job).await;
+    assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
+    let other_stage = other_client.sends.lock().unwrap()[0].1.send_id.clone();
+    // Keep another fixture's stage claimed to simulate overlap with a parallel test.
+    let _working = Working::claim(&other_stage).expect("claim the other fixture's stage");
+
     let mut clients: Vec<_> = not_delivered()
         .into_iter()
         .map(|reply| Client::new(vec![reply], vec![]))
@@ -411,9 +430,12 @@ async fn never_ran_turn_two_and_recovery_return_facts_without_spending_attempts(
         vec![handover("host_unreachable"); 2],
     ));
     for client in clients {
-        let (_dir, db) = store_with_candidates();
-        let outcome = run(&client, &db, &job("pi")).await;
-        assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
+        let (_dir, db, job) = store_with_candidates();
+        let outcome = run(&client, &db, &job).await;
+        assert!(
+            matches!(outcome, Outcome::AccountWait(_)),
+            "fresh send: {outcome:?}"
+        );
         assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
         db.with_connection(|conn| {
             conn.execute_batch(
@@ -423,8 +445,11 @@ async fn never_ran_turn_two_and_recovery_return_facts_without_spending_attempts(
             )
         })
         .unwrap();
-        let outcome = run(&client, &db, &job("pi")).await;
-        assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
+        let outcome = run(&client, &db, &job).await;
+        assert!(
+            matches!(outcome, Outcome::AccountWait(_)),
+            "recovery: {outcome:?}"
+        );
         assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
         let request: String = db.with_connection(|conn| {
             conn.query_row(
@@ -450,11 +475,11 @@ async fn never_ran_fact_check_forgets_its_unrun_ledger_entry() {
         vec![handover("nothing_written")],
     ));
     for client in clients {
-        let (_dir, db) = store_with_candidates();
+        let (_dir, db, job) = store_with_candidates();
         let resolver = Resolver {
             client: &client,
             db: &db,
-            carrier: Carrier::of(&job("pi")),
+            carrier: Carrier::of(&job),
             memory_enabled: true,
             auto_promote: true,
             authority: None,
@@ -489,8 +514,8 @@ async fn never_ran_fact_check_forgets_its_unrun_ledger_entry() {
 #[tokio::test]
 async fn account_wait_recovered_turn_two_is_revoked_without_a_visit() {
     use crate::summary::run::account_wait_send_tests::{Answer, Client};
-    let (_dir, db) = store_with_candidates();
-    run(&Client::new(Answer::RefuseSend), &db, &job("pi")).await;
+    let (_dir, db, job) = store_with_candidates();
+    run(&Client::new(Answer::RefuseSend), &db, &job).await;
     // Put the stage back as a send interrupted before its reply.
     db.with_connection(|conn| {
         conn.execute_batch(
@@ -501,7 +526,7 @@ async fn account_wait_recovered_turn_two_is_revoked_without_a_visit() {
     })
     .unwrap();
     let client = Client::new(Answer::RunEndsRefused);
-    let outcome = run(&client, &db, &job("pi")).await;
+    let outcome = run(&client, &db, &job).await;
     assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
     assert_eq!(*client.sends.lock().unwrap(), 1);
     assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
@@ -523,12 +548,12 @@ async fn account_wait_recovered_turn_two_is_revoked_without_a_visit() {
 async fn account_wait_fact_check_stops_the_stage_and_forgets_the_check() {
     use crate::summary::run::account_wait_send_tests::{Answer, Client};
     for answer in [Answer::RefuseSend, Answer::RunEndsRefused] {
-        let (_dir, db) = store_with_candidates();
+        let (_dir, db, job) = store_with_candidates();
         let client = Client::new(answer);
         let resolver = Resolver {
             client: &client,
             db: &db,
-            carrier: Carrier::of(&job("pi")),
+            carrier: Carrier::of(&job),
             memory_enabled: true,
             auto_promote: true,
             authority: None,
@@ -564,8 +589,8 @@ async fn account_wait_fact_check_stops_the_stage_and_forgets_the_check() {
 async fn account_wait_final_refusal_spends_the_turn_two_attempt_as_before() {
     use crate::summary::run::account_wait_send_tests::{Answer, Client};
     for answer in [Answer::RefuseSendFinal, Answer::RunEndsFinal] {
-        let (_dir, db) = store_with_candidates();
-        let outcome = run(&Client::new(answer), &db, &job("pi")).await;
+        let (_dir, db, job) = store_with_candidates();
+        let outcome = run(&Client::new(answer), &db, &job).await;
         assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
         let (facts, stages) = ledger(&db);
         assert!(
@@ -591,7 +616,7 @@ async fn account_wait_revoked_stage_counts_no_item_send_on_either_side() {
         .expect("the plugin's ITEM_SENDS")
         + 20;
     let plugin_sends = &PLUGIN[start..start + PLUGIN[start..].find('`').unwrap()];
-    let (_dir, db) = store_with_candidates();
+    let (_dir, db, job) = store_with_candidates();
     db.with_connection(|conn| {
         conn.execute_batch(
             "INSERT INTO memories(id, level, owner_id, category, origin_category, content, normalized_hash,
@@ -603,7 +628,7 @@ async fn account_wait_revoked_stage_counts_no_item_send_on_either_side() {
         )
     })
     .unwrap();
-    let outcome = run(&Client::new(Answer::RefuseSend), &db, &job("pi")).await;
+    let outcome = run(&Client::new(Answer::RefuseSend), &db, &job).await;
     assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
     db.with_connection(|conn| {
         let held: String = conn
@@ -635,8 +660,8 @@ async fn account_wait_revoked_stage_counts_no_item_send_on_either_side() {
 #[tokio::test(start_paused = true)]
 async fn account_wait_turn_two_paused_for_an_account_revokes_its_stage() {
     use crate::summary::run::account_wait_send_tests::{Answer, Client};
-    let (_dir, db) = store_with_candidates();
-    let outcome = run(&Client::new(Answer::PausedForAccount), &db, &job("pi")).await;
+    let (_dir, db, job) = store_with_candidates();
+    let outcome = run(&Client::new(Answer::PausedForAccount), &db, &job).await;
     let Outcome::AccountWait(wait) = outcome else {
         panic!("not an account wait: {outcome:?}");
     };
@@ -650,7 +675,7 @@ async fn account_wait_turn_two_paused_for_an_account_revokes_its_stage() {
 #[test]
 fn provisional_scores_queue_one_outbox_row_per_scored_memory() {
     use crate::replica::test_support::{assert_changes_captured, mark_sent, state};
-    let (_dir, db) = store_with_candidates();
+    let (_dir, db, _job) = store_with_candidates();
     db.with_connection(|conn| {
         conn.execute_batch(
             "INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash,
