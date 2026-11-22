@@ -4,7 +4,8 @@
 //! The answer is one JSON array of section changes,
 //! `{file, action, heading, text, reason}`, as the task's output frame asks.
 //! A section is a heading line (`#` to `######`, outside code fences) and
-//! the lines up to the next heading of any level. Each change is checked on
+//! everything under it until the next heading of the same or a higher level,
+//! or the end of the file. Each change is checked on
 //! its own, against both documents as the changes kept before it left them,
 //! and is dropped with its reason when a check fails; the rest are kept and
 //! applied in their order. The checks:
@@ -15,8 +16,8 @@
 //!   `add` one it doesn't hold;
 //! - the `text` of `replace` and `add` is one section that starts with its
 //!   heading line, and holds no date;
-//! - no protected region changes ([`super::protected`]); a section that holds
-//!   one can't be removed or rewritten;
+//! - protected regions are preserved byte for byte and in order
+//!   ([`super::protected`]), even when a change targets a parent section;
 //! - the documents stay within their budget: when the kept changes make them
 //!   larger than the budget (or larger than they are, when they already
 //!   exceed it), the latest changes that make them larger are dropped first.
@@ -76,20 +77,30 @@ fn fence_line() -> &'static Regex {
     PATTERN.get_or_init(|| Regex::new(r"^\s*(```|~~~)").expect("the fence pattern compiles"))
 }
 
-/// The sections of `text`, in order. A heading inside a code fence opens
-/// none. Lines before the first heading belong to no section.
+/// The sections of `text`, in heading order, including nested sections.
+/// A heading inside a code fence opens none. Lines before the first heading
+/// belong to no section.
 pub(crate) fn sections(text: &str) -> Vec<Section> {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut found: Vec<Section> = Vec::new();
+    let mut open: Vec<(usize, usize)> = Vec::new();
     let mut fenced = false;
     for (at, line) in lines.iter().enumerate() {
         if fence_line().is_match(line) {
             fenced = !fenced;
         }
         if !fenced && heading_line().is_match(line) {
-            if let Some(last) = found.last_mut() {
-                last.end = at;
+            let level = line.bytes().take_while(|byte| *byte == b'#').count();
+            // A new heading closes its peers and their descendants, but not
+            // its parents, whose edits must include the nested text.
+            while let Some(&(index, open_level)) = open.last() {
+                if open_level < level {
+                    break;
+                }
+                found[index].end = at;
+                open.pop();
             }
+            open.push((found.len(), level));
             found.push(Section {
                 heading: line.trim_end_matches('\r').to_owned(),
                 start: at,
@@ -251,7 +262,10 @@ fn check(
         if first_line.trim_end() != change.heading {
             return Err("the text doesn't start with its heading line".into());
         }
-        if sections(&change.text).len() != 1 {
+        let first_section_covers_text = sections(&change.text)
+            .first()
+            .is_some_and(|section| section.end == change.text.split('\n').count());
+        if !first_section_covers_text {
             return Err("the text holds more than one section".into());
         }
         if let Some(date) =

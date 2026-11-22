@@ -7,6 +7,7 @@ use super::*;
 
 const ARCHITECTURE: &str = "# Architecture\n\n## Core\nOld sentence.\n\n## Guard\n<!-- mc:protected START hand-authored -->\nHand authored\n<!-- mc:protected END -->\n\n## Tail\nLast words.\n";
 const STRUCTURE: &str = "# Structure\n\n## Layout\nOld layout.\n";
+const LIVE: &str = "# Architecture\n\n## Live\n\n### A\nOld text.\n\n### B\nOther text.\n";
 
 fn base() -> Texts {
     [Some(ARCHITECTURE.into()), Some(STRUCTURE.into())]
@@ -23,6 +24,10 @@ fn change(file: &str, action: &str, heading: &str, text: &str) -> Value {
 
 fn check(answer: &[Value]) -> Checked {
     check_answer(answer, &base(), 10_000, &words)
+}
+
+fn check_architecture(text: &str, answer: &[Value]) -> Checked {
+    check_answer(answer, &[Some(text.into()), None], 10_000, &words)
 }
 
 /// The one change's drop reason.
@@ -59,16 +64,146 @@ fn an_answer_is_one_json_array_alone_fenced_or_in_text() {
 }
 
 #[test]
-fn sections_run_to_the_next_heading_and_skip_fenced_lines() {
-    let text = "intro\n# A\none\n```\n# not a heading\n```\n## B\ntwo\n### C\n";
+fn sections_run_to_the_next_same_or_higher_heading_and_skip_fenced_lines() {
+    let text = "intro\n# A\none\n```\n# not a heading\n```\n## B\ntwo\n### C\n## D\n# E\n";
     let found = sections(text);
     let headings: Vec<_> = found
         .iter()
         .map(|section| section.heading.as_str())
         .collect();
-    assert_eq!(headings, ["# A", "## B", "### C"]);
-    assert_eq!((found[0].start, found[0].end), (1, 6));
-    assert_eq!((found[2].start, found[2].end), (8, 10));
+    assert_eq!(headings, ["# A", "## B", "### C", "## D", "# E"]);
+    let ranges: Vec<_> = found
+        .iter()
+        .map(|section| (section.start, section.end))
+        .collect();
+    assert_eq!(ranges, [(1, 10), (6, 9), (8, 9), (9, 10), (10, 12)]);
+}
+
+#[test]
+fn replacing_a_section_rewrites_its_subsections() {
+    let checked = check_architecture(
+        LIVE,
+        &[change(
+            "ARCHITECTURE.md",
+            "replace",
+            "## Live",
+            "## Live\n\n### A\nNew text.\n\n### B\nOther text.\n",
+        )],
+    );
+    assert!(checked.dropped.is_empty(), "{:?}", checked.dropped);
+    assert_eq!(checked.kept.len(), 1);
+    assert_eq!(
+        checked.results[0].as_deref(),
+        Some("# Architecture\n\n## Live\n\n### A\nNew text.\n\n### B\nOther text.\n")
+    );
+}
+
+#[test]
+fn replacing_a_subsection_leaves_its_siblings_intact() {
+    let checked = check_architecture(
+        LIVE,
+        &[change(
+            "ARCHITECTURE.md",
+            "replace",
+            "### A",
+            "### A\nNew text.",
+        )],
+    );
+    assert!(checked.dropped.is_empty(), "{:?}", checked.dropped);
+    assert_eq!(
+        checked.results[0].as_deref(),
+        Some("# Architecture\n\n## Live\n\n### A\nNew text.\n\n### B\nOther text.\n")
+    );
+}
+
+#[test]
+fn removing_a_section_removes_its_subsections_but_not_its_siblings() {
+    let checked = check_architecture(
+        "# Architecture\n\n## Before\nKeep this.\n\n## Live\n\n### A\nOld text.\n\n### B\nOther text.\n\n## After\nKeep this too.\n",
+        &[change("ARCHITECTURE.md", "remove", "## Live", "")],
+    );
+    assert!(checked.dropped.is_empty(), "{:?}", checked.dropped);
+    assert_eq!(
+        checked.results[0].as_deref(),
+        Some("# Architecture\n\n## Before\nKeep this.\n\n## After\nKeep this too.\n")
+    );
+}
+
+#[test]
+fn a_second_same_or_higher_heading_drops_only_that_replacement() {
+    for other in ["## Other", "# Other"] {
+        let checked = check_architecture(
+            LIVE,
+            &[
+                change(
+                    "ARCHITECTURE.md",
+                    "replace",
+                    "## Live",
+                    &format!("## Live\n\n### A\nNew text.\n\n{other}\nExtra text."),
+                ),
+                change("ARCHITECTURE.md", "replace", "### B", "### B\nNew text."),
+            ],
+        );
+        assert_eq!(checked.dropped.len(), 1);
+        assert_eq!(
+            checked.dropped[0].reason,
+            "the text holds more than one section"
+        );
+        assert_eq!(checked.kept.len(), 1);
+        assert_eq!(checked.kept[0].heading, "### B");
+        assert_eq!(
+            checked.results[0].as_deref(),
+            Some("# Architecture\n\n## Live\n\n### A\nOld text.\n\n### B\nNew text.\n")
+        );
+    }
+}
+
+#[test]
+fn an_addition_can_have_subsections_and_fenced_headings() {
+    let checked = check_architecture(
+        LIVE,
+        &[change(
+            "ARCHITECTURE.md",
+            "add",
+            "## Examples",
+            "## Examples\n\n### Shell\n```sh\n# this is a comment\n```\n\n### Markdown\n~~~md\n## example heading\n~~~",
+        )],
+    );
+    assert!(checked.dropped.is_empty(), "{:?}", checked.dropped);
+    assert_eq!(checked.kept.len(), 1);
+    assert!(checked.results[0].as_deref().unwrap().ends_with(
+        "\n\n## Examples\n\n### Shell\n```sh\n# this is a comment\n```\n\n### Markdown\n~~~md\n## example heading\n~~~\n"
+    ));
+}
+
+#[test]
+fn a_protected_region_in_a_subsection_must_survive_a_parent_edit() {
+    let protected =
+        "### Guard\n<!-- mc:protected START -->\nHand authored.\n<!-- mc:protected END -->";
+    let original = format!("## Live\nOld text.\n\n{protected}\n");
+    let updated = format!("## Live\nNew text.\n\n{protected}\n");
+    for (action, text, reason) in [
+        ("remove", "", "the removed section holds a protected region"),
+        (
+            "replace",
+            "## Live\nNew text.",
+            "the change alters a protected region",
+        ),
+    ] {
+        let checked = check_architecture(
+            &original,
+            &[change("ARCHITECTURE.md", action, "## Live", text)],
+        );
+        assert_eq!(checked.dropped.len(), 1, "{checked:?}");
+        assert_eq!(checked.dropped[0].reason, reason);
+        assert_eq!(checked.results[0].as_deref(), Some(original.as_str()));
+    }
+    let checked = check_architecture(
+        &original,
+        &[change("ARCHITECTURE.md", "replace", "## Live", &updated)],
+    );
+    assert!(checked.dropped.is_empty(), "{:?}", checked.dropped);
+    assert_eq!(checked.results[0].as_deref(), Some(updated.as_str()));
 }
 
 #[test]
