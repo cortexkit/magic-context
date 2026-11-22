@@ -22,6 +22,16 @@ pub(crate) fn authored_parts(entry: &Entry) -> impl Iterator<Item = &Part> {
         .filter(|part| host_part(entry, part).is_none())
 }
 
+/// The runner marks notices carrying the person's own words. They stay
+/// verbatim until a summary covers them, rather than being reclaimed as notices.
+pub(crate) fn is_kept_notice(entry: &Entry) -> bool {
+    entry.notice.as_ref().is_some_and(|notice| notice.keep)
+}
+
+pub(crate) fn is_unkept_notice(entry: &Entry) -> bool {
+    entry.notice.as_ref().is_some_and(|notice| !notice.keep)
+}
+
 pub(crate) fn is_host_only(entry: &Entry) -> bool {
     !entry.parts.is_empty() && authored_parts(entry).next().is_none()
 }

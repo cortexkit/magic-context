@@ -650,7 +650,9 @@ impl Session {
         let mut selected = Vec::new();
         for tag in tags {
             let (entry, part) = find(tag).expect("all tags resolved");
-            if matches!(&part.body, PartBody::Tool(tool) if tool.name.eq_ignore_ascii_case("ctx_reduce"))
+            if crate::neutral::is_kept_notice(entry) {
+                skipped.push(format!("§{tag}§ is a kept notice from the person"));
+            } else if matches!(&part.body, PartBody::Tool(tool) if tool.name.eq_ignore_ascii_case("ctx_reduce"))
             {
                 self_stamps += 1;
             } else if entry.role == cortexkit_role_compaction::read::Role::Assistant

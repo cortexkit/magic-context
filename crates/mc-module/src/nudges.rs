@@ -312,9 +312,11 @@ pub fn measure(
                 _ => continue,
             };
             measurement.t += weight;
-            // Conversation takes up space, but ctx_reduce guidance asks the
-            // model to keep it. Only runner-marked notices are stampable text.
-            if matches!(&part.body, PartBody::Text { .. }) && entry.notice.is_none() {
+            // The conversation takes up space, but only unkept notices count
+            // as text the model could reclaim with ctx_reduce.
+            if crate::neutral::is_kept_notice(entry)
+                || (matches!(&part.body, PartBody::Text { .. }) && entry.notice.is_none())
+            {
                 continue;
             }
             let Some(tag) = part.tag else {
@@ -628,6 +630,20 @@ mod tests {
         assert_eq!(measurement.level(), Some(Level::Urgent));
         assert_eq!(measurement.outputs, 0);
         assert!(measurement.hints.is_empty());
+    }
+
+    #[test]
+    fn kept_notice_counts_toward_context_but_not_reclaimable_weight() {
+        let entries = vec![
+            counted_text(1, Role::User, "Initial task", 100),
+            counted_text(2, Role::User, "Owner words", 40_000)
+                .with_notice(NoticeOrigin::new("core").with_keep(true)),
+            counted_text(3, Role::User, "Peer update", 200).with_notice(NoticeOrigin::new("peer")),
+        ];
+        let measurement = measure_entries(entries, &lanes::Edited::default());
+        assert_eq!(measurement.t, 40_300);
+        assert_eq!(measurement.u, 200);
+        assert_eq!(measurement.level(), None);
     }
 
     fn at(u: u64, t: u64) -> Measurement {

@@ -108,6 +108,28 @@ async fn numbers_review_the_summary_due_before_any_view_can_reach_a_floor_the_su
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[tokio::test]
+async fn kept_notice_alone_at_the_numbers_floor_requires_a_summary() {
+    use cortexkit_role_compaction::read::NoticeOrigin;
+
+    let dir = scratch("numbers-review-kept-notice-floor");
+    let mut entries: Vec<Entry> = (1..=10).map(|n| text(n, &format!("m{n}"))).collect();
+    entries[3] = marked(
+        entries[3]
+            .clone()
+            .with_notice(NoticeOrigin::new("core").with_keep(true)),
+    );
+    let (mut session, _client, settings) = head(&dir, entries, &[((1, "m1"), (3, "m3"))]).await;
+    let run = session
+        .summary_due(&settings)
+        .expect("the kept notice needs a summary, not an uncovered cut");
+    assert_eq!((run.from, run.until), (4, 5));
+    assert!(run.force_keep_last_compartment);
+    assert!(session.short_of_numbers_floor());
+    assert!(session.build(&settings, None, false, None).0.is_none());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The summary due before any view reads from the summaries' end through
 /// the floor in one run, however long that is. Every other automatic run,
 /// and a person's wrap-up, reads at most the per-run cap

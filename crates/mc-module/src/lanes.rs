@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::index::Index;
 use crate::injection::{self, Stripped};
-use crate::neutral::{is_finished, is_known};
+use crate::neutral::{is_finished, is_kept_notice, is_known, is_unkept_notice};
 use crate::tokens;
 
 /// A part, by message id and part id.
@@ -285,11 +285,15 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
     let mut covered = Vec::new();
     for (key, shape) in shapes {
         let (mid, part_id) = key;
+        let found = index.find(mid, part_id);
+        if found.is_some_and(|(entry, _)| is_kept_notice(entry)) {
+            continue;
+        }
         if context.edited.covers(mid, part_id) {
             covered.push(key.clone());
             continue;
         }
-        let Some((entry, part)) = index.find(mid, part_id) else {
+        let Some((entry, part)) = found else {
             continue;
         };
         if context.keep_first_message && Some(entry.mid.as_str()) == first_mid {
@@ -560,7 +564,7 @@ pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
 /// own words. Only runner-marked user entries without a keep mark may lose
 /// text to the age sweep; kept notices can carry the person's own words.
 fn is_sweepable_notice(entry: &Entry) -> bool {
-    entry.role == Role::User && entry.notice.as_ref().is_some_and(|notice| !notice.keep)
+    entry.role == Role::User && is_unkept_notice(entry)
 }
 
 /// The highest tag number below which every tool output is far behind: three
@@ -653,7 +657,12 @@ pub fn age_sweep(
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
     let mut parts = Vec::new();
-    for entry in context.index.entries() {
+    for entry in context
+        .index
+        .entries()
+        .iter()
+        .filter(|entry| !is_kept_notice(entry))
+    {
         for part in &entry.parts {
             let Some(tag) = part.tag else {
                 continue;
@@ -897,16 +906,21 @@ fn in_tail(part: &Part, cutoff: Option<u64>) -> bool {
     }
 }
 
-/// Every tool part with the entry that holds it, oldest first.
+/// Tool parts that cleanup lanes may consider, oldest first.
 fn tool_parts<'a>(
     context: &'a Context,
 ) -> impl Iterator<Item = (&'a Entry, &'a Part, &'a ToolPart)> + 'a {
-    context.index.entries().iter().flat_map(|entry| {
-        entry.parts.iter().filter_map(move |part| match &part.body {
-            PartBody::Tool(tool) => Some((entry, part, tool)),
-            _ => None,
+    context
+        .index
+        .entries()
+        .iter()
+        .filter(|entry| !is_kept_notice(entry))
+        .flat_map(|entry| {
+            entry.parts.iter().filter_map(move |part| match &part.body {
+                PartBody::Tool(tool) => Some((entry, part, tool)),
+                _ => None,
+            })
         })
-    })
 }
 
 /// Lookup tools whose identical repeated calls return the same thing.
@@ -1043,7 +1057,7 @@ pub fn caveman(
         .index
         .entries()
         .iter()
-        .filter(|entry| entry.role != Role::System)
+        .filter(|entry| entry.role != Role::System && !is_kept_notice(entry))
         .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
         .filter_map(|(entry, part)| {
             let (PartBody::Text { text }, Some(tag)) = (&part.body, part.tag) else {
@@ -1203,7 +1217,8 @@ pub fn answered_images(context: &Context, images: &Images) -> (Vec<EditOp>, Vec<
             && age <= images.watermark
             && (images.over_limit || images.cutoff.is_none_or(|cutoff| age < cutoff))
             && !(context.keep_first_message && position == 0);
-        if !eligible || !matches!(entry.role, Role::User | Role::Assistant) {
+        if !eligible || is_kept_notice(entry) || !matches!(entry.role, Role::User | Role::Assistant)
+        {
             continue;
         }
         for part in &entry.parts {
@@ -1522,8 +1537,8 @@ pub fn emergency_drop(
 }
 
 /// The parts a `ctx_keep` view drops: everything before the message holding
-/// the `ctx_keep` call, except non-notice user inputs (including instructions
-/// from another agent), the session's first
+/// the `ctx_keep` call, except kept notices, non-notice user inputs (including
+/// instructions from another agent), the session's first
 /// message when it keeps it, the selected parts, and the protected tail. The call's
 /// message and everything after it stay, so the model sees its own note.
 pub fn keep_drops(
@@ -1543,6 +1558,7 @@ pub fn keep_drops(
     let mut drops = Vec::new();
     for (position, entry) in entries[..call_at].iter().enumerate() {
         if (position == 0 && context.keep_first_message)
+            || is_kept_notice(entry)
             || (entry.role == Role::User && entry.notice.is_none())
         {
             continue;
@@ -1668,6 +1684,167 @@ mod tests {
             .unwrap(),
         );
         entry
+    }
+
+    #[test]
+    fn kept_notice_survives_ctx_keep_and_a_queued_drop() {
+        use cortexkit_role_compaction::read::NoticeOrigin;
+
+        let mut index = Index::default();
+        index.extend([
+            notice_text(1, 4_000).with_notice(NoticeOrigin::new("core").with_keep(true)),
+            notice_text(2, 4_000),
+            entry(
+                3,
+                Role::Assistant,
+                vec![part(
+                    "keep",
+                    Some(3),
+                    Seal::None,
+                    PartBody::Tool(ToolPart::new(
+                        "keep",
+                        "ctx_keep",
+                        json!({}),
+                        ToolStatus::Completed,
+                    )),
+                )],
+            ),
+        ]);
+        let edited = Edited::default();
+        let tools = BTreeMap::new();
+        let ctx = context(&index, &edited, &tools);
+        let kept = key("m1", "p1");
+        let unkept = key("m2", "p2");
+        let drops = keep_drops(&ctx, &BTreeSet::new(), None);
+        let (_, covered) = drop_ops(
+            &ctx,
+            &[(kept, Shape::Requested), (unkept.clone(), Shape::Requested)],
+        );
+        assert_eq!(
+            (drops, covered),
+            (vec![(unkept.clone(), Shape::Whole)], vec![unkept])
+        );
+    }
+
+    #[test]
+    fn caveman_leaves_kept_notice_text_verbatim() {
+        use cortexkit_role_compaction::read::NoticeOrigin;
+
+        let mut index = Index::default();
+        index.extend([true, false].into_iter().enumerate().map(|(i, keep)| {
+            let n = i as u64 + 1;
+            entry(
+                n,
+                Role::User,
+                vec![part(
+                    "p",
+                    Some(n),
+                    Seal::None,
+                    PartBody::Text {
+                        text: "It is very important to use the stable API."
+                            .repeat(10)
+                            .into(),
+                    },
+                )],
+            )
+            .with_notice(NoticeOrigin::new("core").with_keep(keep))
+        }));
+        let edited = Edited::default();
+        let tools = BTreeMap::new();
+        let ctx = context(&index, &edited, &tools);
+        let (texts, next) = caveman(
+            &ctx,
+            &crate::pass::Caveman {
+                min_chars: 1,
+                english_word_rules: true,
+            },
+            &CavemanState::default(),
+            None,
+            &[],
+        );
+        assert_eq!(
+            texts.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            [&key("m2", "p")]
+        );
+        assert_eq!(next.depths, [("m2".into(), "p".into(), 3)]);
+    }
+
+    #[test]
+    fn answered_images_leave_kept_notice_attachments_verbatim() {
+        use cortexkit_role_compaction::read::NoticeOrigin;
+
+        let image = |ordinal, keep| {
+            entry(
+                ordinal,
+                Role::User,
+                vec![part(
+                    "image",
+                    None,
+                    Seal::None,
+                    PartBody::File(FileMedia::inline("image/png", Some(300))),
+                )],
+            )
+            .with_notice(NoticeOrigin::new("core").with_keep(keep))
+        };
+        let mut index = Index::default();
+        index.extend([
+            image(1, true),
+            image(2, false),
+            entry(3, Role::Assistant, vec![read(3, 0)]),
+        ]);
+        let edited = Edited::default();
+        let tools = BTreeMap::new();
+        let ctx = context(&index, &edited, &tools);
+        let images = Images {
+            outputs: &BTreeMap::new(),
+            watermark: 3,
+            cutoff: None,
+            over_limit: false,
+            skip: &[],
+        };
+        let (ops, changed) = answered_images(&ctx, &images);
+        assert_eq!(changed, [key("m2", "image")]);
+        assert!(
+            matches!(ops.as_slice(), [EditOp::Replace { mid, value, .. }] if mid == "m2" && value == IMAGE_STRIPPED)
+        );
+    }
+
+    #[test]
+    fn duplicate_and_force_band_selectors_exclude_kept_notice_parts() {
+        use cortexkit_role_compaction::read::NoticeOrigin;
+
+        let with_tool_parts = |ordinal, tag, keep| {
+            entry(
+                ordinal,
+                Role::User,
+                vec![read(tag, 100_000), read(tag + 1, 100_000)],
+            )
+            .with_notice(NoticeOrigin::new("core").with_keep(keep))
+        };
+        let mut index = Index::default();
+        index.extend([with_tool_parts(1, 1, true), with_tool_parts(2, 3, false)]);
+        let edited = Edited::default();
+        let tools = BTreeMap::new();
+        let ctx = context(&index, &edited, &tools);
+        let dupes = duplicate_lookups(&ctx, None);
+        let emergency = Emergency {
+            prompt_tokens: 39_000,
+            request_tokens: None,
+            notes: Default::default(),
+            ceiling_tokens: 25_000,
+            usable_tokens: 42_000,
+            over_limit: false,
+            priced: true,
+            removed_tokens: 0,
+        };
+        let forced = emergency_drop(&ctx, None, &emergency, &BTreeSet::new());
+        assert_eq!(
+            (dupes, forced),
+            (
+                vec![(key("m2", "p3"), Shape::Whole)],
+                vec![(key("m2", "p3"), Shape::Default)]
+            )
+        );
     }
 
     #[test]

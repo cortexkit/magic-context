@@ -772,9 +772,9 @@ pub(super) fn render_entry(
                     true,
                 ));
             }
-            // A notice's own text is never the user's words, but an answer
-            // notice carries the user's decision.
-            let mut parts: Vec<String> = if entry.notice.is_some() {
+            // Unkept notices are not the person's words, but an answer
+            // notice can still carry the person's decision.
+            let mut parts: Vec<String> = if crate::neutral::is_unkept_notice(entry) {
                 Vec::new()
             } else {
                 raw_texts
@@ -1030,6 +1030,33 @@ mod tests {
 
     fn text(text: &str) -> PartBody {
         PartBody::Text { text: text.into() }
+    }
+
+    #[test]
+    fn kept_notice_reaches_historian_as_the_persons_words() {
+        let words = entry(2, Role::User, false, vec![text("Use the stable API.")]);
+        let notice = NoticeOrigin::new("core");
+        let input = |middle: Entry| {
+            build(
+                &[
+                    entry(1, Role::User, false, vec![text("Fix the bug.")]),
+                    middle,
+                    entry(3, Role::Assistant, false, vec![text("Done.")]),
+                ],
+                10_000,
+                crate::count::Counter::for_model(None),
+            )
+            .unwrap()
+            .input
+        };
+        let unkept = words.clone().with_notice(notice.clone());
+        assert_eq!(
+            input(unkept),
+            "Messages 1-3:\n\n[1] U: Fix the bug.\n[2-3] A: Done."
+        );
+        let kept = words.clone().with_notice(notice.with_keep(true));
+        assert_eq!(input(kept.clone()), input(words));
+        assert!(super::super::trigger::is_meaningful_user(&kept));
     }
 
     #[test]

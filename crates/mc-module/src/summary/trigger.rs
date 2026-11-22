@@ -64,12 +64,12 @@ pub fn protected_tail_tokens(
     ceiling.min(floor.min(ceiling).max(raw))
 }
 
-/// Whether a user message carries the person's own words: not a notice or relay, and
-/// with text left once injected regions (reminders, directives) are stripped.
+/// Whether a user message carries the person's own words: not an unkept notice
+/// or relay, and with text left once injected regions are stripped.
 pub fn is_meaningful_user(entry: &Entry) -> bool {
     let _timing = crate::notice_cost_timing::span("trigger.meaningful_user");
     entry.role == Role::User
-        && entry.notice.is_none()
+        && !crate::neutral::is_unkept_notice(entry)
         && entry.speaks_for.is_none()
         && !super::chunk::is_relayed_wake(
             &crate::neutral::authored_parts(entry)

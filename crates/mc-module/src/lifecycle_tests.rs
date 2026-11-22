@@ -411,6 +411,36 @@ async fn audit_views_noop_fold_does_not_authorize_the_next_notice() {
 }
 
 #[tokio::test]
+async fn ctx_reduce_skips_kept_notice_but_stamps_and_drops_unkept_notice() {
+    use cortexkit_role_compaction::read::NoticeOrigin;
+
+    let (mut session, client, _, _, settings) = fixture();
+    session.index.extend([
+        text(1, "owner").with_notice(NoticeOrigin::new("core").with_keep(true)),
+        text(2, "peer").with_notice(NoticeOrigin::new("peer")),
+        text(3, "latest"),
+    ]);
+    let reply = session
+        .ctx_reduce(&client, &serde_json::json!({"drop": "1-2"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        reply,
+        "1 tag stamped. Skipped: §1§ is a kept notice from the person."
+    );
+    assert_eq!(
+        session.queued,
+        BTreeSet::from([("peer".into(), "p".into())])
+    );
+    let view = session.build(&settings, None, false, None).0.unwrap();
+    assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, field, value, .. }
+            if mid == "peer" && field == "text" && value == "[dropped §2§]")));
+    assert!(!view.edits.iter().any(|edit| matches!(&edit.op,
+        EditOp::Replace { mid, .. } | EditOp::Drop { mid, .. } if mid == "owner")));
+}
+
+#[tokio::test]
 async fn audit_views_refusal_preserves_later_stamp() {
     let (mut session, client, _, _, settings) = fixture();
     let entries = vec![text(1, "one"), text(2, "two"), text(3, "latest")];
