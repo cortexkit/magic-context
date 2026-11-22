@@ -98,7 +98,7 @@ cortexkit-bus-trait = "=0.3.1"
 cortexkit-bus-naming = "=0.5.4"
 # The computer's box id (`BusClient::box_id`), which names every memory this
 # computer shares with the user's other computers (`replica/`).
-cortexkit-bus-client = "=0.1.12"
+cortexkit-bus-client = "=0.1.14"
 # API keys the user names as `{vault:<credential id>}` are read from the
 # CortexKit vault over ck-mc's own SDK consumer (`vault.rs`), and shared
 # memories are sealed and opened under the fleet epoch key with its typed
