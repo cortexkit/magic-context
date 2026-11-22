@@ -11,5 +11,5 @@ through `msg_a2`. Each later view below is refused, and view 1 stays in force.
 - `notice-cut-before-move-1.json`: the same, for view 2 with no cut at all.
 
 Each notice is the params value broca passed to `compaction.notice`. A view cutting through
-`msg_a2` itself or any later entry applies. Heads imported before this build have no recorded
-move cut and stay unchecked.
+`msg_a2` itself or any later entry applies. Broca records no move cut for heads imported before
+the build that added this refusal, so it never refuses their views this way.
