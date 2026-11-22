@@ -1110,12 +1110,17 @@ fn an_archive_needs_its_reason_and_what_it_repeats() {
     // A duplicate of a memory of the part, of one every session sees, or
     // of a documents line; a one-off; a lesson.
     let store = fixture();
+    store.insert(&[row(
+        13,
+        "PROJECT_RULES",
+        "The module has owned context.db since schema 106.",
+    )]);
     let batch = store.rules();
     let applied = store.apply(
         &batch,
         &list(&format!(
             "<archive id=\"2\" reason=\"duplicate\" of=\"1\"/>\n\
-             <archive id=\"3\" reason=\"duplicate\" of=\"20\"/>\n\
+             <archive id=\"13\" reason=\"duplicate\" of=\"20\"/>\n\
              <archive id=\"12\" reason=\"duplicate\" quote=\"{quote}\"/>\n\
              <archive id=\"5\" reason=\"one-off\" why=\"a room id and a date\"/>\n\
              <archive id=\"11\" reason=\"lesson\" why=\"a story with no rule\"/>"
@@ -1139,7 +1144,7 @@ fn an_archive_needs_its_reason_and_what_it_repeats() {
         ("archived".into(), Some(1), "duplicate of memory 1".into())
     );
     assert_eq!(
-        archived(3),
+        archived(13),
         ("archived".into(), Some(20), "duplicate of memory 20".into())
     );
     assert_eq!(
@@ -1185,9 +1190,21 @@ fn an_archive_needs_its_reason_and_what_it_repeats() {
 
     // A quote that holds the documents' escapes written out matches too,
     // and so does a line quoted with the whitespace around it.
-    let store = fixture();
-    let batch = store.rules();
-    let applied = store.apply(
+    let quotes = self::store(&[
+        row(
+            5,
+            "PROJECT_RULES",
+            "Run scripts/gate.sh preflight before delivery.",
+        ),
+        row(
+            12,
+            "PROJECT_RULES",
+            "The module fills a frame, never a profile.",
+        ),
+    ]);
+    quotes.docs(DOCS);
+    let batch = quotes.rules();
+    let applied = quotes.apply(
         &batch,
         &list("<archive id=\"12\" reason=\"duplicate\" quote=\"A &lt;frame&gt; is filled by the module &amp; never by a profile.\"/>\n<archive id=\"5\" reason=\"duplicate\" quote=\"  Run scripts/gate.sh preflight before every delivery of a change. \"/>"),
         RUN,
@@ -1239,6 +1256,80 @@ fn an_archive_needs_its_reason_and_what_it_repeats() {
         ),
         "archive 3",
         "memory 20 is not a live memory of the project",
+    );
+}
+
+#[test]
+fn a_duplicate_archive_cannot_drop_the_opt_in_env_var() {
+    let store = store(&[
+        row(
+            1,
+            "PROJECT_RULES",
+            "Live tests require `BROCA_LIVE_TESTS=1`.",
+        ),
+        row(
+            2,
+            "PROJECT_RULES",
+            "Live integration tests must opt in before making billed calls.",
+        ),
+    ]);
+    says(
+        &refused(
+            &store,
+            &store.rules(),
+            "<archive id=\"1\" reason=\"duplicate\" of=\"2\"/>",
+        ),
+        "archive 1",
+        "the kept memory drops `BROCA_LIVE_TESTS=1`",
+    );
+}
+
+#[test]
+fn a_duplicate_archive_cannot_borrow_a_name_from_another_paragraph() {
+    let store = store(&[row(
+        1,
+        "PROJECT_RULES",
+        "Every lane asks `reclaimRidePermitted`. In-flight summaries never block the drain.",
+    )]);
+    store.docs(
+        "Every lane asks `reclaimRidePermitted`.\n  \nIn-flight summaries never block the drain.",
+    );
+    says(
+        &refused(
+            &store,
+            &store.rules(),
+            "<archive id=\"1\" reason=\"duplicate\" quote=\"In-flight summaries never block the drain.\"/>",
+        ),
+        "archive 1",
+        "the quoted paragraph drops `reclaimRidePermitted`",
+    );
+}
+
+#[test]
+fn a_duplicate_archive_can_quote_one_line_of_a_covering_paragraph() {
+    let store = store(&[row(
+        1,
+        "PROJECT_RULES",
+        "Every lane asks `reclaimRidePermitted`. In-flight summaries never block the drain.",
+    )]);
+    let quote = "In-flight summaries never block the drain.";
+    store.docs(&format!("Every lane asks `reclaimRidePermitted`.\n{quote}"));
+    let applied = store.apply(
+        &store.rules(),
+        &list(&format!(
+            "<archive id=\"1\" reason=\"duplicate\" quote=\"{quote}\"/>"
+        )),
+        RUN,
+    );
+    assert_eq!(
+        (applied.applied, applied.dropped.len()),
+        (1, 0),
+        "{applied:?}"
+    );
+    assert_eq!(store.memory(1).status, "archived");
+    assert_eq!(
+        store.journal()[0].2["evidence"],
+        json!({"reason": "duplicate", "quote": quote})
     );
 }
 
@@ -1725,6 +1816,11 @@ fn the_guidance_adds_one_block_after_the_documents_and_changes_nothing_else() {
 #[test]
 fn a_memory_that_repeats_one_line_of_the_guidance_is_archived_as_its_duplicate() {
     let store = fixture();
+    store.insert(&[row(
+        13,
+        "PROJECT_RULES",
+        "Run scripts/gate.sh preflight before delivery.",
+    )]);
     let batch = store.rules_with(Some(GUIDANCE));
     let line = "- Deliver every change through the gate script.";
     let documents = "Run scripts/gate.sh preflight before every delivery of a change.";
@@ -1732,7 +1828,7 @@ fn a_memory_that_repeats_one_line_of_the_guidance_is_archived_as_its_duplicate()
         &batch,
         &list(&format!(
             "<archive id=\"12\" reason=\"duplicate\" quote=\"{line}\"/>\n\
-             <archive id=\"3\" reason=\"duplicate\" quote=\"{documents}\"/>"
+             <archive id=\"13\" reason=\"duplicate\" quote=\"{documents}\"/>"
         )),
         RUN,
     );
@@ -1752,7 +1848,7 @@ fn a_memory_that_repeats_one_line_of_the_guidance_is_archived_as_its_duplicate()
         format!("duplicate of the workspace guidance: \"{line}\"")
     );
     assert_eq!(
-        reason(3),
+        reason(13),
         format!("duplicate of the project documents: \"{documents}\"")
     );
     let journal = store.journal();

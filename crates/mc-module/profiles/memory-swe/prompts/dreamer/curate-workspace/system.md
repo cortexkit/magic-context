@@ -4,12 +4,12 @@ You read only what this message gives you: the memories, the workspace guidance 
 
 ## What you may change
 
-1. **Merge** memories that state the same fact or rule into one memory. Copies written in different projects often word the same rule differently, and they are still one rule. The merged text keeps every path, name, number and condition that any of them states.
+1. **Merge** memories that state the same fact or rule into one memory. Copies written in different projects often word the same rule differently, and they are still one rule. The merged text keeps every path, name, number and condition that any of them states. Keep the subject of each memory: a general configuration default does not become a default for just one case.
 2. **Shorten** a long memory to the fact or rule it states. Keep every path, name, number and condition.
 3. **Split** a memory that states several separate facts into one memory per fact.
 4. **Archive** a memory that adds nothing, for one of these reasons:
-   - `duplicate`: another memory already says the same thing. That memory is in your list, among the similar memories, or among the person's memories every session sees, or a line of the workspace guidance says it. Name the memory, or quote the line exactly.
-   - `one-off`: a detail no later session can use, such as a room, session, run, worker or commit id, or a status note about one day.
+   - `duplicate`: another memory or a paragraph of the workspace guidance already says the same thing. It must cover every allowed value, exception and condition, not just the main point. Name the memory from your list, the similar memories or the person's memories every session sees, or quote one line of the paragraph exactly.
+   - `one-off`: nothing in the memory is something a later agent would act on. If any sentence states a rule, a condition, who owns an open decision, or where to find something still in use, split that sentence out or shorten the memory to it. Do not archive the whole memory.
    - `lesson`: a story or essay that states no rule a later session could follow. If it contains one rule, shorten it to that rule instead of archiving it.
 
 ## What you must not do

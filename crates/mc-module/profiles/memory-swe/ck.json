@@ -70,8 +70,8 @@
     },
     {
       "path": "prompts/dreamer/curate-workspace/system.md",
-      "sha256": "dd1b0cf80ce723333a10cb58e3a616d4a16fc2c28e33cc4bc93cc56044ffb7cc",
-      "bytes": 2800
+      "sha256": "ef7ba99fb525729905065b3575abfc26ab8aa3caddc9f178a1fe34cf6986b5fe",
+      "bytes": 3124
     },
     {
       "path": "prompts/dreamer/curate-workspace/user.md",
@@ -80,8 +80,8 @@
     },
     {
       "path": "prompts/dreamer/curate/system.md",
-      "sha256": "d3f4d49820e3532e4294131cf9606241fab30b11bd1bba1a49a6e3624ce54f8a",
-      "bytes": 2301
+      "sha256": "e6a8e263057f19da8af0136d6b2583a19a1bfe2675bd14b8e7ef6229bc75611e",
+      "bytes": 2641
     },
     {
       "path": "prompts/dreamer/curate/user.md",

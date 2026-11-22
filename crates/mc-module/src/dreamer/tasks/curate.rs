@@ -1569,22 +1569,30 @@ impl CurateBatch {
         }
     }
 
-    /// Where `quote` is one whole line, without its surrounding whitespace,
-    /// of what the message showed: the project documents (as shown, or with
-    /// their XML escapes written out), or else the workspace guidance.
-    fn quoted_in(&self, quote: &str) -> Option<&'static str> {
-        let is_line = |text: &str| {
-            text.lines()
-                .map(str::trim)
-                .any(|line| line == quote || unescape(line) == quote)
-        };
-        if is_line(&self.docs) {
-            Some("the project documents")
-        } else if is_line(&self.guidance) {
-            Some("the workspace guidance")
-        } else {
-            None
+    /// The source and paragraph of the first whole line matching `quote`.
+    /// Nearby lines can supply details, but blank lines and document wrappers
+    /// keep unrelated text and the prompt's markup out of the evidence.
+    fn quoted_in(&self, quote: &str) -> Option<(&'static str, String)> {
+        for (source, text, rendered_docs) in [
+            ("the project documents", self.docs.as_str(), true),
+            ("the workspace guidance", self.guidance.as_str(), false),
+        ] {
+            let lines: Vec<_> = text.lines().map(str::trim).collect();
+            let paragraphs = lines.split(|line| {
+                line.is_empty()
+                    || (rendered_docs && (line.starts_with("<file name=\"") || *line == "</file>"))
+            });
+            for paragraph in paragraphs {
+                if paragraph
+                    .iter()
+                    .any(|line| *line == quote || unescape(line) == quote)
+                {
+                    let text = paragraph.join("\n");
+                    return Some((source, if rendered_docs { unescape(&text) } else { text }));
+                }
+            }
         }
+        None
     }
 
     fn check_archive<'c>(
@@ -1622,13 +1630,14 @@ impl CurateBatch {
                     // A memory every session sees from another owner (the
                     // project's workspace, or the person's) stays a valid
                     // original only while it is still that owner's.
-                    let live = match self.elsewhere.get(&of) {
-                        Some((level, owner)) => survivor.is_some_and(|survivor| {
-                            survivor.level == *level && survivor.owner_id == *owner
-                        }),
-                        None => survivor.is_some_and(|survivor| self.scope.owns(&survivor)),
-                    };
-                    if !live {
+                    let Some(survivor) =
+                        survivor.filter(|survivor| match self.elsewhere.get(&of) {
+                            Some((level, owner)) => {
+                                survivor.level == *level && survivor.owner_id == *owner
+                            }
+                            None => self.scope.owns(survivor),
+                        })
+                    else {
                         return Ok(Err(if self.elsewhere.contains_key(&of) {
                             format!("memory {of} is no longer a live memory every session sees")
                         } else {
@@ -1637,6 +1646,10 @@ impl CurateBatch {
                                 self.scope.level
                             )
                         }));
+                    };
+                    if let Some(token) = dropped_token([memory.content.as_str()], &survivor.content)
+                    {
+                        return Ok(Err(format!("the kept memory drops {token}")));
                     }
                     return archived(
                         format!("duplicate of memory {of}"),
@@ -1670,9 +1683,12 @@ impl CurateBatch {
                 if quote.starts_with('<') && quote.ends_with('>') {
                     return Ok(Err(format!("the quote is markup, not a line of {sources}")));
                 }
-                let Some(source) = self.quoted_in(quote) else {
+                let Some((source, paragraph)) = self.quoted_in(quote) else {
                     return Ok(Err(format!("the quote is not one line of {sources}")));
                 };
+                if let Some(token) = dropped_token([memory.content.as_str()], &paragraph) {
+                    return Ok(Err(format!("the quoted paragraph drops {token}")));
+                }
                 archived(
                     format!("duplicate of {source}: \"{quote}\""),
                     None,

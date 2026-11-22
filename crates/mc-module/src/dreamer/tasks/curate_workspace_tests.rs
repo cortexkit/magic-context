@@ -961,12 +961,13 @@ fn the_message_shows_the_guidance_before_the_persons_memories() {
 }
 
 #[test]
-fn a_workspace_memory_that_repeats_one_line_of_the_guidance_is_archived_as_its_duplicate() {
+fn a_workspace_memory_that_repeats_a_guidance_paragraph_is_archived_as_its_duplicate() {
     let line = "- Every release needs two reviewers and a green CI run.";
     let store = fixture();
     let workspace = members(&["subc", "magic-context", "entorhinal"]);
+    let guidance = GUIDANCE.replacen(line, &format!("{line}\n  CI takes 45 minutes on main."), 1);
     let batch = store
-        .plan_with(&workspace, Some(GUIDANCE), Some("PROJECT_RULES"))
+        .plan_with(&workspace, Some(&guidance), Some("PROJECT_RULES"))
         .remove(0);
     let written = store.write(
         &batch,
