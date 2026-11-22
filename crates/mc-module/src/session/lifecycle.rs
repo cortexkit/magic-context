@@ -126,6 +126,7 @@ impl Session {
             store: None,
             mural_image: None,
             move_floor: None,
+            move_floor_unplaced_logged: BTreeSet::new(),
             move_floor_held: false,
             numbers_refused: None,
             numbers_floor_held: false,

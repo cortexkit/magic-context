@@ -351,6 +351,8 @@ pub struct Session {
     /// cut through. No view ck-mc publishes cuts before it, or goes without
     /// a cut ([`move_floor`]).
     move_floor: Option<MoveFloor>,
+    /// Refusal ids the runner could not place and that were already logged.
+    move_floor_unplaced_logged: BTreeSet<String>,
     /// A pass held its view back because the view could not meet the move
     /// floor, and no view has met it since: the hold is logged only once.
     move_floor_held: bool,

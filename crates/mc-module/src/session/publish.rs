@@ -47,11 +47,13 @@ impl Session {
                 return (true, Some(durable));
             }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
-                tracing::warn!(
-                    "ck-mc: session {}: runner refused view {}: {refusal:?}",
-                    self.key.session,
-                    view.version
-                );
+                if !self.take_move_refusal(client, view.version, &refusal).await {
+                    tracing::warn!(
+                        "ck-mc: session {}: runner refused view {}: {refusal:?}",
+                        self.key.session,
+                        view.version
+                    );
+                }
                 self.roll_back_refused(&view, view.version, &refusal);
             }
             // An answer the contract may add later leaves the outcome
@@ -192,12 +194,14 @@ impl Session {
                 self.lost_answer_found(view.version, true);
             }
             Ok(ApplyViewAnswer::Refused { refusal }) => {
-                tracing::warn!(
-                    "ck-mc: session {}: runner refused view {} offered again: {refusal:?} ({})",
-                    self.key.session,
-                    view.version,
-                    policy_members(&view)
-                );
+                if !self.take_move_refusal(client, view.version, &refusal).await {
+                    tracing::warn!(
+                        "ck-mc: session {}: runner refused view {} offered again: {refusal:?} ({})",
+                        self.key.session,
+                        view.version,
+                        policy_members(&view)
+                    );
+                }
                 self.roll_back_refused(&view, oldest, &refusal);
             }
             Ok(other) => {
@@ -267,13 +271,14 @@ impl Session {
         // not the drops, and the next views wait for a summary through that
         // history instead of repeating it.
         let numbers = self.take_numbers_refusal(view.version, refusal);
+        let move_cut = matches!(refusal, ViewRefusal::CutBeforeMove { .. });
         // A refusal that names the part at fault blames only that part.
         self.roll_back(
             from,
-            !stale && !floor_at_fault && !numbers,
+            !stale && !floor_at_fault && !numbers && !move_cut,
             refusal_part(refusal),
         );
-        if floor_at_fault {
+        if floor_at_fault || move_cut {
             self.app_view_status(from, "refused");
         }
         self.reset_transcript_retry();
@@ -595,7 +600,9 @@ impl Session {
             if kept == Some(true) {
                 self.disprove_floor(*version, refusal);
             }
-            let floor_at_fault = kept.is_some() || numbers.contains(version);
+            let floor_at_fault = kept.is_some()
+                || numbers.contains(version)
+                || matches!(refusal, ViewRefusal::CutBeforeMove { .. });
             // FinalTurnRemoved depends on the newest entry; UnknownMessage
             // can follow a revert. Neither blames a drop when an accepted
             // view first loses that race. Only its immediate retry pays the

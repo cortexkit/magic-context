@@ -73,7 +73,13 @@ impl Session {
         let decisions = std::mem::take(&mut self.app_decisions);
         let unsaved = std::mem::take(&mut self.app_decisions_unsaved);
         let revision = self.app_decisions_revision;
+        // The runner may report its move floor while refusing the view. That
+        // floor is not part of the attempted rebuild and survives its rollback.
+        let move_floor = self.move_floor.take();
+        let move_floor_unplaced_logged = std::mem::take(&mut self.move_floor_unplaced_logged);
         *self = snapshot;
+        self.move_floor = move_floor;
+        self.move_floor_unplaced_logged = move_floor_unplaced_logged;
         self.view_validation = validation;
         self.app_decisions = decisions;
         self.app_decisions_unsaved = unsaved;
@@ -389,7 +395,8 @@ impl Session {
             // Do not expose a failed answer that was never saved. Restore the
             // last durable view and answer together; retries then see exactly
             // the same recovery state as a restarted worker.
-            if let Some(durable) = durable {
+            if let Some(mut durable) = durable {
+                durable.move_floor.clone_from(&self.move_floor);
                 self.restore(durable);
             } else {
                 Arc::make_mut(&mut self.command_answers).pop();

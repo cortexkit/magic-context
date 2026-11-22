@@ -846,6 +846,7 @@ const TEMPLATE_DATA = [
 "recomp partial code=\x01 reason=\"the history model's window cannot hold a historian prompt: \x01\"",
 "thinking-binding recovery armed from message_end (provider paths: failing=\x01 firstChanged=\x01)\x020p,1p",
 "[magic-context] legacy WAL checkpoint before copy failed (continuing with sidecar copy): \x01",
+"ck-mc: session \x01: runner refused view \x01: cut_before_move through \x01 (previous move floor: \x01); \x01",
 "compaction-marker drain: stale-skip (partial-message-boundary) for ordinal \x01 endMessageId=\x01\x021i",
 "edit admission: held lane=temporal marker first application coords=\x01 boundary=\x01 held_edits=\x01\x021i",
 "Pi compaction-marker clear: reason=session-reset endMessageId=\x01 ordinal=\x01 firstKeptEntryId=\x01\x020i",

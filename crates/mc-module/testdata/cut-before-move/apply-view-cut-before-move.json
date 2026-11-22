@@ -1,0 +1,7 @@
+{
+  "answer": "refused",
+  "refusal": {
+    "code": "cut_before_move",
+    "moved_through": "msg_a2"
+  }
+}

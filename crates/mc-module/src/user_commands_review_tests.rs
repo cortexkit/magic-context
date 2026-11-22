@@ -90,6 +90,44 @@ async fn user_commands_refused_flush_discards_queued_work_instead_of_saving_the_
 }
 
 #[tokio::test]
+async fn user_commands_refused_flush_saves_the_runners_move_floor() {
+    let (mut session, client, settings) = ready();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+    session.set_store(Some(store.clone()));
+    *client.refuse.lock().unwrap() = true;
+    *client.refusal.lock().unwrap() = Some(ViewRefusal::CutBeforeMove {
+        moved_through: "old".into(),
+    });
+
+    let p = preview(&mut session, &client, &settings, "flush").await;
+    assert!(p.available, "{p:?}");
+    let request = wire::ModuleRunRequest::new(
+        preview_request(&session, "flush"),
+        p.version,
+        "refused-flush-move-floor",
+    );
+    assert_eq!(
+        session
+            .command_run(&client, &settings, &request)
+            .await
+            .unwrap()
+            .outcome,
+        "failed"
+    );
+
+    let floor = Some(MoveFloor {
+        ordinal: 1,
+        mid: "old".into(),
+    });
+    assert_eq!(session.move_floor, floor);
+    let saved = store.load(&session.key).unwrap();
+    assert_eq!(saved.move_floor, floor);
+    assert_eq!(saved.queued, [("old".into(), "p".into())].into());
+    assert!(saved.unconfirmed.is_empty());
+}
+
+#[tokio::test]
 async fn user_commands_preview_keeps_the_complete_saved_document_byte_identical() {
     for already_covered in [false, true] {
         let (mut session, client, settings) = ready();

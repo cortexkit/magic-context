@@ -180,6 +180,15 @@ impl Session {
     /// The ordinal of entry `mid`: from the index when it holds it,
     /// otherwise from the runner.
     pub(super) async fn place<C: RunnerClient>(&self, client: &C, mid: &str) -> Placed {
+        self.place_entry(client, mid, true).await
+    }
+
+    async fn place_entry<C: RunnerClient>(
+        &self,
+        client: &C,
+        mid: &str,
+        log_failures: bool,
+    ) -> Placed {
         if let Some(ordinal) = self.index.ordinal_of(mid) {
             return Placed::At(ordinal);
         }
@@ -204,14 +213,16 @@ impl Session {
                 if error.code.as_deref()
                     == Some(cortexkit_role_compaction::wire::codes::TRANSIENT) =>
             {
-                tracing::info!(
-                    "ck-mc: session {}: the runner can't place entry {mid} against the move floor yet: {error:?}",
-                    self.key.session
-                );
+                if log_failures {
+                    tracing::info!(
+                        "ck-mc: session {}: the runner can't place entry {mid} against the move floor yet: {error:?}",
+                        self.key.session
+                    );
+                }
                 Placed::Later
             }
             Err(error) => {
-                if !error.message.starts_with("runner fault:") {
+                if log_failures && !error.message.starts_with("runner fault:") {
                     tracing::warn!(
                         "ck-mc: session {}: reading entry {mid} to place it against the move floor failed: {error:?}",
                         self.key.session
@@ -220,6 +231,60 @@ impl Session {
                 Placed::Nowhere
             }
         }
+    }
+
+    /// A `cut_before_move` refusal describes a cut the runner cannot serve,
+    /// regardless of the drops the view carried. Use its floor from now on
+    /// if we can place it and it is later than the floor already held.
+    pub(super) async fn take_move_refusal<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        version: u64,
+        refusal: &ViewRefusal,
+    ) -> bool {
+        let ViewRefusal::CutBeforeMove { moved_through } = refusal else {
+            return false;
+        };
+        let placed = match self
+            .move_floor
+            .as_ref()
+            .filter(|floor| floor.mid == *moved_through)
+        {
+            Some(floor) => Placed::At(floor.ordinal),
+            None => self.place_entry(client, moved_through, false).await,
+        };
+        let previous = self.move_floor.as_ref().map_or_else(
+            || "none".into(),
+            |floor| format!("entry {} ({})", floor.ordinal, floor.mid),
+        );
+        let outcome = match placed {
+            Placed::At(ordinal)
+                if self
+                    .move_floor
+                    .as_ref()
+                    .is_none_or(|floor| ordinal > floor.ordinal) =>
+            {
+                self.set_move_floor(Some((ordinal, moved_through)));
+                format!("adopting move floor at entry {ordinal}")
+            }
+            Placed::At(_) => "keeping the previous move floor".into(),
+            Placed::Nowhere | Placed::Later => {
+                // Retry placement on the next refusal, but don't keep
+                // reporting the same missing ordinal.
+                if !self
+                    .move_floor_unplaced_logged
+                    .insert(moved_through.clone())
+                {
+                    return true;
+                }
+                "cannot place the runner's move floor; leaving the floor unchanged".into()
+            }
+        };
+        tracing::warn!(
+            "ck-mc: session {}: runner refused view {version}: cut_before_move through {moved_through} (previous move floor: {previous}); {outcome}",
+            self.key.session
+        );
+        true
     }
 
     /// Setup: take the move floor from the session's move fence when its

@@ -86,24 +86,25 @@ impl Session {
         self.warn_if_prompt_size_missing(&notice.entries);
         // What the runner says about the views it took comes first: a
         // rollback restores the state before the events below change it.
-        let refused: Vec<_> = notice
-            .events
-            .iter()
-            .filter_map(|event| match event {
-                Event::ViewRefused { refusal: ViewRefusal::RenderFailed { .. }, .. } => None,
-                Event::ViewRefused { version, refusal } => {
-                    // A runner can take a view and refuse it later, at the
-                    // step it would first serve it. The reason is the only
-                    // record of why the view's work was undone.
-                    tracing::warn!(
-                        "ck-mc: session {}: runner refused view {version} at a step boundary: {refusal:?}",
-                        self.key.session
-                    );
-                    Some((*version, refusal.clone()))
-                }
-                _ => None,
-            })
-            .collect();
+        let mut refused = Vec::new();
+        for event in &notice.events {
+            let Event::ViewRefused { version, refusal } = event else {
+                continue;
+            };
+            if matches!(refusal, ViewRefusal::RenderFailed { .. }) {
+                continue;
+            }
+            // A runner can take a view and refuse it later, at the step it
+            // would first serve it. Take its move floor even if the refused
+            // view is no longer waiting for confirmation.
+            if !self.take_move_refusal(client, *version, refusal).await {
+                tracing::warn!(
+                    "ck-mc: session {}: runner refused view {version} at a step boundary: {refusal:?}",
+                    self.key.session
+                );
+            }
+            refused.push((*version, refusal.clone()));
+        }
         // ck-mc's newest view, which the runner holds or was handed before
         // this notice.
         let held = self.latest.as_ref().map(|view| view.version);

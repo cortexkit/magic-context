@@ -1,0 +1,48 @@
+{
+  "applied_view": {
+    "checksum": "6850e7f92fbcbb4f0075963c5b0b7fed5e89803aeb661d35ee48b9ee89ae3ad3",
+    "version": 1
+  },
+  "conditions": {
+    "accepts_images": false,
+    "context_window": 200000,
+    "last_prompt_tokens": 100,
+    "last_prompt_view": 1,
+    "model": {
+      "model": "m2",
+      "provider": "stub",
+      "service_tier": "standard"
+    },
+    "output_reserve": 0,
+    "rules": {
+      "history_edit_cost": "suffix",
+      "signed_parts": "none"
+    },
+    "system_tokens": {
+      "count": 4,
+      "exact": false
+    },
+    "tools_tokens": {
+      "count": 1,
+      "exact": false
+    }
+  },
+  "events": [
+    {
+      "event": "view_refused",
+      "refusal": {
+        "code": "cut_before_move",
+        "moved_through": "msg_a2"
+      },
+      "version": 2
+    }
+  ],
+  "newest": {
+    "digest": "2de3a5c7633e779ce03eda57603ca36f5c4027989983c208580ac8670542a342",
+    "mid": "g085e5868de2c2d17.39",
+    "ordinal": 11
+  },
+  "seq": 2,
+  "token_family": "o200k/1+img:anthropic-2576-4784",
+  "token_family_exact": false
+}

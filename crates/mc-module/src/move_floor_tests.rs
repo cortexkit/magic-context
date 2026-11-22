@@ -7,6 +7,13 @@ use cortexkit_role_compaction::ride::RideCause;
 
 /// The move's cut: the entry before the newest one when the session moved.
 const FLOOR: (u64, &str) = (9, "m9");
+const RUNNER_FLOOR: (u64, &str) = (9, "msg_a2");
+
+const APPLY_REFUSAL: &str =
+    include_str!("../testdata/cut-before-move/apply-view-cut-before-move.json");
+const NOTICE_CUT: &str = include_str!("../testdata/cut-before-move/notice-cut-before-move-0.json");
+const NOTICE_NO_CUT: &str =
+    include_str!("../testdata/cut-before-move/notice-cut-before-move-1.json");
 
 fn summary(
     db: &ContextDb,
@@ -62,6 +69,10 @@ impl Drop for Scratch {
 /// them reaching entry 5, below the floor. With `floor` false the session
 /// is the same in every other way but never moved: it has no floor.
 fn moved(label: &str, floor: bool) -> Moved {
+    moved_at(label, floor, FLOOR)
+}
+
+fn moved_at(label: &str, floor: bool, cut: (u64, &str)) -> Moved {
     let (mut session, client, route, setup, settings) = fixture();
     let dir = scratch(label);
     let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
@@ -70,14 +81,14 @@ fn moved(label: &str, floor: bool) -> Moved {
     session.db = Some(Arc::new(db));
     session.features.summarizer = true;
     session.load_summaries();
-    let view = session
-        .first_view_after_move(&settings, Some(FLOOR))
-        .unwrap();
-    assert_eq!(cut_through(&view), Some(FLOOR.1));
+    let view = session.first_view_after_move(&settings, Some(cut)).unwrap();
+    assert_eq!(cut_through(&view), Some(cut.1));
     if !floor {
         session.move_floor = None;
     }
-    *client.entries.lock().unwrap() = transcript(10);
+    let mut entries = transcript(10);
+    entries[cut.0 as usize - 1] = text(cut.0, cut.1);
+    *client.entries.lock().unwrap() = entries;
     let mut answer = AppliedViewAnswer::new();
     answer.view = Some(view.clone());
     *client.applied.lock().unwrap() = Some(answer);
@@ -420,4 +431,259 @@ async fn move_floor_a_transient_refusal_offers_the_view_again_later() {
     request.entries = vec![entry];
     session.notice(&client, &settings, request).await;
     assert_eq!(client.offered.lock().unwrap().first(), Some(&view));
+}
+
+#[test]
+fn move_floor_refusal_samples_round_trip() {
+    use sha2::{Digest, Sha256};
+
+    let sums = include_str!("../testdata/cut-before-move/SHA256SUMS");
+    for (name, raw) in [
+        ("apply-view-cut-before-move.json", APPLY_REFUSAL),
+        ("notice-cut-before-move-0.json", NOTICE_CUT),
+        ("notice-cut-before-move-1.json", NOTICE_NO_CUT),
+        (
+            "README.md",
+            include_str!("../testdata/cut-before-move/README.md"),
+        ),
+    ] {
+        let line = format!("{:x}  {name}", Sha256::digest(raw.as_bytes()));
+        assert!(sums.lines().any(|sum| sum == line), "{name} changed");
+    }
+
+    let apply: ApplyViewAnswer = serde_json::from_str(APPLY_REFUSAL).unwrap();
+    assert!(matches!(&apply, ApplyViewAnswer::Refused {
+        refusal: ViewRefusal::CutBeforeMove { moved_through }
+    } if moved_through == RUNNER_FLOOR.1));
+    assert_eq!(
+        serde_json::to_value(apply).unwrap(),
+        serde_json::from_str::<Value>(APPLY_REFUSAL).unwrap()
+    );
+    for raw in [NOTICE_CUT, NOTICE_NO_CUT] {
+        let notice: NoticeRequest = serde_json::from_str(raw).unwrap();
+        assert!(matches!(notice.events.as_slice(), [Event::ViewRefused {
+            version: 2, refusal: ViewRefusal::CutBeforeMove { moved_through }
+        }] if moved_through == RUNNER_FLOOR.1));
+        assert_eq!(
+            serde_json::to_value(notice).unwrap(),
+            serde_json::from_str::<Value>(raw).unwrap()
+        );
+    }
+}
+
+fn assert_refusal_preserves_drop(session: &Session, key: &lanes::PartKey) {
+    assert!(session.queued.contains(key), "the refused drop was lost");
+    assert!(session.refused_once.is_empty(), "the drop was blamed");
+    assert!(session.failed_parts.is_empty(), "parts were set aside");
+}
+
+async fn moved_without_floor(label: &str) -> Moved {
+    let mut moved = moved_at(label, false, RUNNER_FLOOR);
+    moved
+        .client
+        .entries
+        .lock()
+        .unwrap()
+        .extend([text(11, "m11"), text(12, "m12")]);
+    moved.set_up().await;
+    assert_eq!(moved.session.move_floor, None);
+    moved
+}
+
+#[tokio::test]
+async fn move_floor_apply_refusal_teaches_the_missing_floor() {
+    let logs = crate::test_log::capture();
+    let mut moved = moved_without_floor("apply-cut-before-move").await;
+    let key = ("m10".into(), "p".into());
+    moved.session.queued.insert(key.clone());
+    let (view, _) = moved.session.build(&moved.settings, None, false, None);
+    let view = view.expect("the cut was allowed without a floor");
+    assert_eq!(cut_through(&view), Some("m5"));
+    assert!(moved.session.next_covered.contains(&key));
+    let ApplyViewAnswer::Refused { refusal } = serde_json::from_str(APPLY_REFUSAL).unwrap() else {
+        panic!("expected a refusal sample");
+    };
+    *moved.client.refuse.lock().unwrap() = true;
+    *moved.client.refusal.lock().unwrap() = Some(refusal);
+    assert!(!moved.session.publish(&moved.client, view).await);
+
+    assert_refusal_preserves_drop(&moved.session, &key);
+    let durable = moved.session.durable();
+    assert_eq!(
+        durable.move_floor,
+        Some(MoveFloor {
+            ordinal: RUNNER_FLOOR.0,
+            mid: RUNNER_FLOOR.1.into()
+        })
+    );
+    assert_eq!(
+        logs.count("cut_before_move through msg_a2 (previous move floor: none)"),
+        1
+    );
+    moved.notice(3).await;
+    assert!(
+        moved.session.move_floor_held,
+        "the next rebuild did not reach the hold"
+    );
+    assert_eq!(
+        moved.offered().len(),
+        1,
+        "the refused cut was offered again"
+    );
+    assert_eq!(moved.session.latest.as_ref(), Some(&moved.view));
+}
+
+#[tokio::test]
+async fn move_floor_notice_refusal_advances_an_earlier_floor() {
+    let mut moved = moved_without_floor("notice-cut-before-move").await;
+    moved.session.set_move_floor(Some((5, "m5")));
+    let key = ("m10".into(), "p".into());
+    moved.session.queued.insert(key.clone());
+    let mut conditions = moved.session.conditions.clone();
+    conditions.last_prompt_tokens = Some(98_000);
+    let ride = RideRequest::new(vec![RideCause::OverLimit], 1_000, conditions)
+        .with_request_tokens(120_000);
+    let view = moved
+        .session
+        .ride(&moved.settings, &ride)
+        .expect("the cut reaches the old floor");
+    assert_eq!(view.version, 2);
+    assert_eq!(cut_through(&view), Some("m5"));
+    assert!(
+        !moved.session.queued.contains(&key),
+        "the ride did not carry the drop"
+    );
+
+    // After a restart the pending view is saved, but the index may not hold
+    // the entry in the refusal. The runner must place it by id.
+    moved.session.index = Index::starting_at(5);
+    moved.session.index_ready = false;
+    let mut request: NoticeRequest = serde_json::from_str(NOTICE_CUT).unwrap();
+    request.applied_view = Some(moved.view.applied());
+    request.newest = moved.client.entries.lock().unwrap().last().map(cursor);
+    moved
+        .session
+        .notice(&moved.client, &moved.settings, request)
+        .await;
+
+    assert_refusal_preserves_drop(&moved.session, &key);
+    assert_eq!(
+        moved.session.move_floor,
+        Some(MoveFloor {
+            ordinal: RUNNER_FLOOR.0,
+            mid: RUNNER_FLOOR.1.into()
+        })
+    );
+    assert!(moved
+        .client
+        .reads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|read| matches!(
+            &read.select, Select::Mids { mids } if mids == &[RUNNER_FLOOR.1.to_owned()]
+        )));
+    assert!(
+        moved.offered().is_empty(),
+        "the refused cut was offered again"
+    );
+    assert_eq!(moved.session.latest.as_ref(), Some(&moved.view));
+}
+
+#[tokio::test]
+async fn move_floor_notice_refusal_does_not_lower_a_later_floor() {
+    let (mut session, client, route, mut setup, settings) = fixture();
+    let mut entries = transcript(13);
+    entries[8] = text(RUNNER_FLOOR.0, RUNNER_FLOOR.1);
+    setup.newest = entries.last().map(cursor);
+    *client.entries.lock().unwrap() = entries;
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &setup, features)
+        .await;
+    let key = ("m4".into(), "p".into());
+    session.queued.insert(key.clone());
+    let (view, _) = session.build(&settings, None, false, None);
+    let view = view.expect("a view with just the drop");
+    assert_eq!(cut_through(&view), None);
+    assert!(session.next_covered.contains(&key));
+    assert!(session.publish(&client, view.clone()).await);
+    // The floor is known now, but was not when this view was handed over.
+    session.set_move_floor(Some((10, "m10")));
+    let mut request: NoticeRequest = serde_json::from_str(NOTICE_NO_CUT).unwrap();
+    request.applied_view = None;
+    request.newest = setup.newest;
+    let Event::ViewRefused { version, .. } = &mut request.events[0] else {
+        panic!("expected a refusal event");
+    };
+    *version = view.version;
+    session.notice(&client, &settings, request).await;
+
+    assert_refusal_preserves_drop(&session, &key);
+    assert_eq!(
+        session.move_floor,
+        Some(MoveFloor {
+            ordinal: 10,
+            mid: "m10".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn move_floor_notice_retries_unplaced_floor_without_repeating_the_warning() {
+    let logs = crate::test_log::capture();
+    let (mut session, client, route, mut setup, settings) = fixture();
+    let entries = transcript(6);
+    setup.newest = entries.last().map(cursor);
+    *client.entries.lock().unwrap() = entries;
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &setup, features)
+        .await;
+    session.set_move_floor(Some((2, "m2")));
+    client
+        .pages
+        .lock()
+        .unwrap()
+        .push_back(Err(crate::client::ClientError::refused(
+            "transient",
+            "index_filling",
+        )));
+
+    for (offset, mid) in ["unplaced", "absent", "unplaced", "absent"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut request = notice(&session, offset as u64 + 1, setup.newest.clone());
+        request.events.push(Event::ViewRefused {
+            version: 2,
+            refusal: ViewRefusal::CutBeforeMove {
+                moved_through: mid.into(),
+            },
+        });
+        session.notice(&client, &settings, request).await;
+        assert_eq!(session.move_floor.as_ref().unwrap().ordinal, 2);
+    }
+    assert_eq!(logs.count("cannot place the runner's move floor"), 2);
+    assert_eq!(logs.count("cut_before_move through unplaced"), 1);
+    assert_eq!(logs.count("cut_before_move through absent"), 1);
+
+    let entry = text(7, "unplaced");
+    client.entries.lock().unwrap().push(entry.clone());
+    let mut request = notice(&session, 5, Some(cursor(&entry)));
+    request.events.push(Event::ViewRefused {
+        version: 3,
+        refusal: ViewRefusal::CutBeforeMove {
+            moved_through: entry.mid,
+        },
+    });
+    session.notice(&client, &settings, request).await;
+    assert_eq!(
+        session.move_floor,
+        Some(MoveFloor {
+            ordinal: 7,
+            mid: "unplaced".into()
+        })
+    );
+    assert_eq!(logs.count("adopting move floor at entry 7"), 1);
 }
