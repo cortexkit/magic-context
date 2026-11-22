@@ -93,7 +93,7 @@ semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # The module publishes its bus events itself, as Plexus does (`bus.rs`): a
 # NATS credential from ck-bus, a JetStream publish, the fleet's subject names.
-cortexkit-bus-nats = "=0.5.6"
+cortexkit-bus-nats = "=0.5.7"
 cortexkit-bus-trait = "=0.3.1"
 cortexkit-bus-naming = "=0.5.4"
 # The computer's box id (`BusClient::box_id`), which names every memory this
