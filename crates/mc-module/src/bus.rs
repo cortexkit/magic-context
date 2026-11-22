@@ -1229,8 +1229,9 @@ impl RunEndCursor {
                 // digest) can't be decoded, so no wait can match it. Left
                 // unsettled, the server would deliver it again after every
                 // ack wait; terminating it stops that, and the next pull
-                // moves on. A wait it might have woken still ends on the
-                // polling backstop.
+                // moves on. A summary or dreamer run it might have woken still
+                // finishes waiting, because the run-end reader also checks
+                // every waiting run every 15 seconds without an event.
                 Some(Pulled::Undecodable(undecodable)) => {
                     tracing::warn!(
                         "ck-mc: run ends: terminating undecodable event {} on {} (delivered {} time(s)): {}",

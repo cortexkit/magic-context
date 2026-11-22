@@ -562,7 +562,9 @@ async fn run_ends_terminates_an_undecodable_event_from_its_own_durable_and_reads
 /// Bind the real run-end cursor against a local peer that hands out
 /// `deliveries`, one per pull, then pull one delivery and acknowledge it.
 /// Returns that delivery, every `$JS.ACK` publish the peer saw with its
-/// payload, and the connection (for its forged-delivery count).
+/// payload, and the connection, whose `forged_deliveries_dropped` counts the
+/// deliveries the cursor discarded because they didn't come from its own
+/// durable and filter.
 async fn pull_one_run_end(
     deliveries: Vec<PeerDelivery>,
 ) -> (run_ends::Delivery, Vec<(String, String)>, NatsConnection) {
