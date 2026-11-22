@@ -1303,6 +1303,7 @@ const TEMPLATE_DATA = [
 "[magic-context] SQLite boot busy timeout: backend=Node.js timeout=\x01ms path=\x01\x021p",
 "ck-mc: bus: docs proposal notices wait unsent until the bus is reachable: \x01",
 "ck-mc: dreamer: \x01 for \x01: the memories learned on \x01 are not checked this run: \x01",
+"ck-mc: run ends: terminating undecodable event \x01 on \x01 (delivered \x01 time(s)): \x01",
 "overflow detected via message.updated: reportedLimit=\x01 provenance=\x01 pattern=\x01",
 "pi m[0] HARD fold decision: reason=\x01 mismatch=\x01 executed=\x01 bustsServedPrefix=\x01",
 "tag identity decision \x01 could not be written; serving duplicates unmerged: \x01",
