@@ -1,0 +1,21 @@
+{
+  "reply": {
+    "code": "unknown_workspace",
+    "message": "a registered workspace with a root and members is required"
+  },
+  "request": {
+    "base_generations": {
+      "a": 0
+    },
+    "edits": [
+      {
+        "layer": "workspace",
+        "module_id": "a",
+        "path": "/limit",
+        "set": 8,
+        "workspace_id": "missing"
+      }
+    ],
+    "op": "config.plan"
+  }
+}

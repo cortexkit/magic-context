@@ -1,0 +1,321 @@
+{
+  "reply": {
+    "op": "config.plan",
+    "view": {
+      "base_revision": 0,
+      "digest": "sha256:435d8598b94f2691e62c107bd48e2b2b2f67646987384b3a802e1b0ae1dabcbc",
+      "plan": {
+        "active_generations": {},
+        "base_generation": 0,
+        "base_revision": 0,
+        "changeset": {
+          "affected_projects": [],
+          "apply_plan": {
+            "edit_plan": {
+              "unstamped": true,
+              "write_back": []
+            },
+            "module_transitions": {},
+            "operation": "change",
+            "previous": {
+              "\"Daemon\"": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "modules": {
+                        "a": {
+                          "program": "/home/example/program",
+                          "registration_channel": true
+                        }
+                      },
+                      "version": 1
+                    }
+                  }
+                }
+              },
+              "{\"Declaration\":\"a\"}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "op": "config.declare",
+                      "project_dirs": [],
+                      "schema": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "properties": {
+                          "limit": {
+                            "default": 1,
+                            "description": "Limit",
+                            "type": "integer",
+                            "x-ck-bound": "raise_only"
+                          }
+                        },
+                        "type": "object",
+                        "unevaluatedProperties": false,
+                        "x-ck-apply": "live",
+                        "x-ck-layers": [
+                          "user",
+                          "workspace",
+                          "project"
+                        ]
+                      },
+                      "user_file": "/home/example/cortexkit/a.jsonc"
+                    }
+                  }
+                }
+              },
+              "{\"Entry\":\"a\"}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "program": "/home/example/program",
+                      "registration_channel": true
+                    }
+                  }
+                }
+              },
+              "{\"Layer\":{\"module\":\"a\",\"path\":\"/home/example/cortexkit/a.jsonc\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "state": "absent"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {}
+                  }
+                }
+              },
+              "{\"Program\":{\"module\":\"a\",\"path\":\"/home/example/program\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "file": {
+                        "device": "1",
+                        "inode": "1",
+                        "platform": "unix"
+                      },
+                      "length": 25,
+                      "path": "/home/example/program",
+                      "raw": "sha256:744456cdcb787e63f8ca619ec6eaab592abad550190dfed1e22b2dc362cb2b57"
+                    }
+                  }
+                }
+              }
+            },
+            "project_approval_digests": {},
+            "project_file_approvals": [
+              {
+                "candidate_digest": "sha256:873afb9b26170eff8bc6d1e03ddfcd0c9b842fab12cc21b93fd09e2a2405d887",
+                "expected": {
+                  "digest": "sha256:31cb930247617bffb9ef0bce05b5d83f1c9c471a45f59a000375a736ff38fa01",
+                  "identity": {
+                    "device": "1",
+                    "inode": "1",
+                    "platform": "unix"
+                  },
+                  "state": "present"
+                },
+                "missing_approved": false,
+                "operation": "write",
+                "target": {
+                  "layer": "workspace",
+                  "module": "a",
+                  "registry_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "relative_path": ".cortexkit/a.jsonc",
+                  "root": "/home/example/repos/workspace",
+                  "root_identity": {
+                    "device": "1",
+                    "inode": "1",
+                    "platform": "unix"
+                  },
+                  "workspace_id": "W"
+                }
+              }
+            ],
+            "review": {
+              "edit_registry": {
+                "a": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            },
+            "reviewed_programs": {},
+            "rollback_to": null,
+            "snapshot": {
+              "\"Daemon\"": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "modules": {
+                        "a": {
+                          "program": "/home/example/program",
+                          "registration_channel": true
+                        }
+                      },
+                      "version": 1
+                    }
+                  }
+                }
+              },
+              "{\"Declaration\":\"a\"}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "op": "config.declare",
+                      "project_dirs": [],
+                      "schema": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "properties": {
+                          "limit": {
+                            "default": 1,
+                            "description": "Limit",
+                            "type": "integer",
+                            "x-ck-bound": "raise_only"
+                          }
+                        },
+                        "type": "object",
+                        "unevaluatedProperties": false,
+                        "x-ck-apply": "live",
+                        "x-ck-layers": [
+                          "user",
+                          "workspace",
+                          "project"
+                        ]
+                      },
+                      "user_file": "/home/example/cortexkit/a.jsonc"
+                    }
+                  }
+                }
+              },
+              "{\"Entry\":\"a\"}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "program": "/home/example/program",
+                      "registration_channel": true
+                    }
+                  }
+                }
+              },
+              "{\"Layer\":{\"module\":\"a\",\"path\":\"/home/example/cortexkit/a.jsonc\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "state": "absent"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {}
+                  }
+                }
+              },
+              "{\"Program\":{\"module\":\"a\",\"path\":\"/home/example/program\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "file": {
+                        "device": "1",
+                        "inode": "1",
+                        "platform": "unix"
+                      },
+                      "length": 25,
+                      "path": "/home/example/program",
+                      "raw": "sha256:744456cdcb787e63f8ca619ec6eaab592abad550190dfed1e22b2dc362cb2b57"
+                    }
+                  }
+                }
+              },
+              "{\"ProjectFile\":{\"module\":\"a\",\"path\":\"/home/example/repos/workspace/.cortexkit/a.jsonc\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": null
+                  }
+                }
+              }
+            },
+            "tuple_targets": []
+          },
+          "fields": [],
+          "launch_manifests": {},
+          "policy_changes": []
+        },
+        "daemon_incarnation": "example-daemon",
+        "input_vector": {
+          "inputs": {
+            "subc.jsonc": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "present"
+            }
+          }
+        }
+      }
+    }
+  },
+  "request": {
+    "base_generations": {
+      "a": 0
+    },
+    "edits": [
+      {
+        "layer": "workspace",
+        "module_id": "a",
+        "path": "/limit",
+        "set": 8,
+        "workspace_id": "W"
+      }
+    ],
+    "op": "config.plan"
+  }
+}

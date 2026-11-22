@@ -39,15 +39,14 @@ cortexkit-tokens = "0.2"
 # A build machine that accepts only git sources found in Cargo.lock refuses
 # the manifest because of this line: remove it in that run's working tree,
 # uncommitted, and never in a commit.
-# The SDK is on 0.41 because the vault client (cortexkit-claustrum-client
-# 0.12) reads credentials over the module's own SDK consumer, and takes that
-# release's `SubcConsumer`; 0.41 in turn needs control 0.41 and protocol
-# 0.37.2.
-subc-protocol = "=0.37.4"
-subc-control = "=0.41.0"
+# The vault client takes our SDK's SubcConsumer; the managed settings
+# loader uses the SDK's project-scoped config delivery.
+subc-protocol = "=0.37.6"
+subc-control = "=0.42.4"
 subc-transport = "=0.18.0"
-subc-client-rs = "=0.41.1"
-subc-os = "=0.1.40"
+subc-client-rs = "=0.41.8"
+subc-config = "=0.1.4"
+subc-os = "=0.1.45"
 # The daemon the registration live suite boots in-process
 # (crates/mc-module/tests/registration_live.rs), with its test support on.
 # It is the first release that builds against the control and protocol pins

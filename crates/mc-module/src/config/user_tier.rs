@@ -40,6 +40,11 @@ impl UserTier {
         &self.0
     }
 
+    #[cfg(feature = "managed-settings")]
+    pub(super) fn into_value(self) -> Value {
+        self.0
+    }
+
     /// Settings in the managed shape, translated member by member. A value
     /// that is not in the managed shape passes through as it is, so a file
     /// still in the 0.49 shape reads as before.
@@ -67,6 +72,12 @@ impl UserTier {
             text_choice(embedding, "query_instruction");
             text_choice(embedding, "document_prefix");
             api_key(embedding);
+        }
+        if let Some(Value::Object(backend)) = root.remove("rerank_backend") {
+            let rerank = root.entry("rerank").or_insert_with(|| json!({}));
+            if let Some(rerank) = rerank.as_object_mut() {
+                rerank.extend(backend);
+            }
         }
         if let Some(rerank) = root.get_mut("rerank").and_then(Value::as_object_mut) {
             match rerank.remove("enabled") {

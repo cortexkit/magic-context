@@ -195,11 +195,11 @@ fn each_reshape_converts_as_the_design_table_says() {
         ),
         (
             json!({"rerank": {"api_key": " {vault: cohere } "}}),
-            json!({"rerank": {"api_key": {"kind": "vault", "key": {"vault_ref": "cohere"}}}}),
+            json!({"rerank": {}, "rerank_backend": {"api_key": {"kind": "vault", "key": {"vault_ref": "cohere"}}}}),
         ),
         (
             json!({"rerank": {"provider": "off", "module": "synapse"}}),
-            json!({"rerank": {"enabled": false, "module": "synapse"}}),
+            json!({"rerank": {"enabled": false}, "rerank_backend": {"module": "synapse"}}),
         ),
         (
             json!({"rerank": {"provider": "off", "enabled": true}}),
@@ -207,11 +207,11 @@ fn each_reshape_converts_as_the_design_table_says() {
         ),
         (
             json!({"rerank": {"provider": "cohere"}}),
-            json!({"rerank": {"provider": "synapse"}}),
+            json!({"rerank": {}, "rerank_backend": {"provider": "synapse"}}),
         ),
         (
             json!({"rerank": {"provider": "remote", "timeout_ms": 20000}}),
-            json!({"rerank": {"provider": "remote", "timeout_ms": 15000}}),
+            json!({"rerank": {"timeout_ms": 15000}, "rerank_backend": {"provider": "remote"}}),
         ),
         (
             json!({"dreamer": {"disable": true}}),

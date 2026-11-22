@@ -1,0 +1,29 @@
+{
+  "reply": {
+    "active": {
+      "effective": {
+        "limit": 2
+      },
+      "generation": 2,
+      "layers": [
+        {
+          "bytes": "eyJsaW1pdCI6Mn0=",
+          "digest": "sha256:649c187d840a97ceebfecf4a5e8a1121655263c52487be7d5cd1970fe17e1bd3",
+          "layer": "user",
+          "module_id": "a",
+          "path": "/home/example/cortexkit/a.jsonc"
+        }
+      ],
+      "project_id": "C",
+      "sources": {
+        "/limit": "user"
+      },
+      "status": "active"
+    },
+    "op": "config.get"
+  },
+  "request": {
+    "op": "config.get",
+    "project_id": "C"
+  }
+}

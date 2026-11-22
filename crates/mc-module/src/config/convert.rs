@@ -187,7 +187,8 @@ impl Converter {
                 "clock_note" => self.leaf(&at, value, clock_note),
                 "prompt_surface" => self.prompt_surface(&at, value),
                 "embedding" => self.embedding(&at, value),
-                "rerank" => self.rerank(&at, value),
+                "rerank" => self.rerank(&at, value, root.get("rerank_backend")),
+                "rerank_backend" => self.object(&at, value, &mut Self::rerank_backend_field),
                 "dreamer" => self.dreamer(&at, value),
                 "temporal_awareness" => {
                     self.edits.push(Edit::remove(&at));
@@ -407,25 +408,29 @@ impl Converter {
         });
     }
 
-    fn rerank(&mut self, at: &str, value: &Value) {
+    fn rerank(&mut self, at: &str, value: &Value, backend: Option<&Value>) {
         let has_enabled = value.get("enabled").is_some();
         self.object(at, value, &mut |this, key, at, value| match key {
-            "provider" => match value.as_str() {
-                // `"off"` becomes `enabled: false`, on the provider's own line.
-                Some("off") if !expansion(value) => {
-                    this.renamed(at, "enabled", has_enabled, json!(false));
+            // `"off"` becomes `enabled: false`, on the provider's own line.
+            "provider" if value.as_str() == Some("off") => {
+                this.renamed(at, "enabled", has_enabled, json!(false));
+            }
+            "provider" | "module" | "endpoint" | "model" | "api_key" => {
+                let start = this.edits.len();
+                let notes = this.notes.len();
+                this.rerank_backend_field(key, at, value);
+                let converted = match this.edits.get(start) {
+                    Some(Edit::Set { value, .. }) => value.clone(),
+                    Some(_) => return,
+                    None if this.notes.len() != notes => return,
+                    None => value.clone(),
+                };
+                this.edits.truncate(start);
+                this.edits.push(Edit::remove(at));
+                if backend.and_then(|section| section.get(key)).is_none() {
+                    this.edits.push(Edit::set(child("/rerank_backend", key), converted));
                 }
-                _ => this.leaf(at, value, |v| match v.as_str() {
-                    Some("synapse" | "remote") => Keep,
-                    Some(other) => Replace(
-                        json!("synapse"),
-                        Some(format!(
-                            "{other:?} is not a reranker ck-mc knows, so Synapse reranked; now \"synapse\""
-                        )),
-                    ),
-                    None => Drop("not text".into()),
-                }),
-            },
+            }
             "enabled" => {
                 // A provider of "off" sets this member itself.
                 let off = this
@@ -436,9 +441,6 @@ impl Converter {
                     this.leaf(at, value, boolean);
                 }
             }
-            "module" => this.leaf(at, value, module),
-            "endpoint" | "model" => this.leaf(at, value, text),
-            "api_key" => this.api_key(at, value),
             "timeout_ms" => this.leaf(at, value, |v| match v.as_f64() {
                 Some(ms) if ms.is_finite() && ms.fract() == 0.0 => {
                     if (50.0..=15_000.0).contains(&ms) {
@@ -455,6 +457,23 @@ impl Converter {
             "top_n" => this.leaf(at, value, |v| integer(v, 1, Some(20))),
             _ => this.unknown(at),
         });
+    }
+
+    fn rerank_backend_field(&mut self, key: &str, at: &str, value: &Value) {
+        match key {
+            "provider" => self.leaf(at, value, |v| match v.as_str() {
+                Some("synapse" | "remote") => Keep,
+                Some(other) => Replace(
+                    json!("synapse"),
+                    Some(format!("{other:?} is not a reranker ck-mc knows, so Synapse reranked; now \"synapse\"")),
+                ),
+                None => Drop("not text".into()),
+            }),
+            "module" => self.leaf(at, value, module),
+            "endpoint" | "model" => self.leaf(at, value, text),
+            "api_key" => self.api_key(at, value),
+            _ => self.unknown(at),
+        }
     }
 
     /// An API key: a `{vault:<id>}` reference becomes the vault credential;

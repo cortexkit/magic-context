@@ -1,0 +1,13 @@
+{
+  "reply": {
+    "op": "config.applied"
+  },
+  "request": {
+    "attempt": 1,
+    "generation": 3,
+    "op": "config.applied",
+    "project_id": "A",
+    "reasons": [],
+    "result": "ack"
+  }
+}

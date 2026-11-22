@@ -870,7 +870,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         project_root: Option<&str>,
         arguments: &Value,
     ) -> Result<Vec<u8>, crate::catalog::CatalogError> {
-        let config = self.inner.config.catalog_config(project_root);
+        self.catalog_for_project(project_root, None, arguments)
+    }
+
+    pub(crate) fn catalog_for_project(
+        &self,
+        project_root: Option<&str>,
+        project_id: Option<&str>,
+        arguments: &Value,
+    ) -> Result<Vec<u8>, crate::catalog::CatalogError> {
+        let config = self
+            .inner
+            .config
+            .catalog_for_project(project_root, project_id);
         crate::catalog::catalog_answer_bytes(arguments, &config)
     }
 
@@ -1000,7 +1012,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let mut reports = Vec::new();
         for (id, root) in projects {
             // Upkeep reads no per-model setting, so no model is named.
-            let settings = self.inner.config.resolve(Some(&root), "", 0);
+            let settings = self
+                .inner
+                .config
+                .resolve_for_project(Some(&root), Some(&id), "", 0);
             let plan = crate::upkeep::Plan::from_settings(&settings);
             // Only sessions registered in this process belong to this upkeep
             // scope. After a restart their persisted summaries wait until the
@@ -1762,7 +1777,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     ),
                     (_, Some(session)) => {
                         let (root, model_key, usable) = session.config_inputs();
-                        inner.config.resolve(root, &model_key, usable)
+                        let project = session.config_project_id();
+                        inner
+                            .config
+                            .resolve_for_project(root, project, &model_key, usable)
                     }
                     // The first tool call of a session that has no Setup: only
                     // the project's settings matter to its tools.
@@ -1771,7 +1789,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     (_, None) => match &carry {
                         Some(carry) => {
                             let (root, model_key, usable) = carry.config_inputs();
-                            inner.config.resolve(root, &model_key, usable)
+                            let project = carry.config_project_id();
+                            inner
+                                .config
+                                .resolve_for_project(root, project, &model_key, usable)
                         }
                         None => Settings::default(),
                     },
@@ -2077,8 +2098,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         }
                         let session = session.as_mut().expect("tool session");
                         let (root, model, usable) = session.config_inputs();
-                        let settings = inner.config.resolve(root, &model, usable);
-                        let config = inner.config.catalog_config(session.config_inputs().0);
+                        let project = session.config_project_id();
+                        let settings = inner
+                            .config
+                            .resolve_for_project(root, project, &model, usable);
+                        let config = inner.config.catalog_for_project(root, project);
                         timing.mark("config");
                         let answer = if !session.serves_tool(&name, &config) {
                             Err(ModuleError::UnknownTool(name.clone()))
@@ -2803,12 +2827,13 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
 }
 
 fn route_settings(config: &Config, route: &Route, model_key: &str, usable: u64) -> Settings {
-    config.resolve(
+    config.resolve_for_project(
         route
             .project
             .as_ref()
             .map(|project| project.root.as_str())
             .or(route.workdir.as_deref()),
+        route.project.as_ref().map(|project| project.id.as_str()),
         model_key,
         usable,
     )
@@ -2858,6 +2883,66 @@ mod config_tests {
     use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
     use cortexkit_role_compaction::setup::ModelRef;
 
+    #[cfg(feature = "managed-settings")]
+    #[test]
+    fn managed_setup_in_an_unregistered_folder_uses_only_the_user_view() {
+        use subc_client_rs::config::{ConfigLayer, ConfigLayerSnapshot, ConfigStatus, ConfigView};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join(".cortexkit")).unwrap();
+        std::fs::write(
+            root.join(".cortexkit/magic-context.jsonc"),
+            r#"{"execute_threshold_percentage":90}"#,
+        )
+        .unwrap();
+        let loader =
+            crate::config::Loader::with_user_path(root.join("user.jsonc")).managed_offline(root);
+        let user = serde_json::json!({"execute_threshold_percentage":{"default":70}});
+        loader
+            .config_apply(&ConfigView::new(
+                1,
+                user.clone(),
+                Default::default(),
+                vec![],
+                ConfigStatus::Active,
+            ))
+            .unwrap();
+        let mut project = ConfigView::new(
+            0,
+            user,
+            Default::default(),
+            vec![ConfigLayerSnapshot::file(
+                crate::MODULE_ID,
+                ConfigLayer::Project,
+                root.join(".cortexkit/magic-context.jsonc")
+                    .to_string_lossy(),
+                Some(br#"{"execute_threshold_percentage":{"default":85}}"#.to_vec()),
+            )],
+            ConfigStatus::Unstamped,
+        );
+        project.project_id = Some("pj-registered".to_owned());
+        loader.config_apply(&project).unwrap();
+        let config = Config::Files(loader);
+        let mut route = Route {
+            session: SessionRef::new("runner", "test", "folder-config"),
+            project: None,
+            workdir: Some(root.to_string_lossy().into_owned()),
+            agent_id: None,
+        };
+        assert_eq!(
+            route_settings(&config, &route, "test/model", 100_000).execute_threshold_percentage,
+            70.0
+        );
+        route.project = Some(crate::route::Project {
+            id: "pj-registered".to_owned(),
+            root: root.to_string_lossy().into_owned(),
+        });
+        assert_eq!(
+            route_settings(&config, &route, "test/model", 100_000).execute_threshold_percentage,
+            85.0
+        );
+    }
+
     #[test]
     fn folder_only_setup_and_first_tool_match_later_passes() {
         let root = std::env::temp_dir().join(format!("ck-mc-folder-config-{}", std::process::id()));
@@ -2884,7 +2969,7 @@ mod config_tests {
         );
         let session = Session::new(&route, &request, preset::Features::NONE, None);
         let (folder, model, usable) = session.config_inputs();
-        let later = config.resolve(folder, &model, usable);
+        let later = config.resolve_for_project(folder, session.config_project_id(), &model, usable);
         let setup = route_settings(&config, &route, &model, usable);
         let first_tool = route_settings(&config, &route, "", 0);
         assert_eq!(later.execute_threshold_percentage, 85.0);

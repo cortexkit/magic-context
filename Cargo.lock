@@ -1678,7 +1678,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "subc-client-rs",
- "subc-control",
+ "subc-config",
+ "subc-control 0.42.4",
  "subc-daemon",
  "subc-jsonc",
  "subc-os",
@@ -2702,16 +2703,16 @@ dependencies = [
 
 [[package]]
 name = "subc-client-rs"
-version = "0.41.1"
+version = "0.41.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d5e18a56ef70e37f6b99f645e6114b908e0ae8d148e7e77a62de536219ed1c5"
+checksum = "7ebb5917eb390869f24b3139f9e7b7cb03c00d1285e130f3da486d38939dff3f"
 dependencies = [
  "async-trait",
  "serde",
  "serde_json",
  "sha2",
  "subc-config",
- "subc-control",
+ "subc-control 0.42.4",
  "subc-os",
  "subc-protocol",
  "subc-transport",
@@ -2746,6 +2747,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "subc-control"
+version = "0.42.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8023d7c84f246b6361d4374eeea45ee594f8706e5cca6b5624672c232720c13e"
+dependencies = [
+ "serde",
+ "serde_json",
+ "subc-config",
+ "subc-protocol",
+]
+
+[[package]]
 name = "subc-daemon"
 version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2767,7 +2780,7 @@ dependencies = [
  "sha2",
  "subc-cgroup",
  "subc-config",
- "subc-control",
+ "subc-control 0.41.0",
  "subc-jobobject",
  "subc-jsonc",
  "subc-os",
@@ -2801,9 +2814,9 @@ dependencies = [
 
 [[package]]
 name = "subc-os"
-version = "0.1.40"
+version = "0.1.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40dad45881b7449d2d55429e2117a7aea18cef401a3fb3f8c3a0f9bd58cd661f"
+checksum = "a76c1ecf1517cf3ede2a97fb6da70a292559eef40168189526f3497ce9bfe34e"
 dependencies = [
  "libc",
  "rustix",
@@ -2831,9 +2844,9 @@ dependencies = [
 
 [[package]]
 name = "subc-protocol"
-version = "0.37.4"
+version = "0.37.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8223340be699cb9e743edb3cfa3e45889d2cd1bfce5892c627e666f40e923933"
+checksum = "78b250dc26dbf11b6cc86d514cd121c281aa14b658ea90959e320ae9d6f624c3"
 dependencies = [
  "base64 0.22.1",
  "serde",

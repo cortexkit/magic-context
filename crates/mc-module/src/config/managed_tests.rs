@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use subc_client_rs::config::{
-    ConfigAvailability, ConfigState, ConfigStatus, ConfigView, Layer, LayerValue, ValidationContext,
+    ConfigAvailability, ConfigLayer, ConfigLayerSnapshot, ConfigState, ConfigStatus, ConfigView,
+    Layer, LayerValue, ValidationContext,
 };
 
 use super::*;
@@ -175,6 +176,187 @@ fn a_daemon_without_a_config_gate_has_the_user_file_read() {
     // The file is read in the managed shape: `clock_note: "off"` switches
     // the clock note off.
     assert_eq!(settings.clock_note, None);
+}
+
+fn project_view(id: &str, layers: &[(ConfigLayer, &str)]) -> ConfigView {
+    let layers = layers
+        .iter()
+        .map(|(layer, bytes)| {
+            ConfigLayerSnapshot::file(
+                crate::MODULE_ID,
+                layer.clone(),
+                "/test/settings.jsonc",
+                Some(bytes.as_bytes().to_vec()),
+            )
+        })
+        .collect();
+    let mut view = ConfigView::new(
+        0,
+        json!({"execute_threshold_percentage": {"default": 42}}),
+        Default::default(),
+        layers,
+        ConfigStatus::Unstamped,
+    );
+    view.project_id = Some(id.to_owned());
+    view
+}
+
+fn project_config(loader: &Loader, id: &str) -> crate::pass::Settings {
+    loader.resolve_for_project(None, Some(id), OPUS, 200_000)
+}
+
+#[test]
+fn delivered_project_config_raises_threshold_only_for_its_project() {
+    let home = home(&file_at_80());
+    let loader = Loader::with_user_path(home.user.clone()).managed(&home.data);
+    loader
+        .config_apply(&view(
+            json!({"execute_threshold_percentage":{"default":70}}),
+            1,
+        ))
+        .unwrap();
+    loader.config_apply(&project_view("pj-a", &[
+        (ConfigLayer::User, r#"{"execute_threshold_percentage":{"default":70}}"#),
+        (ConfigLayer::Project, "{ // keep later pressure local to this project\n\"execute_threshold_percentage\":{\"default\":85},\n}"),
+    ])).unwrap();
+    assert_eq!(
+        project_config(&loader, "pj-a").execute_threshold_percentage,
+        85.0
+    );
+    assert_eq!(
+        project_config(&loader, "pj-b").execute_threshold_percentage,
+        70.0
+    );
+    assert_eq!(threshold(&loader), 70.0);
+}
+
+#[test]
+fn lower_project_threshold_does_not_drop_its_other_settings() {
+    let home = home(&file_at_80());
+    let loader = Loader::with_user_path(home.user.clone()).managed(&home.data);
+    loader
+        .config_apply(&project_view(
+            "pj-a",
+            &[
+                (
+                    ConfigLayer::User,
+                    r#"{"execute_threshold_percentage":{"default":80}}"#,
+                ),
+                (
+                    ConfigLayer::Project,
+                    r#"{"execute_threshold_percentage":{"default":70},"memory":{"enabled":false}}"#,
+                ),
+            ],
+        ))
+        .unwrap();
+    let config = project_config(&loader, "pj-a");
+    assert_eq!(config.execute_threshold_percentage, 80.0);
+    assert!(!config.memory_enabled);
+}
+
+#[test]
+fn workspace_then_project_applies_the_same_rules_at_each_tier() {
+    let home = home(&file_at_80());
+    let loader = Loader::with_user_path(home.user.clone()).managed(&home.data);
+    loader.config_apply(&project_view("pj-a", &[
+        (ConfigLayer::Project, r#"{"execute_threshold_percentage":{"anthropic/claude-opus-5-5":75},"protected_tokens":{"kind":"tokens","tokens":20000},"history_budget_percentage":0.3,"rerank":{"enabled":true}}"#),
+        (ConfigLayer::Workspace, r#"{"execute_threshold_percentage":{"default":82},"protected_tokens":{"kind":"tokens","tokens":30000},"history_budget_percentage":0.2,"rerank":{"enabled":false}}"#),
+        (ConfigLayer::User, r#"{"execute_threshold_percentage":{"default":70}}"#),
+    ])).unwrap();
+    let config = project_config(&loader, "pj-a");
+    assert_eq!(config.execute_threshold_percentage, 82.0);
+    assert_eq!(config.protected_tokens, Some(30_000));
+    assert_eq!(config.history_budget_percentage, 0.3);
+    assert!(matches!(
+        config.rerank,
+        crate::search::rerank::Reranker::Off
+    ));
+}
+
+#[test]
+fn only_an_unsupported_config_refusal_falls_back_globally() {
+    for code in ["unknown_control_op", "capability_not_advertised"] {
+        let home = home(&file_at_80());
+        let loader = Loader::with_user_path(home.user.clone()).managed(&home.data);
+        loader
+            .config_apply(&view(
+                json!({"execute_threshold_percentage":{"default":70}}),
+                1,
+            ))
+            .unwrap();
+        for id in ["pj-a", "pj-b"] {
+            loader
+                .config_apply(&project_view(
+                    id,
+                    &[(
+                        ConfigLayer::Project,
+                        r#"{"execute_threshold_percentage":{"default":85}}"#,
+                    )],
+                ))
+                .unwrap();
+        }
+        assert!(loader.project_settings_available());
+        loader.on_config_error(&ConfigError::Refused(subc_protocol::ErrorBody::new(
+            code,
+            "unsupported",
+        )));
+        assert!(!loader.project_settings_available());
+        for id in ["pj-a", "pj-b"] {
+            assert_eq!(
+                project_config(&loader, id).execute_threshold_percentage,
+                70.0
+            );
+        }
+    }
+}
+
+#[test]
+fn a_broken_project_file_keeps_last_good_and_other_projects_still_resolve() {
+    let home = home(&file_at_80());
+    let loader = Loader::with_user_path(home.user.clone()).managed(&home.data);
+    loader
+        .config_apply(&view(
+            json!({"execute_threshold_percentage":{"default":70}}),
+            1,
+        ))
+        .unwrap();
+    loader
+        .config_apply(&project_view(
+            "pj-a",
+            &[(
+                ConfigLayer::Project,
+                r#"{"execute_threshold_percentage":{"default":85}}"#,
+            )],
+        ))
+        .unwrap();
+    for code in ["value_invalid", "bound_violated", "layer_forbidden"] {
+        loader.on_config_error(&ConfigError::Refused(subc_protocol::ErrorBody::new(
+            code,
+            "invalid file",
+        )));
+    }
+    assert!(loader.project_settings_available());
+    assert_eq!(
+        project_config(&loader, "pj-a").execute_threshold_percentage,
+        85.0
+    );
+    assert_eq!(
+        project_config(&loader, "pj-b").execute_threshold_percentage,
+        70.0
+    );
+    loader
+        .config_apply(&project_view(
+            "pj-c",
+            &[(
+                ConfigLayer::Project,
+                r#"{"execute_threshold_percentage":{"default":90}}"#,
+            )],
+        ))
+        .unwrap();
+    assert_eq!(
+        project_config(&loader, "pj-c").execute_threshold_percentage,
+        90.0
+    );
 }
 
 #[test]

@@ -1,0 +1,30 @@
+{
+  "reply": {
+    "base_generation": 3,
+    "effective": {
+      "limit": 2
+    },
+    "layers": [
+      {
+        "document": {
+          "limit": 2
+        },
+        "layer": "user"
+      }
+    ],
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "A",
+    "sources": {
+      "/limit": "user"
+    },
+    "stamped": true,
+    "through": "user"
+  },
+  "request": {
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "A",
+    "through": "user"
+  }
+}

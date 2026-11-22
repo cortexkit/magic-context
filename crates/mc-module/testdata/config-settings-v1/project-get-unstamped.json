@@ -1,0 +1,37 @@
+{
+  "reply": {
+    "active": {
+      "effective": {
+        "limit": 4
+      },
+      "generation": 0,
+      "layers": [
+        {
+          "layer": "user",
+          "module_id": "a",
+          "path": "/home/example/cortexkit/a.jsonc",
+          "project_id": "A"
+        },
+        {
+          "bytes": "eyJsaW1pdCI6NH0=",
+          "digest": "sha256:31cb930247617bffb9ef0bce05b5d83f1c9c471a45f59a000375a736ff38fa01",
+          "layer": "workspace",
+          "module_id": "a",
+          "path": "/home/example/repos/workspace/.cortexkit/a.jsonc",
+          "project_id": "A",
+          "workspace_id": "W"
+        }
+      ],
+      "project_id": "A",
+      "sources": {
+        "/limit": "workspace"
+      },
+      "status": "unstamped"
+    },
+    "op": "config.get"
+  },
+  "request": {
+    "op": "config.get",
+    "project_id": "A"
+  }
+}

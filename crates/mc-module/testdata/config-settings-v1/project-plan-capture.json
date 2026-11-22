@@ -1,0 +1,390 @@
+{
+  "reply": {
+    "op": "config.plan",
+    "view": {
+      "base_revision": 5,
+      "digest": "sha256:bac125695eb8f07a5ab52430ec22266d15c4503baa2ba75e26d3345af6924cea",
+      "plan": {
+        "active_generations": {
+          "{\"module\":\"a\",\"project\":null}": 2
+        },
+        "base_generation": 2,
+        "base_revision": 5,
+        "changeset": {
+          "affected_projects": [
+            "A"
+          ],
+          "apply_plan": {
+            "module_transitions": {},
+            "operation": "change",
+            "previous": {
+              "\"Daemon\"": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "modules": {
+                        "a": {
+                          "program": "/home/example/program",
+                          "registration_channel": true
+                        }
+                      },
+                      "version": 1
+                    }
+                  }
+                }
+              },
+              "{\"Declaration\":\"a\"}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "op": "config.declare",
+                      "project_dirs": [],
+                      "schema": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "properties": {
+                          "limit": {
+                            "default": 1,
+                            "description": "Limit",
+                            "type": "integer",
+                            "x-ck-bound": "raise_only"
+                          }
+                        },
+                        "type": "object",
+                        "unevaluatedProperties": false,
+                        "x-ck-apply": "live",
+                        "x-ck-layers": [
+                          "user",
+                          "workspace",
+                          "project"
+                        ]
+                      },
+                      "user_file": "/home/example/cortexkit/a.jsonc"
+                    }
+                  }
+                }
+              },
+              "{\"Entry\":\"a\"}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "program": "/home/example/program",
+                      "registration_channel": true
+                    }
+                  }
+                }
+              },
+              "{\"Layer\":{\"module\":\"a\",\"path\":\"/home/example/cortexkit/a.jsonc\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "limit": 2
+                    }
+                  }
+                }
+              },
+              "{\"Program\":{\"module\":\"a\",\"path\":\"/home/example/program\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "file": {
+                        "device": "1",
+                        "inode": "1",
+                        "platform": "unix"
+                      },
+                      "length": 25,
+                      "path": "/home/example/program",
+                      "raw": "sha256:744456cdcb787e63f8ca619ec6eaab592abad550190dfed1e22b2dc362cb2b57"
+                    }
+                  }
+                }
+              }
+            },
+            "project_approval_digests": {
+              "a": {
+                "A": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            },
+            "project_file_approvals": [
+              {
+                "candidate_digest": "sha256:c905bff51a424366957233647c96f393c0b76864d9f5d10e726685974be79e37",
+                "operation": "adopt",
+                "target": {
+                  "layer": "project",
+                  "module": "a",
+                  "project_id": "A",
+                  "registry_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "relative_path": ".cortexkit/a.jsonc",
+                  "root": "/home/example/repos/project",
+                  "root_identity": {
+                    "device": "1",
+                    "inode": "1",
+                    "platform": "unix"
+                  }
+                }
+              },
+              {
+                "candidate_digest": "sha256:31cb930247617bffb9ef0bce05b5d83f1c9c471a45f59a000375a736ff38fa01",
+                "operation": "adopt",
+                "target": {
+                  "layer": "workspace",
+                  "module": "a",
+                  "registry_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "relative_path": ".cortexkit/a.jsonc",
+                  "root": "/home/example/repos/workspace",
+                  "root_identity": {
+                    "device": "1",
+                    "inode": "1",
+                    "platform": "unix"
+                  },
+                  "workspace_id": "W"
+                }
+              }
+            ],
+            "review": null,
+            "reviewed_programs": {
+              "a": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "rollback_to": null,
+            "snapshot": {
+              "\"Daemon\"": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "modules": {
+                        "a": {
+                          "program": "/home/example/program",
+                          "registration_channel": true
+                        }
+                      },
+                      "version": 1
+                    }
+                  }
+                }
+              },
+              "{\"Declaration\":\"a\"}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "op": "config.declare",
+                      "project_dirs": [],
+                      "schema": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "properties": {
+                          "limit": {
+                            "default": 1,
+                            "description": "Limit",
+                            "type": "integer",
+                            "x-ck-bound": "raise_only"
+                          }
+                        },
+                        "type": "object",
+                        "unevaluatedProperties": false,
+                        "x-ck-apply": "live",
+                        "x-ck-layers": [
+                          "user",
+                          "workspace",
+                          "project"
+                        ]
+                      },
+                      "user_file": "/home/example/cortexkit/a.jsonc"
+                    }
+                  }
+                }
+              },
+              "{\"Entry\":\"a\"}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "program": "/home/example/program",
+                      "registration_channel": true
+                    }
+                  }
+                }
+              },
+              "{\"Layer\":{\"module\":\"a\",\"path\":\"/home/example/cortexkit/a.jsonc\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "limit": 2
+                    }
+                  }
+                }
+              },
+              "{\"Program\":{\"module\":\"a\",\"path\":\"/home/example/program\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": {
+                      "file": {
+                        "device": "1",
+                        "inode": "1",
+                        "platform": "unix"
+                      },
+                      "length": 25,
+                      "path": "/home/example/program",
+                      "raw": "sha256:744456cdcb787e63f8ca619ec6eaab592abad550190dfed1e22b2dc362cb2b57"
+                    }
+                  }
+                }
+              },
+              "{\"ProjectFile\":{\"module\":\"a\",\"path\":\"/home/example/repos/project/.cortexkit/a.jsonc\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": null
+                  }
+                }
+              },
+              "{\"ProjectFile\":{\"module\":\"a\",\"path\":\"/home/example/repos/workspace/.cortexkit/a.jsonc\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": null
+                  }
+                }
+              },
+              "{\"ProjectTuple\":{\"module\":\"a\",\"project\":\"A\"}}": {
+                "kind": "value",
+                "value": {
+                  "state": {
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "present"
+                  },
+                  "value": {
+                    "kind": "value",
+                    "value": null
+                  }
+                }
+              }
+            },
+            "tuple_targets": [
+              {
+                "module": "a",
+                "project": "A"
+              }
+            ]
+          },
+          "fields": [
+            {
+              "apply": "live",
+              "module_id": "a",
+              "new": {
+                "kind": "value",
+                "value": 9
+              },
+              "new_source": "project",
+              "old": {
+                "kind": "value",
+                "value": null
+              },
+              "old_source": "default",
+              "path": "/limit",
+              "project_id": "A",
+              "reasons": []
+            }
+          ],
+          "launch_manifests": {},
+          "policy_changes": []
+        },
+        "daemon_incarnation": "example-daemon",
+        "input_vector": {
+          "inputs": {
+            "module:\"a\"": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "present"
+            },
+            "project_tuple:[\"a\",\"A\"]": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "present"
+            },
+            "subc.jsonc": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "present"
+            }
+          }
+        }
+      },
+      "skipped": [
+        {
+          "code": "config_unavailable",
+          "message": "B: root /home/example/repos/missing: root open refused: input open failed: No such file or directory (os error 2)",
+          "module_id": "a",
+          "path": "",
+          "project_id": "B"
+        }
+      ]
+    }
+  },
+  "request": {
+    "op": "config.plan"
+  }
+}

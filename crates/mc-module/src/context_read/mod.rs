@@ -543,8 +543,9 @@ impl Reader {
         let (snapshot, _) = self.snapshot(harness, session, purpose, newest)?;
         // Tokenizer initialization and all rendering happen after releasing both read transactions.
         let counter = Counter::for_model(snapshot.model.as_deref());
-        let settings = self.config.resolve(
+        let settings = self.config.resolve_for_project(
             snapshot.config_root.as_deref(),
+            snapshot.project.as_ref().map(|project| project.id.as_str()),
             snapshot.model.as_deref().unwrap_or(""),
             snapshot.usable,
         );

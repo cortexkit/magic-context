@@ -1,0 +1,22 @@
+{
+  "reply": {
+    "code": "workspace_mismatch",
+    "message": "the project does not belong to the selected workspace"
+  },
+  "request": {
+    "base_generations": {
+      "a": 0
+    },
+    "edits": [
+      {
+        "layer": "workspace",
+        "module_id": "a",
+        "path": "/limit",
+        "project_id": "A",
+        "set": 8,
+        "workspace_id": "other"
+      }
+    ],
+    "op": "config.plan"
+  }
+}

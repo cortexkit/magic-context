@@ -1,0 +1,70 @@
+{
+  "reply": {
+    "op": "config.plan",
+    "view": {
+      "base_revision": 0,
+      "digest": "sha256:043233c0210924114e2ec2a71dc525436f6eb88dd737cda85f4a98a060208092",
+      "plan": {
+        "active_generations": {},
+        "base_generation": 0,
+        "base_revision": 0,
+        "changeset": {
+          "affected_projects": [],
+          "apply_plan": {
+            "project_refusals": [
+              {
+                "code": "project_apply_kind_unsupported",
+                "message": "a/A: /limit",
+                "module_id": "a",
+                "path": "",
+                "project_id": "A",
+                "workspace_id": "W"
+              }
+            ]
+          },
+          "fields": [],
+          "launch_manifests": {},
+          "policy_changes": []
+        },
+        "daemon_incarnation": "example-daemon",
+        "input_vector": {
+          "inputs": {
+            "module:\"a\"": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "present"
+            },
+            "subc.jsonc": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "present"
+            }
+          }
+        }
+      },
+      "refusals": [
+        {
+          "code": "project_apply_kind_unsupported",
+          "message": "a/A: /limit",
+          "module_id": "a",
+          "path": "",
+          "project_id": "A",
+          "workspace_id": "W"
+        }
+      ]
+    }
+  },
+  "request": {
+    "base_generations": {
+      "a": 0
+    },
+    "edits": [
+      {
+        "layer": "project",
+        "module_id": "a",
+        "path": "/limit",
+        "project_id": "A",
+        "set": 8
+      }
+    ],
+    "op": "config.plan"
+  }
+}

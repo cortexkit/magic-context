@@ -82,7 +82,12 @@ impl Apps {
     pub(super) fn embedding_model(&self, project: &str) -> Option<String> {
         let root = self.projects.get(project)?.root.as_deref()?;
         let config = &self.attached.as_ref()?.config;
-        let plan = crate::upkeep::Plan::from_settings(&config.resolve(Some(root), "", 0));
+        let plan = crate::upkeep::Plan::from_settings(&config.resolve_for_project(
+            Some(root),
+            Some(project),
+            "",
+            0,
+        ));
         plan.memory
             .then_some(plan.embedding)
             .flatten()

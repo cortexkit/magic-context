@@ -1,11 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Magic Context (ck-mc) user settings",
+  "title": "Magic Context (ck-mc) settings",
   "type": "object",
   "unevaluatedProperties": false,
   "x-ck-apply": "live",
   "x-ck-layers": [
-    "user"
+    "user",
+    "workspace",
+    "project"
   ],
   "properties": {
     "execute_threshold_percentage": {
@@ -21,7 +23,9 @@
           "description": "The execute threshold for the models this key names, 20 to 90 percent.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       },
@@ -31,7 +35,9 @@
       "description": "Context usage, as a percentage of the usable window, at which a pass executes: `default` for every model, plus entries for provider/model or model keys.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "execute_threshold_tokens": {
@@ -47,7 +53,9 @@
           "description": "The execute threshold in tokens, 5,000 to 2,000,000.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       },
@@ -55,7 +63,9 @@
       "description": "Execute thresholds in tokens for the models a key names; one that applies wins over every percentage.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "keep_reasoning_tokens": {
@@ -71,7 +81,9 @@
           "description": "Reasoning tokens kept, 0 to 1,000,000.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       },
@@ -81,7 +93,9 @@
       "description": "Reasoning tokens the newest assistant messages keep: `default`, provider/* and model keys.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "protected_tokens": {
@@ -100,14 +114,18 @@
               "description": "Selects a size derived from the usable window.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             }
           },
           "description": "a size derived from the usable window",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         {
@@ -125,7 +143,9 @@
               "description": "Selects a fixed number of tokens.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             },
             "tokens": {
@@ -135,7 +155,9 @@
               "description": "Tokens left alone, 4,000 to 1,000,000.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ],
               "x-ck-required": true
             }
@@ -143,14 +165,18 @@
           "description": "a fixed number of tokens",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       ],
       "description": "Tokens of the newest tool output the routine heuristics leave alone. Absent means auto: a size derived from the usable window.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "protected_tools": {
@@ -165,7 +191,9 @@
           "description": "How many of the tool's newest results are kept.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       },
@@ -173,7 +201,9 @@
       "description": "Tools whose newest results are never dropped automatically, by tool name, with how many results each keeps; added to the built-in todowrite (1) and ctx_reduce (3).",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "history_budget_percentage": {
@@ -184,7 +214,9 @@
       "description": "The history head's budget, as a share of the window up to the execute threshold, 0.05 to 0.5.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "memory": {
@@ -197,7 +229,9 @@
           "description": "Project memories, primers and their search.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         "auto_promote": {
@@ -206,7 +240,9 @@
           "description": "Facts a summary finds become project memories.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         "injection_budget_tokens": {
@@ -217,7 +253,9 @@
           "description": "Project memories shown in the history head, in tokens, 500 to 20,000.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         "auto_search": {
@@ -230,7 +268,9 @@
               "description": "Add a memory hint to a person's message when a search finds something related.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             },
             "score_threshold": {
@@ -241,7 +281,9 @@
               "description": "The relevance a fragment needs to appear in the hint, 0.3 to 0.95.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             },
             "min_prompt_chars": {
@@ -252,14 +294,18 @@
               "description": "Shorter messages get no hint, 5 to 500 characters.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             }
           },
           "description": "Memory hints on a person's message.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         "git_commit_indexing": {
@@ -272,7 +318,9 @@
               "description": "Index the project's commits for search.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             },
             "since_days": {
@@ -283,7 +331,9 @@
               "description": "How far back commits are indexed, 7 to 3,650 days.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             },
             "max_commits": {
@@ -294,21 +344,27 @@
               "description": "Commits kept per project, oldest evicted first, 100 to 20,000.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             }
           },
           "description": "Commit search.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       },
       "description": "Project memories.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "mural": {
@@ -321,14 +377,18 @@
           "description": "The history head carries an image of the project memories its memory budget left out, on models that read images.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       },
       "description": "The memory mural.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "commit_cluster_trigger": {
@@ -341,7 +401,9 @@
           "description": "The summarizer runs, at any usage, once enough stretches of work ended in commits.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         "min_clusters": {
@@ -351,14 +413,18 @@
           "description": "How many such stretches, at least 1.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       },
       "description": "Summaries triggered by finished work.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "caveman_text_compression": {
@@ -371,7 +437,9 @@
           "description": "Compress older long text, for sessions with a summarizer.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         "min_chars": {
@@ -382,14 +450,18 @@
           "description": "Shorter text stays as it is, 100 to 10,000 characters.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         }
       },
       "description": "Older long text compressed by age.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "language": {
@@ -454,7 +526,9 @@
           "description": "The wording every model gets unless a model key says otherwise.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         "models": {
@@ -472,7 +546,9 @@
               "description": "The wording for these models.",
               "x-ck-apply": "live",
               "x-ck-layers": [
-                "user"
+                "user",
+                "workspace",
+                "project"
               ]
             }
           },
@@ -480,7 +556,9 @@
           "description": "The wording for the models a provider/model or model key names.",
           "x-ck-apply": "live",
           "x-ck-layers": [
-            "user"
+            "user",
+            "workspace",
+            "project"
           ]
         },
         "tool_descriptions": {
@@ -527,7 +605,9 @@
       "description": "What the model is told about Magic Context.",
       "x-ck-apply": "live",
       "x-ck-layers": [
-        "user"
+        "user",
+        "workspace",
+        "project"
       ]
     },
     "embedding": {
@@ -866,9 +946,46 @@
           "description": "Rerank explicit prose searches.",
           "x-ck-apply": "live",
           "x-ck-layers": [
+            "user",
+            "workspace",
+            "project"
+          ]
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "default": 1500,
+          "minimum": 50,
+          "maximum": 15000,
+          "description": "How long the hosted reranker may take, 50 to 15,000 ms.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
             "user"
           ]
         },
+        "top_n": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "The most candidates sent, 1 to 20.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        }
+      },
+      "description": "Reranking an explicit prose search's best candidates.",
+      "x-ck-apply": "live",
+      "x-ck-layers": [
+        "user",
+        "workspace",
+        "project"
+      ]
+    },
+    "rerank_backend": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "properties": {
         "provider": {
           "type": "string",
           "default": "synapse",
@@ -976,31 +1093,9 @@
           "x-ck-layers": [
             "user"
           ]
-        },
-        "timeout_ms": {
-          "type": "integer",
-          "default": 1500,
-          "minimum": 50,
-          "maximum": 15000,
-          "description": "How long the hosted reranker may take, 50 to 15,000 ms.",
-          "x-ck-apply": "live",
-          "x-ck-layers": [
-            "user"
-          ]
-        },
-        "top_n": {
-          "type": "integer",
-          "default": 20,
-          "minimum": 1,
-          "maximum": 20,
-          "description": "The most candidates sent, 1 to 20.",
-          "x-ck-apply": "live",
-          "x-ck-layers": [
-            "user"
-          ]
         }
       },
-      "description": "Reranking an explicit prose search's best candidates.",
+      "description": "Reranker destination and credentials. Only user settings can select where the reranker sends search text and any vault key.",
       "x-ck-apply": "live",
       "x-ck-layers": [
         "user"

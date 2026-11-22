@@ -109,7 +109,18 @@ impl Reranker {
         project: &Value,
         vault: &crate::vault::Vault,
     ) -> Self {
-        if project.pointer("/rerank/provider").and_then(Value::as_str) == Some("off") {
+        Self::from_layers_in(user, &[project], vault)
+    }
+
+    pub(crate) fn from_layers_in(
+        user: &Value,
+        overlays: &[&Value],
+        vault: &crate::vault::Vault,
+    ) -> Self {
+        if overlays
+            .iter()
+            .any(|layer| layer.pointer("/rerank/provider").and_then(Value::as_str) == Some("off"))
+        {
             return Self::Off;
         }
         let rerank = &user["rerank"];

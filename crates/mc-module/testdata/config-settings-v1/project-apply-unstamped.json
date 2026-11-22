@@ -1,0 +1,11 @@
+{
+  "reply": {
+    "generation": 0,
+    "op": "config.apply",
+    "restart_required": false
+  },
+  "request": {
+    "digest": "sha256:435d8598b94f2691e62c107bd48e2b2b2f67646987384b3a802e1b0ae1dabcbc",
+    "op": "config.apply"
+  }
+}

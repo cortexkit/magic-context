@@ -1571,6 +1571,7 @@ const TEMPLATE_DATA = [
 "v2 response ownership unavailable; keeping system identity pending \x01",
 "WARN: [auto-update-checker] Could not write pending update marker: \x01",
 "[magic-context] compaction-off: fail-closed inert, passing through",
+"ck-mc: daemon does not serve project settings; using the user view",
 "historian no-op: waiting for new history after no forward progress",
 "transform refused degraded pass site=stale-reduce-strip-exception:",
 "transform: recovery chain stops: the request could not be counted:",

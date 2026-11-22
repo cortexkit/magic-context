@@ -1,0 +1,21 @@
+{
+  "reply": {
+    "code": "project_registry_unavailable",
+    "message": "fixture registry disconnected"
+  },
+  "request": {
+    "base_generations": {
+      "a": 0
+    },
+    "edits": [
+      {
+        "layer": "project",
+        "module_id": "a",
+        "path": "/limit",
+        "project_id": "A",
+        "set": 8
+      }
+    ],
+    "op": "config.plan"
+  }
+}

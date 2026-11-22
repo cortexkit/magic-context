@@ -1,0 +1,29 @@
+{
+  "event": "resync",
+  "modules": [
+    {
+      "active_generation": 0,
+      "approved_generation": 0,
+      "gated": true,
+      "module_id": "a",
+      "schema_digest": "sha256:50f4d8ad093176c1878045c8a9819005b09492f01ca2c3fc2342d0a2394e3ef4",
+      "status": "adopted"
+    },
+    {
+      "active_generation": 0,
+      "approved_generation": 0,
+      "file_error": {
+        "code": "value_invalid",
+        "message": "configuration must be JSON with unique keys and lossless finite numbers"
+      },
+      "gated": true,
+      "module_id": "a",
+      "project_id": "A",
+      "schema_digest": "sha256:50f4d8ad093176c1878045c8a9819005b09492f01ca2c3fc2342d0a2394e3ef4",
+      "status": "adopted",
+      "workspace_id": "W"
+    }
+  ],
+  "op": "config.watch",
+  "stamped": false
+}

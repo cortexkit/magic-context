@@ -1,0 +1,37 @@
+{
+  "reply": {
+    "base_generation": 3,
+    "effective": {
+      "limit": 4
+    },
+    "layers": [
+      {
+        "document": {
+          "limit": 2
+        },
+        "layer": "user"
+      },
+      {
+        "document": {
+          "limit": 4
+        },
+        "layer": "workspace",
+        "workspace_id": "W"
+      }
+    ],
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "A",
+    "sources": {
+      "/limit": "workspace"
+    },
+    "stamped": true,
+    "through": "workspace"
+  },
+  "request": {
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "A",
+    "through": "workspace"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "reply": {
+    "code": "edit_spans_files",
+    "message": "an unstamped edit plan can touch only one file"
+  },
+  "request": {
+    "base_generations": {
+      "a": 0
+    },
+    "edits": [
+      {
+        "layer": "workspace",
+        "module_id": "a",
+        "path": "/limit",
+        "set": 8,
+        "workspace_id": "W"
+      },
+      {
+        "layer": "project",
+        "module_id": "a",
+        "path": "/limit",
+        "project_id": "A",
+        "set": 8
+      }
+    ],
+    "op": "config.plan"
+  }
+}

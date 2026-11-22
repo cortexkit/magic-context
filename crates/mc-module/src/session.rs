@@ -798,6 +798,10 @@ impl QuietCarry {
         self.0.config_inputs()
     }
 
+    pub(crate) fn config_project_id(&self) -> Option<&str> {
+        self.0.config_project_id()
+    }
+
     /// [`Session::pre_user`] on the freed session, which answers it as the
     /// resumed one would, so a person's message need not wait for a resume.
     /// Its memory search stops at the newest summary or, before the first,

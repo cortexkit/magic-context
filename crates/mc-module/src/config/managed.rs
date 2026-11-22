@@ -1,12 +1,12 @@
-//! ck-mc's user settings on the daemon's managed settings (subc's config
+//! ck-mc's settings on the daemon's managed settings (subc's config
 //! gate), behind the `managed-settings` build switch.
 //!
 //! The daemon owns the user file once ck-mc declares it: it reviews each
 //! change with ck-mc ([`super::review`]) and delivers the approved,
 //! effective settings as a view. ck-mc never reads the user file directly
 //! then, except through `config_files` when the daemon is too old to have a
-//! config gate. The per-project file is still read from disk, with its own
-//! trust rules.
+//! config gate. Project views are kept separately, with their original tiers,
+//! so each session can apply ck-mc's rules for its model and window.
 //!
 //! The user tier comes from, in order:
 //! 1. the view the daemon delivered this run;
@@ -25,6 +25,7 @@
 //! once ([`super::convert::convert_0_49`]), keeping its comments and saving
 //! the old bytes in the data folder.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -34,11 +35,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use subc_client_rs::config::{
-    ConfigAvailability, ConfigDeclareRequest, ConfigReviewReply, ConfigReviewRequest, ConfigState,
-    ConfigView, Layer,
+    ConfigAvailability, ConfigDeclareRequest, ConfigError, ConfigReviewReply, ConfigReviewRequest,
+    ConfigState, ConfigView,
 };
+use subc_config::Layer;
 
-use super::{Loader, SettingsSource, UserTier};
+use super::{Loader, SettingsSource, Tiers, UserTier};
 
 /// How long the first run's settings resolution waits for the daemon's
 /// first answer before it serves the defaults.
@@ -88,6 +90,9 @@ impl State {
 /// The user tier's source under managed settings.
 pub struct Managed {
     state: Mutex<State>,
+    projects: Mutex<HashMap<String, Tiers>>,
+    projects_unsupported: AtomicBool,
+    projects_advertised: AtomicBool,
     // Health probes cannot wait for settings resolution or view delivery.
     source: AtomicU8,
     changed: Condvar,
@@ -119,6 +124,9 @@ impl Managed {
         Self {
             source: AtomicU8::new(state.source() as u8),
             state: Mutex::new(state),
+            projects: Mutex::new(HashMap::new()),
+            projects_unsupported: AtomicBool::new(false),
+            projects_advertised: AtomicBool::new(false),
             changed: Condvar::new(),
             view_path,
             wait,
@@ -260,6 +268,61 @@ impl Managed {
             },
         );
         Ok(tier)
+    }
+
+    pub(super) fn project_tiers(&self, id: &str) -> Option<Tiers> {
+        if self.projects_unsupported.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.projects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
+
+    fn apply_project(&self, id: &str, view: &ConfigView) -> Result<(), Vec<String>> {
+        let mut tiers = Tiers::default();
+        for snapshot in &view.layers {
+            let Some(bytes) = &snapshot.bytes else {
+                continue;
+            };
+            let tier =
+                UserTier::from_managed(super::review::parse_layer(bytes).map_err(|why| {
+                    vec![format!(
+                        "ck-mc could not decode the settings layer for {id}: {why}"
+                    )]
+                })?);
+            match snapshot.layer.known_layer() {
+                Some(Layer::User) => tiers.user = Some(tier),
+                Some(Layer::Workspace) => tiers.overlays[0] = Some(tier.into_value()),
+                Some(Layer::Project) => tiers.overlays[1] = Some(tier.into_value()),
+                _ => {
+                    return Err(vec![format!(
+                        "ck-mc received an unknown settings layer for {id}"
+                    )])
+                }
+            }
+        }
+        // The daemon reports refused files. Only a delivered view replaces
+        // these tiers; a refused refresh leaves the last usable view intact.
+        self.projects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.to_owned(), tiers);
+        Ok(())
+    }
+
+    fn config_error(&self, error: &ConfigError) {
+        // Remove the refusal fallback once every supported daemon advertises
+        // project settings in HELLO_ACK. File refusals don't signal support.
+        if !self.projects_advertised.load(Ordering::Relaxed)
+            && matches!(error, ConfigError::Refused(body) if matches!(body.code.as_str(),
+                "unknown_control_op" | "capability_not_advertised"))
+            && !self.projects_unsupported.swap(true, Ordering::Relaxed)
+        {
+            tracing::info!("ck-mc: daemon does not serve project settings; using the user view");
+        }
     }
 
     /// The daemon has no config gate: read the user file.
@@ -486,15 +549,43 @@ impl Loader {
         super::review::review(request, &self.user_path)
     }
 
-    /// Take a delivered view as the user tier.
+    /// Take a delivered user or project view. The SDK acknowledges delivery
+    /// attempts with the same project ID after this callback succeeds.
     pub fn config_apply(&self, view: &ConfigView) -> Result<(), Vec<String>> {
         let managed = self
             .managed
             .as_ref()
             .ok_or_else(|| vec!["ck-mc reads these settings from its files".to_owned()])?;
+        if let Some(id) = &view.project_id {
+            return managed.apply_project(id, view);
+        }
         let tier = managed.apply(view)?;
         super::register_vault_keys(&tier, &self.vault);
         Ok(())
+    }
+
+    pub(crate) fn refresh_project_config(&self, handle: &subc_client_rs::ModuleHandle, id: &str) {
+        if let Some(managed) = &self.managed {
+            let advertised = handle.daemon_supports("config.settings.projects/v1");
+            if advertised {
+                managed.projects_advertised.store(true, Ordering::Relaxed);
+            }
+            if advertised || self.project_settings_available() {
+                handle.refresh_project_config(id);
+            }
+        }
+    }
+
+    fn project_settings_available(&self) -> bool {
+        self.managed
+            .as_ref()
+            .is_some_and(|managed| !managed.projects_unsupported.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn on_config_error(&self, error: &ConfigError) {
+        if let Some(managed) = &self.managed {
+            managed.config_error(error);
+        }
     }
 
     /// The daemon has no config gate: read the user file as before.
@@ -510,6 +601,22 @@ impl Loader {
     /// Log the daemon's word on the settings, and end a first run's wait
     /// on a refusal.
     pub fn on_config_state(&self, state: &ConfigState) {
+        let view = match state {
+            ConfigState::Unstamped(view)
+            | ConfigState::Pending(view)
+            | ConfigState::Active(view) => Some(view),
+            ConfigState::Failed { view, .. }
+            | ConfigState::ConfigGated { view, .. }
+            | ConfigState::NotDeliveryTarget { view, .. }
+            | ConfigState::AnchorPending { view, .. } => match view {
+                ConfigAvailability::LastView(view) => Some(view),
+                _ => None,
+            },
+            _ => None,
+        };
+        if view.is_some_and(|view| view.project_id.is_some()) {
+            return;
+        }
         match state {
             ConfigState::Failed { reasons, .. } => {
                 tracing::warn!("ck-mc: managed settings: failed: {}", reasons.join("; "))

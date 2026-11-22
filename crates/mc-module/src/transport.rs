@@ -1814,7 +1814,7 @@ impl Handler {
     /// An op on a route ck-mc bound, received at `Instant::now()`.
     #[cfg(test)]
     async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Vec<u8>, Refusal> {
-        self.dispatch_at(channel, body, Instant::now()).await
+        self.dispatch_at(channel, body, Instant::now(), None).await
     }
 
     /// An op on a route ck-mc bound, received at `arrived`: a tool call's
@@ -1824,6 +1824,7 @@ impl Handler {
         channel: u16,
         body: &[u8],
         arrived: Instant,
+        handle: Option<&subc_client_rs::ModuleHandle>,
     ) -> Result<Vec<u8>, Refusal> {
         // Every route was checked at bind (`on_bind`): one known role, and a
         // bound session unless it is a module-level hook or tool route, which
@@ -1836,7 +1837,7 @@ impl Handler {
             .cloned()
             .ok_or_else(|| Refusal::new(codes::ROUTE_UNBOUND, "no route was bound", None))?;
         let answer = match bound.role {
-            RouteRole::Compaction => self.compaction(&bound.route, body).await?,
+            RouteRole::Compaction => self.compaction(&bound.route, body, handle).await?,
             // Catalog answers are served as the exact canonical bytes the
             // catalog produced, never re-serialized.
             RouteRole::Tools => {
@@ -1855,12 +1856,28 @@ impl Handler {
     }
 
     /// A compaction op, about the session the route is bound to.
-    async fn compaction(&self, route: &Route, body: &[u8]) -> Result<Value, Refusal> {
+    async fn compaction(
+        &self,
+        route: &Route,
+        body: &[u8],
+        _handle: Option<&subc_client_rs::ModuleHandle>,
+    ) -> Result<Value, Refusal> {
         let (method, params) = wire::decode(body)?;
         let session = &route.session;
         let answer = match method.as_str() {
             ops::COMPACTION_SETUP => {
-                to_value(self.module.setup(route.clone(), wire::params(params)?))
+                let setup = self.module.setup(route.clone(), wire::params(params)?);
+                #[cfg(feature = "managed-settings")]
+                if setup.is_ok() {
+                    if let (Some(handle), Some(project), Some(loader)) = (
+                        _handle,
+                        route.project.as_ref(),
+                        self.module.config().loader(),
+                    ) {
+                        loader.refresh_project_config(handle, &project.id);
+                    }
+                }
+                to_value(setup)
             }
             ops::COMPACTION_NOTICE => to_value(self.module.notice(session, wire::params(params)?)),
             ops::COMPACTION_RIDE => {
@@ -1884,7 +1901,9 @@ impl Handler {
                     .as_ref()
                     .map(|project| project.root.as_str())
                     .or(route.workdir.as_deref());
-                self.module.catalog(root, &call.arguments)
+                let project = route.project.as_ref().map(|project| project.id.as_str());
+                self.module
+                    .catalog_for_project(root, project, &call.arguments)
             }
             _ => return None,
         };
@@ -2211,6 +2230,13 @@ impl ModuleHandler for Handler {
     async fn on_config_state(&self, state: subc_client_rs::config::ConfigState) {
         if let Some(loader) = self.module.config().loader() {
             loader.on_config_state(&state);
+        }
+    }
+
+    #[cfg(feature = "managed-settings")]
+    async fn on_config_error(&self, error: subc_client_rs::config::ConfigError) {
+        if let Some(loader) = self.module.config().loader() {
+            loader.on_config_error(&error);
         }
     }
     /// Record who opened the route and for which session. Only a module the
@@ -2585,9 +2611,14 @@ impl Handler {
         } else if let Some(caller) = caller {
             self.app(ctx, body, caller).await
         } else {
-            self.dispatch_at(ctx.route_handle().channel, body, arrived)
-                .await
-                .map(HandlerOutcome::Response)
+            self.dispatch_at(
+                ctx.route_handle().channel,
+                body,
+                arrived,
+                Some(&ctx.module_handle()),
+            )
+            .await
+            .map(HandlerOutcome::Response)
         };
         match result {
             Ok(answer) => answer,

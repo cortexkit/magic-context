@@ -1,0 +1,4 @@
+{
+  "op": "config.watch",
+  "projects": true
+}

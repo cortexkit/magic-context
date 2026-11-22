@@ -1,0 +1,42 @@
+{
+  "reply": {
+    "base_generation": 3,
+    "effective": {
+      "limit": 9
+    },
+    "layers": [
+      {
+        "document": {
+          "limit": 2
+        },
+        "layer": "user"
+      },
+      {
+        "document": {
+          "limit": 4
+        },
+        "layer": "workspace",
+        "workspace_id": "W"
+      },
+      {
+        "document": {
+          "limit": 9
+        },
+        "layer": "project",
+        "project_id": "A"
+      }
+    ],
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "A",
+    "sources": {
+      "/limit": "project"
+    },
+    "stamped": true
+  },
+  "request": {
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "A"
+  }
+}

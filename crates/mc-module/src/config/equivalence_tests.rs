@@ -123,8 +123,8 @@ fn equivalent_files_resolve_to_the_same_settings_in_both_builds() {
                     assert_same(&actual, &expected, &case);
                 }
                 assert_eq!(
-                    super::catalog_config(Some(tier.value()), Some(&project), path),
-                    super::catalog_config(Some(&file), Some(&project), path),
+                    super::catalog_config(Some(tier.value()), &[&project], path),
+                    super::catalog_config(Some(&file), &[&project], path),
                     "{name}, {how}, project {project}"
                 );
             }

@@ -45,28 +45,28 @@ fn review(user: &Value, base: Option<ConfigView>, user_path: &Path) -> ConfigRev
 }
 
 #[test]
-fn a_layer_with_a_byte_order_mark_reads_as_json() {
+fn a_layer_with_a_byte_order_mark_and_comments_reads_as_jsonc() {
     let request = ConfigReviewRequest::new(
         0,
         vec![ConfigLayerSnapshot::file(
             "magic-context",
             ConfigLayer::User,
             USER_FILE,
-            Some(b"\xef\xbb\xbf{\"language\": \"tr\"}\r\n".to_vec()),
+            Some(b"\xef\xbb\xbf{\"language\": \"tr\",} // trailing\r\n".to_vec()),
         )],
         None,
     );
     let reply = super::review::review(&request, Path::new(USER_FILE));
     assert!(reply.refusals.is_empty(), "{:?}", reply.refusals);
     assert!(reply.fields.iter().any(|field| field.path == "/language"));
-    // Bytes that are not JSON are refused, not read as nothing.
+    // An invalid JSONC document is refused, not read as an empty layer.
     let request = ConfigReviewRequest::new(
         0,
         vec![ConfigLayerSnapshot::file(
             "magic-context",
             ConfigLayer::User,
             USER_FILE,
-            Some(b"{\"language\": \"tr\",} // trailing".to_vec()),
+            Some(b"{\"language\": \"tr\", // missing closing brace".to_vec()),
         )],
         None,
     );
@@ -125,8 +125,8 @@ fn a_review_refuses_what_only_ck_mc_knows_is_wrong() {
             "/embedding/module",
         ),
         (
-            json!({"rerank": {"module": "fed:short:synapse"}}),
-            "/rerank/module",
+            json!({"rerank_backend": {"module": "fed:short:synapse"}}),
+            "/rerank_backend/module",
         ),
         (
             json!({"dreamer": {"tasks": {"verify": {"schedule": "every day"}}}}),
@@ -134,8 +134,8 @@ fn a_review_refuses_what_only_ck_mc_knows_is_wrong() {
         ),
         (json!({"clock_note": "99999999999999999h"}), "/clock_note"),
         (
-            json!({"rerank": {"api_key": {"kind": "vault", "key": {"vault_ref": "a}b"}}}}),
-            "/rerank/api_key",
+            json!({"rerank_backend": {"api_key": {"kind": "vault", "key": {"vault_ref": "a}b"}}}}),
+            "/rerank_backend/api_key",
         ),
     ] {
         let reply = review(&user, None, Path::new(USER_FILE));

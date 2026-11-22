@@ -1,0 +1,23 @@
+{
+  "reply": {
+    "base_generation": 3,
+    "effective": {
+      "limit": 1
+    },
+    "layers": [],
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "A",
+    "sources": {
+      "/limit": "default"
+    },
+    "stamped": true,
+    "through": "default"
+  },
+  "request": {
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "A",
+    "through": "default"
+  }
+}

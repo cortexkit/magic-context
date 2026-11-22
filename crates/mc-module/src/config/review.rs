@@ -1,4 +1,4 @@
-//! The daemon's review of the user's settings (`config.review`), the
+//! The daemon's review of settings (`config.review`), the
 //! schema ck-mc declares (`assets/settings-schema.json`), and the checks the
 //! schema can't state.
 //!
@@ -20,7 +20,8 @@ use subc_client_rs::config::{
     FieldChange, Layer, LayerValue, RecordedValue, Schema, ValidationContext,
 };
 
-/// The schema ck-mc declares for its user settings.
+/// The schema ck-mc declares. `rerank_backend` is user-only so an overlay can
+/// disable reranking without changing where the backend sends text or a key.
 pub(crate) const SCHEMA_JSON: &str = include_str!("../../assets/settings-schema.json");
 
 /// [`SCHEMA_JSON`], parsed.
@@ -120,15 +121,16 @@ pub fn review(request: &ConfigReviewRequest, user_path: &Path) -> ConfigReviewRe
                 "a settings layer of a kind ck-mc does not know".into(),
             )]);
         };
-        // A layer's bytes are plain JSON; a byte order mark is not JSON.
-        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
-        match serde_json::from_slice::<Value>(bytes) {
+        match parse_layer(bytes) {
             Ok(value) => layers.push(LayerValue::new(layer, value)),
             Err(error) => {
                 return refuse(vec![(
                     "value_invalid".into(),
                     String::new(),
-                    format!("the {} settings are not JSON: {error}", layer_name(layer)),
+                    format!(
+                        "the {} settings are not valid JSONC: {error}",
+                        layer_name(layer)
+                    ),
                 )])
             }
         }
@@ -165,6 +167,17 @@ pub fn review(request: &ConfigReviewRequest, user_path: &Path) -> ConfigReviewRe
         change.project_id = project_id.clone();
     }
     ConfigReviewReply::new(changes, vec![])
+}
+
+/// Snapshots contain the original file bytes, including comments and a BOM.
+pub(super) fn parse_layer(bytes: &[u8]) -> Result<Value, String> {
+    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    let json = subc_jsonc::jsonc_to_json(text.strip_prefix('\u{feff}').unwrap_or(text))?;
+    let value: Value = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    if !value.is_object() {
+        return Err("expected an object".to_owned());
+    }
+    Ok(value)
 }
 
 fn layer_name(layer: Layer) -> &'static str {
@@ -210,7 +223,7 @@ pub(crate) fn checks(effective: &Value, user_path: &Path) -> Vec<(String, String
             ));
         }
     }
-    for pointer in ["/embedding/module", "/rerank/module"] {
+    for pointer in ["/embedding/module", "/rerank_backend/module"] {
         if let Some(id) = text(pointer) {
             if crate::search::rerank::module_id(id).is_none() {
                 problems.push((
@@ -237,7 +250,7 @@ pub(crate) fn checks(effective: &Value, user_path: &Path) -> Vec<(String, String
             }
         }
     }
-    for pointer in ["/embedding/api_key", "/rerank/api_key"] {
+    for pointer in ["/embedding/api_key", "/rerank_backend/api_key"] {
         if let Some(id) = text(&format!("{pointer}/key/vault_ref")) {
             if !super::convert::vault_id(id) {
                 problems.push((

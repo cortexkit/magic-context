@@ -122,6 +122,16 @@ impl Config {
     /// `provider/model`) and its usable window, which token thresholds are
     /// measured against.
     pub fn resolve(&self, project_root: Option<&str>, model_key: &str, usable: u64) -> Settings {
+        self.resolve_for_project(project_root, None, model_key, usable)
+    }
+
+    pub(crate) fn resolve_for_project(
+        &self,
+        project_root: Option<&str>,
+        project_id: Option<&str>,
+        model_key: &str,
+        usable: u64,
+    ) -> Settings {
         match self {
             Self::Fixed(settings) => {
                 let mut settings = settings.as_ref().clone();
@@ -133,7 +143,12 @@ impl Config {
                     .map(embedding::Provider::unbound);
                 settings
             }
-            Self::Files(loader) => loader.resolve(project_root.map(Path::new), model_key, usable),
+            Self::Files(loader) => loader.resolve_for_project(
+                project_root.map(Path::new),
+                project_id,
+                model_key,
+                usable,
+            ),
         }
     }
 
@@ -155,9 +170,19 @@ impl Config {
     /// The settings `tool.catalog` answers with (see [`Loader::catalog_config`]).
     /// Fixed settings answer with the files' defaults.
     pub fn catalog_config(&self, project_root: Option<&str>) -> crate::catalog::CatalogConfig {
+        self.catalog_for_project(project_root, None)
+    }
+
+    pub(crate) fn catalog_for_project(
+        &self,
+        project_root: Option<&str>,
+        project_id: Option<&str>,
+    ) -> crate::catalog::CatalogConfig {
         match self {
-            Self::Fixed(_) => catalog_config(None, None, Path::new("")),
-            Self::Files(loader) => loader.catalog_config(project_root.map(Path::new)),
+            Self::Fixed(_) => catalog_config(None, &[], Path::new("")),
+            Self::Files(loader) => {
+                loader.catalog_for_project(project_root.map(Path::new), project_id)
+            }
         }
     }
 
@@ -368,13 +393,20 @@ impl Loader {
     }
 
     pub fn resolve(&self, project_root: Option<&Path>, model_key: &str, usable: u64) -> Settings {
-        let user = self.user_tier();
-        let project = project_root
-            .map(|root| detect_config_file(&root.join(".cortexkit")))
-            .and_then(|path| self.read(&path));
-        let mut settings = resolve_tiers(
-            user.as_ref().map(UserTier::value),
-            project.as_ref(),
+        self.resolve_for_project(project_root, None, model_key, usable)
+    }
+
+    fn resolve_for_project(
+        &self,
+        project_root: Option<&Path>,
+        project_id: Option<&str>,
+        model_key: &str,
+        usable: u64,
+    ) -> Settings {
+        let tiers = self.tiers(project_root, project_id);
+        let mut settings = resolve_layers(
+            tiers.user.as_ref().map(UserTier::value),
+            &tiers.overlays.iter().flatten().collect::<Vec<_>>(),
             model_key,
             usable,
             &self.vault,
@@ -390,15 +422,41 @@ impl Loader {
     /// The settings `tool.catalog` answers with, for a project folder or, on
     /// an unscoped preflight, the user's file alone.
     pub fn catalog_config(&self, project_root: Option<&Path>) -> crate::catalog::CatalogConfig {
-        let user = self.user_tier();
-        let project = project_root
-            .map(|root| detect_config_file(&root.join(".cortexkit")))
-            .and_then(|path| self.read(&path));
+        self.catalog_for_project(project_root, None)
+    }
+
+    fn catalog_for_project(
+        &self,
+        project_root: Option<&Path>,
+        project_id: Option<&str>,
+    ) -> crate::catalog::CatalogConfig {
+        let tiers = self.tiers(project_root, project_id);
         catalog_config(
-            user.as_ref().map(UserTier::value),
-            project.as_ref(),
+            tiers.user.as_ref().map(UserTier::value),
+            &tiers.overlays.iter().flatten().collect::<Vec<_>>(),
             &self.user_path,
         )
+    }
+
+    fn tiers(&self, project_root: Option<&Path>, _project_id: Option<&str>) -> Tiers {
+        #[cfg(feature = "managed-settings")]
+        if let Some(managed) = &self.managed {
+            return _project_id
+                .and_then(|id| managed.project_tiers(id))
+                .unwrap_or_else(|| Tiers {
+                    user: self.user_tier(),
+                    overlays: [None, None],
+                });
+        }
+        Tiers {
+            user: self.user_tier(),
+            overlays: [
+                None,
+                project_root
+                    .map(|root| detect_config_file(&root.join(".cortexkit")))
+                    .and_then(|path| self.read(&path)),
+            ],
+        }
     }
 
     fn read(&self, path: &Path) -> Option<Value> {
@@ -460,6 +518,13 @@ impl Loader {
     }
 }
 
+/// Settings kept apart until the session's model and window are known.
+#[derive(Clone, Default)]
+struct Tiers {
+    user: Option<UserTier>,
+    overlays: [Option<Value>; 2], // workspace, then project
+}
+
 /// What a file's settings call for in the log: an obsolete key that is
 /// ignored, a `clock_note` that can't be used, and a `rerank.module` or
 /// `embedding.module` that names no module ck-mc may call. `user` is whether
@@ -486,7 +551,7 @@ fn setting_notes(value: &Value, user: bool) -> Vec<String> {
     notes
 }
 
-/// Merge the two tiers into one session's settings.
+#[cfg(test)]
 fn resolve_tiers(
     user: Option<&Value>,
     project: Option<&Value>,
@@ -494,11 +559,23 @@ fn resolve_tiers(
     usable: u64,
     vault: &Vault,
 ) -> Settings {
+    let overlays = project.into_iter().collect::<Vec<_>>();
+    resolve_layers(user, &overlays, model_key, usable, vault)
+}
+
+/// Merge the user tier and any overlays into one session's settings.
+fn resolve_layers(
+    user: Option<&Value>,
+    overlays: &[&Value],
+    model_key: &str,
+    usable: u64,
+    vault: &Vault,
+) -> Settings {
     let empty = Value::Null;
     let user = user.unwrap_or(&empty);
-    let project = project.unwrap_or(&empty);
+    let tiers = || std::iter::once(user).chain(overlays.iter().copied());
     let (execute_threshold_percentage, execute_threshold_source) =
-        execute_threshold(user, project, model_key, usable);
+        execute_threshold(user, overlays, model_key, usable);
     let mut settings = Settings {
         execute_threshold_percentage,
         execute_threshold_source,
@@ -506,7 +583,7 @@ fn resolve_tiers(
     };
 
     let mut reasoning: Option<Value> = None;
-    for tier in [user, project] {
+    for tier in tiers() {
         if let Some(value) = tier.get("keep_reasoning_tokens") {
             let valid = |value: &Value| integer(value).is_some_and(|n| n <= 1_000_000);
             let value = match value {
@@ -540,22 +617,20 @@ fn resolve_tiers(
             .and_then(integer)
             .filter(|tokens| (4_000..=1_000_000).contains(tokens))
     };
-    let user_protected = protected_tokens(user);
-    let project_protected = protected_tokens(project);
     // The derived floor depends on the runner's usable window, not the file.
     // Keep the tiers separate until that geometry is available here.
-    settings.protected_tokens = match project_protected {
-        Some(project)
-            if project
-                >= user_protected
-                    .unwrap_or_else(|| crate::lanes::default_protected_tokens(usable)) =>
+    settings.protected_tokens = protected_tokens(user);
+    for count in overlays.iter().filter_map(|tier| protected_tokens(tier)) {
+        if count
+            >= settings
+                .protected_tokens
+                .unwrap_or_else(|| crate::lanes::default_protected_tokens(usable))
         {
-            Some(project)
+            settings.protected_tokens = Some(count);
         }
-        _ => user_protected,
-    };
+    }
 
-    for tier in [user, project] {
+    for tier in tiers() {
         if let Some(map) = tier.get("protected_tools").and_then(Value::as_object) {
             for (name, count) in map {
                 if let Some(count) = integer(count) {
@@ -599,17 +674,16 @@ fn resolve_tiers(
             auto.min_prompt_chars = chars as usize;
         }
     }
-    settings.git_commits_enabled = project
-        .pointer("/memory/git_commit_indexing/enabled")
-        .and_then(Value::as_bool)
-        .or_else(|| {
-            user.pointer("/memory/git_commit_indexing/enabled")
+    settings.git_commits_enabled = tiers()
+        .filter_map(|tier| {
+            tier.pointer("/memory/git_commit_indexing/enabled")
                 .and_then(Value::as_bool)
         })
+        .next_back()
         .unwrap_or(false);
     // The plugin drops an out-of-range value, so the other tier or the
     // default applies.
-    for tier in [user, project] {
+    for tier in tiers() {
         if let Some(days) = in_range(tier, "/memory/git_commit_indexing/since_days", 7.0, 3650.0) {
             settings.git_since_days = days as u64;
         }
@@ -622,10 +696,11 @@ fn resolve_tiers(
             settings.git_max_commits = commits as u64;
         }
     }
-    settings.embedding = embedding::Provider::from_tiers_in(user, project, vault);
-    settings.rerank = crate::search::rerank::Reranker::from_tiers_in(user, project, vault);
-    settings.caveman = caveman(user, project);
-    settings.commit_clusters = commit_clusters(user, project);
+    settings.embedding =
+        embedding::Provider::from_tiers_in(user, overlays.last().copied().unwrap_or(&empty), vault);
+    settings.rerank = crate::search::rerank::Reranker::from_layers_in(user, overlays, vault);
+    settings.caveman = caveman(user, tiers());
+    settings.commit_clusters = commit_clusters(tiers());
     // Only the user sets the language; a project file cannot.
     settings.language = user
         .pointer("/language")
@@ -654,10 +729,10 @@ fn resolve_tiers(
 /// `commit_cluster_trigger`: on unless the last tier that sets `enabled`
 /// turns it off, with `min_clusters` (at least 1, default 3) from the last
 /// tier that sets a valid one.
-fn commit_clusters(user: &Value, project: &Value) -> Option<u64> {
+fn commit_clusters<'a>(tiers: impl Iterator<Item = &'a Value>) -> Option<u64> {
     let mut enabled = true;
     let mut min = 3;
-    for tier in [user, project] {
+    for tier in tiers {
         if let Some(on) = tier
             .pointer("/commit_cluster_trigger/enabled")
             .and_then(Value::as_bool)
@@ -681,10 +756,13 @@ fn commit_clusters(user: &Value, project: &Value) -> Option<u64> {
 /// plugin's loader falls back to the default for an invalid leaf. The word rules follow the user-level `language`: English
 /// when it is unset, `en`, `en-*` or not a known code (the values that give no
 /// reply-language directive), as `cavemanWordRulesForLanguage` decides.
-fn caveman(user: &Value, project: &Value) -> Option<crate::pass::Caveman> {
+fn caveman<'a>(
+    user: &Value,
+    tiers: impl Iterator<Item = &'a Value>,
+) -> Option<crate::pass::Caveman> {
     let mut enabled = false;
     let mut min_chars = 500;
-    for tier in [user, project] {
+    for tier in tiers {
         if let Some(on) = tier
             .pointer("/caveman_text_compression/enabled")
             .and_then(Value::as_bool)
@@ -724,12 +802,12 @@ fn caveman(user: &Value, project: &Value) -> Option<crate::pass::Caveman> {
 /// choice alone; a project may pick the light or full wording.
 fn catalog_config(
     user: Option<&Value>,
-    project: Option<&Value>,
+    overlays: &[&Value],
     user_path: &Path,
 ) -> crate::catalog::CatalogConfig {
     use crate::catalog::{CatalogConfig, Surface};
 
-    let tiers = || [user, project].into_iter().flatten();
+    let tiers = || user.into_iter().chain(overlays.iter().copied());
     let last_bool = |pointer: &str, default: bool| {
         tiers()
             .filter_map(|tier| tier.pointer(pointer).and_then(Value::as_bool))
@@ -883,7 +961,7 @@ fn guidance_file(path: &Path) -> Result<String, String> {
 /// `project_percentage` or `default`.
 fn execute_threshold(
     user: &Value,
-    project: &Value,
+    overlays: &[&Value],
     model_key: &str,
     usable: u64,
 ) -> (f64, &'static str) {
@@ -912,15 +990,21 @@ fn execute_threshold(
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     };
-    let user_tokens = valid_map(user.get("execute_threshold_tokens"), &valid_tokens);
+    let mut user_tokens = valid_map(user.get("execute_threshold_tokens"), &valid_tokens);
     if usable > 0 {
         if let Some(user_value) = model_value(&user_tokens, model_key).and_then(valid_tokens) {
-            let project_tokens = valid_map(project.get("execute_threshold_tokens"), &valid_tokens);
-            let merged = raised_threshold_map(&user_tokens, &project_tokens);
-            let chosen = model_value(&merged, model_key)
-                .and_then(valid_tokens)
-                .unwrap_or(user_value)
-                .max(user_value);
+            let mut chosen = user_value;
+            for tier in overlays {
+                let higher = valid_map(tier.get("execute_threshold_tokens"), &valid_tokens);
+                let merged = raised_threshold_map(&user_tokens, &higher);
+                let candidate = model_value(&merged, model_key)
+                    .and_then(valid_tokens)
+                    .unwrap_or(chosen);
+                if candidate >= chosen {
+                    user_tokens = merged;
+                    chosen = candidate;
+                }
+            }
             let cap = usable as f64 * MAX_EXECUTE_THRESHOLD_PERCENTAGE / 100.0;
             return (
                 (chosen.min(cap) / usable as f64 * 100.0).min(MAX_EXECUTE_THRESHOLD_PERCENTAGE),
@@ -948,24 +1032,25 @@ fn execute_threshold(
     let user_value = model_value(&user_percentages, model_key)
         .and_then(valid_percentage)
         .unwrap_or(default);
-    let chosen = if let Some(scalar) = project
-        .get("execute_threshold_percentage")
-        .and_then(valid_percentage)
-    {
-        user_value.max(scalar)
-    } else {
-        let project_percentages = valid_map(
-            project.get("execute_threshold_percentage"),
-            &valid_percentage,
-        );
-        let merged = raised_threshold_map(&user_percentages, &project_percentages);
-        // A new, more-specific project key must not bypass the user's resolved
-        // floor, even if it passed the literal-key comparison above.
-        model_value(&merged, model_key)
-            .and_then(valid_percentage)
-            .unwrap_or(user_value)
-            .max(user_value)
-    };
+    let mut chosen = user_value;
+    for tier in overlays {
+        let value = tier.get("execute_threshold_percentage");
+        if let Some(scalar) = value.and_then(valid_percentage) {
+            chosen = chosen.max(scalar);
+        } else {
+            let higher = valid_map(value, &valid_percentage);
+            let merged = raised_threshold_map(&user_percentages, &higher);
+            // A more-specific key must not bypass the applicable lower tier,
+            // even if it passed the literal-key comparison.
+            let candidate = model_value(&merged, model_key)
+                .and_then(valid_percentage)
+                .unwrap_or(chosen);
+            if candidate >= chosen {
+                user_percentages = merged;
+                chosen = candidate;
+            }
+        }
+    }
     let source = if chosen > user_value {
         "project_percentage"
     } else if model_matched {
@@ -1266,6 +1351,8 @@ pub(crate) fn resolve_for_test(
 mod convert_tests;
 #[cfg(test)]
 mod equivalence_tests;
+#[cfg(test)]
+mod project_vectors_tests;
 #[cfg(test)]
 mod review_tests;
 #[cfg(test)]

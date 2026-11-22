@@ -1,0 +1,57 @@
+{
+  "reply": {
+    "op": "config.status",
+    "status": {
+      "anchor_pending": false,
+      "approval_channels": [
+        {
+          "channel": "attested_desktop",
+          "generation": 1
+        }
+      ],
+      "approved_but_inactive": [
+        {
+          "approved": {
+            "digest": "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+          },
+          "entry": "module",
+          "generation": 1,
+          "in_force": {
+            "digest": "sha256:fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+          },
+          "module_id": "a",
+          "waiting_for": "daemon_restart"
+        }
+      ],
+      "base_revision": 1,
+      "development_switches": [],
+      "gated_modules": [],
+      "integrity": "digest_only",
+      "interpreter_only_covered": [],
+      "missing_approval_surfaces": [
+        "desktop (required for stamp)",
+        "phone",
+        "OS prompt (Linux requires the per-user polkit action file)"
+      ],
+      "pending_proposals": 0,
+      "revision": 2,
+      "root_io": {
+        "charged_workers": 1,
+        "stuck_roots": [
+          "/home/example/repos/workspace"
+        ]
+      },
+      "state": "stamped",
+      "ungated_inputs": [],
+      "ungated_modules": [],
+      "warnings": [
+        "Digest-only: while the daemon is stopped, rewriting the store into another well-formed store, replay, deletion and data-home relocation are not detected",
+        "Deleting the sealed key and rewriting the store as digest-only bypasses sealing; pre-gate binaries ignore the store",
+        "approved stamp is waiting for registration channel cutover"
+      ]
+    }
+  },
+  "request": {
+    "op": "config.status"
+  }
+}

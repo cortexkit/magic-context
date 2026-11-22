@@ -272,7 +272,7 @@ impl Session {
         .any(|tool| tool.name == name)
     }
 
-    /// What the session's settings depend on: its project folder, its model
+    /// What the session's settings depend on: its folder, its model
     /// as `provider/model`, and its usable window.
     pub fn config_inputs(&self) -> (Option<&str>, String, u64) {
         let model = &self.conditions.model;
@@ -281,6 +281,10 @@ impl Session {
             format!("{}/{}", model.provider, model.model),
             crate::pass::usable_window(&self.conditions),
         )
+    }
+
+    pub(crate) fn config_project_id(&self) -> Option<&str> {
+        self.project.as_ref().map(|project| project.id.as_str())
     }
 
     /// What must survive a restart.

@@ -1,0 +1,68 @@
+{
+  "reply": {
+    "active": {
+      "effective": {
+        "limit": 2
+      },
+      "generation": 2,
+      "layers": [
+        {
+          "bytes": "eyJsaW1pdCI6Mn0=",
+          "digest": "sha256:649c187d840a97ceebfecf4a5e8a1121655263c52487be7d5cd1970fe17e1bd3",
+          "layer": "user",
+          "module_id": "a",
+          "path": "/home/example/cortexkit/a.jsonc"
+        }
+      ],
+      "project_id": "A",
+      "sources": {
+        "/limit": "user"
+      },
+      "status": "active"
+    },
+    "op": "config.get",
+    "pending": {
+      "attempt": 1,
+      "effective": {
+        "limit": 9
+      },
+      "generation": 3,
+      "layers": [
+        {
+          "bytes": "eyJsaW1pdCI6Mn0=",
+          "digest": "sha256:649c187d840a97ceebfecf4a5e8a1121655263c52487be7d5cd1970fe17e1bd3",
+          "layer": "user",
+          "module_id": "a",
+          "path": "/home/example/cortexkit/a.jsonc",
+          "project_id": "A"
+        },
+        {
+          "bytes": "eyJsaW1pdCI6NH0=",
+          "digest": "sha256:31cb930247617bffb9ef0bce05b5d83f1c9c471a45f59a000375a736ff38fa01",
+          "layer": "workspace",
+          "module_id": "a",
+          "path": "/home/example/repos/workspace/.cortexkit/a.jsonc",
+          "project_id": "A",
+          "workspace_id": "W"
+        },
+        {
+          "bytes": "eyJsaW1pdCI6OX0=",
+          "digest": "sha256:c905bff51a424366957233647c96f393c0b76864d9f5d10e726685974be79e37",
+          "layer": "project",
+          "module_id": "a",
+          "path": "/home/example/repos/project/.cortexkit/a.jsonc",
+          "project_id": "A"
+        }
+      ],
+      "project_id": "A",
+      "sources": {
+        "/limit": "project"
+      },
+      "status": "pending"
+    }
+  },
+  "request": {
+    "op": "config.get",
+    "project_id": "A"
+  }
+}

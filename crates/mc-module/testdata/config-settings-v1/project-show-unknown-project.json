@@ -1,0 +1,11 @@
+{
+  "reply": {
+    "code": "unknown_project",
+    "message": "project is not registered"
+  },
+  "request": {
+    "module_id": "a",
+    "op": "config.show",
+    "project_id": "unknown"
+  }
+}

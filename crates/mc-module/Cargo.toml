@@ -29,7 +29,7 @@ memory-replica = []
 # nothing. No build turns it on yet: it waits until the daemon supports
 # converting old settings files, and then turns on in one build together with
 # ck-mc's own conversion.
-managed-settings = ["dep:subc-jsonc"]
+managed-settings = ["dep:subc-config", "dep:subc-jsonc"]
 # Opt-in heap attribution for the `heap_profile` test (allocation sites with
 # backtraces). Only that test target requires it; no build of ck-mc turns it on.
 heap-profile = ["dep:dhat"]
@@ -53,6 +53,7 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true }
 subc-client-rs = { workspace = true }
+subc-config = { workspace = true, optional = true }
 subc-jsonc = { version = "=0.1.5", optional = true }
 subc-protocol = { workspace = true }
 # Only the registration live suite's helper binaries use it directly; ck-mc

@@ -1,0 +1,21 @@
+{
+  "reply": {
+    "code": "config_unavailable",
+    "message": "unavailable: root /home/example/repos/unavailable: root open refused: input open failed: No such file or directory (os error 2)"
+  },
+  "request": {
+    "base_generations": {
+      "a": 0
+    },
+    "edits": [
+      {
+        "layer": "project",
+        "module_id": "a",
+        "path": "/limit",
+        "project_id": "unavailable",
+        "set": 8
+      }
+    ],
+    "op": "config.plan"
+  }
+}

@@ -74,7 +74,40 @@ fn every_node_carries_its_metadata_and_keeps_the_daemons_rules() {
             assert!(!map.contains_key(refused), "{path}: {refused}");
         }
         assert_eq!(node["x-ck-apply"], "live", "{path}");
-        assert_eq!(node["x-ck-layers"], json!(["user"]), "{path}");
+        let shared = path.is_empty()
+            || [
+                "/execute_threshold_percentage",
+                "/execute_threshold_tokens",
+                "/protected_tokens",
+                "/history_budget_percentage",
+                "/keep_reasoning_tokens",
+                "/protected_tools",
+                "/memory",
+                "/mural",
+                "/commit_cluster_trigger",
+                "/caveman_text_compression",
+                "/prompt_surface/default",
+                "/prompt_surface/models",
+                "/rerank/enabled",
+            ]
+            .iter()
+            .any(|base| {
+                path == *base
+                    || path
+                        .strip_prefix(base)
+                        .is_some_and(|suffix| suffix.starts_with(['/', '|']))
+            })
+            || matches!(path.as_str(), "/prompt_surface" | "/rerank");
+        assert_eq!(
+            node["x-ck-layers"],
+            if shared {
+                json!(["user", "workspace", "project"])
+            } else {
+                json!(["user"])
+            },
+            "{path}"
+        );
+        assert!(!map.contains_key("x-ck-bound"), "{path}");
         if path.is_empty() {
             continue;
         }
@@ -147,7 +180,7 @@ fn every_union_variant_can_be_chosen_over_the_defaults() {
         json!({"embedding": {"document_prefix": {"kind": "text", "text": ""}}}),
         json!({"embedding": {"api_key": {"kind": "none"}}}),
         json!({"embedding": {"api_key": {"kind": "vault", "key": {"vault_ref": "openai"}}}}),
-        json!({"rerank": {"api_key": {"kind": "vault", "key": {"vault_ref": "cohere"}}}}),
+        json!({"rerank_backend": {"api_key": {"kind": "vault", "key": {"vault_ref": "cohere"}}}}),
         json!({"dreamer": {"projects": {"kind": "all"}}}),
         json!({"dreamer": {"projects": {"kind": "listed", "projects": ["git:abc"]}}}),
     ] {
@@ -165,6 +198,47 @@ fn every_union_variant_can_be_chosen_over_the_defaults() {
         json!({"temporal_awareness": true}),
     ] {
         assert!(review(refused.clone()).is_err(), "{refused}");
+    }
+}
+
+#[test]
+fn project_and_workspace_can_disable_rerank_but_cannot_redirect_a_user_key() {
+    use subc_client_rs::config::{Layer, LayerValue, ValidationContext};
+    let schema = super::review::schema();
+    let context = ValidationContext::new(crate::MODULE_ID, Some("pj-example".into()));
+    let user = LayerValue::new(
+        Layer::User,
+        json!({"rerank_backend": {
+            "provider": "remote", "endpoint": "https://user.example", "model": "user-model",
+            "api_key": {"kind":"vault", "key":{"vault_ref":"user-key"}}
+        }}),
+    );
+    for layer in [Layer::Workspace, Layer::Project] {
+        let review = |overlay| {
+            schema.review_tuple(&[user.clone(), LayerValue::new(layer, overlay)], &context)
+        };
+        let approved = review(json!({"rerank": {"enabled": false}})).unwrap();
+        assert_eq!(approved.effective["rerank"]["enabled"], false);
+        assert_eq!(
+            approved.effective["rerank_backend"]["endpoint"],
+            "https://user.example"
+        );
+        for overlay in [
+            json!({"rerank_backend": {"provider":"synapse"}}),
+            json!({"rerank_backend": {"module":"other"}}),
+            json!({"rerank_backend": {"endpoint":"https://other.example"}}),
+            json!({"rerank_backend": {"model":"other-model"}}),
+            json!({"rerank_backend": {"api_key":{"kind":"vault", "key":{"vault_ref":"other-key"}}}}),
+            json!({"rerank": {"timeout_ms":123}}),
+            json!({"rerank": {"top_n":1}}),
+            json!({"rerank": {"endpoint":"https://other.example"}}),
+            json!({"language": "de"}),
+        ] {
+            assert!(
+                review(overlay.clone()).is_err(),
+                "accepted {layer:?} {overlay}"
+            );
+        }
     }
 }
 
@@ -265,6 +339,11 @@ fn renamed(key: &str) -> &str {
     match key {
         "/dreamer/disable" => "/dreamer/enabled",
         "/dreamer/maxTokens" => "/dreamer/max_tokens",
+        "/rerank/provider" => "/rerank_backend/provider",
+        "/rerank/module" => "/rerank_backend/module",
+        "/rerank/endpoint" => "/rerank_backend/endpoint",
+        "/rerank/model" => "/rerank_backend/model",
+        "/rerank/api_key" => "/rerank_backend/api_key",
         other => other,
     }
 }
@@ -406,11 +485,8 @@ fn the_schema_defaults_are_the_readers_defaults() {
     super::equivalence_tests::assert_same(&relabelled, &from_code, "schema defaults");
     let path = std::path::Path::new("/settings/magic-context.jsonc");
     assert_eq!(
-        format!(
-            "{:?}",
-            super::catalog_config(Some(tier.value()), None, path)
-        ),
-        format!("{:?}", super::catalog_config(None, None, path))
+        format!("{:?}", super::catalog_config(Some(tier.value()), &[], path)),
+        format!("{:?}", super::catalog_config(None, &[], path))
     );
     let dreamer = super::dreamer_settings(Some(tier.value())).unwrap();
     let default = crate::dreamer::engine::Settings::default();

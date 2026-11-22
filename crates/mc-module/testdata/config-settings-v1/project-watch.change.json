@@ -1,0 +1,15 @@
+{
+  "active_generation": 0,
+  "approved_generation": 0,
+  "event": "change",
+  "file_error": {
+    "code": "bound_violated",
+    "message": "a/B: /limit"
+  },
+  "module_id": "a",
+  "op": "config.watch",
+  "project_id": "B",
+  "schema_digest": "sha256:50f4d8ad093176c1878045c8a9819005b09492f01ca2c3fc2342d0a2394e3ef4",
+  "status": "adopted",
+  "workspace_id": "W"
+}
