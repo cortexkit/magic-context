@@ -67,7 +67,7 @@ fn resolve_log_path_from_temp_dir(temp_dir: &std::path::Path, harness: Harness) 
 
 /// Resolve the module data directory using the same environment precedence as
 /// the database reader. Log discovery must not depend on context.db existing.
-fn resolve_storage_dir() -> Option<PathBuf> {
+pub(crate) fn resolve_storage_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var("MAGIC_CONTEXT_STORAGE_DIR")
         .ok()
         .map(|value| PathBuf::from(value.trim()))
