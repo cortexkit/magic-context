@@ -139,7 +139,7 @@ impl Cursor for FeedCursor {
 
 fn test_subjects(account: &str) -> RunEndSubjects {
     let account = AccountNames::derive(account).unwrap();
-    RunEndSubjects::new(&account, &account.event_binding(), &[])
+    RunEndSubjects::new(&account)
 }
 
 /// The run-end event of `session`'s run, as Broca publishes it, under the
@@ -399,19 +399,13 @@ async fn a_missing_durable_is_logged_once_and_leaves_the_fast_poll() {
     assert_eq!(log.count("ck-mc: run ends: reading"), 0);
 }
 
-/// The naming crate's consumer table decides which subjects the durable
-/// carries. Once the pinned `cortexkit-bus-naming` release lists the durable
-/// in that table, it must list exactly the subjects this module expects.
-/// Until a release that adds it is pinned, the table has no entry to compare,
-/// and the test checks nothing.
+/// The naming crate provisions the durable with the two subjects that wake waits.
 #[test]
-fn the_durable_matches_the_naming_table_once_the_table_lists_it() {
-    let Some(entry) = cortexkit_bus_naming::EVENT_CONSUMERS
+fn the_durable_matches_the_naming_table() {
+    let entry = cortexkit_bus_naming::EVENT_CONSUMERS
         .iter()
         .find(|entry| entry.durable == DURABLE)
-    else {
-        return;
-    };
+        .expect("ck-bus must provision the run-end durable");
     assert_eq!(entry.module_id, crate::MODULE_ID);
     let mut listed = entry.filter_subjects.to_vec();
     listed.sort_unstable();
@@ -568,23 +562,15 @@ async fn configured_run_started_is_acknowledged_without_warning_or_drop() {
 }
 
 #[test]
-fn the_bound_account_and_consumer_filters_both_limit_deliveries() {
-    let account = AccountNames::derive("box_sample").unwrap();
-    let subjects = RunEndSubjects::new(
-        &account,
-        "",
-        &[
-            "ck.*.event.broca.run.*.v1".into(),
-            "ck.box_sample.event.thalamus-harness.turn_ended.v1".into(),
-        ],
-    );
+fn the_account_event_scope_limits_deliveries_even_with_a_broad_durable_filter() {
+    let subjects = test_subjects("box_sample");
     let ends = RunEnds::new();
     let mut event = broca_sample("01-run.started.json");
     assert_eq!(handle(&ends, &subjects, &event), Outcome::NotARunEnd);
     event.subject = "ck.box_other.event.broca.run.started.v1".into();
-    assert_eq!(handle(&ends, &subjects, &event), Outcome::OutsideFilters);
-    event.subject = "ck.box_sample.event.broca.unrelated.v1".into();
-    assert_eq!(handle(&ends, &subjects, &event), Outcome::OutsideFilters);
+    assert_eq!(handle(&ends, &subjects, &event), Outcome::OutsideEventScope);
+    event.subject = "ck.box_sample.live.broca.run.started.v1".into();
+    assert_eq!(handle(&ends, &subjects, &event), Outcome::OutsideEventScope);
     assert_eq!(ends.subject_drops.count(), 2);
 }
 

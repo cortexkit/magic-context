@@ -12,17 +12,17 @@
 //! event carries no body on the bus, and ck-mc needs none. A wait registers
 //! its child's ref before it sends ([`RunEnds::watch`]); an event with that
 //! ref wakes it, and it makes one read and goes by what that read says. The
-//! event itself decides nothing. An event for a session nobody waits on, or
-//! any other event that reaches the reader, is acknowledged and dropped.
+//! event itself decides nothing. Decoded events from the bound durable are
+//! acknowledged even when they do not wake a wait.
 //!
 //! Reading on a timer stays as the backstop. While the reader is connected
 //! and has read from the durable since it connected, a wait reads every
 //! [`BACKSTOP_POLL`]; otherwise every [`FAST_POLL`], as it did before these
 //! events existed. Each change between the two is logged once.
 //!
-//! The reader binds the durable with async-nats on ck-mc's one bus
-//! connection; it moves onto the event reader of SUBC's shared bus client
-//! when ck-mc moves to that client.
+//! The reader binds the durable on ck-mc's shared bus connection. The bus
+//! cursor checks the delivery's origin and consumer filter before the reader
+//! sees it; deliveries that fail those checks are never acknowledged.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -60,23 +60,17 @@ pub const RETRY: Duration = Duration::from_secs(60);
 /// ids can come again.
 const REMEMBERED: usize = 4096;
 
-/// The bound EVENT stream, its consumer filters, and the events that wake waits.
+/// The account's EVENT scope and the events that wake waits within it.
 pub(crate) struct RunEndSubjects {
     event_scope: String,
-    filters: Vec<String>,
     run_end: [String; SUBJECTS.len()],
 }
 
 impl RunEndSubjects {
-    pub(crate) fn new(account: &AccountNames, single: &str, multiple: &[String]) -> Self {
-        let mut filters = multiple.to_vec();
-        if !single.is_empty() {
-            filters.push(single.to_owned());
-        }
+    pub(crate) fn new(account: &AccountNames) -> Self {
         let account_id = account.account();
         Self {
             event_scope: account.event_binding(),
-            filters,
             run_end: SUBJECTS.map(|subject| format!("ck.{account_id}.{subject}")),
         }
     }
@@ -324,7 +318,7 @@ pub(crate) struct Delivery {
 #[async_trait]
 #[allow(clippy::double_must_use)]
 pub(crate) trait Cursor: Send {
-    /// The current binding's stream and consumer filter subjects.
+    /// The bound account's event scope and run-end subjects.
     fn subjects(&self) -> &RunEndSubjects;
     /// The next event, or `None` when none came within one pull.
     async fn next(&mut self) -> Result<Option<Delivery>, String>;
@@ -365,7 +359,8 @@ pub(crate) async fn read_bound(ends: &RunEnds, durable: &dyn Durable) -> String 
             continue;
         };
         handle(ends, cursor.subjects(), &delivery);
-        // Acknowledge even a rejected delivery so it is not redelivered.
+        // The cursor has checked the origin. Settle even events we did not
+        // use, so they are not redelivered.
         if let Err(reason) = cursor.ack().await {
             return reason;
         }
@@ -379,25 +374,21 @@ pub(crate) enum Outcome {
     Ended(Woke),
     /// An event allowed by the durable's filters that does not wake waits.
     NotARunEnd,
-    /// A message outside the bound stream or consumer filters.
-    OutsideFilters,
+    /// A message outside the bound account's EVENT scope.
+    OutsideEventScope,
     /// A run-end event without a `session_ref` header.
     NoSession,
 }
 
-/// Diagnose a delivery the durable could not have selected. Allow other
-/// events from a broader durable without treating them as run-end wakes.
+/// Allow other events from a broader durable without treating them as wakes.
 fn handle(ends: &RunEnds, subjects: &RunEndSubjects, delivery: &Delivery) -> Outcome {
-    // An unfiltered consumer selects the whole EVENT stream, not other accounts.
+    // A cursor checks the server's filter. Check the account independently in
+    // case the configured filter is broader than the account's EVENT scope.
     if !ends
         .subject_drops
         .accepts(&[&subjects.event_scope], &delivery.subject)
-        || (!subjects.filters.is_empty()
-            && !ends
-                .subject_drops
-                .accepts(&subjects.filters, &delivery.subject))
     {
-        return Outcome::OutsideFilters;
+        return Outcome::OutsideEventScope;
     }
     if !subjects.run_end.contains(&delivery.subject) {
         return Outcome::NotARunEnd;

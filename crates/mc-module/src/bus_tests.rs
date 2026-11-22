@@ -507,6 +507,151 @@ async fn every_user_of_the_bus_shares_one_session() {
     assert_eq!(test_bus.opened.load(Ordering::Relaxed), 1);
 }
 
+#[tokio::test]
+async fn run_ends_does_not_ack_a_delivery_for_another_durable() {
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_end_pull_peer(listener));
+    let connection = NatsConnection::connect(
+        addr.to_string(),
+        async_nats::ConnectOptions::new(),
+        ConnectConfig::new("UTEST").unwrap(),
+    )
+    .await
+    .unwrap();
+    let test_bus = TestBus::new();
+    let bus = test_bus.bus();
+    let mut session = BusSession::fixed(account(), Box::new(TestPublisher(test_bus)));
+    session.connection = Some(connection.clone());
+    bus.session.lock().await.replace(session);
+    let mut cursor = run_ends::Durable::bind(&RunEndDurable { bus })
+        .await
+        .unwrap();
+    let delivery = tokio::time::timeout(Duration::from_secs(5), cursor.next())
+        .await
+        .expect("the reader pulls again after the rejected deliveries")
+        .unwrap()
+        .unwrap();
+    cursor.ack().await.unwrap();
+
+    let stream = account().streams().event.clone();
+    assert_eq!(
+        server.await.unwrap(),
+        format!("$JS.ACK.{stream}.{}.1.3.3.0.0", run_ends::DURABLE),
+        "only the delivery matching both the bound durable and its filter may be acknowledged"
+    );
+    assert_eq!(delivery.id.as_deref(), Some("event-3"));
+    assert_eq!(connection.forged_deliveries_dropped(), 2);
+}
+
+/// A local peer supplies three deliveries and records the reader's first ACK.
+/// No NATS service, credentials, or store are needed to exercise the real cursor.
+async fn run_end_pull_peer(listener: tokio::net::TcpListener) -> String {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let (socket, _) = listener.accept().await.unwrap();
+    let (read, mut write) = tokio::io::split(socket);
+    let mut read = BufReader::new(read);
+    write
+        .write_all(b"INFO {\"server_id\":\"test\",\"version\":\"2.15.0\",\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n")
+        .await
+        .unwrap();
+    let account = account();
+    let stream = &account.streams().event;
+    let durable = run_ends::DURABLE;
+    let info_subject = format!("$JS.API.CONSUMER.INFO.{stream}.{durable}");
+    let pull_subject = format!("$JS.API.CONSUMER.MSG.NEXT.{stream}.{durable}");
+    let filters = run_ends::SUBJECTS.map(|subject| format!("ck.{}.{subject}", account.account()));
+    let sequence = json!({"consumer_seq": 0, "stream_seq": 0});
+    let info = json!({
+        "stream_name": stream, "name": durable, "created": "2025-01-01T00:00:00Z",
+        "config": {"durable_name": durable, "filter_subjects": filters, "deliver_policy": "all"},
+        "delivered": sequence, "ack_floor": sequence,
+        "num_ack_pending": 0, "num_redelivered": 0, "num_waiting": 0, "num_pending": 0,
+    })
+    .to_string();
+    let mut subscriptions = BTreeMap::new();
+    let mut pulls = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(
+            read.read_line(&mut line).await.unwrap(),
+            0,
+            "peer closed early"
+        );
+        let fields: Vec<_> = line.split_ascii_whitespace().collect();
+        match fields.as_slice() {
+            ["CONNECT" | "UNSUB", ..] => {}
+            ["PING"] => write.write_all(b"PONG\r\n").await.unwrap(),
+            ["SUB", subject, sid] => {
+                subscriptions.insert((*subject).to_owned(), (*sid).to_owned());
+            }
+            ["PUB", subject, reply, len] => {
+                let mut payload = vec![0; len.parse::<usize>().unwrap() + 2];
+                read.read_exact(&mut payload).await.unwrap();
+                // async-nats multiplexes API request replies on one wildcard subscription.
+                let sid = subscriptions
+                    .get(*reply)
+                    .or_else(|| {
+                        subscriptions.iter().find_map(|(pattern, sid)| {
+                            pattern
+                                .strip_suffix('*')
+                                .filter(|prefix| reply.starts_with(prefix))
+                                .map(|_| sid)
+                        })
+                    })
+                    .expect("a subscribed reply inbox");
+                if *subject == info_subject {
+                    write
+                        .write_all(
+                            format!("MSG {reply} {sid} {}\r\n{info}\r\n", info.len()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                } else if *subject == pull_subject {
+                    pulls += 1;
+                    let (subject, consumer) = match pulls {
+                        1 => (filters[0].clone(), "other_durable"),
+                        2 => (
+                            format!("ck.{}.event.broca.run.started.v1", account.account()),
+                            durable,
+                        ),
+                        3 => (filters[0].clone(), durable),
+                        _ => panic!("unexpected additional pull"),
+                    };
+                    let ack = format!("$JS.ACK.{stream}.{consumer}.1.{pulls}.{pulls}.0.0");
+                    let digest = ContentDigest::of_bytes(b"");
+                    let headers = format!("NATS/1.0\r\nNats-Msg-Id: event-{pulls}\r\nCk-Content-Digest: {digest}\r\nsession_ref: test\r\n\r\n");
+                    let len = headers.len();
+                    write
+                        .write_all(
+                            format!("HMSG {subject} {sid} {ack} {len} {len}\r\n{headers}\r\n")
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(
+                        subject.starts_with("$JS.ACK."),
+                        "unexpected request on {subject}"
+                    );
+                    write
+                        .write_all(format!("MSG {reply} {sid} 0\r\n\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                    return (*subject).to_owned();
+                }
+            }
+            _ => panic!("unexpected peer command: {line:?}"),
+        }
+    }
+}
+
 /// The run-end reader forgets a session whose connection it lost, but never
 /// one that got a new connection since it bound, which other users may
 /// already be on.

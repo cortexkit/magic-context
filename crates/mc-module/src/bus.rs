@@ -28,13 +28,9 @@
 //!
 //! A runner's run-end event carries no body on the bus either; it names its
 //! session in a `session_ref` header, which is all the reader needs. The
-//! reader binds its durable ([`crate::run_ends::DURABLE`]) with async-nats
-//! directly, on the shared session's connection: `cortexkit-bus-nats` binds
-//! a module's cursor only to `m_{module}`, and its cursor fails on a message
-//! that lacks a `Nats-Msg-Id` or `Ck-Content-Digest` header without keeping
-//! it to acknowledge, so the durable would redeliver that message forever.
-//! It pulls one event at a time with explicit acknowledgement
-//! ([`spawn_run_end_reader`]).
+//! reader uses a checked JetStream cursor on the shared session's connection.
+//! It verifies the durable and subject before decoding and acknowledges one
+//! event at a time ([`spawn_run_end_reader`]).
 //!
 //! The `attribution_fact` v1 event is the one ck-mc event with a body: its
 //! payload is the fact ([`crate::attribution`]), which Astrocyte reads off
@@ -55,15 +51,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_nats::jetstream::consumer::{pull, Consumer};
 use async_trait::async_trait;
 use base64::Engine as _;
 use cortexkit_bus_naming::AccountNames;
-use cortexkit_bus_nats::{ConnectConfig, NatsConnection};
+use cortexkit_bus_nats::{ConnectConfig, NatsConnection, NatsStreamCursor};
 use cortexkit_bus_trait::{
-    BusError, ContentDigest, Headers, PublishReceipt, Register, RegisterWatch, Stream,
+    BusError, ContentDigest, DurableOwner, Headers, PublishReceipt, Register, RegisterWatch,
+    Stream, StreamCursor,
 };
-use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
@@ -1103,9 +1098,6 @@ pub(crate) async fn run_attribution_events(
     }
 }
 
-/// How long one pull of the run-end durable waits for an event.
-const PULL_EXPIRES: Duration = Duration::from_secs(10);
-
 /// Read the run-end events of ck-mc's child runs over `bus`, the process's
 /// one bus session, and wake the waits in `ends` ([`crate::run_ends`]), for
 /// as long as the process runs.
@@ -1124,7 +1116,6 @@ impl run_ends::Durable for RunEndDurable {
         Ok(Box::new(RunEndCursor {
             bus: self.bus.clone(),
             binding: bind_run_ends(&self.bus).await?,
-            in_flight: None,
         }))
     }
 }
@@ -1132,7 +1123,7 @@ impl run_ends::Durable for RunEndDurable {
 struct RunEndBinding {
     generation: u64,
     connection: NatsConnection,
-    consumer: Consumer<pull::Config>,
+    cursor: NatsStreamCursor,
     subjects: run_ends::RunEndSubjects,
 }
 
@@ -1149,50 +1140,31 @@ async fn bind_run_ends(bus: &Bus) -> Result<RunEndBinding, String> {
             active.account.clone(),
         )
     };
-    let consumer = async_nats::jetstream::new(connection.client())
-        .get_consumer_from_stream::<pull::Config, _, _>(run_ends::DURABLE, &account.streams().event)
+    // The cursor adds `m_` to this token, addressing the existing suffixed
+    // durable rather than ck-mc's separate compaction consumer.
+    let owner = run_ends::DURABLE
+        .strip_prefix("m_")
+        .expect("module durable");
+    let cursor = connection
+        .stream(&account.streams().event)
+        .consumer(DurableOwner::Module(owner))
         .await
-        .map_err(|error| binding_refused(&error))?;
-    let config = &consumer.cached_info().config;
-    let subjects =
-        run_ends::RunEndSubjects::new(&account, &config.filter_subject, &config.filter_subjects);
+        .map_err(|error| match error {
+            BusError::Denied { .. } => "nats_consumer_refused",
+            _ => "nats_consumer_bind_failed",
+        })?;
     Ok(RunEndBinding {
         generation,
         connection,
-        consumer,
-        subjects,
+        cursor,
+        subjects: run_ends::RunEndSubjects::new(&account),
     })
-}
-
-/// Why the run-end durable could not be bound, for the log.
-fn binding_refused(error: &async_nats::jetstream::stream::ConsumerError) -> String {
-    use async_nats::jetstream::stream::ConsumerErrorKind;
-    use async_nats::jetstream::ErrorCode;
-    match error.kind() {
-        ConsumerErrorKind::JetStream(error)
-            if error.error_code() == ErrorCode::CONSUMER_NOT_FOUND =>
-        {
-            "the durable is not provisioned".into()
-        }
-        ConsumerErrorKind::JetStream(error)
-            if error.error_code() == ErrorCode::STREAM_NOT_FOUND =>
-        {
-            "the event stream is missing".into()
-        }
-        ConsumerErrorKind::JetStream(error) => {
-            format!("nats_consumer_refused {}", error.error_code().0)
-        }
-        ConsumerErrorKind::TimedOut => "nats_consumer_info_timeout".into(),
-        _ => "nats_consumer_bind_failed".into(),
-    }
 }
 
 /// The run-end durable, bound on one connection of the bus's session.
 struct RunEndCursor {
     bus: Arc<Bus>,
     binding: RunEndBinding,
-    /// The event `next` returned and the reader has not acknowledged yet.
-    in_flight: Option<async_nats::jetstream::Message>,
 }
 
 #[async_trait]
@@ -1225,60 +1197,32 @@ impl run_ends::Cursor for RunEndCursor {
     }
 
     async fn ack(&mut self) -> Result<(), String> {
-        let Some(message) = self.in_flight.take() else {
-            return Ok(());
-        };
-        message
-            .double_ack()
+        self.binding
+            .cursor
+            .ack()
             .await
             .map_err(|_| "nats_ack_failed".to_owned())
     }
 }
 
 impl RunEndCursor {
-    /// One pull of at most one event, waiting up to [`PULL_EXPIRES`].
+    /// Pull a delivery, using the shared connection's request timeout.
     async fn pull(&mut self) -> Result<Option<run_ends::Delivery>, String> {
-        let mut batch = self
-            .binding
-            .consumer
-            .fetch()
-            .max_messages(1)
-            .expires(PULL_EXPIRES)
-            .messages()
-            .await
-            .map_err(|error| format!("nats_pull_failed ({})", error.kind()))?;
-        let Some(message) = batch.next().await else {
-            return Ok(None);
-        };
-        let message = message.map_err(|_| "nats_pull_failed".to_owned())?;
-        // The publisher's message id, which a redelivery repeats; the stream
-        // sequence names the same message when a publisher set none.
-        let headers: cortexkit_bus_trait::Headers = message
-            .headers
-            .iter()
-            .flat_map(|headers| headers.iter())
-            .filter_map(|(name, values)| {
-                let name: &str = name.as_ref();
-                values
-                    .last()
-                    .map(|value| (name.to_owned(), value.as_str().to_owned()))
-            })
-            .collect();
-        let id = headers.get("Nats-Msg-Id").cloned().or_else(|| {
-            message
-                .info()
-                .ok()
-                .map(|info| format!("stream:{}", info.stream_sequence))
-        });
-        // Only the headers are kept: the event is a wake, and its payload, if
-        // a publisher ever sent one, is never read.
-        let delivery = run_ends::Delivery {
-            id,
-            subject: message.subject.to_string(),
-            headers,
-        };
-        self.in_flight = Some(message);
-        Ok(Some(delivery))
+        // An undecodable delivery fails the pull and is redelivered. Once
+        // bus-nats 0.5.8 is pinned, use next_or_undecodable and term to stop
+        // redelivery of malformed messages that passed the origin check.
+        let delivery = self.binding.cursor.next().await.map_err(|error| {
+            match error {
+                BusError::Absent { .. } => "nats_delivery_headers_missing",
+                _ => "nats_pull_failed",
+            }
+            .to_owned()
+        })?;
+        Ok(delivery.map(|delivery| run_ends::Delivery {
+            id: Some(delivery.message.id),
+            subject: delivery.message.subject,
+            headers: delivery.message.headers,
+        }))
     }
 }
 
