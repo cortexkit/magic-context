@@ -6,8 +6,8 @@
 //! reader of the runners' run-end events ([`crate::run_ends`]).
 //!
 //! The daemon serves no call that publishes a module's event, so the module
-//! publishes to the bus itself, as Plexus does: it opens a route to ck-bus
-//! (`ckbus`, the NATS credential module) over subc, has it issue a NATS
+//! publishes to the bus itself: it opens a route to ck-bus
+//! (`ckbus`, the NATS credential module) through the CortexKit daemon, has it issue a NATS
 //! credential, connects with it (ck-bus signs each connection nonce), and
 //! renews it before it expires. Credential material is never logged, and
 //! each credential's `Debug` leaves it out. ck-bus keeps one live credential
@@ -1208,9 +1208,13 @@ impl run_ends::Cursor for RunEndCursor {
 impl RunEndCursor {
     /// Pull a delivery, using the shared connection's request timeout.
     async fn pull(&mut self) -> Result<Option<run_ends::Delivery>, String> {
-        // An undecodable delivery fails the pull and is redelivered. Once
-        // bus-nats 0.5.8 is pinned, use next_or_undecodable and term to stop
-        // redelivery of malformed messages that passed the origin check.
+        // A delivery from our own durable that can't be decoded (for
+        // example, missing its message-id or digest header) fails the pull
+        // and the server delivers it again after the ack wait. The
+        // `cortexkit-bus-nats` release after the pinned one adds
+        // `next_or_undecodable`, which hands such a message back so it can be
+        // settled with `term`; switch to it then, so one bad event can't keep
+        // coming back.
         let delivery = self.binding.cursor.next().await.map_err(|error| {
             match error {
                 BusError::Absent { .. } => "nats_delivery_headers_missing",
