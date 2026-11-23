@@ -3271,6 +3271,7 @@ const SOURCE_FILE_DATA = [
 "10:worker-client-pi.ts",
 "17:pi.ts",
 "p:il-hygiene-walk-pi.ts",
+"o:emporal-awareness-pi.ts",
 "o:okenize-pi-messages.ts",
 "p:ols/ctx-expand.ts",
 "x:memory.ts",

@@ -300,6 +300,10 @@ test("generate replay drops a session's older request when its new request is ov
 test("generate replay hands back host class instances by reference, as the host requires", () => {
     class Asset {
         constructor(readonly bytes: Uint8Array) {}
+
+        toJSON() {
+            return "asset metadata only";
+        }
     }
     const asset = new Asset(new Uint8Array(4096));
     const replay = new V2GenerateReplay();
@@ -307,9 +311,36 @@ test("generate replay hands back host class instances by reference, as the host 
     served.messages[0]!.content.push({ type: "media", media: asset });
     capture(replay, served);
     expect(replay.stats().totalBytes).toBeGreaterThan(4096);
-    const input = sideQuestion("s", 10);
-    input.messages[0]!.content.push({ type: "media", media: new Asset(new Uint8Array(4096)) });
+    const input = structuredClone(served);
+    input.messages.push({ role: "user", content: [{ type: "text", text: "btw" }] });
+    expect(input.messages[0]!.content[1]!.media).not.toBeInstanceOf(Asset);
     expect(replay.apply(input)).toBe(true);
     expect(input.messages[0]!.content[1]!.media).toBe(asset);
     expect(input.messages[0]).not.toBe(served.messages[0]);
+});
+
+test("generate history digest distinguishes value shapes and hashes only the bytes of a view", () => {
+    const digest = (value: unknown) => {
+        const raw = sized("s", 10);
+        raw.messages[0]!.content.push({ type: "media", media: value });
+        return generateReplayAnchor(raw.messages)?.prefixDigest;
+    };
+    const sliced = new Uint8Array([1, 6, 8, 3]).subarray(1, 3);
+    expect(digest(sliced)).toBe(digest(new Uint8Array([6, 8])));
+    for (const [left, right] of [
+        [sliced, new Uint8Array([6, 9])],
+        [sliced, new Uint8Array([6, 8]).buffer],
+        [sliced, new Uint16Array(new Uint8Array([6, 8]).buffer)],
+        [new Uint8Array([6, 8]).buffer, new Uint8Array([6, 9]).buffer],
+        [
+            ["ab", "c"],
+            ["a", "bc"],
+        ],
+        [["a"], { 0: "a" }],
+        ["1", 1],
+        [null, false],
+        ["\ud800", "\ud801"],
+    ]) {
+        expect(digest(left)).not.toBe(digest(right));
+    }
 });

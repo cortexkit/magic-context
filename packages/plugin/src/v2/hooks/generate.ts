@@ -9,12 +9,69 @@ interface GenerateReplayAnchor {
     tail: V2Message[];
 }
 
+// The intrinsic name is the same for a typed array subclass and its structured clone.
+const typedArrayName = Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(Uint8Array.prototype),
+    Symbol.toStringTag,
+)?.get;
+
 function hostPrefixDigest(messages: V2Message[], end: number): string {
     const hash = createHash("sha256");
-    for (let index = 0; index < end; index++) {
-        hash.update(JSON.stringify(messages[index]));
-        hash.update("\n");
-    }
+    const header = Buffer.allocUnsafe(9);
+    const number = Buffer.allocUnsafe(8);
+    // Each value starts with its type and either a payload length or a child count.
+    const mark = (type: string, length = 0): void => {
+        header[0] = type.charCodeAt(0);
+        header.writeDoubleLE(length, 1);
+        hash.update(header);
+    };
+    const text = (type: string, value: string): void => {
+        mark(type, value.length * 2);
+        // Hash the original code units; UTF-8 would equate distinct lone surrogates.
+        hash.update(value, "utf16le");
+    };
+    const visit = (value: unknown): void => {
+        if (typeof value === "string") {
+            text("s", value);
+        } else if (typeof value === "number") {
+            mark("n", number.length);
+            number.writeDoubleLE(value);
+            hash.update(number);
+        } else if (typeof value === "boolean") {
+            mark(value ? "t" : "f");
+        } else if (value === null) {
+            mark("0");
+        } else if (value === undefined) {
+            mark("u");
+        } else if (ArrayBuffer.isView(value)) {
+            mark("v", value.byteLength);
+            text("s", typedArrayName?.call(value) ?? "DataView");
+            hash.update(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+        } else if (value instanceof ArrayBuffer) {
+            mark("b", value.byteLength);
+            hash.update(new Uint8Array(value));
+        } else if (Array.isArray(value)) {
+            mark("a", value.length);
+            for (let index = 0; index < value.length; index++) {
+                if (Object.hasOwn(value, index)) visit(value[index]);
+                else mark("h");
+            }
+        } else if (typeof value === "object") {
+            const entries = Object.entries(value);
+            mark("o", entries.length);
+            for (const [key, child] of entries) {
+                text("s", key);
+                visit(child);
+            }
+        } else if (typeof value === "bigint") {
+            text("i", value.toString());
+        } else {
+            // Functions and symbols are not wire content. Record their presence, not their identity.
+            mark(typeof value === "function" ? "x" : "y");
+        }
+    };
+    mark("a", end);
+    for (let index = 0; index < end; index++) visit(messages[index]);
     return hash.digest("hex");
 }
 
