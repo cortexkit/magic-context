@@ -28,6 +28,9 @@ import {
 } from "./test-utils.test";
 
 // Compare complete handler outputs rather than token estimates.
+// 40 trials of 12 full context passes take 22-28 s on CI's Linux runners, too
+// close to bun's default 30 s per-test timeout, so the budget is set explicitly.
+// The test checks the outputs, not the speed.
 test("REVIEW differential: 480 complete Pi requests with recovery and restart", async () => {
 	let state = 0xa6319b27;
 	const random = () => {
@@ -241,4 +244,4 @@ test("REVIEW differential: 480 complete Pi requests with recovery and restart", 
 	expect(records).toHaveLength(480);
 	if (process.env.MC_PI_REVIEW_RECORD)
 		writeFileSync(process.env.MC_PI_REVIEW_RECORD, JSON.stringify(records));
-});
+}, 120_000);
