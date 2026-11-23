@@ -9,7 +9,8 @@ interface GenerateReplayAnchor {
     tail: V2Message[];
 }
 
-// The intrinsic name is the same for a typed array subclass and its structured clone.
+// The built-in typed-array tag getter gives a typed-array subclass and its structured
+// clone the same name (for example "Uint8Array"), so a host class and its clone match.
 const typedArrayName = Object.getOwnPropertyDescriptor(
     Object.getPrototypeOf(Uint8Array.prototype),
     Symbol.toStringTag,
