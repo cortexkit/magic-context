@@ -365,8 +365,8 @@ async function runStartedWrapup(
         return `## Magic Wrapup — Skipped\n\n${message}`;
     }
 
-    const startLastEnd = getLastCompartmentEndMessage(ctx.db, sessionId);
-    const startCompartmentCount = getCompartments(ctx.db, sessionId).length;
+    let startLastEnd = getLastCompartmentEndMessage(ctx.db, sessionId);
+    let startCompartmentCount = getCompartments(ctx.db, sessionId).length;
     let chunkIndex = 0;
     let lastEnd = startLastEnd;
     let stoppedForFailure = false;
@@ -418,6 +418,11 @@ async function runStartedWrapup(
         if (activeAtStart === "timeout") {
             stoppedForFailure = true;
             stoppedReason = "Timed out waiting for the active historian run.";
+        } else {
+            // An already-running historian may have covered the target while
+            // wrapup waited. Its rows are not a publication by this command.
+            startLastEnd = lastEnd = getLastCompartmentEndMessage(ctx.db, sessionId);
+            startCompartmentCount = getCompartments(ctx.db, sessionId).length;
         }
 
         // The command blocks until the drain finishes and fires no message events,
@@ -587,7 +592,8 @@ async function runStartedWrapup(
             sessionId,
             "user_wrapup",
         );
-        message += " The compacted history applies on your next message.";
+        message +=
+            " The compacted history applies on your next message, or on the next rebuild if the host restarts first.";
     }
     setRecompTerminal(ctx.liveSessionState, sessionId, "done", message);
     return message;

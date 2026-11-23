@@ -228,7 +228,9 @@ describe("runManagedWrapup", () => {
             );
 
             expect(result).toContain("Wrapped up 9 messages into 3 compartments");
-            expect(result).toContain("The compacted history applies on your next message.");
+            expect(result).toContain(
+                "The compacted history applies on your next message, or on the next rebuild if the host restarts first.",
+            );
             expect(
                 pendingMaterializationOrigin(
                     ctx.liveSessionState.pendingMaterializationSessions,
@@ -408,6 +410,35 @@ describe("runManagedWrapup", () => {
         } finally {
             setTimeoutSpy.mockRestore();
             clearTimeoutSpy.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
+    it("succeeds with zero new compartments when an already-running historian covers the target", async () => {
+        const db = createDb();
+        try {
+            const sessionId = "ses-wrapup-finished-by-active-historian";
+            const active = Promise.withResolvers<void>();
+            registerActiveCompartmentRun(sessionId, active.promise, "other");
+            const ctx = baseCtx(db);
+            const runner = mock(async () => {});
+            ctx.runCompartmentAgentForWrapup = runner;
+            const result = await withProvider(sessionId, 8, async () => {
+                const run = runManagedWrapup(ctx, sessionId, { messagesToKeep: 2 });
+                try {
+                    await Bun.sleep(0);
+                    expect(getWrapupInProgressState(db, sessionId)).not.toBeNull();
+                    appendRange(db, sessionId, 1, 6);
+                } finally {
+                    active.resolve();
+                }
+                return run;
+            });
+            expect(runner).not.toHaveBeenCalled();
+            expect(getLastCompartmentEndMessage(db, sessionId)).toBe(6);
+            expect(result).toBe("Wrapped up 0 messages into 0 compartments.");
+            expect(ctx.liveSessionState.pendingMaterializationSessions.has(sessionId)).toBe(false);
+        } finally {
             closeQuietly(db);
         }
     });

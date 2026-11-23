@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
@@ -20,8 +20,38 @@ import {
     resolveTrustedContextLimit,
 } from "./event-resolvers";
 import { recordOpenCodeProvenInputFloor } from "./opencode-proven-floor";
+import * as sessionDb from "./read-session-db";
 
 describe("event-resolvers", () => {
+    it("resolves the recovered host model window before considering a saved route", () => {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        runMigrations(db);
+        const recovered = { providerID: "fictional", modelID: "recent" };
+        const read = spyOn(sessionDb, "findLastAssistantModelFromOpenCodeDb").mockReturnValue(
+            recovered,
+        );
+        try {
+            const sessionId = "ses-cold-wrapup-host-route";
+            updateSessionMeta(db, sessionId, {
+                lastObservedModelKey: "fictional/previous",
+                lastUsageContextLimit: 750_000,
+            });
+            recordDetectedContextLimit(db, sessionId, 90_000, "fictional/recent", "prompt_only");
+            expect(resolveOpenCodeWrapupWindow(db, sessionId)).toEqual({
+                contextLimit: 90_000,
+                modelKey: "fictional/recent",
+            });
+            expect(read).toHaveBeenCalledWith(sessionId);
+            expect(
+                resolveOpenCodeWrapupWindow(db, sessionId, { ...recovered, modelID: "selected" }),
+            ).toBeUndefined();
+            expect(read).toHaveBeenCalledTimes(1);
+        } finally {
+            read.mockRestore();
+            closeQuietly(db);
+        }
+    });
     it("recovers the already-reserved wrapup window only for its saved route", () => {
         const db = new Database(":memory:");
         initializeDatabase(db);

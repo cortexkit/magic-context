@@ -14,7 +14,10 @@ import type { SessionContext } from "../../v2/hooks/types";
 import { createAutoSearchReplayFixture } from "./auto-search-replay.fixture";
 import { type CompartmentTriggerResult, checkCompartmentTrigger } from "./compartment-trigger";
 import { opencode1ToModelMessages } from "./opencode1-to-model-messages.fixture";
-import { requestPendingMaterialization } from "./pending-materialization";
+import {
+    hasPendingMaterializationOrigin,
+    requestPendingMaterialization,
+} from "./pending-materialization";
 import { resolveOpenCodeProtectedTailBoundary } from "./protected-tail-boundary";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { buildInMemoryTailRawMessages } from "./read-session-raw";
@@ -34,6 +37,7 @@ export function openCodeRideHarness(
     const history = new Set<string>();
     const deferred = new Set<string>();
     let previous: MessageLike[] | null = null;
+    let lastPass: Awaited<ReturnType<typeof runPostTransformPhase>> | undefined;
     let legacyBlock = "Baseline legacy history";
     const source: MessageLike[] = Array.from({ length: 18 }, (_, i) => ({
         info: {
@@ -64,6 +68,7 @@ export function openCodeRideHarness(
     let lastTrigger: CompartmentTriggerResult | undefined;
     let rebuilds = 0;
     let protectQueued = false;
+    let memoryEnabled = !!scenario;
     let publicationSequence = 1;
     let systemRevision = 0;
     let boundaryLimit = 96_000;
@@ -95,6 +100,12 @@ export function openCodeRideHarness(
         get rebuilds() {
             return rebuilds;
         },
+        get lastPass() {
+            return lastPass;
+        },
+        get wrapupPending() {
+            return hasPendingMaterializationOrigin(pending, id, "user_wrapup");
+        },
         setBoundaryLimit(limit: number) {
             boundaryLimit = limit;
         },
@@ -125,6 +136,9 @@ export function openCodeRideHarness(
         },
         protectQueue(value: boolean) {
             protectQueued = value;
+        },
+        setMemoryEnabled(value: boolean) {
+            memoryEnabled = value;
         },
         fold() {
             systemRevision++;
@@ -160,7 +174,10 @@ export function openCodeRideHarness(
         flush() {
             requestPendingMaterialization(pending, id, "user_flush");
         },
-        publish() {
+        wrapup() {
+            requestPendingMaterialization(pending, id, "user_wrapup");
+        },
+        publish({ endMessageId = "msg_0003", summaryLines = 20 } = {}) {
             updateSessionMeta(db, id, { compartmentInProgress: false });
             legacyBlock = "Fresh legacy history";
             appendCompartments(db, id, [
@@ -180,10 +197,10 @@ export function openCodeRideHarness(
                         scenario === "floor"
                             ? source[(lastTrigger?.boundarySnapshot?.eligibleEndOrdinal ?? 5) - 2]!
                                   .info.id
-                            : "msg_0003",
+                            : endMessageId,
                     title: "Fresh publication",
-                    content: "New history facts.\n".repeat(20),
-                    p1: "New history facts.\n".repeat(20),
+                    content: "New history facts.\n".repeat(summaryLines),
+                    p1: "New history facts.\n".repeat(summaryLines),
                 },
             ]);
             history.add(id);
@@ -321,10 +338,11 @@ export function openCodeRideHarness(
                               ...fixture.renderOptions("openai/gpt-test").hardSignals,
                               systemHash: systemRevision ? `system-${systemRevision}` : "system",
                           },
-                          memoryEnabled: !!scenario,
+                          memoryEnabled,
                           temporalAwareness: false,
                       },
             });
+            lastPass = result;
             if (result.bustedThisPass) rebuilds++;
             previous = structuredClone(messages);
             if (mapped) {
@@ -355,6 +373,54 @@ function firstDifference(previous: unknown[], next: unknown[]) {
 }
 
 for (const host of ["opencode", "opencode2"] as const) {
+    test(`${host} wrapup spends the grant when it safely refuses the trim`, async () => {
+        const h = openCodeRideHarness(host);
+        try {
+            h.setMemoryEnabled(true);
+            await h.pass(40);
+            h.publish({ endMessageId: "msg_missing" });
+            h.wrapup();
+            const after = await h.pass(40);
+            expect(h.lastPass?.prefixTrimStatus).toBe("refused");
+            expect(JSON.stringify(after)).toContain("New history facts.");
+            expect(JSON.stringify(after)).toContain("Message 3: independent historical content");
+            expect(h.wrapupPending).toBe(false);
+
+            h.queue();
+            expect(await h.pass(40)).toEqual(after);
+            expect(h.lastPass?.bustedThisPass).toBe(false);
+            expect(h.lastPass?.explicitMaterializedSuccessfully).toBe(false);
+            expect(getPendingOps(h.db, h.id)).toHaveLength(1);
+        } finally {
+            h.close();
+        }
+    });
+
+    test(`${host} wrapup skips the size backstop only while applying the grant`, async () => {
+        const h = openCodeRideHarness(host);
+        try {
+            h.setMemoryEnabled(true);
+            await h.pass(40);
+            const baseline = getOrCreateSessionMeta(h.db, h.id).cachedM0Bytes;
+            expect(baseline).not.toBeNull();
+            h.publish({ summaryLines: 200 });
+            h.wrapup();
+            const after = await h.pass(40);
+            expect(h.lastPass?.prefixTrimStatus).toBe("applied");
+            expect(JSON.stringify(after)).toContain("New history facts.");
+            expect(
+                getOrCreateSessionMeta(h.db, h.id).cachedM0Bytes?.equals(baseline!) === true,
+                `m[0] changed on the wrapup pass (cause=${h.lastPass?.materializeReason})`,
+            ).toBe(true);
+            expect(h.wrapupPending).toBe(false);
+            expect(await h.pass(40)).toEqual(after);
+
+            await h.pass(85);
+            expect(getOrCreateSessionMeta(h.db, h.id).cachedM0Bytes?.equals(baseline!)).toBe(false);
+        } finally {
+            h.close();
+        }
+    });
     test(`${host} legacy history admits drops only when the served history block changes`, async () => {
         const h = openCodeRideHarness(host, true);
         try {

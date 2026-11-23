@@ -10,6 +10,7 @@ import { initializeDatabase } from "./storage-db";
 import {
     __test,
     type CanonicalMaterializeReason,
+    normalizeMaterializeReason,
     notePiSystemPromptHashChange,
     noteSystemPromptHashChange,
     recordPendingPiTransformDecision,
@@ -69,6 +70,12 @@ function rowCount(): number {
 }
 
 describe("transform_decisions retention cap", () => {
+    it("keeps the wrapup origin as a canonical reason on each host", () => {
+        for (const host of ["opencode", "opencode2", "pi"] as const) {
+            expect(normalizeMaterializeReason(host, "user_wrapup", false)).toBe("user_wrapup");
+        }
+    });
+
     it("attributes a byte-identical expired Rust resend to its own execute ttl_idle decision", () => {
         writeRustTransformDecision({
             sessionId: "ses-1",

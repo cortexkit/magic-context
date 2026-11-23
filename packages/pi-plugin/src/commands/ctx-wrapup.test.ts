@@ -56,6 +56,7 @@ import {
 } from "../context-handler";
 import { resolveHistorianFromConfig } from "../index";
 import { buildPiHistorianCommandOptions } from "../pi-historian-command-options";
+import { recordPiProvenFloorModel } from "../pi-proven-floor";
 import {
 	parseWrapupArgs,
 	type RegisterCtxWrapupDeps,
@@ -656,12 +657,74 @@ describe("Pi /ctx-wrapup", () => {
 			);
 
 			expect(result).toContain(
-				"The compacted history applies on your next message.",
+				"The compacted history applies on your next message, or on the next rebuild if the host restarts first.",
 			);
 			expect(consumePendingMaterialization(sessionId)).toBe(true);
 			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(true);
 			expect(consumeDeferredMaterialization(sessionId)).toBe(true);
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("plans wrapup with the model's proven input floor", async () => {
+		const db = createDb();
+		try {
+			const sessionId = "pi-wrapup-proven-input";
+			updateSessionMeta(db, sessionId, { observedSafeInputTokens: 198_000 });
+			recordPiProvenFloorModel(db, sessionId, "anthropic/claude", 198_000);
+			const limits: Array<number | undefined> = [];
+			await runPiWrapup(
+				pi().api,
+				deps(db, {
+					runPiHistorianForWrapup: mock(async (args) => {
+						limits.push(args.currentContextLimit);
+						appendRange(
+							db,
+							sessionId,
+							1,
+							args.boundarySnapshot.eligibleEndOrdinal - 1,
+						);
+					}),
+				}),
+				ctx(sessionId, 8),
+				sessionId,
+				2,
+			);
+			expect(limits).toEqual([198_000]);
+		} finally {
+			consumePendingMaterialization("pi-wrapup-proven-input");
+			closeQuietly(db);
+		}
+	});
+
+	it("grants nothing when Pi wrapup succeeds without producing new compartments", async () => {
+		const db = createDb();
+		const sessionId = "pi-wrapup-already-covered";
+		try {
+			const runner = mock(async () => {});
+			const appendEntry = mock(() => {
+				// Another historian finishes after planning but before wrapup takes
+				// its before-count. The command itself has nothing left to produce.
+				const marker = getWrapupInProgressState(db, sessionId);
+				if (!marker) throw new Error("Wrapup did not finish its initial plan");
+				appendRange(db, sessionId, 1, marker.targetEligibleEndOrdinal - 1);
+			});
+			const result = await runPiWrapup(
+				{ appendEntry } as never,
+				deps(db, { runPiHistorianForWrapup: runner }),
+				ctx(sessionId, 8),
+				sessionId,
+				2,
+			);
+			expect(appendEntry).toHaveBeenCalledTimes(1);
+			expect(runner).not.toHaveBeenCalled();
+			expect(consumePendingMaterialization(sessionId)).toBe(false);
+			expect(result).toBe(
+				"## Magic Wrapup\n\nWrapped up 0 messages into 0 compartments.",
+			);
+		} finally {
+			consumePendingMaterialization(sessionId);
 			closeQuietly(db);
 		}
 	});

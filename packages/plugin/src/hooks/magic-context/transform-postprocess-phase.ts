@@ -3981,7 +3981,7 @@ export async function runPostTransformPhase(
             // ── Drain pendingMaterializationSessions ──
             // Heuristics + materialization successfully ran on this pass.
             // Clear the reasons fulfilled by cleanup. A wrapup still needs
-            // to serve the new summary and trim the covered messages. If
+            // to serve the new summary. If
             // compartmentRunning had blocked us above, this drain is
             // intentionally NOT reached — the flag survives so the next
             // safe pass picks up the work.
@@ -4612,9 +4612,7 @@ export async function runPostTransformPhase(
         isCacheBustingPass &&
         !freezeM0M1 &&
         deliveredPrefix?.injected === true &&
-        !deliveredPrefix.materializationContentionRetryExhausted &&
-        (deliveredPrefix.prefixTrimStatus === "applied" ||
-            deliveredPrefix.prefixTrimStatus === "boundary-precedes-window");
+        !deliveredPrefix.materializationContentionRetryExhausted;
     if (wrapupServed) {
         clearPendingMaterializationOrigin(
             args.pendingMaterializationSessions,
@@ -4626,8 +4624,14 @@ export async function runPostTransformPhase(
         !deferredMaterializationWasPending ||
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully;
+    // Wrapup authorizes one request rewrite. Serving the summary uses it even
+    // if the cut cannot be proven; retry the trim when another pass rebuilds.
+    const wrapupTrimProven =
+        wrapupServed &&
+        (deliveredPrefix?.prefixTrimStatus === "applied" ||
+            deliveredPrefix?.prefixTrimStatus === "boundary-precedes-window");
     const historyWasConsumedThisPass =
-        wrapupServed ||
+        wrapupTrimProven ||
         ((!m0M1Enabled ||
             (deliveredPrefix?.injected === true &&
                 !deliveredPrefix.materializationContentionRetryExhausted)) &&

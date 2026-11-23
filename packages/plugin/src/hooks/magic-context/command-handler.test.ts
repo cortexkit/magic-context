@@ -361,6 +361,27 @@ describe("createMagicContextCommandHandler", () => {
         });
     }
 
+    it("forwards the OpenCode selection even before it has been used in a request", async () => {
+        const executeWrapup = mock(async () => "wrapup ran");
+        const handler = createMagicContextCommandHandler({
+            db,
+            executeWrapup,
+            sendNotification: async () => {},
+        });
+        await expectSentinel(
+            handler["command.execute.before"](
+                { command: "ctx-wrapup", sessionID: "ses-wrapup-selection", arguments: "3" },
+                makeOutput(""),
+                { providerId: "custom", modelId: "selected" },
+            ),
+            "__CONTEXT_MANAGEMENT_CTX-WRAPUP_HANDLED__",
+        );
+        expect(executeWrapup).toHaveBeenCalledWith("ses-wrapup-selection", {
+            messagesToKeep: 3,
+            model: { providerID: "custom", modelID: "selected" },
+        });
+    });
+
     it("keeps compaction commands functional when compaction is on", async () => {
         for (const command of ["ctx-wrapup", "ctx-recomp", "ctx-flush"] as const) {
             const sendNotification = mock(async () => {});

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { dirname } from "node:path";
+import { Database } from "../../plugin/src/shared/sqlite";
 import { TestHarness } from "../src/harness";
 import { inspectHostOpenFiles } from "../src/host-open-files";
 
@@ -45,11 +46,11 @@ test("OpenCode 1 wrapup replaces covered raw history once on the next request", 
             expect(matches).toHaveLength(1);
             return matches[0]!.body.messages!;
         };
-        const wrapup = async (keep: number) => {
+        const command = async (command: string, args: string) => {
             const result = await fetch(`${h.serverUrl}/session/${sessionId}/command?directory=${encodeURIComponent(h.workdir)}`, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ command: "ctx-wrapup", arguments: String(keep) }),
+                body: JSON.stringify({ command, arguments: args }),
             });
             expect(result.ok).toBe(true);
             await result.text();
@@ -62,7 +63,7 @@ test("OpenCode 1 wrapup replaces covered raw history once on the next request", 
         expect(JSON.stringify(before)).toContain("WRAPUP_RAW_0:");
         expect(JSON.stringify(before)).not.toContain(summary);
         expect(count()).toBe(0);
-        await wrapup(6);
+        await command("ctx-wrapup", "6");
         const published = count();
         expect(published).toBeGreaterThan(0);
 
@@ -82,10 +83,31 @@ test("OpenCode 1 wrapup replaces covered raw history once on the next request", 
         const defer = await turn("Ordinary defer after refresh");
         expect(contentBytes(defer.slice(0, after.length))).toBe(contentBytes(after));
 
-        await wrapup(100);
+        // A queued drop gives an accidental explicit refresh real work to do.
+        const retained = contentBytes(defer).match(/\u00a7(\d+)\u00a7 ordinary turn/);
+        if (!retained) throw new Error("Expected a tagged assistant reply in the kept tail");
+        const tag = Number(retained[1]);
+        const writer = new Database(h.contextDbPath(), { fileMustExist: true });
+        try {
+            writer.prepare(
+                "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, 'drop', ?, 'opencode')",
+            ).run(sessionId, tag, Date.now());
+        } finally {
+            writer.close();
+        }
+        const pending = () => (h.contextDb().query(
+            "SELECT count(*) AS n FROM pending_ops WHERE session_id = ? AND tag_id = ? AND harness = 'opencode'",
+        ).get(sessionId, tag) as { n: number }).n;
+        await command("ctx-wrapup", "100");
         expect(count()).toBe(published);
         const afterEmpty = await turn("Ordinary request after empty wrapup");
+        expect(pending()).toBe(1);
         expect(contentBytes(afterEmpty.slice(0, defer.length))).toBe(contentBytes(defer));
+
+        await command("ctx-flush", "");
+        const afterFlush = await turn("Ordinary request after explicit flush");
+        expect(pending()).toBe(0);
+        expect(contentBytes(afterFlush)).not.toContain(retained[0]);
     } finally {
         await h.dispose();
     }

@@ -17,6 +17,7 @@ import {
 	clearContextHandlerSession,
 	consumeDeferredHistoryRefresh,
 	consumeDeferredMaterialization,
+	hasPendingMaterialization,
 	registerPiContextHandler,
 	signalPiDeferredHistoryRefresh,
 	signalPiDeferredMaterialization,
@@ -310,6 +311,7 @@ test("Pi wrapup serves the new summary and cut once without a pressure-backstop 
 		);
 		expect(JSON.stringify(after)).toContain("File 1: preserving the content");
 		expect(firstDifference(before, after)).toBe(2);
+		expect(hasPendingMaterialization(h.id)).toBe(false);
 		expect(JSON.stringify(await h.pass(40))).toBe(JSON.stringify(after));
 	} finally {
 		h.close();

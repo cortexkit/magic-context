@@ -522,13 +522,15 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 ),
         };
     };
-    const buildManagedWrapupCtx = (sessionId: string): ManagedWrapupContext | undefined => {
-        const liveModel = liveModelBySession.get(sessionId);
-        const window =
-            resolveOpenCodeWrapupWindow(db, sessionId, liveModel) ??
-            (liveModel
-                ? undefined
-                : resolveOpenCodeWrapupWindow(db, sessionId, resolveLiveModel(sessionId)));
+    const buildManagedWrapupCtx = (
+        sessionId: string,
+        selectedModel?: { providerID: string; modelID: string },
+    ): ManagedWrapupContext | undefined => {
+        const window = resolveOpenCodeWrapupWindow(
+            db,
+            sessionId,
+            selectedModel ?? liveModelBySession.get(sessionId),
+        );
         if (!window) return undefined;
         const { contextLimit, modelKey } = window;
         return {
@@ -1002,7 +1004,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // empty primary model). One runner closes both gaps.
         executeWrapup: historianRunnable
             ? async (sessionId, options) => {
-                  const ctx = buildManagedWrapupCtx(sessionId);
+                  const ctx = buildManagedWrapupCtx(sessionId, options.model);
                   return ctx
                       ? runManagedWrapup(ctx, sessionId, options)
                       : WRAPUP_WINDOW_UNAVAILABLE;

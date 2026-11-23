@@ -18,6 +18,7 @@ import {
 } from "../../shared/models-dev-cache";
 import { applyProvenInputFloor, hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 import { resolveOpenCodeProvenInputFloor } from "./opencode-proven-floor";
+import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 
 export { escalationBands, MAX_EXECUTE_THRESHOLD };
 export const DEFAULT_CONTEXT_LIMIT = 200_000;
@@ -266,9 +267,10 @@ export function resolveOpenCodeWrapupWindow(
     sessionId: string,
     model?: { providerID: string; modelID: string },
 ): { contextLimit: number; modelKey: string } | undefined {
-    const modelKey = resolveModelKey(model?.providerID, model?.modelID);
+    const route = model ?? findLastAssistantModelFromOpenCodeDb(sessionId);
+    const modelKey = resolveModelKey(route?.providerID, route?.modelID);
     if (modelKey) {
-        const contextLimit = resolveTrustedContextLimit(model?.providerID, model?.modelID, {
+        const contextLimit = resolveTrustedContextLimit(route?.providerID, route?.modelID, {
             db,
             sessionID: sessionId,
         });

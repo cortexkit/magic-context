@@ -508,7 +508,10 @@ export function createMagicContextCommandHandler(deps: {
         options?: { range?: PartialRecompRange },
     ) => Promise<string>;
     /** Runs /ctx-wrapup over the live raw tail, keeping the newest N raw messages. */
-    executeWrapup?: (sessionId: string, options: { messagesToKeep: number }) => Promise<string>;
+    executeWrapup?: (
+        sessionId: string,
+        options: { messagesToKeep: number; model?: { providerID: string; modelID: string } },
+    ) => Promise<string>;
     /** `/ctx-embed start` — backfill this session's compartment embeddings. */
     executeEmbedHistory?: (
         sessionId: string,
@@ -883,6 +886,14 @@ export function createMagicContextCommandHandler(deps: {
                 } else {
                     result = await deps.executeWrapup(sessionId, {
                         messagesToKeep: parsed.messagesToKeep,
+                        ...(_params.providerId && _params.modelId
+                            ? {
+                                  model: {
+                                      providerID: _params.providerId,
+                                      modelID: _params.modelId,
+                                  },
+                              }
+                            : {}),
                     });
                 }
             }

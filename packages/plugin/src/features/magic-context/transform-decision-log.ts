@@ -29,6 +29,7 @@ export type CanonicalMaterializeReason =
     | "ttl_idle"
     | "explicit_flush"
     | "user_flush"
+    | "user_wrapup"
     | "fit_retry"
     | "pending_materialization"
     | "variant_change"
@@ -126,6 +127,7 @@ const canonicalReasons = new Set<string>([
     "ttl_idle",
     "explicit_flush",
     "user_flush",
+    "user_wrapup",
     "fit_retry",
     "pending_materialization",
     "variant_change",

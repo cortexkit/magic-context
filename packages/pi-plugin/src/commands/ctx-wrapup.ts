@@ -45,13 +45,18 @@ import {
 } from "../context-handler";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { repairPiHistoryBoundary } from "../history-boundary-repair-pi";
-import { resolvePiUsableContextLimit } from "../pi-context-limit";
+import {
+	resolvePiUsableContextLimit,
+	resolvePiWindowGeometry,
+} from "../pi-context-limit";
 import { runPiHistorian } from "../pi-historian-runner";
 import {
 	isPiOrdinalAlignmentUnanchored,
 	piRawOrdinalOffsetSource,
 	resolvePiOrdinalAlignmentForContext,
 } from "../pi-ordinal-alignment";
+import { piPressureEvidenceLimit } from "../pi-pressure";
+import { resolvePiProvenInputFloor } from "../pi-proven-floor";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
 import {
 	readPiSessionMessagePage,
@@ -572,7 +577,8 @@ export async function runPiWrapup(
 			let message = `## Magic Wrapup\n\nWrapped up ${messagesWrapped} messages into ${compartmentsCreated} compartments.`;
 			if (compartmentsCreated > 0) {
 				signalPiPendingMaterialization(sessionId, "user_wrapup");
-				message += " The compacted history applies on your next message.";
+				message +=
+					" The compacted history applies on your next message, or on the next rebuild if the host restarts first.";
 			}
 			return message;
 		} finally {
@@ -594,9 +600,22 @@ function resolvePiWrapupWindow(
 	if (!model) return readPersistedWrapupWindow(db, sessionId);
 	const modelKey = `${model.provider}/${model.id}`;
 	const overflow = getOverflowState(db, sessionId, modelKey);
-	const contextLimit = resolvePiUsableContextLimit({
+	const window = {
 		model,
 		detectedContextLimit: overflow.detectedContextLimit,
+	};
+	const provenInputTokens = resolvePiProvenInputFloor({
+		db,
+		sessionId,
+		modelKey,
+		readBranch: () => ctx.sessionManager.getBranch(),
+		providerInputLimit: piPressureEvidenceLimit(
+			resolvePiWindowGeometry(window),
+		),
+	});
+	const contextLimit = resolvePiUsableContextLimit({
+		...window,
+		provenInputTokens: provenInputTokens || undefined,
 	});
 	return contextLimit === undefined
 		? readPersistedWrapupWindow(db, sessionId, modelKey)

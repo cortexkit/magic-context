@@ -1046,7 +1046,9 @@ export interface M0M1RenderOptions {
      * deterministic mural on demand and folds its image into the m[0] baseline. */
     muralEnabled?: boolean;
     isCacheBustingPass?: boolean;
-    /** A wrapup can update recent summaries without replacing the cached baseline, even when the delta grows large. */
+    /** Like a flush, wrapup does not request a rewrite of the cached baseline.
+     * Merge an oversized summary delta into the baseline on the next rebuild
+     * instead of doing it on the pass that first serves the wrapup summaries. */
     skipPressureRefold?: boolean;
     /** Force/emergency may serve a fresh recovery prefix even if persistence loses contention. */
     allowFreshContentionFallback?: boolean;
