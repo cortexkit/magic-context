@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readdirSync, readlinkSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createE2ETempDir } from "../src/temp-dir";
@@ -119,5 +120,37 @@ test("openTestDb preserves constructor options and sets a five-second busy timeo
         });
     } finally {
         integers.close();
+    }
+});
+
+test("openTestDb closes WAL store descriptors with a prepared statement still reachable", () => {
+    const path = resolve(createE2ETempDir("test-db-close-"), "opencode2.db");
+    const files = new Set([path, `${path}-wal`, `${path}-shm`]);
+    // Preflight does not require lsof. On Linux, inspect our own descriptors via procfs.
+    const storeDescriptors = () => readdirSync("/proc/self/fd").flatMap((fd) => {
+        try {
+            const file = readlinkSync(`/proc/self/fd/${fd}`).replace(/ \(deleted\)$/, "");
+            return files.has(file) ? [file] : [];
+        } catch (error) {
+            // The directory descriptor used for the listing is already closed.
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            return [];
+        }
+    });
+    const db = openTestDb(path);
+    try {
+        db.exec("PRAGMA journal_mode = WAL; CREATE TABLE sample (value INTEGER)");
+        const insert = db.prepare("INSERT INTO sample VALUES (?)");
+        try {
+            insert.run(1);
+            if (process.platform === "linux") expect(storeDescriptors()).toContain(path);
+            db.close();
+            if (process.platform === "linux") expect(storeDescriptors()).toEqual([]);
+            expect(() => insert.run(2)).toThrow();
+        } finally {
+            insert.finalize();
+        }
+    } finally {
+        db.close(true);
     }
 });
