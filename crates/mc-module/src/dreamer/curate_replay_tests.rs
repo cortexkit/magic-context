@@ -201,6 +201,7 @@ fn curate_requests() {
         declaration: &declaration,
         workspace: None,
         guidance: guidance.as_deref(),
+        branches: &[],
     };
     let live = db
         .with_connection(|conn| {

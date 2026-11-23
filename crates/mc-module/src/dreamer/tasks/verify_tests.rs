@@ -55,6 +55,9 @@ pub(crate) struct Fixture {
     _dir: tempfile::TempDir,
     pub db: ContextDb,
     pub profile: Profile,
+    /// The project's live branches besides its default branch, as the
+    /// person's `dreamer.branches` setting would name them.
+    pub branches: Vec<String>,
 }
 
 impl Fixture {
@@ -66,6 +69,7 @@ impl Fixture {
             _dir: dir,
             db,
             profile: prompt_profile(None).unwrap(),
+            branches: Vec::new(),
         }
     }
 
@@ -78,6 +82,7 @@ impl Fixture {
             _dir: dir,
             db,
             profile: prompt_profile(None).unwrap(),
+            branches: Vec::new(),
         }
     }
 
@@ -200,6 +205,7 @@ impl Fixture {
                     declaration,
                     workspace: None,
                     guidance: None,
+                    branches: &self.branches,
                 },
                 read_batch,
             )
@@ -301,7 +307,8 @@ impl Fixture {
 /// can check the verdicts of its reply without writing anything: `read`
 /// holds its memories as the batch sent them, `checkout` the code at the
 /// commit the batch read, and `main` the repository's main checkout, whose
-/// live branches a memory without a line of its own is checked against.
+/// live branches (the default branch and `branches`) a memory without a line
+/// of its own is checked against.
 pub(crate) fn replay_batch(
     declaration: &Value,
     broad: bool,
@@ -309,8 +316,12 @@ pub(crate) fn replay_batch(
     read: Vec<Read>,
     checkout: Arc<Checkout>,
     main: &std::path::Path,
+    branches: &[String],
 ) -> VerifyBatch {
-    let gate = read.iter().any(|read| !read.lined).then(|| Gate::new(main));
+    let gate = read
+        .iter()
+        .any(|read| !read.lined)
+        .then(|| Gate::new(main, branches));
     VerifyBatch {
         declared: Arc::new(Declared::of(declaration, Verify { broad }.kind())),
         index: 0,
@@ -631,6 +642,9 @@ fn a_search_cut_by_its_limits_lists_nothing_and_puts_nobody_first() {
         confirmation: None,
         branch: None,
         checked_at: 0,
+        checked_revision: None,
+        checked_commit: None,
+        not_code: false,
     };
     let checkout = fixture.repo.checkout();
     let full = look_up(&checkout, &[&memory], &SEARCH_LIMITS);
@@ -665,6 +679,9 @@ fn the_diff_frame_keeps_the_plugins_shape_and_bounds_long_diffs() {
         confirmation: None,
         branch: None,
         checked_at: 1,
+        checked_revision: None,
+        checked_commit: None,
+        not_code: false,
     };
     let diff = "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
     let evidence = bounded_evidence(vec![EvidenceFile {
@@ -769,6 +786,7 @@ async fn broad_through_engine(fixture: Fixture, ends: &[Ends], settings: &Settin
         _dir,
         db,
         profile,
+        ..
     } = fixture;
     let db = Arc::new(db);
     let engine = Arc::new(
@@ -1129,4 +1147,94 @@ fn diff_batches_hold_twenty_memories_and_read_batches_one() {
             (1, false)
         ]
     );
+}
+
+/// A memory a model called no code fact waits for new text; one it couldn't
+/// confirm, or whose verdict the module refused, waits a week unless one of
+/// its files changes. Without the wait, each went back to a model every
+/// night with the same evidence and got the same answer.
+#[test]
+fn a_memory_decided_without_a_confirmation_waits_before_it_is_sent_again() {
+    let fixture = Fixture::new(&[
+        ("src/a.rs", "fn alpha() {}\n"),
+        ("src/b.rs", "fn beta() {}\n"),
+    ]);
+    fixture.insert(&[
+        Row {
+            files: vec!["src/a.rs"],
+            ..row(1, "OpenCode answers `alpha` in src/a.rs with a 403.")
+        },
+        Row {
+            files: vec!["src/b.rs"],
+            ..row(2, "`beta` in src/b.rs retries twice.")
+        },
+        Row {
+            files: vec!["src/a.rs"],
+            ..row(3, "`alpha` in src/a.rs takes no argument.")
+        },
+    ]);
+    let replies = [
+        (
+            1,
+            r#"<skip id="1" reason="about another program: OpenCode's answer"/>"#,
+        ),
+        (2, r#"<skip id="2" reason="unsure: no retry found"/>"#),
+        // An empty rewrite the module refuses.
+        (
+            3,
+            r#"<update id="3" files="src/a.rs" cites="src/a.rs:1-1"></update>"#,
+        ),
+    ];
+    let sent = |fixture: &Fixture| -> Vec<i64> {
+        let mut ids: Vec<i64> = fixture
+            .batches(false)
+            .iter()
+            .flat_map(|batch| batch.memory_ids())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(sent(&fixture), [1, 2, 3]);
+    for batch in fixture.batches(false) {
+        let id = batch.memory_ids()[0];
+        let (_, verdict) = replies.iter().find(|(of, _)| *of == id).unwrap();
+        let applied = fixture.apply(&batch, &format!("<verify>{verdict}</verify>"));
+        if id == 3 {
+            // The refusal reads as before; the memory is marked checked.
+            assert_eq!(
+                applied.dropped,
+                ["memory 3: the update's text is empty or longer than 20000 characters"]
+            );
+        }
+    }
+    assert_eq!(fixture.memory(1).4[NOT_CODE_KEY], 1);
+    assert_eq!(fixture.memory(2).4[NOT_CODE_KEY], Value::Null);
+    assert_eq!(fixture.memory(3).4[CHECKED_REVISION_KEY], 1);
+    assert!(sent(&fixture).is_empty());
+
+    // A changed file brings back the unsure memory mapped to it.
+    fixture
+        .repo
+        .write(&[("src/b.rs", "fn beta() { retry(); retry(); }\n")]);
+    fixture.repo.commit("retry");
+    assert_eq!(sent(&fixture), [2]);
+
+    // New text brings back the memory no code could decide; a week brings
+    // back the refused one.
+    fixture
+        .db
+        .with_connection(|conn| {
+            conn.execute(
+                "UPDATE memories SET content = '`alpha` in src/a.rs answers 403.', revision = 2
+                  WHERE id = 1",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE memories SET metadata_json = json_set(metadata_json, '$.dreamerCheckedAt', ?1)
+                  WHERE id = 3",
+                [crate::memory_writes::now_ms() - RECHECK_AFTER_MS - 1],
+            )
+        })
+        .unwrap();
+    assert_eq!(sent(&fixture), [1, 2, 3]);
 }

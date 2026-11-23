@@ -55,16 +55,18 @@ fn a_folder_outside_git_or_without_a_main_checkout_stays_as_it_is() {
     );
     assert_eq!(main_checkout(&worktree).unwrap(), worktree);
 }
-
 #[test]
-fn live_branches_are_the_default_branch_and_every_worktree_head_once_per_commit() {
+fn live_branches_are_the_default_branch_and_the_named_branches_once_per_commit() {
     let repo = Repo::on("master", &[("a.rs", "one\n")]);
     let first = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
-    // A worktree on a branch at the same commit adds no live branch.
-    let (_same, _) = repo.worktree("same");
     let (_outer, worktree) = repo.worktree("feature");
     let feature = commit_at(&worktree, &[("a.rs", "two\n")], "feature");
-    // A branch no worktree has checked out is not live.
+    // Another side checkout with commits of its own is no live branch
+    // unless it is named.
+    let (_side, side) = repo.worktree("side");
+    commit_at(&side, &[("a.rs", "side\n")], "side");
+    // A named branch at the default branch's commit, one the default branch
+    // contains, and one git doesn't know are left out.
     repo.git(&["branch", "parked"]);
     let refs = Refs::read(repo.path()).unwrap();
     assert_eq!(
@@ -73,65 +75,39 @@ fn live_branches_are_the_default_branch_and_every_worktree_head_once_per_commit(
     );
     assert_eq!(refs.main_branch(), Some("master"));
     assert_eq!(refs.tip("feature"), Some(feature.as_str()));
-    assert_eq!(refs.tip("parked"), Some(first.as_str()));
     assert_eq!(refs.tip("gone"), None);
-    assert_eq!(
-        refs.live(),
-        [
-            LiveBranch {
-                name: "master".into(),
-                commit: first.clone()
-            },
-            LiveBranch {
-                name: "feature".into(),
-                commit: feature.clone()
-            },
-        ]
-    );
-    // A detached worktree is live under its commit.
-    git_at(&worktree, &["checkout", "-q", "--detach", &first]);
-    let (_detached, detached) = repo.worktree("other");
-    let third = commit_at(&detached, &[("b.rs", "b\n")], "third");
-    git_at(&detached, &["checkout", "-q", "--detach"]);
-    let names: Vec<String> = Refs::read(repo.path())
+    let named = |names: &[&str]| -> Vec<String> {
+        refs.lines(
+            repo.path(),
+            &names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+        )
         .unwrap()
-        .live()
         .into_iter()
         .map(|branch| branch.name)
-        .collect();
+        .collect()
+    };
+    assert_eq!(named(&[]), ["master"]);
     assert_eq!(
-        names,
-        [
-            "master".to_owned(),
-            format!("detached at {}", short(&third))
-        ]
+        named(&["feature", "parked", "gone", "feature"]),
+        ["master", "feature"]
     );
 }
 
 #[test]
-fn a_worktree_head_the_default_branch_already_contains_is_not_live() {
+fn a_named_branch_the_default_branch_already_contains_is_not_live() {
     let repo = Repo::on("master", &[("a.rs", "one\n")]);
-    // A side checkout left on the first commit while master moved on.
-    let (_old, old) = repo.worktree("old");
-    let first = git_at(&old, &["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&["branch", "old"]);
     let second = commit_at(repo.path(), &[("a.rs", "two\n")], "second");
-    // A branch with a commit of its own stays live.
-    let (_outer, feature) = repo.worktree("feature");
-    let own = commit_at(&feature, &[("a.rs", "three\n")], "own");
     let refs = Refs::read(repo.path()).unwrap();
-    // The default branch comes first; git lists linked worktrees in no
-    // fixed order, so the rest compare as sets.
-    let commits = |live: Vec<LiveBranch>| {
-        let mut rest: Vec<String> = live.iter().skip(1).map(|b| b.commit.clone()).collect();
-        rest.sort();
-        (live[0].commit.clone(), rest)
-    };
-    let mut expected = vec![first.clone(), own.clone()];
-    expected.sort();
-    assert_eq!(commits(refs.live()), (second.clone(), expected));
     assert_eq!(
-        commits(refs.live_in(repo.path()).unwrap()),
-        (second, vec![own])
+        refs.lines(repo.path(), &["old".to_owned()]).unwrap(),
+        [LiveBranch {
+            name: "master".into(),
+            commit: second
+        }]
     );
 }
 
@@ -161,7 +137,6 @@ fn the_default_branch_is_origins_head_then_a_local_main_or_master() {
     let other = Repo::on("work", &[("a.rs", "one\n")]);
     assert_eq!(Refs::read(other.path()).unwrap().default_branch(), None);
 }
-
 #[test]
 fn a_tree_lists_each_file_of_its_commit_with_its_blob() {
     let repo = Repo::on(
@@ -233,70 +208,6 @@ fn a_copy_holds_one_commit_reads_its_history_up_to_there_and_is_deleted_when_dro
     assert_eq!(repo.git(&["status", "--porcelain"]).trim(), "M src/b.rs");
     drop(copy);
     assert!(!folder.exists());
-}
-
-/// Worktrees inside the CortexKit data root (agents' task checkouts,
-/// verification and deploy copies) are no live branch, whatever commits they
-/// have. The main checkout always is, and a sibling folder whose name only
-/// starts like the root's is not inside it.
-#[test]
-fn worktrees_inside_the_cortexkit_data_root_are_not_live() {
-    let repo = Repo::on("master", &[("a.rs", "one\n")]);
-    let data = tempfile::tempdir().unwrap();
-    let root = data.path().join("cortexkit");
-    let add = |path: &Path, branch: &str| {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        git_at(
-            repo.path(),
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                branch,
-                path.to_str().unwrap(),
-            ],
-        );
-        let text = format!("{branch}\n");
-        commit_at(path, &[("a.rs", text.as_str())], branch);
-    };
-    add(&root.join("alfonso/worktrees/task"), "task");
-    add(&data.path().join("cortexkit-scratch/wt"), "scratch");
-    let (_outer, feature) = repo.worktree("feature");
-    commit_at(&feature, &[("a.rs", "feature\n")], "feature");
-    let refs = Refs::read(repo.path()).unwrap();
-    let live = |refs: &Refs, root: Option<&Path>| -> Vec<String> {
-        let mut names: Vec<String> = refs
-            .live_outside(repo.path(), root)
-            .unwrap()
-            .into_iter()
-            .map(|branch| branch.name)
-            .collect();
-        names.sort();
-        names
-    };
-    assert_eq!(live(&refs, Some(&root)), ["feature", "master", "scratch"]);
-    // With the data root elsewhere every head with commits of its own counts.
-    assert_eq!(
-        live(&refs, Some(&data.path().join("elsewhere"))),
-        ["feature", "master", "scratch", "task"]
-    );
-    assert_eq!(live(&refs, None), ["feature", "master", "scratch", "task"]);
-    // The root reached through a symlink still matches.
-    #[cfg(unix)]
-    {
-        let link = data.path().join("link");
-        std::os::unix::fs::symlink(&root, &link).unwrap();
-        assert_eq!(live(&refs, Some(&link)), ["feature", "master", "scratch"]);
-    }
-    // The main checkout is never left out, even when it is the root itself.
-    git_at(repo.path(), &["checkout", "-q", "-b", "own"]);
-    commit_at(repo.path(), &[("b.rs", "own\n")], "own");
-    let refs = Refs::read(repo.path()).unwrap();
-    assert_eq!(
-        live(&refs, Some(repo.path())),
-        ["feature", "master", "own", "scratch", "task"]
-    );
 }
 
 /// A project's tasks run in the main checkout of its sessions' folders that

@@ -881,6 +881,25 @@ fn dreamer_projects_limit_the_dreamer_and_an_unreadable_list_means_none() {
 }
 
 #[test]
+fn dreamer_branches_name_each_projects_other_live_branches() {
+    let settings =
+        |dreamer: serde_json::Value| dreamer_settings(Some(&json!({ "dreamer": dreamer })));
+    assert!(settings(json!({})).unwrap().branches.is_empty());
+    let branches = settings(json!({"branches": {
+        "pj-a": [" release ", ""],
+        "pj-b": "release",
+        "pj-c": ["next", 3],
+    }}))
+    .unwrap()
+    .branches;
+    // An entry that can't be read leaves its project on one line.
+    assert_eq!(
+        branches,
+        [("pj-a".to_owned(), vec!["release".to_owned()])].into()
+    );
+}
+
+#[test]
 fn clock_note_defaults_to_thirty_minutes_and_only_the_user_sets_it() {
     let interval =
         |user: Value, project: Value| resolve_for_test(user, project, OPUS, 100_000).clock_note;

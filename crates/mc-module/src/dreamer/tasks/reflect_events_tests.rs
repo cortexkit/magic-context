@@ -190,6 +190,7 @@ fn with_context<T>(
         declaration: &declaration,
         workspace: None,
         guidance: None,
+        branches: &[],
     })
 }
 

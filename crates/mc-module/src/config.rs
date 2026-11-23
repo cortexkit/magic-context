@@ -227,7 +227,8 @@ impl Config {
 /// The dreamer's settings from the user's file, the same keys the 0.49
 /// dreamer read: `dreamer.disable`, `dreamer.maxTokens` and each task's
 /// `dreamer.tasks.<kind>.schedule`, plus `dreamer.projects`, the project ids
-/// it runs for (every project when absent). Only the user's file is read: a
+/// it runs for (every project when absent), and `dreamer.branches`, each
+/// project's live branches besides its default branch. Only the user's file is read: a
 /// project's file can't make the person's machine spend more.
 fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Settings> {
     if !dreamer_enabled(user) {
@@ -255,6 +256,28 @@ fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Sett
             tracing::warn!("ck-mc: dreamer.projects is not a list of project ids; the dreamer runs for no project");
         }
         settings.projects = Some(listed.unwrap_or_default());
+    }
+    // A project's entry that can't be read is left out with a warning: the
+    // project then has one line, as it had before the setting existed.
+    for (project, names) in dreamer
+        .and_then(|dreamer| dreamer.get("branches"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let listed: Option<Vec<String>> = names.as_array().and_then(|names| {
+            names
+                .iter()
+                .map(|name| name.as_str().map(|name| name.trim().to_owned()))
+                .filter(|name| name.as_ref().is_none_or(|name| !name.is_empty()))
+                .collect()
+        });
+        match listed {
+            Some(listed) => {
+                settings.branches.insert(project.trim().to_owned(), listed);
+            }
+            None => tracing::warn!("ck-mc: dreamer.branches.{project} is not a list of branch names; the project has one live branch"),
+        }
     }
     for (kind, task) in dreamer
         .and_then(|dreamer| dreamer.get("tasks"))

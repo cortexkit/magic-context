@@ -82,6 +82,12 @@ pub struct Settings {
     /// the person's own tasks carried by one of them, and the shared tasks
     /// of their workspaces.
     pub projects: Option<BTreeSet<String>>,
+    /// Each project's live branches besides its default branch, by project
+    /// id: the other lines of the project that people run, such as a
+    /// release line kept beside the main one. `verify` never rewrites or
+    /// archives a memory it read on the main checkout while its project has
+    /// another live branch, since the memory may describe that other line.
+    pub branches: HashMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -90,6 +96,7 @@ impl Default for Settings {
             schedules: HashMap::new(),
             budget_tokens: DEFAULT_BUDGET_TOKENS,
             projects: None,
+            branches: HashMap::new(),
         }
     }
 }
@@ -1445,6 +1452,11 @@ impl Engine {
             None
         };
         let batches = {
+            let branches = settings
+                .branches
+                .get(&due.owner.owner_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             let context = TaskContext {
                 db,
                 owner: &owner,
@@ -1452,6 +1464,7 @@ impl Engine {
                 declaration,
                 workspace,
                 guidance: guidance.as_deref(),
+                branches,
             };
             task.plan(&context, embedding.as_ref()).await
         };

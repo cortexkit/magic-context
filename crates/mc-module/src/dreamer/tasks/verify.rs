@@ -115,6 +115,15 @@ const HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
 /// manifest is the batch's answer.
 pub(crate) const FINALIZE: &str =
     "Stop reading now. Answer with what you have verified; mark anything you could not check as SKIP.";
+/// One day, in milliseconds.
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How long a memory a verify run decided without confirming it waits
+/// before it is sent again, unless its text or one of its files changes.
+pub(crate) const RECHECK_AFTER_MS: i64 = 7 * DAY_MS;
+/// The metadata key holding the revision a verify run last decided.
+pub(crate) const CHECKED_REVISION_KEY: &str = "dreamerCheckedRevision";
+/// The metadata key holding the revision a model called no code fact.
+pub(crate) const NOT_CODE_KEY: &str = "dreamerNotCode";
 
 /// One live project memory as the task reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +147,15 @@ pub(crate) struct Memory {
     pub confirmation: Option<Confirmation>,
     /// When a verify task last decided anything about it, a skip included.
     pub checked_at: i64,
+    /// The revision that last decision read; `None` when none recorded it.
+    pub checked_revision: Option<i64>,
+    /// The commit that last decision read.
+    pub checked_commit: Option<String>,
+    /// Whether a model said this revision is not a fact this repository's
+    /// code can decide (about another program, a value code can't hold, a
+    /// rule, a reason or history). No verify task sends it again until its
+    /// text changes.
+    pub not_code: bool,
     /// The branch it was learned on ([`crate::memory_line`]); `None` when
     /// it names none.
     pub branch: Option<String>,
@@ -173,7 +191,7 @@ pub(crate) fn live_memories(
     }
     let mut statement = conn.prepare(
         "SELECT id, origin_category, category, content, revision, COALESCE(verified_at, 0), metadata_json,
-                source_branch
+                source_branch, verify_commit
            FROM memories
           WHERE level = 'project' AND owner_id = ?1 AND status IN ('active', 'permanent')
             AND superseded_by_memory_id IS NULL AND (expires_at IS NULL OR expires_at > ?2)
@@ -189,11 +207,22 @@ pub(crate) fn live_memories(
             row.get::<_, i64>(5)?,
             row.get::<_, Option<String>>(6)?,
             row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
     let mut memories = Vec::new();
     for row in rows {
-        let (id, tag, category, content, revision, column_verified_at, metadata, branch) = row?;
+        let (
+            id,
+            tag,
+            category,
+            content,
+            revision,
+            column_verified_at,
+            metadata,
+            branch,
+            checked_commit,
+        ) = row?;
         if !categories.contains(&category) {
             continue;
         }
@@ -226,6 +255,8 @@ pub(crate) fn live_memories(
             .as_i64()
             .unwrap_or(0)
             .max(verified_at);
+        let checked_revision = metadata[CHECKED_REVISION_KEY].as_i64();
+        let not_code = metadata[NOT_CODE_KEY].as_i64() == Some(revision);
         memories.push(Memory {
             id,
             tag,
@@ -243,6 +274,9 @@ pub(crate) fn live_memories(
                 .map(|confirmation| confirmation.commit.clone()),
             confirmation,
             checked_at,
+            checked_revision,
+            checked_commit: checked_commit.filter(|commit| !commit.is_empty()),
+            not_code,
             branch: branch.filter(|branch| !branch.is_empty()),
         });
     }
@@ -279,6 +313,13 @@ impl Changes {
             .iter()
             .filter(|memory| memory.verified_at > 0)
             .filter_map(|memory| memory.verified_commit.as_deref())
+            // The commit a later decision read, for [`waits`].
+            .chain(
+                mapped
+                    .iter()
+                    .filter(|memory| memory.verified_at == 0)
+                    .filter_map(|memory| memory.checked_commit.as_deref()),
+            )
             .collect();
         for commit in commits {
             if let Some(files) = checkout.changed_since(commit) {
@@ -698,9 +739,10 @@ impl Verify {
                 )
             })
             .map_err(|error| format!("reading the memories of {project}: {error}"))?;
+        // A memory a model called no code fact waits for its text to change.
         let candidates: Vec<&Memory> = pool
             .iter()
-            .filter(|memory| self.broad || !memory.files.is_empty())
+            .filter(|memory| !memory.not_code && (self.broad || !memory.files.is_empty()))
             .collect();
         if candidates.is_empty() {
             return Ok(Vec::new());
@@ -739,15 +781,25 @@ impl Verify {
             // confirmed only where every live branch holds their lines, and
             // are not sent while every file they are mapped to differs
             // between live branches.
-            let live = (target == Target::Main).then(|| Gate::new(&main));
-            let (plans, lookup, kept, left_out) = self.plan_group(
+            let live = (target == Target::Main).then(|| Gate::new(&main, context.branches));
+            let (plans, lookup, kept, left_out, held) = self.plan_group(
                 &checkout,
                 &group.memories,
                 &group.lined,
                 live.as_ref(),
                 read_batch,
+                crate::memory_writes::now_ms(),
             );
             rechecked.extend(kept);
+            // Nothing is written for them; they come back once their text or
+            // one of their files changes, or the wait is over.
+            if held > 0 {
+                tracing::info!(
+                    "ck-mc: dreamer: {} for {project}: {held} memories checked in the last {} days wait until they or their files change",
+                    declared.task,
+                    RECHECK_AFTER_MS / DAY_MS
+                );
+            }
             // Nothing is written for them, so they are not counted as
             // checked and a later run plans them again.
             if !left_out.is_empty() {
@@ -852,7 +904,7 @@ impl Verify {
                 // A batch of the main checkout holding a memory without a
                 // line of its own checks the live branches before writing.
                 let gate = (group.target == Target::Main && read.iter().any(|read| !read.lined))
-                    .then(|| Gate::new(&main));
+                    .then(|| Gate::new(&main, context.branches));
                 batches.push(VerifyBatch {
                     declared: Arc::clone(&declared),
                     index: batches.len(),
@@ -892,7 +944,10 @@ impl Verify {
     /// every file it is mapped to differs between live branches (`live`, for
     /// the main checkout's group): a confirmation from lines of those files
     /// is almost always refused, and a rewrite or an archive always is. A
-    /// message checked by reading holds at most `read_batch` memories.
+    /// never-confirmed memory a run decided recently waits ([`waits`]); the
+    /// last item counts them. A message checked by reading holds at most
+    /// `read_batch` memories.
+    #[allow(clippy::type_complexity)]
     fn plan_group<'a>(
         &self,
         checkout: &Checkout,
@@ -900,7 +955,8 @@ impl Verify {
         lined: &HashSet<i64>,
         live: Option<&Gate>,
         read_batch: usize,
-    ) -> (Vec<Planned<'a>>, Lookup, Vec<Rechecked>, Vec<i64>) {
+        now: i64,
+    ) -> (Vec<Planned<'a>>, Lookup, Vec<Rechecked>, Vec<i64>, usize) {
         let mut left_out = Vec::new();
         let mut send = |memory: &&Memory| {
             let unsendable = !lined.contains(&memory.id)
@@ -924,7 +980,7 @@ impl Verify {
                     evidence: None,
                 });
             }
-            return (plans, lookup, Vec::new(), left_out);
+            return (plans, lookup, Vec::new(), left_out, 0);
         }
         let changes = Changes::read(checkout, memories);
         let selected: Vec<&Memory> = memories
@@ -955,6 +1011,12 @@ impl Verify {
         }
         stale.retain(&mut send);
         let never: Vec<&Memory> = never.into_iter().filter(&mut send).collect();
+        let before = never.len();
+        let never: Vec<&Memory> = never
+            .into_iter()
+            .filter(|memory| !waits(memory, &changes, now))
+            .collect();
+        let held = before - never.len();
         let mut read: Vec<&Memory> = Vec::new();
         for chunk in stale.chunks(DIFF_BATCH_SIZE) {
             match evidence(checkout, chunk) {
@@ -977,8 +1039,34 @@ impl Verify {
         } else {
             look_up(checkout, &read, &SEARCH_LIMITS)
         };
-        (plans, lookup, kept, left_out)
+        (plans, lookup, kept, left_out, held)
     }
+}
+
+/// Whether `memory`, never confirmed with cited lines, waits instead of
+/// going to a model this run: a verify run decided this same revision less
+/// than [`RECHECK_AFTER_MS`] ago and none of its files changed since the
+/// commit that run read. A memory a model could not confirm, or whose
+/// confirmation or change the module refused, would otherwise be sent again
+/// every night with the same evidence and get the same answer. When git
+/// can't tell whether a file changed, the memory is sent.
+fn waits(memory: &Memory, changes: &Changes, now: i64) -> bool {
+    if memory.checked_revision != Some(memory.revision)
+        || now - memory.checked_at >= RECHECK_AFTER_MS
+    {
+        return false;
+    }
+    let Some(changed) = memory
+        .checked_commit
+        .as_ref()
+        .and_then(|commit| changes.since.get(commit))
+    else {
+        return false;
+    };
+    !memory
+        .files
+        .iter()
+        .any(|file| changed.contains(file) || changes.missing.contains(file))
 }
 
 /// A confirmed memory whose cited lines are unchanged, as a re-check found

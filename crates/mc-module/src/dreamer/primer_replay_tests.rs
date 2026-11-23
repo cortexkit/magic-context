@@ -169,6 +169,7 @@ fn write_requests(args: &Args) -> Value {
         declaration: &declaration,
         workspace: None,
         guidance: None,
+        branches: &[],
     };
     let promoted = RefreshPrimers
         .promote_by_text(&context)

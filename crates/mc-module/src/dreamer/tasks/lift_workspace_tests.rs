@@ -127,6 +127,7 @@ impl Store {
                     declaration: &declaration,
                     workspace: Some(workspace),
                     guidance: None,
+                    branches: &[],
                 },
                 workspace,
             )

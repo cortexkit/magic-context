@@ -111,12 +111,11 @@ fn project_folder_outside(roots: &[String], data_root: Option<&Path>) -> Option<
     }
 }
 
-/// A live branch: the default branch, or what some worktree has checked
-/// out.
+/// A live branch: the default branch, or a branch the person's
+/// `dreamer.branches` setting names for the project.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LiveBranch {
-    /// The branch's name, or `detached at <commit>` for a worktree whose
-    /// HEAD is detached.
+    /// The branch's name.
     pub name: String,
     pub commit: String,
 }
@@ -211,88 +210,40 @@ impl Refs {
         self.worktrees.first()?.branch.as_deref()
     }
 
-    /// The live branches: the default branch, then each worktree's HEAD,
-    /// once per commit (the first name a commit is reached by is kept). The
-    /// module reads them through [`Refs::live_in`].
-    #[cfg(test)]
-    pub(crate) fn live(&self) -> Vec<LiveBranch> {
-        self.live_of(self.worktrees.iter())
-    }
-
-    /// The live branches with only the heads of `worktrees`: the default
-    /// branch, then each of those heads, once per commit (the first name a
-    /// commit is reached by is kept).
-    fn live_of<'a>(&self, worktrees: impl Iterator<Item = &'a Worktree>) -> Vec<LiveBranch> {
-        let mut live: Vec<LiveBranch> = Vec::new();
-        let worktrees = worktrees.map(|worktree| LiveBranch {
-            name: worktree
-                .branch
-                .clone()
-                .unwrap_or_else(|| format!("detached at {}", short(&worktree.commit))),
-            commit: worktree.commit.clone(),
-        });
-        let default = self
-            .default_branch()
-            .map(|(name, commit)| LiveBranch { name, commit });
-        for branch in default.into_iter().chain(worktrees) {
-            if !live.iter().any(|seen| seen.commit == branch.commit) {
-                live.push(branch);
-            }
-        }
-        live
-    }
-
-    /// The live branches without the worktree heads the default branch already
-    /// contains, and without the worktrees inside the CortexKit data root
-    /// ([`crate::storage_paths::cortexkit_data_root`]). A checkout without a
-    /// commit of its own holds older code of the default branch's line,
-    /// which the default branch supersedes, so a memory needs no protection
-    /// on its account. Busy repositories collect many of these (old side
-    /// checkouts, worktrees left on an earlier commit), and each one would
-    /// otherwise make files differ and keep verify from changing any old
-    /// memory that names them. A worktree inside the data root is an agent's
-    /// task checkout, verification copy or deploy copy, not a line anyone
-    /// runs, whatever commits it has. The main checkout is never left out.
+    /// The live branches: the default branch first, then each branch of
+    /// `named` (the project's `dreamer.branches` entry), local or else
+    /// origin's, once per commit. A named branch git doesn't know is left
+    /// out with a log line, and so is one the default branch already
+    /// contains: it holds older code of the default branch's line. Which
+    /// lines a project runs is the person's statement, never a guess from
+    /// the worktrees that happen to exist: side checkouts come and go, and a
+    /// line that has none is still run.
     /// `Err` when git fails or runs out of time on one of the checks.
-    pub(crate) fn live_in(&self, repo: &Path) -> Result<Vec<LiveBranch>, String> {
-        self.live_outside(repo, crate::storage_paths::cortexkit_data_root().as_deref())
-    }
-
-    /// [`Refs::live_in`] with `data_root` as the CortexKit data root. Paths
-    /// are compared resolved, so a symlinked home or macOS's `/private/var`
-    /// still matches; a folder equal to the root or inside it counts, a
-    /// sibling such as `cortexkit-scratch` does not. If the root is unknown,
-    /// no worktree is excluded based on its location.
-    fn live_outside(
-        &self,
-        repo: &Path,
-        data_root: Option<&Path>,
-    ) -> Result<Vec<LiveBranch>, String> {
-        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
-        let root = data_root.map(real);
-        let main = real(repo);
-        let live = self.live_of(self.worktrees.iter().enumerate().filter_map(
-            |(index, worktree)| {
-                let path = real(&worktree.path);
-                let main_checkout = index == 0 || path == main;
-                let internal = root.as_ref().is_some_and(|root| path.starts_with(root));
-                (main_checkout || !internal).then_some(worktree)
-            },
-        ));
-        let Some(default) = live
-            .first()
-            .cloned()
-            .filter(|_| self.default_branch().is_some())
-        else {
-            return Ok(live);
+    pub(crate) fn lines(&self, repo: &Path, named: &[String]) -> Result<Vec<LiveBranch>, String> {
+        let Some((name, commit)) = self.default_branch() else {
+            return Ok(Vec::new());
         };
-        let mut kept = vec![default.clone()];
-        for branch in live.into_iter().skip(1) {
-            if !contains(repo, &default.commit, &branch.commit)? {
-                kept.push(branch);
+        let default = LiveBranch { name, commit };
+        let mut live = vec![default.clone()];
+        for name in named {
+            let Some(commit) = self.heads.get(name).or_else(|| self.origin.get(name)) else {
+                tracing::info!(
+                    "ck-mc: dreamer: live branch {name} is not a branch of {}; it is left out",
+                    repo.display()
+                );
+                continue;
+            };
+            if live.iter().any(|seen| &seen.commit == commit)
+                || contains(repo, &default.commit, commit)?
+            {
+                continue;
             }
+            live.push(LiveBranch {
+                name: name.clone(),
+                commit: commit.clone(),
+            });
         }
-        Ok(kept)
+        Ok(live)
     }
 }
 

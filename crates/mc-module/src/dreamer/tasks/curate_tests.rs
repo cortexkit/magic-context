@@ -273,6 +273,7 @@ fn with_context<T>(
         declaration: &declaration,
         workspace: None,
         guidance: None,
+        branches: &[],
     })
 }
 
@@ -1620,6 +1621,7 @@ impl Store {
                     declaration: &declaration,
                     workspace,
                     guidance,
+                    branches: &[],
                 },
                 resume,
                 only,

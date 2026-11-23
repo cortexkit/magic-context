@@ -102,9 +102,12 @@ pub(super) fn check_claim(
         .filter(|cite| Some(cite.text()) != missing)
     {
         let found = match &cite {
-            Cite::Name(name) => cited
-                .iter()
-                .any(|span| span.text.contains(name.as_str()) || span.path.contains(name.as_str())),
+            Cite::Name(name) => {
+                cited.iter().any(|span| {
+                    span.text.contains(name.as_str()) || span.path.contains(name.as_str())
+                }) || settings_path_held(name, cited)
+                    || only_negated(content, name)
+            }
             Cite::Path(path) => cited.iter().any(|span| {
                 span.text.contains(path.as_str())
                     || clean_path(path).is_some_and(|path| names(&path, &span.path))
@@ -122,6 +125,78 @@ pub(super) fn check_claim(
         derive.map(str::trim).filter(|derive| !derive.is_empty()),
         cited,
     )
+}
+
+/// Whether `name` is a dotted settings or column path (`rerank.timeout_ms`,
+/// `session_meta.tags_version`) whose every part some cited span holds as a
+/// whole word, in any letter case. Code nests such a path (a `rerank` table with a
+/// `timeout_ms` field) and rarely writes it dotted. A file name such as
+/// `config.rs` is no settings path.
+fn settings_path_held(name: &str, cited: &[Cited]) -> bool {
+    const FILE_ENDINGS: [&str; 12] = [
+        "rs", "ts", "tsx", "js", "md", "json", "jsonc", "toml", "sh", "py", "yml", "yaml",
+    ];
+    let parts: Vec<&str> = name.split('.').collect();
+    let part = |part: &str| {
+        part.chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+            && part
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    };
+    if parts.len() < 2
+        || !parts.iter().all(|piece| part(piece))
+        || parts.last().is_some_and(|last| FILE_ENDINGS.contains(last))
+    {
+        return false;
+    }
+    // Case aside: a `Rerank` type holds the `rerank` table.
+    parts.iter().all(|piece| {
+        cited.iter().any(|span| {
+            let text = span.text.to_ascii_lowercase();
+            text.match_indices(piece).any(|(at, _)| {
+                let word = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+                !text[..at].chars().next_back().is_some_and(word)
+                    && !text[at + piece.len()..].chars().next().is_some_and(word)
+            })
+        })
+    })
+}
+
+/// Whether every place `content` names `name` says what the code does not
+/// do (`runs asynchronously rather than spawnSync`, `never calls fooBar`):
+/// within one clause, at most 60 bytes after one of the negating phrases
+/// below. Such a name is no claim that the code uses it, so the cited lines
+/// need not hold it.
+fn only_negated(content: &str, name: &str) -> bool {
+    const NEGATIONS: [&str; 7] = [
+        "rather than",
+        "instead of",
+        "not ",
+        "never ",
+        "without ",
+        "no longer",
+        "unlike ",
+    ];
+    let lower = content.to_lowercase();
+    if lower.len() != content.len() {
+        return false;
+    }
+    let mut places = content.match_indices(name).peekable();
+    places.peek().is_some()
+        && places.all(|(at, _)| {
+            let mut start = at.saturating_sub(60);
+            while !content.is_char_boundary(start) {
+                start += 1;
+            }
+            let window = &lower[start..at];
+            NEGATIONS.iter().any(|negation| {
+                window
+                    .rfind(negation)
+                    .is_some_and(|found| !window[found..].contains(['.', ';', ',', ':']))
+            })
+        })
 }
 
 /// Every number `content` states appears in some span of `cited` in an

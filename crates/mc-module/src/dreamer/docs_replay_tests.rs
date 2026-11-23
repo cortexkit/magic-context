@@ -99,6 +99,7 @@ fn plan(db: &ContextDb, profile: &Profile, project: &str, checkout: &str, from: 
             declaration: &declaration,
             workspace: None,
             guidance: None,
+            branches: &[],
         })
         .unwrap_or_else(|error| panic!("planning the docs task: {error}"))
 }

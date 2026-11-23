@@ -231,6 +231,33 @@ fn unit_after(rest: &str) -> Result<Option<(Dim, f64, usize)>, ()> {
     Ok(None)
 }
 
+/// Whether the bare number at byte `at` of `text` is part of a name: it
+/// follows one space after a capitalized word that doesn't start its
+/// sentence (`the Channel 1 nudge`), or one with a capital inside it at any
+/// place (`OpenCode 2`, `GitHub 3`). Such a number names a product version
+/// or an item (`Channel 2`, `Oh My Pi 19`) and is no quantity code must
+/// hold; a sentence's own first word, such as `Keep 3 copies`, is read as
+/// prose, so its number stays a quantity.
+fn names_item(text: &str, at: usize) -> bool {
+    let Some(head) = text[..at].strip_suffix(' ') else {
+        return false;
+    };
+    let start = head
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !(ch.is_alphanumeric() || *ch == '-'))
+        .map_or(0, |(index, ch)| index + ch.len_utf8());
+    let word = &head[start..];
+    if !word.chars().next().is_some_and(char::is_uppercase) {
+        return false;
+    }
+    if word.chars().skip(1).any(char::is_uppercase) {
+        return true;
+    }
+    let before = head[..start].trim_end();
+    !(before.is_empty() || before.ends_with(['.', '!', '?', ':', '\n']))
+}
+
 /// The lowercase word right before byte `at` of `text`, across spaces.
 fn word_before(text: &str, at: usize) -> String {
     let head = text[..at].trim_end_matches([' ', '\t']);
@@ -365,6 +392,9 @@ pub(crate) fn quantities(text: &str) -> Vec<Quantity> {
         };
         if dim == Dim::Count && unit_length == 0 {
             if LABELS.contains(&word_before(&masked, start).as_str()) {
+                continue;
+            }
+            if names_item(text, start) {
                 continue;
             }
             let rest = &masked[end..];

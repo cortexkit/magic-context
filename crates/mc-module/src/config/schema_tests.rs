@@ -331,6 +331,8 @@ fn reader_keys() -> BTreeSet<String> {
         "/dreamer/disable",
         "/dreamer/maxTokens",
         "/dreamer/projects",
+        "/dreamer/branches",
+        "/dreamer/branches/*",
     ]
     .into_iter()
     .map(str::to_owned)

@@ -60,6 +60,10 @@ pub(crate) struct TaskContext<'a> {
     /// it ([`Task::reads_guidance`]), and `None` whenever core serves no
     /// guidance for head agents of the run's workspace.
     pub guidance: Option<&'a str>,
+    /// The project's live branches besides its default branch, as the
+    /// person's `dreamer.branches` setting lists them; empty for every
+    /// other owner and for a project with one line.
+    pub branches: &'a [String],
 }
 
 impl TaskContext<'_> {

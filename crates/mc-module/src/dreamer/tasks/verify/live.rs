@@ -20,12 +20,12 @@
 //!   would be spent for nothing. It stays as it is, not marked checked, and
 //!   a later run plans it again.
 //!
-//! The live branches are the default branch and the head of every worktree
-//! that has commits the default branch doesn't contain ([`Refs::live_in`]),
-//! except worktrees inside the CortexKit data root (`~/.local/share/cortexkit`
-//! or `$XDG_DATA_HOME/cortexkit`): those are agents' task checkouts,
-//! verification copies and deploy copies, not lines anyone runs, so their
-//! commits never hold a memory back. The main checkout always counts.
+//! The live branches are the default branch and the branches the person's
+//! `dreamer.branches` setting names for the project ([`Refs::lines`]): the
+//! lines people run, such as a release line kept beside the main one. Which
+//! lines exist is the person's statement, never a guess from the worktrees
+//! that happen to exist: side checkouts come and go, and stale ones made old
+//! memories unsendable for nothing, while a line with no checkout still runs.
 //! With one live branch every check passes, so a project on a single line
 //! behaves as it did before lines were recorded. The branches are read once
 //! when a run is planned and once per batch, when its reply is accepted; a
@@ -58,8 +58,8 @@ pub(crate) struct Live {
 }
 
 impl Live {
-    fn read(repo: &Path) -> Result<Self, String> {
-        let branches = Refs::read(repo)?.live_in(repo)?;
+    fn read(repo: &Path, named: &[String]) -> Result<Self, String> {
+        let branches = Refs::read(repo)?.lines(repo, named)?;
         if branches.len() < 2 {
             return Ok(Self {
                 branches,
@@ -84,15 +84,19 @@ impl Live {
 pub(crate) struct Gate {
     /// The main checkout, where git runs.
     repo: PathBuf,
+    /// The project's live branches besides its default branch, as the
+    /// person's setting names them.
+    named: Vec<String>,
     live: OnceLock<Result<Live, String>>,
     /// The text of each file the confirmation check read, by blob id.
     blobs: Mutex<HashMap<String, Result<String, String>>>,
 }
 
 impl Gate {
-    pub(crate) fn new(repo: &Path) -> Self {
+    pub(crate) fn new(repo: &Path, named: &[String]) -> Self {
         Self {
             repo: repo.to_owned(),
+            named: named.to_vec(),
             live: OnceLock::new(),
             blobs: Mutex::default(),
         }
@@ -101,7 +105,7 @@ impl Gate {
     /// The live branches, read on first use.
     fn live(&self) -> Result<&Live, String> {
         self.live
-            .get_or_init(|| Live::read(&self.repo))
+            .get_or_init(|| Live::read(&self.repo, &self.named))
             .as_ref()
             .map_err(|why| format!("the live branches could not be read: {why}"))
     }

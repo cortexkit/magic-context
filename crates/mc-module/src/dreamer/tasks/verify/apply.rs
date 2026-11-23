@@ -63,7 +63,7 @@ use super::cites::{cites, cites_all, code_cites, Cite};
 use super::confirm::{check_claim, read_cited};
 use super::manifest::{js_trim, Decision, Verdict};
 use super::spans::{Confirmation, STORED_KEY};
-use super::{Absence, Read, VerifyBatch};
+use super::{Absence, Read, VerifyBatch, CHECKED_REVISION_KEY, NOT_CODE_KEY};
 use crate::dreamer::branches::short;
 use crate::dreamer::checkout::{Checkout, RecentBranches, GIT_TIMEOUT};
 use crate::dreamer::task::Applied;
@@ -196,10 +196,32 @@ fn directive(memory: &MemoryRow) -> bool {
     patterns.iter().any(|pattern| pattern.is_match(text))
 }
 
+/// The labels the verify prompt has a model start a skip's reason with when
+/// the memory is no fact this repository's code can decide.
+const NOT_CODE_LABELS: [&str; 3] = [
+    "about another program",
+    "not a value in the code",
+    "not a code fact",
+];
+
+/// Whether a model's skip `reason` says code can't decide the memory at all,
+/// so checking it again before its text changes would get the same answer.
+pub(crate) fn not_code(reason: &str) -> bool {
+    let reason = js_trim(reason).to_lowercase();
+    NOT_CODE_LABELS
+        .iter()
+        .any(|label| reason.starts_with(label))
+}
+
 /// What the write does with one verdict, as its checks decide it.
 pub(crate) enum Decided {
-    /// Dropped by a check, with why; nothing is written.
+    /// Dropped because the memory changed, went, or isn't this batch's,
+    /// with why; nothing is written.
     Refused(String),
+    /// Dropped by one of the verdict's own checks, with why: the memory as
+    /// it is now is written as checked, as a skip is, so it waits before it
+    /// is sent again.
+    Declined(MemoryRow, String),
     /// A confirmation that failed its checks: written as a skip of the
     /// memory as it is now, with why.
     Skipped(MemoryRow, String),
@@ -219,7 +241,8 @@ impl VerifyBatch {
     ) -> rusqlite::Result<Decided> {
         Ok(match self.check(tx, verdict)? {
             Err(reason) => Decided::Refused(reason),
-            Ok(current) => match self.confirmed(verdict) {
+            Ok((current, Some(why))) => Decided::Declined(current, why),
+            Ok((current, None)) => match self.confirmed(verdict) {
                 Some(Err(why)) => Decided::Skipped(current, why),
                 confirmation => Decided::Write(current, confirmation.and_then(Result::ok)),
             },
@@ -242,12 +265,24 @@ impl VerifyBatch {
         for verdict in verdicts {
             let dropped = match self.decide(tx, verdict)? {
                 Decided::Refused(reason) => Some(reason),
+                Decided::Declined(current, why) => {
+                    let skip = Verdict {
+                        decision: Decision::Skip,
+                        reason: why.clone(),
+                        ..verdict.clone()
+                    };
+                    self.write_one(tx, &skip, &current, None, run, now, &mut remapped)?;
+                    Some(why)
+                }
                 // A confirmation that fails its checks counts as a skip: the
                 // memory is marked checked, and the reason is kept with the
-                // run's dropped proposals.
+                // run's dropped proposals. The skip carries the check's
+                // reason, never the model's, so a refused confirmation is
+                // never read as the model calling the memory no code fact.
                 Decided::Skipped(current, why) => {
                     let skip = Verdict {
                         decision: Decision::Skip,
+                        reason: why.clone(),
                         ..verdict.clone()
                     };
                     self.write_one(tx, &skip, &current, None, run, now, &mut remapped)?;
@@ -274,13 +309,15 @@ impl VerifyBatch {
         Ok(applied)
     }
 
-    /// The memory as it is now when `verdict` may be written; why not
-    /// otherwise.
+    /// The memory as it is now when `verdict` may be decided, with why one
+    /// of the verdict's own checks refuses it; why nothing may be written
+    /// otherwise (the memory changed, went, or isn't this batch's).
+    #[allow(clippy::type_complexity)]
     fn check(
         &self,
         tx: &Transaction<'_>,
         verdict: &Verdict,
-    ) -> rusqlite::Result<Result<MemoryRow, String>> {
+    ) -> rusqlite::Result<Result<(MemoryRow, Option<String>), String>> {
         let id = verdict.id;
         let task = &self.declared.task;
         let Some(read) = self.read.iter().find(|read| read.id == id) else {
@@ -316,17 +353,14 @@ impl VerifyBatch {
                 read.revision, current.revision
             )));
         }
-        if verdict.decision == Decision::Archive && protected(tx, id)? {
-            return Ok(Err(format!(
-                "memory {id} is protected (safety-critical, permanent, a policy, or the person's own) and is never archived"
-            )));
-        }
-        let refusal = match verdict.decision {
-            Decision::Update => self.check_update(tx, verdict, &current)?,
-            Decision::Archive => self.check_archive(verdict, &current),
-            Decision::Verified | Decision::Skip => None,
-        };
-        let refusal = refusal
+        let refusal = if verdict.decision == Decision::Archive && protected(tx, id)? {
+            Some(format!("memory {id} is protected (safety-critical, permanent, a policy, or the person's own) and is never archived"))
+        } else {
+            match verdict.decision {
+                Decision::Update => self.check_update(tx, verdict, &current)?,
+                Decision::Archive => self.check_archive(verdict, &current),
+                Decision::Verified | Decision::Skip => None,
+            }
             .or_else(|| self.check_lines(verdict, read))
             .or_else(|| self.check_change_evidence(verdict, &current.content).err())
             .or_else(|| {
@@ -337,11 +371,10 @@ impl VerifyBatch {
                     &self.checkout,
                     cites(&current.content, self.checkout.top_level()),
                 )
-            });
-        Ok(match refusal {
-            Some(reason) => Err(format!("memory {id}: {reason}")),
-            None => Ok(current),
-        })
+            })
+            .map(|reason| format!("memory {id}: {reason}"))
+        };
+        Ok(Ok((current, refusal)))
     }
 
     /// For a confirmation, the cited lines it rests on or why it counts as a
@@ -537,14 +570,26 @@ impl VerifyBatch {
             .unwrap_or_default();
         match verdict.decision {
             Decision::Skip => {
+                // The model's label says whether code can decide the memory
+                // at all; a later verify run waits for new text only then.
                 tx.execute(
                     &format!(
                         "UPDATE memories SET verify_result = 'skipped', verify_commit = ?2,
-                                metadata_json = json_set({METADATA}, '$.dreamerCheckedAt', ?3)
+                                metadata_json = json_set(json_remove({METADATA}, '$.{NOT_CODE_KEY}'),
+                                    '$.dreamerCheckedAt', ?3, '$.{CHECKED_REVISION_KEY}', ?4)
                           WHERE id = ?1"
                     ),
-                    params![id, commit, now],
+                    params![id, commit, now, current.revision],
                 )?;
+                if not_code(&verdict.reason) {
+                    tx.execute(
+                        &format!(
+                            "UPDATE memories SET metadata_json = json_set({METADATA}, '$.{NOT_CODE_KEY}', ?2)
+                              WHERE id = ?1"
+                        ),
+                        params![id, current.revision],
+                    )?;
+                }
                 Ok(None)
             }
             Decision::Verified => {

@@ -195,6 +195,7 @@ fn plan(
                 declaration: &declaration,
                 workspace: Some(workspace),
                 guidance,
+                branches: &[],
             },
             None,
             only,

@@ -75,6 +75,7 @@ impl Fixture {
             declaration: &declaration,
             workspace: None,
             guidance: None,
+            branches: &[],
         })
     }
 
@@ -378,6 +379,7 @@ fn the_child_reads_the_main_checkout_not_the_worktree_the_session_was_in() {
         declaration: &declaration,
         workspace: None,
         guidance: None,
+        branches: &[],
     };
     let Planned::Batch(batch) = fixture.task.planned(&context).unwrap() else {
         panic!("the change is read");

@@ -1302,6 +1302,40 @@
             "user"
           ]
         },
+        "branches": {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "additionalProperties": false,
+          "patternProperties": {
+            "^\\S+$": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "default": "",
+                "title": "Branch name",
+                "description": "A branch people run besides the default branch.",
+                "x-ck-apply": "live",
+                "x-ck-layers": [
+                  "user"
+                ]
+              },
+              "default": [],
+              "title": "Project's other live branches",
+              "description": "The project's live branches besides its default branch, such as a release line.",
+              "x-ck-apply": "live",
+              "x-ck-layers": [
+                "user"
+              ]
+            }
+          },
+          "default": {},
+          "title": "Other live branches",
+          "description": "Each project's live branches besides its default branch, by project id. Background maintenance never rewrites or archives a memory of a project with more than one live branch, since the memory may describe another line.",
+          "x-ck-apply": "live",
+          "x-ck-layers": [
+            "user"
+          ]
+        },
         "tasks": {
           "type": "object",
           "unevaluatedProperties": false,

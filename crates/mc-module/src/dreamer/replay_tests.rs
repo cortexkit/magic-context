@@ -370,6 +370,7 @@ fn with_context<T>(db: &ContextDb, project: &str, body: impl FnOnce(&TaskContext
         declaration: &declaration,
         workspace: None,
         guidance: None,
+        branches: &[],
     })
 }
 

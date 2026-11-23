@@ -472,3 +472,43 @@ fn products_named_in_prose_need_not_be_in_the_cited_lines() {
         "OpenCode, which the memory names, is in none of the cited lines"
     );
 }
+
+/// A product or item name with a number (`OpenCode 2`, `Channel 1`), a name
+/// the memory says the code does not use, and a dotted settings path the
+/// code nests need no copy in the cited lines; each was once refused that
+/// way. A real quantity and a name the memory says is used still do.
+#[test]
+fn product_numbers_negated_names_and_nested_settings_paths_need_no_cited_copy() {
+    let held = files(&[(
+        "src/a.rs",
+        "pub fn read_times() { spawn_reader(); }\npub struct Rerank { pub timeout_ms: u64 }\n",
+    )]);
+    let cites = Some("src/a.rs:1-2");
+    for content in [
+        "In OpenCode 2, `read_times` calls `spawn_reader`.",
+        "The Channel 1 nudge uses `read_times`.",
+        "`read_times` runs `spawn_reader` rather than spawnSync.",
+        "`rerank.timeout_ms` is a `Rerank` field.",
+    ] {
+        assert!(check(&held, content, cites, None).is_ok(), "{content}");
+    }
+    // A sentence's own first word is prose: its number is a quantity.
+    assert!(check(&held, "Keep 3 readers in `read_times`.", cites, None)
+        .unwrap_err()
+        .contains("the number 3"));
+    // A name the memory says the code uses is still required.
+    assert!(check(&held, "`read_times` calls spawnSync.", cites, None)
+        .unwrap_err()
+        .contains("spawnSync"));
+    // A clause break ends the negation.
+    assert!(check(
+        &held,
+        "`read_times` never blocks, and it calls `spawnSync`.",
+        cites,
+        None
+    )
+    .unwrap_err()
+    .contains("spawnSync"));
+    // A dotted file name is no settings path.
+    assert!(check(&held, "`read_times` is in `times.rs`.", cites, None).is_err());
+}

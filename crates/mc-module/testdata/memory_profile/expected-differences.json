@@ -953,12 +953,12 @@
       "document": "dreamer/swe:verify/system",
       "class": "ruling",
       "ruling": "dreamer verify fix (.cortexkit/internal-docs/designs/dreamer-verify-fix-2026-11-16.md), approved by Ufuk 2026-11-16 §1: a confirmation cites the lines that state the claim, so the model reads them before it confirms.",
-      "why": "The verify prompt for this fix allows 4 tool calls per memory instead of 3: a memory is confirmed only after the lines that state it are read and cited. Since the dreamer read-cost change (§1) a read message may hold a single memory, so the prompt no longer speaks of a batch.",
+      "why": "A confirmation needs the lines that state the claim, found and cited. Since the dreamer read-cost change a read message holds a single memory and its run has 12 steps, so the prompt sets no per-memory call budget: the 23 Nov 2026 run stopped 170 of 274 checks at exactly 4 calls, and 63 skips said the budget ran out.",
       "today": [
         "Tools (read-only): read, grep, glob, plus any available AFT navigation tools. Use at most 3 tool calls per memory, including searches and reads. Start with the backing files and likely identifier matches. Never read the same file twice in a batch; reuse evidence. Request short useful line ranges unless the claim concerns the file as a whole. If evidence is insufficient when the call budget runs out, SKIP that memory; uncertainty never justifies archival. You change nothing."
       ],
       "rendered": [
-        "Tools (read-only): read, grep, glob, plus any available AFT navigation tools. Use at most 4 tool calls per memory, including searches and reads. Start with the backing files and likely identifier matches. Never read the same file twice; reuse evidence. Request short useful line ranges unless the claim concerns the file as a whole. If evidence is insufficient when the call budget runs out, SKIP that memory; uncertainty never justifies archival. You change nothing."
+        "Tools (read-only): read, grep, glob, plus any available AFT navigation tools. You have up to 12 steps for this message, and one step may run several tool calls at once. Start with the backing files and likely identifier matches, then follow what they lead to until you find the lines that state the claim. Never read the same file twice; reuse evidence. Request short useful line ranges unless the claim concerns the file as a whole. Answer as soon as you can decide. If the evidence is still insufficient when you must answer, SKIP that memory; uncertainty never justifies archival. You change nothing."
       ]
     },
     {
@@ -970,9 +970,11 @@
         "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify, such as an API that no longer exists, a path that moved, or a constant that changed. Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED. A named path inside a directive does not make the directive a code fact, and a file's failure to corroborate a behavioral rule is never grounds to update or archive it."
       ],
       "rendered": [
-        "What this repository's code cannot decide, SKIP:",
+        "What this repository's code cannot decide, SKIP, and start the reason with its label:",
         "- How another program behaves: a host such as OpenCode or Pi, a model provider, a library, another module. Code here that reacts to that behaviour does not show it. Reason: \"about another program\".",
-        "- A number code cannot hold: a measured latency, a size seen at runtime, a provider's limit. Reason: \"not a value in the code\"."
+        "- A number code cannot hold: a measured latency, a size seen at runtime, a provider's limit. Reason: \"not a value in the code\".",
+        "- A rule for how people or agents work, the reason behind a decision, something that happened, or a memory only part of which this code can show. Reason: \"not a code fact\".",
+        "With one of these three labels the memory is not checked again until its text changes. When the memory is a code fact but you could not find or confirm the lines that state it, start the reason with \"unsure:\"; it is checked again later."
       ]
     },
     {

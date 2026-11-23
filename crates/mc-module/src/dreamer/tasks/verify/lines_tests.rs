@@ -154,13 +154,16 @@ fn a_memory_learned_on_a_branch_is_checked_on_a_copy_of_its_newest_commit() {
 /// src/b.rs as master has it. The worktree's folder is returned with the
 /// guard that deletes it.
 fn agreed_file(second: bool) -> (Fixture, Option<(tempfile::TempDir, PathBuf)>) {
-    let fixture = Fixture::on(
+    let mut fixture = Fixture::on(
         "master",
         &[
             ("src/b.rs", "fn beta(x: u8) {}\n"),
             ("src/other.rs", "fn other() {}\n"),
         ],
     );
+    if second {
+        fixture.branches = vec!["feature".into()];
+    }
     let feature = second.then(|| {
         let (outer, worktree) = fixture.repo.worktree("feature");
         commit_at(
@@ -234,8 +237,9 @@ fn an_old_memory_is_archived_when_there_is_one_live_branch() {
 /// whose archive is refused.
 #[test]
 fn a_memory_that_names_its_branch_is_archived_while_there_are_two_live_branches() {
-    let fixture = Fixture::on("master", &[("src/other.rs", "fn other() {}\n")]);
+    let mut fixture = Fixture::on("master", &[("src/other.rs", "fn other() {}\n")]);
     let (_feature, worktree) = fixture.repo.worktree("feature");
+    fixture.branches = vec!["feature".into()];
     commit_at(
         &worktree,
         &[("src/other.rs", "fn other(x: u8) {}\n")],
@@ -278,12 +282,15 @@ fn a_memory_that_names_its_branch_is_archived_while_there_are_two_live_branches(
 /// then applied on the proof every such archive needs.
 #[test]
 fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
-    let fixture = Fixture::on("master", &[("src/live.rs", "fn live_function() {}\n")]);
-    let repo = &fixture.repo;
-    repo.write(&[("src/old/gone.rs", "fn gone_function() {}\n")]);
-    repo.commit("add");
+    let mut fixture = Fixture::on("master", &[("src/live.rs", "fn live_function() {}\n")]);
+    // The person runs the keep branch beside master.
+    fixture.branches = vec!["keep".into()];
+    fixture
+        .repo
+        .write(&[("src/old/gone.rs", "fn gone_function() {}\n")]);
+    fixture.repo.commit("add");
     // Another worktree's branch moved the function instead of removing it.
-    let (_outer, worktree) = repo.worktree("keep");
+    let (_outer, worktree) = fixture.repo.worktree("keep");
     std::fs::remove_file(worktree.join("src/old/gone.rs")).unwrap();
     let keeper = commit_at(
         &worktree,
@@ -293,8 +300,8 @@ fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
         )],
         "move",
     );
-    std::fs::remove_file(repo.path().join("src/old/gone.rs")).unwrap();
-    repo.commit("remove");
+    std::fs::remove_file(fixture.repo.path().join("src/old/gone.rs")).unwrap();
+    fixture.repo.commit("remove");
     fixture.insert(&[row(
         2,
         "`gone_function` in src/old/gone.rs registers the dream timer.",
@@ -311,12 +318,13 @@ fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
     );
     assert_eq!(fixture.memory(2).0, "active");
 
-    // Removing the checkout leaves just one live branch, but the keeper
-    // branch's unmerged change to the name still protects the memory.
+    // Once the person no longer runs keep, one live branch is left, but the
+    // keeper branch's unmerged change to the name still protects the memory.
     git_at(
-        repo.path(),
+        fixture.repo.path(),
         &["worktree", "remove", "--force", worktree.to_str().unwrap()],
     );
+    fixture.branches.clear();
     let batch = fixture.batches(true).remove(0);
     let applied = fixture.apply(
         &batch,
@@ -333,7 +341,7 @@ fn a_subject_gone_archive_of_an_old_memory_waits_for_a_single_live_branch() {
     assert_eq!(fixture.memory(2).0, "active");
 
     // The default branch's removal is enough once the keeper ref is gone.
-    repo.git(&["branch", "-D", "keep"]);
+    fixture.repo.git(&["branch", "-D", "keep"]);
     let batch = fixture.batches(true).remove(0);
     let applied = fixture.apply(
         &batch,
@@ -380,7 +388,7 @@ fn a_confirmation_stands_only_where_every_live_branch_holds_its_lines() {
     const PHASE: &str = "packages/plugin/src/hooks/magic-context/transform-postprocess-phase.ts";
     const DAEMON: &str = "crates/mc-module/tests/real_daemon.rs";
     const WAL: &str = "packages/dashboard/src-tauri/src/broca_wal.rs";
-    let fixture = Fixture::on(
+    let mut fixture = Fixture::on(
         "master",
         &[
             (
@@ -397,6 +405,7 @@ fn a_confirmation_stands_only_where_every_live_branch_holds_its_lines() {
     );
     // The next version's line, in its own worktree with commits of its own.
     let (_outer, worktree) = fixture.repo.worktree("mode3-clean");
+    fixture.branches = vec!["mode3-clean".into()];
     std::fs::remove_file(worktree.join(DAEMON)).unwrap();
     std::fs::remove_file(worktree.join(WAL)).unwrap();
     commit_at(
@@ -469,7 +478,7 @@ fn a_confirmation_stands_only_where_every_live_branch_holds_its_lines() {
 /// changes them, it goes to the model.
 #[test]
 fn stored_lines_keep_a_memory_confirmed_only_while_every_live_branch_holds_them() {
-    let fixture = Fixture::on(
+    let mut fixture = Fixture::on(
         "master",
         &[
             ("src/a.rs", "const CAP: u64 = 64_000;\n"),
@@ -490,6 +499,7 @@ fn stored_lines_keep_a_memory_confirmed_only_while_every_live_branch_holds_them(
         ..row(1, "`CAP` is 64k.")
     }]);
     let (_outer, worktree) = fixture.repo.worktree("next");
+    fixture.branches = vec!["next".into()];
     commit_at(
         &worktree,
         &[("src/a.rs", "const CAP: u64 = 32_000;\n")],
@@ -499,11 +509,13 @@ fn stored_lines_keep_a_memory_confirmed_only_while_every_live_branch_holds_them(
     assert_eq!(read(&batches[0]), [(1, false)]);
     assert!(batches[0].has_diff());
 
-    // With the other branch gone, master alone holds the lines unchanged.
+    // Once next is no longer a live branch, master alone holds the lines
+    // unchanged.
     git_at(
         fixture.repo.path(),
         &["worktree", "remove", "--force", worktree.to_str().unwrap()],
     );
+    fixture.branches.clear();
     assert!(fixture.batches(false).is_empty());
 }
 
@@ -515,7 +527,7 @@ fn stored_lines_keep_a_memory_confirmed_only_while_every_live_branch_holds_them(
 /// one mapped to nothing, and one that names its branch are sent.
 #[test]
 fn an_old_memory_whose_mapped_files_all_differ_between_live_branches_is_not_sent() {
-    let fixture = Fixture::on(
+    let mut fixture = Fixture::on(
         "master",
         &[
             ("src/a.rs", "fn alpha() {}\n"),
@@ -524,6 +536,7 @@ fn an_old_memory_whose_mapped_files_all_differ_between_live_branches_is_not_sent
         ],
     );
     let (_outer, worktree) = fixture.repo.worktree("feature");
+    fixture.branches = vec!["feature".into()];
     commit_at(
         &worktree,
         &[
@@ -548,19 +561,20 @@ fn an_old_memory_whose_mapped_files_all_differ_between_live_branches_is_not_sent
         },
     ]);
     learned_on(&fixture, 4, "master");
-    let sent = |broad: bool| {
+    let sent = |fixture: &Fixture, broad: bool| {
         let mut sent: Vec<(i64, bool)> = fixture.batches(broad).iter().flat_map(read).collect();
         sent.sort();
         sent
     };
     // `verify` checks mapped memories only; `verify-broad` every one.
-    assert_eq!(sent(false), [(2, false), (4, true)]);
-    assert_eq!(sent(true), [(2, false), (3, false), (4, true)]);
+    assert_eq!(sent(&fixture, false), [(2, false), (4, true)]);
+    assert_eq!(sent(&fixture, true), [(2, false), (3, false), (4, true)]);
     assert_eq!(fixture.memory(1).4, Value::Null);
 
     git_at(
         fixture.repo.path(),
         &["worktree", "remove", "--force", worktree.to_str().unwrap()],
     );
-    assert_eq!(sent(false), [(1, false), (2, false), (4, true)]);
+    fixture.branches.clear();
+    assert_eq!(sent(&fixture, false), [(1, false), (2, false), (4, true)]);
 }

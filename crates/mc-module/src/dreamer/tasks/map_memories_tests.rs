@@ -284,6 +284,7 @@ fn with_context<T>(db: &ContextDb, root: &Path, body: impl FnOnce(&TaskContext<'
         declaration: &declaration,
         workspace: None,
         guidance: None,
+        branches: &[],
     })
 }
 

@@ -88,6 +88,7 @@ impl Store {
             declaration: &declaration,
             workspace: None,
             guidance: None,
+            branches: &[],
         })
     }
 

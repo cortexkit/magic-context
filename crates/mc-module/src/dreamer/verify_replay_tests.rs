@@ -197,6 +197,24 @@ struct Args {
     kinds: Vec<String>,
     model: String,
     limit: Option<usize>,
+    /// The project's live branches besides its default branch, as its
+    /// `dreamer.branches` setting names them.
+    branches: Vec<String>,
+}
+
+/// `DREAMER_REPLAY_BRANCHES`: the project's other live branches, comma
+/// separated.
+fn branches_from_env() -> Vec<String> {
+    env("DREAMER_REPLAY_BRANCHES")
+        .map(|names| {
+            names
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl Args {
@@ -210,6 +228,7 @@ impl Args {
                 "a new folder for the output",
             )),
             kinds: kinds_from_env(),
+            branches: branches_from_env(),
             model: env("DREAMER_REPLAY_MODEL").unwrap_or_else(|| "deepseek-flash".into()),
             limit: env("DREAMER_REPLAY_BATCHES").map(|value| {
                 value
@@ -268,6 +287,7 @@ fn write_requests(args: &Args) -> Value {
                 declaration: &declaration,
                 workspace: None,
                 guidance: None,
+                branches: &args.branches,
             })
             .unwrap_or_else(|error| panic!("planning {task}: {error}"));
         let planned = batches.len();
@@ -326,6 +346,7 @@ fn verify_requests() {
 struct ApplyArgs {
     out: PathBuf,
     kinds: Vec<String>,
+    branches: Vec<String>,
 }
 
 impl ApplyArgs {
@@ -336,6 +357,7 @@ impl ApplyArgs {
                 "the folder the requests were written to",
             )),
             kinds: kinds_from_env(),
+            branches: branches_from_env(),
         }
     }
 }
@@ -581,7 +603,15 @@ fn apply_replies(args: &ApplyArgs) -> Value {
                 })
                 .collect();
             let project = request["project"].as_str().unwrap_or_default();
-            let batch = replay_batch(&declaration, broad, project, read, checkout, &main);
+            let batch = replay_batch(
+                &declaration,
+                broad,
+                project,
+                read,
+                checkout,
+                &main,
+                &args.branches,
+            );
             for verdict in &verdicts {
                 let mut memory = json!({"kind": kind, "batch": index, "id": verdict.id});
                 let name = match verdict.decision {
@@ -601,7 +631,7 @@ fn apply_replies(args: &ApplyArgs) -> Value {
                 }
                 // The write's own decision, every gate included.
                 let refusal = match batch.decide(&tx, verdict).expect("read the store copy") {
-                    Decided::Refused(reason) => {
+                    Decided::Refused(reason) | Decided::Declined(_, reason) => {
                         let prefix = format!("memory {}: ", verdict.id);
                         Some(reason.strip_prefix(&prefix).unwrap_or(&reason).to_owned())
                     }
@@ -722,6 +752,7 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
         kinds: vec![VERIFY.to_owned(), VERIFY_BROAD.to_owned()],
         model: "deepseek-flash".into(),
         limit: None,
+        branches: Vec::new(),
     };
     let manifest = write_requests(&args);
     assert_eq!(
@@ -805,6 +836,7 @@ fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_
         kinds: vec![VERIFY_BROAD.to_owned()],
         model: "deepseek-flash".into(),
         limit: None,
+        branches: vec!["feature".to_owned()],
     };
     write_requests(&args);
     let request: Value = serde_json::from_str(
@@ -849,6 +881,7 @@ fn the_apply_step_decides_each_saved_verdict_as_the_write_would_and_writes_only_
     let report = apply_replies(&ApplyArgs {
         out: args.out.clone(),
         kinds: vec![VERIFY_BROAD.to_owned()],
+        branches: vec!["feature".to_owned()],
     });
     // Every file the replay had is as it was, the store copy included, and
     // the report is the one file added.
