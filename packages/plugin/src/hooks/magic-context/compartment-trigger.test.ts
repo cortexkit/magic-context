@@ -18,6 +18,7 @@ import {
 } from "../../features/magic-context/storage";
 import { recordOverflowDetected } from "../../features/magic-context/storage-meta-persisted";
 import type { SessionMeta } from "../../features/magic-context/types";
+import { buildSidebarSnapshot } from "../../plugin/rpc-handlers";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -37,6 +38,7 @@ import {
 import { resolveOpenCodeProtectedTailBoundary } from "./protected-tail-boundary";
 import { withRawMessageProvider } from "./read-session-chunk";
 import type { RawMessage } from "./read-session-raw";
+import { rememberWaitingMessages, sidebarObservations } from "./sidebar-observations";
 import type { TagTarget } from "./tag-messages";
 import { prewarmTagOwners } from "./tag-owner-warmup";
 
@@ -109,6 +111,7 @@ it("does not fire at 88.3% for a tiny capped head even when later eligible histo
                 expect(result.shouldFire).toBe(false);
             }
             expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+            expect(buildSidebarSnapshot(db, sessionId, process.cwd()).waitingMessages).toBe(1);
         });
     } finally {
         if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
@@ -381,6 +384,25 @@ function insertCoveredMessageTag(
 }
 
 describe("checkCompartmentTrigger", () => {
+    it("invalidates a stale waiting count when a below-floor small tail cheap-skips", () => {
+        useTempDataHome("compartment-trigger-waiting-");
+        const db = openDatabase();
+        const sessionId = "ses-waiting-cheap-skip";
+        seedTriggerPolicy(db, sessionId);
+        insertCoveredMessageTag(db, sessionId, "small", 1, 10);
+        rememberWaitingMessages(sessionId, 140);
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 25),
+            { percentage: 25, inputTokens: 100 },
+            25,
+            65,
+            1000,
+        );
+        expect(result.shouldFire).toBe(false);
+        expect(sidebarObservations(sessionId).waitingMessages).toBeUndefined();
+    });
     it("cheap-skips the in-memory tail below the proactive floor when persisted plus untagged tokens are under budget", () => {
         useTempDataHome("compartment-trigger-memory-skip-");
         const db = openDatabase();

@@ -264,6 +264,13 @@ async function exerciseManagedOutputCap(args: {
             caps.every((cap) => cap === args.maxTokens),
             `${args.surface} ${args.method}`,
         ).toBe(true);
+        expect(
+            buildSidebarSnapshot(db, sessionId, liveConfig.directory).historianRun,
+        ).toMatchObject({
+            outcome: "ok",
+            model: "test/rpc-historian",
+            fallback: false,
+        });
     } finally {
         unregisterProvider();
         closeQuietly(db);
@@ -282,6 +289,25 @@ describe("manual historian cap reaches the OpenCode historian executor", () => {
                 });
             }
         }
+    }
+});
+
+test("sidebar copies the live config reload failure carried by status detail", () => {
+    const liveConfig = createLiveHistorianConfig(4096);
+    const db = createTestDb();
+    try {
+        const configPath = join(liveConfig.root, "config", "cortexkit", "magic-context.jsonc");
+        writeFileSync(configPath, "{ invalid config");
+        pluginConfigReader(liveConfig.directory, liveConfig.bootConfig).poll();
+        const sidebar = buildSidebarSnapshot(db, "config-health", liveConfig.directory);
+        const status = buildStatusDetail(db, "config-health", liveConfig.directory);
+        expect(sidebar.configReloadFailure?.path).toBe(configPath);
+        expect(sidebar.configReloadFailure?.message).toBeTruthy();
+        expect(sidebar.configReloadFailure).toEqual(status.configReloadFailure);
+    } finally {
+        closeQuietly(db);
+        liveConfig.restoreEnvironment();
+        rmSync(liveConfig.root, { recursive: true, force: true });
     }
 });
 
@@ -1499,6 +1525,10 @@ describe("buildSidebarSnapshot — Rust module status merge", () => {
             expect(snapshot.compartmentCount).toBe(4);
             expect(snapshot.compartmentTokens).toBe(23);
             expect(snapshot.pendingOpsCount).toBe(2);
+            expect(snapshot.queuedDropCount).toBe(2);
+            // The module reports no token total for its drop queue; a TypeScript-side estimate would describe
+            // a different queue, so the estimate is absent.
+            expect(snapshot.queuedDropTokens).toBeUndefined();
             expect(snapshot.boundaryPresent).toBe(true);
             expect(snapshot.coverageOrdinal).toBe(17);
             expect(buildCompartmentCount(db, sessionId, moduleStatus)).toBe(4);

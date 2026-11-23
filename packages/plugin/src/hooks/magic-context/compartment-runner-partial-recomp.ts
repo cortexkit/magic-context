@@ -15,6 +15,7 @@ import {
 import { clearCompressionDepthRange } from "../../features/magic-context/compression-depth-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import {
+    clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
     getPendingCompactionMarkerState,
     updateSessionMeta,
@@ -153,6 +154,7 @@ export async function executePartialRecompInternal(
     }
     const leaseHolderId = holderId;
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
+    const sidebarRuns: ((published: boolean) => void)[] = [];
 
     try {
         // ── Snap to compartment boundaries ─────────────────────────────────
@@ -328,6 +330,16 @@ export async function executePartialRecompInternal(
             }
 
             // Clear partial-range marker — staging is now empty.
+            for (const finish of sidebarRuns.splice(0)) finish(true);
+            // A published rebuild proves the historian works, as an incremental publish does.
+            // The rebuild is already committed, so a failure here must not fail it.
+            try {
+                clearHistorianFailureState(db, sessionId);
+            } catch (error) {
+                log(
+                    `[magic-context] partial recomp could not clear historian failure state: ${error}`,
+                );
+            }
             setRecompPartialRange(db, sessionId, null);
             // Reset depth counters for rebuilt range so fresh compartments start
             // at depth 0. Prior/tail depth is preserved.
@@ -514,6 +526,7 @@ export async function executePartialRecompInternal(
                 return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
             }
 
+            if (validatedPass.finishSidebarRun) sidebarRuns.push(validatedPass.finishSidebarRun);
             candidateCompartments = [
                 ...candidateCompartments,
                 ...(validatedPass.compartments ?? []),
@@ -558,6 +571,7 @@ export async function executePartialRecompInternal(
         );
         return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
     } finally {
+        for (const finish of sidebarRuns) finish(false);
         updateSessionMeta(db, sessionId, { compartmentInProgress: false });
         // Best-effort cleanup: if staging is somehow left over without a matching
         // range marker, clear it. Normal success already cleared via promoteFinal.

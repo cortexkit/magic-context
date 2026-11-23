@@ -32,6 +32,21 @@ export interface TailHygieneStatus {
     computedAt: number;
 }
 
+export interface SidebarHistorianRun {
+    finishedAt: number;
+    outcome: "ok" | "fallback" | "failed";
+    model: string | null;
+    primaryModel: string | null;
+    fallback: boolean;
+    primaryRejections: number;
+    primaryAttempts: number;
+    sinceLastClean: {
+        primaryRejections: number;
+        primaryAttempts: number;
+        fallbackRuns: number;
+    };
+}
+
 export interface SidebarSnapshot {
     sessionId: string;
     usagePercentage: number;
@@ -55,6 +70,15 @@ export interface SidebarSnapshot {
     memoryCount: number;
     memoryBlockCount: number;
     pendingOpsCount: number;
+    queuedDropCount?: number;
+    queuedDropTokens?: number;
+    historianRun?: SidebarHistorianRun;
+    waitingMessages?: number;
+    proactiveFloor?: number;
+    cachedM0MaterializedAt?: number | null;
+    summariesSinceCache?: number;
+    memoriesSinceCache?: number;
+    configReloadFailure?: { path: string; message: string };
     historianRunning: boolean;
     compartmentInProgress: boolean;
     sessionNoteCount: number;
@@ -255,7 +279,6 @@ export interface StatusDetail extends SidebarSnapshot {
     activeProfile: string | null;
     configGeneration?: number;
     configAdoptedAt?: number;
-    configReloadFailure?: { path: string; message: string };
     tagCounter: number;
     activeTags: number;
     droppedTags: number;

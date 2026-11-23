@@ -18,6 +18,7 @@ import {
 } from "../../features/magic-context/storage-historian-runs";
 import {
     clearCachedM0M1,
+    clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
     getPendingCompactionMarkerState,
     updateSessionMeta,
@@ -200,6 +201,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
     };
     // State file for the current pass — hoisted to be accessible in finally{}
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
+    const sidebarRuns: ((published: boolean) => void)[] = [];
 
     try {
         const rawMessageCount = getRawSessionMessageCount(sessionId);
@@ -303,6 +305,11 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
             const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
             if (!promoted) return null;
+            for (const finish of sidebarRuns.splice(0)) finish(true);
+            // A published rebuild proves the historian works, as an incremental publish does.
+            afterPublish("historian-failure-state", () =>
+                clearHistorianFailureState(db, sessionId),
+            );
 
             // Full recomp rebuilds every compartment from message 1 onward, so
             // all pre-existing compression-depth rows are stale — the compressor
@@ -599,6 +606,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
             }
 
+            if (validatedPass.finishSidebarRun) sidebarRuns.push(validatedPass.finishSidebarRun);
             // historian_runs telemetry: one row per SUCCESSFUL recomp pass. Failure
             // early-returns above are already captured in subagent_invocations; we
             // keep recomp instrumentation to the clean per-pass success point to
@@ -683,6 +691,9 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             sessionLog(sessionId, "recomp publish skipped: compartment lease no longer held");
             return "## Magic Recomp — Skipped\n\nAnother process acquired the compartment-state lease before recomp could publish. No state was written.";
         }
+        for (const finish of sidebarRuns.splice(0)) finish(true);
+        // A published rebuild proves the historian works, as an incremental publish does.
+        afterPublish("historian-failure-state", () => clearHistorianFailureState(db, sessionId));
         // Full recomp rebuilds every compartment, so all pre-existing depth
         // rows are stale. Matches partial recomp's behavior for rebuilt ranges.
         afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
@@ -776,6 +787,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         );
         return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
     } finally {
+        for (const finish of sidebarRuns) finish(false);
         updateSessionMeta(db, sessionId, { compartmentInProgress: false });
     }
 }

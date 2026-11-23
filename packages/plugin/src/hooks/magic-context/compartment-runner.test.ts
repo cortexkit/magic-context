@@ -32,6 +32,7 @@ import {
     getOrCreateSessionMeta,
     getPendingOps,
     getTagsBySession,
+    incrementHistorianFailure,
     loadProtectedTailMeta,
     openDatabase,
     recordOverflowDetected,
@@ -45,6 +46,7 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import { rebaseSessionCoordinates } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
+import { buildSidebarSnapshot } from "../../plugin/rpc-handlers";
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
 import { resolveHistorianModel } from "../../shared/model-resolution";
@@ -315,6 +317,59 @@ describe("executeContextRecomp", () => {
         // (facts are a promoted-memory concern, and recomp must not re-emit
         // facts that could degrade curated memories).
         expect(getSessionFacts(db, "ses-recomp")).toHaveLength(0);
+    });
+
+    it("clears an earlier historian failure count when the rebuild publishes", async () => {
+        useTempDataHome("magic-recomp-clears-failure-");
+        const sessionId = "ses-recomp-clears-failure";
+        createOpenCodeDb(sessionId, [
+            { id: "m-1", role: "user", text: "eligible one" },
+            { id: "m-2", role: "assistant", text: "eligible two" },
+            { id: "m-3", role: "user", text: "eligible three" },
+            { id: "m-4", role: "assistant", text: "eligible four" },
+            { id: "m-5", role: "user", text: "protected 1" },
+            { id: "m-6", role: "user", text: "protected 2" },
+            { id: "m-7", role: "user", text: "protected 3" },
+            { id: "m-8", role: "user", text: "protected 4" },
+            { id: "m-9", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        incrementHistorianFailure(db, sessionId, "earlier incremental failure");
+        incrementHistorianFailure(db, sessionId, "earlier incremental failure");
+        expect(getHistorianFailureState(db, sessionId).failureCount).toBe(2);
+
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/recomp" } })),
+                create: mock(async () => ({ data: { id: "ses-agent-recomp-clears" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: 1 } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: `<compartment start="1" end="4" title="Recovered history"><p1>Recovered summary</p1></compartment>`,
+                                },
+                            ],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        const result = await executeContextRecomp({
+            client,
+            db,
+            sessionId,
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+        });
+
+        expect(result).toContain("Rebuilt 1 compartment across 1 historian pass");
+        expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
     });
 
     it("aborts after winning the recomp lease if a wrapup marker appeared meanwhile", async () => {
@@ -1597,6 +1652,7 @@ describe("runCompartmentAgent", () => {
 
         const meta = getOrCreateSessionMeta(db, "ses-1");
         expect(meta.compartmentInProgress).toBe(false);
+        expect(buildSidebarSnapshot(db, "ses-1", process.cwd()).historianRun?.outcome).toBe("ok");
         const compartments = getCompartments(db, "ses-1");
         expect(compartments).toHaveLength(1);
         expect(compartments[0]?.startMessageId).toBe("m-1");
@@ -2018,6 +2074,12 @@ describe("runCompartmentAgent", () => {
         ).toEqual([]);
         expect(loadProtectedTailMeta(db, "ses-fact-insert-rollback").priorBoundaryOrdinal).toBe(1);
         expect(onPublished).not.toHaveBeenCalled();
+        expect(
+            buildSidebarSnapshot(db, "ses-fact-insert-rollback", process.cwd()).historianRun,
+        ).toMatchObject({
+            outcome: "failed",
+            model: null,
+        });
         expect(
             db
                 .prepare(

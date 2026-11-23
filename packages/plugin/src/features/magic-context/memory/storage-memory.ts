@@ -943,6 +943,24 @@ export function getMaxMemoryIdForProjects(
     return typeof row?.max_id === "number" ? row.max_id : 0;
 }
 
+export function countNewMemoriesForM1Union(
+    db: Database,
+    projectPaths: readonly string[],
+    afterId: number,
+    expiryCutoff: number,
+    ownIdentities?: readonly string[],
+    shareCategories?: readonly string[] | null,
+): number {
+    return readNewMemoriesForM1Union(
+        db,
+        projectPaths,
+        afterId,
+        expiryCutoff,
+        ownIdentities,
+        shareCategories,
+    ).length;
+}
+
 export function readNewMemoriesForM1Union(
     db: Database,
     projectPaths: readonly string[],
