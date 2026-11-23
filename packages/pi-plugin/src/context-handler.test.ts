@@ -848,6 +848,105 @@ describe("Pi pressure guards", () => {
 
 describe("Pi reasoning variant cache policy", () => {
 	it.each([
+		"claude-sonnet-5-5",
+		"claude-haiku-5-5",
+		"claude-fable-5-2",
+		"claude-mythos-5-1",
+		"claude-mythos-5-2",
+		"claude-opus-5-5",
+	])("Pi anthropic/%s effort change leaves queued work deferred", async (id) => {
+		const db = createTestDb();
+		const sessionId = `ses-pi-effort-${id}`;
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+			const contextHandler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const model = {
+				provider: "anthropic",
+				id,
+				api: "anthropic-messages",
+				contextWindow: 100_000,
+			};
+			const runPass = async () => {
+				const messages = [
+					userMessage("keep", 1),
+					assistantMessage("queued evidence", 2),
+				];
+				return contextHandler({ messages: messages as never[] }, {
+					...fakeContext(
+						sessionId,
+						process.cwd(),
+						["entry-1", "entry-2"],
+						messages,
+					),
+					model,
+				} as never);
+			};
+			await runPass();
+			decisionLogs.clearTransformDecisionSession(sessionId);
+			const before = JSON.stringify((await runPass()).messages);
+			queuePendingOp(db, sessionId, 2, "drop");
+			const queued = getPendingOps(db, sessionId);
+			expect(queued).toHaveLength(1);
+
+			const selectLevel = fake.handlers.get("thinking_level_select");
+			if (!selectLevel) throw new Error("Pi effort handler not registered");
+			await selectLevel(
+				{ previousLevel: "high", level: "xhigh" } as never,
+				{
+					...fakeContext(sessionId),
+					model,
+				} as never,
+			);
+			expect(
+				contextHandlerInternals.variantRefreshStateForTests(sessionId),
+			).toEqual({
+				history: false,
+				systemPrompt: false,
+				materialization: false,
+			});
+			const after = JSON.stringify((await runPass()).messages);
+			expect(after).toBe(before);
+			expect(decisionLogs.__test.getPendingPi(sessionId)).toBeUndefined();
+			expect(getPendingOps(db, sessionId)).toEqual(queued);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("Pi anthropic/claude-opus-4-1 effort change still schedules a flush", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-effort-flush-opus-4-1";
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, { db });
+			const selectLevel = fake.handlers.get("thinking_level_select");
+			if (!selectLevel) throw new Error("Pi effort handler not registered");
+			await selectLevel(
+				{ previousLevel: "high", level: "xhigh" } as never,
+				{
+					...fakeContext(sessionId),
+					model: { provider: "anthropic", id: "claude-opus-4-1" },
+				} as never,
+			);
+			expect(
+				contextHandlerInternals.variantRefreshStateForTests(sessionId),
+			).toEqual({
+				history: true,
+				systemPrompt: true,
+				materialization: true,
+			});
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it.each([
 		["Astra canonical xhigh -> high", "openai", "gpt-6-astra", false],
 		["Astra Codex alias xhigh -> high", "openai-codex", "gpt-6-astra", false],
 		[

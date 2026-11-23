@@ -790,7 +790,7 @@ describe("createChatMessageHook variant-change flush is provider-aware", () => {
 
     // Pins current behavior on the Anthropic family. Deleting the predicate
     // call (so the gate always takes the TRUE arm) must leave this test green.
-    test("anthropic provider: variant flip signals all three sets + clears lastHeuristicsTurnId", async () => {
+    test("older Claude: variant flip signals all three sets + clears lastHeuristicsTurnId", async () => {
         const sets = freshSets();
         sets.lastHeuristicsTurnId.set("ses", "turn-1");
         const { hook, db } = makeHook(sets);
@@ -798,12 +798,12 @@ describe("createChatMessageHook variant-change flush is provider-aware", () => {
             await hook({
                 sessionID: "ses",
                 variant: "low",
-                model: { providerID: "anthropic", modelID: "claude" },
+                model: { providerID: "anthropic", modelID: "claude-opus-4-1" },
             });
             await hook({
                 sessionID: "ses",
                 variant: "high",
-                model: { providerID: "anthropic", modelID: "claude" },
+                model: { providerID: "anthropic", modelID: "claude-opus-4-1" },
             });
 
             expect(sets.historyRefreshSessions.has("ses")).toBe(true);

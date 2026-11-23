@@ -46,6 +46,7 @@ import {
     markWhitespaceAssistantTagInert,
 } from "../../features/magic-context/storage-tags";
 import { createTagger } from "../../features/magic-context/tagger";
+import { __test as decisionLog } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { registerActiveCompartmentRun } from "./compartment-runner";
@@ -830,9 +831,17 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         expect(replayAssistant).toEqual(foldAssistant);
     });
 
-    it("Astra xhigh -> high keeps the next defer pass byte-identical and pending", async () => {
-        useTempDataHome("ctx-astra-variant-defer-");
-        const sessionId = "ses-astra-variant-defer";
+    it.each([
+        ["anthropic", "claude-sonnet-5-5"],
+        ["anthropic", "claude-haiku-5-5"],
+        ["anthropic", "claude-fable-5-2"],
+        ["anthropic", "claude-mythos-5-1"],
+        ["anthropic", "claude-mythos-5-2"],
+        ["anthropic", "claude-opus-5-5"],
+        ["openai-codex", "gpt-6-astra"],
+    ])("OpenCode %s/%s effort change leaves queued work deferred", async (providerID, modelID) => {
+        useTempDataHome("ctx-effort-defer-");
+        const sessionId = `ses-effort-${modelID}`;
         const db = openDatabase();
         const historyRefreshSessions = new Set<string>();
         const systemPromptRefreshSessions = new Set<string>();
@@ -870,8 +879,8 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         });
         await hook({
             sessionID: sessionId,
-            variant: "xhigh",
-            model: { providerID: "openai-codex", modelID: "gpt-6-astra" },
+            variant: "high",
+            model: { providerID, modelID },
         });
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         const beforeFlip = buildSimpleMessages(sessionId);
@@ -881,17 +890,21 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
 
         await hook({
             sessionID: sessionId,
-            variant: "high",
-            model: { providerID: "github-copilot", modelID: "gpt-6-astra" },
+            variant: "xhigh",
+            model: { providerID, modelID },
         });
+        expect({
+            history: historyRefreshSessions.size,
+            systemPrompt: systemPromptRefreshSessions.size,
+            materialization: pendingMaterializationSessions.size,
+        }).toEqual({ history: 0, systemPrompt: 0, materialization: 0 });
+        shouldExecute.mockClear();
         const afterFlip = buildSimpleMessages(sessionId);
         await transform({}, { messages: afterFlip });
         const afterHash = createHash("sha256").update(JSON.stringify(afterFlip)).digest("hex");
 
         expect(afterHash).toBe(beforeHash);
-        expect(historyRefreshSessions.size).toBe(0);
-        expect(systemPromptRefreshSessions.size).toBe(0);
-        expect(pendingMaterializationSessions.size).toBe(0);
+        expect(decisionLog.getPending(sessionId)).toBeUndefined();
         expect(getPendingOps(db, sessionId)).toHaveLength(1);
         expect(shouldExecute).toHaveBeenCalled();
     });

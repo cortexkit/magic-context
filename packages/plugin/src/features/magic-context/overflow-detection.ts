@@ -349,8 +349,7 @@ export function isPrefixBoundThinkingModel(
  * recovery uses isPrefixBoundThinkingModel instead, which covers every
  * prefix-bound model and cloud route. The variant-cache policy uses this
  * narrower check to recognize Fable 5.1, whose cached prefix was measured to
- * survive effort changes; that cache behavior is separate from prefix binding,
- * so a newer prefix-bound model (Fable 5.2) is not included until measured.
+ * survive effort changes; that cache behavior is separate from prefix binding.
  */
 export function isFable51ThinkingBindingModel(
     providerID: string | null | undefined,

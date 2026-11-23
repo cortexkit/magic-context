@@ -133,14 +133,28 @@ export function neutralizedReasoningSource(part: unknown): unknown {
  * invalidating cached prompt bytes: Anthropic Fable 5.1 was observed on
  * 2026-09-02, OpenAI GPT-6 Astra on 2026-09-05, and Anthropic Opus 5.5 on
  * 2026-09-23 (an effort high -> default -> high round trip kept reading the
- * same cached message prefix). Keep this list in sync with
+ * same cached message prefix). The five entries added on 2026-11-23 follow the
+ * maintainer's rule for newer Claude models: per-message effort leaves the
+ * cached prefix intact. Keep the entries and ID matching in sync with
  * `VARIANT_CACHE_PRESERVING_MODELS` in crates/mc-module/src/transform.rs.
  */
-const VARIANT_CACHE_PRESERVING_MODELS: Readonly<Record<string, string>> = {
-    "anthropic/claude-fable-5-1": "2026-09-02",
-    "openai/gpt-6-astra": "2026-09-05",
-    "anthropic/claude-opus-5-5": "2026-09-23",
+const VARIANT_CACHE_PRESERVING_MODELS: Readonly<
+    Record<string, readonly [date: string, datedAndCloudIds?: true]>
+> = {
+    "anthropic/claude-fable-5-1": ["2026-09-02"],
+    "openai/gpt-6-astra": ["2026-09-05"],
+    "anthropic/claude-opus-5-5": ["2026-09-23"],
+    "anthropic/claude-sonnet-5-5": ["2026-11-23", true],
+    "anthropic/claude-haiku-5-5": ["2026-11-23", true],
+    "anthropic/claude-fable-5-2": ["2026-11-23", true],
+    "anthropic/claude-mythos-5-1": ["2026-11-23", true],
+    "anthropic/claude-mythos-5-2": ["2026-11-23", true],
 };
+
+// Match canonical Claude IDs, native `-YYYYMMDD`, Vertex `@YYYYMMDD` and
+// Bedrock region/provider prefixes with an optional model revision suffix.
+const CLAUDE_VARIANT_ALIAS =
+    /^(?:(?:[a-z0-9-]+\.)?anthropic\.)?(?:claude-)?([a-z]+)[-_.]?([0-9]+)[-_.]([0-9]+)(?:[-@][0-9]{8})?(?:-v[0-9]+:[0-9]+)?$/i;
 
 function canonicalVariantModelIdentity(providerID: string, modelID: string): string {
     const normalizedProviderID = providerID.toLowerCase();
@@ -150,6 +164,13 @@ function canonicalVariantModelIdentity(providerID: string, modelID: string): str
         normalizedProviderID.includes("bedrock");
     if (isAnthropicFamily && isFable51ThinkingBindingModel("anthropic", modelID)) {
         return "anthropic/claude-fable-5-1";
+    }
+    if (isAnthropicFamily) {
+        const alias = CLAUDE_VARIANT_ALIAS.exec(modelID.split("/").at(-1) ?? "");
+        if (alias) {
+            const identity = `anthropic/claude-${alias[1].toLowerCase()}-${alias[2]}-${alias[3]}`;
+            if (VARIANT_CACHE_PRESERVING_MODELS[identity]?.[1]) return identity;
+        }
     }
     return canonicalModelIdentity(`${providerID}/${modelID}`).toLowerCase();
 }
