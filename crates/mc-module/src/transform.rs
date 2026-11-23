@@ -8790,11 +8790,27 @@ fn render_config_base(render_config: &str) -> &str {
 /// from `high` to absent still read the 1h-TTL message-prefix cache written only by `high`
 /// requests, and the flip back read that same prefix again. The flip itself therefore costs
 /// nothing at the provider, while a HARD on it rewrites every re-rendered message.
-const VARIANT_CACHE_PRESERVING_MODELS: [(&str, &str); 3] = [
-    ("anthropic/claude-fable-5-1", "2026-09-02"),
-    ("openai/gpt-6-astra", "2026-09-05"),
-    ("anthropic/claude-opus-5-5", "2026-09-23"),
+/// The five entries added on 2026-11-23 follow the maintainer's rule for newer Claude
+/// models: per-message effort leaves the cached prefix intact. The third field enables
+/// native `-YYYYMMDD`, Vertex `@YYYYMMDD` and Bedrock IDs for those additions.
+/// Keep the entries and matching in sync with
+/// `VARIANT_CACHE_PRESERVING_MODELS` in the OpenCode plugin's sentinel.ts (shared by Pi).
+const VARIANT_CACHE_PRESERVING_MODELS: [(&str, &str, bool); 8] = [
+    ("anthropic/claude-fable-5-1", "2026-09-02", false),
+    ("openai/gpt-6-astra", "2026-09-05", false),
+    ("anthropic/claude-opus-5-5", "2026-09-23", false),
+    ("anthropic/claude-sonnet-5-5", "2026-11-23", true),
+    ("anthropic/claude-haiku-5-5", "2026-11-23", true),
+    ("anthropic/claude-fable-5-2", "2026-11-23", true),
+    ("anthropic/claude-mythos-5-1", "2026-11-23", true),
+    ("anthropic/claude-mythos-5-2", "2026-11-23", true),
 ];
+
+fn variant_cache_matches_dated_and_cloud_ids(identity: &str) -> bool {
+    VARIANT_CACHE_PRESERVING_MODELS
+        .iter()
+        .any(|(model, _, dated_and_cloud_ids)| *dated_and_cloud_ids && *model == identity)
+}
 
 fn canonical_variant_model_identity(
     provider_id: Option<&str>,
@@ -8816,6 +8832,19 @@ fn canonical_variant_model_identity(
             .is_match(&model)
     {
         return Some("anthropic/claude-fable-5-1".to_string());
+    }
+    if anthropic_family {
+        static CLAUDE_VARIANT_ALIAS: OnceLock<Regex> = OnceLock::new();
+        let alias = CLAUDE_VARIANT_ALIAS.get_or_init(|| {
+            Regex::new(r"^(?:(?:[a-z0-9-]+\.)?anthropic\.)?(?:claude-)?([a-z]+)[-_.]?([0-9]+)[-_.]([0-9]+)(?:[-@][0-9]{8})?(?:-v[0-9]+:[0-9]+)?$")
+                .expect("valid Claude variant model aliases")
+        });
+        if let Some(parts) = alias.captures(model.rsplit('/').next().unwrap_or(&model)) {
+            let identity = format!("anthropic/claude-{}-{}-{}", &parts[1], &parts[2], &parts[3]);
+            if variant_cache_matches_dated_and_cloud_ids(&identity) {
+                return Some(identity);
+            }
+        }
     }
     if model == "gpt-6-astra"
         && matches!(
@@ -8840,7 +8869,7 @@ fn variant_change_busts_provider_cache(provider_id: Option<&str>, model_key: Opt
     };
     if VARIANT_CACHE_PRESERVING_MODELS
         .iter()
-        .any(|(model, _verified_at)| *model == identity)
+        .any(|(model, _, _)| *model == identity)
     {
         return false;
     }
@@ -8856,20 +8885,44 @@ fn variant_change_busts_provider_cache(provider_id: Option<&str>, model_key: Opt
 fn cache_relevant_render_config<'a>(req: &'a TransformRequest) -> Cow<'a, str> {
     if req.render_config.is_empty()
         || variant_change_busts_provider_cache(req.provider_id.as_deref(), req.model_key.as_deref())
-        || !req
-            .render_config
-            .split('|')
-            .any(|part| part.starts_with("variant:"))
     {
-        return Cow::Borrowed(&req.render_config);
+        Cow::Borrowed(&req.render_config)
+    } else {
+        render_config_without_variant(&req.render_config)
+    }
+}
+
+fn render_config_without_variant(render_config: &str) -> Cow<'_, str> {
+    if !render_config
+        .split('|')
+        .any(|part| part.starts_with("variant:"))
+    {
+        return Cow::Borrowed(render_config);
     }
     Cow::Owned(
-        req.render_config
+        render_config
             .split('|')
             .filter(|part| !part.starts_with("variant:"))
             .collect::<Vec<_>>()
             .join("|"),
     )
+}
+
+// Older builds saved the effort for these models. Ignore that field when comparing
+// the saved identity so the allowlist update does not cause a fold on its own.
+fn comparable_stored_render_config<'a>(req: &TransformRequest, stored: &'a str) -> Cow<'a, str> {
+    if stored.contains("variant:")
+        && canonical_variant_model_identity(req.provider_id.as_deref(), req.model_key.as_deref())
+            .is_some_and(|identity| variant_cache_matches_dated_and_cloud_ids(&identity))
+    {
+        let base = render_config_base(stored);
+        if let Cow::Owned(mut normalized) = render_config_without_variant(base) {
+            // The length-prefixed epoch suffix can contain pipes in its field values.
+            normalized.push_str(&stored[base.len()..]);
+            return Cow::Owned(normalized);
+        }
+    }
+    Cow::Borrowed(stored)
 }
 
 fn render_identity_base(req: &TransformRequest, prompt_surface_epoch: &str) -> String {
@@ -8946,7 +8999,7 @@ fn can_adopt_system_identity(
         base
     };
     fold_mural_content_identity(&fold_m0_content_epoch(&base, &previous_epoch), mural_hash)
-        == meta.last_render_config
+        == comparable_stored_render_config(req, &meta.last_render_config)
 }
 
 fn m0_mural_input(
@@ -9022,16 +9075,17 @@ fn render_config_change(
         || req.model_key.is_some()
         || !req.system_prompt_hash.is_empty()
         || !req.upgrade_state.is_empty();
+    let previous = comparable_stored_render_config(req, &meta.last_render_config);
     let changed = meta.initialized
         && if transition_due || identity_observed || !coordinator_identity {
-            effective_render_config != meta.last_render_config
-        } else if meta.last_render_config.is_empty() {
+            effective_render_config != previous
+        } else if previous.is_empty() {
             false
-        } else if render_config_base(&meta.last_render_config).is_empty() {
+        } else if render_config_base(&previous).is_empty() {
             render_epoch_suffix(effective_render_config, true)
-                != render_epoch_suffix(&meta.last_render_config, true)
+                != render_epoch_suffix(&previous, true)
         } else {
-            effective_render_config != meta.last_render_config
+            effective_render_config != previous
         };
     #[cfg(feature = "drive-fault")]
     tracing::debug!(
@@ -23417,7 +23471,94 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn variant_cache_predicate_canonicalizes_astra_aliases_and_preserves_defaults() {
+    fn effort_change_preserves_rendered_bytes_and_queued_work() {
+        for model in [
+            "anthropic/claude-sonnet-5-5",
+            "anthropic/claude-haiku-5-5",
+            "anthropic/claude-fable-5-2",
+            "anthropic/claude-mythos-5-1",
+            "anthropic/claude-mythos-5-2",
+            "anthropic/claude-opus-5-5",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let mut request = effort_change_request(model, "high");
+            run(&s, &request, &spine());
+            let before = run(&s, &request, &spine());
+            assert_eq!(before.action, "SOFT+");
+            s.append_pending_agent_drops(&request.session_id, &["a#0".into()], 1)
+                .unwrap();
+
+            request.render_config = request
+                .render_config
+                .replace("variant:high", "variant:xhigh");
+            let after = run(&s, &request, &spine());
+            assert_eq!(after.action, "SOFT+", "{model}: {:?}", after.identity_delta);
+            assert_eq!(after.scheduler_decision.as_deref(), Some("defer"));
+            assert!(!after.committed);
+            assert_eq!(
+                canonical_response_hash(&after),
+                canonical_response_hash(&before)
+            );
+            assert_eq!(
+                s.load_pending_agent_drops(&request.session_id)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn effort_change_policy_upgrade_does_not_rebuild_a_cache_keeping_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = effort_change_request("anthropic/claude-sonnet-5-5", "high");
+        let session = request.session_id.clone();
+        request.render_config = request.render_config.replace("|variant:high", "");
+        run(&s, &request, &spine());
+        let before = run(&s, &request, &spine());
+        assert_eq!(before.action, "SOFT+");
+
+        let mut loaded = s.load(&session).unwrap();
+        assert!(loaded.meta.last_render_config.contains("|m0epoch["));
+        loaded.meta.last_render_config =
+            loaded
+                .meta
+                .last_render_config
+                .replacen("|m0epoch[", "|variant:high|m0epoch[", 1);
+        s.commit(&session, loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+
+        let render_config = request.render_config.clone();
+        for effort in ["xhigh", "high"] {
+            request.render_config = format!("{render_config}|variant:{effort}");
+            let after = run(&s, &request, &spine());
+            assert_eq!(after.action, "SOFT+", "{:?}", after.identity_delta);
+            assert!(!after.committed);
+            assert!(after.identity_delta.is_empty());
+            assert_eq!(
+                canonical_response_hash(&after),
+                canonical_response_hash(&before)
+            );
+        }
+    }
+
+    fn effort_change_request(model: &str, effort: &str) -> TransformRequest {
+        let provider = model.split_once('/').unwrap().0;
+        let mut request = req(
+            "effort-change",
+            &format!("provider:{provider}|model:{model}|variant:{effort}"),
+            vec![item("a", 1, "keep me")],
+        );
+        request.serializer_profile = "opencode-aisdk".to_string();
+        request.provider_id = Some(provider.to_string());
+        request.model_key = Some(model.to_string());
+        request
+    }
+
+    #[test]
+    fn variant_cache_predicate_canonicalizes_model_aliases_and_preserves_defaults() {
         for model_key in [
             "openai/gpt-6-astra",
             "openai-codex/gpt-6-astra",
@@ -23437,6 +23578,33 @@ pub(crate) mod tests {
             Some("anthropic"),
             Some("anthropic/claude-opus-5-5")
         ));
+        assert!(variant_change_busts_provider_cache(
+            None,
+            Some("amazon-bedrock/us.anthropic.claude-opus-5-5-v1:0")
+        ));
+        assert!(variant_change_busts_provider_cache(
+            None,
+            Some("anthropic/claude-mythos-5-21")
+        ));
+        for id in [
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-2",
+            "claude-mythos-5-1",
+            "claude-mythos-5-2",
+        ] {
+            for model_key in [
+                format!("anthropic/{id}"),
+                format!("anthropic/{id}-20261123"),
+                format!("amazon-bedrock/us.anthropic.{id}-v1:0"),
+                format!("google-vertex-anthropic/{id}@20261123"),
+            ] {
+                assert!(
+                    !variant_change_busts_provider_cache(None, Some(&model_key)),
+                    "{model_key}"
+                );
+            }
+        }
         assert!(variant_change_busts_provider_cache(
             Some("anthropic"),
             Some("anthropic/claude-opus-4-1")
