@@ -163,6 +163,7 @@ enum Job {
         now: u64,
         reply: oneshot::Sender<Addition>,
     },
+    RunEnded,
     Idle(oneshot::Sender<()>),
     /// A move's `busy`: answers whether a view offered to the runner is
     /// still unconfirmed. Changes nothing.
@@ -1593,7 +1594,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             let mut unread: VecDeque<Job> = VecDeque::new();
             // A session without a summarizer is freed sooner once the runner
             // says its run ended.
-            let watch_run_end = || inner.client.run_ends().map(|ends| ends.watch(&held_key));
+            let watch_run_end = || {
+                inner.client.run_ends().map(|ends| {
+                    let own = own.clone();
+                    ends.on_end(&held_key, move || {
+                        if let Some(jobs) = own.upgrade() {
+                            let _ = jobs.send(Job::RunEnded);
+                        }
+                    })
+                })
+            };
             let mut run_end = if subagent { watch_run_end() } else { None };
             let mut run_ended = false;
             // When each recent job started, so a slow tool call can name the
@@ -1614,28 +1624,15 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             QUIET_AFTER
                         };
                         let quiet_at = now + quiet_after;
-                        let ended = async {
-                            match &run_end {
-                                Some(watch) => watch.ended().await,
-                                None => std::future::pending().await,
-                            }
-                        };
                         // Biased, so a job that is waiting always runs before
                         // the session is freed.
-                        let waited = tokio::select! {
+                        tokio::select! {
                             biased;
-                            job = receiver.recv() => Ok(job),
-                            () = tokio::time::sleep_until(quiet_at) => Err(NoJob::Quiet),
-                            () = ended => Err(NoJob::RunEnded),
-                        };
-                        match waited {
-                            Ok(Some(job)) => job,
-                            Ok(None) => break,
-                            Err(NoJob::RunEnded) => {
-                                run_ended = true;
-                                continue;
-                            }
-                            Err(NoJob::Quiet) => {
+                            job = receiver.recv() => match job {
+                                Some(job) => job,
+                                None => break,
+                            },
+                            () = tokio::time::sleep_until(quiet_at) => {
                                 let freed = held.is_empty()
                                     && unread.is_empty()
                                     && !retry_save
@@ -1665,7 +1662,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                 };
                 let mut job = job;
-                idle_since = None;
+                if !matches!(job, Job::RunEnded) {
+                    idle_since = None;
+                }
                 let taken = std::time::Instant::now();
                 jobs_run.started(job_kind(&job), taken);
                 if let Job::Tool { timing, .. } = &mut job {
@@ -1715,6 +1714,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     &job,
                     Job::Idle(_)
                         | Job::Busy(_)
+                        | Job::RunEnded
                         | Job::Resume
                         | Job::Park { .. }
                         | Job::Discard { .. }
@@ -1814,6 +1814,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     &job,
                     Job::Idle(_)
                         | Job::Busy(_)
+                        | Job::RunEnded
                         | Job::Resume
                         | Job::Park { .. }
                         | Job::Discard { .. }
@@ -1846,6 +1847,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 }
                 match job {
                     Job::Resume => continue,
+                    Job::RunEnded => {
+                        // A later session job clears this flag, even if both
+                        // jobs were queued while the worker was blocked.
+                        run_ended = subagent;
+                        continue;
+                    }
                     Job::Command { request, reply } => {
                         if session.is_none() {
                             if let Some(durable) =
@@ -2380,6 +2387,7 @@ fn hold(
     match job {
         Job::Setup(..)
         | Job::Notice(_)
+        | Job::RunEnded
         | Job::SummaryFinished(..)
         | Job::AccountWait(_)
         | Job::Workspace { .. } => {
@@ -2445,6 +2453,7 @@ fn job_kind(job: &Job) -> &'static str {
             _ => "tool",
         },
         Job::PreUser { .. } => "pre_user",
+        Job::RunEnded => "run_ended",
         Job::Idle(_) => "idle",
         Job::Busy(_) => "busy",
         Job::Resume => "resume",
@@ -2463,14 +2472,6 @@ fn view_unconfirmed(session: Option<&Session>) -> bool {
     session
         .filter(|session| session.compacting())
         .is_some_and(|session| !session.durable().unconfirmed.is_empty())
-}
-
-/// Why a worker stopped waiting for its next job without one.
-enum NoJob {
-    /// The session's quiet time passed.
-    Quiet,
-    /// The runner said the session's run ended.
-    RunEnded,
 }
 
 /// What a worker that frees its session keeps besides the session, and

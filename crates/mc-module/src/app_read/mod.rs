@@ -402,6 +402,8 @@ enum Command {
     CacheStats(oneshot::Sender<(usize, usize)>),
     #[cfg(test)]
     LoadGate(mpsc::Sender<()>, mpsc::Receiver<()>),
+    #[cfg(test)]
+    ThreadGate(oneshot::Sender<()>, mpsc::Receiver<()>),
     Activate(SessionRef, oneshot::Sender<()>),
     #[cfg(test)]
     Publish(Box<Snapshot>),
@@ -570,6 +572,11 @@ impl AppRead {
                         Command::LoadGate(started, resume) => {
                             replica.cache.load_gate = Some((started, resume));
                         }
+                        #[cfg(test)]
+                        Command::ThreadGate(started, resume) => {
+                            let _ = started.send(());
+                            let _ = resume.recv();
+                        }
                         Command::Activate(key, reply) => {
                             replica.activate(&key);
                             let _ = reply.send(());
@@ -613,6 +620,16 @@ impl AppRead {
 
     pub(crate) fn update(&self, update: Update) {
         let _ = self.tx.send(Command::Update(update));
+    }
+
+    /// Pause the replica before its next command until the sender is signalled or dropped.
+    #[cfg(test)]
+    pub(crate) async fn gate_thread(&self) -> mpsc::Sender<()> {
+        let (started, waiting) = oneshot::channel();
+        let (resume, held) = mpsc::channel();
+        self.tx.send(Command::ThreadGate(started, held)).unwrap();
+        waiting.await.unwrap();
+        resume
     }
 
     pub(crate) async fn activate(&self, key: &SessionRef) {

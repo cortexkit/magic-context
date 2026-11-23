@@ -303,8 +303,6 @@ async fn every_event_is_acknowledged_once_handled_and_an_unnamed_one_stops_nothi
 
 #[tokio::test]
 async fn foreign_run_end_subjects_are_acknowledged_without_waking_either_runner() {
-    use futures_util::FutureExt as _;
-
     let ends = Arc::new(RunEnds::new());
     let (feed, pulls) = Feed::new();
     let reader = tokio::spawn({
@@ -322,17 +320,23 @@ async fn foreign_run_end_subjects_are_acknowledged_without_waking_either_runner(
         crate::agent_data::source::session_ref(&thalamus),
     );
     for (child, event) in [(broca, broca_event), (thalamus, thalamus_event)] {
-        let watch = ends.watch(&child);
+        let (enqueue, mut jobs) = mpsc::unbounded_channel();
+        let _watch = ends.on_end(&child, move || enqueue.send(()).unwrap());
         let mut foreign = event.clone();
         foreign.subject = event.subject.replacen("ck.box_test.", "ck.box_other.", 1);
         pulls.send(Pull::Event(foreign)).unwrap();
         feed.ack.notified().await;
-        assert!(watch.ended().now_or_never().is_none(), "{}", event.subject);
+        assert_eq!(
+            jobs.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty),
+            "{}",
+            event.subject
+        );
 
         // A rejected message must not mark the matching event's id as handled.
         pulls.send(Pull::Event(event)).unwrap();
         feed.ack.notified().await;
-        assert!(watch.ended().now_or_never().is_some());
+        assert_eq!(jobs.try_recv(), Ok(()));
     }
     pulls.send(Pull::Fail("done".into())).unwrap();
     assert_eq!(reader.await.unwrap(), "done");
@@ -538,11 +542,12 @@ fn broca_samples_of_its_other_run_events_wake_nothing() {
 
 #[tokio::test]
 async fn configured_run_started_is_acknowledged_without_warning_or_drop() {
-    use futures_util::FutureExt as _;
-
     let mut log = crate::test_log::capture();
     let ends = RunEnds::new();
-    let watch = ends.watch(&SessionRef::new("broca", "store-actor", "s1"));
+    let (enqueue, mut jobs) = mpsc::unbounded_channel();
+    let _watch = ends.on_end(&SessionRef::new("broca", "store-actor", "s1"), move || {
+        enqueue.send(()).unwrap()
+    });
     let (feed, pulls) = Feed::for_account("box_sample");
     let started = broca_sample("01-run.started.json");
     assert_eq!(
@@ -556,7 +561,7 @@ async fn configured_run_started_is_acknowledged_without_warning_or_drop() {
     log.stop();
 
     assert_eq!(feed.acked(), [id]);
-    assert!(watch.ended().now_or_never().is_none());
+    assert_eq!(jobs.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     assert_eq!(ends.subject_drops.count(), 0);
     assert_eq!(log.count("dropped a bus delivery"), 0);
 }

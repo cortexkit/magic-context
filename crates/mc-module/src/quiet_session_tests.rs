@@ -256,6 +256,14 @@ impl Fixture {
         settle().await;
     }
 
+    /// Finish the search and app checkpoint work before measuring a quiet
+    /// period, so neither can delay freeing or reset its timer.
+    async fn drain_quiet_prerequisites(&self) {
+        self.notice(1, None, None).await;
+        self.module.search_idle(self.key()).await.unwrap();
+        self.module.flush_app_snapshots().await;
+    }
+
     /// What the apps read of the session, without the times each answer
     /// stamps when it is made.
     async fn app_reads(&self) -> Vec<Value> {
@@ -297,6 +305,16 @@ async fn settle() {
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }
+}
+
+/// The paused runtime runs earlier timers before advancing to this one.
+async fn wait_past_quiet_deadline(quiet_for: Duration) {
+    tokio::time::timeout(
+        quiet_for + Duration::from_secs(1),
+        std::future::pending::<()>(),
+    )
+    .await
+    .unwrap_err();
 }
 
 /// Remove every member that holds a wall-clock time (`*_ms`): two modules
@@ -490,8 +508,7 @@ async fn quiet_a_notice_sent_as_the_quiet_time_ends_runs_once_on_the_worker() {
 /// The runner reports that the session's run ended, then a minute passes
 /// after the session's last job; whether the session is quiet then.
 async fn quiet_a_minute_after_the_run_ended(f: &Fixture) -> bool {
-    f.notice(1, None, None).await;
-    f.module.search_idle(f.key()).await.unwrap();
+    f.drain_quiet_prerequisites().await;
     // A job that starts the worker again if the paused clock freed the
     // session while the search index was waited for. A `pre_user` answered
     // from a freed session reads the session again right after it: wait for
@@ -499,12 +516,21 @@ async fn quiet_a_minute_after_the_run_ended(f: &Fixture) -> bool {
     f.module.pre_user(f.key(), "next", 0).await;
     f.module.idle_foreground(f.key()).await.unwrap();
     assert!(!f.quiet());
-    f.client()
+    let woke = f
+        .client()
         .ends
         .wake(None, &crate::agent_data::source::session_ref(f.key()));
-    settle().await;
-    tokio::time::advance(QUIET_AFTER_RUN_END + Duration::from_secs(1)).await;
-    settle().await;
+    assert_eq!(
+        woke,
+        if f.setup.preset == "worker" {
+            crate::run_ends::Woke::Waits(1)
+        } else {
+            crate::run_ends::Woke::Nobody
+        }
+    );
+    // Wait for the worker to handle the queued run-end job before measuring.
+    f.module.idle_foreground(f.key()).await.unwrap();
+    wait_past_quiet_deadline(QUIET_AFTER_RUN_END).await;
     f.quiet()
 }
 

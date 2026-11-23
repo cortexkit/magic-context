@@ -96,23 +96,32 @@ async fn quiet_review_an_over_limit_ride_after_a_free_gets_the_view_a_kept_sessi
 #[tokio::test(start_paused = true)]
 async fn quiet_review_a_worker_whose_next_run_started_waits_its_whole_quiet_time() {
     let f = Fixture::new("worker", false).await;
-    f.notice(1, None, None).await;
-    f.module.search_idle(f.key()).await.unwrap();
-    // A job that touches no thread, so the clock stays where it is. The
-    // paused clock may have freed the session while the search index was
-    // waited for; this job starts its worker again.
+    f.drain_quiet_prerequisites().await;
+    wait_past_quiet_deadline(QUIET_AFTER).await;
+    assert!(f.quiet(), "the worker went quiet without a run-end event");
+
+    // The hook uses the state kept when the worker went quiet to answer
+    // before resuming. Hold the replica thread so the previous run's end
+    // and the next hook both arrive before the worker finishes resuming.
+    let resume_replica = f.module.inner.app_read.gate_thread().await;
     f.module.pre_user(f.key(), "next", 0).await;
     assert!(!f.quiet());
-    f.client()
-        .ends
-        .wake(None, &crate::agent_data::source::session_ref(f.key()));
-    settle().await;
-    // The parent writes to the worker again: its next run starts.
-    f.module
-        .pre_user(f.key(), "One more thing: fix the lexer too", 0)
-        .await;
-    tokio::time::advance(QUIET_AFTER_RUN_END + Duration::from_secs(1)).await;
-    settle().await;
+    assert_eq!(
+        f.client()
+            .ends
+            .wake(None, &crate::agent_data::source::session_ref(f.key())),
+        crate::run_ends::Woke::Waits(1),
+    );
+    let next = f
+        .module
+        .pre_user(f.key(), "One more thing: fix the lexer too", 0);
+    tokio::pin!(next);
+    assert!(futures_util::poll!(&mut next).is_pending());
+
+    resume_replica.send(()).unwrap();
+    next.await;
+    f.module.idle_foreground(f.key()).await.unwrap();
+    wait_past_quiet_deadline(QUIET_AFTER_RUN_END).await;
     assert!(
         !f.quiet(),
         "a worker in its next run was freed a minute after its last job"
@@ -126,18 +135,16 @@ async fn quiet_review_a_worker_whose_next_run_started_waits_its_whole_quiet_time
 #[tokio::test(start_paused = true)]
 async fn quiet_review_a_run_end_reader_that_stops_ends_no_run() {
     let f = Fixture::new("worker", false).await;
-    f.notice(1, None, None).await;
-    f.module.search_idle(f.key()).await.unwrap();
+    f.drain_quiet_prerequisites().await;
     // Starts the worker again if the paused clock freed the session while
     // the search index was waited for.
     f.module.pre_user(f.key(), "next", 0).await;
+    f.module.idle_foreground(f.key()).await.unwrap();
     assert!(!f.quiet());
     let ends = &f.client().ends;
     ends.reading();
     ends.stopped("the event stream went away");
-    settle().await;
-    tokio::time::advance(QUIET_AFTER_RUN_END + Duration::from_secs(1)).await;
-    settle().await;
+    wait_past_quiet_deadline(QUIET_AFTER_RUN_END).await;
     assert!(
         !f.quiet(),
         "a worker whose run did not end was freed a minute after its last job"
