@@ -324,9 +324,12 @@ pub enum RideCauseKind {
     /// lane lands and the emergency drop runs whatever the usage.
     OverLimit,
     /// The request needs a new prefix anyway (`model_change`, `surface_change`,
-    /// `effort_change`). The model, system prompt, tool definitions or request
-    /// settings change in a way that loses the cached prefix and invalidates
-    /// signed thinking. The head folds and every lane lands in that same rewrite.
+    /// `effort_change`). The model, system prompt, tool definitions or the
+    /// effort setting change, and the provider writes the whole request again.
+    /// A runner reports `effort_change` only where the effort change itself
+    /// loses the cached prefix. That rewrite is already paid for, so the
+    /// summary history at the start of the conversation is rebuilt and every
+    /// queued reduction (drops, history, cleanup) is applied in it.
     PrefixChanges,
     /// No change to the request's prefix bytes is established (`cache_expired`,
     /// `chain_reset`, `tier_change`, `account_change`, `window_over_budget`,

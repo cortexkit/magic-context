@@ -3,10 +3,11 @@
 //! A ride whose causes only say the provider forgot its cache (expiry, a
 //! chain reset, a tier or account switch, an unknown cause) permits nothing
 //! by itself: resending the same bytes keeps signed thinking valid and the
-//! re-read is paid either way. A ride whose request's bytes before the
-//! conversation change (`surface_change`, `model_change`, `effort_change`)
-//! folds the head and lands everything, and `over_limit` keeps its own
-//! pressure handling.
+//! re-read is paid either way. When the request's bytes before the
+//! conversation change (`surface_change`, `model_change`, `effort_change`),
+//! the provider writes the whole request again anyway: the summary history at
+//! the start of the conversation is rebuilt and every queued reduction is
+//! applied in that rewrite. `over_limit` keeps its own pressure handling.
 
 use super::*;
 
