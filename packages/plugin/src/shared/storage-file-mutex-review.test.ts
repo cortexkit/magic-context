@@ -68,6 +68,25 @@ test("mutex retries ticket creation when empty-directory cleanup wins the mkdir 
     }
 });
 
+test("mutex keeps retrying ticket creation while cleanups remove the directory", () => {
+    const { dir: root, cleanup } = createTestTempDir("mc-mutex-rmdir-repeat-");
+    const directory = join(root, "locks");
+    const write = permissions.writeStorageFileSync;
+    let attempts = 0;
+    const writer = spyOn(permissions, "writeStorageFileSync").mockImplementation((...args) => {
+        // Three releases in sequence each remove the empty directory.
+        if (attempts++ < 3) rmdirSync(directory);
+        return write(...args);
+    });
+    try {
+        expect(withStorageFileMutex(directory, () => "acquired")).toBe("acquired");
+        expect(attempts).toBe(5);
+    } finally {
+        writer.mockRestore();
+        cleanup();
+    }
+});
+
 async function holder(root: string) {
     const script = `
 import { existsSync } from 'node:fs';
