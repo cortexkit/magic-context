@@ -925,6 +925,11 @@ fn opencode_probe_dir() -> PathBuf {
 
 fn opencode_probe_dir_from(storage: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
     match storage {
+        // A relative folder would resolve under the launch directory again.
+        Some(dir) if !dir.is_absolute() => eprintln!(
+            "WARN: the Magic Context data folder {} is relative; using the home folder for the OpenCode probe",
+            dir.display()
+        ),
         Some(dir) => match config::ensure_private_config_directory(&dir) {
             Ok(()) => return dir,
             Err(err) => eprintln!(
@@ -1929,6 +1934,36 @@ mod tests {
         let fallback = super::opencode_probe_dir_from(None, None);
         assert_eq!(fallback, std::env::temp_dir());
         assert_ne!(Some(fallback), std::env::current_dir().ok());
+    }
+
+    #[test]
+    fn opencode_probe_dir_rejects_relative_storage_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let relative =
+            std::path::PathBuf::from(format!("mc-probe-relative-{}", std::process::id()));
+        assert_eq!(
+            super::opencode_probe_dir_from(Some(relative.clone()), Some(home.clone())),
+            home
+        );
+        assert!(!relative.exists(), "a relative folder must not be created");
+    }
+
+    #[test]
+    fn opencode_probe_dir_treats_blank_xdg_data_home_as_unset() {
+        let mut env = crate::test_env::EnvGuard::new();
+        let root = tempfile::tempdir().unwrap();
+        env.remove("MAGIC_CONTEXT_STORAGE_DIR");
+        env.set("HOME", root.path());
+        env.set("XDG_DATA_HOME", "  ");
+        let expected = root
+            .path()
+            .join(".local")
+            .join("share")
+            .join("cortexkit")
+            .join("magic-context");
+        assert_eq!(super::opencode_probe_dir(), expected);
+        assert!(expected.is_dir());
     }
 
     #[cfg(unix)]
