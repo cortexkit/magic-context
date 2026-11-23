@@ -9,6 +9,7 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import * as messageIndex from "@magic-context/core/features/magic-context/message-index-async";
 import {
 	getOrCreateSessionMeta,
 	getTagsBySession,
@@ -17,9 +18,15 @@ import {
 import { markTagDropped } from "@magic-context/core/features/magic-context/storage-tags";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { bumpEpochsForWorkspaceMembers } from "@magic-context/core/features/magic-context/workspaces";
+import * as warmup from "@magic-context/core/hooks/magic-context/raw-ordinal-warmup";
 import { getServedCheckCountersForTest } from "@magic-context/core/hooks/magic-context/served-check";
 import * as loggerModule from "@magic-context/core/shared/logger";
-import { Database } from "@magic-context/core/shared/sqlite";
+import {
+	Database,
+	isSqliteTransactionOpen,
+	withoutSqliteTransformPass,
+	withSqliteTransformPass,
+} from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
@@ -82,6 +89,43 @@ test("Pi: ordinary turns and a plain replay log nothing; a replay with a drop th
 	const restoreLogs = __test.setLkgRecoveryLogObserverForTests((line) =>
 		replayLogs.push(line),
 	);
+	const writerGate = new Int32Array(new SharedArrayBuffer(8));
+	const startWriter = Promise.withResolvers<void>();
+	const releaseWriter = () => {
+		Atomics.store(writerGate, 1, 1);
+		Atomics.notify(writerGate, 1);
+	};
+	const runWorker = warmup.runSessionWarmupWorker;
+	const scheduleReconciliation = messageIndex.scheduleReconciliation;
+	const reconciliationSpy = spyOn(
+		messageIndex,
+		"scheduleReconciliation",
+	).mockImplementation((connection, id, source) => {
+		// Let the incremental worker, not scheduled reconciliation, index
+		// the first message.
+		if (connection !== db || id !== sessionId)
+			scheduleReconciliation(connection, id, source);
+	});
+	let pausedWriter: ReturnType<typeof runWorker> | undefined;
+	const workerSpy = spyOn(warmup, "runSessionWarmupWorker").mockImplementation(
+		(input, options) => {
+			if (input.path !== path || input.indexMessage?.id !== "entry-1")
+				return runWorker(input, options);
+			// Start the first ordinary pass's incremental write after the busy
+			// pass's metadata update, but before the fixture tries to own SQLite.
+			const data = { ...input, writerGate: writerGate.buffer };
+			pausedWriter = startWriter.promise.then(() =>
+				runWorker(data, {
+					...options,
+					entry: new URL(
+						"./test-support/served-check-index-worker.fixture.ts",
+						import.meta.url,
+					),
+				}),
+			);
+			return pausedWriter;
+		},
+	);
 	const raw: PiMessage[] = [userMessage("start", 1)];
 	const model = {
 		provider: "anthropic",
@@ -130,7 +174,17 @@ test("Pi: ordinary turns and a plain replay log nothing; a replay with a drop th
 		if (busy) {
 			// Another connection holds SQLite's writer for the whole pass.
 			db.exec("PRAGMA busy_timeout=0");
-			locker.exec("BEGIN IMMEDIATE");
+			startWriter.resolve();
+			const acquired = Atomics.waitAsync(writerGate, 0, 0, 10_000);
+			if (acquired.async) await acquired.value;
+			expect(Atomics.load(writerGate, 0)).toBe(1);
+			expect(isSqliteTransactionOpen(db)).toBe(false);
+			queueMicrotask(releaseWriter);
+			// Wait for the off-thread index transaction, then acquire SQLite's
+			// writer before more indexing starts. Keep the locker nonblocking.
+			await withSqliteTransformPass(() =>
+				withoutSqliteTransformPass(() => locker.exec("BEGIN IMMEDIATE")),
+			);
 		}
 		try {
 			return await withEvents(() =>
@@ -160,6 +214,7 @@ test("Pi: ordinary turns and a plain replay log nothing; a replay with a drop th
 
 		turn(4);
 		const plain = await pass(true);
+		expect(await pausedWriter).toMatchObject({ inserted: true });
 		expect(replayLogs.join("\n")).toContain("LKG replay served");
 		expect(plain.events).toEqual([]);
 
@@ -192,7 +247,12 @@ test("Pi: ordinary turns and a plain replay log nothing; a replay with a drop th
 		).toBe(true);
 	} finally {
 		restoreLogs();
+		workerSpy.mockRestore();
+		reconciliationSpy.mockRestore();
+		startWriter.resolve();
+		releaseWriter();
 		clearContextHandlerSession(sessionId);
+		await pausedWriter;
 		closeQuietly(locker);
 		closeQuietly(db);
 		rmSync(root, { recursive: true, force: true });
