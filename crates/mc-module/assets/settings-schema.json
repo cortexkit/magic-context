@@ -649,7 +649,7 @@
           ]
         }
       },
-      "title": "Prompt surface",
+      "title": "Prompt presets",
       "description": "What the model is told about Magic Context.",
       "x-ck-apply": "live",
       "x-ck-layers": [
