@@ -15,10 +15,10 @@ describe("variantChangeBustsProviderCache", () => {
         ],
         ["Opus 5.5 effort flip is non-busting", "anthropic", "claude-opus-5-5", false],
         [
-            "Opus 5.5 Bedrock behavior is unchanged",
+            "Opus 5.5 Bedrock id keeps the cache",
             "amazon-bedrock",
             "us.anthropic.claude-opus-5-5-v1:0",
-            true,
+            false,
         ],
         ["older Anthropic behavior remains busting", "anthropic", "claude-opus-4-1", true],
         ["unlisted adjacent version still busts", "anthropic", "claude-mythos-5-21", true],

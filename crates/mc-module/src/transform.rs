@@ -8791,14 +8791,15 @@ fn render_config_base(render_config: &str) -> &str {
 /// requests, and the flip back read that same prefix again. The flip itself therefore costs
 /// nothing at the provider, while a HARD on it rewrites every re-rendered message.
 /// The five entries added on 2026-11-23 follow the maintainer's rule for newer Claude
-/// models: per-message effort leaves the cached prefix intact. The third field enables
-/// native `-YYYYMMDD`, Vertex `@YYYYMMDD` and Bedrock IDs for those additions.
+/// models: per-message effort leaves the cached prefix intact. The third field also matches
+/// native `-YYYYMMDD`, Vertex `@YYYYMMDD` and Bedrock IDs for every Claude entry except
+/// Fable 5.1, which has its own matcher.
 /// Keep the entries and matching in sync with
 /// `VARIANT_CACHE_PRESERVING_MODELS` in the OpenCode plugin's sentinel.ts (shared by Pi).
 const VARIANT_CACHE_PRESERVING_MODELS: [(&str, &str, bool); 8] = [
     ("anthropic/claude-fable-5-1", "2026-09-02", false),
     ("openai/gpt-6-astra", "2026-09-05", false),
-    ("anthropic/claude-opus-5-5", "2026-09-23", false),
+    ("anthropic/claude-opus-5-5", "2026-09-23", true),
     ("anthropic/claude-sonnet-5-5", "2026-11-23", true),
     ("anthropic/claude-haiku-5-5", "2026-11-23", true),
     ("anthropic/claude-fable-5-2", "2026-11-23", true),
@@ -8908,8 +8909,9 @@ fn render_config_without_variant(render_config: &str) -> Cow<'_, str> {
     )
 }
 
-// Older builds saved the effort for these models. Ignore that field when comparing
-// the saved identity so the allowlist update does not cause a fold on its own.
+// Builds before 0.49.72 saved the effort in the render identity of these models. Ignore
+// that field when comparing against the saved identity, so upgrading doesn't look like
+// a render change and rebuild the whole cached prefix (`m[0]`) for nothing.
 fn comparable_stored_render_config<'a>(req: &TransformRequest, stored: &'a str) -> Cow<'a, str> {
     if stored.contains("variant:")
         && canonical_variant_model_identity(req.provider_id.as_deref(), req.model_key.as_deref())
@@ -8917,7 +8919,8 @@ fn comparable_stored_render_config<'a>(req: &TransformRequest, stored: &'a str) 
     {
         let base = render_config_base(stored);
         if let Cow::Owned(mut normalized) = render_config_without_variant(base) {
-            // The length-prefixed epoch suffix can contain pipes in its field values.
+            // Only the base before the render-epoch suffix is split on `|`; the suffix's
+            // length-prefixed values can themselves contain `|`, so it is copied as is.
             normalized.push_str(&stored[base.len()..]);
             return Cow::Owned(normalized);
         }
@@ -23578,7 +23581,7 @@ pub(crate) mod tests {
             Some("anthropic"),
             Some("anthropic/claude-opus-5-5")
         ));
-        assert!(variant_change_busts_provider_cache(
+        assert!(!variant_change_busts_provider_cache(
             None,
             Some("amazon-bedrock/us.anthropic.claude-opus-5-5-v1:0")
         ));

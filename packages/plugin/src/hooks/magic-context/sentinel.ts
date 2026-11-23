@@ -135,7 +135,8 @@ export function neutralizedReasoningSource(part: unknown): unknown {
  * 2026-09-23 (an effort high -> default -> high round trip kept reading the
  * same cached message prefix). The five entries added on 2026-11-23 follow the
  * maintainer's rule for newer Claude models: per-message effort leaves the
- * cached prefix intact. Keep the entries and ID matching in sync with
+ * cached prefix intact. The second field also matches dated native, Bedrock and
+ * Vertex IDs; Fable 5.1 has its own matcher. Keep the entries and ID matching in sync with
  * `VARIANT_CACHE_PRESERVING_MODELS` in crates/mc-module/src/transform.rs.
  */
 const VARIANT_CACHE_PRESERVING_MODELS: Readonly<
@@ -143,7 +144,7 @@ const VARIANT_CACHE_PRESERVING_MODELS: Readonly<
 > = {
     "anthropic/claude-fable-5-1": ["2026-09-02"],
     "openai/gpt-6-astra": ["2026-09-05"],
-    "anthropic/claude-opus-5-5": ["2026-09-23"],
+    "anthropic/claude-opus-5-5": ["2026-09-23", true],
     "anthropic/claude-sonnet-5-5": ["2026-11-23", true],
     "anthropic/claude-haiku-5-5": ["2026-11-23", true],
     "anthropic/claude-fable-5-2": ["2026-11-23", true],

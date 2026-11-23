@@ -27,8 +27,9 @@ export async function ensureMemoryEmbeddings(args: {
         return args.existingEmbeddings;
     }
 
-    // The background drain has no explicit order. Choose by memory ID so the
-    // search budget picks the same rows regardless of how candidates were loaded.
+    // Candidates arrive in whatever order the caller loaded them, and the
+    // background embedding job's query has no order either. Choosing by memory
+    // ID makes the search budget pick the same rows every time.
     const missingMemories = args.memories
         .filter((memory) => !args.existingEmbeddings.has(memory.id))
         .sort((a, b) => a.id - b.id)
