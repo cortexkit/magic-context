@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Magic Context (ck-mc) settings",
+  "title": "Magic Context",
   "type": "object",
   "unevaluatedProperties": false,
   "x-ck-apply": "live",
@@ -20,6 +20,7 @@
           "default": 65,
           "minimum": 20,
           "maximum": 90,
+          "title": "Model execute threshold",
           "description": "The execute threshold for the models this key names, 20 to 90 percent.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -32,6 +33,7 @@
       "default": {
         "default": 65
       },
+      "title": "Execute threshold",
       "description": "Context usage, as a percentage of the usable window, at which a pass executes: `default` for every model, plus entries for provider/model or model keys.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -50,6 +52,7 @@
           "default": 5000,
           "minimum": 5000,
           "maximum": 2000000,
+          "title": "Model execute threshold in tokens",
           "description": "The execute threshold in tokens, 5,000 to 2,000,000.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -60,6 +63,7 @@
         }
       },
       "default": {},
+      "title": "Execute threshold in tokens",
       "description": "Execute thresholds in tokens for the models a key names; one that applies wins over every percentage.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -78,6 +82,7 @@
           "default": 10000,
           "minimum": 0,
           "maximum": 1000000,
+          "title": "Reasoning tokens kept per model",
           "description": "Reasoning tokens kept, 0 to 1,000,000.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -90,6 +95,7 @@
       "default": {
         "default": 10000
       },
+      "title": "Kept reasoning tokens",
       "description": "Reasoning tokens the newest assistant messages keep: `default`, provider/* and model keys.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -111,6 +117,7 @@
               "type": "string",
               "default": "auto",
               "const": "auto",
+              "title": "Protection mode",
               "description": "Selects a size derived from the usable window.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -120,6 +127,7 @@
               ]
             }
           },
+          "title": "Automatic protection",
           "description": "a size derived from the usable window",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -140,6 +148,7 @@
               "type": "string",
               "default": "tokens",
               "const": "tokens",
+              "title": "Protection mode",
               "description": "Selects a fixed number of tokens.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -152,6 +161,7 @@
               "type": "integer",
               "minimum": 4000,
               "maximum": 1000000,
+              "title": "Protected token count",
               "description": "Tokens left alone, 4,000 to 1,000,000.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -162,6 +172,7 @@
               "x-ck-required": true
             }
           },
+          "title": "Fixed token count",
           "description": "a fixed number of tokens",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -171,6 +182,7 @@
           ]
         }
       ],
+      "title": "Protected tokens",
       "description": "Tokens of the newest tool output the routine heuristics leave alone. Absent means auto: a size derived from the usable window.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -188,6 +200,7 @@
           "type": "integer",
           "default": 1,
           "minimum": 0,
+          "title": "Kept results per tool",
           "description": "How many of the tool's newest results are kept.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -198,6 +211,7 @@
         }
       },
       "default": {},
+      "title": "Protected tools",
       "description": "Tools whose newest results are never dropped automatically, by tool name, with how many results each keeps; added to the built-in todowrite (1) and ctx_reduce (3).",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -211,6 +225,7 @@
       "default": 0.15,
       "minimum": 0.05,
       "maximum": 0.5,
+      "title": "History budget",
       "description": "The history head's budget, as a share of the window up to the execute threshold, 0.05 to 0.5.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -226,6 +241,7 @@
         "enabled": {
           "type": "boolean",
           "default": true,
+          "title": "Enable memory",
           "description": "Project memories, primers and their search.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -237,6 +253,7 @@
         "auto_promote": {
           "type": "boolean",
           "default": true,
+          "title": "Automatic memory promotion",
           "description": "Facts a summary finds become project memories.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -250,6 +267,7 @@
           "default": 4000,
           "minimum": 500,
           "maximum": 20000,
+          "title": "Memory injection budget",
           "description": "Project memories shown in the history head, in tokens, 500 to 20,000.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -265,6 +283,7 @@
             "enabled": {
               "type": "boolean",
               "default": true,
+              "title": "Enable automatic search",
               "description": "Add a memory hint to a person's message when a search finds something related.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -278,6 +297,7 @@
               "default": 0.6,
               "minimum": 0.3,
               "maximum": 0.95,
+              "title": "Search score threshold",
               "description": "The relevance a fragment needs to appear in the hint, 0.3 to 0.95.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -291,6 +311,7 @@
               "default": 20,
               "minimum": 5,
               "maximum": 500,
+              "title": "Minimum prompt length",
               "description": "Shorter messages get no hint, 5 to 500 characters.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -300,6 +321,7 @@
               ]
             }
           },
+          "title": "Automatic memory search",
           "description": "Memory hints on a person's message.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -315,6 +337,7 @@
             "enabled": {
               "type": "boolean",
               "default": false,
+              "title": "Enable commit indexing",
               "description": "Index the project's commits for search.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -328,6 +351,7 @@
               "default": 365,
               "minimum": 7,
               "maximum": 3650,
+              "title": "Commit indexing lookback",
               "description": "How far back commits are indexed, 7 to 3,650 days.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -341,6 +365,7 @@
               "default": 2000,
               "minimum": 100,
               "maximum": 20000,
+              "title": "Maximum indexed commits",
               "description": "Commits kept per project, oldest evicted first, 100 to 20,000.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -350,6 +375,7 @@
               ]
             }
           },
+          "title": "Commit indexing",
           "description": "Commit search.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -359,6 +385,7 @@
           ]
         }
       },
+      "title": "Memory",
       "description": "Project memories.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -374,6 +401,7 @@
         "enabled": {
           "type": "boolean",
           "default": false,
+          "title": "Enable memory mural",
           "description": "The history head carries an image of the project memories its memory budget left out, on models that read images.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -383,6 +411,7 @@
           ]
         }
       },
+      "title": "Memory mural",
       "description": "The memory mural.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -398,6 +427,7 @@
         "enabled": {
           "type": "boolean",
           "default": true,
+          "title": "Enable commit cluster summaries",
           "description": "The summarizer runs, at any usage, once enough stretches of work ended in commits.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -410,6 +440,7 @@
           "type": "integer",
           "default": 3,
           "minimum": 1,
+          "title": "Minimum commit clusters",
           "description": "How many such stretches, at least 1.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -419,6 +450,7 @@
           ]
         }
       },
+      "title": "Summaries after commit clusters",
       "description": "Summaries triggered by finished work.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -434,6 +466,7 @@
         "enabled": {
           "type": "boolean",
           "default": false,
+          "title": "Enable text compression",
           "description": "Compress older long text, for sessions with a summarizer.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -447,6 +480,7 @@
           "default": 500,
           "minimum": 100,
           "maximum": 10000,
+          "title": "Minimum text length",
           "description": "Shorter text stays as it is, 100 to 10,000 characters.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -456,6 +490,7 @@
           ]
         }
       },
+      "title": "Text compression",
       "description": "Older long text compressed by age.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -467,6 +502,7 @@
     "language": {
       "type": "string",
       "default": "",
+      "title": "Summary language",
       "description": "The language the summarizer writes its prose in, as a language code; empty writes English.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -476,6 +512,7 @@
     "keep_subagents": {
       "type": "boolean",
       "default": false,
+      "title": "Keep summary sessions",
       "description": "Keep a summary's child sessions for inspection instead of deleting them once their hold ends.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -489,6 +526,7 @@
         "enabled": {
           "type": "boolean",
           "default": true,
+          "title": "Enable context management",
           "description": "Magic Context manages the context window. Off, it keeps only its knowledge layer.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -496,6 +534,7 @@
           ]
         }
       },
+      "title": "Context management",
       "description": "Context management.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -506,6 +545,7 @@
       "type": "string",
       "default": "30m",
       "pattern": "^(off|[1-9][0-9]*[mh])$",
+      "title": "Clock note interval",
       "description": "How often an agent is told the time: \"off\", or a whole number of minutes or hours such as \"30m\" or \"1h\".",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -523,6 +563,7 @@
             "full",
             "light"
           ],
+          "title": "Default prompt preset",
           "description": "The wording every model gets unless a model key says otherwise.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -543,6 +584,7 @@
                 "full",
                 "light"
               ],
+              "title": "Model prompt preset",
               "description": "The wording for these models.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -553,6 +595,7 @@
             }
           },
           "default": {},
+          "title": "Model prompt presets",
           "description": "The wording for the models a provider/model or model key names.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -569,6 +612,7 @@
             "^(ctx_reduce|ctx_expand|ctx_note|ctx_memory|ctx_search|ctx_keep)$": {
               "type": "string",
               "default": "",
+              "title": "Tool description override",
               "description": "The tool's description; empty keeps the built-in one.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -577,6 +621,7 @@
             }
           },
           "default": {},
+          "title": "Tool description overrides",
           "description": "Replacement descriptions for Magic Context's tools, by tool name.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -586,6 +631,7 @@
         "guidance_override_path": {
           "type": "string",
           "default": "",
+          "title": "Guidance override file",
           "description": "A file that replaces the built-in guidance section, relative to this settings file; it must hold exactly one \"## Magic Context\" heading. Empty keeps the built-in guidance.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -595,6 +641,7 @@
         "guidance_override_text": {
           "type": "string",
           "default": "",
+          "title": "Guidance override text",
           "description": "Text that replaces the built-in guidance section when no override file is named; empty keeps the built-in guidance.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -602,6 +649,7 @@
           ]
         }
       },
+      "title": "Prompt surface",
       "description": "What the model is told about Magic Context.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -622,6 +670,7 @@
             "openai-compatible",
             "off"
           ],
+          "title": "Embedding provider",
           "description": "Who embeds text: a Synapse module, an OpenAI-compatible endpoint, or off (search by words only).",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -631,6 +680,7 @@
         "module": {
           "type": "string",
           "default": "synapse",
+          "title": "Embedding module",
           "description": "The Synapse module embedding calls: a module id such as \"synapse\", or fed:<fingerprint>:<module id> for a module another paired computer serves.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -640,6 +690,7 @@
         "endpoint": {
           "type": "string",
           "default": "",
+          "title": "Embedding endpoint",
           "description": "The OpenAI-compatible endpoint's base URL.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -649,6 +700,7 @@
         "model": {
           "type": "string",
           "default": "",
+          "title": "Embedding model",
           "description": "The embedding model; empty uses the provider's default.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -668,6 +720,7 @@
                   "type": "string",
                   "default": "none",
                   "const": "none",
+                  "title": "API key mode",
                   "description": "Selects no API key.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -675,6 +728,7 @@
                   ]
                 }
               },
+              "title": "No API key",
               "description": "no API key",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -693,6 +747,7 @@
                   "type": "string",
                   "default": "vault",
                   "const": "vault",
+                  "title": "API key mode",
                   "description": "Selects a key read from the CortexKit vault.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -702,6 +757,7 @@
                 "key": {
                   "type": "object",
                   "x-ck-kind": "credential_ref",
+                  "title": "Vault credential",
                   "description": "The vault credential holding the key.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -710,6 +766,7 @@
                   "x-ck-required": true
                 }
               },
+              "title": "Vault API key",
               "description": "a key read from the CortexKit vault",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -717,6 +774,7 @@
               ]
             }
           ],
+          "title": "Embedding API key",
           "description": "The API key the embedding endpoint sends, as a CortexKit vault credential. Absent means no key. A key is never written here as text: store it in the vault and name it here.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -726,6 +784,7 @@
         "input_type": {
           "type": "string",
           "default": "",
+          "title": "Document input type",
           "description": "The endpoint's input_type for documents; empty sends none.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -735,6 +794,7 @@
         "query_input_type": {
           "type": "string",
           "default": "",
+          "title": "Query input type",
           "description": "The endpoint's input_type for queries; empty sends none.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -754,6 +814,7 @@
                   "type": "string",
                   "default": "auto",
                   "const": "auto",
+                  "title": "Query instruction mode",
                   "description": "Selects the wording the model family calls for.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -761,6 +822,7 @@
                   ]
                 }
               },
+              "title": "Automatic query instruction",
               "description": "the wording the model family calls for",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -778,6 +840,7 @@
                   "type": "string",
                   "default": "none",
                   "const": "none",
+                  "title": "Query instruction mode",
                   "description": "Selects no text at all.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -785,6 +848,7 @@
                   ]
                 }
               },
+              "title": "No query instruction",
               "description": "no text at all",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -803,6 +867,7 @@
                   "type": "string",
                   "default": "text",
                   "const": "text",
+                  "title": "Query instruction mode",
                   "description": "Selects the text given here.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -811,6 +876,7 @@
                 },
                 "text": {
                   "type": "string",
+                  "title": "Query instruction text",
                   "description": "The query instruction text, used as written.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -819,6 +885,7 @@
                   "x-ck-required": true
                 }
               },
+              "title": "Custom query instruction",
               "description": "the text given here",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -826,6 +893,7 @@
               ]
             }
           ],
+          "title": "Query instruction",
           "description": "The query instruction. Absent means auto: the wording the model family calls for.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -845,6 +913,7 @@
                   "type": "string",
                   "default": "auto",
                   "const": "auto",
+                  "title": "Document prefix mode",
                   "description": "Selects the prefix the model family calls for (empty text for none).",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -852,6 +921,7 @@
                   ]
                 }
               },
+              "title": "Automatic document prefix",
               "description": "the prefix the model family calls for (empty text for none)",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -870,6 +940,7 @@
                   "type": "string",
                   "default": "text",
                   "const": "text",
+                  "title": "Document prefix mode",
                   "description": "Selects the text given here.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -878,6 +949,7 @@
                 },
                 "text": {
                   "type": "string",
+                  "title": "Document prefix text",
                   "description": "The document prefix text, used as written.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -886,6 +958,7 @@
                   "x-ck-required": true
                 }
               },
+              "title": "Custom document prefix",
               "description": "the text given here",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -893,6 +966,7 @@
               ]
             }
           ],
+          "title": "Document prefix",
           "description": "The document prefix. Absent means auto: the prefix the model family calls for (empty text for none).",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -902,6 +976,7 @@
         "truncate": {
           "type": "string",
           "default": "",
+          "title": "Truncation mode",
           "description": "The endpoint's truncate setting; empty sends none.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -913,6 +988,7 @@
           "default": 0,
           "minimum": 0,
           "maximum": 8192,
+          "title": "Embedding dimensions",
           "description": "The vector width to ask for, 1 to 8,192; 0 keeps the model's own.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -923,6 +999,7 @@
           "type": "integer",
           "default": 0,
           "minimum": 0,
+          "title": "Maximum input tokens",
           "description": "The most tokens one input may hold; 0 uses the provider's limit.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -930,6 +1007,7 @@
           ]
         }
       },
+      "title": "Embeddings",
       "description": "Embeddings for search by meaning.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -943,6 +1021,7 @@
         "enabled": {
           "type": "boolean",
           "default": true,
+          "title": "Enable search reranking",
           "description": "Rerank explicit prose searches.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -956,6 +1035,7 @@
           "default": 1500,
           "minimum": 50,
           "maximum": 15000,
+          "title": "Reranking timeout",
           "description": "How long the hosted reranker may take, 50 to 15,000 ms.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -967,6 +1047,7 @@
           "default": 20,
           "minimum": 1,
           "maximum": 20,
+          "title": "Reranking candidate count",
           "description": "The most candidates sent, 1 to 20.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -974,6 +1055,7 @@
           ]
         }
       },
+      "title": "Search reranking",
       "description": "Reranking an explicit prose search's best candidates.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -993,6 +1075,7 @@
             "synapse",
             "remote"
           ],
+          "title": "Reranker provider",
           "description": "Who reranks: a Synapse module, or a hosted /rerank endpoint.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1002,6 +1085,7 @@
         "module": {
           "type": "string",
           "default": "synapse",
+          "title": "Reranker module",
           "description": "The Synapse module reranking calls: a module id such as \"synapse\", or fed:<fingerprint>:<module id> for a module another paired computer serves.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1011,6 +1095,7 @@
         "endpoint": {
           "type": "string",
           "default": "",
+          "title": "Reranker endpoint",
           "description": "The hosted reranker's base URL.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1020,6 +1105,7 @@
         "model": {
           "type": "string",
           "default": "",
+          "title": "Reranker model",
           "description": "The hosted reranker's model.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1039,6 +1125,7 @@
                   "type": "string",
                   "default": "none",
                   "const": "none",
+                  "title": "API key mode",
                   "description": "Selects no API key.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1046,6 +1133,7 @@
                   ]
                 }
               },
+              "title": "No API key",
               "description": "no API key",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1064,6 +1152,7 @@
                   "type": "string",
                   "default": "vault",
                   "const": "vault",
+                  "title": "API key mode",
                   "description": "Selects a key read from the CortexKit vault.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1073,6 +1162,7 @@
                 "key": {
                   "type": "object",
                   "x-ck-kind": "credential_ref",
+                  "title": "Vault credential",
                   "description": "The vault credential holding the key.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1081,6 +1171,7 @@
                   "x-ck-required": true
                 }
               },
+              "title": "Vault API key",
               "description": "a key read from the CortexKit vault",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1088,6 +1179,7 @@
               ]
             }
           ],
+          "title": "Reranker API key",
           "description": "The API key the hosted reranker sends, as a CortexKit vault credential. Absent means no key. A key is never written here as text: store it in the vault and name it here.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1095,6 +1187,7 @@
           ]
         }
       },
+      "title": "Reranker backend",
       "description": "Reranker destination and credentials. Only user settings can select where the reranker sends search text and any vault key.",
       "x-ck-apply": "live",
       "x-ck-layers": [
@@ -1108,6 +1201,7 @@
         "enabled": {
           "type": "boolean",
           "default": true,
+          "title": "Enable background maintenance",
           "description": "Run the dreamer's tasks.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1118,6 +1212,7 @@
           "type": "integer",
           "default": 20000000,
           "minimum": 1,
+          "title": "Maintenance token budget",
           "description": "The most input and output tokens one task run may spend.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1137,6 +1232,7 @@
                   "type": "string",
                   "default": "all",
                   "const": "all",
+                  "title": "Project selection mode",
                   "description": "Selects every project with a session.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1144,6 +1240,7 @@
                   ]
                 }
               },
+              "title": "All projects",
               "description": "every project with a session",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1162,6 +1259,7 @@
                   "type": "string",
                   "default": "listed",
                   "const": "listed",
+                  "title": "Project selection mode",
                   "description": "Selects only the projects listed.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1173,12 +1271,14 @@
                   "items": {
                     "type": "string",
                     "default": "",
+                    "title": "Project ID",
                     "description": "A project id.",
                     "x-ck-apply": "live",
                     "x-ck-layers": [
                       "user"
                     ]
                   },
+                  "title": "Project IDs",
                   "description": "The project ids.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1187,6 +1287,7 @@
                   "x-ck-required": true
                 }
               },
+              "title": "Listed projects",
               "description": "only the projects listed",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1194,6 +1295,7 @@
               ]
             }
           ],
+          "title": "Maintenance projects",
           "description": "The projects the dreamer runs for. Absent means every project with a session.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1211,6 +1313,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 6 * * *",
+                  "title": "Memory classification schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1218,6 +1321,7 @@
                   ]
                 }
               },
+              "title": "Memory classification",
               "description": "The classify-memories task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1231,6 +1335,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 4 * * *",
+                  "title": "Memory cue compression schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1238,6 +1343,7 @@
                   ]
                 }
               },
+              "title": "Memory cue compression",
               "description": "The compress-cues task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1251,6 +1357,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 4 * * 0",
+                  "title": "Memory curation schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1258,6 +1365,7 @@
                   ]
                 }
               },
+              "title": "Memory curation",
               "description": "The curate task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1271,6 +1379,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 4 * * 0",
+                  "title": "Workspace memory curation schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1278,6 +1387,7 @@
                   ]
                 }
               },
+              "title": "Workspace memory curation",
               "description": "The curate-workspace task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1291,6 +1401,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "",
+                  "title": "Workspace memory promotion schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1298,6 +1409,7 @@
                   ]
                 }
               },
+              "title": "Workspace memory promotion",
               "description": "The lift-workspace task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1311,6 +1423,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "30 5 * * *",
+                  "title": "Documentation maintenance schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1318,6 +1431,7 @@
                   ]
                 }
               },
+              "title": "Documentation maintenance",
               "description": "The maintain-docs task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1331,6 +1445,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 2 * * *",
+                  "title": "Memory file mapping schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1338,6 +1453,7 @@
                   ]
                 }
               },
+              "title": "Memory file mapping",
               "description": "The map-memories task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1351,6 +1467,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 5 * * *",
+                  "title": "Recurring mistake review schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1358,6 +1475,7 @@
                   ]
                 }
               },
+              "title": "Recurring mistake review",
               "description": "The reflect-events task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1371,6 +1489,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 3 * * *",
+                  "title": "Primer refresh schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1378,6 +1497,7 @@
                   ]
                 }
               },
+              "title": "Primer refresh",
               "description": "The refresh-primers task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1391,6 +1511,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 3 * * *",
+                  "title": "User memory review schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1398,6 +1519,7 @@
                   ]
                 }
               },
+              "title": "User memory review",
               "description": "The review-user-memories task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1411,6 +1533,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 3 * * *",
+                  "title": "Memory verification schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1418,6 +1541,7 @@
                   ]
                 }
               },
+              "title": "Memory verification",
               "description": "The verify task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1431,6 +1555,7 @@
                 "schedule": {
                   "type": "string",
                   "default": "0 4 * * 0",
+                  "title": "Full memory verification schedule",
                   "description": "A five-field cron expression in the machine's time zone; empty switches the task off.",
                   "x-ck-apply": "live",
                   "x-ck-layers": [
@@ -1438,6 +1563,7 @@
                   ]
                 }
               },
+              "title": "Full memory verification",
               "description": "The verify-broad task.",
               "x-ck-apply": "live",
               "x-ck-layers": [
@@ -1445,6 +1571,7 @@
               ]
             }
           },
+          "title": "Maintenance task schedules",
           "description": "Each task's schedule.",
           "x-ck-apply": "live",
           "x-ck-layers": [
@@ -1452,6 +1579,7 @@
           ]
         }
       },
+      "title": "Background maintenance",
       "description": "The dreamer's scheduled background tasks.",
       "x-ck-apply": "live",
       "x-ck-layers": [

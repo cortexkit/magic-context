@@ -56,6 +56,22 @@ fn walk<'a>(node: &'a Value, path: String, out: &mut Vec<(String, &'a Value)>) {
 }
 
 #[test]
+fn every_schema_node_has_a_title() {
+    let mut nodes = Vec::new();
+    walk(schema_value(), String::new(), &mut nodes);
+    assert!(nodes.len() > 100, "{}", nodes.len());
+    for (path, node) in nodes {
+        assert!(
+            node["title"]
+                .as_str()
+                .is_some_and(|title| !title.trim().is_empty()),
+            "{path}: no title"
+        );
+    }
+    assert_eq!(schema_value()["title"], "Magic Context");
+}
+
+#[test]
 fn every_node_carries_its_metadata_and_keeps_the_daemons_rules() {
     let mut nodes = Vec::new();
     walk(schema_value(), String::new(), &mut nodes);
