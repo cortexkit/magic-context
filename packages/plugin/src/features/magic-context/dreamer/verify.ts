@@ -811,7 +811,7 @@ async function applyParsedVerifyManifest(
         | { kind: "archive"; id: number; reason: string };
     const writes: VerifyWrite[] = [];
     let refused = 0;
-    const skipped = valid.skipped.length;
+    let skipped = valid.skipped.length;
     for (const v of valid.verified) {
         const files = await normalizeFiles(args, v.files);
         writes.push({ kind: "verify", id: v.id, files });
@@ -949,6 +949,13 @@ async function applyParsedVerifyManifest(
         for (const w of writes) {
             const memory = getMemoryById(args.db, w.id);
             if (!isPrimaryMutable(memory)) continue;
+            if (memory.content !== batchById.get(w.id)?.content) {
+                log(
+                    `[dreamer] verify skipped: memory_id=${w.id} verdict=${w.kind} reason=content-changed-since-prompt`,
+                );
+                if (w.kind === "skip") skipped -= 1;
+                continue;
+            }
             if (w.kind === "verify") {
                 recordMemoryVerifications(args.db, w.id, w.files, now);
                 updateMemoryVerification(args.db, w.id, "verified");
@@ -958,7 +965,6 @@ async function applyParsedVerifyManifest(
                     recordVerifiedCommit(args.db, verifiedMemory, now, verifiedHead);
                 verified += 1;
             } else if (w.kind === "skip") {
-                if (memory.content !== batchById.get(w.id)?.content) continue;
                 updateMemoryVerification(args.db, w.id, "unverified");
                 recordVerificationVerdict(args.db, memory, "skip", now, w.fingerprint);
             } else if (w.kind === "update") {

@@ -1808,6 +1808,7 @@ export async function registerContext(context: V2Context) {
                             nativeFoldReplay?.onEvent(event);
                             restoredRows.forget(sessionID);
                             messageTimesCache.delete(sessionID);
+                            generateReplay.forget(sessionID);
                         }
                         if (
                             event.type === "session.step.started" ||
@@ -3546,7 +3547,7 @@ export async function registerContext(context: V2Context) {
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
             hostFoldIdle?.active(draft.sessionID);
-            const anchor = generateReplayAnchor(draft.messages);
+            const anchor = compactionOff ? undefined : generateReplayAnchor(draft.messages);
             beginServedRequest(draft.sessionID);
             let returned = false;
             try {

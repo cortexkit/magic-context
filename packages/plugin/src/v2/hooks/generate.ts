@@ -1,10 +1,21 @@
+import { createHash } from "node:crypto";
 import { sessionLog } from "../../shared/logger";
 import { clonePreservingInstances, clonePreservingInstancesMeasured } from "./payload";
 import type { SessionContext, V2Message } from "./types";
 
 interface GenerateReplayAnchor {
     id: string;
+    prefixDigest: string;
     tail: V2Message[];
+}
+
+function hostPrefixDigest(messages: V2Message[], end: number): string {
+    const hash = createHash("sha256");
+    for (let index = 0; index < end; index++) {
+        hash.update(JSON.stringify(messages[index]));
+        hash.update("\n");
+    }
+    return hash.digest("hex");
 }
 
 /** Preserve the host boundary before Magic Context tags or drops tool results. */
@@ -14,7 +25,11 @@ export function generateReplayAnchor(messages: V2Message[]): GenerateReplayAncho
     if (index < 0) return undefined;
     const id = messages.at(index)?.id;
     if (!id) return undefined;
-    return { id, tail: clonePreservingInstances(messages.slice(index + 1)) };
+    return {
+        id,
+        prefixDigest: hostPrefixDigest(messages, index),
+        tail: clonePreservingInstances(messages.slice(index + 1)),
+    };
 }
 
 interface ServedPrefix {
@@ -169,6 +184,10 @@ export class V2GenerateReplay {
             JSON.stringify(prefix.anchor.tail)
         )
             return skip("anchor-tail-mismatch");
+        // Edit and revert events also discard the saved prefix, but a generate
+        // request can race a late event or follow an edit whose event never reached us.
+        if (hostPrefixDigest(draft.messages, index) !== prefix.anchor.prefixDigest)
+            return skip("history-mismatch");
         const tail = draft.messages.slice(end);
         draft.messages.splice(
             0,

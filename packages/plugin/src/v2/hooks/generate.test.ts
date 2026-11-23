@@ -16,6 +16,7 @@ const draft = (): SessionContext => ({
 test("generate reuses exact served bytes and pristine live tail without changing replay state", () => {
     const replay = new V2GenerateReplay();
     const served = draft();
+    const anchor = generateReplayAnchor(served.messages);
     served.system = [{ text: "managed system" }];
     served.tools = { ctx_reduce: { description: "managed description", input: {} } };
     served.messages.unshift({
@@ -24,7 +25,7 @@ test("generate reuses exact served bytes and pristine live tail without changing
         content: [{ type: "text", text: "<session-history>summary</session-history>" }],
     });
     served.messages[1]!.content.push({ type: "text", text: "[dropped]" });
-    replay.capture(served, generateReplayAnchor(served.messages));
+    replay.capture(served, anchor);
     const input = draft();
     input.messages.push(
         { id: "a", role: "assistant", content: [{ type: "text", text: "live" }] },
@@ -47,7 +48,7 @@ test("generate leaves host request unchanged without a compatible anchored prefi
     const input = draft();
     const bytes = JSON.stringify(input);
     expect(replay.apply(input)).toBe(false);
-    replay.capture(input, { id: "missing", tail: [] });
+    replay.capture(input, generateReplayAnchor([{ ...input.messages[0]!, id: "missing" }]));
     expect(replay.apply(input)).toBe(false);
     expect(JSON.stringify(input)).toBe(bytes);
     replay.capture(input, generateReplayAnchor(input.messages));
@@ -102,10 +103,11 @@ test("generate captures the final request with id-less tool tails without duplic
 test("generate rejects a changed or missing id-less anchor tail without consuming live messages", () => {
     const replay = new V2GenerateReplay();
     const served = draft();
-    replay.capture(served, {
-        id: "u",
-        tail: [{ role: "tool", content: [{ type: "tool-result", id: "call", result: "raw" }] }],
-    });
+    const anchor = generateReplayAnchor([
+        ...served.messages,
+        { role: "tool", content: [{ type: "tool-result", id: "call", result: "raw" }] },
+    ]);
+    replay.capture(served, anchor);
     for (const tail of [
         [],
         [{ role: "tool", content: [{ type: "tool-result", id: "call", result: "changed" }] }],
@@ -119,6 +121,26 @@ test("generate rejects a changed or missing id-less anchor tail without consumin
     }
 });
 
+test("generate leaves an earlier host edit intact even when the anchor and tail match", () => {
+    const replay = new V2GenerateReplay();
+    const raw = draft();
+    raw.messages.push(
+        { id: "a", role: "assistant", content: [{ type: "tool-call", id: "call" }] },
+        { role: "tool", content: [{ type: "tool-result", id: "call", result: "raw" }] },
+    );
+    const served = structuredClone(raw);
+    served.messages[0]!.content[0]!.text = "managed question";
+    replay.capture(served, generateReplayAnchor(raw.messages));
+
+    const input = structuredClone(raw);
+    input.messages[0]!.content[0]!.text = "redacted";
+    input.messages.push({ role: "user", content: [{ type: "text", text: "btw" }] });
+    const bytes = JSON.stringify(input);
+    const applied = replay.apply(input);
+    expect(JSON.stringify(input)).toBe(bytes);
+    expect(applied).toBe(false);
+});
+
 test("generate logs each capture and apply skip once", () => {
     const logging = spyOn(logger, "sessionLog").mockImplementation(() => {});
     logging.mockClear();
@@ -126,16 +148,19 @@ test("generate logs each capture and apply skip once", () => {
         const replay = new V2GenerateReplay();
         const input = draft();
         expect(replay.apply(input)).toBe(false);
-        replay.capture(input, { id: "missing", tail: [] });
+        replay.capture(input, generateReplayAnchor([{ ...input.messages[0]!, id: "missing" }]));
         expect(replay.apply(input)).toBe(false);
-        replay.capture(input, { id: "u", tail: [] });
+        replay.capture(input, generateReplayAnchor(input.messages));
         input.model.id = "other";
         expect(replay.apply(input)).toBe(false);
         input.model.id = "m";
         input.agent = "other";
         expect(replay.apply(input)).toBe(false);
         input.agent = "a";
-        replay.capture(input, { id: "u", tail: [{ role: "tool", content: [] }] });
+        replay.capture(
+            input,
+            generateReplayAnchor([...input.messages, { role: "tool", content: [] }]),
+        );
         expect(replay.apply(input)).toBe(false);
         const idless = [{ role: "tool", content: [] }];
         expect(generateReplayAnchor(idless)).toBeUndefined();
@@ -170,8 +195,8 @@ const sized = (sessionID: string, chars: number, label = "served"): SessionConte
 });
 
 /** The host's request for a side question: its raw history plus the new question. */
-const sideQuestion = (sessionID: string): SessionContext => {
-    const input = sized(sessionID, 10, "raw");
+const sideQuestion = (sessionID: string, chars = 100): SessionContext => {
+    const input = sized(sessionID, chars, "raw");
     input.messages.push({ role: "user", content: [{ type: "text", text: "btw" }] });
     return input;
 };
@@ -282,7 +307,8 @@ test("generate replay hands back host class instances by reference, as the host 
     served.messages[0]!.content.push({ type: "media", media: asset });
     capture(replay, served);
     expect(replay.stats().totalBytes).toBeGreaterThan(4096);
-    const input = sideQuestion("s");
+    const input = sideQuestion("s", 10);
+    input.messages[0]!.content.push({ type: "media", media: new Asset(new Uint8Array(4096)) });
     expect(replay.apply(input)).toBe(true);
     expect(input.messages[0]!.content[1]!.media).toBe(asset);
     expect(input.messages[0]).not.toBe(served.messages[0]);

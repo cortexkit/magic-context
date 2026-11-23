@@ -20,7 +20,12 @@ import {
     resetEmbeddingCacheForTests,
     saveEmbedding,
 } from "../memory";
-import { getMemoryById, updateMemoryVerification } from "../memory/storage-memory";
+import { computeNormalizedHash } from "../memory/normalize-hash";
+import {
+    getMemoryById,
+    updateMemoryContent,
+    updateMemoryVerification,
+} from "../memory/storage-memory";
 import {
     getMemoryVerifications,
     recordMemoryVerifications,
@@ -570,6 +575,58 @@ describe("runVerify disposition", () => {
             });
             expect(getMemoryById(db, constraint.id)?.status).toBe("archived");
             expect(getMemoryById(db, projectRuleCodeFact.id)?.status).toBe("archived");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test.each([
+        "update",
+        "archive",
+        "verified",
+        "skip",
+    ] as const)("verify ignores the %s verdict for content edited during the batch", async (verdict) => {
+        const db = freshDb();
+        try {
+            const project = `git:verify-concurrent-edit-${verdict}`;
+            const memory = insertMemory(db, {
+                projectPath: project,
+                category: "ARCHITECTURE",
+                content: "The exported counter in src/old.ts starts at zero.",
+                sourceSessionId: "ses",
+            });
+            recordMemoryVerifications(db, memory.id, ["src/old.ts"], 1_000);
+            const corrected = "The exported counter in src/old.ts starts at one.";
+            const scripted = scriptedVerifyClient(() => {
+                updateMemoryContent(db, memory.id, corrected, computeNormalizedHash(corrected));
+                const entries = {
+                    update: `<update id="${memory.id}">The exported counter in src/old.ts starts at two.</update>`,
+                    archive: `<archive id="${memory.id}" reason="the counter no longer exists"/>`,
+                    verified: `<verified id="${memory.id}"/>`,
+                    skip: `<skip id="${memory.id}" reason="unable to confirm"/>`,
+                };
+                return { kind: "text", text: `<verify>${entries[verdict]}</verify>` };
+            });
+            const args = verifyArgs(db, tempProject(), project);
+            args.forceBroad = true;
+            args.client = scripted.client as never;
+
+            const result = await runVerify(args);
+
+            expect(scripted.promptIds()).toEqual([[memory.id]]);
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                content: corrected,
+                status: "active",
+                metadataJson: memory.metadataJson,
+            });
+            expect(result).toMatchObject({
+                verified: 0,
+                updated: 0,
+                archived: 0,
+                skipped: 0,
+                remaining: 1,
+                complete: false,
+            });
         } finally {
             closeQuietly(db);
         }
