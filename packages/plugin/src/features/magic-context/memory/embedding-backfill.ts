@@ -1,12 +1,19 @@
 import { isEmbeddingHostBusy } from "../../../shared/embedding-activity";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
-import { embedBatchForProject, getProjectEmbeddingSnapshot } from "./embedding";
+import {
+    contentSha256,
+    embedItemsWindowBounded,
+    getProjectEmbeddingSnapshot,
+} from "../project-embedding-registry";
 import {
     type StoredMemoryEmbedding,
     saveEmbeddingIfHashMatches,
 } from "./storage-memory-embeddings";
 import type { Memory } from "./types";
+
+const SEARCH_BACKFILL_LIMIT = 50;
+const SEARCH_BACKFILL_REQUEST_SIZE = 10;
 
 export async function ensureMemoryEmbeddings(args: {
     db: Database;
@@ -20,17 +27,28 @@ export async function ensureMemoryEmbeddings(args: {
         return args.existingEmbeddings;
     }
 
-    const missingMemories = args.memories.filter(
-        (memory) => !args.existingEmbeddings.has(memory.id),
-    );
+    // The background drain has no explicit order. Choose by memory ID so the
+    // search budget picks the same rows regardless of how candidates were loaded.
+    const missingMemories = args.memories
+        .filter((memory) => !args.existingEmbeddings.has(memory.id))
+        .sort((a, b) => a.id - b.id)
+        .slice(0, SEARCH_BACKFILL_LIMIT);
     if (missingMemories.length === 0) {
         return args.existingEmbeddings;
     }
 
     try {
-        const result = await embedBatchForProject(
+        const result = await embedItemsWindowBounded(
             args.projectIdentity,
-            missingMemories.map((memory) => memory.content),
+            missingMemories.map((memory) => ({
+                id: `memory:${memory.id}`,
+                text: memory.content,
+                contentSha256: contentSha256(memory.content),
+            })),
+            undefined,
+            args.db,
+            args.projectIdentity,
+            { maxItemsPerCall: SEARCH_BACKFILL_REQUEST_SIZE },
         );
         if (!result) {
             return args.existingEmbeddings;
@@ -41,8 +59,8 @@ export async function ensureMemoryEmbeddings(args: {
         const staged = new Map<number, StoredMemoryEmbedding>();
         args.db
             .transaction(() => {
-                for (const [index, memory] of missingMemories.entries()) {
-                    const embedding = result.vectors[index];
+                for (const memory of missingMemories) {
+                    const embedding = result.vectors.get(`memory:${memory.id}`);
                     if (!embedding) {
                         continue;
                     }

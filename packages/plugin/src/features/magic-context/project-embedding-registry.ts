@@ -2784,16 +2784,17 @@ export async function embedItemsWindowBounded(
     signal?: AbortSignal,
     db?: Database,
     sessionId = projectIdentity,
-    options: { stopOnIncompleteSlice?: boolean } = {},
+    options: { stopOnIncompleteSlice?: boolean; maxItemsPerCall?: number } = {},
 ): Promise<Awaited<ReturnType<typeof embedItemsForProject>>> {
-    if (items.length <= MAX_WINDOWS_PER_EMBED_CALL) {
+    const maxItemsPerCall = options.maxItemsPerCall ?? MAX_WINDOWS_PER_EMBED_CALL;
+    if (items.length <= maxItemsPerCall) {
         return embedItemsForProject(projectIdentity, items, signal, db, sessionId);
     }
     const vectors = new Map<string, Float32Array>();
     let modelId: string | null = null;
     let generation: number | null = null;
-    for (let start = 0; start < items.length; start += MAX_WINDOWS_PER_EMBED_CALL) {
-        const slice = items.slice(start, start + MAX_WINDOWS_PER_EMBED_CALL);
+    for (let start = 0; start < items.length; start += maxItemsPerCall) {
+        const slice = items.slice(start, start + maxItemsPerCall);
         const result = await embedItemsForProject(projectIdentity, slice, signal, db, sessionId);
         if (!result) return null;
         // Publication is atomic per summary: after a missing vector, more requests
