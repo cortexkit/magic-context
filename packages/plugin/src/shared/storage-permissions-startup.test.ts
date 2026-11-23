@@ -247,4 +247,20 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         setStoragePrivatePermissionEnforcement(false);
         expect(fs.existsSync(join(root, markerName))).toBe(false);
     });
+
+    it("does not trust a certificate with unexpected contents", () => {
+        for (const content of ["", "1", "2\n", "1\nextra\n"]) {
+            const root = fixture();
+            const marker = join(root, markerName);
+            fs.writeFileSync(marker, content, { mode: 0o600 });
+            const lstat = spyOn(fs, "lstatSync");
+            try {
+                tightenStorageTreeSync(root);
+                expect(lstat.mock.calls.length).toBeGreaterThan(2000);
+            } finally {
+                lstat.mockRestore();
+            }
+            expect(fs.readFileSync(marker, "utf8")).toBe("1\n");
+        }
+    });
 });

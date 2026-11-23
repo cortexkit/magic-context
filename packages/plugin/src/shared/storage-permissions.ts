@@ -15,6 +15,7 @@ import {
     mkdirSync,
     openSync,
     readdirSync,
+    readFileSync,
     readlinkSync,
     readSync,
     renameSync,
@@ -280,7 +281,10 @@ export function tightenStorageTreeSync(
     let certified = false;
     try {
         const stat = lstatSync(marker);
-        certified = stat.isFile() && (stat.mode & 0o7777) === 0o600;
+        certified =
+            stat.isFile() &&
+            (stat.mode & 0o7777) === 0o600 &&
+            readFileSync(marker, "utf8") === `${STORAGE_PERMISSIONS_POLICY_VERSION}\n`;
         if (!certified) removeMarker();
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures++;
