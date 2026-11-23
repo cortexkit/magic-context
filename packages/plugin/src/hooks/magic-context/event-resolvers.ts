@@ -1,4 +1,8 @@
-import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
+import {
+    type ContextDatabase,
+    getOrCreateSessionMeta,
+    updateSessionMeta,
+} from "../../features/magic-context/storage";
 import {
     getOverflowState,
     loadPersistedUsage,
@@ -238,6 +242,39 @@ export function resolveTrustedContextLimit(
     return isSaneLimit(persisted?.lastUsageContextLimit)
         ? persisted.lastUsageContextLimit
         : undefined;
+}
+
+export const WRAPUP_WINDOW_UNAVAILABLE =
+    "Cannot run /ctx-wrapup: the model's context window is unknown. Select a model with a configured context window or send a message with that model, then retry.";
+
+export function readPersistedWrapupWindow(
+    db: ContextDatabase,
+    sessionId: string,
+    modelKey?: string,
+): { contextLimit: number; modelKey: string } | undefined {
+    // Pressure can reset to zero without invalidating the saved input budget.
+    // This denominator is already output-reserved; do not resolve it as a raw window.
+    const { lastUsageContextLimit, lastObservedModelKey } = getOrCreateSessionMeta(db, sessionId);
+    if (!isSaneLimit(lastUsageContextLimit) || !lastObservedModelKey) return undefined;
+    if (modelKey && piModelRefToCanonical(modelKey) !== piModelRefToCanonical(lastObservedModelKey))
+        return undefined;
+    return { contextLimit: lastUsageContextLimit, modelKey: lastObservedModelKey };
+}
+
+export function resolveOpenCodeWrapupWindow(
+    db: ContextDatabase,
+    sessionId: string,
+    model?: { providerID: string; modelID: string },
+): { contextLimit: number; modelKey: string } | undefined {
+    const modelKey = resolveModelKey(model?.providerID, model?.modelID);
+    if (modelKey) {
+        const contextLimit = resolveTrustedContextLimit(model?.providerID, model?.modelID, {
+            db,
+            sessionID: sessionId,
+        });
+        if (contextLimit !== undefined) return { contextLimit, modelKey };
+    }
+    return readPersistedWrapupWindow(db, sessionId, modelKey);
 }
 
 export function resolveCacheTtl(cacheTtl: CacheTtlConfig, modelKey: string | undefined): string {

@@ -25,6 +25,7 @@ import { executeContextRecompWithResult, registerActiveCompartmentRun } from "./
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 import { createLiveSessionState, type LiveSessionState } from "./live-session-state";
+import { pendingMaterializationOrigin } from "./pending-materialization";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { type ManagedWrapupContext, runManagedWrapup } from "./wrapup-orchestrator";
 
@@ -227,9 +228,13 @@ describe("runManagedWrapup", () => {
             );
 
             expect(result).toContain("Wrapped up 9 messages into 3 compartments");
-            expect(result).toContain(
-                "If you want it applied on the very next message, run /ctx-flush first.",
-            );
+            expect(result).toContain("The compacted history applies on your next message.");
+            expect(
+                pendingMaterializationOrigin(
+                    ctx.liveSessionState.pendingMaterializationSessions,
+                    sessionId,
+                ),
+            ).toBe("user_wrapup");
             expect(forceKeepFlags).toEqual([false, false, true]);
             const promoted = getMemoriesByProject(db, project).map((memory) => memory.content);
             expect(promoted).toHaveLength(2);
@@ -262,6 +267,7 @@ describe("runManagedWrapup", () => {
 
             expect(result).toBe("Nothing to wrap up — only 3 messages above the last compartment.");
             expect(runner).not.toHaveBeenCalled();
+            expect(ctx.liveSessionState.pendingMaterializationSessions.has(sessionId)).toBe(false);
             expect(getWrapupInProgressState(db, sessionId)).toBeNull();
         } finally {
             closeQuietly(db);
@@ -486,14 +492,14 @@ describe("runManagedWrapup", () => {
         }
     });
 
-    it("suppresses the flush hint when a natural bust is already pending", async () => {
+    it("keeps published chunks deferred when a later chunk fails", async () => {
         const db = createDb();
         try {
-            const sessionId = "ses-wrapup-flush-hint";
+            const sessionId = "ses-wrapup-partial-no-rebuild";
             const ctx = baseCtx(db);
-            ctx.hasPendingNaturalBust = () => true;
             ctx.runCompartmentAgentForWrapup = mock(async (deps) => {
-                appendRange(db, sessionId, 1, deps.boundarySnapshot.eligibleEndOrdinal - 1);
+                if (getLastCompartmentEndMessage(db, sessionId) > 0) return;
+                appendRange(db, sessionId, 1, 1);
                 deps.onCompartmentStatePublished?.(sessionId);
             });
 
@@ -501,8 +507,10 @@ describe("runManagedWrapup", () => {
                 runManagedWrapup(ctx, sessionId, { messagesToKeep: 2 }),
             );
 
-            expect(result).toContain("materializes on your next message");
-            expect(result).not.toContain("ctx-flush");
+            expect(result).toContain("Magic Wrapup — Partial");
+            expect(getLastCompartmentEndMessage(db, sessionId)).toBe(1);
+            expect(ctx.liveSessionState.pendingMaterializationSessions.has(sessionId)).toBe(false);
+            expect(ctx.liveSessionState.deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
         } finally {
             closeQuietly(db);
         }

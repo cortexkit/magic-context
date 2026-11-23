@@ -78,6 +78,8 @@ import {
     resolveContextLimit,
     resolveContextWindowGeometry,
     resolveExecuteThresholdDetail,
+    resolveOpenCodeWrapupWindow,
+    WRAPUP_WINDOW_UNAVAILABLE,
 } from "../hooks/magic-context/event-resolvers";
 import { executeFlush } from "../hooks/magic-context/execute-flush";
 import { formatEmbedStatusText } from "../hooks/magic-context/format-embed-status";
@@ -1501,6 +1503,9 @@ export function registerRpcHandlers(
         prepareHistorySession?: (sessionId: string) => void;
         /** Read the session's current host directory, not the plugin's pre-move cached directory. */
         readSessionDirectory?: (sessionId: string) => Promise<string | null>;
+        readSelectedSessionModel?: (
+            sessionId: string,
+        ) => Promise<{ providerID: string; modelID: string } | undefined>;
         storageDir?: string;
         getDebugMemoryHolders?: () => RuntimeDebugMemoryHolders | undefined;
         getDatabase?: () => Database | null;
@@ -1860,17 +1865,19 @@ export function registerRpcHandlers(
         const { runManagedWrapup } = await importPluginModule(
             () => import("../hooks/magic-context/wrapup-orchestrator"),
         );
-        const model = liveSessionState.liveModelBySession.get(sessionId);
-        const contextLimit = model
-            ? resolveContextLimit(model.providerID, model.modelID, { db, sessionID: sessionId })
-            : 128_000;
+        const model =
+            (await args.readSelectedSessionModel?.(sessionId)) ??
+            liveSessionState.liveModelBySession.get(sessionId);
+        const window = resolveOpenCodeWrapupWindow(db, sessionId, model);
+        if (!window) return { ok: false, error: WRAPUP_WINDOW_UNAVAILABLE };
+        const { contextLimit, modelKey } = window;
         const ctx = {
             ...(await buildManagedCtx(db)),
             memoryInjectionBudgetTokens: config.memory?.injection_budget_tokens,
             contextLimit,
             executeThresholdPercentage: resolveExecuteThresholdDetail(
                 config.execute_threshold_percentage ?? 65,
-                model ? `${model.providerID}/${model.modelID}` : undefined,
+                modelKey,
                 65,
                 {
                     tokensConfig: config.execute_threshold_tokens,
@@ -1878,10 +1885,6 @@ export function registerRpcHandlers(
                     sessionId,
                 },
             ).percentage,
-            hasPendingNaturalBust: (sid: string) =>
-                liveSessionState.historyRefreshSessions.has(sid) ||
-                liveSessionState.systemPromptRefreshSessions.has(sid) ||
-                liveSessionState.pendingMaterializationSessions.has(sid),
         };
         log(`[rpc] wrapup requested for session ${sessionId} (keep ${messagesToKeep})`);
         args.prepareHistorySession?.(sessionId);

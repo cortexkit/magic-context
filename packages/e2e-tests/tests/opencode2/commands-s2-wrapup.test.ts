@@ -26,12 +26,16 @@ for (const { kind, reopen } of [
 			await commandStoreFixture(kind);
 		const logPath = join(fixture.root, "wrapup.log");
 		fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
+		fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
 		const options = {
 			existingIsolation: fixture,
 			existingMock: { mock, baseURL: provider.baseURL },
-			modelContextLimit: 16_000,
+			compactionAuto: false,
+			modelContextLimit: 751_024,
 			modelOutputLimit: 1_024,
 			magicContextConfig: {
+				cache_ttl: "never",
+				execute_threshold_percentage: { default: 65, "openai/mock-model": 60 },
 				memory: { enabled: false },
 				dreamer: { disable: true },
 				historian: { two_pass: false },
@@ -57,16 +61,27 @@ for (const { kind, reopen } of [
 				text: "ordinary turn",
 				usage: { input_tokens: 100, output_tokens: 10 },
 			});
-			for (let index = 0; index < 6; index++) {
-				await client.session.prompt({
-					sessionID: session.id,
-					text: `Source turn ${index}: ${"durable history ".repeat(80)}`,
-				});
+			const turn = async (text: string) => {
+				const offset = host.mock.requests().length;
+				await client.session.prompt({ sessionID: session.id, text });
 				await client.session.wait(
 					{ sessionID: session.id },
 					{ signal: AbortSignal.timeout(30_000) },
 				);
+				const requests = host.mock.requests().slice(offset).filter((request) =>
+					JSON.stringify(request.body).includes(text),
+				);
+				expect(requests).toHaveLength(1);
+				const input = requests[0]!.body.input;
+				if (!Array.isArray(input)) throw new Error("No provider message array");
+				return input;
+			};
+			let cached: unknown[] = [];
+			for (let index = 0; index < 8; index++) {
+				cached = await turn(`Source turn ${index}: ${"durable history ".repeat(35)}`);
 			}
+			expect(JSON.stringify(cached)).toContain("Source turn 0:");
+			expect(JSON.stringify(cached)).not.toContain("The source turns record durable history.");
 			let historianCalls = 0;
 			host.mock.addMatcher((body) => {
 				const range = JSON.stringify(body).match(/Messages (\d+)-(\d+):/);
@@ -115,7 +130,7 @@ for (const { kind, reopen } of [
 				await client.session.command({
 					sessionID: session.id,
 					name: "ctx-wrapup",
-					text: "2",
+					text: "6",
 				});
 				const deadline = Date.now() + 30_000;
 				let count = row.count;
@@ -161,25 +176,7 @@ for (const { kind, reopen } of [
 				expect(legacyStoreSnapshot(fixture.openCodeDbPath, kind)).toBe(
 					legacyBefore,
 				);
-				// Wrapup deliberately defers publication until a priced pass. Flush is
-				// the user's explicit request to consume it on the very next message.
-				await client.session.command({
-					sessionID: session.id,
-					name: "ctx-flush",
-					text: "",
-				});
-				const before = host.mock.requests().length;
-				const marker = "first turn after wrapup";
-				await client.session.prompt({ sessionID: session.id, text: marker });
-				await client.session.wait(
-					{ sessionID: session.id },
-					{ signal: AbortSignal.timeout(30_000) },
-				);
-				const served = host.mock
-					.requests()
-					.slice(before)
-					.filter((request) => JSON.stringify(request.body).includes(marker));
-				expect(served).toHaveLength(1);
+				const served = await turn("first turn after wrapup");
 				console.error(
 					host
 						.pluginLog()
@@ -191,9 +188,26 @@ for (const { kind, reopen } of [
 						.join("\n"),
 				);
 				expect(host.pluginLog()).not.toContain("generation mismatch");
-				expect(JSON.stringify(served[0]!.body)).toContain(
+				const line = host
+					.pluginLog()
+					.split("\n")
+					.find((line) => line.includes("wrapup chunk 1:"));
+				expect(line).toContain('"usable":450000');
+				expect(line).toContain('"capTokens":192000');
+				expect(JSON.stringify(served)).toContain(
 					"The source turns record durable history.",
 				);
+				for (let index = 0; index < 5; index++) {
+					expect(JSON.stringify(served)).not.toContain(`Source turn ${index}:`);
+				}
+				for (let index = 5; index < 8; index++) {
+					expect(JSON.stringify(served)).toContain(`Source turn ${index}:`);
+				}
+				const baseline = (wire: unknown[]) => wire.find((item) => JSON.stringify(item).includes("<session-history>"));
+				expect(baseline(cached)).toBeDefined();
+				expect(JSON.stringify(baseline(served))).toBe(JSON.stringify(baseline(cached)));
+				const defer = await turn("second turn after wrapup");
+				expect(JSON.stringify(defer.slice(0, served.length))).toBe(JSON.stringify(served));
 			} finally {
 				db.close();
 			}

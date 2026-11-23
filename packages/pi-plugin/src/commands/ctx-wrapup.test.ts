@@ -52,6 +52,7 @@ import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 import {
 	consumeDeferredHistoryRefresh,
 	consumeDeferredMaterialization,
+	consumePendingMaterialization,
 } from "../context-handler";
 import { resolveHistorianFromConfig } from "../index";
 import { buildPiHistorianCommandOptions } from "../pi-historian-command-options";
@@ -85,7 +86,12 @@ function ctx(sessionId: string, source: number | unknown[] = 8) {
 	const entries = typeof source === "number" ? branch(source) : source;
 	return {
 		cwd: "/tmp/pi-wrapup",
-		model: { provider: "anthropic", id: "claude" },
+		model: {
+			provider: "anthropic",
+			id: "claude",
+			contextWindow: 200_000,
+			maxTokens: 4_096,
+		},
 		sessionManager: {
 			getSessionId: () => sessionId,
 			getBranch: () => entries,
@@ -626,7 +632,7 @@ describe("Pi /ctx-wrapup", () => {
 		}
 	});
 
-	it("signals deferred history and materialization after a wrapup publish", async () => {
+	it("signals an explicit refresh only after successful wrapup publication", async () => {
 		const db = createDb();
 		try {
 			const sessionId = "pi-wrapup-signals";
@@ -634,8 +640,14 @@ describe("Pi /ctx-wrapup", () => {
 				pi().api,
 				deps(db, {
 					runPiHistorianForWrapup: mock(async (args) => {
-						appendRange(db, sessionId, 1, 3);
+						appendRange(
+							db,
+							sessionId,
+							1,
+							args.boundarySnapshot.eligibleEndOrdinal - 1,
+						);
 						args.onPublished?.();
+						expect(consumePendingMaterialization(sessionId)).toBe(false);
 					}),
 				}),
 				ctx(sessionId, 8),
@@ -643,7 +655,10 @@ describe("Pi /ctx-wrapup", () => {
 				2,
 			);
 
-			expect(result).toContain("## Magic Wrapup");
+			expect(result).toContain(
+				"The compacted history applies on your next message.",
+			);
+			expect(consumePendingMaterialization(sessionId)).toBe(true);
 			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(true);
 			expect(consumeDeferredMaterialization(sessionId)).toBe(true);
 		} finally {

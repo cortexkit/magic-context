@@ -15,12 +15,37 @@ import {
     resolveExecuteThreshold,
     resolveExecuteThresholdDetail,
     resolveModelKey,
+    resolveOpenCodeWrapupWindow,
     resolveSessionId,
     resolveTrustedContextLimit,
 } from "./event-resolvers";
 import { recordOpenCodeProvenInputFloor } from "./opencode-proven-floor";
 
 describe("event-resolvers", () => {
+    it("recovers the already-reserved wrapup window only for its saved route", () => {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        runMigrations(db);
+        try {
+            const sessionId = "ses-cold-wrapup-limit";
+            const model = { providerID: "fictional", modelID: "a" };
+            expect(resolveOpenCodeWrapupWindow(db, sessionId)).toBeUndefined();
+            updateSessionMeta(db, sessionId, {
+                lastObservedModelKey: "fictional/a",
+                lastUsageContextLimit: 750_000,
+                lastInputTokens: 0,
+            });
+            const window = { contextLimit: 750_000, modelKey: "fictional/a" };
+            expect(resolveOpenCodeWrapupWindow(db, sessionId, model)).toEqual(window);
+            expect(resolveOpenCodeWrapupWindow(db, sessionId)).toEqual(window);
+            expect(
+                resolveOpenCodeWrapupWindow(db, sessionId, { ...model, modelID: "b" }),
+            ).toBeUndefined();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     it("identifies the selected history policy without a live window or unrelated model overrides", () => {
         expect(
             historyBudgetPolicyIdentity(0.15, { default: 65, "custom/model": 40 }, "custom/model"),

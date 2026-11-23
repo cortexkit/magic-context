@@ -193,7 +193,7 @@ import {
     pendingDropEligibilityKey,
 } from "./pending-drop-eligibility";
 import {
-    hasPendingMaterializationOrigin,
+    hasExplicitRefreshRequest,
     requestPendingMaterialization,
 } from "./pending-materialization";
 import {
@@ -2788,12 +2788,9 @@ export function createTransform(deps: TransformDeps) {
                             contextUsageEarly.percentage >= forceMaterializationPercentage &&
                             (contextUsageEarly.percentage >= 95 ||
                                 getEmergencyInputSample(db, sessionId) === 0),
-                        // Postprocess counts a pending materialization as the flush
-                        // ride only when a user flush requested it.
-                        explicitFlush: hasPendingMaterializationOrigin(
+                        explicitFlush: hasExplicitRefreshRequest(
                             deps.pendingMaterializationSessions,
                             sessionId,
-                            "user_flush",
                         ),
                         publishedHistory: isCacheBusting,
                         // The same gate postprocess applies. First render is not
@@ -3617,10 +3614,9 @@ export function createTransform(deps: TransformDeps) {
                         !(sessionMeta.cachedM0Bytes != null && sessionMeta.cachedM1Bytes != null) &&
                         !hasCompleteCachedM0M1(db, sessionId),
                     folds: protectionFoldWillBust,
-                    explicitFlush: hasPendingMaterializationOrigin(
+                    explicitFlush: hasExplicitRefreshRequest(
                         deps.pendingMaterializationSessions,
                         sessionId,
-                        "user_flush",
                     ),
                     materializationRequested:
                         deps.pendingMaterializationSessions.has(sessionId) ||

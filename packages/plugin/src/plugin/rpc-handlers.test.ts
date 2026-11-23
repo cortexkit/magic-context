@@ -20,6 +20,7 @@ import {
 } from "../features/magic-context/memory/project-identity";
 import { FORK_MIGRATION_VERSION_FLOOR, runMigrations } from "../features/magic-context/migrations";
 import { upsertMural } from "../features/magic-context/mural/storage-mural";
+import { updateSessionMeta } from "../features/magic-context/storage";
 import {
     getPersistedSchemaVersion,
     initializeDatabase,
@@ -212,7 +213,12 @@ async function exerciseManagedOutputCap(args: {
     const caps: Array<number | undefined> = [];
     const rpc = new MagicContextRpcServer(join(liveConfig.root, "storage"), liveConfig.directory);
     try {
+        _resetHarnessForTesting();
         setHarness(args.surface === "opencode2-command" ? "opencode2" : "opencode");
+        updateSessionMeta(db, sessionId, {
+            lastObservedModelKey: "test/manual-wrapup",
+            lastUsageContextLimit: 200_000,
+        });
         registerRpcHandlers(rpc, {
             directory: liveConfig.directory,
             config: liveConfig.bootConfig,
@@ -282,6 +288,42 @@ describe("manual historian cap reaches the OpenCode historian executor", () => {
                 });
             }
         }
+    }
+});
+
+test("wrapup RPC refuses an unknown selected window rather than reusing the previous model", async () => {
+    const sessionId = "ses-wrapup-window-refusal";
+    const db = createTestDb();
+    const liveSessionState = createLiveSessionState();
+    const rpc = new MagicContextRpcServer(process.cwd(), process.cwd());
+    const selected = { providerID: "fictional", modelID: "selected" };
+    const prepareHistorySession = mock(() => {});
+    try {
+        registerRpcHandlers(rpc, {
+            directory: process.cwd(),
+            config: MagicContextConfigSchema.parse({}),
+            client: undefined,
+            liveSessionState,
+            getDatabase: () => db,
+            readSelectedSessionModel: async () => selected,
+            prepareHistorySession,
+        });
+        const refused = await rpc.dispatch("wrapup", { sessionId });
+        expect(refused).toMatchObject({
+            ok: false,
+            error: expect.stringContaining("context window is unknown"),
+        });
+
+        const previous = { providerID: "fictional", modelID: "previous" };
+        liveSessionState.liveModelBySession.set(sessionId, previous);
+        updateSessionMeta(db, sessionId, {
+            lastObservedModelKey: "fictional/previous",
+            lastUsageContextLimit: 750_000,
+        });
+        expect(await rpc.dispatch("wrapup", { sessionId })).toEqual(refused);
+        expect(prepareHistorySession).not.toHaveBeenCalled();
+    } finally {
+        closeQuietly(db);
     }
 });
 

@@ -2,6 +2,7 @@ export type PendingMaterializationOrigin =
     | "fit_retry"
     | "system_hash"
     | "user_flush"
+    | "user_wrapup"
     | "variant_change"
     | "recomp"
     | "boundary_repair"
@@ -52,10 +53,24 @@ export function hasPendingMaterializationOrigin(
     return sessions.has(sessionId) && causes.get(sessions)?.get(sessionId)?.has(origin) === true;
 }
 
+export function hasExplicitRefreshRequest(sessions: Set<string>, sessionId: string): boolean {
+    return (
+        hasPendingMaterializationOrigin(sessions, sessionId, "user_flush") ||
+        hasPendingMaterializationOrigin(sessions, sessionId, "user_wrapup")
+    );
+}
+
 export function clearPendingMaterialization(sessions: Set<string>, sessionId: string): void {
     sessions.delete(sessionId);
     origins.get(sessions)?.delete(sessionId);
     causes.get(sessions)?.delete(sessionId);
+}
+
+/** Cleanup can finish before injection; keep the wrapup request until its summary is served. */
+export function clearReclaimedMaterialization(sessions: Set<string>, sessionId: string): void {
+    const wrapupPending = hasPendingMaterializationOrigin(sessions, sessionId, "user_wrapup");
+    clearPendingMaterialization(sessions, sessionId);
+    if (wrapupPending) requestPendingMaterialization(sessions, sessionId, "user_wrapup");
 }
 
 /** Withdraw one recorded cause. The session stays pending while another cause

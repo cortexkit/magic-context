@@ -187,6 +187,14 @@
             "hosts": ["opencode"]
         },
         {
+            "path": "tests/wrapup-next-message.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 1 serves successful wrapup history on the next request below execute, without changing the baseline head. A subsequent defer and a wrapup with no publication preserve the served prefix; PID lsof proves throwaway containment.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/opencode2/latest-turn-thinking-recovery.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -1046,7 +1054,7 @@
                 "ts": true,
                 "rust": false
             },
-            "rationale": "Real OpenCode 2 /ctx-wrapup publishes through v2 bounded history and hidden completions on a pure-v2 store, including before the first pass after reopening, and a real v1-converted store. A flush renders the publication; no v1 pending marker, legacy row write or reconversion is allowed; PID lsof proves throwaway-store containment.",
+            "rationale": "Real OpenCode 2 /ctx-wrapup plans with the same model window and threshold before and after reopening, then replaces covered raw history on the next request without changing the baseline head. A later defer preserves the served prefix; no v1 pending marker, legacy row write or reconversion is allowed; PID lsof proves throwaway-store containment.",
             "contract_refs": [
                 "OC2-S1"
             ],

@@ -3648,6 +3648,14 @@ export async function registerContext(context: V2Context) {
                 return null;
             }
         },
+        readSelectedSessionModel: async (sessionID) => {
+            try {
+                const model = (await context.session.get({ sessionID })).model;
+                if (model) return { providerID: model.providerID, modelID: model.id };
+            } catch {
+                // Older hosts or unavailable sessions can still use saved model geometry.
+            }
+        },
         storageDir,
         getDebugMemoryHolders: () => ({ generateReplay: generateReplay.stats() }),
     });

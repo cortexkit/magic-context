@@ -2382,6 +2382,11 @@ export async function runPostTransformPhase(
         args.pendingMaterializationSessions,
         args.sessionId,
     );
+    const wrapupPending = hasPendingMaterializationOrigin(
+        args.pendingMaterializationSessions,
+        args.sessionId,
+        "user_wrapup",
+    );
     const deferredMaterializationAtPassStart = args.deferredMaterializationSessions.has(
         args.sessionId,
     );
@@ -2779,6 +2784,7 @@ export async function runPostTransformPhase(
                 historyBudgetPolicyIdentity: args.m0M1.historyBudgetPolicyIdentity,
                 temporalAwareness: args.m0M1.temporalAwareness,
                 isCacheBustingPass: true,
+                skipPressureRefold: wrapupPending,
                 contentionFallbackPrefix: cachedPrefixBeforePreflight,
                 allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
@@ -2992,11 +2998,7 @@ export async function runPostTransformPhase(
         }),
         explicitFlush:
             isExplicitFlush &&
-            hasPendingMaterializationOrigin(
-                args.pendingMaterializationSessions,
-                args.sessionId,
-                "user_flush",
-            ),
+            hasExplicitRefreshRequest(args.pendingMaterializationSessions, args.sessionId),
         publishedHistory:
             !prefixPreflightFailed &&
             (publishedM1RefreshedThisPass ||
@@ -3978,9 +3980,8 @@ export async function runPostTransformPhase(
             droppedCount += clearedReasoning + strippedInline + removedReasoningMessages;
             // ── Drain pendingMaterializationSessions ──
             // Heuristics + materialization successfully ran on this pass.
-            // We've fulfilled every reason the set was added (user
-            // /ctx-flush, variant change, system-prompt hash change,
-            // historian publish), so clear the persistent signal. If
+            // Clear the reasons fulfilled by cleanup. A wrapup still needs
+            // to serve the new summary and trim the covered messages. If
             // compartmentRunning had blocked us above, this drain is
             // intentionally NOT reached — the flag survives so the next
             // safe pass picks up the work.
@@ -3991,7 +3992,7 @@ export async function runPostTransformPhase(
                 !freezeM0M1 &&
                 !pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
             ) {
-                clearPendingMaterialization(args.pendingMaterializationSessions, args.sessionId);
+                clearReclaimedMaterialization(args.pendingMaterializationSessions, args.sessionId);
             }
             if (args.currentTurnId) {
                 args.lastHeuristicsTurnId.set(args.sessionId, args.currentTurnId);
@@ -4315,6 +4316,7 @@ export async function runPostTransformPhase(
                 historyBudgetPolicyIdentity: args.m0M1.historyBudgetPolicyIdentity,
                 temporalAwareness: args.m0M1.temporalAwareness,
                 isCacheBustingPass: isCacheBustingPass && !freezeM0M1,
+                skipPressureRefold: wrapupPending,
                 preparedPrefix,
                 prefixTrimSourceOrder: args.prefixTrimSourceOrder,
                 allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
@@ -4605,19 +4607,35 @@ export async function runPostTransformPhase(
     const tMarker = performance.now();
     const explicitRebuildHappened =
         args.historyRefreshExplicitBeforePrepare && args.rebuiltHistoryFromInitialPrepare;
+    const wrapupServed =
+        wrapupPending &&
+        isCacheBustingPass &&
+        !freezeM0M1 &&
+        deliveredPrefix?.injected === true &&
+        !deliveredPrefix.materializationContentionRetryExhausted &&
+        (deliveredPrefix.prefixTrimStatus === "applied" ||
+            deliveredPrefix.prefixTrimStatus === "boundary-precedes-window");
+    if (wrapupServed) {
+        clearPendingMaterializationOrigin(
+            args.pendingMaterializationSessions,
+            args.sessionId,
+            "user_wrapup",
+        );
+    }
     const materializationSatisfied =
         !deferredMaterializationWasPending ||
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully;
     const historyWasConsumedThisPass =
-        (!m0M1Enabled ||
+        wrapupServed ||
+        ((!m0M1Enabled ||
             (deliveredPrefix?.injected === true &&
                 !deliveredPrefix.materializationContentionRetryExhausted)) &&
-        args.historyRebuiltThisPass &&
-        (args.canConsumeDeferredLate ||
-            args.phaseJustAwaitedPublication ||
-            explicitRebuildHappened) &&
-        materializationSatisfied;
+            args.historyRebuiltThisPass &&
+            (args.canConsumeDeferredLate ||
+                args.phaseJustAwaitedPublication ||
+                explicitRebuildHappened) &&
+            materializationSatisfied);
 
     // Drain the persisted marker before todo synthesis so the todo anchor sees
     // the same summary representation that this pass will emit.
@@ -5925,7 +5943,9 @@ export function checkM0MutationDriftAndSignal(args: {
 
 import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
 import {
-    clearPendingMaterialization,
+    clearPendingMaterializationOrigin,
+    clearReclaimedMaterialization,
+    hasExplicitRefreshRequest,
     hasPendingMaterializationOrigin,
     pendingMaterializationOrigin,
     requestPendingMaterialization,

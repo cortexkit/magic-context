@@ -6209,10 +6209,9 @@ export function registerPiContextHandler(
 					inputTokens: usageInputTokens,
 				},
 				isCacheBusting,
-				userFlushOrigin: hasPendingMaterializationOrigin(
+				userFlushOrigin: hasExplicitRefreshRequest(
 					pendingMaterializationSessions,
 					sessionId,
-					"user_flush",
 				),
 				reasoningClearing: {
 					keepReasoningTokens: resolveKeepReasoningTokens(
@@ -9031,12 +9030,10 @@ function maybeFireHistorian(args: {
 					usage.percentage >= historianForceMaterializationPercentage &&
 					(usage.percentage >= 95 ||
 						getEmergencyInputSample(db, sessionId) === 0),
-				// The pipeline counts a pending materialization as the flush ride
-				// only when a user flush requested it.
-				explicitFlush: hasPendingMaterializationOrigin(
+				// Count the flush ride only when a user requested a refresh.
+				explicitFlush: hasExplicitRefreshRequest(
 					pendingMaterializationSessions,
 					sessionId,
-					"user_flush",
 				),
 				publishedHistory: args.publishedHistoryRide,
 				// The pipeline's own permission: a pass held for recent signed
@@ -10214,6 +10211,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let publishedM1RefreshedThisPass = false;
 	let prefixPreflightContended = false;
 	const softRefreshOpportunity = args.schedulerDecision === "execute";
+	const wrapupPending = hasPendingMaterializationOrigin(
+		pendingMaterializationSessions,
+		args.sessionId,
+		"user_wrapup",
+	);
+	if (piM0State) piM0State.skipPressureRefold = wrapupPending;
 	const cachedPrefixBeforePreflight =
 		piM0State &&
 		(foldDueDecision.value || softRefreshOpportunity) &&
@@ -10611,10 +10614,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		explicitFlush:
 			!protectedSignedPrefix &&
 			(args.userFlushOrigin === true ||
-				hasPendingMaterializationOrigin(
+				hasExplicitRefreshRequest(
 					pendingMaterializationSessions,
 					args.sessionId,
-					"user_flush",
 				)),
 		publishedHistory: !prefixPreflightContended && publishedM1RefreshedThisPass,
 	};
@@ -11509,7 +11511,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 							(op) => newTargets.get(op.tagId)?.thinkingDropProtected,
 						)
 					)
-						consumePendingMaterialization(args.sessionId);
+						clearReclaimedMaterialization(
+							pendingMaterializationSessions,
+							args.sessionId,
+						);
 				}
 			}
 			// NOTE: do NOT consume deferredMaterialization here. OpenCode only
@@ -11913,7 +11918,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						(op) => newTargets.get(op.tagId)?.thinkingDropProtected,
 					)
 				)
-					consumePendingMaterialization(args.sessionId);
+					clearReclaimedMaterialization(
+						pendingMaterializationSessions,
+						args.sessionId,
+					);
 			}
 			if (currentTurnId !== null) {
 				lastHeuristicsTurnIdBySession.set(args.sessionId, currentTurnId);
@@ -12508,6 +12516,20 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// A head held for signed thinking and then released for a system
 			// change was replayed, not rebuilt, so it consumes no refresh.
 			if (!heldHeadReleasedForSystemChange) {
+				if (
+					wrapupPending &&
+					isCacheBustingPass &&
+					!protectedSignedPrefix &&
+					wireInjectionResult.injected &&
+					!wireInjectionResult.contentionExhausted
+				) {
+					clearPendingMaterializationOrigin(
+						pendingMaterializationSessions,
+						args.sessionId,
+						"user_wrapup",
+					);
+					historyWasConsumedThisPass = true;
+				}
 				if (args.isCacheBusting && prefixMutationAllowed) {
 					historyRefreshSessions.delete(args.sessionId);
 					historyWasConsumedThisPass = true;
@@ -13743,6 +13765,9 @@ function runPersistedReplayStage<T>(
 import type { PendingMaterializationOrigin } from "@magic-context/core/hooks/magic-context/pending-materialization";
 import {
 	clearPendingMaterialization,
+	clearPendingMaterializationOrigin,
+	clearReclaimedMaterialization,
+	hasExplicitRefreshRequest,
 	hasPendingMaterializationOrigin,
 	pendingMaterializationOrigin,
 	requestPendingMaterialization,

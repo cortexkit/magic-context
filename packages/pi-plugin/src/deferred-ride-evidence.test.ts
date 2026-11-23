@@ -248,7 +248,7 @@ export function rideHarness(inject = true, scenario?: "floor" | "small") {
 				),
 			);
 		},
-		publish() {
+		publish(lines = 20) {
 			appendCompartments(db, id, [
 				{
 					sequence: 1,
@@ -257,8 +257,10 @@ export function rideHarness(inject = true, scenario?: "floor" | "small") {
 					startMessageId: "entry-2",
 					endMessageId: "entry-5",
 					title: "Fresh publication",
-					content: "Newly published facts about the first file.\n".repeat(20),
-					p1: "Newly published facts about the first file.\n".repeat(20),
+					content: "Newly published facts about the first file.\n".repeat(
+						lines,
+					),
+					p1: "Newly published facts about the first file.\n".repeat(lines),
 				},
 			]);
 			signalPiDeferredHistoryRefresh(id);
@@ -291,6 +293,28 @@ function firstDifference(previous: unknown[], next: unknown[]) {
 			? previous.length
 			: index;
 }
+
+test("Pi wrapup serves the new summary and cut once without a pressure-backstop fold", async () => {
+	const h = rideHarness();
+	try {
+		const before = await h.pass(40);
+		expect(JSON.stringify(before)).toContain("File 0: preserving the content");
+		expect(JSON.stringify(before)).not.toContain("Newly published facts");
+		// The new summary is large enough that a normal rebuild would fold it into the baseline.
+		h.publish(200);
+		signalPiPendingMaterialization(h.id, "user_wrapup");
+		const after = await h.pass(40);
+		expect(JSON.stringify(after)).toContain("Newly published facts");
+		expect(JSON.stringify(after)).not.toContain(
+			"File 0: preserving the content",
+		);
+		expect(JSON.stringify(after)).toContain("File 1: preserving the content");
+		expect(firstDifference(before, after)).toBe(2);
+		expect(JSON.stringify(await h.pass(40))).toBe(JSON.stringify(after));
+	} finally {
+		h.close();
+	}
+});
 
 type Kind = "publication" | "noop" | "marker-retry" | "flush";
 async function differential(kind: Kind, queue: boolean) {

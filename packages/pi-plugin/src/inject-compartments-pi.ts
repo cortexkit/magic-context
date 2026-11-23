@@ -517,6 +517,8 @@ function safeGetActiveUserMemoriesPi(db: ContextDatabase): UserMemory[] {
 }
 
 export interface PiM0M1State {
+	/** A wrapup can update recent summaries without replacing the cached baseline, even when the delta grows large. */
+	skipPressureRefold?: boolean;
 	/** Test hook before writer admission, before any m[1] render reads. */
 	beforeCacheCommitForTest?: () => void;
 	/**
@@ -3167,6 +3169,7 @@ export function injectM0M1Pi(
 		!contentionExhausted &&
 		m1Recomputed &&
 		recomputeM1ThisPass &&
+		!state.skipPressureRefold &&
 		(memoryUpdateCount > 40 ||
 			m1OverAbsoluteCap ||
 			(m1HasContent &&

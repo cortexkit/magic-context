@@ -23,7 +23,11 @@ import {
 	releaseWrapupInProgress,
 	updateWrapupInProgress,
 } from "@magic-context/core/features/magic-context/storage";
-import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
+import {
+	readPersistedWrapupWindow,
+	resolveExecuteThreshold,
+	WRAPUP_WINDOW_UNAVAILABLE,
+} from "@magic-context/core/hooks/magic-context/event-resolvers";
 import {
 	describeBoundaryDiagnostics,
 	hasRunnableCompartmentWindow,
@@ -37,6 +41,7 @@ import { COMPACTION_OFF_COMMAND_UNAVAILABLE } from "../compaction-off-pi";
 import {
 	signalPiDeferredHistoryRefresh,
 	signalPiDeferredMaterialization,
+	signalPiPendingMaterialization,
 } from "../context-handler";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { repairPiHistoryBoundary } from "../history-boundary-repair-pi";
@@ -250,10 +255,11 @@ export async function runPiWrapup(
 	const unregister = setRawMessageProvider(sessionId, provider);
 	let holderId = "";
 	try {
-		const contextLimit = resolvePiContextLimit(ctx, deps.db, sessionId);
-		const modelKey = ctx.model
-			? `${ctx.model.provider}/${ctx.model.id}`
-			: undefined;
+		const window = resolvePiWrapupWindow(ctx, deps.db, sessionId);
+		if (!window)
+			return `## Magic Wrapup — Skipped\n\n${WRAPUP_WINDOW_UNAVAILABLE}`;
+
+		const { contextLimit, modelKey } = window;
 		const executeThresholdPercentage = resolveExecuteThreshold(
 			deps.executeThresholdPercentage ?? 65,
 			modelKey,
@@ -563,7 +569,12 @@ export async function runPiWrapup(
 			} catch {
 				// Best-effort: normal historian recovery disarm remains the backstop.
 			}
-			return `## Magic Wrapup\n\nWrapped up ${messagesWrapped} messages into ${compartmentsCreated} compartments. The compacted history is queued and materializes on your next message.`;
+			let message = `## Magic Wrapup\n\nWrapped up ${messagesWrapped} messages into ${compartmentsCreated} compartments.`;
+			if (compartmentsCreated > 0) {
+				signalPiPendingMaterialization(sessionId, "user_wrapup");
+				message += " The compacted history applies on your next message.";
+			}
+			return message;
 		} finally {
 			clearInterval(renewal);
 			deps.shutdownSignal?.removeEventListener("abort", stopRenewal);
@@ -574,27 +585,22 @@ export async function runPiWrapup(
 	}
 }
 
-function resolvePiContextLimit(
+function resolvePiWrapupWindow(
 	ctx: ExtensionCommandContext,
 	db: ContextDatabase,
 	sessionId: string,
-): number {
-	const usage = ctx.getContextUsage?.();
-	let detectedContextLimit: number | undefined;
-	try {
-		const detected = getOverflowState(db, sessionId).detectedContextLimit;
-		if (detected > 0) detectedContextLimit = detected;
-	} catch {
-		// Wrap-up can continue with the runtime model window.
-	}
-	return (
-		resolvePiUsableContextLimit({
-			rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
-			rawContextWindowSource: "catalog",
-			model: ctx.model,
-			detectedContextLimit,
-		}) ?? 128_000
-	);
+): { contextLimit: number; modelKey: string } | undefined {
+	const model = ctx.model;
+	if (!model) return readPersistedWrapupWindow(db, sessionId);
+	const modelKey = `${model.provider}/${model.id}`;
+	const overflow = getOverflowState(db, sessionId, modelKey);
+	const contextLimit = resolvePiUsableContextLimit({
+		model,
+		detectedContextLimit: overflow.detectedContextLimit,
+	});
+	return contextLimit === undefined
+		? readPersistedWrapupWindow(db, sessionId, modelKey)
+		: { contextLimit, modelKey };
 }
 
 async function acquireCompartmentLeaseEventually(

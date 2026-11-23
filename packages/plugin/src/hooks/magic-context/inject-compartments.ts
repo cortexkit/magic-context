@@ -1046,6 +1046,8 @@ export interface M0M1RenderOptions {
      * deterministic mural on demand and folds its image into the m[0] baseline. */
     muralEnabled?: boolean;
     isCacheBustingPass?: boolean;
+    /** A wrapup can update recent summaries without replacing the cached baseline, even when the delta grows large. */
+    skipPressureRefold?: boolean;
     /** Force/emergency may serve a fresh recovery prefix even if persistence loses contention. */
     allowFreshContentionFallback?: boolean;
     /** Exact off-wire prefix chosen before reduction gates; do not decide again at delivery. */
@@ -4585,7 +4587,13 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     // diverge sharply from token count, so the ratio must compare tokens on both
     // sides. Computed once; this branch is rare (cache-busting + m1Recomputed).
     let driftNeedsRefold = false;
-    if (!rematerialized && !contentionExhausted && m1Recomputed && options.isCacheBustingPass) {
+    if (
+        !rematerialized &&
+        !contentionExhausted &&
+        m1Recomputed &&
+        options.isCacheBustingPass &&
+        !options.skipPressureRefold
+    ) {
         driftNeedsRefold = memoryUpdateCount > 40;
         if (!driftNeedsRefold && m1Text !== M1_EMPTY_PLACEHOLDER) {
             const m1Tokens = estimateTokens(m1Text);

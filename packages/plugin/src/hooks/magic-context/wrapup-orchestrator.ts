@@ -26,6 +26,7 @@ import {
 } from "./compartment-runner";
 import { runCompartmentAgent } from "./compartment-runner-incremental";
 import type { RecompProgress } from "./compartment-runner-types";
+import { requestPendingMaterialization } from "./pending-materialization";
 import {
     describeBoundaryDiagnostics,
     hasRunnableCompartmentWindow,
@@ -41,7 +42,6 @@ export interface ManagedWrapupContext extends ManagedRecompContext {
     memoryInjectionBudgetTokens?: number;
     contextLimit: number;
     executeThresholdPercentage: number;
-    hasPendingNaturalBust?: (sessionId: string) => boolean;
     runCompartmentAgentForWrapup?: typeof runCompartmentAgent;
     wrapupLeaseWaitTimeoutMs?: number;
 }
@@ -106,11 +106,6 @@ function formatAlreadyRunningMessage(state: ReturnType<typeof getWrapupInProgres
     const through =
         state.lastCompartmentEnd > 0 ? ` through message ${state.lastCompartmentEnd}` : "";
     return `/ctx-wrapup is already running for this session${chunk}${through}. Wait for it to finish, then run /ctx-wrapup again if more history remains.`;
-}
-
-function appendFlushHint(ctx: ManagedWrapupContext, sessionId: string, message: string): string {
-    if (ctx.hasPendingNaturalBust?.(sessionId)) return message;
-    return `${message} If you want it applied on the very next message, run /ctx-flush first.`;
 }
 
 function buildPlan(
@@ -583,8 +578,17 @@ async function runStartedWrapup(
     } catch {
         // Best-effort: normal historian recovery disarm remains the backstop.
     }
-    const base = `Wrapped up ${messagesWrapped} messages into ${compartmentsCreated} compartments. The compacted history is queued and materializes on your next message.`;
-    const message = appendFlushHint(ctx, sessionId, base);
+    let message = `Wrapped up ${messagesWrapped} messages into ${compartmentsCreated} compartments.`;
+    // Publish the intent once, after the whole run succeeds, rather than rewriting
+    // the served history once for every chunk or after a partial failure.
+    if (compartmentsCreated > 0) {
+        requestPendingMaterialization(
+            ctx.liveSessionState.pendingMaterializationSessions,
+            sessionId,
+            "user_wrapup",
+        );
+        message += " The compacted history applies on your next message.";
+    }
     setRecompTerminal(ctx.liveSessionState, sessionId, "done", message);
     return message;
 }
