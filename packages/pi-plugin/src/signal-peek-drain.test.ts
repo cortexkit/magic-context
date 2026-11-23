@@ -261,15 +261,18 @@ describe("source contract: peek-then-drain in runPipeline (pending materializati
 
 	test("drain happens AFTER applyPendingOperations succeeds", () => {
 		// Find the gate body. After the applyPendingOperations call there
-		// must be a conditional consumePendingMaterialization drain
-		// guarded by hasPendingMaterializeSignal, all inside the same
-		// `if` block (so a throw from applyPendingOperations skips the drain).
+		// must be a conditional drain guarded by hasPendingMaterializeSignal,
+		// all inside the same `if` block (so a throw from
+		// applyPendingOperations skips the drain). The drain keeps a wrapup's
+		// request, which is spent only when its summary is served.
 		const idx = code.indexOf("applyPendingOperations(");
 		expect(idx).toBeGreaterThan(0);
 		const catchIndex = code.indexOf("} catch", idx);
 		expect(catchIndex).toBeGreaterThan(idx);
 		const segment = code.slice(idx, catchIndex);
-		expect(segment).toContain("consumePendingMaterialization(args.sessionId)");
+		expect(segment).toMatch(
+			/clearReclaimedMaterialization\(\s*pendingMaterializationSessions,\s*args\.sessionId,?\s*\)/,
+		);
 		expect(segment).toMatch(/if\s*\(\s*hasPendingMaterializeSignal\s*\)/);
 	});
 });
