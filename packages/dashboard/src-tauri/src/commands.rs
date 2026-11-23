@@ -1950,20 +1950,19 @@ mod tests {
     }
 
     #[test]
-    fn opencode_probe_dir_treats_blank_xdg_data_home_as_unset() {
+    fn storage_dir_treats_blank_xdg_data_home_as_unset() {
+        // Resolve only: the probe would create the folder in the real home
+        // on Windows, where `dirs` ignores HOME.
         let mut env = crate::test_env::EnvGuard::new();
-        let root = tempfile::tempdir().unwrap();
         env.remove("MAGIC_CONTEXT_STORAGE_DIR");
-        env.set("HOME", root.path());
         env.set("XDG_DATA_HOME", "  ");
-        let expected = root
-            .path()
-            .join(".local")
-            .join("share")
-            .join("cortexkit")
-            .join("magic-context");
-        assert_eq!(super::opencode_probe_dir(), expected);
-        assert!(expected.is_dir());
+        let expected = dirs::home_dir().map(|home| {
+            home.join(".local")
+                .join("share")
+                .join("cortexkit")
+                .join("magic-context")
+        });
+        assert_eq!(crate::log_parser::resolve_storage_dir(), expected);
     }
 
     #[cfg(unix)]
