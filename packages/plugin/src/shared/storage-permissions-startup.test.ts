@@ -263,4 +263,18 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
             expect(fs.readFileSync(marker, "utf8")).toBe("1\n");
         }
     });
+
+    it("does not certify a full pass that keeps a fresh legacy fence temp", () => {
+        const root = fixture();
+        const fresh = join(root, "lkg-recovery-fences", "fresh.json.publisher.tmp");
+        fs.writeFileSync(fresh, "keep", { mode: 0o600 });
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.existsSync(fresh)).toBe(true);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+        const old = new Date(Date.now() - 11 * 60_000);
+        fs.utimesSync(fresh, old, old);
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.existsSync(fresh)).toBe(false);
+        expect(fs.existsSync(join(root, markerName))).toBe(true);
+    });
 });

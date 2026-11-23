@@ -267,6 +267,7 @@ export function tightenStorageTreeSync(
     const marker = join(root, STORAGE_PERMISSIONS_MARKER);
     let tightened = 0;
     let failures = 0;
+    let keptLegacyTemp = false;
     const removeMarker = (): void => {
         try {
             rmSync(marker, { force: true });
@@ -302,11 +303,11 @@ export function tightenStorageTreeSync(
         if (!certified && dirname(entryPath) === fenceDirectory) {
             const name = basename(entryPath);
             // A legacy publisher can use a recent temp file.
-            if (
-                stat.isFile() &&
-                /^.+\.json\..+\.tmp$/.test(name) &&
-                Date.now() - stat.mtimeMs > LEGACY_FENCE_TEMP_MIN_AGE_MS
-            ) {
+            const legacyTemp = stat.isFile() && /^.+\.json\..+\.tmp$/.test(name);
+            if (legacyTemp && Date.now() - stat.mtimeMs <= LEGACY_FENCE_TEMP_MIN_AGE_MS) {
+                // A certified start does not sweep, so do not certify until a later pass removes it.
+                keptLegacyTemp = true;
+            } else if (legacyTemp) {
                 try {
                     rmSync(entryPath, { force: true });
                 } catch {
@@ -367,7 +368,7 @@ export function tightenStorageTreeSync(
         if (tightened > 0 || failures > 0) removeMarker();
     } else {
         visit(root);
-        if (failures === 0) {
+        if (failures === 0 && !keptLegacyTemp) {
             try {
                 writeStorageFileSync(marker, `${STORAGE_PERMISSIONS_POLICY_VERSION}\n`, {
                     flag: "wx",
