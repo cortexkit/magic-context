@@ -323,11 +323,10 @@ pub enum RideCauseKind {
     /// The request would not fit (`over_limit`). It must shrink, so every
     /// lane lands and the emergency drop runs whatever the usage.
     OverLimit,
-    /// The bytes before the conversation change anyway (`model_change`,
-    /// `surface_change`): the system prompt, the tool definitions or the
-    /// model differ, so the whole prefix is written again and any signed
-    /// thinking is invalid already. The head folds and every lane lands in
-    /// that rewrite for free.
+    /// The request needs a new prefix anyway (`model_change`, `surface_change`,
+    /// `effort_change`). The model, system prompt, tool definitions or request
+    /// settings change in a way that loses the cached prefix and invalidates
+    /// signed thinking. The head folds and every lane lands in that same rewrite.
     PrefixChanges,
     /// No change to the request's prefix bytes is established (`cache_expired`,
     /// `chain_reset`, `tier_change`, `account_change`, `window_over_budget`,
@@ -346,7 +345,9 @@ pub enum RideCauseKind {
 pub fn ride_cause_kind(cause: &RideCause) -> RideCauseKind {
     match cause {
         RideCause::OverLimit => RideCauseKind::OverLimit,
-        RideCause::ModelChange | RideCause::SurfaceChange => RideCauseKind::PrefixChanges,
+        RideCause::ModelChange | RideCause::SurfaceChange | RideCause::EffortChange => {
+            RideCauseKind::PrefixChanges
+        }
         RideCause::CacheExpired
         | RideCause::ChainReset
         | RideCause::TierChange

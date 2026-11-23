@@ -4,8 +4,9 @@
 //! chain reset, a tier or account switch, an unknown cause) permits nothing
 //! by itself: resending the same bytes keeps signed thinking valid and the
 //! re-read is paid either way. A ride whose request's bytes before the
-//! conversation change (`surface_change`, `model_change`) folds the head and
-//! lands everything, and `over_limit` keeps its own pressure handling.
+//! conversation change (`surface_change`, `model_change`, `effort_change`)
+//! folds the head and lands everything, and `over_limit` keeps its own
+//! pressure handling.
 
 use super::*;
 
@@ -394,21 +395,18 @@ fn ride_an_expired_cache_never_folds_the_head() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A surface change rewrites the prefix anyway: the head folds the newer
-/// summary into `m[0]` and the queued drop lands, below the threshold.
-#[test]
-fn ride_a_surface_change_folds_and_lands_queued_drops() {
-    let dir = scratch("ride-surface-folds");
+/// A prefix change folds the newer summary into `m[0]` and lands the queued
+/// drop even below the execute threshold.
+fn assert_ride_folds_and_lands_queued_drops(cause: RideCause, scratch_name: &str) {
+    let dir = scratch(scratch_name);
     let (mut session, settings, served) = head_with_a_newer_summary(&dir);
     session.queued.insert(("old".into(), "p".into()));
+    let request = ride(&session, vec![cause], BELOW);
     let view = session
-        .ride(
-            &settings,
-            &ride(&session, vec![RideCause::SurfaceChange], BELOW),
-        )
-        .expect("a surface change rewrites anyway");
+        .ride(&settings, &request)
+        .expect("a prefix-changing ride rebuilds even below the execute threshold");
     let folded = m0(&view).expect("the view carries m[0]");
-    assert_ne!(folded, served, "the surface change did not fold m[0]");
+    assert_ne!(folded, served, "the ride did not fold m[0]");
     assert!(
         serde_json::to_string(&folded)
             .unwrap()
@@ -419,6 +417,18 @@ fn ride_a_surface_change_folds_and_lands_queued_drops() {
     session.accept(view);
     assert!(!session.queued.contains(&("old".into(), "p".into())));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ride_a_surface_change_folds_and_lands_queued_drops() {
+    assert_ride_folds_and_lands_queued_drops(RideCause::SurfaceChange, "ride-surface-folds");
+}
+
+#[test]
+fn ride_an_effort_change_folds_and_lands_queued_drops() {
+    let cause = serde_json::from_str(r#""effort_change""#).expect("a wire ride cause");
+    assert_ride_folds_and_lands_queued_drops(cause, "ride-effort-folds");
+    assert_ride_folds_and_lands_queued_drops(RideCause::ModelChange, "ride-model-folds");
 }
 
 /// What one ride leaves behind, for comparing two rides.
