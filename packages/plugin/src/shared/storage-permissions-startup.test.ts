@@ -239,4 +239,12 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
             lstat.mockRestore();
         }
     });
+
+    it("clears the certificate of a checked root when enforcement turns off", () => {
+        const root = fixture();
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.existsSync(join(root, markerName))).toBe(true);
+        setStoragePrivatePermissionEnforcement(false);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+    });
 });

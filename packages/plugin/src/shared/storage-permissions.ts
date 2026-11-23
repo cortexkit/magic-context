@@ -52,6 +52,16 @@ function invalidateStoragePermissionMarkers(directory: string): void {
 
 export function setStoragePrivatePermissionEnforcement(enforce: boolean): void {
     enforcePrivateStoragePermissions = enforce;
+    if (enforce || process.platform === "win32") return;
+    // A host can keep its database open across a reload, so the next open does not
+    // run the startup walk. Files written while enforcement is off can be loose.
+    for (const root of storagePermissionRoots) {
+        try {
+            rmSync(join(root, STORAGE_PERMISSIONS_MARKER), { force: true });
+        } catch {
+            // Do not stop the configuration change. The startup walk reports this failure.
+        }
+    }
 }
 
 export function shouldEnforcePrivateStoragePermissions(): boolean {
