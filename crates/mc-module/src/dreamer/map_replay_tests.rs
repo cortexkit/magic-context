@@ -36,7 +36,8 @@ use serde_json::{json, Value};
 
 use super::checkout::Checkout;
 use super::curate_replay_tests::migrated_copy;
-use super::run::{TaskInput, STEP_CAP};
+use super::run::TaskInput;
+use super::tasks::map_memories::MAP_STEP_CAP;
 use super::task::{Owner, TaskContext};
 use super::tasks::map_memories::{MapBatch, MapMemories, KIND};
 use super::verify_replay_tests::{env, required, write_json, ANY_WINDOW};
@@ -384,7 +385,7 @@ fn the_harness_writes_each_batchs_request_and_leaves_the_store_alone() {
         (&request["kind"], &request["commit"], &request["model"]),
         (&json!(KIND), &json!(head), &json!("deepseek-flash"))
     );
-    assert_eq!(request["settings"]["maxSteps"], STEP_CAP);
+    assert_eq!(request["settings"]["maxSteps"], MAP_STEP_CAP);
     assert_eq!(request["settings"]["maxOutputTokens"], DREAM_OUTPUT_TOKENS);
     let revision = |id: i64| -> i64 {
         fixture

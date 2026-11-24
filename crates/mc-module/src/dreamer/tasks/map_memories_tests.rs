@@ -1115,7 +1115,7 @@ async fn retry_a_step_capped_child_records_when_and_what_it_tried() {
     let ran = through_engine(
         store,
         &[
-            Ends::StepCapped(STEP_CAP),
+            Ends::StepCapped(MAP_STEP_CAP),
             Ends::Reply("I couldn't decide."),
         ],
         &Settings::default(),
@@ -1218,7 +1218,7 @@ async fn a_due_run_maps_each_memory_in_a_child_of_its_own_through_the_engine() {
             .starts_with("You are a memory mapper"));
         assert_eq!(
             request.runner_params["stop_when"],
-            json!({"max_steps": STEP_CAP})
+            json!({"max_steps": MAP_STEP_CAP})
         );
         assert!(request
             .prompt
@@ -1285,9 +1285,9 @@ async fn a_capped_child_answers_once_more_and_one_without_a_manifest_leaves_its_
     let ran = through_engine(
         store,
         &[
-            Ends::StepCapped(STEP_CAP),
+            Ends::StepCapped(MAP_STEP_CAP),
             Ends::Reply(leaked(manifest(&[(1, "files=\"src/view.rs\"")]))),
-            Ends::StepCapped(STEP_CAP),
+            Ends::StepCapped(MAP_STEP_CAP),
             Ends::Reply("I ran out of steps before I could decide."),
             Ends::Reply(leaked(manifest(&[(3, "independent=\"true\"")]))),
         ],
@@ -1348,7 +1348,7 @@ async fn the_token_budget_stops_a_run_of_one_memory_messages_before_the_next() {
     let ran = through_engine(
         store,
         &[
-            Ends::StepCapped(STEP_CAP),
+            Ends::StepCapped(MAP_STEP_CAP),
             Ends::Spent("I ran out of steps.", 500),
         ],
         &settings,

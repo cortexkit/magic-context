@@ -15,7 +15,7 @@
 //! its text names that the checkout tracks, and for a memory naming none, the
 //! files where a bounded literal search finds the code names it mentions. The
 //! model reads the checkout with a tool provider's read-only tools
-//! ([`super::super::plan`]) for at most [`STEP_CAP`] steps and answers with
+//! ([`super::super::plan`]) for at most [`MAP_STEP_CAP`] steps and answers with
 //! one `<mappings>` manifest. A child that reaches the cap is told to answer
 //! with what it has; when that answer is unusable too, the task records the
 //! attempt without changing the mapping, and the run goes on.
@@ -58,7 +58,7 @@ use sha2::{Digest, Sha256};
 
 use super::classify::{attribute, body, describe_shape, re};
 use crate::dreamer::branches::main_checkout;
-use crate::dreamer::run::{StepCap, TaskInput, TaskReply, STEP_CAP};
+use crate::dreamer::run::{StepCap, TaskInput, TaskReply};
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
 use crate::memory_profile::Profile;
 use crate::memory_writes::now_ms;
@@ -79,8 +79,14 @@ pub(crate) const OPERATION: &str = "map";
 /// definitions and the task's fixed instructions) stays cached. Verify's batches checked by reading hold the same
 /// number ([`super::verify::READ_BATCH_SIZE`]).
 pub(crate) const BATCH_SIZE: usize = 1;
-/// What a child whose run reached [`STEP_CAP`] is sent, once; its reply's
-/// manifest is the batch's answer.
+/// The most model steps one mapping child takes. Locating a memory's files
+/// takes a few reads, and one step may run several of them at once. With
+/// verify's 12 steps a mapping run of 31 memories cost 7.9 million prompt
+/// tokens for 12 saved mappings, where three tool calls per memory had cost
+/// 0.85 million for 16. The fourth step is the answer.
+pub(crate) const MAP_STEP_CAP: u64 = 4;
+/// What a child whose run reached [`MAP_STEP_CAP`] is sent, once; its
+/// reply's manifest is the batch's answer.
 pub(crate) const FINALIZE: &str = "Stop reading now. Answer with the mappings you have decided; leave any id you could not decide unmapped.";
 /// At most this many memories already marked file-independent are sent
 /// again in one run (see [`select`]).
@@ -1010,7 +1016,7 @@ impl TaskInput for MapBatch {
 
     fn step_cap(&self) -> Option<StepCap> {
         Some(StepCap {
-            steps: STEP_CAP,
+            steps: MAP_STEP_CAP,
             finalize: FINALIZE,
         })
     }
