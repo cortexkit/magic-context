@@ -185,6 +185,7 @@ interface ProjectEmbeddingRegistration {
     runtimeFingerprint: string;
     provider: EmbeddingProvider | null;
     generation: number;
+    searchBackfillAfterId?: number;
     features: EmbeddingFeatures;
     modelId: string;
     chunkModelId: string;
@@ -1469,6 +1470,7 @@ export function registerProjectEmbedding(
         runtimeFingerprint,
         provider: canReuseProvider ? prior.provider : null,
         generation,
+        searchBackfillAfterId: generationChanged ? undefined : prior.searchBackfillAfterId,
         features: { ...features },
         modelId: providerIdentity === OFF_PROVIDER_IDENTITY ? "off" : providerIdentity,
         chunkModelId: providerIdentity === OFF_PROVIDER_IDENTITY ? "off" : chunkModelId,
@@ -2559,6 +2561,25 @@ export function getProjectEmbeddingSnapshot(
     return registration ? snapshotFor(registration) : null;
 }
 
+export function readSearchBackfillCursor(
+    projectIdentity: string,
+    generation: number,
+): number | undefined {
+    const registration = projectRegistrations.get(projectIdentity);
+    return registration?.generation === generation ? registration.searchBackfillAfterId : undefined;
+}
+
+export function writeSearchBackfillCursor(
+    projectIdentity: string,
+    generation: number,
+    expected: number | undefined,
+    afterId: number | undefined,
+): void {
+    const registration = projectRegistrations.get(projectIdentity);
+    if (registration?.generation === generation && registration.searchBackfillAfterId === expected)
+        registration.searchBackfillAfterId = afterId;
+}
+
 /**
  * Install a worker-local search runtime backed by the owner's provider bridge.
  * This does not register a project, load configuration, or write descriptors.
@@ -2575,6 +2596,10 @@ export function installProjectEmbeddingSearchBridge(
         providerIdentity: snapshot.providerIdentity,
         runtimeFingerprint: snapshot.runtimeFingerprint,
         generation: snapshot.generation,
+        searchBackfillAfterId: readSearchBackfillCursor(
+            snapshot.projectIdentity,
+            snapshot.generation,
+        ),
         features: { ...snapshot.features },
         modelId: snapshot.modelId,
         chunkModelId: snapshot.chunkModelId,
