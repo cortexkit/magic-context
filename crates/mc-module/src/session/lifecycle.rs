@@ -276,11 +276,22 @@ impl Session {
     /// What the session's settings depend on: its folder, its model
     /// as `provider/model`, and its usable window.
     pub fn config_inputs(&self) -> (Option<&str>, String, u64) {
-        let model = &self.conditions.model;
+        self.config_inputs_for(None)
+    }
+
+    /// Resolve settings for the geometry this job will actually take.
+    pub(crate) fn config_inputs_for(
+        &self,
+        incoming: Option<&Conditions>,
+    ) -> (Option<&str>, String, u64) {
+        let conditions = incoming
+            .filter(|conditions| self.standing(conditions) == Some(Standing::Current))
+            .unwrap_or(&self.conditions);
+        let model = &conditions.model;
         (
             self.workdir.as_deref(),
             format!("{}/{}", model.provider, model.model),
-            crate::pass::usable_window(&self.conditions),
+            crate::pass::usable_window(conditions),
         )
     }
 
