@@ -170,6 +170,40 @@ fn hold(computer: &Computer) -> Option<super::EpochHold> {
         .unwrap()
 }
 
+#[tokio::test]
+async fn restoring_a_winner_after_an_epoch_hold_clears_health_without_an_arrival() {
+    let hub = InMemoryHub::new();
+    let a = sealed_under(&hub, 2, "Sealed under epoch two.").await;
+    let mut b = Computer::new(&hub, 2);
+    let vault = Vault::new(&[2], (UNAVAILABLE, "transient"));
+    b.with_vault(&hub, 2, Arc::clone(&vault) as _, Arc::new(UnknownEpochs));
+    b.sync().await;
+
+    // Reopen the store with a vault that doesn't have the key to the
+    // previously applied winner. The restore queue normally comes from
+    // reconciliation after a local change can no longer win.
+    b.execute("UPDATE memories SET content = 'Losing local edit.'");
+    b.execute(
+        "DELETE FROM replica_outbox;
+               INSERT INTO replica_restore (global_id, seq)
+               SELECT global_id, seq FROM replica_ids",
+    );
+    let mut b = Computer::open(&hub, 2, b.copy());
+    let vault = Vault::new(&[1], (UNAVAILABLE, "transient"));
+    b.with_vault(&hub, 2, Arc::clone(&vault) as _, Arc::new(UnknownEpochs));
+    let position = b.replica.position().unwrap();
+    assert!(b.replica.follow().await.unwrap_err().contains(UNAVAILABLE));
+    assert_eq!(hold(&b).expect("restore is held").epoch, 2);
+
+    vault.receive(2);
+    assert_eq!(b.replica.follow().await.unwrap(), 0);
+    assert_eq!(b.replica.position().unwrap(), position);
+    assert_eq!(b.value::<i64>("SELECT COUNT(*) FROM replica_restore"), 0);
+    assert_eq!(b.live(), a.live());
+    assert_eq!(hub.messages().len(), 1);
+    assert_eq!(hold(&b), None, "the restore is no longer held");
+}
+
 /// A message sealed under an epoch this computer's vault doesn't hold yet
 /// is never skipped: the stream is held before it, with nothing recorded as
 /// rejected, until the vault holds the epoch, and then it applies. Nothing
