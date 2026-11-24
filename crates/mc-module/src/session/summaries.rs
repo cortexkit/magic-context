@@ -552,7 +552,9 @@ impl Session {
             .summarized_through()
             .is_none_or(|covered| ordinal > covered)
         {
-            self.head_stale = true;
+            if self.numbers_reach().is_none_or(|reach| ordinal > reach) {
+                self.head_stale = true;
+            }
             return;
         }
         self.cut = Some(ordinal);

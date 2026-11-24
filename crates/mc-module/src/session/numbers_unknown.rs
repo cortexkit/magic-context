@@ -90,7 +90,18 @@ impl Session {
     /// would otherwise go unmanaged until a rebuild came for another reason.
     pub(super) fn numbers_view_due(&self) -> bool {
         self.numbers_floor().is_some_and(|floor| {
-            self.cut.is_none_or(|cut| cut < floor.ordinal)
+            // A numbers-only cut is not a summary boundary and so does not
+            // advance `self.cut`. Compare the view the runner has instead.
+            let served = self
+                .unconfirmed
+                .iter()
+                .rev()
+                .find(|pending| pending.accepted)
+                .map(|pending| &pending.view)
+                .or_else(|| self.applied_copy())
+                .and_then(|view| self.rendered_view(Some(view)))
+                .and_then(|view| cut_of(&view).and_then(|mid| self.index.ordinal_of(mid)));
+            served.is_none_or(|cut| cut < floor.ordinal)
                 && self
                     .numbers_reach()
                     .is_some_and(|reach| reach >= floor.ordinal)
