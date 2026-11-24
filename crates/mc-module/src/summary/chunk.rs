@@ -47,6 +47,9 @@ pub struct Chunk {
     pub messages: usize,
     /// Each printed line, in order: what a fact's anchor may cite.
     pub printed_blocks: Vec<PrintedBlock>,
+    /// The historian input marks at least one line whose host metadata
+    /// verifies that it contains the person's words from an ongoing turn.
+    pub(super) marks_mid_turn: bool,
 }
 
 /// One `[N]`/`[N-M]` line of the chunk as the summarizer reads it.
@@ -84,6 +87,7 @@ struct Block {
     lines: Vec<ChunkLine>,
     commit_hashes: Vec<String>,
     tool_only: bool,
+    mid_turn: bool,
 }
 
 impl Block {
@@ -106,7 +110,7 @@ impl Block {
         format!("{range} {}:{commits} ", self.role)
     }
 
-    fn format(&self) -> String {
+    fn format(&self, historian: bool) -> String {
         if self.role == 'R' {
             return self
                 .parts
@@ -115,7 +119,11 @@ impl Block {
                 .collect::<Vec<_>>()
                 .join("\n");
         }
-        format!("{}{}", self.header(), self.parts.join(" / "))
+        let mut header = self.header();
+        if historian && self.mid_turn {
+            header = header.replacen(" U:", " U (mid-turn):", 1);
+        }
+        format!("{header}{}", self.parts.join(" / "))
     }
 }
 
@@ -138,7 +146,38 @@ pub fn build_with(
     mode: Lines,
     counter: crate::count::Counter,
 ) -> Option<Chunk> {
-    build_counted(entries, token_budget, mode, |_, text| counter.count(text))
+    let build = |entries| build_counted(entries, token_budget, mode, |_, text| counter.count(text));
+    let chunk = build(entries)?;
+    if mode != Lines::PerMessage || counter.count(&chunk.input) <= token_budget {
+        return Some(chunk);
+    }
+    // Tokenizing each block separately does not count the header or the
+    // joins. Keep the original bytes when they fit; otherwise select a
+    // whole-block prefix against the actual joined input and header.
+    let header_end = chunk.input.split_once("\n\n")?.0.len() + 2;
+    let start = chunk.validation.start_index;
+    let mut lo = 1;
+    let mut hi = chunk.printed_blocks.len();
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let block = &chunk.printed_blocks[mid - 1];
+        let end = block.end;
+        let body = &chunk.input[header_end..block.text_end];
+        if counter.count(&format!("Messages {start}-{end}:\n\n{body}")) <= token_budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let end = chunk.printed_blocks[lo - 1].end;
+    if end == chunk.validation.end_index {
+        // A single oversized first line still makes progress. The caller
+        // truncates only that line, never a later advertised message.
+        return Some(chunk);
+    }
+    let mut prefix = build(&entries[..entries.partition_point(|entry| entry.ordinal <= end)])?;
+    prefix.has_more = true;
+    Some(prefix)
 }
 
 /// The newest lines of a transcript, as [`build`] prints them, for a reader
@@ -456,6 +495,7 @@ pub(super) fn count_header(
         lines: Vec::new(),
         commit_hashes: hashes.iter().map(|hash| (*hash).to_owned()).collect(),
         tool_only: false,
+        mid_turn: false,
     };
     let header = block.header();
     if let Some((_, count)) = counts
@@ -513,6 +553,7 @@ fn build_counted(
     let mut stopped = false;
     let mut clusters = 0;
     let mut last_role: Option<char> = None;
+    let mut marks_mid_turn = false;
 
     // Appends the current block to the chunk; false when it does not fit.
     let mut flush = |block: Block,
@@ -524,7 +565,7 @@ fn build_counted(
                      clusters: &mut u64,
                      last_role: &mut Option<char>|
      -> bool {
-        let text = block.format();
+        let text = block.format(per_message);
         let tokens = count(&block, &text);
         if *total + tokens > token_budget && *total > 0 {
             return false;
@@ -534,6 +575,7 @@ fn build_counted(
             *clusters += 1;
         }
         *last_role = Some(block.role);
+        marks_mid_turn |= per_message && block.mid_turn;
         lines.push(text);
         printed.push((block.role, block.start, block.end, block.parts.clone()));
         covered.extend(block.lines);
@@ -617,6 +659,7 @@ fn build_counted(
         } else {
             block_lines.first().map_or(number, |first| first.ordinal)
         };
+        let mid_turn = line.mid_turn;
         block_lines.push(line);
         current = Some(Block {
             role,
@@ -626,6 +669,7 @@ fn build_counted(
             lines: block_lines,
             commit_hashes: commits,
             tool_only: !narrative,
+            mid_turn,
         });
         // A relay's labels all name this message, not adjacent hidden ordinals.
         if role == 'R'
@@ -697,15 +741,7 @@ fn build_counted(
             }
         })
         .collect();
-    let hidden_ordinals = present
-        .iter()
-        .copied()
-        .filter(|ordinal| {
-            !printed_blocks
-                .iter()
-                .any(|block| block.start <= *ordinal && *ordinal <= block.end)
-        })
-        .collect();
+    let hidden_ordinals = hidden_ordinals(&present, &printed_blocks);
     Some(Chunk {
         input: format!("{header}{text}"),
         validation: HistorianChunk {
@@ -722,7 +758,106 @@ fn build_counted(
         commit_clusters: clusters,
         messages,
         printed_blocks,
+        marks_mid_turn,
     })
+}
+
+fn hidden_ordinals(present: &[u64], printed: &[PrintedBlock]) -> Vec<u64> {
+    // Both streams follow the transcript order. Once a block is behind an
+    // ordinal, it cannot cover any later ordinal either.
+    let mut blocks = printed.iter().peekable();
+    present
+        .iter()
+        .copied()
+        .filter(|ordinal| {
+            while blocks.peek().is_some_and(|block| block.end < *ordinal) {
+                blocks.next();
+            }
+            blocks.peek().is_none_or(|block| block.start > *ordinal)
+        })
+        .collect()
+}
+
+#[test]
+fn historian_visibility_scaling() {
+    for size in [1_000, 2_000, 4_000, 8_000] {
+        let entries: Vec<_> = (1..=size)
+            .map(|ordinal| {
+                Entry::new(
+                    ordinal,
+                    ordinal.to_string(),
+                    Role::User,
+                    ordinal,
+                    vec![cortexkit_role_compaction::part::Part::new(
+                        "p",
+                        PartBody::Text {
+                            text: "word".into(),
+                        },
+                    )],
+                )
+            })
+            .collect();
+        let mut durations = [std::time::Duration::ZERO; 5];
+        for elapsed in &mut durations {
+            let started = std::time::Instant::now();
+            let chunk = build_counted(&entries, u64::MAX, Lines::PerMessage, |_, _| 1).unwrap();
+            *elapsed = started.elapsed();
+            assert!(chunk.validation.hidden_ordinals.is_empty());
+            assert_eq!(chunk.printed_blocks.len(), size as usize);
+        }
+        durations.sort_unstable();
+        eprintln!("{size} messages: median {:?}", durations[2]);
+    }
+}
+
+#[test]
+fn historian_budget_keeps_every_advertised_line_whole() {
+    let entries: Vec<_> = (1..=600)
+        .map(|ordinal| {
+            Entry::new(
+                ordinal,
+                format!("m{ordinal}"),
+                if ordinal % 2 == 1 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                ordinal,
+                vec![cortexkit_role_compaction::part::Part::new(
+                    "p",
+                    PartBody::Text {
+                        text: "One more sentence about the test fixture and its findings. "
+                            .repeat(4)
+                            .into(),
+                    },
+                )],
+            )
+        })
+        .collect();
+    for model in [
+        None,
+        Some("anthropic/claude-opus-5-5"),
+        Some("openai/gpt-5"),
+    ] {
+        let counter = crate::count::Counter::for_model(model);
+        for budget in [8_000, 20_000] {
+            let chunk = build_with(&entries, budget, Lines::PerMessage, counter).unwrap();
+            assert!(chunk.has_more, "fixture must hit the cap for {model:?}");
+            assert!(
+                counter.count(&chunk.input) <= budget,
+                "budget {budget} exceeded for {model:?}: {}",
+                counter.count(&chunk.input)
+            );
+            assert_eq!(
+                blocks_sent(&chunk, &chunk.input).len(),
+                chunk.printed_blocks.len()
+            );
+            assert_eq!(
+                chunk.printed_blocks.last().unwrap().end,
+                chunk.validation.end_index
+            );
+        }
+    }
 }
 
 /// The printed blocks of `chunk` whose whole line reached the summarizer in

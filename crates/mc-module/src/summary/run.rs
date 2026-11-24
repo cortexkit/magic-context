@@ -564,7 +564,10 @@ async fn summarize_on<C: RunnerClient>(
         anchored_facts: anchored,
         turn_one_instruction: &call.prompts.turn_one,
     });
-    let prompt = format!("{prompt}\n\n{}", turn_one::FORMAT_INSTRUCTION);
+    let mut prompt = format!("{prompt}\n\n{}", turn_one::FORMAT_INSTRUCTION);
+    if chunk.marks_mid_turn {
+        prompt.push_str("\n\n`U (mid-turn):` marks words the person spoke during an ongoing turn. Include them in the preceding compartment: do not start a compartment or set `<unprocessed_from>` at that message unless it is the first message in this chunk.");
+    }
     // The model is part of the child's name, so a fallback model never
     // continues another model's conversation.
     let range = format!(
