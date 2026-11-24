@@ -374,6 +374,62 @@ function firstDifference(previous: unknown[], next: unknown[]) {
 }
 
 for (const host of ["opencode", "opencode2"] as const) {
+    test.each([
+        "fold",
+        "m[1]",
+    ] as const)(`${host} wrapup spends its grant when the replayed %s already covers the publication`, async (writer) => {
+        const h = openCodeRideHarness(host);
+        const injectM0M1 = injection.injectM0M1;
+        let writes = 0;
+        const inject = spyOn(injection, "injectM0M1");
+        try {
+            h.setMemoryEnabled(true);
+            await h.pass(40);
+            h.publish();
+            if (writer === "m[1]") {
+                h.flush();
+                expect(JSON.stringify(await h.pass(40))).toContain("New history facts.");
+                await h.pass(40);
+                await h.pass(40);
+            }
+            h.wrapup();
+            inject.mockImplementation((options) =>
+                injectM0M1({
+                    ...options,
+                    beforeCacheCommitForTest: () => {
+                        if (writes++ !== 0) return;
+                        if (writer === "fold") {
+                            const fold = injection.materializeWithRetry({
+                                ...options,
+                                state: getOrCreateSessionMeta(h.db, h.id),
+                                beforeCacheCommitForTest: undefined,
+                                onFoldPrepare: undefined,
+                            });
+                            expect(fold.m0Text).toContain("New history facts.");
+                        } else {
+                            h.db
+                                .prepare(
+                                    "UPDATE session_meta SET cached_m0_materialized_at = cached_m0_materialized_at + 1 WHERE session_id = ?",
+                                )
+                                .run(h.id);
+                        }
+                    },
+                }),
+            );
+
+            const served = await h.pass(40);
+            expect(writes).toBe(1);
+            expect(JSON.stringify(served)).toContain("New history facts.");
+            expect(h.wrapupPending).toBe(false);
+            h.queue();
+            expect(await h.pass(40)).toEqual(served);
+            expect(getPendingOps(h.db, h.id)).toHaveLength(1);
+        } finally {
+            inject.mockRestore();
+            h.close();
+        }
+    });
+
     test(`${host} wrapup keeps its grant when a soft refresh serves the old history head`, async () => {
         const h = openCodeRideHarness(host);
         const injectM0M1 = injection.injectM0M1;

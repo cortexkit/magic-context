@@ -4613,7 +4613,7 @@ export async function runPostTransformPhase(
         !freezeM0M1 &&
         deliveredPrefix?.injected === true &&
         !deliveredPrefix.materializationContentionRetryExhausted &&
-        !deliveredPrefix.softRefreshReplayed;
+        !deliveredPrefix.wrapupPublicationUnconfirmed;
     if (wrapupServed) {
         clearPendingMaterializationOrigin(
             args.pendingMaterializationSessions,

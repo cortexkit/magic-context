@@ -12523,7 +12523,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					!protectedSignedPrefix &&
 					wireInjectionResult.injected &&
 					!wireInjectionResult.contentionExhausted &&
-					!wireInjectionResult.softRefreshReplayed
+					!wireInjectionResult.wrapupPublicationUnconfirmed
 				) {
 					clearPendingMaterializationOrigin(
 						pendingMaterializationSessions,
