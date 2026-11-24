@@ -3,8 +3,8 @@
 //! maintain them by hand, and the docs-upkeep task may change nothing in
 //! them. Ported from the 0.49 plugin's `protected-regions.ts`.
 
-const START: &str = "mc:protected START";
-const END: &str = "mc:protected END";
+const START: &str = "<!-- mc:protected START";
+const END: &str = "<!-- mc:protected END -->";
 
 /// One protected region: its whole start-marker line, and its bytes from
 /// that line through the end-marker line.
@@ -21,9 +21,15 @@ pub(crate) fn blocks(text: &str) -> Vec<Block> {
     let mut found = Vec::new();
     let mut at = 0;
     while at < lines.len() {
-        if lines[at].contains(START) {
+        if lines[at]
+            .trim()
+            .strip_prefix(START)
+            .is_some_and(|suffix| suffix.starts_with(char::is_whitespace) || suffix == "-->")
+        {
             let start = at;
-            while at < lines.len() && !lines[at].contains(END) {
+            // A start comment can describe the closing marker without ending the region.
+            at += 1;
+            while at < lines.len() && lines[at].trim() != END {
                 at += 1;
             }
             if at >= lines.len() {

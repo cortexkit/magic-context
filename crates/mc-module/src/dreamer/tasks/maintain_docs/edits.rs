@@ -72,9 +72,14 @@ fn heading_line() -> &'static Regex {
     PATTERN.get_or_init(|| Regex::new(r"^#{1,6} \S").expect("the heading pattern compiles"))
 }
 
-fn fence_line() -> &'static Regex {
-    static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| Regex::new(r"^\s*(```|~~~)").expect("the fence pattern compiles"))
+fn fence_line(line: &str) -> Option<(u8, usize, &str)> {
+    let line = line.trim_start();
+    let marker = *line.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let length = line.bytes().take_while(|byte| *byte == marker).count();
+    (length >= 3).then(|| (marker, length, &line[length..]))
 }
 
 /// The sections of `text`, in heading order, including nested sections.
@@ -84,12 +89,20 @@ pub(crate) fn sections(text: &str) -> Vec<Section> {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut found: Vec<Section> = Vec::new();
     let mut open: Vec<(usize, usize)> = Vec::new();
-    let mut fenced = false;
+    let mut fence = None;
     for (at, line) in lines.iter().enumerate() {
-        if fence_line().is_match(line) {
-            fenced = !fenced;
+        if let Some((marker, length, suffix)) = fence_line(line) {
+            match fence {
+                None if marker != b'`' || !suffix.contains('`') => fence = Some((marker, length)),
+                Some((opener, minimum))
+                    if marker == opener && length >= minimum && suffix.trim().is_empty() =>
+                {
+                    fence = None;
+                }
+                _ => (),
+            }
         }
-        if !fenced && heading_line().is_match(line) {
+        if fence.is_none() && heading_line().is_match(line) {
             let level = line.bytes().take_while(|byte| *byte == b'#').count();
             // A new heading closes its peers and their descendants, but not
             // its parents, whose edits must include the nested text.
