@@ -1,15 +1,9 @@
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	type ContextDatabase,
-	clearPendingPiCompactionMarkerStateIf,
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
-import { applyDeferredPiCompactionMarker } from "./compaction-marker-manager-pi";
 import { signalPiDeferredHistoryRefresh } from "./context-handler";
-import {
-	adaptPiAppendCompaction,
-	type PiAppendCompaction,
-} from "./pi-append-compaction";
 import {
 	buildPiCompactionSummary,
 	placePiMarkerKeptEntry,
@@ -45,7 +39,7 @@ function placeFirstKeptEntryId(
  * already fires drive the synthetic `<session-history>` render, not the native
  * marker that trims `getBranch()`; those are separate mechanisms.)
  *
- * Used by detached recomp and upgrade runs: applying the marker eagerly
+ * Detached /ctx-recomp stages the marker because applying it eagerly
  * (`appendCompaction`) mutates `getBranch()` immediately and could alter a
  * cache-stable pass. Staging + deferred drain mirrors the background historian's
  * `onPublished` signals so the marker rides the next genuine bust.
@@ -90,98 +84,4 @@ export function stagePiRecompMarker(args: {
 		publishedAt: Date.now(),
 	});
 	signalPiDeferredHistoryRefresh(args.sessionId);
-}
-
-/**
- * EAGER marker apply — bypasses the rendered-coverage gate that the pipeline's
- * deferred drain enforces (pendingPiMarkerCoveredByRenderedBoundary). Safe ONLY
- * in a context where a recomp has JUST republished the compartments:
- * recomp writes the m[0] mutation log, so the next transform pass HARD-folds
- * m[0] over the republished compartments and the model is shown everything the
- * marker trims in that same busting pass. Calling this without that same-pass
- * rendered coverage could trim getBranch() beyond content the model has seen.
- * The live background command (/ctx-recomp) therefore uses the DEFERRED
- * stagePiRecompMarker instead; this eager path is kept for a same-turn caller
- * that owns the rendered-coverage precondition itself.
- */
-export function queueAndApplyPiRecompMarker(args: {
-	db: ContextDatabase;
-	sessionId: string;
-	ctx: unknown;
-}): void {
-	const appendCompaction = resolvePiAppendCompaction(args.ctx);
-	const readBranchEntries = resolvePiReadBranchEntries(args.ctx);
-	if (!appendCompaction || !readBranchEntries) return;
-
-	const compartments = getCompartments(args.db, args.sessionId);
-	const last = compartments[compartments.length - 1];
-	if (!last) return;
-
-	let firstKeptEntryId: string | null = null;
-	try {
-		firstKeptEntryId = placeFirstKeptEntryId(
-			args.db,
-			args.sessionId,
-			readBranchEntries(),
-			last,
-		);
-	} catch {
-		firstKeptEntryId = null;
-	}
-	if (!firstKeptEntryId || last.endMessageId.length === 0) return;
-
-	const pending = {
-		firstKeptEntryId,
-		endMessageId: last.endMessageId,
-		ordinal: last.endMessage,
-		tokensBefore: 0,
-		summary: buildPiCompactionSummary(compartments),
-		publishedAt: Date.now(),
-	};
-
-	setPendingPiCompactionMarkerState(args.db, args.sessionId, pending);
-	const outcome = applyDeferredPiCompactionMarker(
-		{ db: args.db, appendCompaction, readBranchEntries },
-		args.sessionId,
-		pending,
-	);
-	if (outcome.kind === "retryable-failure") {
-		signalPiDeferredHistoryRefresh(args.sessionId);
-		return;
-	}
-	if (
-		!clearPendingPiCompactionMarkerStateIf(
-			args.db,
-			args.sessionId,
-			pending,
-			outcome.kind === "stale-skip" ? outcome.reason : outcome.kind,
-		)
-	) {
-		signalPiDeferredHistoryRefresh(args.sessionId);
-	}
-}
-
-function resolvePiAppendCompaction(
-	ctx: unknown,
-): PiAppendCompaction | undefined {
-	return adaptPiAppendCompaction(
-		(ctx as { sessionManager?: unknown })?.sessionManager,
-	);
-}
-
-function resolvePiReadBranchEntries(
-	ctx: unknown,
-): (() => unknown[]) | undefined {
-	const sm = (ctx as { sessionManager?: unknown })?.sessionManager as
-		| { getBranch?: () => unknown[] }
-		| undefined;
-	if (typeof sm?.getBranch !== "function") return undefined;
-	return () => {
-		try {
-			const entries = sm.getBranch?.call(sm);
-			return Array.isArray(entries) ? entries : [];
-		} catch {
-			return [];
-		}
-	};
 }
