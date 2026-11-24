@@ -371,6 +371,29 @@ pub fn start_run(
     Ok(conn.last_insert_rowid())
 }
 
+/// Memory IDs whose requests the previous run could not send successfully.
+/// Keep the retry order in the run journal, not in a memory's verdict or
+/// cooldown metadata.
+pub(super) fn prior_request_failures(
+    conn: &Connection,
+    due: &Due,
+    run: i64,
+) -> rusqlite::Result<std::collections::HashSet<i64>> {
+    conn.prepare(
+        "SELECT m.value
+           FROM json_each((SELECT batches_json FROM dream_task_runs
+                            WHERE level = ?1 AND owner_id = ?2 AND task = ?3 AND id < ?4
+                              AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1)) b,
+                json_each(b.value, '$.deferred_memory_ids') m
+          WHERE m.type = 'integer'",
+    )?
+    .query_map(
+        params![due.owner.level, due.owner.owner_id, due.task, run],
+        |row| row.get(0),
+    )?
+    .collect()
+}
+
 /// The previous waiting run and the total already spent in this occurrence.
 /// A retry before the next cron slot belongs to the waiting run; the next
 /// cron slot itself starts with a fresh budget.

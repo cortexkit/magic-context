@@ -542,7 +542,7 @@ fn documents_that_changed_while_the_run_read_them_propose_nothing_and_keep_the_w
 }
 
 #[test]
-fn a_new_proposal_replaces_the_pending_one_and_removes_its_copy() {
+fn a_new_edit_to_the_same_section_replaces_the_pending_edit() {
     let fixture = Fixture::documented();
     changed(&fixture);
     let first = fixture.batch();
@@ -556,12 +556,58 @@ fn a_new_proposal_replaces_the_pending_one_and_removes_its_copy() {
         .write(&[("src/parser.rs", "fn parse() { 2 }\n")]);
     fixture.repo.commit("again");
     let second = fixture.batch();
-    fixture.apply(&second, &replacement());
+    let mut newer = replacement();
+    newer[0]["text"] = json!("## Core\nThe parser was rewritten.");
+    let applied = fixture.apply(&second, &newer);
     let later = fixture.pending().unwrap();
     assert_ne!(later.id, earlier.id);
     assert_eq!(fixture.proposal(earlier.id).status, "stale");
     assert!(!earlier_copy.exists());
     assert!(proposals::file::path(fixture.repo.path(), later.id).exists());
+    assert_eq!(later.changes.len(), 1);
+    assert_eq!(later.changes[0].text, "## Core\nThe parser was rewritten.");
+    assert!(applied
+        .dropped
+        .iter()
+        .any(|reason| reason.contains("pending proposal") && reason.contains("## Core")));
+}
+
+#[test]
+fn a_new_proposal_keeps_unrelated_unapplied_changes() {
+    let fixture = Fixture::documented();
+    changed(&fixture);
+    fixture.apply(&fixture.batch(), &replacement());
+    let earlier = fixture.pending().unwrap();
+
+    fixture
+        .repo
+        .write(&[("src/parser.rs", "fn parse() { 2 }\n")]);
+    fixture.repo.commit("change code a second time");
+    let applied = fixture.apply(
+        &fixture.batch(),
+        &json!([{
+            "file": "STRUCTURE.md",
+            "action": "replace",
+            "heading": "## Layout",
+            "text": "## Layout\nThe parser module now handles output too.",
+            "reason": "The output implementation moved."
+        }]),
+    );
+    assert!(applied.dropped.is_empty(), "{applied:?}");
+    let later = fixture.pending().unwrap();
+    assert_ne!(later.id, earlier.id);
+    assert_eq!(later.base_commit, fixture.head());
+    assert_eq!(later.changes.len(), 2);
+    assert!(later.changes.contains(&earlier.changes[0]));
+    assert!(later
+        .changes
+        .iter()
+        .any(|change| change.heading == "## Layout"));
+    assert!(later
+        .result
+        .iter()
+        .zip(later.base.iter())
+        .all(|(result, base)| result != base));
 }
 
 // --- A proposal's status on read ---

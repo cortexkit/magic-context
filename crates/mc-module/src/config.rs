@@ -308,7 +308,7 @@ fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Sett
             if schedule.is_empty() || crate::dreamer::cron::Cron::parse(schedule).is_some() {
                 settings.schedules.insert(kind.clone(), schedule.to_owned());
             } else {
-                tracing::info!("ck-mc: dreamer.tasks.{kind}.schedule {schedule:?} is not a five-field cron expression; the default applies");
+                tracing::info!("ck-mc: dreamer.tasks.{kind}.schedule {schedule:?} is not a runnable five-field cron schedule; the default applies");
             }
         }
     }

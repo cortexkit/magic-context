@@ -51,12 +51,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{named_params, params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::classify::{attribute, body, describe_shape, re};
+use super::directive::directive_shaped_rule;
+use super::LIVE_MEMORY;
 use crate::dreamer::branches::main_checkout;
 use crate::dreamer::run::{StepCap, TaskInput, TaskReply};
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
@@ -101,8 +103,6 @@ const RETRY_AFTER_MS: i64 = 7 * 86_400_000;
 const METADATA_OBJECT: &str = "CASE WHEN json_valid(metadata_json)
     THEN CASE WHEN json_type(metadata_json) = 'object' THEN metadata_json ELSE '{}' END
     ELSE '{}' END";
-/// The category whose directive-shaped memories never map to files.
-const PROJECT_RULES: &str = "swe:project-rules";
 /// The extensions a path the memory names must end in when the profile
 /// gives none (`map_extensions`).
 const DEFAULT_EXTENSIONS: [&str; 14] = [
@@ -154,13 +154,14 @@ fn content_sha256(content: &str) -> String {
 
 /// `project`'s live memories with their mappings, by id.
 pub(crate) fn live_memories(conn: &Connection, project: &str) -> rusqlite::Result<Vec<Memory>> {
+    let now = now_ms();
     let mut memories: Vec<Memory> = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT id, origin_category, category, content, revision, metadata_json FROM memories
-              WHERE level = 'project' AND owner_id = ?1 AND status IN ('active', 'permanent')
-              ORDER BY id",
-        )?
-        .query_map(params![project], |row| {
+              WHERE level = 'project' AND owner_id = :project AND {LIVE_MEMORY}
+              ORDER BY id"
+        ))?
+        .query_map(named_params! {":project": project, ":now": now}, |row| {
             let metadata: Option<String> = row.get(5)?;
             Ok(Memory {
                 id: row.get(0)?,
@@ -176,13 +177,13 @@ pub(crate) fn live_memories(conn: &Connection, project: &str) -> rusqlite::Resul
         })?
         .collect::<rusqlite::Result<_>>()?;
     let mut mappings: HashMap<i64, Vec<(String, String)>> = HashMap::new();
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare(&format!(
         "SELECT v.memory_id, v.file_path, v.mapping_origin FROM memory_verifications v
            JOIN memories m ON m.id = v.memory_id
-          WHERE m.level = 'project' AND m.owner_id = ?1 AND m.status IN ('active', 'permanent')
-          ORDER BY v.memory_id, v.file_path",
-    )?;
-    let rows = statement.query_map(params![project], |row| {
+          WHERE m.level = 'project' AND m.owner_id = :project AND {LIVE_MEMORY}
+          ORDER BY v.memory_id, v.file_path"
+    ))?;
+    let rows = statement.query_map(named_params! {":project": project, ":now": now}, |row| {
         Ok((row.get::<_, i64>(0)?, row.get(1)?, row.get(2)?))
     })?;
     for row in rows {
@@ -751,31 +752,6 @@ pub(crate) fn validate_manifest(text: &str, expected: &[i64]) -> Result<Vec<Mapp
     Ok(found)
 }
 
-/// Whether a project rule reads as a workflow directive: a modal tied to a
-/// person (`you must`, `agents should`), a behavioural `when` clause, a
-/// workflow imperative, or a statement of who decides. File names in such a
-/// rule are things to act on, not code that backs it, so it never maps to
-/// files. A declarative claim about code ("binds use spread args") is not
-/// one.
-pub(crate) fn directive_shaped_rule(category: &str, content: &str) -> bool {
-    if category != PROJECT_RULES {
-        return false;
-    }
-    let text = content.trim();
-    if text.is_empty() {
-        return false;
-    }
-    [
-        r"(?:^|[.!?]\s+|\n\s*)(?:[-*]\s+|\d+[.)]\s+)?(?:you\s+|we\s+)?(?:must(?:\s+not)?|never|always|do\s+not|don't|shall\s+not)\b",
-        r"\b(?:you|we|agents?|masons?|workers?|operators?|users?|maintainers?)\s+(?:must(?:\s+not)?|should(?:\s+not)?|need\s+to|shall(?:\s+not)?|cannot|can't|may\s+not)\b",
-        r"\bwhen\s+(?:you(?:'re|\s+are)?|we(?:'re|\s+are)?|told|asked|requested|working|debugging|reviewing|checking|verifying|investigating|using|running|editing|changing)\b",
-        r"(?:^|[.!?]\s+|\n\s*)(?:[-*]\s+|\d+[.)]\s+)?(?:please\s+)?(?:run|use|check|ask|avoid|prefer|ensure|keep|follow|brief|report|inspect|search|open|read|review|validate|confirm|delegate|stop|start|remember)\b",
-        r"\b(?:the\s+)?(?:user|operator|maintainer|owner)\s+(?:decides|chooses|approves|has\s+(?:the\s+)?final\s+say)\b",
-    ]
-    .iter()
-    .any(|pattern| re(&format!("(?i){pattern}")).is_match(text))
-}
-
 /// The task kind.
 pub(crate) struct MapMemories;
 
@@ -1158,12 +1134,12 @@ impl MapBatch {
         // A child that saw an older revision must not put the current one
         // on cooldown. A mapping written while the child ran wins over a miss.
         tx.execute(
-            &format!("UPDATE memories SET metadata_json = json_set({METADATA_OBJECT}, '$.{ATTEMPT_KEY}', json(?2))
-                      WHERE id = ?1 AND level = 'project' AND owner_id = ?3
-                        AND status IN ('active', 'permanent') AND revision = ?4 AND content = ?5
+            &format!("UPDATE memories SET metadata_json = json_set({METADATA_OBJECT}, '$.{ATTEMPT_KEY}', json(:attempt))
+                      WHERE id = :id AND level = 'project' AND owner_id = :project
+                        AND {LIVE_MEMORY} AND revision = :revision AND content = :content
                         AND NOT EXISTS (SELECT 1 FROM memory_verifications
-                                         WHERE memory_id = ?1 AND file_path <> '')"),
-            params![seen.id, json!(attempt).to_string(), self.run.project, seen.revision, seen.content],
+                                         WHERE memory_id = :id AND file_path <> '')"),
+            named_params! {":id": seen.id, ":attempt": json!(attempt).to_string(), ":project": self.run.project, ":revision": seen.revision, ":content": seen.content, ":now": now},
         )?;
         Ok(())
     }
@@ -1240,9 +1216,9 @@ impl MapBatch {
             };
             let current: Option<(bool, i64)> = tx
                 .query_row(
-                    "SELECT level = 'project' AND owner_id = ?2 AND status IN ('active', 'permanent'), revision
-                       FROM memories WHERE id = ?1",
-                    params![id, project],
+                    &format!("SELECT level = 'project' AND owner_id = :project AND {LIVE_MEMORY}, revision
+                       FROM memories WHERE id = :id"),
+                    named_params! {":id": id, ":project": project, ":now": now},
                     |row| Ok((row.get::<_, Option<bool>>(0)?.unwrap_or(false), row.get(1)?)),
                 )
                 .optional()?;
@@ -1263,14 +1239,8 @@ impl MapBatch {
                 }
             }
             let (files, origin) = self.decide(proposal, seen, &mut applied.dropped);
-            if origin == REJECTED {
-                self.record_attempt(tx, seen, now)?;
-            }
-            let paths = if files.is_empty() {
-                vec![String::new()]
-            } else {
-                files
-            };
+            let empty = files.is_empty();
+            let paths = if empty { vec![String::new()] } else { files };
             let wanted: Vec<MappingRow> = paths
                 .into_iter()
                 .map(|file_path| MappingRow {
@@ -1281,15 +1251,18 @@ impl MapBatch {
                 })
                 .collect();
             let before = mapping_rows(tx, id)?;
-            if same_mapping(&before, &wanted) {
-                if origin != REJECTED {
-                    clear_attempt(tx, id)?;
-                }
-                continue;
+            if !same_mapping(&before, &wanted) {
+                put_mapping(tx, id, &wanted)?;
+                changes.push((id, before, wanted));
+                applied.applied += 1;
+            } else if !empty {
+                clear_attempt(tx, id)?;
             }
-            put_mapping(tx, id, &wanted)?;
-            changes.push((id, before, wanted));
-            applied.applied += 1;
+            if empty {
+                // An empty mapping needs a cooldown even if the model leaves
+                // the existing empty-path row unchanged.
+                self.record_attempt(tx, seen, now)?;
+            }
         }
         if !changes.is_empty() {
             record_mappings(tx, project, &self.decision_key(run), &changes, now)?;

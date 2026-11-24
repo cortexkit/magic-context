@@ -23,7 +23,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::checkout::{is_commit, run_git_output, run_git_within, GIT_TIMEOUT};
+use super::checkout::{is_commit, run_git_within, GIT_TIMEOUT};
 
 /// How long making a copy of one commit may take.
 const COPY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -213,18 +213,16 @@ impl Refs {
     /// The live branches: the default branch first, then each branch of
     /// `named` (the project's `dreamer.branches` entry), local or else
     /// origin's, once per commit. A named branch git doesn't know is left
-    /// out with a log line, and so is one the default branch already
-    /// contains: it holds older code of the default branch's line. Which
+    /// out with a log line. A named tip is still live when it is an ancestor
+    /// of the default tip: a release can keep running code main removed. Which
     /// lines a project runs is the person's statement, never a guess from
     /// the worktrees that happen to exist: side checkouts come and go, and a
     /// line that has none is still run.
-    /// `Err` when git fails or runs out of time on one of the checks.
     pub(crate) fn lines(&self, repo: &Path, named: &[String]) -> Result<Vec<LiveBranch>, String> {
         let Some((name, commit)) = self.default_branch() else {
             return Ok(Vec::new());
         };
-        let default = LiveBranch { name, commit };
-        let mut live = vec![default.clone()];
+        let mut live = vec![LiveBranch { name, commit }];
         for name in named {
             let Some(commit) = self.heads.get(name).or_else(|| self.origin.get(name)) else {
                 tracing::info!(
@@ -233,9 +231,7 @@ impl Refs {
                 );
                 continue;
             };
-            if live.iter().any(|seen| &seen.commit == commit)
-                || contains(repo, &default.commit, commit)?
-            {
+            if live.iter().any(|seen| &seen.commit == commit) {
                 continue;
             }
             live.push(LiveBranch {
@@ -244,29 +240,6 @@ impl Refs {
             });
         }
         Ok(live)
-    }
-}
-
-/// Whether commit `ancestor` is in the history of commit `tip`.
-fn contains(repo: &Path, tip: &str, ancestor: &str) -> Result<bool, String> {
-    if !is_commit(tip) || !is_commit(ancestor) {
-        return Err(format!("{ancestor} or {tip} is not a commit id"));
-    }
-    let output = run_git_output(
-        repo,
-        &["merge-base", "--is-ancestor", ancestor, tip],
-        GIT_TIMEOUT,
-    )?;
-    match output.code {
-        Some(0) => Ok(true),
-        // `git merge-base --is-ancestor` exits 1 when it is not.
-        Some(1) if output.stderr.trim().is_empty() => Ok(false),
-        _ => Err(format!(
-            "checking whether {} contains {}: {}",
-            short(tip),
-            short(ancestor),
-            output.stderr.trim().chars().take(300).collect::<String>()
-        )),
     }
 }
 

@@ -711,6 +711,7 @@ fn the_diff_frame_keeps_the_plugins_shape_and_bounds_long_diffs() {
 struct Ran {
     db: Arc<ContextDb>,
     client: Arc<Client>,
+    engine: Arc<Engine>,
     /// The project's folder, as git names it.
     root: String,
     _repo: Repo,
@@ -724,7 +725,7 @@ impl Ran {
         self.db
             .with_connection(|conn| {
                 conn.query_row(
-                    "SELECT task, outcome, proposed, applied, error, batches_json FROM dream_task_runs",
+                    "SELECT task, outcome, proposed, applied, error, batches_json FROM dream_task_runs ORDER BY id DESC LIMIT 1",
                     [],
                     |row| {
                         Ok((
@@ -822,6 +823,7 @@ async fn broad_through_engine(fixture: Fixture, ends: &[Ends], settings: &Settin
             return Ran {
                 db,
                 client,
+                engine,
                 root,
                 _repo: repo,
                 _dir,
@@ -844,6 +846,68 @@ fn live_and_gone(rows: &[Row]) -> Fixture {
 }
 
 const ARCHIVE_2: &str = "<verify>\n<archive id=\"2\" reason=\"its subject was removed\" missing=\"gone_function\"/>\n</verify>";
+
+#[tokio::test]
+async fn a_request_refusal_defers_one_memory_without_stopping_verification() {
+    let fixture = live_and_gone(&[
+        row(1, "`live_function` runs first."),
+        row(2, "`gone_function` does it."),
+        row(3, "`live_function` is in `src/live.rs`."),
+    ]);
+    let refused = Ends::Error("invalid_request_error: the prompt is too long");
+    let settings = Settings::default();
+    let ran = broad_through_engine(fixture, &[
+        refused.clone(), refused,
+        Ends::Reply(r#"<verify><verified id="1" files="src/live.rs" cites="src/live.rs:1-1"/></verify>"#),
+        Ends::Reply(r#"<verify><skip id="3" reason="unsure"/></verify>"#),
+    ], &settings).await;
+    assert_eq!(ran.checked(1).1.as_deref(), Some("confirmed"));
+    assert_eq!(ran.checked(2), ("active".into(), None, None));
+    let initial = ran.sent().len();
+    assert_eq!(initial, 4);
+    ran.client.ends.lock().unwrap().extend([
+        Ends::Reply(r#"<verify><skip id="1" reason="unsure"/></verify>"#),
+        Ends::Reply(r#"<verify><skip id="3" reason="unsure"/></verify>"#),
+        Ends::Reply(ARCHIVE_2),
+    ]);
+    for _ in 0..500 {
+        if ran.engine.is_idle_for_tests() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    ran.db
+        .with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
+        .unwrap();
+    ran.engine.tick(
+        &ran.db,
+        &ran.client,
+        &settings,
+        crate::memory_writes::now_ms(),
+    );
+    for _ in 0..500 {
+        if ran.engine.is_idle_for_tests() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let next = ran.sent().split_off(initial);
+    assert_eq!(next.len(), 3);
+    assert!(next.last().unwrap().1.contains("[2]"), "{next:?}");
+}
+
+#[tokio::test]
+async fn an_account_wait_still_stops_verification_before_later_batches() {
+    let fixture = live_and_gone(&[
+        row(1, "`live_function` runs first."),
+        row(2, "`gone_function` does it."),
+    ]);
+    let reset = crate::memory_writes::now_ms() as u64 + 60_000;
+    let ran = broad_through_engine(fixture, &[Ends::Full(reset)], &Settings::default()).await;
+    assert_eq!(ran.run().1, "waiting");
+    assert_eq!(ran.sent().len(), 1);
+    assert_eq!(ran.checked(1).1, None);
+}
 
 /// The engine runs `verify-broad` end to end: each memory goes alone to a
 /// runner that takes plans, with AFT's reader tools; a final message without
@@ -1106,6 +1170,57 @@ fn a_confirmation_whose_cited_lines_changed_goes_to_the_model_with_them() {
         fixture.memory(1).4["dreamerVerifiedCommit"],
         json!(fixture.repo.git(&["rev-parse", "HEAD~1"]).trim())
     );
+}
+
+#[test]
+fn an_unsure_or_refused_recheck_of_a_stale_confirmation_waits() {
+    for verdict in [
+        r#"<skip id="1" reason="unsure: the cap changed"/>"#,
+        r#"<update id="1">`CAP` is 32_000.</update>"#,
+    ] {
+        let fixture = Fixture::new(&[
+            ("src/a.rs", "fn uses_cap() {}\n"),
+            ("src/b.rs", "const CAP: u64 = 64_000;\n"),
+        ]);
+        let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+        fixture
+            .repo
+            .write(&[("src/b.rs", "const CAP: u64 = 32_000;\n")]);
+        fixture.repo.commit("halve the cap");
+        fixture.insert(&[Row {
+            files: vec!["src/a.rs"],
+            verified: Some((1_000, Some(first))),
+            spans: vec![("src/b.rs", 1, 1, "const CAP: u64 = 64_000;")],
+            ..row(1, "`uses_cap` reads `CAP`, which is 64k.")
+        }]);
+
+        let batch = fixture.batches(false).remove(0);
+        fixture.apply(&batch, &format!("<verify>{verdict}</verify>"));
+        assert!(
+            fixture.batches(false).is_empty(),
+            "sent again after {verdict}"
+        );
+
+        fixture
+            .repo
+            .write(&[("src/b.rs", "const CAP: u64 = 16_000;\n")]);
+        fixture.repo.commit("change the evidence again");
+        let batch = fixture.batches(false).remove(0);
+        fixture.apply(&batch, &format!("<verify>{verdict}</verify>"));
+        assert!(fixture.batches(false).is_empty());
+        fixture.execute(&format!(
+            "UPDATE memories SET metadata_json = json_set(metadata_json, '$.dreamerCheckedAt', {}) WHERE id = 1",
+            crate::memory_writes::now_ms() - RECHECK_AFTER_MS - 1,
+        ));
+        assert_eq!(
+            fixture
+                .batches(false)
+                .iter()
+                .flat_map(ids)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+    }
 }
 
 /// Diff messages hold up to twenty memories; a memory checked by reading

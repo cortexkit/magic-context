@@ -362,6 +362,7 @@ fn job() -> TaskRun<'static> {
         run_id: "17",
         project_root: "/work/project",
         reader: None,
+        remaining_tokens: u64::MAX,
         attribution: None,
     }
 }
@@ -626,6 +627,7 @@ fn verify() -> TaskRun<'static> {
         run_id: "18",
         project_root: "/work/project",
         reader: Some("aft"),
+        remaining_tokens: u64::MAX,
         attribution: None,
     }
 }

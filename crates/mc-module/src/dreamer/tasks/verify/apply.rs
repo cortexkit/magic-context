@@ -67,6 +67,7 @@ use super::{Absence, Read, VerifyBatch, CHECKED_REVISION_KEY, NOT_CODE_KEY};
 use crate::dreamer::branches::short;
 use crate::dreamer::checkout::{Checkout, RecentBranches, GIT_TIMEOUT};
 use crate::dreamer::task::Applied;
+use crate::dreamer::tasks::directive::directive_shaped_rule as directive;
 use crate::dreamer::tasks::map_memories::{
     mapping_json, mapping_rows, put_mapping, MappingRow, MAPPER,
 };
@@ -78,9 +79,6 @@ use crate::memory_writes::{
 /// A memory's mapping before and after a write, as the journal records it.
 type MappingChange = (i64, Vec<MappingRow>, Vec<MappingRow>);
 
-/// The category of project rules, whose directive-shaped memories 0.49 kept
-/// from being rewritten or archived on the code's evidence.
-const RULES_CATEGORY: &str = "swe:project-rules";
 /// The longest text an update may write, in UTF-16 units as the plugin
 /// counted.
 const MAX_CONTENT: usize = 20_000;
@@ -158,42 +156,6 @@ impl ArchiveBranches {
         }
         Ok(None)
     }
-}
-
-/// Whether a project rule reads as a behavioural directive (when to act, how
-/// to work, who decides): 0.49's patterns, compiled with the JavaScript
-/// semantics the plugin's verifier had (ASCII word boundaries and digits,
-/// JavaScript's whitespace).
-fn directive(memory: &MemoryRow) -> bool {
-    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-    if memory.category_id != RULES_CATEGORY {
-        return false;
-    }
-    let patterns = PATTERNS.get_or_init(|| {
-        [
-            r"(?:^|[.!?]\s+|\n\s*)(?:[-*]\s+|\d+[.)]\s+)?(?:you\s+|we\s+)?(?:must(?:\s+not)?|never|always|do\s+not|don't|shall\s+not)\b",
-            r"\b(?:you|we|agents?|masons?|workers?|operators?|users?|maintainers?)\s+(?:must(?:\s+not)?|should(?:\s+not)?|need\s+to|shall(?:\s+not)?|cannot|can't|may\s+not)\b",
-            r"\bwhen\s+(?:you(?:'re|\s+are)?|we(?:'re|\s+are)?|told|asked|requested|working|debugging|reviewing|checking|verifying|investigating|using|running|editing|changing)\b",
-            r"(?:^|[.!?]\s+|\n\s*)(?:[-*]\s+|\d+[.)]\s+)?(?:please\s+)?(?:run|use|check|ask|avoid|prefer|ensure|keep|follow|brief|report|inspect|search|open|read|review|validate|confirm|delegate|stop|start|remember)\b",
-            r"\b(?:the\s+)?(?:user|operator|maintainer|owner)\s+(?:decides|chooses|approves|has\s+(?:the\s+)?final\s+say)\b",
-        ]
-        .iter()
-        .map(|pattern| {
-            Regex::new(
-                &format!("(?i){pattern}")
-                    .replace("\\b", r"(?-u:\b)")
-                    .replace("\\d", "[0-9]")
-                    .replace(
-                        "\\s",
-                        r"[\t\n\x0B\x0C\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]",
-                    ),
-            )
-            .expect("a fixed directive pattern")
-        })
-        .collect()
-    });
-    let text = js_trim(&memory.content);
-    patterns.iter().any(|pattern| pattern.is_match(text))
 }
 
 /// The labels the verify prompt has a model start a skip's reason with when
@@ -362,7 +324,10 @@ impl VerifyBatch {
                 Decision::Verified | Decision::Skip => None,
             }
             .or_else(|| self.check_lines(verdict, read))
-            .or_else(|| self.check_change_evidence(verdict, &current.content).err())
+            .or_else(|| {
+                self.check_change_evidence(verdict, &current.category_id, &current.content)
+                    .err()
+            })
             .or_else(|| {
                 if verdict.decision != Decision::Archive {
                     return None;
@@ -416,7 +381,9 @@ impl VerifyBatch {
     /// Read change evidence before taking the store's write lock.
     pub(super) fn warm_change(&self, verdict: &Verdict, read: &Read) {
         if self.check_lines(verdict, read).is_none()
-            && self.check_change_evidence(verdict, &read.content).is_ok()
+            && self
+                .check_change_evidence(verdict, &read.category, &read.content)
+                .is_ok()
             && verdict.decision == Decision::Archive
         {
             self.archive_branches.refusal(
@@ -434,7 +401,7 @@ impl VerifyBatch {
     ) -> rusqlite::Result<Option<String>> {
         let content = js_trim(&verdict.content);
         let length = content.encode_utf16().count();
-        if directive(current) {
+        if directive(&current.category_id, &current.content) {
             return Ok(Some(
                 "a project rule that reads as a behavioural directive is only verified or skipped"
                     .into(),
@@ -469,36 +436,52 @@ impl VerifyBatch {
     }
 
     fn check_archive(&self, verdict: &Verdict, current: &MemoryRow) -> Option<String> {
-        (verdict.missing.is_none() && directive(current)).then(|| {
+        (verdict.missing.is_none() && directive(&current.category_id, &current.content)).then(|| {
             "a project rule that reads as a behavioural directive is archived only with missing=, once everything it cites is gone".into()
         })
     }
 
-    fn check_change_evidence(&self, verdict: &Verdict, old: &str) -> Result<(), String> {
+    fn check_change_evidence(
+        &self,
+        verdict: &Verdict,
+        category: &str,
+        old: &str,
+    ) -> Result<(), String> {
         if !matches!(verdict.decision, Decision::Archive | Decision::Update) {
             return Ok(());
         }
         let missing = verdict.missing.as_deref();
         if let Some(missing) = missing {
-            let cite = cites_all(old, self.checkout.top_level())
-                .into_iter()
+            let mut subjects = cites_all(old, self.checkout.top_level());
+            let cite = subjects
+                .iter()
                 .find(|cite| cite.text() == missing)
+                .cloned()
                 .or_else(|| quoted_literal(old, missing).then(|| Cite::Name(missing.into())))
                 .ok_or_else(|| {
                     format!("missing={missing:?} is not a path or name the memory cites")
                 })?;
+            if verdict.decision == Decision::Archive && directive(category, old) {
+                // A directive still applies if any of its subjects survives, including
+                // a name that moved to a file outside the verdict's reading scope.
+                if !subjects.contains(&cite) {
+                    subjects.push(cite);
+                }
+                if subjects.len() > super::cites::MAX_CITES {
+                    return Err(
+                        "the directive cites too many subjects to prove all were removed".into(),
+                    );
+                }
+                for subject in subjects {
+                    self.require_removal(&subject, &[])?;
+                }
+                return Ok(());
+            }
             let files = match cite {
                 Cite::Name(_) => verdict.files.as_slice(),
                 Cite::Path(_) => &[],
             };
-            match self.absence(&cite, files) {
-                Absence::Absent => (),
-                Absence::Present => return Err(format!("{missing} is still in the checkout")),
-                Absence::Never => return Err(format!("{missing} was never in this repository")),
-                Absence::Undecided(why) => {
-                    return Err(format!("whether {missing} is gone is undecided: {why}"))
-                }
-            }
+            self.require_removal(&cite, files)?;
             if verdict.decision == Decision::Archive {
                 return Ok(());
             }
@@ -532,6 +515,18 @@ impl VerifyBatch {
             );
         }
         Ok(())
+    }
+
+    fn require_removal(&self, cite: &Cite, files: &[String]) -> Result<(), String> {
+        let subject = cite.text();
+        match self.absence(cite, files) {
+            Absence::Absent => Ok(()),
+            Absence::Present => Err(format!("{subject} is still in the checkout")),
+            Absence::Never => Err(format!("{subject} was never in this repository")),
+            Absence::Undecided(why) => {
+                Err(format!("whether {subject} is gone is undecided: {why}"))
+            }
+        }
     }
 
     /// The tracked files among `named`, in order and once each.

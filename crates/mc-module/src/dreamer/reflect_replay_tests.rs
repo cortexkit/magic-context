@@ -170,7 +170,7 @@ fn request(batch: &ReflectBatch, index: usize, task: &str, project: &str, model:
         ],
         "groups": batch.groups,
         "existingMemories": batch.existing,
-        "watermark": batch.watermark,
+        "watermark": batch.watermark(),
         "tokens": {
             "system": counter.count(system),
             "user": counter.count(&user),

@@ -80,6 +80,41 @@ fn sections_run_to_the_next_same_or_higher_heading_and_skip_fenced_lines() {
 }
 
 #[test]
+fn only_a_matching_fence_can_end_a_markdown_example() {
+    let example = "## Example\n````md\n~~~\n## Tilde\n```\n## Short\n````text\n## Suffix\n`````\n";
+    let text = format!("# Doc\n{example}## Real\nOld text.\n");
+    let checked = check_architecture(
+        &text,
+        &[
+            change(
+                "ARCHITECTURE.md",
+                "replace",
+                "## Tilde",
+                "## Tilde\nNot a section.",
+            ),
+            change(
+                "ARCHITECTURE.md",
+                "replace",
+                "## Real",
+                "## Real\nNew text.",
+            ),
+        ],
+    );
+    assert_eq!(
+        checked
+            .kept
+            .iter()
+            .map(|edit| edit.heading.as_str())
+            .collect::<Vec<_>>(),
+        ["## Real"]
+    );
+    assert_eq!(
+        checked.results[0],
+        Some(format!("# Doc\n{example}## Real\nNew text.\n"))
+    );
+}
+
+#[test]
 fn replacing_a_section_rewrites_its_subsections() {
     let checked = check_architecture(
         LIVE,
@@ -204,6 +239,29 @@ fn a_protected_region_in_a_subsection_must_survive_a_parent_edit() {
     );
     assert!(checked.dropped.is_empty(), "{:?}", checked.dropped);
     assert_eq!(checked.results[0].as_deref(), Some(updated.as_str()));
+}
+
+#[test]
+fn the_repositorys_hand_authored_cache_core_cannot_be_rewritten() {
+    let original = include_str!("../../../../../../ARCHITECTURE.md");
+    let checked = check_architecture(
+        original,
+        &[change(
+            "ARCHITECTURE.md",
+            "replace",
+            "## Transform pass mechanics",
+            "## Transform pass mechanics\nRewritten cache policy.",
+        )],
+    );
+    assert!(
+        checked.kept.is_empty(),
+        "a rewrite of the cache core was kept"
+    );
+    assert_eq!(
+        checked.dropped[0].reason,
+        "the change alters a protected region"
+    );
+    assert_eq!(checked.results[0].as_deref(), Some(original));
 }
 
 #[test]

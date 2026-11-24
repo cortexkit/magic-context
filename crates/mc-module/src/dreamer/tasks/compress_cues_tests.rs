@@ -618,9 +618,9 @@ fn sent(id: i64, importance: Option<i64>, content: &str) -> Sent {
 }
 
 #[test]
-fn the_fallback_cue_matches_the_archived_vectors() {
+fn the_fallback_cue_keeps_safe_archived_vectors_without_inverting_prohibitions() {
     // Memory, the refused cue, and the cue 0.49's `deterministicFallbackCue`
-    // wrote in its place.
+    // wrote in its place, except when it stripped a prohibition.
     let cases: Vec<(Sent, String, String)> = vec![
         // The model's try, cut to its budget on a word.
         (
@@ -638,7 +638,7 @@ fn the_fallback_cue_matches_the_archived_vectors() {
             "see #7 (ok)".into(),
             "see  (ok)".into(),
         ),
-        // The memory's text without the prohibition marks.
+        // A neutral cue when there is no valid way to draw the prohibition.
         (
             sent(
                 8,
@@ -646,7 +646,7 @@ fn the_fallback_cue_matches_the_archived_vectors() {
                 "Never write the cache without the lock (it corrupts the index) and never skip it.",
             ),
             "must not write".into(),
-            "write the cache the lock it".into(),
+            LAST_RESORT_CUE.into(),
         ),
         (sent(9, Some(50), "((("), "(((".into(), "memory".into()),
         (sent(9, None, "   "), "   ".into(), "memory".into()),
@@ -677,7 +677,7 @@ fn the_fallback_cue_matches_the_archived_vectors() {
         (
             sent(14, Some(50), "⊘ nothing to see (here"),
             ")".into(),
-            "nothing to see here".into(),
+            LAST_RESORT_CUE.into(),
         ),
     ];
     for (memory, last_try, expected) in cases {
@@ -988,6 +988,30 @@ fn the_third_refusal_for_the_same_text_writes_the_fallback_cue() {
     );
     assert!(store.batches().is_empty(), "a cue for the text is written");
     assert_eq!(store.recorded(), (0, 0));
+}
+
+#[test]
+fn compress_cues_only_sends_live_memories() {
+    let store = store(&[row(1), row(2), row(3), row(4)]);
+    store.execute("UPDATE memories SET expires_at = 1 WHERE id = 1; UPDATE memories SET superseded_by_memory_id = 4 WHERE id = 2; UPDATE memories SET status = 'archived' WHERE id = 3;");
+    assert_eq!(
+        store.batches().iter().flat_map(ids).collect::<Vec<_>>(),
+        [4]
+    );
+}
+
+#[test]
+fn a_prohibition_cannot_lose_its_polarity_when_the_cue_is_refused() {
+    let store = store(&[Row {
+        content: "Never publish unfinished reviews.".into(),
+        ..row(1)
+    }]);
+    for _ in 0..3 {
+        let batch = store.batches().remove(0);
+        store.apply(&batch, &manifest(&[(1, "(leaks #1")]));
+    }
+    let (cue, _, _, _, _, _) = store.stored(1);
+    assert!(cue.as_ref().is_none_or(|cue| cue == LAST_RESORT_CUE || cue.contains("⊘publish unfinished reviews")), "{cue:?}");
 }
 
 #[test]

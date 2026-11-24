@@ -943,6 +943,19 @@ fn dreamer_branches_name_each_projects_other_live_branches() {
 }
 
 #[test]
+fn a_dreamer_schedule_that_cannot_match_a_date_keeps_the_default() {
+    let settings = dreamer_settings(Some(&json!({"dreamer": {"tasks": {
+        "verify": {"schedule": "0 0 31 2 *"},
+        "verify-broad": {"schedule": ""},
+        "maintain-docs": {"schedule": "0 0 31 2 5"}
+    }}})))
+    .unwrap();
+    assert_eq!(settings.schedules.get("verify"), None);
+    assert_eq!(settings.schedules["verify-broad"], "");
+    assert_eq!(settings.schedules["maintain-docs"], "0 0 31 2 5");
+}
+
+#[test]
 fn clock_note_defaults_to_thirty_minutes_and_only_the_user_sets_it() {
     let interval =
         |user: Value, project: Value| resolve_for_test(user, project, OPUS, 100_000).clock_note;

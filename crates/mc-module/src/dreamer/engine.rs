@@ -53,6 +53,7 @@ use super::lease::{self, Clock, Lease, RoleLeases, Standing};
 use super::run::{self, TaskError, TaskReply, TaskRun};
 use super::store::{self, OwnerKey, RunEnd, Settled};
 use super::task::{Batch, Owner, Task, TaskContext};
+use super::tasks;
 use crate::client::RunnerClient;
 use crate::context_db::ContextDb;
 use crate::memory_profile::Profile;
@@ -219,6 +220,11 @@ impl Engine {
     pub(crate) fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_idle_for_tests(&self) -> bool {
+        self.running.lock().unwrap().is_empty()
     }
 
     /// The engine with `source` as where a project's runs find their
@@ -1517,12 +1523,31 @@ impl Engine {
         run_id: i64,
         root: &str,
         reader: Option<&str>,
-        batches: Vec<Box<dyn Batch>>,
+        mut batches: Vec<Box<dyn Batch>>,
         leases: &[Lease],
         end: &mut RunEnd,
     ) {
         let name = run_id.to_string();
         end.outcome = "nothing_to_do".into();
+        let can_defer = matches!(
+            demand.kind,
+            tasks::map_memories::KIND | tasks::verify::VERIFY | tasks::verify::VERIFY_BROAD
+        );
+        if can_defer {
+            match db.with_connection(|conn| store::prior_request_failures(conn, due, run_id)) {
+                Ok(ids) if !ids.is_empty() => batches.sort_by_cached_key(|batch| {
+                    batch.memory_ids().iter().any(|id| ids.contains(id))
+                }),
+                Ok(_) => (),
+                Err(error) => {
+                    end.outcome = "failed".into();
+                    end.error = Some(format!(
+                        "reading the previous run's request failures: {error}"
+                    ));
+                    return;
+                }
+            }
+        }
         let (resumed_run, carried) = match db
             .with_connection(|conn| store::resumed_budget(conn, due, run_id))
         {
@@ -1596,6 +1621,7 @@ impl Engine {
                 run_id: &format!("{name}.{index}"),
                 project_root: batch.folder().unwrap_or(root),
                 reader,
+                remaining_tokens: settings.budget_tokens - used,
                 attribution: Some(crate::attribution::Attribution {
                     db,
                     purpose: &purpose,
@@ -1603,15 +1629,14 @@ impl Engine {
             };
             let result = run::run(client, &job, batch.as_ref()).await;
             let records_unusable = batch.records_unusable_reply();
-            if result.is_ok()
+            if matches!(result, Ok(_) | Err(TaskError::Skipped(_)))
                 || (records_unusable
                     && matches!(
                         result,
-                        Err(TaskError::Skipped(_)
-                            | TaskError::Failed {
-                                unusable_reply: true,
-                                ..
-                            })
+                        Err(TaskError::Failed {
+                            unusable_reply: true,
+                            ..
+                        })
                     ))
             {
                 // A child may outlast its acting window. Check the roles
@@ -1656,13 +1681,7 @@ impl Engine {
                             .map_or_else(|| "unreported".to_owned(), |steps| steps.to_string()),
                         skipped.reason
                     );
-                    if records_unusable {
-                        write_fenced(None)
-                    } else {
-                        Ok(write_locked(db, locks, &self.holder, |tx| {
-                            batch.skip(tx, run_id)
-                        }))
-                    }
+                    write_fenced(None)
                 }
                 Err(TaskError::AccountWait(wait, usage)) => {
                     end.outcome = "waiting".into();
@@ -1675,11 +1694,38 @@ impl Engine {
                     }));
                     return;
                 }
+                Err(TaskError::BudgetStopped(usage)) => {
+                    let (input, output) = record_usage(end, usage.as_ref());
+                    end.batches
+                        .push(json!({"input_tokens": input, "output_tokens": output}));
+                    end.outcome = "budget_stopped".into();
+                    end.error = Some(format!(
+                        "used {} of {} tokens; stopped before another send for batch {} of {}",
+                        used.saturating_add(input).saturating_add(output),
+                        settings.budget_tokens,
+                        index + 1,
+                        batches.len(),
+                    ));
+                    return;
+                }
                 Err(TaskError::Failed {
                     mut error,
                     usage,
                     unusable_reply,
+                    request_specific,
                 }) => {
+                    if can_defer && request_specific {
+                        let ids = batch.memory_ids();
+                        if !ids.is_empty() {
+                            let (input, output) = record_usage(end, usage.as_ref());
+                            end.batches.push(json!({
+                                "error": error, "deferred_memory_ids": ids,
+                                "input_tokens": input, "output_tokens": output,
+                            }));
+                            end.dropped.push(format!("memories {ids:?}: the provider refused this request; retry after other batches: {error}"));
+                            continue;
+                        }
+                    }
                     end.outcome = "failed".into();
                     end.failure_class = Some("model".into());
                     if usage.is_some() {
@@ -1927,14 +1973,7 @@ fn record_usage(
     end: &mut RunEnd,
     usage: Option<&cortexkit_role_compaction::read::StepUsage>,
 ) -> (u64, u64) {
-    // `prompt_tokens` is the whole prompt: uncached input, cache reads and
-    // cache writes.
-    let (input, output) = usage.map_or((0, 0), |usage| {
-        (
-            usage.prompt_tokens.unwrap_or(0),
-            usage.output_tokens.unwrap_or(0),
-        )
-    });
+    let (input, output) = run::usage_tokens(usage);
     end.input_tokens += input;
     end.output_tokens += output;
     (input, output)

@@ -30,6 +30,19 @@ fn a_region_runs_from_its_start_line_through_its_end_line() {
 }
 
 #[test]
+fn mentioning_the_end_marker_does_not_close_a_region() {
+    let original = "<!-- mc:protected START — preserve through mc:protected END -->\nHand authored.\nThe mc:protected END marker follows.\nOriginal.\n<!-- mc:protected END -->";
+    assert!(!kept(
+        original,
+        &original.replace("Hand authored.", "Overwritten.")
+    ));
+    assert!(!kept(
+        original,
+        &original.replace("Original.", "Overwritten.")
+    ));
+}
+
+#[test]
 fn edits_outside_an_untouched_region_keep_it() {
     let original = doc("intro", "cache core", "outro");
     assert!(kept(&original, &doc("intro", "cache core", "outro")));

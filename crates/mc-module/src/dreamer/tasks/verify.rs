@@ -63,6 +63,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, Transaction};
 use serde_json::Value;
 
+use super::LIVE_MEMORY;
 use crate::dreamer::branches::{main_checkout, Refs};
 use crate::dreamer::checkout::{Checkout, Limits, SEARCH_LIMITS};
 use crate::dreamer::run::{StepCap, TaskInput, TaskReply, STEP_CAP};
@@ -189,27 +190,29 @@ pub(crate) fn live_memories(
             mappings.entry(id).or_default().push((file, at));
         }
     }
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare(&format!(
         "SELECT id, origin_category, category, content, revision, COALESCE(verified_at, 0), metadata_json,
                 source_branch, verify_commit
            FROM memories
-          WHERE level = 'project' AND owner_id = ?1 AND status IN ('active', 'permanent')
-            AND superseded_by_memory_id IS NULL AND (expires_at IS NULL OR expires_at > ?2)
-          ORDER BY origin_category, updated_at DESC, id",
+          WHERE level = 'project' AND owner_id = :project AND {LIVE_MEMORY}
+          ORDER BY origin_category, updated_at DESC, id"
+    ))?;
+    let rows = statement.query_map(
+        rusqlite::named_params! {":project": project, ":now": now},
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        },
     )?;
-    let rows = statement.query_map(params![project, now], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<String>>(7)?,
-            row.get::<_, Option<String>>(8)?,
-        ))
-    })?;
     let mut memories = Vec::new();
     for row in rows {
         let (
@@ -317,7 +320,6 @@ impl Changes {
             .chain(
                 mapped
                     .iter()
-                    .filter(|memory| memory.verified_at == 0)
                     .filter_map(|memory| memory.checked_commit.as_deref()),
             )
             .collect();
@@ -894,6 +896,7 @@ impl Verify {
                     .memories
                     .iter()
                     .map(|memory| Read {
+                        category: memory.category.clone(),
                         id: memory.id,
                         revision: memory.revision,
                         files: memory.files.clone(),
@@ -1010,13 +1013,11 @@ impl Verify {
             }
         }
         stale.retain(&mut send);
-        let never: Vec<&Memory> = never.into_iter().filter(&mut send).collect();
-        let before = never.len();
-        let never: Vec<&Memory> = never
-            .into_iter()
-            .filter(|memory| !waits(memory, &changes, now))
-            .collect();
-        let held = before - never.len();
+        let mut never: Vec<&Memory> = never.into_iter().filter(&mut send).collect();
+        let before = stale.len() + never.len();
+        stale.retain(|memory| !waits(memory, &changes, now));
+        never.retain(|memory| !waits(memory, &changes, now));
+        let held = before - stale.len() - never.len();
         let mut read: Vec<&Memory> = Vec::new();
         for chunk in stale.chunks(DIFF_BATCH_SIZE) {
             match evidence(checkout, chunk) {
@@ -1043,7 +1044,7 @@ impl Verify {
     }
 }
 
-/// Whether `memory`, never confirmed with cited lines, waits instead of
+/// Whether `memory`, without a confirmation that still holds, waits instead of
 /// going to a model this run: a verify run decided this same revision less
 /// than [`RECHECK_AFTER_MS`] ago and none of its files changed since the
 /// commit that run read. A memory a model could not confirm, or whose
@@ -1063,10 +1064,9 @@ fn waits(memory: &Memory, changes: &Changes, now: i64) -> bool {
     else {
         return false;
     };
-    !memory
-        .files
-        .iter()
-        .any(|file| changed.contains(file) || changes.missing.contains(file))
+    // The diff reports new removals too; a path already gone when the
+    // model checked it is not fresh evidence.
+    !watched(memory).iter().any(|file| changed.contains(*file))
 }
 
 /// A confirmed memory whose cited lines are unchanged, as a re-check found
@@ -1210,6 +1210,7 @@ impl Task for Verify {
 pub(crate) struct Read {
     pub id: i64,
     pub revision: i64,
+    pub category: String,
     /// The files it was mapped to.
     pub files: Vec<String>,
     /// Its text as the batch sent it.

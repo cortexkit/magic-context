@@ -28,6 +28,7 @@ use regex::Regex;
 use rusqlite::{named_params, params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 
+use super::LIVE_MEMORY;
 use crate::dreamer::run::{TaskInput, TaskReply};
 use crate::dreamer::task::{task_prompts, Applied, Batch, Owner, Task, TaskContext};
 use crate::memory_writes::now_ms;
@@ -211,13 +212,19 @@ fn truncate(value: &str, chars: usize) -> String {
 }
 
 /// The cue written in place of one refused for the third time: the model's
-/// last try made to fit, else the start of the memory's text, else that text
-/// without the marks the cue checks look for. Each is used only if it passes
-/// the checks.
+/// last try made to fit, else the start of the memory's text. If a
+/// prohibition cannot be shown with its negative marker and mechanism, use
+/// a neutral label rather than drawing it as a positive instruction.
 pub(crate) fn fallback_cue(memory: &Sent, last_try: &str, budget: Budget) -> String {
     let importance = memory.importance.unwrap_or(DEFAULT_IMPORTANCE);
     let chars = budget.chars(importance);
-    let passes = |cue: &str| validate_cue(cue, importance, memory.id, budget).is_ok();
+    let negative = memory.content.contains('⊘')
+        || prohibition().is_match(&memory.content)
+        || re(r"(?i-u)\b(?:do not|don't|should not|shall not|cannot|can't)\b")
+            .is_match(&memory.content);
+    let passes = |cue: &str| {
+        (!negative || cue.contains('⊘')) && validate_cue(cue, importance, memory.id, budget).is_ok()
+    };
     let fit = |text: &str| truncate(&own_id(memory.id).replace_all(text, ""), chars);
     let model = fit(last_try);
     if passes(&model) {
@@ -227,12 +234,13 @@ pub(crate) fn fallback_cue(memory: &Sent, last_try: &str, budget: Budget) -> Str
     if passes(&slice) {
         return slice;
     }
-    let unmarked = slice.replace('⊘', "").replace(['(', ')'], "");
-    let unmarked = prohibition().replace_all(&unmarked, "");
-    let unmarked = re(&format!("{JS_SPACE}+")).replace_all(&unmarked, " ");
-    let unmarked = truncate(&unmarked, chars);
-    if passes(&unmarked) {
-        return unmarked;
+    if !negative {
+        let unmarked = slice.replace(['(', ')'], "");
+        let unmarked = re(&format!("{JS_SPACE}+")).replace_all(&unmarked, " ");
+        let unmarked = truncate(&unmarked, chars);
+        if passes(&unmarked) {
+            return unmarked;
+        }
     }
     LAST_RESORT_CUE.into()
 }
@@ -260,11 +268,6 @@ impl Memory {
     }
 }
 
-/// The condition that makes a memory row a live memory of `:project` at
-/// `:now`: active or permanent, and not expired.
-const LIVE: &str = "level = 'project' AND owner_id = :project AND status IN ('active', 'permanent')
-                    AND (expires_at IS NULL OR expires_at > :now)";
-
 /// `project`'s live memories at `now`, in the order 0.49 sent them: by tag,
 /// then most recently updated first, then by id.
 pub(crate) fn live_memories(
@@ -275,7 +278,7 @@ pub(crate) fn live_memories(
     conn.prepare(&format!(
         "SELECT id, origin_category, content, importance, mural_cue, mural_cue_hash
            FROM memories
-          WHERE {LIVE}
+           WHERE level = 'project' AND owner_id = :project AND {LIVE_MEMORY}
           ORDER BY origin_category ASC, updated_at DESC, id ASC"
     ))?
     .query_map(named_params! {":project": project, ":now": now}, |row| {
@@ -512,7 +515,8 @@ fn current(
 ) -> rusqlite::Result<Option<Current>> {
     tx.query_row(
         &format!(
-            "SELECT {LIVE}, content, mural_cue, mural_cue_hash, mural_cue_rejection_count
+            "SELECT level = 'project' AND owner_id = :project AND {LIVE_MEMORY},
+                    content, mural_cue, mural_cue_hash, mural_cue_rejection_count
                FROM memories WHERE id = :id"
         ),
         named_params! {":id": id, ":project": project, ":now": now},

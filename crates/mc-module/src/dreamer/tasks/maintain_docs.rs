@@ -422,7 +422,13 @@ impl DocsBatch {
                 .dropped
                 .push(format!("the task's declaration does not allow {ACTION}"));
         } else {
-            let checked = edits::check_answer(answer, &self.documents, BUDGET, &count);
+            let pending = proposals::pending_of(tx, &self.project)
+                .map_err(|error| format!("reading the pending docs proposal: {error}"))?;
+            let carried = pending
+                .as_ref()
+                .map_or(&[][..], |proposal| proposal.changes.as_slice());
+            let checked =
+                edits::check_with_pending(answer, carried, &self.documents, BUDGET, &count);
             applied.dropped = checked
                 .dropped
                 .iter()
@@ -433,7 +439,7 @@ impl DocsBatch {
                     )
                 })
                 .collect();
-            if !checked.kept.is_empty() {
+            if !checked.kept.is_empty() && checked.kept != carried {
                 let documents = DOCUMENTS
                     .into_iter()
                     .zip(self.documents.iter().zip(&checked.results))
