@@ -823,6 +823,34 @@ fn the_install_plan_deletes_children_first_then_inserts_parents_first() {
     ), "{}", selection.sql);
 }
 
+#[test]
+fn snapshot_boundaries_survive_split_headers_and_verify_each_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = store(dir.path(), "context.db");
+    let empty = read(&mut conn).bytes;
+    seed(&conn);
+    let full = read(&mut conn).bytes;
+    let stream = [empty.as_slice(), full.as_slice()].concat();
+
+    for page_size in [1, 3, 4, 31, stream.len()] {
+        let mut boundaries = snapshot::StreamBoundaries::new(12);
+        for page in stream.chunks(page_size) {
+            boundaries.push(page).unwrap();
+        }
+        boundaries.end().unwrap();
+        assert_eq!(boundaries.snapshot_start(), 12 + stream.len() as u64);
+    }
+
+    // Preserve every row boundary but alter the second snapshot's body.
+    let mut changed = stream;
+    let last_row = changed.len() - 2;
+    changed[last_row] ^= 1;
+    let mut boundaries = snapshot::StreamBoundaries::new(12);
+    let why = boundaries.push(&changed).unwrap_err();
+    assert!(why.contains("does not match its digest"), "{why}");
+    assert_eq!(boundaries.snapshot_start(), 12 + empty.len() as u64);
+}
+
 fn with_rows(encoded: &snapshot::Encoded, edit: impl FnOnce(&mut Rows)) -> Vec<u8> {
     let mut rows = snapshot::decode(&encoded.bytes).unwrap().rows;
     edit(&mut rows);

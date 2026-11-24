@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 
 use super::midstate::{Midstate, Resumed};
 use super::service::Host;
+use super::snapshot::StreamBoundaries;
 use crate::client::DoorRefusal;
 
 /// The most raw bytes one `session.admit` or `session.read` carries: the
@@ -278,6 +279,11 @@ const ANSWERS: &[(&str, Answer, Answer)] = &[
         Fault("the session's stream does not match its recorded digest; check it on Engram"),
         Fault("the session's stream does not match its recorded digest; check it on Engram"),
     ),
+    (
+        "stream_snapshot_torn",
+        Fault("the session's stream needs repair on Engram before it can be moved"),
+        Fault("the session's stream needs repair on Engram before it can be moved"),
+    ),
 ];
 
 /// What `op` answers for a door failure with `code`. A code the table does
@@ -435,8 +441,9 @@ pub async fn admit<H: Host>(
 /// The door keeps the stream's bytes from its trim floor on, and the hash's
 /// running state at that floor (`session.digest`). The digest resumes from
 /// that state, reads the bytes from the floor up to `start`, checks them
-/// against the door's own digest of `[0, start)`, and then hashes the
-/// snapshot. Today the floor is 0 and this reads every earlier move's
+/// against the door's own digest of `[0, start)`, and checks the retained
+/// snapshots are whole before hashing the new snapshot. Today the floor is
+/// 0 and this reads every earlier move's
 /// snapshot back; once the stream is trimmed below its newest snapshot after
 /// each completed move, the read is one snapshot long. A stream nothing was
 /// admitted to yet hashes the snapshot alone.
@@ -474,18 +481,27 @@ pub async fn digest<H: Host>(
                 ),
             )
         })?;
-        match read(host, session_ref, state.floor, start, &mut hash).await {
-            Ok(()) => {}
+        let torn = match read(host, session_ref, state.floor, start, &mut hash).await {
+            Ok(torn) => torn,
             // A trim raised the floor while the bytes were read: start
             // again from the new floor and its running state.
             Err(Read::BelowFloor) => continue,
             Err(Read::Failed(error)) => return Err(error),
-        }
+        };
         if hash.clone().finish() != state.digest {
             return Err(DoorError::new(
                 "stream_digest_mismatch",
                 format!(
                     "session {session_ref}'s stream bytes up to {start} do not hash to the digest the door recorded for them"
+                ),
+            ));
+        }
+        if let Some((snapshot_start, why)) = torn {
+            return Err(DoorError::new(
+                "stream_snapshot_torn",
+                format!(
+                    "session {session_ref}'s stream (trim floor {}, durable end {start}) has a torn snapshot at retained byte {snapshot_start}: {why}. The floor must not split a snapshot, and an interrupted export must not leave a partial snapshot at the end",
+                    state.floor
                 ),
             ));
         }
@@ -506,15 +522,19 @@ enum Read {
     Failed(DoorError),
 }
 
-/// Hash the stream's bytes `[from, to)`, read page by page.
+/// Hash the stream's bytes `[from, to)` and check its snapshot boundaries,
+/// page by page. Report a torn snapshot separately so the caller can check
+/// the stream digest first.
 async fn read<H: Host>(
     host: &H,
     session_ref: &str,
     from: u64,
     to: u64,
     hash: &mut Resumed,
-) -> Result<(), Read> {
+) -> Result<Option<(u64, String)>, Read> {
     let mut offset = from;
+    let mut boundaries = StreamBoundaries::new(from);
+    let mut torn = None;
     while offset < to {
         let limit = (to - offset).min(PAGE as u64);
         let answer = host
@@ -546,9 +566,19 @@ async fn read<H: Host>(
             ))));
         }
         hash.update(&bytes);
+        if torn.is_none() {
+            if let Err(why) = boundaries.push(&bytes) {
+                torn = Some((boundaries.snapshot_start(), why));
+            }
+        }
         offset = page.end_offset;
     }
-    Ok(())
+    Ok(torn.or_else(|| {
+        boundaries
+            .end()
+            .err()
+            .map(|why| (boundaries.snapshot_start(), why))
+    }))
 }
 
 /// A page of `session.read` bound to a cut: the page, the cut's end and
