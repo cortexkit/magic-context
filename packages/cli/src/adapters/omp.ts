@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { checkCacheClearPath } from "../lib/cache-clear-path";
 import {
     detectOmpBinary,
     listOmpPlugins,
@@ -10,9 +11,9 @@ import {
     dirSizeBytes,
     getMagicContextLogPath,
     getOmpAgentDir,
-    getOmpPluginsDir,
     getOmpPluginsLockPath,
     getOmpUserConfigPath,
+    resolveOmpPaths,
 } from "../lib/paths";
 import type {
     HarnessAdapter,
@@ -172,8 +173,17 @@ export class OmpAdapter implements HarnessAdapter {
     }
 
     getPluginCacheInfo(): PluginCacheInfo[] {
-        const path = join(getOmpPluginsDir(), "cache");
-        return [{ path, exists: existsSync(path), sizeBytes: dirSizeBytes(path) }];
+        const { dataRoot, pluginsDir } = resolveOmpPaths();
+        const path = join(pluginsDir, "cache");
+        const check = checkCacheClearPath(dataRoot, path);
+        return [
+            {
+                path,
+                cacheRoot: dataRoot,
+                exists: check.allowed || check.reason !== "missing",
+                sizeBytes: check.allowed ? dirSizeBytes(check.path) : 0,
+            },
+        ];
     }
 
     getLogPath(): string {

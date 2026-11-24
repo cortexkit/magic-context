@@ -15,6 +15,7 @@ import {
     removeOpenCodeV2PluginCacheSlot,
 } from "../commands/doctor-opencode2-cache";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { checkCacheClearPath } from "../lib/cache-clear-path";
 import { readJsoncTextForEdit } from "../lib/jsonc-config";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getOpenCodeVersion } from "../lib/opencode-helpers";
@@ -35,6 +36,7 @@ import {
     detectConfigPaths,
     dirSizeBytes,
     getMagicContextLogPath,
+    getOpenCodeCacheHome,
     getOpenCodePluginCacheDir,
 } from "../lib/paths";
 import type {
@@ -297,28 +299,33 @@ export class OpenCodeAdapter implements HarnessAdapter {
      * not ours to remove, and a dist-tag or pinned slot is what the user chose.
      */
     getPluginCacheInfo(): PluginCacheInfo[] {
+        const cacheRoot = getOpenCodeCacheHome();
         const legacyPath = getOpenCodePluginCacheDir();
-        const legacyExists = existsSync(legacyPath);
+        const legacyCheck = checkCacheClearPath(cacheRoot, legacyPath);
+        const legacyExists = legacyCheck.allowed || legacyCheck.reason !== "missing";
         const slot = getOpenCodeV2PluginCacheSlot();
-        const slotExists = existsSync(slot);
+        const slotCheck = checkCacheClearPath(cacheRoot, slot);
+        const slotExists = slotCheck.allowed || slotCheck.reason !== "missing";
         const caches: PluginCacheInfo[] = [];
         // With neither present, the 1.x path is still reported (as missing) so
         // callers keep seeing where OpenCode's cache would be.
         if (legacyExists || !slotExists) {
             caches.push({
                 path: legacyPath,
+                cacheRoot,
                 exists: legacyExists,
-                sizeBytes: dirSizeBytes(legacyPath),
+                sizeBytes: legacyCheck.allowed ? dirSizeBytes(legacyCheck.path) : 0,
                 label: "OpenCode 1 plugin packages",
             });
         }
         if (slotExists) {
             caches.push({
                 path: slot,
+                cacheRoot,
                 exists: true,
-                sizeBytes: dirSizeBytes(slot),
+                sizeBytes: slotCheck.allowed ? dirSizeBytes(slotCheck.path) : 0,
                 label: "OpenCode 2 Magic Context @latest install",
-                clear: () => this.clearOpenCodeV2Slot(slot),
+                clear: () => this.clearOpenCodeV2Slot(cacheRoot, slot),
             });
         }
         return caches;
@@ -329,7 +336,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
      * OpenCode session database (either host generation's) or a file in the
      * slot, or when that cannot be checked.
      */
-    private clearOpenCodeV2Slot(slot: string): PluginCacheClearResult {
+    private clearOpenCodeV2Slot(cacheRoot: string, slot: string): PluginCacheClearResult {
         let databases: string[];
         try {
             databases = [
@@ -342,6 +349,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
             };
         }
         const removal = removeOpenCodeV2PluginCacheSlot(
+            cacheRoot,
             slot,
             openCodeHostDatabaseFiles(databases),
             {
@@ -357,6 +365,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     reason: `OpenCode is running (pid ${removal.pids.join(", ")}); quit it (and \`opencode service stop\`) first`,
                 };
             case "in_use_unknown":
+            case "skipped":
                 return { cleared: false, reason: removal.reason };
             case "error":
                 return { cleared: false, reason: removal.error };

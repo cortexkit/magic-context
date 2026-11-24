@@ -94,7 +94,7 @@ describe("doctor OpenCode 2 plugin cache check against the config", () => {
     }
 
     it("reports a stale @latest slot as one info line when the config loads a local path", () => {
-        const { slot } = makeNpmCache("0.31.2");
+        const { npm, slot } = makeNpmCache("0.31.2");
         const removed: string[] = [];
         const result = checkOpenCodeV2PluginCache(
             {
@@ -107,7 +107,7 @@ describe("doctor OpenCode 2 plugin cache check against the config", () => {
                 }),
             },
             {
-                slot,
+                npmCacheDir: npm,
                 probe: () => ({ status: "in_use", pids: [4242] }),
                 remove: (path) => removed.push(path),
             },
@@ -127,28 +127,28 @@ describe("doctor OpenCode 2 plugin cache check against the config", () => {
     });
 
     it("still warns about a stale @latest slot an @latest entry loads", () => {
-        const { slot } = makeNpmCache("0.31.2");
+        const { npm, slot } = makeNpmCache("0.31.2");
         const result = checkOpenCodeV2PluginCache(
             {
                 latestVersion: "0.47.0",
                 hostFiles: [],
                 referencedSpecs: references({ plugins: [`${OPENCODE_PLUGIN_NAME}@latest`] }),
             },
-            { slot, probe: free },
+            { npmCacheDir: npm, probe: free },
         );
         expect(result).toEqual({ action: "stale", slot, cached: "0.31.2", latest: "0.47.0" });
         expect(collect(result).lines.map((line) => line.kind)).toContain("warn");
     });
 
     it("treats the @latest slot as unused when the entry pins a version", () => {
-        const { slot } = makeNpmCache("0.31.2");
+        const { npm } = makeNpmCache("0.31.2");
         const result = checkOpenCodeV2PluginCache(
             {
                 latestVersion: "0.47.0",
                 hostFiles: [],
                 referencedSpecs: references({ plugin: [`${OPENCODE_PLUGIN_NAME}@0.45.0`] }),
             },
-            { slot, probe: free },
+            { npmCacheDir: npm, probe: free },
         );
         expect(result.action).toBe("unused");
         const { lines } = collect(result);
@@ -159,10 +159,11 @@ describe("doctor OpenCode 2 plugin cache check against the config", () => {
     });
 
     it("says nothing about a missing slot the config does not load", () => {
-        const slot = getOpenCodeV2PluginCacheSlot(join(tempDir(), "npm"));
+        const npm = join(tempDir(), "npm");
+        const slot = getOpenCodeV2PluginCacheSlot(npm);
         const result = checkOpenCodeV2PluginCache(
             { latestVersion: "0.47.0", hostFiles: [], referencedSpecs: new Set() },
-            { slot, probe: free },
+            { npmCacheDir: npm, probe: free },
         );
         expect(result).toEqual({ action: "not_found", slot, unused: true });
         expect(collect(result).lines).toEqual([]);
@@ -171,22 +172,22 @@ describe("doctor OpenCode 2 plugin cache check against the config", () => {
 
 describe("doctor OpenCode 2 plugin cache check", () => {
     it("reports a cached install older than latest without --fix and leaves it", () => {
-        const { slot } = makeNpmCache("0.42.6");
+        const { npm, slot } = makeNpmCache("0.42.6");
         const result = checkOpenCodeV2PluginCache(
             { latestVersion: "0.43.1", hostFiles: [] },
-            { slot, probe: free },
+            { npmCacheDir: npm, probe: free },
         );
         expect(result).toEqual({ action: "stale", slot, cached: "0.42.6", latest: "0.43.1" });
         expect(existsSync(slot)).toBe(true);
     });
 
     it("clears only Magic Context's @latest slot under --fix", () => {
-        const { slot, neighbours } = makeNpmCache("0.42.6");
+        const { npm, slot, neighbours } = makeNpmCache("0.42.6");
         const probed: unknown[] = [];
         const result = checkOpenCodeV2PluginCache(
             { fix: true, latestVersion: "0.43.1", hostFiles: ["/x/opencode.db"] },
             {
-                slot,
+                npmCacheDir: npm,
                 probe: (targets) => {
                     probed.push(targets);
                     return { status: "free" };
@@ -201,10 +202,10 @@ describe("doctor OpenCode 2 plugin cache check", () => {
     });
 
     it("never clears while an OpenCode process holds the database or slot", () => {
-        const { slot } = makeNpmCache("0.42.6");
+        const { npm, slot } = makeNpmCache("0.42.6");
         const result = checkOpenCodeV2PluginCache(
             { fix: true, latestVersion: "0.43.1", hostFiles: [] },
-            { slot, probe: () => ({ status: "in_use", pids: [4242] }) },
+            { npmCacheDir: npm, probe: () => ({ status: "in_use", pids: [4242] }) },
         );
         expect(result).toEqual({
             action: "in_use",
@@ -217,10 +218,13 @@ describe("doctor OpenCode 2 plugin cache check", () => {
     });
 
     it("never clears when use cannot be ruled out", () => {
-        const { slot } = makeNpmCache("0.42.6");
+        const { npm, slot } = makeNpmCache("0.42.6");
         const result = checkOpenCodeV2PluginCache(
             { fix: true, latestVersion: "0.43.1", hostFiles: [] },
-            { slot, probe: () => ({ status: "unknown", reason: "could not run lsof (ENOENT)" }) },
+            {
+                npmCacheDir: npm,
+                probe: () => ({ status: "unknown", reason: "could not run lsof (ENOENT)" }),
+            },
         );
         expect(result.action).toBe("in_use_unknown");
         expect(existsSync(slot)).toBe(true);
@@ -228,10 +232,10 @@ describe("doctor OpenCode 2 plugin cache check", () => {
 
     it("leaves a current or newer install alone, even under --fix", () => {
         for (const cached of ["0.43.1", "0.44.0-beta.1"]) {
-            const { slot } = makeNpmCache(cached);
+            const { npm, slot } = makeNpmCache(cached);
             const result = checkOpenCodeV2PluginCache(
                 { fix: true, latestVersion: "0.43.1", hostFiles: [] },
-                { slot, probe: free },
+                { npmCacheDir: npm, probe: free },
             );
             expect(result.action).toBe("up_to_date");
             expect(existsSync(slot)).toBe(true);
@@ -239,29 +243,29 @@ describe("doctor OpenCode 2 plugin cache check", () => {
     });
 
     it("preserves the slot when latest is unknown unless --force", () => {
-        const { slot } = makeNpmCache("0.42.6");
+        const { npm, slot } = makeNpmCache("0.42.6");
         expect(
             checkOpenCodeV2PluginCache(
                 { fix: true, latestVersion: null, hostFiles: [] },
-                { slot, probe: free },
+                { npmCacheDir: npm, probe: free },
             ).action,
         ).toBe("check_unavailable");
         expect(existsSync(slot)).toBe(true);
         expect(
             checkOpenCodeV2PluginCache(
                 { force: true, latestVersion: null, hostFiles: [] },
-                { slot, probe: free },
+                { npmCacheDir: npm, probe: free },
             ),
         ).toMatchObject({ action: "cleared", forced: true });
         expect(existsSync(slot)).toBe(false);
     });
 
     it("reports no install when the slot is missing", () => {
-        const slot = getOpenCodeV2PluginCacheSlot(join(tempDir(), "npm"));
+        const npm = join(tempDir(), "npm");
         expect(
             checkOpenCodeV2PluginCache(
                 { fix: true, latestVersion: "0.43.1", hostFiles: [] },
-                { slot },
+                { npmCacheDir: npm },
             ).action,
         ).toBe("not_found");
     });
@@ -384,7 +388,7 @@ describe("doctor OpenCode 2 plugin cache check for dist-tag entries", () => {
         writeGeneration(betaSlot, "1790000000000", OPENCODE_PLUGIN_NAME, "0.44.0-beta.1");
         const result = checkOpenCodeV2PluginCache(
             { fix: true, latestVersion: "0.44.0-beta.3", distTag: "beta", hostFiles: [] },
-            { slot: betaSlot, probe: free },
+            { npmCacheDir: npm, probe: free },
         );
         expect(result).toMatchObject({ action: "cleared", distTag: "beta" });
         expect(existsSync(betaSlot)).toBe(false);

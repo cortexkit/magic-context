@@ -9,11 +9,12 @@
  * dispatch through the per-harness flows because the goal is a single "what
  * do I want to nuke?" prompt rather than two separate flows.
  */
-import { existsSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { getInstalledAdapters } from "../adapters";
 import type { HarnessAdapter, PluginCacheClearResult } from "../adapters/types";
+import { checkCacheClearPath, describeCacheClearRefusal } from "../lib/cache-clear-path";
 import {
     openExistingContextDatabase,
     openExistingContextDatabaseForMutation,
@@ -189,6 +190,7 @@ async function runClear(): Promise<number> {
     const items: {
         adapter: HarnessAdapter;
         path: string;
+        cacheRoot: string;
         sizeBytes: number;
         label?: string;
         clear?: () => PluginCacheClearResult;
@@ -199,6 +201,7 @@ async function runClear(): Promise<number> {
                 items.push({
                     adapter,
                     path: cache.path,
+                    cacheRoot: cache.cacheRoot,
                     sizeBytes: cache.sizeBytes,
                     label: cache.label,
                     clear: cache.clear,
@@ -245,6 +248,13 @@ async function runClear(): Promise<number> {
         const s = spinner();
         s.start(`Clearing ${item.path}`);
         try {
+            const check = checkCacheClearPath(item.cacheRoot, item.path);
+            if (!check.allowed) {
+                s.stop(`Left in place: ${item.path}`);
+                log.warn(describeCacheClearRefusal(item.path, check.reason));
+                failed += 1;
+                continue;
+            }
             if (item.clear) {
                 // The adapter's own removal carries its guard (for OpenCode 2,
                 // never while OpenCode may be using the slot).
@@ -255,8 +265,8 @@ async function runClear(): Promise<number> {
                     failed += 1;
                     continue;
                 }
-            } else if (existsSync(item.path)) {
-                rmSync(item.path, { recursive: true, force: true });
+            } else {
+                rmSync(check.path, { recursive: true, force: true });
             }
             s.stop(`Cleared ${item.path}`);
         } catch (err) {

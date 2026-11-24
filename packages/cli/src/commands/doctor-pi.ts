@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
@@ -30,6 +30,7 @@ import {
 } from "@magic-context/core/features/magic-context/shadow-backfill-state";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getLiveMigrationBlockingProcesses } from "@magic-context/core/features/magic-context/storage-db";
+import { isValidSemver } from "@magic-context/core/hooks/auto-update-checker/semver";
 import {
     getMagicContextStorageDir,
     getMagicContextStorageResolution,
@@ -52,6 +53,7 @@ import {
 } from "@magic-context/pi-core/model-chain-health";
 import { parse as parseCommentJson, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { checkCacheClearPath, describeCacheClearRefusal } from "../lib/cache-clear-path";
 import {
     hasUserConfigLocationMigrationRefusal,
     migrateConfigLocationsForCli,
@@ -77,6 +79,7 @@ import {
 } from "../lib/github-issue";
 import { formatLogFileInspection, inspectMagicContextLogs, readLogLines } from "../lib/log-lines";
 import { bundleIssueReport } from "../lib/logs-pi";
+import { isOpenCodePluginDistTag } from "../lib/opencode-plugin-cache";
 import {
     getPiAgentConfigDir,
     getPiCacheRoot,
@@ -108,6 +111,7 @@ import {
 } from "../lib/storage-versions";
 import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 import {
+    compareSemverPrecedence,
     type HostUseProbe,
     type HostUseProbeTargets,
     probeHostProcessesUsing,
@@ -132,7 +136,7 @@ interface CheckResult {
 interface RepairPlan {
     addPackageEntry: boolean;
     writeUserConfig: boolean;
-    clearCachePaths: string[];
+    clearCachePaths: PiCacheCandidate[];
     reasoningAgeConfigPaths: string[];
 }
 
@@ -151,7 +155,7 @@ interface DoctorDeps {
     getPiVersion: (piPath: string) => string | null;
     /** `provider/model` ids from `pi --list-models`; empty when the list is unavailable. */
     listPiModels: (piPath: string) => string[];
-    getLatestNpmVersion: () => string | null;
+    getLatestNpmVersion: (tag?: string) => string | null;
     selfVersion: () => string;
     probeEmbeddingEndpoint: typeof probeEmbeddingEndpoint;
     openExistingContextDatabase: typeof openExistingContextDatabase;
@@ -179,7 +183,8 @@ const DEFAULT_DEPS: DoctorDeps = {
     detectPiBinary,
     getPiVersion,
     listPiModels: getAvailableModels,
-    getLatestNpmVersion: () => getLatestNpmVersion(PACKAGE_NAME),
+    getLatestNpmVersion: (tag) =>
+        getLatestNpmVersion(tag ? `${PACKAGE_NAME}@${tag}` : PACKAGE_NAME),
     selfVersion,
     probeEmbeddingEndpoint,
     openExistingContextDatabase,
@@ -482,28 +487,45 @@ function countTable(db: ContextDatabase, table: string): number | null {
     }
 }
 
-function pinnedVersionFromPackageSpecifier(specifier: string | null): string | null {
+function expectedPiCacheVersion(
+    specifier: string | null,
+    latest: string | null,
+    lookupTag: DoctorDeps["getLatestNpmVersion"],
+): string | null {
     if (!specifier) return null;
-    const normalized = specifier.replace(/^npm:/, "");
-    const slash = normalized.indexOf("/");
-    const versionAt = normalized.indexOf("@", slash + 1);
-    if (versionAt < 0) return null;
-    const version = normalized.slice(versionAt + 1);
-    return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version) ? version : null;
+    const spec = specifier.replace(/^npm:/, "").slice(PACKAGE_NAME.length + 1);
+    if (isValidSemver(spec)) return spec;
+    // A range or failed tag lookup supplies no single version to compare against.
+    const version =
+        !spec || spec === "latest"
+            ? latest
+            : isOpenCodePluginDistTag(spec)
+              ? lookupTag(spec)
+              : null;
+    return version && isValidSemver(version) ? version : null;
 }
 
-function cacheRoots(cwd: string): string[] {
+interface PiCacheCandidate {
+    root: string;
+    path: string;
+    version?: string;
+}
+
+function cacheSearchPaths(cwd: string): PiCacheCandidate[] {
     const home = process.env.HOME?.trim();
     const cacheHome = process.env.XDG_CACHE_HOME || join(home || homedir(), ".cache");
     const piCacheRoot = getPiCacheRoot();
+    const xdgPi = join(cacheHome, "pi");
+    const agent = getPiAgentConfigDir();
+    const projectPi = join(cwd, ".pi");
     return [
-        join(piCacheRoot, "extensions"),
-        join(piCacheRoot, "packages"),
-        join(cacheHome, "pi", "extensions"),
-        join(cacheHome, "pi", "packages"),
-        join(getPiAgentConfigDir(), "cache", "extensions"),
-        join(getPiAgentConfigDir(), "npm", "node_modules", PACKAGE_NAME),
-        join(cwd, ".pi", "npm", "node_modules", PACKAGE_NAME),
+        { root: piCacheRoot, path: join(piCacheRoot, "extensions") },
+        { root: piCacheRoot, path: join(piCacheRoot, "packages") },
+        { root: xdgPi, path: join(xdgPi, "extensions") },
+        { root: xdgPi, path: join(xdgPi, "packages") },
+        { root: agent, path: join(agent, "cache", "extensions") },
+        { root: agent, path: join(agent, "npm", "node_modules", PACKAGE_NAME) },
+        { root: projectPi, path: join(projectPi, "npm", "node_modules", PACKAGE_NAME) },
     ];
 }
 
@@ -511,14 +533,19 @@ function findPiMagicContextCacheDirs(
     cwd: string,
     expectedVersion: string | null,
     force = false,
-): Array<{ path: string; version?: string }> {
-    const found = new Map<string, { path: string; version?: string }>();
-    const visit = (path: string, depth: number): void => {
-        if (depth < 0 || !existsSync(path)) return;
-        let stat: ReturnType<typeof statSync>;
+): { staleCaches: PiCacheCandidate[]; warnings: string[] } {
+    const found = new Map<string, PiCacheCandidate>();
+    const warnings = new Set<string>();
+    const visit = (root: string, path: string, depth: number): void => {
+        if (depth < 0) return;
+        let stat: ReturnType<typeof lstatSync>;
         try {
-            stat = statSync(path);
+            stat = lstatSync(path);
         } catch {
+            return;
+        }
+        if (stat.isSymbolicLink()) {
+            warnings.add(describeCacheClearRefusal(path, "linked"));
             return;
         }
         if (!stat.isDirectory()) return;
@@ -533,12 +560,16 @@ function findPiMagicContextCacheDirs(
                 const name = typeof pkg.name === "string" ? pkg.name : "";
                 const version = typeof pkg.version === "string" ? pkg.version : undefined;
                 if (name === PACKAGE_NAME) {
-                    if (force || !version || (expectedVersion && version !== expectedVersion)) {
-                        found.set(path, { path, version });
+                    const order =
+                        version && expectedVersion
+                            ? compareSemverPrecedence(version, expectedVersion)
+                            : null;
+                    if (force || (order !== null && order < 0)) {
+                        found.set(path, { root, path, version });
                     }
                 }
             } catch {
-                if (path.includes("pi-magic-context")) found.set(path, { path });
+                if (force && path.includes("pi-magic-context")) found.set(path, { root, path });
             }
         }
 
@@ -548,11 +579,17 @@ function findPiMagicContextCacheDirs(
         } catch {
             return;
         }
-        for (const entry of entries) visit(join(path, entry), depth - 1);
+        for (const entry of entries) visit(root, join(path, entry), depth - 1);
     };
 
-    for (const root of cacheRoots(cwd)) visit(root, 5);
-    return [...found.values()];
+    for (const { root, path } of cacheSearchPaths(cwd)) {
+        const check = checkCacheClearPath(root, path);
+        if (check.allowed) visit(root, path, 5);
+        else if (check.reason !== "missing") {
+            warnings.add(describeCacheClearRefusal(check.path, check.reason));
+        }
+    }
+    return { staleCaches: [...found.values()], warnings: [...warnings] };
 }
 
 /**
@@ -1082,13 +1119,17 @@ async function runHealthChecks(options: {
 
         const configuredEntry = packages.find(isPiMagicContextPackageEntry);
         const configuredSpecifier = getPiMagicContextPackageSpecifier(configuredEntry);
-        const expectedPluginVersion =
-            pinnedVersionFromPackageSpecifier(configuredSpecifier) ?? latest ?? null;
-        const staleCaches = findPiMagicContextCacheDirs(
+        const expectedPluginVersion = expectedPiCacheVersion(
+            configuredSpecifier,
+            latest,
+            options.deps.getLatestNpmVersion,
+        );
+        const { staleCaches, warnings } = findPiMagicContextCacheDirs(
             options.cwd,
             expectedPluginVersion,
             options.force === true,
         );
+        for (const warning of warnings) add(results, "warn", warning);
         if (!expectedPluginVersion && !options.force) {
             add(
                 results,
@@ -1096,13 +1137,13 @@ async function runHealthChecks(options: {
                 "Pi extension cache version check unavailable; preserving cached packages. Use doctor --force to clear them.",
             );
         } else if (staleCaches.length > 0) {
-            repairPlan.clearCachePaths = staleCaches.map((entry) => entry.path);
+            repairPlan.clearCachePaths = staleCaches;
             add(
                 results,
                 "warn",
                 `${options.force ? "Pi extension cache selected for clearing" : "Stale Pi extension cache found"}: ${staleCaches.map((entry) => `${entry.path}${entry.version ? ` (v${entry.version})` : ""}`).join(", ")}`,
             );
-        } else {
+        } else if (warnings.length === 0) {
             add(results, "pass", "Pi extension cache clean (no stale cached package found)");
         }
 
@@ -1299,7 +1340,10 @@ function repair(
     }
 
     if (plan.clearCachePaths.length === 0) return { fixed, cacheBlocked: false };
-    const blocker = piCacheClearBlocker(plan.clearCachePaths, deps);
+    const blocker = piCacheClearBlocker(
+        plan.clearCachePaths.map(({ path }) => path),
+        deps,
+    );
     if (blocker !== undefined) {
         prompts.log.warn(
             `Pi extension cache was not cleared: ${blocker}. Quit Pi or Oh My Pi and rerun doctor.`,
@@ -1307,9 +1351,14 @@ function repair(
         return { fixed, cacheBlocked: true };
     }
 
-    for (const path of plan.clearCachePaths) {
+    for (const { root, path } of plan.clearCachePaths) {
+        const check = checkCacheClearPath(root, path);
+        if (!check.allowed) {
+            prompts.log.warn(describeCacheClearRefusal(path, check.reason));
+            continue;
+        }
         try {
-            rmSync(path, { recursive: true, force: true });
+            rmSync(check.path, { recursive: true, force: true });
             prompts.log.success(`Cleared Pi extension cache: ${path}`);
             fixed += 1;
         } catch (error) {

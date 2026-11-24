@@ -2226,6 +2226,7 @@ export async function runDoctor(
             hostFiles: openCodeHostDatabaseFiles([openCodeDbResolution.path]),
             referencedSpecs: pluginConfigUse?.referencedSpecs.opencode1,
         });
+        for (const warning of cacheResult.skippedWarnings ?? []) warn(warning);
         if (cacheResult.action === "unused") {
             log.info(
                 describeUnusedOpenCodePluginCache({
@@ -2275,7 +2276,7 @@ export async function runDoctor(
                 log.info(`  Manually delete: ${cacheResult.path}`);
             }
             issues++;
-        } else if (hostGeneration !== "v2") {
+        } else if (cacheResult.action === "not_found" && hostGeneration !== "v2") {
             // OpenCode 2 never uses the 1.x `packages/` tree; its own cache is
             // reported by the next step, so an empty 1.x tree says nothing there.
             pass("Plugin cache clean (no cached version found)");

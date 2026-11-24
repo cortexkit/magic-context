@@ -1,8 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    renameSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc } from "comment-json";
@@ -1162,6 +1170,140 @@ describe("Pi doctor", () => {
         expect(existsSync(cache)).toBe(unavailable);
         expect(lookedUpPids).toEqual(unavailable ? [] : [4321]);
         if (unavailable) expect(prompts.messages.join("\n")).toContain("could not run lsof");
+    });
+
+    it.each([
+        { spec: "beta", channelVersion: "0.50.0-beta.1", cached: "0.50.0-beta.1", removed: false },
+        { spec: "next", channelVersion: "0.50.0-beta.2", cached: "0.50.0-beta.10", removed: false },
+        { spec: "beta", channelVersion: "0.50.0-beta.10", cached: "0.50.0-beta.2", removed: true },
+        { spec: "beta", channelVersion: null, cached: "0.50.0-beta.1", removed: false },
+        { spec: "^0.50.0", channelVersion: null, cached: "0.50.1", removed: false },
+    ])("Pi cache version: @$spec (registry $channelVersion), cached $cached, removed=$removed", async ({
+        spec,
+        channelVersion,
+        cached,
+        removed,
+    }) => {
+        const root = makeTempRoot();
+        const cwd = join(root, "project");
+        const agent = setEnv(root, cwd);
+        writeHealthyFiles(agent, cwd);
+        writeFileSync(
+            join(agent, "settings.json"),
+            JSON.stringify({ packages: [`npm:@cortexkit/pi-magic-context@${spec}`] }),
+        );
+        const cache = writePiCachePackage(join(root, ".pi", "cache"), cached);
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+        const lookedUp: string[] = [];
+
+        await runDoctor({
+            ...options,
+            fix: true,
+            deps: {
+                ...options.deps,
+                getLatestNpmVersion: (...args: string[]) => {
+                    const [tag] = args;
+                    lookedUp.push(tag ?? "latest");
+                    return tag === undefined ? "0.49.74" : channelVersion;
+                },
+            },
+        });
+
+        expect(existsSync(cache)).toBe(!removed);
+        const output = prompts.messages.join("\n");
+        expect(output.includes("Stale Pi extension cache found")).toBe(removed);
+        expect(output.includes("version check unavailable; preserving cached packages")).toBe(
+            channelVersion === null,
+        );
+        expect([...new Set(lookedUp)]).toEqual(
+            spec.startsWith("^") ? ["latest"] : ["latest", spec],
+        );
+    });
+
+    it("leaves a linked Pi scope alone and still clears a real stale Pi cache", async () => {
+        const root = makeTempRoot();
+        const cwd = join(root, "project");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const source = join(root, "source", "pi-magic-context");
+        const linkedScope = join(cwd, ".pi", "npm", "node_modules", "@cortexkit");
+        mkdirSync(source, { recursive: true });
+        mkdirSync(dirname(linkedScope), { recursive: true });
+        writeFileSync(
+            join(source, "package.json"),
+            JSON.stringify({ name: "@cortexkit/pi-magic-context", version: "0.49.66" }),
+        );
+        const marker = join(source, "unsaved.txt");
+        writeFileSync(marker, "uncached source file");
+        symlinkSync(dirname(source), linkedScope, "junction");
+        const realCache = writePiCachePackage(join(root, ".pi", "cache"), "0.49.66");
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+
+        await runDoctor({
+            ...options,
+            fix: true,
+            deps: {
+                ...options.deps,
+                getPiVersion: () => "0.83.0",
+                getLatestNpmVersion: () => "0.49.74",
+            },
+        });
+
+        expect(existsSync(marker)).toBe(true);
+        expect(existsSync(realCache)).toBe(false);
+        expect(prompts.messages.join("\n")).toContain(`Cleared Pi extension cache: ${realCache}`);
+        expect(prompts.messages.join("\n")).toContain(`Left ${linkedScope} alone`);
+        expect(prompts.messages.join("\n")).not.toContain(
+            `Cleared Pi extension cache: ${linkedScope}`,
+        );
+    });
+
+    it("leaves a linked Pi package itself in place along with its target", async () => {
+        const root = makeTempRoot();
+        const cwd = join(root, "project");
+        writeHealthyFiles(setEnv(root, cwd), cwd);
+        const cache = writePiCachePackage(join(root, ".pi", "cache"), "0.49.66");
+        const source = join(root, "source");
+        renameSync(cache, source);
+        symlinkSync(source, cache, "junction");
+        const prompts = new MockPrompts();
+
+        await runDoctor({ ...baseOptions(root, cwd, prompts), force: true });
+
+        expect(existsSync(join(source, "package.json"))).toBe(true);
+        expect(existsSync(cache)).toBe(true);
+        expect(prompts.messages.join("\n")).toContain(`Left ${cache} alone`);
+    });
+
+    it("rechecks the Pi cache after a probe replaces its parent with a link", async () => {
+        const root = makeTempRoot();
+        const cwd = join(root, "project");
+        writeHealthyFiles(setEnv(root, cwd), cwd);
+        const cache = writePiCachePackage(join(root, ".pi", "cache"), "0.49.66");
+        const scope = dirname(cache);
+        const source = join(root, "source");
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+
+        await runDoctor({
+            ...options,
+            force: true,
+            deps: {
+                ...options.deps,
+                probeCacheUse: ({ directories }) => {
+                    if (directories.includes(cache)) {
+                        renameSync(scope, source);
+                        symlinkSync(source, scope, "junction");
+                    }
+                    return { status: "free" };
+                },
+            },
+        });
+
+        expect(existsSync(join(source, "pi-magic-context", "package.json"))).toBe(true);
+        expect(prompts.messages.join("\n")).toContain(`Left ${cache} alone`);
     });
 
     it("clears stale caches under PI_CODING_AGENT_DIR's parent without touching HOME/.pi/cache", async () => {

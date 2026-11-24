@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { resolveCortexKitUserConfigPath } from "@magic-context/core/config/migrate-config-location";
@@ -321,9 +321,12 @@ export function getProjectHistorianDumpDir(directory: string): string {
  * stayed untouched. The plugin runtime fixed the same bug in
  * packages/plugin/src/shared/data-path.ts; this CLI helper must stay aligned.
  */
+export function getOpenCodeCacheHome(): string {
+    return process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
+}
+
 export function getOpenCodePluginCacheDir(): string {
-    const xdg = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
-    return join(xdg, "opencode", "packages");
+    return join(getOpenCodeCacheHome(), "opencode", "packages");
 }
 
 /**
@@ -333,8 +336,7 @@ export function getOpenCodePluginCacheDir(): string {
  * generation. It shares the 1.x cache root, so the same XDG rule applies.
  */
 export function getOpenCodeV2NpmCacheDir(): string {
-    const xdg = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
-    return join(xdg, "opencode", "npm");
+    return join(getOpenCodeCacheHome(), "opencode", "npm");
 }
 
 /** True if `path` exists and is a directory. */
@@ -348,13 +350,13 @@ export function isDir(path: string): boolean {
 
 /** Recursive size in bytes of a directory; returns 0 if missing. */
 export function dirSizeBytes(path: string): number {
-    if (!isDir(path)) return 0;
     let total = 0;
     const stack = [path];
     while (stack.length > 0) {
         const cur = stack.pop();
         if (cur === undefined) break;
         try {
+            if (!lstatSync(cur).isDirectory()) continue;
             const entries = readdirSync(cur, { withFileTypes: true });
             for (const entry of entries) {
                 const child = join(cur, entry.name);
@@ -362,7 +364,8 @@ export function dirSizeBytes(path: string): number {
                     stack.push(child);
                 } else if (entry.isFile()) {
                     try {
-                        total += statSync(child).size;
+                        const file = lstatSync(child);
+                        if (file.isFile()) total += file.size;
                     } catch {
                         // ignore unreadable
                     }

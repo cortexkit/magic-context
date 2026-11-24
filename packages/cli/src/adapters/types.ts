@@ -38,9 +38,8 @@ export interface PluginEntryResult {
     configPath: string;
 }
 
-export interface PluginCacheInfo {
-    /** Cache directory for the plugin (or null if harness has no plugin cache). */
-    path: string | null;
+/** A cache path and its configured base, or no cache for this harness. */
+export type PluginCacheInfo = ({ path: string; cacheRoot: string } | { path: null }) & {
     /** Whether the cache currently has anything in it. */
     exists: boolean;
     /** Approximate cache size in bytes (0 when missing). */
@@ -52,7 +51,7 @@ export interface PluginCacheInfo {
      * while the host is running). Without it, `doctor --clear` deletes `path`.
      */
     clear?: () => PluginCacheClearResult;
-}
+};
 
 export type PluginCacheClearResult = { cleared: true } | { cleared: false; reason: string };
 

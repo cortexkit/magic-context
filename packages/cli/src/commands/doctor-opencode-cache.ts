@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { isDevPathPluginEntry, pluginEntryPackage } from "../adapters/opencode";
+import { checkCacheClearPath, describeCacheClearRefusal } from "../lib/cache-clear-path";
 import {
     getOpenCodePluginCacheRoots,
     getOpenCodePluginPackageJsonPath,
@@ -7,6 +8,7 @@ import {
     readReferencedOpenCodePluginSpecs,
 } from "../lib/opencode-plugin-cache";
 import { readPluginEntries } from "../lib/opencode-plugin-registration";
+import { getOpenCodeCacheHome } from "../lib/paths";
 import {
     type HostUseProbe,
     type HostUseProbeTargets,
@@ -21,6 +23,7 @@ export interface PluginCacheResult {
         | "check_unavailable"
         | "in_use"
         | "in_use_unknown"
+        | "skipped"
         | "error"
         /**
          * The user's OpenCode config (opencode.json/opencode.jsonc) has no
@@ -38,6 +41,7 @@ export interface PluginCacheResult {
     paths?: string[];
     clearedPaths?: string[];
     failedPaths?: string[];
+    skippedWarnings?: string[];
     cached?: string;
     latest?: string;
     error?: string;
@@ -112,18 +116,28 @@ export async function clearPluginCache(
     // testable; defaults to a real recursive remove.
     const remove =
         deps.remove ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
+    const cacheRoot = getOpenCodeCacheHome();
     const pluginCacheRoots = getOpenCodePluginCacheRoots();
-    const existingRoots = pluginCacheRoots.filter((root) => existsSync(root));
+    const skippedWarnings: string[] = [];
+    const reportSkipped = () => (skippedWarnings.length > 0 ? { skippedWarnings } : {});
+    const cacheEntries = pluginCacheRoots.flatMap((path) => {
+        const check = checkCacheClearPath(cacheRoot, path);
+        if (check.allowed) return [{ path, cached: readCachedPluginVersion(check.path) }];
+        if (check.reason !== "missing") {
+            skippedWarnings.push(describeCacheClearRefusal(path, check.reason));
+        }
+        return [];
+    });
 
-    if (existingRoots.length === 0) {
-        return { action: "not_found", path: pluginCacheRoots[0] ?? "" };
+    if (cacheEntries.length === 0) {
+        return {
+            action: skippedWarnings.length > 0 ? "skipped" : "not_found",
+            path: pluginCacheRoots[0] ?? "",
+            ...reportSkipped(),
+        };
     }
 
     const latestVersion = options.latestVersion ?? undefined;
-    const cacheEntries = existingRoots.map((path) => ({
-        path,
-        cached: readCachedPluginVersion(path),
-    }));
 
     // A copy the host never loads cannot break it or fall behind for it, so it
     // is neither compared with npm nor removed (not even under --force, which
@@ -135,6 +149,7 @@ export async function clearPluginCache(
             path: firstEntry?.path ?? pluginCacheRoots[0] ?? "",
             paths: cacheEntries.map((entry) => entry.path),
             cached: firstEntry?.cached,
+            ...reportSkipped(),
         };
     }
 
@@ -145,6 +160,7 @@ export async function clearPluginCache(
             path: firstEntry?.path ?? pluginCacheRoots[0] ?? "",
             paths: cacheEntries.map((entry) => entry.path),
             cached: firstEntry?.cached,
+            ...reportSkipped(),
         };
     }
 
@@ -161,6 +177,7 @@ export async function clearPluginCache(
             paths: cacheEntries.map((entry) => entry.path),
             cached: firstEntry?.cached,
             latest: latestVersion,
+            ...reportSkipped(),
         };
     }
 
@@ -182,6 +199,7 @@ export async function clearPluginCache(
             paths: clearTargets.map((entry) => entry.path),
             cached: firstTarget?.cached,
             latest: latestVersion,
+            ...reportSkipped(),
             ...(use.status === "in_use" ? { pids: use.pids } : { reason: use.reason }),
         };
     }
@@ -192,8 +210,13 @@ export async function clearPluginCache(
     const cleared: typeof clearTargets = [];
     const failed: Array<{ path: string; error: string }> = [];
     for (const entry of clearTargets) {
+        const check = checkCacheClearPath(cacheRoot, entry.path);
+        if (!check.allowed) {
+            skippedWarnings.push(describeCacheClearRefusal(entry.path, check.reason));
+            continue;
+        }
         try {
-            remove(entry.path);
+            remove(check.path);
             cleared.push(entry);
         } catch (err: unknown) {
             failed.push({
@@ -207,20 +230,22 @@ export async function clearPluginCache(
         const firstFailure = failed[0];
         return {
             action: "error",
-            path: firstFailure?.path ?? clearTargets[0]?.path ?? existingRoots[0] ?? "",
+            path: firstFailure?.path ?? clearTargets[0]?.path ?? cacheEntries[0]?.path ?? "",
             paths: failed.map((entry) => entry.path),
             clearedPaths: cleared.map((entry) => entry.path),
             failedPaths: failed.map((entry) => entry.path),
             error: firstFailure?.error,
+            ...reportSkipped(),
         };
     }
 
     const firstTarget = cleared[0];
     return {
-        action: "cleared",
+        action: firstTarget === undefined ? "skipped" : "cleared",
         path: firstTarget?.path ?? pluginCacheRoots[0] ?? "",
         paths: cleared.map((entry) => entry.path),
         cached: firstTarget?.cached,
         latest: latestVersion,
+        ...reportSkipped(),
     };
 }

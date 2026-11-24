@@ -35,6 +35,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { compareSemverCore } from "@magic-context/core/hooks/auto-update-checker/semver";
 import { inspectWindowsProcessesSync } from "@magic-context/core/shared/rpc-utils";
+import { checkCacheClearPath, describeCacheClearRefusal } from "../lib/cache-clear-path";
 import {
     describeUnusedOpenCodePluginCache,
     getOpenCodeV2PluginCacheSlot,
@@ -42,6 +43,7 @@ import {
     readConfiguredOpenCodePluginSpec,
     readOpenCodeV2CachedPluginVersion,
 } from "../lib/opencode-plugin-cache";
+import { getOpenCodeCacheHome } from "../lib/paths";
 import { assertWindowsStoresClosed } from "./doctor-windows-holders";
 
 export type HostUseProbe =
@@ -129,6 +131,7 @@ export interface OpenCodeV2CacheResult {
         | "cleared"
         | "in_use"
         | "in_use_unknown"
+        | "skipped"
         | "error"
         /** The config never makes OpenCode 2 load this slot; it is left alone. */
         | "unused";
@@ -217,6 +220,7 @@ export type OpenCodeV2SlotRemoval =
     | { action: "cleared" }
     | { action: "in_use"; pids: number[] }
     | { action: "in_use_unknown"; reason: string }
+    | { action: "skipped"; reason: string }
     | { action: "error"; error: string };
 
 /**
@@ -226,10 +230,15 @@ export type OpenCodeV2SlotRemoval =
  * `doctor --fix` and `doctor --clear` so both apply the same guard.
  */
 export function removeOpenCodeV2PluginCacheSlot(
+    cacheRoot: string,
     slot: string,
     hostFiles: string[],
     deps: OpenCodeV2SlotRemovalDeps = {},
 ): OpenCodeV2SlotRemoval {
+    const beforeProbe = checkCacheClearPath(cacheRoot, slot);
+    if (!beforeProbe.allowed) {
+        return { action: "skipped", reason: describeCacheClearRefusal(slot, beforeProbe.reason) };
+    }
     const probe = deps.probe ?? probeHostProcessesUsing;
     const use = probe({ files: hostFiles, directories: [slot] });
     if (use.status === "in_use") return { action: "in_use", pids: use.pids };
@@ -237,8 +246,12 @@ export function removeOpenCodeV2PluginCacheSlot(
 
     const remove =
         deps.remove ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
+    const check = checkCacheClearPath(cacheRoot, slot);
+    if (!check.allowed) {
+        return { action: "skipped", reason: describeCacheClearRefusal(slot, check.reason) };
+    }
     try {
-        remove(slot);
+        remove(check.path);
     } catch (err) {
         return { action: "error", error: err instanceof Error ? err.message : String(err) };
     }
@@ -286,22 +299,29 @@ export function checkOpenCodeV2PluginCache(
          */
         referencedSpecs?: ReadonlySet<string>;
     },
-    deps: OpenCodeV2SlotRemovalDeps & { slot?: string } = {},
+    deps: OpenCodeV2SlotRemovalDeps & { npmCacheDir?: string } = {},
 ): OpenCodeV2CacheResult {
     const distTag = options.distTag && options.distTag !== "latest" ? options.distTag : undefined;
-    const slot = deps.slot ?? getOpenCodeV2PluginCacheSlot(undefined, distTag ?? "latest");
+    const cacheRoot = deps.npmCacheDir ?? getOpenCodeCacheHome();
+    const slot = getOpenCodeV2PluginCacheSlot(deps.npmCacheDir, distTag ?? "latest");
     const tagged = distTag ? { distTag } : {};
-    if (
-        options.referencedSpecs !== undefined &&
-        !options.referencedSpecs.has(distTag ?? "latest")
-    ) {
-        return existsSync(slot)
-            ? { action: "unused", slot, cached: readOpenCodeV2CachedPluginVersion(slot), ...tagged }
-            : { action: "not_found", slot, unused: true, ...tagged };
+    const unused =
+        options.referencedSpecs !== undefined && !options.referencedSpecs.has(distTag ?? "latest");
+    const check = checkCacheClearPath(cacheRoot, slot);
+    if (!check.allowed) {
+        if (check.reason === "missing") {
+            return { action: "not_found", slot, ...(unused ? { unused: true } : {}), ...tagged };
+        }
+        return {
+            action: "skipped",
+            slot,
+            reason: describeCacheClearRefusal(slot, check.reason),
+            ...tagged,
+        };
     }
-    if (!existsSync(slot)) return { action: "not_found", slot, ...tagged };
 
-    const cached = readOpenCodeV2CachedPluginVersion(slot);
+    const cached = readOpenCodeV2CachedPluginVersion(check.path);
+    if (unused) return { action: "unused", slot, cached, ...tagged };
     const latest = options.latestVersion ?? undefined;
     const force = options.force === true;
 
@@ -314,7 +334,7 @@ export function checkOpenCodeV2PluginCache(
         return { action: "stale", slot, cached, latest, ...tagged };
     }
 
-    const removal = removeOpenCodeV2PluginCacheSlot(slot, options.hostFiles, deps);
+    const removal = removeOpenCodeV2PluginCacheSlot(cacheRoot, slot, options.hostFiles, deps);
     switch (removal.action) {
         case "in_use":
             return { action: "in_use", slot, cached, latest, pids: removal.pids, ...tagged };
@@ -327,6 +347,8 @@ export function checkOpenCodeV2PluginCache(
                 reason: removal.reason,
                 ...tagged,
             };
+        case "skipped":
+            return { action: "skipped", slot, cached, latest, reason: removal.reason, ...tagged };
         case "error":
             return { action: "error", slot, cached, latest, error: removal.error, ...tagged };
         case "cleared":
@@ -422,6 +444,9 @@ export function reportOpenCodeV2PluginCache(
             );
             report.info(`  ${result.slot}`);
             return { fixed: true, issue: false };
+        case "skipped":
+            report.warn(result.reason ?? `Left ${result.slot} alone`);
+            return { fixed: false, issue: false };
         case "unused":
             report.info(
                 describeUnusedOpenCodePluginCache({
