@@ -844,12 +844,13 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 /// Run a binary with args, bounded by [`PROBE_TIMEOUT`]. `kill_on_drop` reaps
 /// the child when the future is dropped on timeout so orphans do not accumulate.
 async fn run_bounded_binary(program: &str, args: &[&str]) -> Option<String> {
-    let fut = tokio::process::Command::new(program)
-        .args(args)
-        .no_window()
-        .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(PROBE_TIMEOUT, fut).await {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args).no_window().kill_on_drop(true);
+    run_bounded_command(command).await
+}
+
+async fn run_bounded_command(mut command: tokio::process::Command) -> Option<String> {
+    match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
         Ok(Ok(output)) if output.status.success() => {
             Some(String::from_utf8_lossy(&output.stdout).to_string())
         }
@@ -868,29 +869,80 @@ async fn run_bounded_binary(program: &str, args: &[&str]) -> Option<String> {
 ///
 /// Owned `String` arg (not `&str`): this lives in the commands module and an
 /// async fn with a reference input would trip Tauri's command macro rules.
+///
+/// `cwd` is `None` to keep the dashboard's own working directory.
 #[cfg(unix)]
-async fn run_via_login_shell(command: String) -> Option<String> {
+async fn run_via_login_shell(command: String, cwd: Option<PathBuf>) -> Option<String> {
     // Only the user's real login shell carries their version-manager PATH; a
     // bare /bin/sh fallback wouldn't, so skip when SHELL is unset.
     let shell = std::env::var("SHELL").ok()?;
-    let fut = tokio::process::Command::new(&shell)
-        .arg("-l")
-        .arg("-c")
-        .arg(&command)
-        .no_window()
-        .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(PROBE_TIMEOUT, fut).await {
-        Ok(Ok(output)) if output.status.success() => {
-            Some(String::from_utf8_lossy(&output.stdout).to_string())
-        }
-        _ => None,
+    run_in_login_shell(shell, command, cwd).await
+}
+
+#[cfg(unix)]
+async fn run_in_login_shell(
+    shell: String,
+    command: String,
+    cwd: Option<PathBuf>,
+) -> Option<String> {
+    run_bounded_command(login_shell_command(&shell, &command, cwd.as_deref())).await
+}
+
+#[cfg(unix)]
+fn login_shell_command(shell: &str, command: &str, cwd: Option<&Path>) -> tokio::process::Command {
+    let mut shell_command = tokio::process::Command::new(shell);
+    shell_command.arg("-l").arg("-c").arg(command);
+    if let Some(cwd) = cwd {
+        shell_command.current_dir(cwd);
     }
+    shell_command.no_window().kill_on_drop(true);
+    shell_command
 }
 
 #[cfg(not(unix))]
-async fn run_via_login_shell(_command: String) -> Option<String> {
+async fn run_via_login_shell(_command: String, _cwd: Option<PathBuf>) -> Option<String> {
     None
+}
+
+/// Build an OpenCode CLI probe that runs in `cwd`. OpenCode opens a project
+/// location in its working directory, so a probe that inherits the dashboard's
+/// directory (for an AppImage, its temporary mount) adds a false project (#964).
+fn opencode_probe_command(bin: &str, args: &[&str], cwd: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(bin);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .no_window()
+        .kill_on_drop(true);
+    command
+}
+
+/// Working directory for OpenCode probes: the Magic Context data folder,
+/// created owner-only when it is missing.
+fn opencode_probe_dir() -> PathBuf {
+    opencode_probe_dir_from(log_parser::resolve_storage_dir(), dirs::home_dir())
+}
+
+fn opencode_probe_dir_from(storage: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    match storage {
+        // A relative folder would resolve under the launch directory again.
+        Some(dir) if !dir.is_absolute() => eprintln!(
+            "WARN: the Magic Context data folder {} is relative; using the home folder for the OpenCode probe",
+            dir.display()
+        ),
+        Some(dir) => match config::ensure_private_config_directory(&dir) {
+            Ok(()) => return dir,
+            Err(err) => eprintln!(
+                "WARN: cannot create {} for the OpenCode probe ({err}); using the home folder",
+                dir.display()
+            ),
+        },
+        None => eprintln!(
+            "WARN: no valid Magic Context data folder for the OpenCode probe; using the home folder"
+        ),
+    }
+    // Never fall back to the process directory: that is the location #964 removes.
+    home.unwrap_or_else(std::env::temp_dir)
 }
 
 #[cfg(any(windows, test))]
@@ -925,21 +977,28 @@ async fn resolve_via_where(_tool: &str) -> Option<String> {
 }
 
 async fn opencode_cli_available() -> bool {
+    let cwd = opencode_probe_dir();
     for bin in opencode_cli_candidates() {
-        if run_bounded_binary(&bin, &["--version"]).await.is_some() {
+        if run_bounded_command(opencode_probe_command(&bin, &["--version"], &cwd))
+            .await
+            .is_some()
+        {
             return true;
         }
     }
 
     if cfg!(target_os = "windows") {
         if let Some(bin) = resolve_via_where("opencode").await {
-            if run_bounded_binary(&bin, &["--version"]).await.is_some() {
+            if run_bounded_command(opencode_probe_command(&bin, &["--version"], &cwd))
+                .await
+                .is_some()
+            {
                 return true;
             }
         }
     }
 
-    run_via_login_shell("opencode --version".to_string())
+    run_via_login_shell("opencode --version".to_string(), Some(cwd))
         .await
         .is_some()
 }
@@ -1041,14 +1100,15 @@ async fn probe_opencode_catalog(
     bin: &str,
     timeout: std::time::Duration,
     verbose: bool,
+    cwd: &Path,
 ) -> Result<OpencodeCatalog, String> {
-    let mut command = tokio::process::Command::new(bin);
-    command.arg("models");
-    if verbose {
-        command.arg("--verbose");
-    }
-    let output =
-        tokio::time::timeout(timeout, command.no_window().kill_on_drop(true).output()).await;
+    let args: &[&str] = if verbose {
+        &["models", "--verbose"]
+    } else {
+        &["models"]
+    };
+    let mut command = opencode_probe_command(bin, args, cwd);
+    let output = tokio::time::timeout(timeout, command.output()).await;
     match output {
         Err(_) => Err(format!(
             "Couldn't load models from OpenCode (timed out after {}s)",
@@ -1074,13 +1134,14 @@ async fn probe_opencode_models(
     bin: &str,
     timeout: std::time::Duration,
 ) -> Result<Vec<String>, String> {
-    probe_opencode_catalog(bin, timeout, false)
+    probe_opencode_catalog(bin, timeout, false, &std::env::temp_dir())
         .await
         .map(|catalog| catalog.models)
 }
 
 async fn discover_opencode_models() -> Result<OpencodeCatalog, String> {
     let candidates = opencode_cli_candidates();
+    let cwd = opencode_probe_dir();
     let mut failure = None;
 
     // Use `opencode models` with provider loading, NOT `--pure`. `--pure` skips all
@@ -1092,12 +1153,12 @@ async fn discover_opencode_models() -> Result<OpencodeCatalog, String> {
     // not triggered by a model listing.
     for bin in &candidates {
         // Older/newer hosts may not expose verbose model metadata. IDs remain usable.
-        let catalog = match probe_opencode_catalog(bin, MODEL_PROBE_TIMEOUT, true).await {
+        let catalog = match probe_opencode_catalog(bin, MODEL_PROBE_TIMEOUT, true, &cwd).await {
             Ok(catalog) => Ok(catalog),
             Err(error) if error.contains("timed out") || error.contains("Couldn't run") => {
                 Err(error)
             }
-            Err(_) => probe_opencode_catalog(bin, MODEL_PROBE_TIMEOUT, false).await,
+            Err(_) => probe_opencode_catalog(bin, MODEL_PROBE_TIMEOUT, false, &cwd).await,
         };
         match catalog {
             Ok(models) => return Ok(models),
@@ -1108,7 +1169,8 @@ async fn discover_opencode_models() -> Result<OpencodeCatalog, String> {
 
     if cfg!(target_os = "windows") {
         if let Some(bin) = resolve_via_where("opencode").await {
-            if let Ok(models) = probe_opencode_catalog(&bin, MODEL_PROBE_TIMEOUT, false).await {
+            if let Ok(models) = probe_opencode_catalog(&bin, MODEL_PROBE_TIMEOUT, false, &cwd).await
+            {
                 return Ok(models);
             }
         }
@@ -1116,7 +1178,7 @@ async fn discover_opencode_models() -> Result<OpencodeCatalog, String> {
 
     // Login-shell fallback for version-manager (mise/nvm/fnm) installs the
     // hardcoded candidates can't enumerate — see run_via_login_shell.
-    if let Some(text) = run_via_login_shell("opencode models".to_string()).await {
+    if let Some(text) = run_via_login_shell("opencode models".to_string(), Some(cwd)).await {
         let models = parse_opencode_models_output(&text);
         if !models.is_empty() {
             return Ok(OpencodeCatalog {
@@ -1283,7 +1345,7 @@ async fn get_available_omp_models() -> Vec<String> {
         }
     }
 
-    if let Some(text) = run_via_login_shell("omp models --json".to_string()).await {
+    if let Some(text) = run_via_login_shell("omp models --json".to_string(), None).await {
         return parse_omp_models_output(&text);
     }
     Vec::new()
@@ -1362,7 +1424,7 @@ async fn discover_pi_models() -> Vec<String> {
 
     // Resolve Pi through the user's login shell before reporting an empty Pi
     // catalog. OMP discovery remains a separate harness-scoped catalog.
-    if let Some(text) = run_via_login_shell("pi --list-models".to_string()).await {
+    if let Some(text) = run_via_login_shell("pi --list-models".to_string(), None).await {
         let models = parse_pi_models_output(&text);
         if !models.is_empty() {
             return models;
@@ -1807,6 +1869,150 @@ mod tests {
         );
     }
 
+    // #964: OpenCode opens a project location in its working directory. The
+    // probe must not inherit the dashboard's own directory (an AppImage mount).
+    #[test]
+    fn opencode_probe_command_carries_probe_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let command =
+            super::opencode_probe_command("opencode", &["models", "--verbose"], dir.path());
+        let std_command = command.as_std();
+        assert_eq!(std_command.get_current_dir(), Some(dir.path()));
+        assert_eq!(std_command.get_program(), "opencode");
+        assert_eq!(
+            std_command.get_args().collect::<Vec<_>>(),
+            vec!["models", "--verbose"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_shell_command_carries_probe_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = super::login_shell_command("/bin/sh", "opencode models", Some(dir.path()));
+        let std_command = command.as_std();
+        assert_eq!(std_command.get_current_dir(), Some(dir.path()));
+        assert_eq!(
+            std_command.get_args().collect::<Vec<_>>(),
+            vec!["-l", "-c", "opencode models"]
+        );
+        // Pi and OMP keep their earlier behaviour.
+        let inherited = super::login_shell_command("/bin/sh", "pi --list-models", None);
+        assert_eq!(inherited.as_std().get_current_dir(), None);
+    }
+
+    #[test]
+    fn opencode_probe_dir_creates_private_storage_dir() {
+        let mut env = crate::test_env::EnvGuard::new();
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("missing").join("magic-context");
+        env.set("MAGIC_CONTEXT_STORAGE_DIR", &storage);
+        assert_eq!(super::opencode_probe_dir(), storage);
+        assert!(storage.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&storage).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+    }
+
+    #[test]
+    fn opencode_probe_dir_falls_back_to_home_not_process_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let blocker = root.path().join("file");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let home = root.path().join("home");
+        assert_eq!(
+            super::opencode_probe_dir_from(Some(blocker.join("magic-context")), Some(home.clone())),
+            home
+        );
+        assert_eq!(
+            super::opencode_probe_dir_from(None, Some(home.clone())),
+            home
+        );
+        let fallback = super::opencode_probe_dir_from(None, None);
+        assert_eq!(fallback, std::env::temp_dir());
+        assert_ne!(Some(fallback), std::env::current_dir().ok());
+    }
+
+    #[test]
+    fn opencode_probe_dir_rejects_relative_storage_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let relative =
+            std::path::PathBuf::from(format!("mc-probe-relative-{}", std::process::id()));
+        assert_eq!(
+            super::opencode_probe_dir_from(Some(relative.clone()), Some(home.clone())),
+            home
+        );
+        assert!(!relative.exists(), "a relative folder must not be created");
+    }
+
+    #[test]
+    fn storage_dir_treats_blank_xdg_data_home_as_unset() {
+        // Resolve only: the probe would create the folder in the real home
+        // on Windows, where `dirs` ignores HOME.
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove("MAGIC_CONTEXT_STORAGE_DIR");
+        env.set("XDG_DATA_HOME", "  ");
+        let expected = dirs::home_dir().map(|home| {
+            home.join(".local")
+                .join("share")
+                .join("cortexkit")
+                .join("magic-context")
+        });
+        assert_eq!(crate::log_parser::resolve_storage_dir(), expected);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_model_probes_run_in_probe_working_directory() {
+        // The stub writes its own working directory into a marker file there.
+        let opencode = crate::test_bin::write_test_executable(
+            "opencode",
+            "#!/bin/sh\npwd -P > probe-cwd\nprintf 'opencode/big-pickle\\n'\n",
+            "",
+        );
+        let bin = opencode.to_str().expect("UTF-8 path");
+        for verbose in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let catalog = super::probe_opencode_catalog(
+                bin,
+                std::time::Duration::from_secs(5),
+                verbose,
+                dir.path(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(catalog.models, vec!["opencode/big-pickle"]);
+            let recorded = std::fs::read_to_string(dir.path().join("probe-cwd")).unwrap();
+            assert_eq!(
+                Path::new(recorded.trim()),
+                dir.path().canonicalize().unwrap()
+            );
+        }
+
+        let shell = crate::test_bin::write_test_executable(
+            "login-shell",
+            "#!/bin/sh\npwd -P > shell-cwd\nprintf 'opencode/big-pickle\\n'\n",
+            "",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let output = super::run_in_login_shell(
+            shell.to_str().expect("UTF-8 path").to_string(),
+            "opencode models".to_string(),
+            Some(dir.path().to_path_buf()),
+        )
+        .await;
+        assert_eq!(output.as_deref(), Some("opencode/big-pickle\n"));
+        let recorded = std::fs::read_to_string(dir.path().join("shell-cwd")).unwrap();
+        assert_eq!(
+            Path::new(recorded.trim()),
+            dir.path().canonicalize().unwrap()
+        );
+    }
+
     // #149 regression: the discovery path must be able to LAUNCH a `.cmd` shim
     // (pnpm/npm install opencode as opencode.cmd). Verified on windows-latest
     // that Rust's Command runs a `.cmd` directly, so the fix is purely adding the
@@ -1925,6 +2131,7 @@ mod tests {
             bin.to_str().unwrap(),
             std::time::Duration::from_secs(2),
             true,
+            &std::env::temp_dir(),
         )
         .await
         .unwrap();

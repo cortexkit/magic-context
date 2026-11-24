@@ -67,7 +67,7 @@ fn resolve_log_path_from_temp_dir(temp_dir: &std::path::Path, harness: Harness) 
 
 /// Resolve the module data directory using the same environment precedence as
 /// the database reader. Log discovery must not depend on context.db existing.
-fn resolve_storage_dir() -> Option<PathBuf> {
+pub(crate) fn resolve_storage_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var("MAGIC_CONTEXT_STORAGE_DIR")
         .ok()
         .map(|value| PathBuf::from(value.trim()))
@@ -75,9 +75,11 @@ fn resolve_storage_dir() -> Option<PathBuf> {
     {
         return path.is_absolute().then_some(path);
     }
+    // A blank value means unset, as in the plugin's storage resolver.
     let data_home = std::env::var("XDG_DATA_HOME")
         .ok()
-        .map(PathBuf::from)
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| !path.as_os_str().is_empty())
         .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("share")))?;
     Some(data_home.join("cortexkit").join("magic-context"))
 }

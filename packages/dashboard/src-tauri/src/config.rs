@@ -281,7 +281,7 @@ fn resolve_symlinked_config(path: &Path) -> Result<PathBuf, String> {
     Err("Config path has too many levels of symlinks".to_string())
 }
 
-fn ensure_private_config_directory(path: &Path) -> std::io::Result<()> {
+pub(crate) fn ensure_private_config_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
