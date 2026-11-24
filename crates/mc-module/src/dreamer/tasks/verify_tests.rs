@@ -711,6 +711,7 @@ fn the_diff_frame_keeps_the_plugins_shape_and_bounds_long_diffs() {
 struct Ran {
     db: Arc<ContextDb>,
     client: Arc<Client>,
+    engine: Arc<Engine>,
     /// The project's folder, as git names it.
     root: String,
     _repo: Repo,
@@ -724,7 +725,7 @@ impl Ran {
         self.db
             .with_connection(|conn| {
                 conn.query_row(
-                    "SELECT task, outcome, proposed, applied, error, batches_json FROM dream_task_runs",
+                    "SELECT task, outcome, proposed, applied, error, batches_json FROM dream_task_runs ORDER BY id DESC LIMIT 1",
                     [],
                     |row| {
                         Ok((
@@ -822,6 +823,7 @@ async fn broad_through_engine(fixture: Fixture, ends: &[Ends], settings: &Settin
             return Ran {
                 db,
                 client,
+                engine,
                 root,
                 _repo: repo,
                 _dir,
@@ -844,6 +846,68 @@ fn live_and_gone(rows: &[Row]) -> Fixture {
 }
 
 const ARCHIVE_2: &str = "<verify>\n<archive id=\"2\" reason=\"its subject was removed\" missing=\"gone_function\"/>\n</verify>";
+
+#[tokio::test]
+async fn a_request_refusal_defers_one_memory_without_stopping_verification() {
+    let fixture = live_and_gone(&[
+        row(1, "`live_function` runs first."),
+        row(2, "`gone_function` does it."),
+        row(3, "`live_function` is in `src/live.rs`."),
+    ]);
+    let refused = Ends::Error("invalid_request_error: the prompt is too long");
+    let settings = Settings::default();
+    let ran = broad_through_engine(fixture, &[
+        refused.clone(), refused,
+        Ends::Reply(r#"<verify><verified id="1" files="src/live.rs" cites="src/live.rs:1-1"/></verify>"#),
+        Ends::Reply(r#"<verify><skip id="3" reason="unsure"/></verify>"#),
+    ], &settings).await;
+    assert_eq!(ran.checked(1).1.as_deref(), Some("confirmed"));
+    assert_eq!(ran.checked(2), ("active".into(), None, None));
+    let initial = ran.sent().len();
+    assert_eq!(initial, 4);
+    ran.client.ends.lock().unwrap().extend([
+        Ends::Reply(r#"<verify><skip id="1" reason="unsure"/></verify>"#),
+        Ends::Reply(r#"<verify><skip id="3" reason="unsure"/></verify>"#),
+        Ends::Reply(ARCHIVE_2),
+    ]);
+    for _ in 0..500 {
+        if ran.engine.is_idle_for_tests() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    ran.db
+        .with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
+        .unwrap();
+    ran.engine.tick(
+        &ran.db,
+        &ran.client,
+        &settings,
+        crate::memory_writes::now_ms(),
+    );
+    for _ in 0..500 {
+        if ran.engine.is_idle_for_tests() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let next = ran.sent().split_off(initial);
+    assert_eq!(next.len(), 3);
+    assert!(next.last().unwrap().1.contains("[2]"), "{next:?}");
+}
+
+#[tokio::test]
+async fn an_account_wait_still_stops_verification_before_later_batches() {
+    let fixture = live_and_gone(&[
+        row(1, "`live_function` runs first."),
+        row(2, "`gone_function` does it."),
+    ]);
+    let reset = crate::memory_writes::now_ms() as u64 + 60_000;
+    let ran = broad_through_engine(fixture, &[Ends::Full(reset)], &Settings::default()).await;
+    assert_eq!(ran.run().1, "waiting");
+    assert_eq!(ran.sent().len(), 1);
+    assert_eq!(ran.checked(1).1, None);
+}
 
 /// The engine runs `verify-broad` end to end: each memory goes alone to a
 /// runner that takes plans, with AFT's reader tools; a final message without

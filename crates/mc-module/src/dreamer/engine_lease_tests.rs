@@ -37,6 +37,7 @@ struct Leased {
     batches: usize,
     workspace: Option<&'static str>,
     hook: Hook,
+    capped: bool,
 }
 
 struct LeasedBatch {
@@ -44,6 +45,7 @@ struct LeasedBatch {
     owner: (&'static str, String),
     workspace: Option<&'static str>,
     hook: Hook,
+    capped: bool,
 }
 
 impl Task for Leased {
@@ -66,6 +68,7 @@ impl Task for Leased {
                     owner: owner.clone(),
                     workspace: self.workspace,
                     hook: Arc::clone(&self.hook),
+                    capped: self.capped,
                 }) as Box<dyn Batch>
             })
             .collect())
@@ -80,7 +83,17 @@ impl run::TaskInput for LeasedBatch {
         Some(format!("batch {}", self.index))
     }
     fn accepts(&self, _: &str) -> Result<(), String> {
-        Ok(())
+        if self.capped {
+            Err("no usable answer".into())
+        } else {
+            Ok(())
+        }
+    }
+    fn step_cap(&self) -> Option<run::StepCap> {
+        self.capped.then_some(run::StepCap {
+            steps: 1,
+            finalize: "Give the verdict now",
+        })
     }
 }
 
@@ -95,6 +108,13 @@ fn remember(tx: &rusqlite::Transaction<'_>, level: &str, owner: &str, content: &
 }
 
 impl Batch for LeasedBatch {
+    fn skip(&self, tx: &rusqlite::Transaction<'_>, _: i64) -> Result<Applied, String> {
+        let (level, owner) = &self.owner;
+        remember(tx, level, owner, "capped batch");
+        (self.hook)(self.index);
+        Ok(Applied::default())
+    }
+
     fn apply(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -195,6 +215,7 @@ fn classify(
         batches,
         workspace: None,
         hook,
+        capped: false,
     };
     let engine = engine(db, task, leases, clock);
     db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
@@ -397,6 +418,59 @@ async fn a_window_that_closes_before_a_batch_commits_discards_the_batch_and_stop
     assert_eq!(leases.log().closed, [ROLE]);
 }
 
+#[cfg(feature = "memory-replica")]
+#[tokio::test]
+async fn a_capped_batch_cannot_commit_skip_bookkeeping_after_lease_loss() {
+    for lapse in [true, false] {
+        let (_dir, db) = store();
+        let leases = SampleLeases::new();
+        leases.default_script(steps("lapsed.json", "dreamer.workspace_02"));
+        let (now, clock) = clock(100_500);
+        let hook: Hook = Arc::new(move |_| {
+            if lapse {
+                now.store(140_000, Ordering::SeqCst);
+            }
+        });
+        let engine = engine(
+            &db,
+            Leased {
+                kind: "classify-memories",
+                batches: 1,
+                workspace: None,
+                hook,
+                capped: true,
+            },
+            &leases,
+            clock,
+        );
+        db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
+            .unwrap();
+        let client = Arc::new(Client::new(
+            &["p/a"],
+            &[Ends::StepCapped(1), Ends::Reply("no verdict")],
+        ));
+        engine.tick(&db, &client, &Settings::default(), now_ms());
+        settled(&engine).await;
+        assert_eq!(client.children().len(), 2, "step cap then finalize");
+        let (outcome, _, journaled) = last_run(&db);
+        assert_eq!(journaled, Some(json!({ROLE: 4})));
+        if lapse {
+            assert_eq!(outcome.as_deref(), Some("lease_lost"));
+            assert!(epochs(&db).is_empty());
+        } else {
+            assert_eq!(epochs(&db), ["capped batch: 4"]);
+        }
+        let count = db
+            .with_connection(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM memories", [], |row| {
+                    row.get::<_, usize>(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(count, usize::from(!lapse));
+    }
+}
+
 /// A run whose first notice comes so late that less than the margin of
 /// its window is left starts nothing.
 #[cfg(feature = "memory-replica")]
@@ -543,6 +617,7 @@ fn lift(
         batches,
         workspace: Some(workspace),
         hook,
+        capped: false,
     };
     let engine = engine(db, task, leases, clock);
     engine.see_workspace(PROJECT, Some(workspace));

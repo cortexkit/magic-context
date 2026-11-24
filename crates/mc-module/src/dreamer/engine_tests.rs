@@ -344,25 +344,57 @@ async fn a_spent_budget_stops_the_run_before_its_next_batch() {
 }
 
 #[tokio::test]
+async fn a_settled_attempt_that_spends_the_budget_cannot_send_a_fallback() {
+    let (_dir, db) = store();
+    let engine = engine(1);
+    let settings = Settings {
+        budget_tokens: 60_000,
+        ..Settings::default()
+    };
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &settings, 1);
+    make_due(&db);
+    let client = Arc::new(Client::new(
+        &["p/a", "p/b"],
+        &[Ends::Spent("no", 70_000), Ends::Spent("ok", 30_000)],
+    ));
+    engine.tick(&db, &client, &settings, now_ms());
+    settled(&engine).await;
+    assert_eq!(client.children().len(), 1);
+    let (outcome, input): (String, u64) = db
+        .with_connection(|conn| {
+            conn.query_row(
+                "SELECT outcome, input_tokens FROM dream_task_runs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((outcome.as_str(), input), ("budget_stopped", 70_000));
+}
+
+#[tokio::test]
 async fn fallback_and_unsuccessful_batches_count_in_the_run_total() {
-    for (ends, expected) in [
+    for (ends, budget_tokens, expected) in [
         (
             vec![Ends::Spent("no", 70_000), Ends::Spent("ok", 30_000)],
+            90_000,
             "budget_stopped",
         ),
         (
             vec![Ends::Spent("no", 70_000), Ends::Spent("also no", 30_000)],
+            110_000,
             "failed",
         ),
         (
             vec![Ends::SpentFull((now_ms() + 120_000) as u64, 100_000)],
+            90_000,
             "waiting",
         ),
     ] {
         let (_dir, db) = store();
         let engine = engine(2);
         let settings = Settings {
-            budget_tokens: 90_000,
+            budget_tokens,
             ..Settings::default()
         };
         engine.see_project(&db, PROJECT, FOLDER, profile(), &settings, 1);

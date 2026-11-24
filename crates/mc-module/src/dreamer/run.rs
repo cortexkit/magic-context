@@ -106,6 +106,8 @@ pub struct TaskRun<'a> {
     /// The tool provider whose `reader` preset a code-reading child reads
     /// with; `None` for a task that reads no code.
     pub reader: Option<&'a str>,
+    /// Tokens the occurrence can still spend before starting this batch.
+    pub remaining_tokens: u64,
     /// Where the run's children are attributed, each right before the send
     /// that creates it ([`crate::attribution`]); `None` attributes none.
     pub attribution: Option<crate::attribution::Attribution<'a>>,
@@ -129,12 +131,16 @@ pub struct TaskReply {
 pub enum TaskError {
     /// Routing or the runner named a time to ask again. Not a failure.
     AccountWait(AccountWait, Option<Box<StepUsage>>),
+    /// A send spent the balance, leaving none for a retry, fallback or finalize.
+    BudgetStopped(Option<StepUsage>),
     Failed {
         error: String,
         usage: Option<StepUsage>,
         /// A child returned an unusable answer and no fallback succeeded.
         /// Failures to start or reach a model don't count as answers.
         unusable_reply: bool,
+        /// Every route that ran explicitly rejected this particular request.
+        request_specific: bool,
     },
     /// The child's run reached its step cap ([`TaskInput::step_cap`]) and
     /// its answer to the finalize message can't be used. No other model is tried:
@@ -157,10 +163,26 @@ impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AccountWait(wait, _) => write!(f, "waiting on an account: {}", wait.code),
+            Self::BudgetStopped(_) => f.write_str("the task's token budget is spent"),
             Self::Failed { error, .. } => f.write_str(error),
             Self::Skipped(skipped) => write!(f, "skipped at the step cap: {}", skipped.reason),
         }
     }
+}
+
+fn budget_spent(remaining: u64, usage: Option<StepUsage>) -> bool {
+    let (input, output) = usage_tokens(usage.as_ref());
+    input.saturating_add(output) >= remaining
+}
+
+pub(super) fn usage_tokens(usage: Option<&StepUsage>) -> (u64, u64) {
+    // Prompt tokens include uncached input, cache reads and cache writes.
+    usage.map_or((0, 0), |usage| {
+        (
+            usage.prompt_tokens.unwrap_or(0),
+            usage.output_tokens.unwrap_or(0),
+        )
+    })
 }
 
 /// Run `task` once.
@@ -175,7 +197,11 @@ pub async fn run<C: RunnerClient + Router>(
     let mut paid_failure: Option<String> = None;
     let mut unusable_reply = false;
     let mut total = None;
+    let mut only_request_failures = true;
     for attempt in 0..=MAX_FALLBACKS {
+        if budget_spent(job.remaining_tokens, total) {
+            return Err(TaskError::BudgetStopped(total));
+        }
         let answer = match client
             .select(routing::dream_select(job.demand, &tried))
             .await
@@ -190,6 +216,9 @@ pub async fn run<C: RunnerClient + Router>(
                     }
                 }
                 return Err(TaskError::Failed {
+                    request_specific: paid_failure.is_some()
+                        && only_request_failures
+                        && error.code == "no_route",
                     error: paid_failure
                         .or(failure)
                         .unwrap_or_else(|| error.to_string()),
@@ -205,6 +234,7 @@ pub async fn run<C: RunnerClient + Router>(
         // A runner session can only be bound on an answer that names the
         // harness to run it in.
         let Some(harness) = answer.runner.harness.clone() else {
+            only_request_failures = false;
             report(Outcome::Cancelled, None).await;
             failure = Some(format!(
                 "routing named no harness on {} for {}",
@@ -221,6 +251,7 @@ pub async fn run<C: RunnerClient + Router>(
             .output_tokens(DREAM_OUTPUT_TOKENS)
             .min(answer.max_output_tokens);
         let Some(prompt) = task.prompt(window, output_tokens) else {
+            only_request_failures = false;
             report(Outcome::Cancelled, None).await;
             failure = Some(format!(
                 "the task's input doesn't fit {}",
@@ -237,6 +268,7 @@ pub async fn run<C: RunnerClient + Router>(
                         .into(),
                     usage: total,
                     unusable_reply,
+                    request_specific: false,
                 });
             };
             let child = Child {
@@ -255,6 +287,7 @@ pub async fn run<C: RunnerClient + Router>(
                     }),
                 }),
                 Err(ReaderPlan::Runner(problem)) => {
+                    only_request_failures = false;
                     report(Outcome::Cancelled, None).await;
                     failure = Some(problem);
                     continue;
@@ -267,6 +300,7 @@ pub async fn run<C: RunnerClient + Router>(
                         error: problem,
                         usage: total,
                         unusable_reply,
+                        request_specific: false,
                     });
                 }
             }
@@ -317,6 +351,11 @@ pub async fn run<C: RunnerClient + Router>(
                 // A run that reached the task's step cap answers once more in
                 // the same child, and no other model is tried after it.
                 (Ok(ended), Some(cap)) if ended.step_capped => {
+                    let used = batch_usage(usage);
+                    if budget_spent(job.remaining_tokens, used) {
+                        report(Outcome::Failed, usage.as_ref()).await;
+                        return Err(TaskError::BudgetStopped(used));
+                    }
                     let capped_steps = ended.reply.steps;
                     let (last, usable) = match finalize(
                         client,
@@ -409,6 +448,11 @@ pub async fn run<C: RunnerClient + Router>(
                     ));
                 }
                 Err(SummaryError::Failed(error)) if retry < MAX_RETRIES && retryable(&error) => {
+                    let used = batch_usage(usage);
+                    if budget_spent(job.remaining_tokens, used) {
+                        report(Outcome::Failed, usage.as_ref()).await;
+                        return Err(TaskError::BudgetStopped(used));
+                    }
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     tokio::time::sleep(backoff(retry).min(remaining)).await;
                     retry += 1;
@@ -425,6 +469,7 @@ pub async fn run<C: RunnerClient + Router>(
                 return Ok(reply);
             }
             Err(error) => {
+                only_request_failures &= request_refusal(&error);
                 report(Outcome::Failed, usage.as_ref()).await;
                 total = batch_usage(usage);
                 paid_failure = Some(error);
@@ -432,10 +477,31 @@ pub async fn run<C: RunnerClient + Router>(
         }
     }
     Err(TaskError::Failed {
+        request_specific: paid_failure.is_some() && only_request_failures,
         error: paid_failure.or(failure).unwrap_or_default(),
         usage: total,
         unusable_reply,
     })
+}
+
+/// Only explicit request-level provider errors may move a memory back in
+/// the queue. An unknown error, including a missing provider, must stop the
+/// run instead of making the next batch pay for the same failure.
+fn request_refusal(error: &str) -> bool {
+    error
+        .strip_prefix("the run ended error: ")
+        .and_then(|message| message.split_once(':'))
+        .is_some_and(|(code, _)| {
+            matches!(
+                code.trim(),
+                "invalid_request_error"
+                    | "invalid_request"
+                    | "context_length_exceeded"
+                    | "content_policy_violation"
+                    | "request_too_large"
+                    | "safety_refusal"
+            )
+        })
 }
 
 fn waiting(
@@ -450,6 +516,7 @@ fn waiting(
             error,
             usage,
             unusable_reply,
+            request_specific: false,
         },
     )
 }

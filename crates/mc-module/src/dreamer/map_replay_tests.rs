@@ -478,6 +478,7 @@ async fn a_request_holds_the_text_and_settings_a_run_sends() {
         run_id: "1.0",
         project_root: &args.checkout,
         reader: Some("aft"),
+        remaining_tokens: u64::MAX,
         attribution: None,
     };
     run(&client, &job, batches[0].as_ref()).await.unwrap();

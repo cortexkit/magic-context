@@ -175,8 +175,9 @@ pub(crate) trait Batch: TaskInput + Send {
     fn after_commit(&self, db: &ContextDb) {
         let _ = db;
     }
-    /// Whether to record unusable answers after model fallback fails as well
-    /// as at the step cap, using the same role fence as a normal answer.
+    /// Whether to record unusable answers after model fallback fails. A
+    /// step-cap skip, like an accepted answer, can only commit while the
+    /// computer still holds the role with enough time left on its lease.
     fn records_unusable_reply(&self) -> bool {
         false
     }
