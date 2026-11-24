@@ -643,13 +643,7 @@ impl Session {
                 return None;
             }
         };
-        // A revert during the run may have removed what it summarized.
-        let present = |mid: &str| self.index.entries().iter().any(|entry| entry.mid == mid);
-        if summarized.validated.compartments.is_empty()
-            || !summarized.validated.compartments.iter().all(|summary| {
-                present(&summary.end_message_id) && present(&summary.start_message_id)
-            })
-        {
+        if summarized.validated.compartments.is_empty() {
             if let Some(reservation) = reservation {
                 self.drain.release(reservation);
             }
@@ -666,6 +660,21 @@ impl Session {
             error: String::new(),
             previous_through: self.summarized_through(),
         };
+        // An edit can arrive while the historian is answering, before this
+        // worker gets its notice. Prove the covered words before any write.
+        match self.publication_is_current(client, &publication).await {
+            Some(true) => {}
+            Some(false) => {
+                publication.error = "the covered transcript no longer matches".into();
+                self.give_up_publication(publication);
+                return None;
+            }
+            None => {
+                publication.error = "could not read the covered transcript".into();
+                self.pending_publication = Some(Box::new(publication));
+                return None;
+            }
+        }
         if let Err(error) = self.store_publication(&publication, now_ms) {
             tracing::warn!(
                 "ck-mc: session {}: storing summaries failed, retrying: {error}",
