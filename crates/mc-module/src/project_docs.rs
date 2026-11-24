@@ -10,9 +10,9 @@
 //!  - the file is opened once and checked on that handle (same file the stat saw, read
 //!    no further than the cap), closing the gap between checking the path and reading it.
 //!
-//! The canonical hash drives a deferred-HARD on docs edits (the trigger wiring is the
-//! slice-4d integration question, Q1); the read + render + hash here are independent of
-//! that and fork-free.
+//! Editing docs does not trigger a rebuild of the cached prompt prefix.
+//! Reread the docs when another trigger rebuilds the baseline, and reuse
+//! the previously rendered block between rebuilds.
 
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -119,9 +119,8 @@ fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
         && left.modified().ok() == right.modified().ok()
 }
 
-/// Read + render + hash the project docs in `project_directory`. Pure over the
-/// filesystem (no caching — the daemon holds the rendered block in the m0 frozen unit;
-/// re-read only happens on a docs-change-driven HARD).
+/// Read, render and hash the project docs in `project_directory`. The caller
+/// decides when to reread them; this function does not cache the render.
 pub fn read_project_docs_canonical(project_directory: &str) -> ProjectDocs {
     let dir = Path::new(project_directory);
     let mut hash_pieces: Vec<String> = Vec::new();
@@ -163,7 +162,7 @@ pub fn read_project_docs_canonical(project_directory: &str) -> ProjectDocs {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     /// A scratch folder removed when dropped.
     struct TempDir(std::path::PathBuf);
 
@@ -200,7 +199,7 @@ mod tests {
         pub(super) static BETWEEN_STAT_AND_OPEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
     }
 
-    fn with_hook<T>(hook: impl Fn(&Path) + 'static, body: impl FnOnce() -> T) -> T {
+    pub(crate) fn with_hook<T>(hook: impl Fn(&Path) + 'static, body: impl FnOnce() -> T) -> T {
         BETWEEN_STAT_AND_OPEN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
         let result = body();
         BETWEEN_STAT_AND_OPEN.with(|slot| *slot.borrow_mut() = None);
