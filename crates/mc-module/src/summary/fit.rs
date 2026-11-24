@@ -43,6 +43,34 @@ pub struct Window {
     pub context_window: u64,
 }
 
+/// What a continuation must fit beside the conversation it already carries.
+#[derive(Clone, Copy, Debug)]
+pub struct ContinuationWindow {
+    pub window: Window,
+    pub system_tokens: u64,
+    pub history_tokens: u64,
+}
+
+impl ContinuationWindow {
+    pub fn admits(self, output: u64, prompt: &str) -> bool {
+        let Some(limit) = self.window.input_limit(output) else {
+            return self.window.context_window == 0;
+        };
+        let tokens = self.window.counter.calibration().provider_mass(
+            LocalMass {
+                system: self.system_tokens as f64,
+                prose: self
+                    .history_tokens
+                    .saturating_add(self.window.counter.count(prompt))
+                    as f64,
+                tools: 0.0,
+            },
+            true,
+        );
+        tokens.is_finite() && tokens <= limit as f64
+    }
+}
+
 impl Window {
     /// The output a run asks for on this model: `cap`, but at most a quarter
     /// of its window.

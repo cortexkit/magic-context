@@ -149,6 +149,18 @@ impl RunnerCapabilities {
             .contains(cortexkit_role_llm_runner::capabilities::RUN_CANCEL)
     }
 
+    pub async fn retract(
+        &self,
+        runner: &str,
+        connection_epoch: u64,
+        describe: impl Future<Output = Result<Value, ClientError>>,
+    ) -> bool {
+        self.declared(runner, connection_epoch, describe)
+            .await
+            .capabilities
+            .contains(cortexkit_role_llm_runner::capabilities::RETRACT)
+    }
+
     /// `Some` only for a runner declaring the `session_retention` group. Any
     /// other runner refuses a `retention_policy` member, so it is sent
     /// nothing new.

@@ -15,10 +15,14 @@ use std::sync::Mutex;
 pub(crate) struct Client {
     base: account_wait_send_tests::Client,
     replies: Mutex<VecDeque<SendReply>>,
+    pub(crate) lose_first_ack: bool,
+    pub(crate) confirms_cancel: bool,
+    pub(crate) reports_usage: bool,
     results: Mutex<VecDeque<RunResult>>,
     pub(crate) sends: Mutex<Vec<(Child, SendRequest)>>,
     reads: Mutex<Vec<String>>,
     reports: Mutex<Vec<Outcome>>,
+    pub(crate) report_bodies: Mutex<Vec<Value>>,
 }
 
 impl Client {
@@ -27,10 +31,14 @@ impl Client {
         Self {
             base: account_wait_send_tests::Client::new(account_wait_send_tests::Answer::RefuseSend),
             replies: Mutex::new(replies.into()),
+            lose_first_ack: false,
+            confirms_cancel: false,
+            reports_usage: false,
             results: Mutex::new(results.into()),
             sends: Mutex::new(Vec::new()),
             reads: Mutex::new(Vec::new()),
             reports: Mutex::new(Vec::new()),
+            report_bodies: Mutex::new(Vec::new()),
         }
     }
 }
@@ -73,7 +81,16 @@ impl RunnerClient for Client {
         child: &Child,
         request: SendRequest,
     ) -> Result<SendReply, ClientError> {
-        self.sends.lock().unwrap().push((child.clone(), request));
+        let first = {
+            let mut sends = self.sends.lock().unwrap();
+            sends.push((child.clone(), request));
+            sends.len() == 1
+        };
+        if first && self.lose_first_ack {
+            return Err(ClientError::unanswered(
+                "timeout receiving session.send reply",
+            ));
+        }
         let mut replies = self.replies.lock().unwrap();
         Ok(if replies.len() == 1 {
             replies[0].clone()
@@ -81,19 +98,40 @@ impl RunnerClient for Client {
             replies.pop_front().unwrap()
         })
     }
+    async fn cancel_child_run(&self, _: &Child, _: &str) -> Result<bool, ClientError> {
+        Ok(self.confirms_cancel)
+    }
+    async fn report_child_usage(&self, request: ReportRequest) {
+        self.report(request).await;
+    }
     async fn child_result(
         &self,
         _: &Child,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
         self.reads.lock().unwrap().push(request.run_id.clone());
-        if let Some(mut result) = self.results.lock().unwrap().pop_front() {
+        let result = {
+            let mut results = self.results.lock().unwrap();
+            if self.confirms_cancel && results.len() == 1 {
+                results.front().cloned()
+            } else {
+                results.pop_front()
+            }
+        };
+        if let Some(mut result) = result {
             result.run_id = request.run_id;
             return Ok(result);
         }
         let sends = self.sends.lock().unwrap();
         let prompt = sends.last().unwrap().1.prompt.as_deref().unwrap();
         let mut result = RunResult::new(request.run_id, states::COMPLETED);
+        if self.reports_usage {
+            let mut usage = cortexkit_role_llm_runner::run::RunUsage::new();
+            usage.input_tokens = Some(100);
+            usage.cached_input_tokens = Some(20);
+            usage.output_tokens = Some(10);
+            result.usage = Some(usage);
+        }
         result.final_message = Some(FinalMessage {
             ordinal: 1,
             mid: "answer".into(),
@@ -108,7 +146,11 @@ impl Router for Client {
         self.base.select(request).await
     }
     async fn report(&self, request: ReportRequest) {
-        self.reports.lock().unwrap().push(request.outcome);
+        self.reports.lock().unwrap().push(request.outcome.clone());
+        self.report_bodies
+            .lock()
+            .unwrap()
+            .push(serde_json::to_value(request).unwrap());
     }
 }
 
@@ -384,6 +426,76 @@ async fn never_ran_handover_exhaustion_is_cancelled_without_fallback() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn lost_turn_one_ack_reattaches_to_the_same_child_and_send() {
+    let client = Client {
+        lose_first_ack: true,
+        ..Client::new(vec![active()], vec![])
+    };
+    assert!(run(&client, None, &account_wait_send_tests::job())
+        .await
+        .unwrap()
+        .is_some());
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 2);
+    assert_eq!(sends[0].0, sends[1].0);
+    assert_eq!(sends[0].1.send_id, sends[1].1.send_id);
+    assert_eq!(*client.reports.lock().unwrap(), [Outcome::Completed]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_refusal_does_not_fall_back_to_another_model() {
+    for (replies, results) in [
+        (
+            vec![
+                SendReply::new(send_states::NOT_DELIVERED).with_reason(REASON_HOST_REFUSED),
+                active(),
+            ],
+            vec![],
+        ),
+        (
+            vec![active()],
+            vec![
+                RunResult::new("run", states::ERROR).with_error(RunError::new(
+                    "host_refused",
+                    "the host refused the prompt",
+                    "provider_error",
+                )),
+            ],
+        ),
+    ] {
+        let client = Client::new(replies, results);
+        assert!(matches!(
+            run(&client, None, &account_wait_send_tests::job()).await,
+            Err(SummaryError::Failed(_))
+        ));
+        assert_eq!(client.sends.lock().unwrap().len(), 1);
+        assert_eq!(*client.reports.lock().unwrap(), [Outcome::Cancelled]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_same_route_retry_wait_does_not_erase_a_paid_attempt() {
+    let mut usage = cortexkit_role_llm_runner::run::RunUsage::new();
+    usage.input_tokens = Some(10_000);
+    let mut failed = RunResult::new("run", states::ERROR).with_error(RunError::new(
+        "provider",
+        "503 overloaded",
+        "provider_error",
+    ));
+    failed.usage = Some(usage);
+    let wait = account_wait_send_tests::refused_run(
+        "5_queued_account_limit_exhausted.new.run_status.json",
+    );
+    let client = Client::new(vec![active()], vec![failed, wait]);
+    let error = run(&client, None, &account_wait_send_tests::job())
+        .await
+        .unwrap_err();
+    assert_eq!(client.sends.lock().unwrap().len(), 2);
+    assert!(error.to_string().contains("503 overloaded"), "{error:?}");
+    assert_eq!(*client.reports.lock().unwrap(), [Outcome::Failed]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn never_ran_host_refused_is_a_counted_failure_and_never_resent() {
     // The send itself: refused by the host, retired by the runner.
     for send in [SendKind::TurnOne, SendKind::TurnTwo, SendKind::FactCheck] {
@@ -475,7 +587,7 @@ async fn never_ran_queued_pending_keeps_the_overall_deadline() {
     let error = direct(&client, SendKind::TurnTwo).await.err().unwrap();
     assert_eq!(
         error,
-        SummaryError::Failed("the run did not finish in time".into())
+        SummaryError::Uncertain("the run did not finish in time".into())
     );
     assert_eq!(start.elapsed(), Duration::from_secs(60));
     assert!(client.reads.lock().unwrap().is_empty());

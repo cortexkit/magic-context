@@ -460,7 +460,11 @@ async fn account_wait_a_run_still_paused_at_its_deadline_times_out_and_is_cancel
             refusal_of(send_and_wait(&client, &child(), "send", "prompt", &how, &mut None).await);
         assert_eq!(
             error,
-            SummaryError::Failed("the run did not finish in time".into())
+            if cancels {
+                SummaryError::Failed("the run did not finish in time".into())
+            } else {
+                SummaryError::Uncertain("the run did not finish in time".into())
+            }
         );
         let expected: Vec<String> = if cancels { vec!["run".into()] } else { vec![] };
         assert_eq!(*client.cancelled.lock().unwrap(), expected);

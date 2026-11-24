@@ -199,13 +199,13 @@ pub async fn run<C: RunnerClient + Router>(
             }
         };
         tried.push(answer.route.route_key());
-        let report = |outcome, usage: Option<&StepUsage>| {
-            client.report(routing::report(&answer.decision_id, outcome, usage))
+        let report = async |outcome, runs: &[(String, StepUsage)]| {
+            routing::report_runs(client, &answer.decision_id, outcome, runs).await;
         };
         // A runner session can only be bound on an answer that names the
         // harness to run it in.
         let Some(harness) = answer.runner.harness.clone() else {
-            report(Outcome::Cancelled, None).await;
+            report(Outcome::Cancelled, &[]).await;
             failure = Some(format!(
                 "routing named no harness on {} for {}",
                 answer.runner.module,
@@ -221,7 +221,7 @@ pub async fn run<C: RunnerClient + Router>(
             .output_tokens(DREAM_OUTPUT_TOKENS)
             .min(answer.max_output_tokens);
         let Some(prompt) = task.prompt(window, output_tokens) else {
-            report(Outcome::Cancelled, None).await;
+            report(Outcome::Cancelled, &[]).await;
             failure = Some(format!(
                 "the task's input doesn't fit {}",
                 answer.route.route_key()
@@ -231,7 +231,7 @@ pub async fn run<C: RunnerClient + Router>(
         let model = routing::model_of(&answer);
         let plan = if job.demand.reads_code {
             let Some(reader) = job.reader else {
-                report(Outcome::Cancelled, None).await;
+                report(Outcome::Cancelled, &[]).await;
                 return Err(TaskError::Failed {
                     error: "the task reads code, and no tool provider was chosen to read it with"
                         .into(),
@@ -255,14 +255,14 @@ pub async fn run<C: RunnerClient + Router>(
                     }),
                 }),
                 Err(ReaderPlan::Runner(problem)) => {
-                    report(Outcome::Cancelled, None).await;
+                    report(Outcome::Cancelled, &[]).await;
                     failure = Some(problem);
                     continue;
                 }
                 // The tools are missing whichever model runs: no other
                 // model would get further.
                 Err(ReaderPlan::Tools(problem)) => {
-                    report(Outcome::Cancelled, None).await;
+                    report(Outcome::Cancelled, &[]).await;
                     return Err(TaskError::Failed {
                         error: problem,
                         usage: total,
@@ -290,6 +290,7 @@ pub async fn run<C: RunnerClient + Router>(
             attribution: job.attribution,
         };
         let mut usage = None;
+        let mut reports = Vec::new();
         // Routing wants just this decision's usage. The task's budget and
         // journal must also count every earlier route that was tried.
         let batch_usage = |usage: Option<StepUsage>| {
@@ -310,28 +311,36 @@ pub async fn run<C: RunnerClient + Router>(
             // The child names the send, so a retry after a lost answer finds
             // the run already started instead of starting a second one.
             let send_id = child.session.session.clone();
-            let sent = match (
-                send_and_wait_stepped(client, &child, &send_id, &prompt, &how, &mut usage).await,
-                task.step_cap(),
-            ) {
+            let mut spent = None;
+            let sent =
+                send_and_wait_stepped(client, &child, &send_id, &prompt, &how, &mut spent).await;
+            retain_usage(&mut usage, &mut reports, send_id.clone(), spent);
+            let sent = match (sent, task.step_cap()) {
                 // A run that reached the task's step cap answers once more in
                 // the same child, and no other model is tried after it.
                 (Ok(ended), Some(cap)) if ended.step_capped => {
                     let capped_steps = ended.reply.steps;
-                    let (last, usable) = match finalize(
+                    let mut spent = None;
+                    let finalized = finalize(
                         client,
                         task,
                         cap.finalize,
                         &child,
                         &send_id,
                         &how,
-                        &mut usage,
+                        &mut spent,
                     )
-                    .await
-                    {
+                    .await;
+                    retain_usage(
+                        &mut usage,
+                        &mut reports,
+                        format!("{send_id}:finalize"),
+                        spent,
+                    );
+                    let (last, usable) = match finalized {
                         Ok(answered) => answered,
                         Err(wait) => {
-                            report(Outcome::Cancelled, usage.as_ref()).await;
+                            report(Outcome::Cancelled, &reports).await;
                             return Err(waiting(
                                 wait,
                                 paid_failure,
@@ -352,11 +361,11 @@ pub async fn run<C: RunnerClient + Router>(
                     };
                     return match usable {
                         Ok(()) => {
-                            report(Outcome::Completed, usage.as_ref()).await;
+                            report(Outcome::Completed, &reports).await;
                             Ok(reply)
                         }
                         Err(problem) => {
-                            report(Outcome::Failed, usage.as_ref()).await;
+                            report(Outcome::Failed, &reports).await;
                             Err(TaskError::Skipped(Box::new(Skipped {
                                 reason: format!(
                                     "the run reached its step cap, and its answer to the request to stop reading can't be used: {problem} (child {})",
@@ -400,7 +409,7 @@ pub async fn run<C: RunnerClient + Router>(
                     }
                 },
                 Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
-                    report(Outcome::Cancelled, usage.as_ref()).await;
+                    report(Outcome::Cancelled, &reports).await;
                     return Err(waiting(
                         wait,
                         paid_failure,
@@ -413,19 +422,27 @@ pub async fn run<C: RunnerClient + Router>(
                     tokio::time::sleep(backoff(retry).min(remaining)).await;
                     retry += 1;
                 }
-                Err(SummaryError::Failed(error)) => {
+                Err(SummaryError::Uncertain(error)) => {
+                    report(Outcome::Failed, &reports).await;
+                    return Err(TaskError::Failed {
+                        error,
+                        usage: batch_usage(usage),
+                        unusable_reply,
+                    });
+                }
+                Err(SummaryError::Failed(error) | SummaryError::PaidThenWait { error, .. }) => {
                     break Err(format!("{error} (child {})", child.session.session))
                 }
             }
         };
         match outcome {
             Ok(mut reply) => {
-                report(Outcome::Completed, reply.usage.as_ref()).await;
+                report(Outcome::Completed, &reports).await;
                 reply.usage = batch_usage(reply.usage);
                 return Ok(reply);
             }
             Err(error) => {
-                report(Outcome::Failed, usage.as_ref()).await;
+                report(Outcome::Failed, &reports).await;
                 total = batch_usage(usage);
                 paid_failure = Some(error);
             }
@@ -436,6 +453,18 @@ pub async fn run<C: RunnerClient + Router>(
         usage: total,
         unusable_reply,
     })
+}
+
+fn retain_usage(
+    total: &mut Option<StepUsage>,
+    reports: &mut Vec<(String, StepUsage)>,
+    id: String,
+    spent: Option<StepUsage>,
+) {
+    if let Some(spent) = spent {
+        *total = Some(crate::summary::run::add_usage(total.take(), &spent));
+        reports.push((id, spent));
+    }
 }
 
 fn waiting(
@@ -502,7 +531,11 @@ async fn finalize<C: RunnerClient>(
             Ok((reply, usable))
         }
         Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => Err(wait),
-        Err(SummaryError::Failed(error)) => Ok((
+        Err(
+            SummaryError::Failed(error)
+            | SummaryError::Uncertain(error)
+            | SummaryError::PaidThenWait { error, .. },
+        ) => Ok((
             Reply {
                 text: String::new(),
                 length_capped: false,

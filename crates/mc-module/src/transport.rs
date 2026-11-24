@@ -815,6 +815,7 @@ impl RunnerClient for SubcRunnerClient {
     }
 
     async fn cancel_child_run(&self, child: &Child, run_id: &str) -> Result<bool, ClientError> {
+        use cortexkit_role_llm_runner::run::{RunCancelReply, RunCancelRequest};
         let epoch = match self.consumer().await {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
@@ -830,10 +831,46 @@ impl RunnerClient for SubcRunnerClient {
         if !declared {
             return Ok(false);
         }
-        let request = cortexkit_role_llm_runner::run::RunCancelRequest::new(run_id);
-        self.child_call::<_, Value>(child, cortexkit_role_llm_runner::ops::RUN_CANCEL, &request)
+        let request = RunCancelRequest::new(run_id);
+        let reply: RunCancelReply = self
+            .child_call(child, cortexkit_role_llm_runner::ops::RUN_CANCEL, &request)
+            .await?;
+        Ok(matches!(reply, RunCancelReply::Ack))
+    }
+
+    async fn retract_child_send(
+        &self,
+        child: &Child,
+        submission_id: &str,
+    ) -> Result<bool, ClientError> {
+        use cortexkit_role_llm_runner::retract::{RetractReply, RetractRequest};
+        let epoch = match self.consumer().await {
+            Ok(consumer) => consumer.current_epoch(),
+            Err(_) => 0,
+        };
+        if !self
+            .runner_capabilities
+            .retract(
+                &child.session.runner,
+                epoch,
+                self.child_call(child, "role.describe", &json!({})),
+            )
             .await
-            .map(|_| true)
+        {
+            return Ok(false);
+        }
+        let reply: RetractReply = self
+            .child_call(
+                child,
+                cortexkit_role_llm_runner::ops::SESSION_RETRACT,
+                &RetractRequest::new(submission_id),
+            )
+            .await?;
+        Ok(matches!(reply, RetractReply::Retracted))
+    }
+
+    async fn report_child_usage(&self, request: cortexkit_role_routing::report::ReportRequest) {
+        crate::routing::Router::report(self, request).await;
     }
 
     /// Synapse admits any principal on its management surface and reads no

@@ -631,7 +631,14 @@ impl Session {
             // history is only for a run that published nothing (the plugin's
             // `historian-history-wait.ts`): a provider that recovers may run
             // again on the same history while the quota lasts.
-            Err(run::SummaryError::Failed(error)) => {
+            Err(error) => {
+                if let run::SummaryError::PaidThenWait { wait, .. } = &error {
+                    let emergency_at = started
+                        .filter(|started| started.emergency)
+                        .and_then(|_| self.index.entries().last().map(|entry| entry.mid.clone()));
+                    self.account_refused_at(wait.clone(), emergency_at);
+                }
+                let error = error.to_string();
                 self.app.failures += 1;
                 self.app.last_error = Some(error.clone());
                 tracing::warn!(

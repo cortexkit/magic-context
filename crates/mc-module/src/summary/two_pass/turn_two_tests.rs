@@ -15,6 +15,7 @@ fn job(child_harness: &str) -> Job {
             model: ModelRef::new("provider", "model"),
             decision_id: "decision".into(),
             output_tokens: 1_000,
+            history: None,
             language: None,
             publication_id: "publication".into(),
         },
@@ -390,6 +391,113 @@ fn untouched() -> FactLedger {
     vec![("retryable".into(), 0, None), ("retryable".into(), 0, None)]
 }
 
+#[tokio::test]
+async fn each_paid_summary_request_has_one_distinct_usage_id() {
+    use crate::summary::run::{
+        account_wait_send_tests,
+        never_ran_tests::{active, Client},
+    };
+    let (_dir, db, mut job) = store_with_candidates();
+    let mut first = account_wait_send_tests::job();
+    first.project = Some(job.project.clone());
+    first.memory_enabled = true;
+    first.emergency = true;
+    let mut client = Client::new(vec![active()], vec![]);
+    client.lose_first_ack = true;
+    client.reports_usage = true;
+    let summary = run::run(&client, Some(&db), &first).await.unwrap().unwrap();
+    job.continuation = summary.continuation.unwrap();
+    let carrier = Carrier::of(&job);
+    carrier
+        .send(&client, &db, &carrier.child, "stage", "prompt", "system")
+        .await
+        .unwrap();
+    carrier
+        .send(
+            &client,
+            &db,
+            "check-child",
+            "stable-check",
+            "prompt",
+            "system",
+        )
+        .await
+        .unwrap();
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 4);
+    assert_eq!(sends[0].1.send_id, sends[1].1.send_id);
+    let bodies = client.report_bodies.lock().unwrap();
+    for body in bodies.iter() {
+        eprintln!("{body}");
+    }
+    assert_eq!(bodies.len(), 3);
+    for (body, suffix) in bodies.iter().zip(["turn1", "turn2", "check:stable-check"]) {
+        assert_eq!(body["decision_id"], carrier.decision_id);
+        assert_eq!(
+            body["usage"]["run_id"],
+            format!("{}:{suffix}", carrier.child)
+        );
+        assert_eq!(body["usage"]["input_tokens"], 100);
+        assert_eq!(body["usage"]["cached_input_tokens"], 20);
+        assert_eq!(body["usage"]["output_tokens"], 10);
+    }
+}
+
+#[tokio::test]
+async fn turn_two_defers_whole_facts_when_the_child_window_is_full() {
+    use crate::summary::{
+        fit::{ContinuationWindow, Window},
+        run::account_wait_send_tests::{Answer, Client},
+    };
+    let (_dir, db, mut job) = store_with_candidates();
+    job.continuation.history = Some(ContinuationWindow {
+        window: Window {
+            counter: crate::count::Counter::for_model(None),
+            context_window: 10_000,
+        },
+        system_tokens: 3_000,
+        history_tokens: 6_000,
+    });
+    let client = Client::new(Answer::RefuseSend);
+    let outcome = run(&client, &db, &job).await;
+    assert_eq!(
+        *client.sends.lock().unwrap(),
+        0,
+        "overfull continuation was sent: {outcome:?}"
+    );
+    assert!(matches!(outcome, Outcome::NothingToSend), "{outcome:?}");
+    assert_eq!(ledger(&db), (untouched(), vec![]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn lost_turn_two_ack_keeps_the_original_reservations() {
+    use crate::summary::run::never_ran_tests::{active, Client};
+    let (_dir, db, job) = store_with_candidates();
+    let mut client = Client::new(vec![active()], vec![]);
+    client.lose_first_ack = true;
+    let outcome = run(&client, &db, &job).await;
+    assert!(matches!(outcome, Outcome::InFlight), "{outcome:?}");
+    let (facts, stages) = ledger(&db);
+    let send = client.sends.lock().unwrap()[0].1.send_id.clone();
+    assert_eq!(facts, vec![("in_flight".into(), 0, Some(send)); 2]);
+    assert_eq!(stages, ["sending"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirmed_turn_two_timeout_cancel_releases_the_reservations() {
+    use crate::summary::run::never_ran_tests::{active, Client};
+    use cortexkit_role_llm_runner::run::{states, RunResult};
+    let (_dir, db, job) = store_with_candidates();
+    let mut client = Client::new(vec![active()], vec![RunResult::new("run", states::ACTIVE)]);
+    client.confirms_cancel = true;
+    let outcome = run(&client, &db, &job).await;
+    assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+    let (facts, stages) = ledger(&db);
+    assert_eq!(facts, vec![("retryable".into(), 1, None); 2]);
+    assert_eq!(stages, ["transport_failed"]);
+    assert_eq!(client.sends.lock().unwrap().len(), 1);
+}
+
 /// The second turn's send meets the account wait, at the send or as the
 /// error its run ends with: its stage is revoked, so both facts are
 /// retryable again with no attempt spent, and the turn reports the wait.
@@ -605,6 +713,33 @@ async fn account_wait_final_refusal_spends_the_turn_two_attempt_as_before() {
 /// own query (`ITEM_SENDS` in `turn-two-scoring.ts`). A stage revoked for an
 /// account wait must count for neither side, or an item one side still
 /// offers is retired by the other.
+#[tokio::test]
+async fn a_check_wait_does_not_refund_a_replied_scoring_prompt() {
+    let (_dir, db, job) = store_with_candidates();
+    run(
+        &crate::summary::run::account_wait_send_tests::Client::new(
+            crate::summary::run::account_wait_send_tests::Answer::RefuseSend,
+        ),
+        &db,
+        &job,
+    )
+    .await;
+    let stage: String = db.with_connection(|conn| {
+        conn.execute_batch(
+            "UPDATE memory_stage_attempts SET state = 'replied', request_json = json_set(request_json, '$.items', json('[42]'));
+             UPDATE memory_pending_facts SET state = 'in_flight', reserved_stage_key = (SELECT stage_key FROM memory_stage_attempts);"
+        ).unwrap();
+        conn.query_row("SELECT stage_key FROM memory_stage_attempts", [], |row| row.get(0)).unwrap()
+    });
+    revoke_for_account(&db, &stage).unwrap();
+    let row = db
+        .with_connection(|conn| stage_row(conn, &stage))
+        .unwrap()
+        .unwrap();
+    assert_eq!(sent_items(&row.request), [42]);
+    assert_eq!(ledger(&db), (untouched(), vec!["revoked".into()]));
+}
+
 #[tokio::test]
 async fn account_wait_revoked_stage_counts_no_item_send_on_either_side() {
     use crate::summary::run::account_wait_send_tests::{Answer, Client};

@@ -72,9 +72,6 @@ const TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const CHECK_CHILD: &str = "mc-check";
 /// The neighbours a fact is shown at most (`TURN_TWO_NEIGHBOUR_LIMIT`).
 const NEIGHBOUR_LIMIT: usize = 3;
-/// The error a wait that ran out of time ends with: the outcome is unknown.
-const TIMED_OUT: &str = "the run did not finish in time";
-
 /// One second turn to run.
 #[derive(Clone)]
 pub struct Job {
@@ -270,15 +267,17 @@ impl Carrier {
     /// Send `prompt` in `child` under `send_id` with `system`, and wait. A
     /// send that creates a check child records its attribution fact in `db`
     /// first.
-    async fn send<C: RunnerClient>(
+    async fn send<'a, C: RunnerClient>(
         &self,
         client: &C,
         db: &ContextDb,
         child: &str,
         send_id: &str,
-        prompt: &str,
+        prompt: impl Into<FollowUp<'a>> + Send,
         system: &str,
     ) -> Result<run::Reply, SummaryError> {
+        use cortexkit_role_routing::report::Outcome as RouteOutcome;
+        let prompt = prompt.into();
         let purpose = self.purpose();
         let how = Model {
             model: &self.model,
@@ -305,15 +304,55 @@ impl Carrier {
             }),
         };
         let mut usage: Option<StepUsage> = None;
-        run::send_and_wait(
+        let result = run::send_and_wait(
             client,
             &self.child(child),
             send_id,
-            prompt,
+            prompt.text,
             &how,
             &mut usage,
         )
-        .await
+        .await;
+        if let Some(usage) = usage
+            .as_ref()
+            .filter(|_| !matches!(result, Err(SummaryError::Uncertain(_))))
+        {
+            let root = run::summary_run_id(&self.child);
+            let id = if how.send == SendKind::FactCheck {
+                format!("{root}:check:{send_id}")
+            } else if prompt.scoring_only {
+                format!("{root}:score")
+            } else {
+                format!("{root}:turn2")
+            };
+            let outcome = if result.is_ok() {
+                RouteOutcome::Completed
+            } else {
+                RouteOutcome::Cancelled
+            };
+            client
+                .report_child_usage(crate::routing::report(
+                    &self.decision_id,
+                    outcome,
+                    Some((&id, usage)),
+                ))
+                .await;
+        }
+        result
+    }
+}
+
+struct FollowUp<'a> {
+    text: &'a str,
+    scoring_only: bool,
+}
+
+impl<'a> From<&'a str> for FollowUp<'a> {
+    fn from(text: &'a str) -> Self {
+        Self {
+            text,
+            scoring_only: false,
+        }
     }
 }
 
@@ -793,21 +832,22 @@ fn charge_stage(
 /// passed over the items, and their sends still count.
 fn revoke(conn: &mut Connection, stage: &str, items_unsent: bool) -> rusqlite::Result<bool> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if items_unsent {
+        tx.execute(
+            "UPDATE memory_stage_attempts
+             SET request_json = json_set(json_remove(request_json, '$.items'),
+                                         '$.itemsHeldForAccount', json(json_extract(request_json, '$.items')))
+             WHERE stage_key = ?1 AND state IN ('reserved', 'sending')
+               AND json_type(request_json, '$.items') = 'array'",
+            params![stage],
+        )?;
+    }
     let changed = tx.execute(
         "UPDATE memory_stage_attempts SET state = 'revoked' WHERE stage_key = ?1 AND state IN ('reserved', 'sending', 'replied')",
         params![stage],
     )?;
     if changed == 0 {
         return Ok(false);
-    }
-    if items_unsent {
-        tx.execute(
-            "UPDATE memory_stage_attempts
-             SET request_json = json_set(json_remove(request_json, '$.items'),
-                                         '$.itemsHeldForAccount', json(json_extract(request_json, '$.items')))
-             WHERE stage_key = ?1 AND json_type(request_json, '$.items') = 'array'",
-            params![stage],
-        )?;
     }
     tx.execute(
         "UPDATE memory_pending_facts SET state = 'retryable', reason = 'turn_two_revoked', reserved_stage_key = NULL
@@ -1039,6 +1079,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                 .collect::<Result<Vec<_>, _>>()
             })
             .map_err(|error| error.to_string())?;
+        let mut wait = None;
         for fact in &facts {
             let attempts = sent.get(&fact.id).copied().unwrap_or(fact.attempts);
             let reservation = self.reservation(fact, stage, attempts);
@@ -1054,7 +1095,13 @@ impl<C: RunnerClient> Resolver<'_, C> {
                 .await?
             {
                 Ok(()) => {}
-                Err(stopped) => return Ok(Err(stopped)),
+                Err(Stopped::AccountWait(refusal)) => {
+                    // This refusal is for a separate check, not the prompt
+                    // that returned these scores. Save those before revocation.
+                    wait = Some(refusal);
+                    break;
+                }
+                Err(Stopped::Unknown) => return Ok(Err(Stopped::Unknown)),
             }
         }
         self.db
@@ -1076,7 +1123,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                     return Ok(());
                 }
                 record_scores(&tx, &items, &envelope.scores)?;
-                if still_reserved(&tx, stage)? == 0 {
+                if wait.is_none() && still_reserved(&tx, stage)? == 0 {
                     tx.execute(
                         "UPDATE memory_stage_attempts SET state = 'resolved' WHERE stage_key = ?1 AND state = 'replied'",
                         params![stage],
@@ -1085,7 +1132,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                 tx.commit()
             })
             .map_err(|error| error.to_string())?;
-        Ok(Ok(()))
+        Ok(wait.map_or(Ok(()), |wait| Err(Stopped::AccountWait(wait))))
     }
 
     /// Resolve one fact from its decision (`resolveFact`). `workspace` is
@@ -1603,7 +1650,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                         self.db,
                         &child,
                         &key,
-                        &gates::render_input(check),
+                        gates::render_input(check).as_str(),
                         &system,
                     )
                     .await
@@ -1623,9 +1670,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                             .map_err(|error| error.to_string())?;
                         reply
                     }
-                    Err(SummaryError::Failed(error)) if error == TIMED_OUT => {
-                        return Ok(Err(Stopped::Unknown))
-                    }
+                    Err(SummaryError::Uncertain(_)) => return Ok(Err(Stopped::Unknown)),
                     // Nothing reached a model. The ledger row only guards
                     // against sending the check twice, so it goes; the stage
                     // that asked for the check is revoked by the caller, and
@@ -1641,7 +1686,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                             .map_err(|error| error.to_string())?;
                         return Ok(Err(Stopped::AccountWait(wait)));
                     }
-                    Err(SummaryError::Failed(error)) => {
+                    Err(error) => {
                         tracing::warn!("ck-mc: turn two: check failed to send: {error}");
                         self.db
                             .with_connection(|conn| {
@@ -1692,6 +1737,7 @@ fn person_wrote(block: &EvidenceBlock) -> bool {
 struct Reserved {
     stage: String,
     prompt: String,
+    scoring_only: bool,
 }
 
 /// Reserve the facts and store the stage, its classification watermark and
@@ -1762,6 +1808,15 @@ fn reserve(
         PROMPT_MAX,
         rule.map(|rule| &rule.text),
     );
+    if job
+        .continuation
+        .history
+        .is_some_and(|history| !history.admits(job.continuation.output_tokens, &fitted.prompt))
+    {
+        // Neither the facts nor the scored items reached a model. Roll
+        // back their reservations and leave them for a later publication.
+        return Ok(None);
+    }
     let selected: BTreeSet<i64> = fitted.facts.iter().map(|fact| fact.fact_id).collect();
     for fact in &available {
         if !selected.contains(&fact.id) {
@@ -1811,6 +1866,7 @@ fn reserve(
     Ok(Some(Reserved {
         stage,
         prompt: fitted.prompt,
+        scoring_only: selected.is_empty(),
     }))
 }
 
@@ -1901,8 +1957,8 @@ async fn recover<C: RunnerClient>(
 }
 
 /// Revoke `stage` for an account wait: its unresolved facts return to
-/// `retryable` with no attempt spent, its classification items spend no
-/// send, and a later second turn sends them
+/// `retryable` with no attempt spent. Classification items spend no send
+/// unless this stage already replied. A later second turn sends unresolved facts
 /// under a new stage, in the child of the summary run that starts it. This
 /// child gets nothing more: a run may have begun in it, so a new send would
 /// repeat the prompt in its transcript, and a send under this stage's own
@@ -1948,7 +2004,19 @@ async fn recover_one<C: RunnerClient>(
             carrier.language.as_deref(),
         );
         match carrier
-            .send(client, db, &carrier.child, stage, &prompt, &system)
+            .send(
+                client,
+                db,
+                &carrier.child,
+                stage,
+                FollowUp {
+                    text: &prompt,
+                    scoring_only: row.request["factAttempts"]
+                        .as_object()
+                        .is_some_and(|facts| facts.is_empty()),
+                },
+                &system,
+            )
             .await
         {
             Ok(reply) => db
@@ -1958,7 +2026,7 @@ async fn recover_one<C: RunnerClient>(
                 revoke_for_account(db, stage)?;
                 return Ok(Some(wait));
             }
-            Err(SummaryError::Failed(error)) => {
+            Err(SummaryError::Uncertain(error)) => {
                 tracing::warn!("ck-mc: turn two: reattaching {stage}: {error}");
                 let visits = db
                     .with_connection(|conn| count_visit(conn, stage))
@@ -1966,6 +2034,10 @@ async fn recover_one<C: RunnerClient>(
                 if visits >= UNKNOWN_MAX_VISITS {
                     give_up("outcome_unknown", "expired")?;
                 }
+                return Ok(None);
+            }
+            Err(_) => {
+                give_up("transport_failed", "transport_failed")?;
                 return Ok(None);
             }
         }
@@ -2150,18 +2222,22 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
             db,
             &carrier.child,
             &reserved.stage,
-            &reserved.prompt,
+            FollowUp {
+                text: &reserved.prompt,
+                scoring_only: reserved.scoring_only,
+            },
             &system,
         )
         .await
     {
         Ok(reply) => reply,
-        Err(SummaryError::Failed(error)) if error == TIMED_OUT => return Ok(Outcome::InFlight),
+        Err(SummaryError::Uncertain(_)) => return Ok(Outcome::InFlight),
         Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
             revoke_for_account(db, &reserved.stage)?;
             return Ok(Outcome::AccountWait(wait));
         }
-        Err(SummaryError::Failed(error)) => {
+        Err(error) => {
+            let error = error.to_string();
             // A known failure spends an attempt; facts with attempts left retry later.
             db.with_connection(|conn| {
                 charge_stage(

@@ -53,6 +53,7 @@ pub(crate) struct Client {
     pub(crate) ends: Mutex<VecDeque<Ends>>,
     pub(crate) selects: Mutex<Vec<SelectRequest>>,
     pub(crate) reports: Mutex<Vec<String>>,
+    report_ids: Mutex<Vec<Option<String>>>,
     pub(crate) sends: Mutex<Vec<(Child, SendRequest)>>,
     pub(crate) send_replies: Mutex<VecDeque<SendReply>>,
     /// The runners that take fetch plans.
@@ -88,6 +89,7 @@ impl Client {
             ends: Mutex::new(ends.iter().cloned().collect()),
             selects: Mutex::default(),
             reports: Mutex::default(),
+            report_ids: Mutex::default(),
             sends: Mutex::default(),
             send_replies: Mutex::default(),
             plans: Vec::new(),
@@ -312,6 +314,10 @@ impl Router for Client {
     }
     async fn report(&self, request: ReportRequest) {
         let outcome = serde_json::to_value(&request.outcome).unwrap();
+        self.report_ids
+            .lock()
+            .unwrap()
+            .push(request.usage.and_then(|usage| usage.run_id));
         self.reports.lock().unwrap().push(format!(
             "{} {}",
             request.decision_id,
@@ -856,7 +862,14 @@ async fn a_run_at_its_step_cap_is_told_once_to_answer_and_that_answer_is_used() 
     assert!(finalize.retention_policy.is_none());
     drop(sends);
     assert_eq!(client.selects.lock().unwrap().len(), 1);
-    assert_eq!(*client.reports.lock().unwrap(), ["decision-a completed"]);
+    assert_eq!(*client.reports.lock().unwrap(), ["decision-a completed"; 2]);
+    assert_eq!(
+        *client.report_ids.lock().unwrap(),
+        [
+            Some("mc-dream:18:0.0".into()),
+            Some("mc-dream:18:0.0:finalize".into())
+        ]
+    );
 }
 
 /// An answer to the finalize message the task can't use, or a finalize run
@@ -887,7 +900,7 @@ async fn a_capped_run_without_a_usable_answer_is_skipped_without_another_model()
         assert!(skipped.reply.usage.is_some());
         assert_eq!(client.sends.lock().unwrap().len(), 2);
         assert_eq!(client.selects.lock().unwrap().len(), 1);
-        assert_eq!(*client.reports.lock().unwrap(), ["decision-a failed"]);
+        assert_eq!(*client.reports.lock().unwrap(), ["decision-a failed"; 2]);
     }
 }
 
