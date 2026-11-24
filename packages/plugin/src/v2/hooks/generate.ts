@@ -6,7 +6,7 @@ import type { SessionContext, V2Message } from "./types";
 interface GenerateReplayAnchor {
     id: string;
     prefixDigest: string;
-    tail: V2Message[];
+    tailCount: number;
 }
 
 // The built-in typed-array tag getter gives a typed-array subclass and its structured
@@ -18,61 +18,78 @@ const typedArrayName = Object.getOwnPropertyDescriptor(
 
 function hostPrefixDigest(messages: V2Message[], end: number): string {
     const hash = createHash("sha256");
-    const header = Buffer.allocUnsafe(9);
-    const number = Buffer.allocUnsafe(8);
-    // Each value starts with its type and either a payload length or a child count.
-    const mark = (type: string, length = 0): void => {
-        header[0] = type.charCodeAt(0);
-        header.writeDoubleLE(length, 1);
-        hash.update(header);
+    const chunks: string[] = [];
+    let pendingCodeUnits = 0;
+    const batchCodeUnits = 16 * 1024 * 1024;
+    const flush = () => {
+        if (chunks.length === 0) return;
+        // Hash the original code units; UTF-8 merges distinct lone surrogates.
+        hash.update(chunks.join(""), "utf16le");
+        chunks.length = 0;
+        pendingCodeUnits = 0;
+    };
+    const append = (chunk: string): void => {
+        if (pendingCodeUnits + chunk.length > batchCodeUnits) flush();
+        if (chunk.length > batchCodeUnits) hash.update(chunk, "utf16le");
+        else {
+            chunks.push(chunk);
+            pendingCodeUnits += chunk.length;
+        }
     };
     const text = (type: string, value: string): void => {
-        mark(type, value.length * 2);
-        // Hash the original code units; UTF-8 would equate distinct lone surrogates.
-        hash.update(value, "utf16le");
+        append(`${type}${value.length}:`);
+        append(value);
+    };
+    const binary = (value: Uint8Array): void => {
+        append(`b${value.byteLength}:`);
+        flush();
+        hash.update(value);
     };
     const visit = (value: unknown): void => {
         if (typeof value === "string") {
             text("s", value);
         } else if (typeof value === "number") {
-            mark("n", number.length);
-            number.writeDoubleLE(value);
-            hash.update(number);
+            text("n", Object.is(value, -0) ? "-0" : String(value));
         } else if (typeof value === "boolean") {
-            mark(value ? "t" : "f");
+            append(value ? "t" : "f");
         } else if (value === null) {
-            mark("0");
+            append("0");
         } else if (value === undefined) {
-            mark("u");
+            append("u");
         } else if (ArrayBuffer.isView(value)) {
-            mark("v", value.byteLength);
-            text("s", typedArrayName?.call(value) ?? "DataView");
-            hash.update(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+            text("v", typedArrayName?.call(value) ?? "DataView");
+            binary(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
         } else if (value instanceof ArrayBuffer) {
-            mark("b", value.byteLength);
-            hash.update(new Uint8Array(value));
+            binary(new Uint8Array(value));
         } else if (Array.isArray(value)) {
-            mark("a", value.length);
+            append("[");
             for (let index = 0; index < value.length; index++) {
                 if (Object.hasOwn(value, index)) visit(value[index]);
-                else mark("h");
+                else append("h");
             }
+            append("]");
         } else if (typeof value === "object") {
-            const entries = Object.entries(value);
-            mark("o", entries.length);
-            for (const [key, child] of entries) {
+            append("{");
+            for (const key in value) {
+                if (!Object.hasOwn(value, key)) continue;
                 text("s", key);
-                visit(child);
+                visit((value as Record<string, unknown>)[key]);
             }
+            append("}");
         } else if (typeof value === "bigint") {
             text("i", value.toString());
         } else {
             // Functions and symbols are not wire content. Record their presence, not their identity.
-            mark(typeof value === "function" ? "x" : "y");
+            append(typeof value === "function" ? "x" : "y");
         }
     };
-    mark("a", end);
-    for (let index = 0; index < end; index++) visit(messages[index]);
+    for (let index = 0; index < end; index++) {
+        if (Object.hasOwn(messages, index)) visit(messages[index]);
+        else append("h");
+    }
+    // Batch one length-framed serialization, passing binary data directly and
+    // bounding the temporary string even for very large histories.
+    flush();
     return hash.digest("hex");
 }
 
@@ -85,8 +102,8 @@ export function generateReplayAnchor(messages: V2Message[]): GenerateReplayAncho
     if (!id) return undefined;
     return {
         id,
-        prefixDigest: hostPrefixDigest(messages, index),
-        tail: clonePreservingInstances(messages.slice(index + 1)),
+        prefixDigest: hostPrefixDigest(messages, messages.length),
+        tailCount: messages.length - index - 1,
     };
 }
 
@@ -234,17 +251,13 @@ export class V2GenerateReplay {
         // already-served history from the live tail, so leave the request alone.
         const index = draft.messages.findIndex((message) => message.id === prefix.anchor.id);
         if (index < 0) return skip("anchor-not-found");
-        const end = index + 1 + prefix.anchor.tail.length;
+        const end = index + 1 + prefix.anchor.tailCount;
         // Count alone can consume a new side question after a checkpoint removed
         // tool results. Match the original host tail, not its managed replacement.
-        if (
-            JSON.stringify(draft.messages.slice(index + 1, end)) !==
-            JSON.stringify(prefix.anchor.tail)
-        )
-            return skip("anchor-tail-mismatch");
+        if (draft.messages.length < end) return skip("anchor-tail-mismatch");
         // Edit and revert events also discard the saved prefix, but a generate
         // request can race a late event or follow an edit whose event never reached us.
-        if (hostPrefixDigest(draft.messages, index) !== prefix.anchor.prefixDigest)
+        if (hostPrefixDigest(draft.messages, end) !== prefix.anchor.prefixDigest)
             return skip("history-mismatch");
         const tail = draft.messages.slice(end);
         draft.messages.splice(

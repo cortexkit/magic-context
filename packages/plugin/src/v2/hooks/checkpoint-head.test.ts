@@ -6,8 +6,11 @@ import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
+import { isRealUserRequest } from "../../hooks/magic-context/active-anthropic-turn";
 import { estimateFinalWireInputTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
+import type { MessageLike } from "../../hooks/magic-context/tag-messages";
+import { toolReclaimDistanceEntries } from "../../hooks/magic-context/tool-reclaim";
 import * as transformModule from "../../hooks/magic-context/transform";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
@@ -16,6 +19,8 @@ import { type FoldIdentity, FoldOwner } from "../fold/owner";
 import { CHECKPOINT_NOTE } from "../fold/summary";
 import * as readerModule from "../store-reader";
 import { registerContext } from "./context";
+import * as generate from "./generate";
+import { HiddenChildHook } from "./hidden-child";
 import { HEAD_IDS } from "./payload";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context } from "./types";
@@ -72,12 +77,14 @@ async function fixture(
     let permission = false;
     let insideTransformHadRecent = false;
     let insideHostEstimate: { tokens: number; pressureTokens: number } | undefined;
+    let transformInput: MessageLike[] = [];
     const transform = spyOn(transformModule, "createTransform").mockImplementation((deps) => {
         const handler = async (_input: unknown, output: any) => {
             insideTransformHadRecent = JSON.stringify(await storage.get("fold/v1/s")).includes(
                 "<recent-context>",
             );
             insideHostEstimate = deps.hostInputEstimate?.("s");
+            transformInput = [...output.messages];
             if (options.head !== false)
                 output.messages.unshift(
                     ...HEAD_IDS.map((id) => ({
@@ -157,6 +164,7 @@ async function fixture(
         },
         insideTransformHadRecent: () => insideTransformHadRecent,
         insideHostEstimate: () => insideHostEstimate,
+        transformInput: () => transformInput,
         async close() {
             await duties.dispose();
             transform.mockRestore();
@@ -169,6 +177,76 @@ async function fixture(
         },
     };
 }
+
+test("native synthetic provenance is the same in a live window and after checkpoint restore", async () => {
+    const f = await fixture();
+    try {
+        f.source.exec(`INSERT INTO session_message VALUES
+            ('auto','s','synthetic',3,300,300,'{"text":"integration update"}'),
+            ('human','s','user',4,400,400,'{"text":"human question"}');`);
+        const auto = {
+            id: "auto",
+            role: "user",
+            content: [{ type: "text", text: "integration update" }],
+        };
+        const human = {
+            id: "human",
+            role: "user",
+            content: [{ type: "text", text: "human question" }],
+        };
+        const turnDecisions = () =>
+            ["auto", "human"].map((id) => {
+                const row = f.transformInput().find((message) => message.info.id === id)!;
+                return [
+                    isRealUserRequest(row),
+                    toolReclaimDistanceEntries([row], new Map())[0]?.userTurn,
+                ];
+            });
+        const live = f.draft();
+        live.messages.push(structuredClone(auto), structuredClone(human));
+        await f.hooks.get("context")!(live);
+        const liveDecisions = turnDecisions();
+        expect(live.messages.find((row) => row.id === "auto")).toEqual(auto);
+        expect(live.messages.find((row) => row.id === "human")).toEqual(human);
+
+        // Move the native rows behind the same local checkpoint; the host now
+        // leaves them out and the adapter rebuilds them from storage.
+        f.source.exec("UPDATE session_message SET seq = 5 WHERE id = 'cut';");
+        const restored = f.draft();
+        await f.hooks.get("context")!(restored);
+        expect(restored.messages.find((row) => row.id === "auto")).toEqual(auto);
+        expect(turnDecisions()).toEqual([
+            [false, false],
+            [true, true],
+        ]);
+        expect(liveDecisions).toEqual(turnDecisions());
+    } finally {
+        await f.close();
+    }
+});
+
+test("hidden maintenance requests skip both replay anchoring and replay capture", async () => {
+    const f = await fixture();
+    const owns = spyOn(HiddenChildHook.prototype, "owns").mockReturnValue(true);
+    const apply = spyOn(HiddenChildHook.prototype, "apply").mockReturnValue(true);
+    const anchor = spyOn(generate, "generateReplayAnchor");
+    const capture = spyOn(generate.V2GenerateReplay.prototype, "capture");
+    try {
+        const draft = f.draft();
+        const bytes = JSON.stringify(draft);
+        await f.hooks.get("context")!(draft);
+        expect(apply).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(draft)).toBe(bytes);
+        expect(anchor).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+    } finally {
+        capture.mockRestore();
+        anchor.mockRestore();
+        apply.mockRestore();
+        owns.mockRestore();
+        await f.close();
+    }
+});
 
 test("checkpoint strip uses this pass's final permission, persists once, and replays on defers", async () => {
     const f = await fixture();

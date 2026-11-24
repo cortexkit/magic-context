@@ -2569,6 +2569,25 @@ export async function registerContext(context: V2Context) {
         };
         const isMagicContextSynthetic = (id: string) =>
             isAdmittedSynthetic(context, draft.sessionID, id);
+        const readSyntheticProvenance = async (
+            reader: V2StoreReader,
+            messages: readonly V2Message[],
+        ): Promise<Set<string>> => {
+            // Native synthetic rows are automation regardless of who sent them. A
+            // pending send not yet in the store still needs Magic Context admission.
+            const stored = reader.syntheticMessageIDs(draft.sessionID);
+            const candidates = syntheticCandidates(context, draft.sessionID, new Set(stored));
+            for (const { id } of messages) {
+                if (
+                    id &&
+                    !stored.has(id) &&
+                    candidates.has(id) &&
+                    (await isMagicContextSynthetic(id))
+                )
+                    stored.add(id);
+            }
+            return stored;
+        };
         // Storing a notice in an idle OpenCode 2 session starts a turn of its own.
         // Such a turn has nothing for the model to answer, so it ends here.
         const newest = draft.messages.at(-1);
@@ -2673,7 +2692,7 @@ export async function registerContext(context: V2Context) {
          * built without writing anything, for a replay that runs before the
          * pass got that far or after it failed. In TypeScript mode it is the
          * input the transform saves its copy from: the rows restored after a
-         * local host checkpoint, the stored message times and the admitted
+         * local host checkpoint, the stored message times and the native
          * synthetic marks, exactly as the managed pass below builds them.
          * Rust mode keeps the host's messages unchanged, as before. Undefined
          * when no replay can match (the store is unreadable, the checkpoint is
@@ -2683,7 +2702,7 @@ export async function registerContext(context: V2Context) {
             { draft: SessionContext; mapped: ReturnType<typeof adaptPayload> } | undefined
         > => {
             let messages = [...hostMessagesAtEntry];
-            const admitted = new Set<string>();
+            let syntheticIDs: Set<string> | undefined;
             let times: ReturnType<V2StoreReader["messageTimes"]> | undefined;
             try {
                 const reader = openStoreReader();
@@ -2705,18 +2724,7 @@ export async function registerContext(context: V2Context) {
                     if (subagent === undefined) return undefined;
                     if (subagent) removePrimaryOnlyTools(draft.tools);
                     if (!rustModeModuleClient) {
-                        const candidates = syntheticCandidates(
-                            context,
-                            draft.sessionID,
-                            reader.syntheticMessageIDs(draft.sessionID),
-                        );
-                        for (const message of messages)
-                            if (
-                                message.id &&
-                                candidates.has(message.id) &&
-                                (await isAdmittedSynthetic(context, draft.sessionID, message.id))
-                            )
-                                admitted.add(message.id);
+                        syntheticIDs = await readSyntheticProvenance(reader, messages);
                         const replayDb = db ?? storage.current();
                         // Compaction on only, as in the managed pass below: with
                         // it off nothing is restored after a host checkpoint, and
@@ -2776,7 +2784,7 @@ export async function registerContext(context: V2Context) {
             const replayDraft = { ...draft, messages };
             return {
                 draft: replayDraft,
-                mapped: adaptPayload(replayDraft, admitted, times, anchorTimesOnly),
+                mapped: adaptPayload(replayDraft, syntheticIDs, times, anchorTimesOnly),
             };
         };
         /** Serve a replay committed to a draft copy, with its saved checkpoint head. */
@@ -2945,7 +2953,7 @@ export async function registerContext(context: V2Context) {
             // registered until plugin disposal, rather than falling back to the v1 store.
             prepareHistorySession(draft.sessionID);
             transform = initializeTransform(db);
-            const admitted = new Set<string>();
+            let syntheticIDs: Set<string>;
             let messageTimes: ReturnType<V2StoreReader["messageTimes"]> | undefined;
             let instructionRows: ReadonlyMap<string, SupersessionRow> = new Map();
             const reader = openStoreReader();
@@ -2955,19 +2963,7 @@ export async function registerContext(context: V2Context) {
             let recordedHead: string | undefined;
             let upgradeCheckpointSequence: number | undefined;
             try {
-                const candidates = syntheticCandidates(
-                    context,
-                    draft.sessionID,
-                    reader.syntheticMessageIDs(draft.sessionID),
-                );
-                for (const message of draft.messages) {
-                    if (
-                        message.id &&
-                        candidates.has(message.id) &&
-                        (await isAdmittedSynthetic(context, draft.sessionID, message.id))
-                    )
-                        admitted.add(message.id);
-                }
+                syntheticIDs = await readSyntheticProvenance(reader, draft.messages);
                 const cut = reader.latestCompaction(draft.sessionID);
                 if (nativeFoldReplay) await nativeFoldReplay.observeSource(draft.sessionID, reader);
                 // Before anything restores or trims against the history boundary,
@@ -3210,7 +3206,7 @@ export async function registerContext(context: V2Context) {
             }
             const mapped = adaptPayload(
                 draft,
-                admitted,
+                syntheticIDs,
                 messageTimes,
                 anchorTimesOnly,
                 instructionRows,
@@ -3547,7 +3543,10 @@ export async function registerContext(context: V2Context) {
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
             hostFoldIdle?.active(draft.sessionID);
-            const anchor = compactionOff ? undefined : generateReplayAnchor(draft.messages);
+            // Maintenance children never issue side questions and should not evict user replays.
+            const hiddenChild = hiddenChildHook.owns(draft.sessionID);
+            const anchor =
+                compactionOff || hiddenChild ? undefined : generateReplayAnchor(draft.messages);
             beginServedRequest(draft.sessionID);
             let returned = false;
             try {
@@ -3595,9 +3594,10 @@ export async function registerContext(context: V2Context) {
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here
             // so side questions reuse the exact history handed back to the host.
-            if (!compactionOff) generateReplay.capture(draft, anchor);
-            else
+            if (compactionOff)
                 sessionLog(draft.sessionID, "generate replay capture skipped: compaction-disabled");
+            else if (!hiddenChild && !deletedSessions.has(draft.sessionID))
+                generateReplay.capture(draft, anchor);
         }),
     );
     await context.session.hook("generate", async (draft) => {
