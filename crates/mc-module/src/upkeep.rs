@@ -211,15 +211,18 @@ fn missing_root(project: &str, root: &Path) -> bool {
     missing
 }
 
-/// Embed one batch of the project's active memories that have no vector for
-/// the provider's model. Returns how many vectors were saved.
+/// Embed one batch of memories written by the project that have no vector for
+/// this model. Workspace memories use their source project's provider, not
+/// the provider of another member that can read the same workspace.
 async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> usize {
     let model_id = provider.model_id();
     let rows = db.with_connection(|conn| -> rusqlite::Result<Vec<(i64, String, String)>> {
         let mut statement = conn.prepare(
             "SELECT m.id, m.content, m.normalized_hash FROM memories m \
              LEFT JOIN memory_embeddings me ON m.id = me.memory_id AND me.model_id = ?1 \
-             WHERE m.level = 'project' AND m.owner_id = ?2 AND m.status = 'active' AND me.memory_id IS NULL LIMIT ?3",
+             WHERE ((m.level = 'project' AND m.owner_id = ?2 AND m.status = 'active')
+                 OR (m.level = 'workspace' AND m.source_project_id = ?2 AND m.status IN ('active', 'permanent')))
+               AND me.memory_id IS NULL LIMIT ?3",
         )?;
         let rows = statement
             .query_map(params![model_id, project, MEMORY_BATCH as i64], |row| {
@@ -248,12 +251,13 @@ async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> u
             // was computed keeps no vector, and gets one on a later run.
             let mut statement = transaction.prepare(
                 "INSERT INTO memory_embeddings (memory_id, embedding, model_id) \
-                 SELECT ?1, ?2, ?3 FROM memories WHERE id = ?1 AND normalized_hash = ?4 \
+                 SELECT ?1, ?2, ?3 FROM memories WHERE id = ?1 AND normalized_hash = ?4
+                   AND ((level = 'project' AND owner_id = ?5) OR (level = 'workspace' AND source_project_id = ?5)) \
                  ON CONFLICT(memory_id, model_id) DO UPDATE SET embedding = excluded.embedding",
             )?;
             for ((id, _, hash), vector) in rows.iter().zip(vectors) {
                 if let Some(vector) = vector {
-                    saved += statement.execute(params![id, encode(&vector), model_id, hash])?;
+                    saved += statement.execute(params![id, encode(&vector), model_id, hash, project])?;
                 }
             }
         }

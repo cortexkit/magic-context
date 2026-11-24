@@ -981,6 +981,8 @@ pub struct ChunkHit {
     pub title: String,
     pub start: i64,
     pub end: i64,
+    /// Ordinal bounds of the window whose vector matched, within the summary.
+    pub(crate) window: (i64, i64),
     pub score: f64,
     pub match_type: &'static str,
     /// The best message hit inside the summary's range, shown in place of
@@ -1003,11 +1005,20 @@ pub fn search_chunks(
     if limit == 0 {
         return Vec::new();
     }
-    type Row = (i64, String, i64, i64, Option<i64>, Option<i64>, Vec<u8>);
+    type Row = (
+        i64,
+        String,
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Vec<u8>,
+        (i64, i64),
+    );
     let read = || -> rusqlite::Result<Vec<Row>> {
         let mut statement = conn.prepare_cached(
             "SELECT e.compartment_id, c.title, c.start_message, c.end_message,
-                    start_map.message_time_ms, end_map.message_time_ms, e.vector
+                    start_map.message_time_ms, end_map.message_time_ms, e.vector, e.start_ordinal, e.end_ordinal
                FROM compartment_chunk_embeddings e
                JOIN compartments c ON c.id = e.compartment_id
                LEFT JOIN message_fts_rowid_map start_map
@@ -1027,12 +1038,13 @@ pub fn search_chunks(
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    (row.get(7)?, row.get(8)?),
                 ))
             })?;
         rows.collect()
     };
     let mut best: BTreeMap<i64, ChunkHit> = BTreeMap::new();
-    for (id, title, start, end, start_time, end_time, blob) in read().unwrap_or_default() {
+    for (id, title, start, end, start_time, end_time, blob, window) in read().unwrap_or_default() {
         if end > cutoff {
             continue;
         }
@@ -1058,6 +1070,7 @@ pub fn search_chunks(
                     title,
                     start,
                     end,
+                    window,
                     score,
                     match_type: "semantic",
                     snippet: None,
