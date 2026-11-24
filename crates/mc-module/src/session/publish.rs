@@ -765,8 +765,9 @@ impl Session {
         }
     }
 
-    /// Restore `ctx_reduce` drops removed from the queue by the discarded
-    /// views, leaving later queued drops untouched.
+    /// Put back into the queue the parts the agent asked to remove with
+    /// `ctx_reduce` that the discarded views had taken off it, leaving parts
+    /// queued since then untouched.
     fn restore_unconfirmed_stamps(
         &mut self,
         discarded: &[Unconfirmed],

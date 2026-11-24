@@ -289,7 +289,9 @@ impl Session {
         self.config_inputs_for(None)
     }
 
-    /// Resolve settings for the geometry this job will actually take.
+    /// The folder, model and usable window this job will run with: the
+    /// incoming conditions when they are the current statement, otherwise
+    /// the session's own.
     pub(crate) fn config_inputs_for(
         &self,
         incoming: Option<&Conditions>,

@@ -471,7 +471,8 @@ fn small_recent_call(tool: &ToolPart, tag: u64, recent: &[u64]) -> bool {
     recent.contains(&tag) && input_string_bytes(&tool.input.parse()) <= SMALL_INPUT_MAX_BYTES
 }
 
-/// The transcript facts that determine what a `ctx_reduce` stamp can remove.
+/// The transcript facts that decide how much an agent's `ctx_reduce`
+/// request could remove, for the reminder that suggests one.
 pub(crate) struct StampRoom<'a> {
     newest_mid: Option<&'a str>,
     recent: Vec<u64>,
@@ -1663,8 +1664,9 @@ pub(crate) fn keep_drops_with_notice_marks(
         .take_while(|entry| entry.ordinal < call.ordinal)
         .enumerate()
     {
-        // Without keep marks, a runner notice can be the person's words.
-        // Our own notices contain reminders, not relayed user input.
+        // A runner that can't mark a notice as the person's own words
+        // (`notice_keep`) may relay them in any notice, so leave every notice
+        // from someone else alone. Our own notices hold only reminders.
         let may_be_user_notice = !notice_keep
             && entry
                 .notice

@@ -543,7 +543,10 @@ async fn reoffered_view_remains_the_base_before_the_runner_can_apply_it() {
         } else {
             notice_applying(&mut session, &client, &settings, 1, None, vec![]).await;
         }
-        assert_eq!(offered_since(&client, before), [pending.clone()]);
+        assert_eq!(
+            offered_since(&client, before),
+            std::slice::from_ref(&pending)
+        );
         assert_eq!(session.latest.as_ref(), Some(&pending));
         assert_eq!(session.unconfirmed.len(), 1);
         assert_eq!(session.newest_applied, 0);
