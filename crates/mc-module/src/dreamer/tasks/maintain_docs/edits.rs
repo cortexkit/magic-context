@@ -164,6 +164,18 @@ impl Proposed {
     }
 }
 
+impl From<&SectionChange> for Proposed {
+    fn from(change: &SectionChange) -> Self {
+        Self {
+            file: change.file.clone(),
+            action: change.action.clone(),
+            heading: change.heading.clone(),
+            text: change.text.clone(),
+            reason: change.reason.clone(),
+        }
+    }
+}
+
 /// One document's text while the changes are applied; `None` while it
 /// doesn't exist.
 type Texts = [Option<String>; 2];
@@ -317,6 +329,7 @@ struct Pass {
 /// apply the rest in order.
 fn check_all(
     answer: &[Proposed],
+    new_edits: usize,
     base: &Texts,
     withheld: &std::collections::BTreeMap<usize, String>,
     count: &dyn Fn(&str) -> u64,
@@ -325,9 +338,17 @@ fn check_all(
     let mut kept: Vec<SectionChange> = Vec::new();
     let mut dropped = Vec::new();
     let mut grown = Vec::new();
+    let mut new_kept = 0;
     for (position, change) in answer.iter().enumerate() {
         if let Some(reason) = withheld.get(&position) {
             dropped.push((position, change.dropped(reason.clone())));
+            continue;
+        }
+        if position >= new_edits && overlaps_new_edit(change, &kept[..new_kept], base, &texts) {
+            dropped.push((
+                position,
+                change.dropped("superseded by a new edit to the section"),
+            ));
             continue;
         }
         match check(change, &texts, &kept) {
@@ -343,6 +364,7 @@ fn check_all(
                     reason: change.reason.clone(),
                 });
                 grown.push((position, added));
+                new_kept += usize::from(position < new_edits);
             }
             Err(reason) => dropped.push((position, change.dropped(reason))),
         }
@@ -355,10 +377,56 @@ fn check_all(
     }
 }
 
+/// A replacement or removal also covers its nested headings. Check both
+/// texts so an old parent edit cannot undo a new addition or removal.
+fn overlaps_new_edit(
+    change: &Proposed,
+    new: &[SectionChange],
+    base: &Texts,
+    current: &Texts,
+) -> bool {
+    let Some(index) = DOCUMENTS.iter().position(|name| *name == change.file) else {
+        return false;
+    };
+    new.iter()
+        .filter(|edit| edit.file == change.file)
+        .any(|edit| {
+            if edit.heading == change.heading {
+                return true;
+            }
+            [base, current].iter().any(|texts| {
+                let headings = sections(texts[index].as_deref().unwrap_or_default());
+                let older = headings
+                    .iter()
+                    .find(|section| section.heading == change.heading);
+                let newer = headings
+                    .iter()
+                    .find(|section| section.heading == edit.heading);
+                older.zip(newer).is_some_and(|(older, newer)| {
+                    (change.action != "add" && older.start < newer.start && newer.start < older.end)
+                        || (edit.action != "add"
+                            && newer.start < older.start
+                            && older.start < newer.end)
+                })
+            })
+        })
+}
+
 /// Check `answer` (the parsed array) against `base`, within `budget` tokens
 /// counted by `count`.
-pub(crate) fn check_answer(
+#[cfg(test)]
+fn check_answer(
     answer: &[Value],
+    base: &Texts,
+    budget: u64,
+    count: &dyn Fn(&str) -> u64,
+) -> Checked {
+    check_with_pending(answer, &[], base, budget, count)
+}
+
+pub(crate) fn check_with_pending(
+    answer: &[Value],
+    pending: &[SectionChange],
     base: &Texts,
     budget: u64,
     count: &dyn Fn(&str) -> u64,
@@ -366,6 +434,7 @@ pub(crate) fn check_answer(
     let proposed: Vec<Proposed> = answer
         .iter()
         .map(|value| Proposed::of(value).unwrap_or_default())
+        .chain(pending.iter().map(Proposed::from))
         .collect();
     let mut withheld = std::collections::BTreeMap::new();
     for (position, value) in answer.iter().enumerate() {
@@ -382,7 +451,7 @@ pub(crate) fn check_answer(
             dropped,
             texts: results,
             grown,
-        } = check_all(&proposed, base, &withheld, count);
+        } = check_all(&proposed, answer.len(), base, &withheld, count);
         let tokens_after = tokens(&results, count);
         let latest_growth = grown.iter().rev().find(|(_, added)| *added > 0);
         match latest_growth {
@@ -403,7 +472,15 @@ pub(crate) fn check_answer(
                 dropped.sort_by_key(|(position, _)| *position);
                 return Checked {
                     kept,
-                    dropped: dropped.into_iter().map(|(_, change)| change).collect(),
+                    dropped: dropped
+                        .into_iter()
+                        .map(|(position, mut change)| {
+                            if position >= answer.len() {
+                                change.reason = format!("pending proposal: {}", change.reason);
+                            }
+                            change
+                        })
+                        .collect(),
                     results,
                     tokens_before,
                     tokens_after,
