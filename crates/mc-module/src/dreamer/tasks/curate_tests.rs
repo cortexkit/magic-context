@@ -569,7 +569,8 @@ fn similar_memories_are_close_texts_of_the_category_outside_the_part() {
         // The same text as the memory once case and spaces are ignored.
         memory(7, "run cargo fmt  before every COMMIT."),
     ];
-    let found: Vec<i64> = similar(&part, &pool)
+    let found: Vec<i64> = Similar::new(&pool)
+        .for_part(&part)
         .iter()
         .map(|memory| memory.id)
         .collect();
@@ -594,13 +595,46 @@ fn similar_memories_are_close_texts_of_the_category_outside_the_part() {
             )
         }));
     }
-    let found = similar(&part, &pool);
+    let found = Similar::new(&pool).for_part(&part);
     assert_eq!(found.len(), 20);
     let distinct: HashSet<i64> = found.iter().map(|memory| memory.id).collect();
     assert_eq!(distinct.len(), 20);
     // The first memories' three closest each, in the part's order.
     let first: Vec<i64> = found.iter().take(4).map(|memory| memory.id).collect();
     assert_eq!(first, [100, 101, 102, 110]);
+}
+
+#[test]
+fn the_similarity_index_ignores_unrelated_rows_even_with_common_words() {
+    for size in [240, 960] {
+        let pool: Vec<Memory> = (0..size)
+            .map(|id| Memory {
+                id,
+                content: format!(
+                    "the {}",
+                    (0..12)
+                        .map(|word| format!("row{id}word{word}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                revision: 1,
+                protected: false,
+            })
+            .collect();
+        let mut elapsed = Vec::new();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let index = Similar::new(&pool);
+            // A sparse pool does not enumerate unrelated rows, even when
+            // every row contains a common word.
+            assert_eq!(index.hashes.len(), size as usize);
+            assert!(index.postings.values().all(|rows| rows.len() == 1));
+            assert!(pool.chunks(60).all(|part| index.for_part(part).is_empty()));
+            elapsed.push(start.elapsed());
+        }
+        elapsed.sort_unstable();
+        println!("rows={size} median={:?} samples={elapsed:?}", elapsed[1]);
+    }
 }
 
 #[test]
@@ -1283,6 +1317,27 @@ fn a_duplicate_archive_cannot_drop_the_opt_in_env_var() {
         "archive 1",
         "the kept memory drops `BROCA_LIVE_TESTS=1`",
     );
+}
+
+#[test]
+fn a_duplicate_archive_cannot_keep_the_opposite_rule() {
+    let opposite = "Always enable `ALLOW_PARTIAL` when writing a report.";
+    let store = store(&[
+        row(
+            1,
+            "PROJECT_RULES",
+            "Never enable `ALLOW_PARTIAL` when writing a report.",
+        ),
+        row(2, "PROJECT_RULES", opposite),
+    ]);
+    store.docs(opposite);
+    for answer in [
+        r#"<archive id="1" reason="duplicate" of="2"/>"#.to_owned(),
+        format!(r#"<archive id="1" reason="duplicate" quote="{opposite}"/>"#),
+    ] {
+        let dropped = refused(&store, &store.rules(), &answer);
+        says(&dropped, "archive 1", "polarity");
+    }
 }
 
 #[test]

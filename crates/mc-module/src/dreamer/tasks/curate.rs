@@ -76,7 +76,8 @@ const SIMILAR_EACH: usize = 3;
 /// A part shows at most this many similar memories.
 const SIMILAR_MAX: usize = 20;
 /// Two memories' word sets this alike, or more, count as close text.
-const SIMILAR_JACCARD: f64 = 0.6;
+const SIMILAR_MIN: (usize, usize) = (3, 5);
+const SIMILAR_JACCARD: f64 = SIMILAR_MIN.0 as f64 / SIMILAR_MIN.1 as f64;
 /// A quoted line shorter than this can't show that a memory repeats the
 /// documents or the guidance it comes from.
 const MIN_QUOTE_CHARS: usize = 20;
@@ -404,46 +405,119 @@ fn jaccard(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
     shared as f64 / (left.len() + right.len() - shared) as f64
 }
 
-/// The memories of `pool` outside `part` whose text is close to one inside
-/// it: for each memory of the part in order, up to [`SIMILAR_EACH`] of the
-/// closest, the same text first, at most [`SIMILAR_MAX`] in all.
-pub(crate) fn similar<'a>(part: &[Memory], pool: &'a [Memory]) -> Vec<&'a Memory> {
-    let inside: HashSet<i64> = part.iter().map(|memory| memory.id).collect();
-    let outside: Vec<(&Memory, BTreeSet<String>)> = pool
-        .iter()
-        .filter(|memory| !inside.contains(&memory.id))
-        .map(|memory| (memory, words(&memory.content)))
-        .collect();
-    let mut found: Vec<&Memory> = Vec::new();
-    for memory in part {
-        let own = words(&memory.content);
-        let hash = normalized_hash(&memory.content);
-        let mut close: Vec<(f64, &Memory)> = outside
+/// The one similarity index shared by all parts of a category.
+struct Similar<'a> {
+    pool: &'a [Memory],
+    positions: HashMap<i64, usize>,
+    words: Vec<BTreeSet<String>>,
+    hashes: Vec<String>,
+    exact: HashMap<String, Vec<usize>>,
+    prefixes: Vec<Vec<String>>,
+    postings: HashMap<String, Vec<usize>>,
+}
+
+impl<'a> Similar<'a> {
+    fn new(pool: &'a [Memory]) -> Self {
+        let words: Vec<_> = pool.iter().map(|memory| words(&memory.content)).collect();
+        let mut frequency = HashMap::new();
+        for word in words.iter().flatten() {
+            *frequency.entry(word.as_str()).or_insert(0_usize) += 1;
+        }
+        let mut postings = HashMap::<String, Vec<usize>>::new();
+        let prefixes = words
             .iter()
-            .filter_map(|(other, other_words)| {
-                let score = if normalized_hash(&other.content) == hash {
-                    f64::INFINITY
-                } else {
-                    jaccard(&own, other_words)
-                };
-                (score >= SIMILAR_JACCARD).then_some((score, *other))
+            .enumerate()
+            .map(|(index, set)| {
+                // A qualifying pair shares at least ceil(0.6 * len) words of
+                // each set. In a common order the first shared word has to
+                // occur in both prefixes; rare words first keep the lists short.
+                let mut ordered: Vec<_> = set.iter().collect();
+                ordered.sort_unstable_by(|a, b| {
+                    frequency[a.as_str()]
+                        .cmp(&frequency[b.as_str()])
+                        .then(a.cmp(b))
+                });
+                let required = (SIMILAR_MIN.0 * set.len()).div_ceil(SIMILAR_MIN.1);
+                ordered
+                    .into_iter()
+                    .take(set.len() - required + 1)
+                    .map(|word| {
+                        postings.entry(word.clone()).or_default().push(index);
+                        word.clone()
+                    })
+                    .collect()
             })
             .collect();
-        close.sort_by(|(left, left_memory), (right, right_memory)| {
-            right
-                .total_cmp(left)
-                .then(left_memory.id.cmp(&right_memory.id))
-        });
-        for (_, other) in close.into_iter().take(SIMILAR_EACH) {
-            if found.len() == SIMILAR_MAX {
-                return found;
-            }
-            if !found.iter().any(|seen| seen.id == other.id) {
-                found.push(other);
-            }
+        let hashes: Vec<_> = pool
+            .iter()
+            .map(|memory| normalized_hash(&memory.content))
+            .collect();
+        let mut exact = HashMap::<String, Vec<usize>>::new();
+        for (index, hash) in hashes.iter().enumerate() {
+            exact.entry(hash.clone()).or_default().push(index);
+        }
+        let positions = pool
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id, index))
+            .collect();
+        Self {
+            pool,
+            positions,
+            words,
+            hashes,
+            exact,
+            prefixes,
+            postings,
         }
     }
-    found
+
+    /// The closest outside memories for each row of `part`, exact text
+    /// first. Candidates arrive in index order only after sorting by score
+    /// and id, so the index never changes the prompt's order or contents.
+    fn for_part(&self, part: &[Memory]) -> Vec<&'a Memory> {
+        let inside: HashSet<i64> = part.iter().map(|memory| memory.id).collect();
+        let mut found: Vec<&Memory> = Vec::new();
+        for memory in part {
+            let index = self.positions[&memory.id];
+            let hash = &self.hashes[index];
+            let candidates: HashSet<usize> = self.prefixes[index]
+                .iter()
+                .flat_map(|word| &self.postings[word])
+                .chain(&self.exact[hash])
+                .copied()
+                .collect();
+            let mut close: Vec<_> = candidates
+                .into_iter()
+                .filter_map(|other| {
+                    let row = &self.pool[other];
+                    if inside.contains(&row.id) {
+                        return None;
+                    }
+                    let score = if &self.hashes[other] == hash {
+                        f64::INFINITY
+                    } else {
+                        jaccard(&self.words[index], &self.words[other])
+                    };
+                    (score >= SIMILAR_JACCARD).then_some((score, row))
+                })
+                .collect();
+            close.sort_unstable_by(|(left, left_memory), (right, right_memory)| {
+                right
+                    .total_cmp(left)
+                    .then(left_memory.id.cmp(&right_memory.id))
+            });
+            for (_, other) in close.into_iter().take(SIMILAR_EACH) {
+                if found.len() == SIMILAR_MAX {
+                    return found;
+                }
+                if !found.iter().any(|seen| seen.id == other.id) {
+                    found.push(other);
+                }
+            }
+        }
+        found
+    }
 }
 
 /// The line of input frame `frame` right after the line `open`: a block's
@@ -926,6 +1000,7 @@ pub(crate) fn plan(
     let task = context.declaration["id"].as_str().unwrap_or(scope.kind);
     let actions = strings(&context.declaration["actions"]);
     let frame = scope.frame;
+    let similar: Vec<_> = pools.iter().map(|pool| Similar::new(pool)).collect();
     planned
         .iter()
         .enumerate()
@@ -940,7 +1015,7 @@ pub(crate) fn plan(
                 .filter(|memory| !inside.contains(&memory.id))
                 .cloned()
                 .collect();
-            let close = similar(&part.memories, &pools[part.category]);
+            let close = similar[part.category].for_part(&part.memories);
             let text = input_in(
                 frame,
                 docs,
@@ -1192,6 +1267,31 @@ fn formatting_key(text: &str) -> String {
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// Literal retention alone cannot distinguish "never use X" from "always
+/// use X". Match explicit opposing modals on the same normalized clause;
+/// neighboring but unrelated instructions are not evidence of a reversal.
+fn opposite_rule(old: &str, new: &str) -> bool {
+    use std::sync::OnceLock;
+
+    static SENTENCE: OnceLock<Regex> = OnceLock::new();
+    static MODAL: OnceLock<Regex> = OnceLock::new();
+    let sentence = SENTENCE.get_or_init(|| re(r"[.!?](?:[ \t]+|$)|\n+"));
+    let modal = MODAL.get_or_init(|| {
+        re(r"(?i)^\s*(?:[-*]\s+|[0-9]+[.)]\s+)?(?:(?:you|we|agents?)\s+)?(?:(must\s+not|never|do\s+not|don't|should\s+not|shall\s+not|cannot|can't)|always|must|do|should|shall)\s+(.+)$")
+    });
+    let rule = |text: &str| {
+        modal
+            .captures(text)
+            .map(|fields| (fields.get(1).is_some(), formatting_key(&fields[2])))
+    };
+    let old: HashSet<(bool, String)> = sentence.split(old).filter_map(rule).collect();
+    !old.is_empty()
+        && sentence
+            .split(new)
+            .filter_map(rule)
+            .any(|(negative, clause)| !clause.is_empty() && old.contains(&(!negative, clause)))
 }
 
 /// A live memory of `scope`'s owner, in any category, other than `except`,
@@ -1490,6 +1590,9 @@ impl CurateBatch {
         if let Some(token) = dropped_token(sources.iter().map(|row| row.content.as_str()), text) {
             return Ok(Err(format!("the merged text drops {token}")));
         }
+        if sources.iter().any(|row| opposite_rule(&row.content, text)) {
+            return Ok(Err("the merged text reverses a rule's polarity".into()));
+        }
         let hash = normalized_hash(text);
         let ids: Vec<i64> = sources.iter().map(|row| row.id).collect();
         if let Some(other) = live_with_hash(tx, &self.scope, &hash, &ids)? {
@@ -1525,6 +1628,9 @@ impl CurateBatch {
         if let Some(token) = dropped_token([memory.content.as_str()], text) {
             return Ok(Err(format!("the new text drops {token}")));
         }
+        if opposite_rule(&memory.content, text) {
+            return Ok(Err("the new text reverses the rule's polarity".into()));
+        }
         let hash = normalized_hash(text);
         if let Some(other) = live_with_hash(tx, &self.scope, &hash, &[memory.id])? {
             return Ok(Err(format!("the new text repeats live memory {other}")));
@@ -1543,6 +1649,12 @@ impl CurateBatch {
         }
         if let Some(token) = dropped_token([memory.content.as_str()], &parts.join("\n")) {
             return Ok(Err(format!("the parts drop {token}")));
+        }
+        if parts
+            .iter()
+            .any(|part| opposite_rule(&memory.content, part))
+        {
+            return Ok(Err("a part reverses the rule's polarity".into()));
         }
         let mut hashes = HashSet::new();
         for part in parts {
@@ -1651,6 +1763,9 @@ impl CurateBatch {
                     {
                         return Ok(Err(format!("the kept memory drops {token}")));
                     }
+                    if opposite_rule(&memory.content, &survivor.content) {
+                        return Ok(Err("the kept memory reverses the rule's polarity".into()));
+                    }
                     return archived(
                         format!("duplicate of memory {of}"),
                         Some(of),
@@ -1688,6 +1803,11 @@ impl CurateBatch {
                 };
                 if let Some(token) = dropped_token([memory.content.as_str()], &paragraph) {
                     return Ok(Err(format!("the quoted paragraph drops {token}")));
+                }
+                if opposite_rule(&memory.content, &paragraph) {
+                    return Ok(Err(
+                        "the quoted paragraph reverses the rule's polarity".into()
+                    ));
                 }
                 archived(
                     format!("duplicate of {source}: \"{quote}\""),
