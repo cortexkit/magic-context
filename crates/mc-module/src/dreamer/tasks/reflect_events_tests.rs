@@ -879,7 +879,30 @@ fn an_observation_joins_the_queue_the_global_review_reads() {
 // --- The watermark ---
 
 #[test]
-fn the_watermark_moves_to_the_newest_event_read_only_when_the_last_message_is_applied() {
+fn reflect_watermarks_preserve_the_legacy_event_id_with_or_without_a_resume() {
+    assert_eq!(
+        Watermark::read(json!({"event": 4})),
+        Watermark {
+            event: 4,
+            resume: None
+        }
+    );
+    let value = json!({"event": 4, "resume": {"through": 20, "done": [["incident", "ui"]]}});
+    assert_eq!(value["event"].as_i64(), Some(4));
+    assert_eq!(
+        Watermark::read(value),
+        Watermark {
+            event: 4,
+            resume: Some(Resume {
+                through: 20,
+                done: [("incident".to_owned(), "ui".to_owned())].into(),
+            })
+        }
+    );
+}
+
+#[test]
+fn a_reflect_run_that_stops_after_each_batch_reaches_the_end_without_resending_groups() {
     let store = store();
     let long = "x ".repeat(700);
     let mut stored = Vec::new();
@@ -902,18 +925,18 @@ fn the_watermark_moves_to_the_newest_event_read_only_when_the_last_message_is_ap
     let batches = store.plan();
     assert!(batches.len() >= 2, "the groups need more than one message");
     assert_eq!(store.watermark(), None, "planning moves nothing");
-    let (last, earlier) = batches.split_last().unwrap();
-    assert!(earlier.iter().all(|batch| batch.watermark.is_none()));
-    assert_eq!(last.watermark, Some(120));
-    for batch in earlier {
-        store.write(batch, "<learnings></learnings>");
-        assert_eq!(
-            store.watermark(),
-            None,
-            "a run that stops here reads them again"
-        );
+    let planned = batches.len();
+    let mut read = Vec::new();
+    for _ in 0..planned {
+        let batch = store.plan().remove(0);
+        for group in &batch.groups {
+            let value = group["value"].as_str().unwrap().to_owned();
+            assert!(!read.contains(&value), "resent event group {value}");
+            read.push(value);
+        }
+        store.write(&batch, "<learnings></learnings>");
     }
-    store.write(last, "<learnings></learnings>");
+    assert_eq!(read.len(), 4);
     assert_eq!(store.watermark(), Some(json!({"event": 120})));
     // The next run has nothing new to send.
     assert!(store.plan().is_empty());

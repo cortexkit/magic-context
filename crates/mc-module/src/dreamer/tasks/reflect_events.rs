@@ -35,10 +35,10 @@
 //! no live memory. A project memory is written under the project's lock in
 //! the batch's transaction, with a history row naming the run, so the run
 //! can be undone; an observation about the person joins the queue the global
-//! review reads. The watermark moves to the newest event the run read once
-//! its last message is applied, or at once when no group was worth sending.
+//! review reads. The watermark records completed groups after each batch.
+//! Its event ID advances only once every group in the scan is settled.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Local, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -254,17 +254,36 @@ pub(crate) fn read_events(
     .collect()
 }
 
-/// The event the task's watermark names: the newest one a finished run read.
-pub(crate) fn stored_watermark(
-    conn: &Connection,
-    project: &str,
-    task: &str,
-) -> rusqlite::Result<i64> {
+/// A scan's upper event ID and the groups already processed below it. A
+/// group is keyed by its stable event tag and value, not presentation order.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Resume {
+    through: i64,
+    done: BTreeSet<(String, String)>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Watermark {
+    event: i64,
+    resume: Option<Resume>,
+}
+
+impl Watermark {
+    fn read(value: Value) -> Self {
+        let event = value["event"].as_i64().unwrap_or(0);
+        let resume = serde_json::from_value::<Resume>(value["resume"].clone())
+            .ok()
+            .filter(|resume| resume.through > event);
+        Self { event, resume }
+    }
+}
+
+fn stored_watermark(conn: &Connection, project: &str, task: &str) -> rusqlite::Result<Watermark> {
     Ok(
         crate::dreamer::store::schedule_of(conn, &OwnerKey::project(project), task)?
             .and_then(|schedule| schedule.watermark)
-            .and_then(|watermark| watermark["event"].as_i64())
-            .unwrap_or(0),
+            .map(Watermark::read)
+            .unwrap_or_default(),
     )
 }
 
@@ -275,15 +294,19 @@ fn write_watermark(
     task: &str,
     event: i64,
 ) -> rusqlite::Result<()> {
+    store_watermark(conn, project, task, json!({ "event": event }))
+}
+
+fn store_watermark(
+    conn: &Connection,
+    project: &str,
+    task: &str,
+    value: Value,
+) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE dream_schedules SET watermark_json = ?4
           WHERE level = ?1 AND owner_id = ?2 AND task = ?3",
-        params![
-            "project",
-            project,
-            task,
-            json!({ "event": event }).to_string()
-        ],
+        params!["project", project, task, value.to_string()],
     )?;
     Ok(())
 }
@@ -646,25 +669,38 @@ impl ReflectEvents {
             ));
         }
         let since = now - WINDOW_DAYS * DAY_MS;
-        let (after, events) = context
+        let (watermark, mut events) = context
             .db
             .with_connection(|conn| {
                 let after = stored_watermark(conn, project, &task)?;
                 Ok::<_, rusqlite::Error>((after, read_events(conn, project, &kinds, since)?))
             })
             .map_err(|error| format!("reading the events of {project}: {error}"))?;
-        let newest = events
-            .iter()
-            .map(|event| event.id)
-            .filter(|id| *id > after)
-            .max();
-        let groups = groups(
+        let after = watermark.event;
+        let newest = if let Some(resume) = &watermark.resume {
+            events.retain(|event| event.id <= resume.through);
+            Some(resume.through)
+        } else {
+            events
+                .iter()
+                .map(|event| event.id)
+                .filter(|id| *id > after)
+                .max()
+        };
+        let mut groups = groups(
             &kinds,
             &events,
             after,
             since,
             min_proof(context.declaration),
         );
+        if let Some(resume) = &watermark.resume {
+            groups.retain(|group| {
+                !resume
+                    .done
+                    .contains(&(kinds[group.kind].tag.clone(), group.value.clone()))
+            });
+        }
         if groups.is_empty() {
             if let Some(newest) = newest {
                 context
@@ -795,11 +831,9 @@ impl ReflectEvents {
                     categories: categories.clone(),
                     profile: profile.clone(),
                     workspace: prepared.workspace.clone(),
-                    watermark: if index == last {
-                        prepared.newest
-                    } else {
-                        None
-                    },
+                    through: prepared.newest.expect("a new event for each group"),
+                    last: index == last,
+                    group_keys: groups.iter().map(|group| (prepared.kinds[group.kind].tag.clone(), group.value.clone())).collect(),
                     groups: groups
                         .iter()
                         .map(|group| {
@@ -943,10 +977,10 @@ pub(crate) struct ReflectBatch {
     /// The project's workspace, when it shares memories; an observation
     /// records its id, as the observations the summarizer stores do.
     workspace: Option<String>,
-    /// The newest event the run read, where the watermark moves once this
-    /// message is applied. Only the run's last message carries it, so a run
-    /// that stops early reads the same events again next time.
-    pub(crate) watermark: Option<i64>,
+    /// Event cutoff shared by the run's batches and any continuation.
+    through: i64,
+    last: bool,
+    group_keys: Vec<(String, String)>,
     /// The groups the message shows, for the replay harness: kind, grouping
     /// field and value, session count, and event ids.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -981,6 +1015,11 @@ impl ReflectBatch {
     #[cfg(test)]
     pub(crate) fn message(&self) -> &str {
         &self.message
+    }
+
+    #[cfg(test)]
+    pub(crate) fn watermark(&self) -> Option<i64> {
+        self.last.then_some(self.through)
     }
 
     /// The decision key of the list's learning `number`.
@@ -1054,8 +1093,26 @@ impl ReflectBatch {
             }
             written.refusals.push(refusal);
         }
-        if let Some(event) = self.watermark {
-            write_watermark(tx, &self.project, &self.task, event)?;
+        if self.last {
+            write_watermark(tx, &self.project, &self.task, self.through)?;
+        } else {
+            let watermark = stored_watermark(tx, &self.project, &self.task)?;
+            let mut resume = watermark
+                .resume
+                .filter(|resume| resume.through == self.through)
+                .unwrap_or_else(|| Resume {
+                    through: self.through,
+                    done: BTreeSet::new(),
+                });
+            resume.done.extend(self.group_keys.iter().cloned());
+            // Old builds still read the completed event ID and can replay
+            // the scan safely; only new builds skip its completed groups.
+            store_watermark(
+                tx,
+                &self.project,
+                &self.task,
+                json!({ "event": watermark.event, "resume": resume }),
+            )?;
         }
         Ok(written)
     }
