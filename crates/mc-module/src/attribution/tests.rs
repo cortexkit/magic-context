@@ -382,6 +382,55 @@ async fn an_unsent_fact_goes_out_on_a_later_round() {
 }
 
 #[tokio::test]
+async fn an_attribution_backlog_yields_the_bus_between_batches() {
+    use std::future::Future;
+    let (_dir, db) = store();
+    let db = Arc::new(db);
+    db.with_connection(|conn| {
+        let tx = conn.transaction().unwrap();
+        for index in 0..120 {
+            insert(
+                &tx,
+                &fact(&child(&index.to_string()), &summary(), 1).unwrap(),
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    });
+    let test_bus = TestBus::new();
+    let bus = test_bus.bus();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *test_bus.pause_payload.lock().unwrap() = Some((started.clone(), release.clone()));
+    let events = AttributionEvents::over(bus.clone());
+    let drain = tokio::spawn(async move { events.publish(&db).await });
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .unwrap();
+
+    let acquire = bus.session();
+    tokio::pin!(acquire);
+    std::future::poll_fn(|cx| {
+        assert!(acquire.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    release.notify_one();
+    let guard = tokio::time::timeout(Duration::from_secs(2), acquire)
+        .await
+        .unwrap()
+        .unwrap();
+    let acknowledged = test_bus.payloads.lock().unwrap().len();
+    drop(guard);
+    drain.await.unwrap();
+    assert_eq!(
+        acknowledged, 50,
+        "the queued bus user waited for one batch, not the backlog"
+    );
+    assert_eq!(test_bus.payloads.lock().unwrap().len(), 120);
+}
+
+#[tokio::test]
 async fn a_round_sends_every_unsent_fact_a_batch_at_a_time() {
     let (_dir, db) = store();
     db.with_connection(|conn| {

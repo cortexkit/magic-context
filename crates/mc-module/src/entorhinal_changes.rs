@@ -124,10 +124,10 @@ impl WatchState {
 /// Start the watch: open the bus session and watch `key`. A watch the bus
 /// refused leaves the session to the others that use it; any other failure
 /// drops it, since its connection may be gone.
-async fn open(bus: &Bus, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
-    let session = bus.session().await?;
+async fn open(bus: &Bus, key: &str) -> Result<(Box<dyn RegisterWatch>, u64), String> {
+    let (session, generation) = bus.session_with_generation().await?;
     match session.watch(OWNER, BUCKET, key).await {
-        Ok(watch) => Ok(watch),
+        Ok(watch) => Ok((watch, generation)),
         Err(error) => {
             if error == "nats_watch_failed" {
                 session.discard();
@@ -190,7 +190,7 @@ async fn run_marker(bus: &Bus, state: &WatchState, key: &str, changed: &(impl Fn
     loop {
         match open(bus, key).await {
             Err(error) => state.down(&error),
-            Ok(mut watch) => {
+            Ok((mut watch, generation)) => {
                 let ended = loop {
                     let value = match watch.next().await {
                         Ok(WatchEvent::Snapshot { entries, .. }) => {
@@ -218,8 +218,9 @@ async fn run_marker(bus: &Bus, state: &WatchState, key: &str, changed: &(impl Fn
                         changed();
                     }
                 };
-                // The watch's connection is likely the shared one, and gone.
-                bus.discard().await;
+                // The failed watch may still be on a connection that has
+                // already been replaced for other bus users.
+                bus.forget(generation).await;
                 state.down(ended);
             }
         }

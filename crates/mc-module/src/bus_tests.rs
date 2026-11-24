@@ -278,6 +278,8 @@ pub(crate) type Sent = (String, String, ContentDigest, Headers, bool);
 /// and whether the stream had a message with its id already.
 pub(crate) type SentPayload = (String, Headers, Vec<u8>, bool);
 
+type PayloadPause = (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+
 /// A bus for other modules' tests. Notices go to an in-memory stream and are
 /// recorded as the bus took them; KV buckets are a second in-memory bus.
 /// `down` refuses every session, as a bus that is down or a missing ck-bus
@@ -291,6 +293,7 @@ pub(crate) struct TestBus {
     /// Fails every publish of an event with a body, as a stream that never
     /// acknowledges it.
     pub refuse_payloads: AtomicBool,
+    pub(crate) pause_payload: Mutex<Option<PayloadPause>>,
     pub down: AtomicBool,
     pub opened: AtomicUsize,
     /// The bucket names watches were opened on.
@@ -315,6 +318,7 @@ impl TestBus {
             sent: Mutex::new(Vec::new()),
             payloads: Mutex::new(Vec::new()),
             refuse_payloads: AtomicBool::new(false),
+            pause_payload: Mutex::new(None),
             down: AtomicBool::new(false),
             opened: AtomicUsize::new(0),
             watched: Mutex::new(Vec::new()),
@@ -395,6 +399,11 @@ impl PayloadPublisher for TestPayloads {
     async fn publish(&self, subject: &str, headers: &Headers, body: &[u8]) -> Result<bool, String> {
         if self.0.down.load(Ordering::Relaxed) || self.0.refuse_payloads.load(Ordering::Relaxed) {
             return Err("nats_publish_unacknowledged".into());
+        }
+        let pause = self.0.pause_payload.lock().unwrap().take();
+        if let Some((started, release)) = pause {
+            started.notify_one();
+            release.notified().await;
         }
         let mut payloads = self.0.payloads.lock().unwrap();
         let id = headers.get("Nats-Msg-Id");
@@ -759,7 +768,7 @@ async fn a_lost_connection_forgets_only_the_session_it_was_on() {
     drop(bus.session().await.unwrap());
     let first = bus.generation.load(Ordering::SeqCst);
     // Another user dropped the session and the next one opened a new one.
-    bus.discard().await;
+    bus.forget(first).await;
     drop(bus.session().await.unwrap());
     let second = bus.generation.load(Ordering::SeqCst);
     assert_ne!(first, second);
@@ -769,6 +778,34 @@ async fn a_lost_connection_forgets_only_the_session_it_was_on() {
     bus.forget(second).await;
     drop(bus.session().await.unwrap());
     assert_eq!(test_bus.opened.load(Ordering::Relaxed), 3, "reopened");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_old_register_watch_cannot_discard_the_replacement_connection() {
+    let test_bus = TestBus::new();
+    let bus = test_bus.bus();
+    let state = Arc::new(crate::entorhinal_changes::WatchState::default());
+    let _watch = crate::entorhinal_changes::spawn_marker(
+        Arc::clone(&bus),
+        Arc::clone(&state),
+        "marker",
+        || {},
+    );
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(state.is_up());
+    bus.forget(bus.generation.load(Ordering::SeqCst)).await;
+    drop(bus.session().await.unwrap());
+    assert_eq!(test_bus.opened.load(Ordering::Relaxed), 2);
+
+    test_bus.cut_watches();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(state.is_up(), "the marker watch reopened");
+    assert_eq!(test_bus.watched.lock().unwrap().len(), 2);
+    assert_eq!(
+        test_bus.opened.load(Ordering::Relaxed),
+        2,
+        "reused the replacement"
+    );
 }
 
 #[tokio::test]
