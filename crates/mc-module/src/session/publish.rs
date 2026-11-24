@@ -425,6 +425,7 @@ impl Session {
                 }
             }
         }
+        let (pending_keep, pending_keep_after) = self.take_landed_keep();
         let before = Before {
             head_stale: self.head_stale,
             latest: self.latest.clone(),
@@ -440,7 +441,8 @@ impl Session {
             reclaim_bookmark: Some(self.reclaim_bookmark),
             notice_reclaim_bookmark: Some(self.notice_reclaim_bookmark),
             summary_unshown: self.summary_unshown,
-            pending_keep: self.next_keep.take(),
+            pending_keep,
+            pending_keep_after,
             spent_reading: self.spent_reading,
             render_recovery: Some(self.render_failed.recovery()),
         };
@@ -724,9 +726,7 @@ impl Session {
         self.transcript_retry = before.transcript_retry;
         self.emergency_latched = before.emergency_latched;
         self.summary_unshown |= before.summary_unshown;
-        if before.pending_keep.is_some() {
-            self.pending_keep = before.pending_keep;
-        }
+        self.restore_unconfirmed_keep(&undone);
         self.spent_reading = before.spent_reading;
         self.baseline = before.baseline;
         self.app_projection.head_read.offered = None;
@@ -781,6 +781,20 @@ impl Session {
                         self.refused_once.insert(part.clone());
                     }
                 }
+            }
+        }
+    }
+
+    fn restore_unconfirmed_keep(&mut self, discarded: &[Unconfirmed]) {
+        if self.pending_keep.is_none() {
+            if let Some(before) = discarded
+                .iter()
+                .rev()
+                .map(|p| &p.before)
+                .find(|before| before.pending_keep.is_some())
+            {
+                self.pending_keep.clone_from(&before.pending_keep);
+                self.pending_keep_after = before.pending_keep_after;
             }
         }
     }
@@ -880,14 +894,10 @@ impl Session {
             let edited = lanes::Edited::of(adopted, &self.index, None);
             let pending = std::mem::take(&mut self.unconfirmed);
             self.restore_unconfirmed_stamps(&pending, |key| !edited.covers(&key.0, &key.1));
-            if self.pending_keep.is_none()
-                && !adopted.is_some_and(|view| pending.iter().any(|p| p.view == *view))
-            {
-                self.pending_keep = pending
-                    .into_iter()
-                    .rev()
-                    .find_map(|p| p.before.pending_keep);
-            }
+            let first_discarded = adopted
+                .and_then(|view| pending.iter().position(|p| p.view == *view))
+                .map_or(0, |at| at + 1);
+            self.restore_unconfirmed_keep(&pending[first_discarded..]);
         }
         if let Some(view) = &answer.view {
             self.reset_transcript_retry();

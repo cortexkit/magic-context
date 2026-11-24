@@ -85,6 +85,7 @@ impl Session {
             failed_parts: BTreeSet::new(),
             keep_requested: false,
             pending_keep: None,
+            pending_keep_after: None,
             seq: 0,
             summaries: Summaries::default(),
             summaries_unread: false,
@@ -361,6 +362,7 @@ impl Session {
             self.conditions = conditions;
         }
         self.pending_keep = durable.pending_keep;
+        self.pending_keep_after = None;
         self.head_stale = durable.head_stale;
         self.marker_possible = durable.marker_possible;
         self.reminder_counter = durable.reminder_counter;

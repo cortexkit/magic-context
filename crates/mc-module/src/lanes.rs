@@ -274,10 +274,7 @@ pub enum Shape {
 /// of both, so a queued drop of it waits.
 pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, Vec<PartKey>) {
     let index = context.index;
-    let recent: BTreeSet<u64> = index
-        .newest_tool_tags(RECENT_TOOL_WINDOW)
-        .into_iter()
-        .collect();
+    let recent = index.newest_tool_tags(RECENT_TOOL_WINDOW);
     let protected = protected_tool_parts(index, context.protected_tools);
     let newest_mid = transcript_end_mid(index);
     let first_mid = index.entries().first().map(|entry| entry.mid.as_str());
@@ -331,11 +328,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
         // branch below keeps it. Without one, none of its parts is dropped
         // while it is the end; a text part may still become its placeholder.
         // A queued drop of such a part waits for a newer message.
-        let final_turn_without_call = Some(entry.mid.as_str()) == newest_mid
-            && !entry
-                .parts
-                .iter()
-                .any(|candidate| matches!(candidate.body, PartBody::Tool(_)));
+        let final_turn_without_call = final_without_call(entry, newest_mid);
         match &part.body {
             PartBody::Text { .. } if sealed => match (part.tag, shape) {
                 // Stripping an injection keeps the rest of the text, which
@@ -364,8 +357,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                 let Some(tag) = part.tag else {
                     continue;
                 };
-                let small_recent = recent.contains(&tag)
-                    && input_string_bytes(&tool.input.parse()) <= SMALL_INPUT_MAX_BYTES;
+                let small_recent = small_recent_call(tool, tag, &recent);
                 let ends = ends_transcript(entry, part, newest_mid);
                 if sealed {
                     // Its output can't be replaced; removing the call that
@@ -403,8 +395,23 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                     }
                 }
             }
-            // A file or a known opaque part goes only when a lane wants it
-            // gone whole (`ctx_keep`); an opaque part can only be dropped.
+            PartBody::File(_) if shape == Shape::Requested => {
+                if protects_from_automatic_reclaim(entry) {
+                    continue;
+                }
+                if sealed {
+                    if final_turn_without_call {
+                        continue;
+                    }
+                    ops.push(drop());
+                } else if let Some(tag) = part.tag {
+                    ops.push(replace("text", json!(placeholder(tag))));
+                } else {
+                    continue;
+                }
+            }
+            // The explicit keep selection removes unwanted files and known
+            // opaque parts whole; an opaque part cannot be replaced.
             PartBody::File(_) | PartBody::Opaque(_)
                 if shape == Shape::Whole && !final_turn_without_call =>
             {
@@ -450,6 +457,62 @@ fn ends_transcript(entry: &Entry, part: &Part, newest_mid: Option<&str>) -> bool
             .rev()
             .find(|candidate| matches!(candidate.body, PartBody::Tool(_)))
             .is_some_and(|last| last.id == part.id)
+}
+
+fn final_without_call(entry: &Entry, newest_mid: Option<&str>) -> bool {
+    Some(entry.mid.as_str()) == newest_mid
+        && !entry
+            .parts
+            .iter()
+            .any(|part| matches!(part.body, PartBody::Tool(_)))
+}
+
+fn small_recent_call(tool: &ToolPart, tag: u64, recent: &[u64]) -> bool {
+    recent.contains(&tag) && input_string_bytes(&tool.input.parse()) <= SMALL_INPUT_MAX_BYTES
+}
+
+/// The transcript facts that determine what a `ctx_reduce` stamp can remove.
+pub(crate) struct StampRoom<'a> {
+    newest_mid: Option<&'a str>,
+    recent: Vec<u64>,
+}
+
+impl<'a> StampRoom<'a> {
+    pub(crate) fn new(index: &'a Index) -> Self {
+        Self {
+            newest_mid: transcript_end_mid(index),
+            recent: index.newest_tool_tags(RECENT_TOOL_WINDOW),
+        }
+    }
+
+    pub(crate) fn tokens(&self, entry: &Entry, part: &Part, tag: u64, weight: u64) -> u64 {
+        if !is_known(entry, part) {
+            return 0;
+        }
+        let sealed = !part.seal.is_none();
+        match &part.body {
+            PartBody::Tool(tool) if is_finished(&tool.status) => {
+                let ends = ends_transcript(entry, part, self.newest_mid);
+                if sealed {
+                    if ends {
+                        0
+                    } else {
+                        weight
+                    }
+                } else if ends || small_recent_call(tool, tag, &self.recent) {
+                    tokens::tool_result(part, tool)
+                } else {
+                    weight
+                }
+            }
+            PartBody::Text { .. } | PartBody::File(_)
+                if !sealed || !final_without_call(entry, self.newest_mid) =>
+            {
+                weight
+            }
+            _ => 0,
+        }
+    }
 }
 
 /// What dropping a tool part with [`Shape::Default`] wins back: its output
@@ -814,7 +877,6 @@ pub fn reasoning_over_budget(
         return Vec::new();
     }
     let entries = context.index.entries();
-    let position_of = |entry: &Entry| entries.iter().position(|e| e.mid == entry.mid);
     // The first assistant that is exempt; every later one is too.
     let mut exempt_from = assistants.len() - 1;
     if let Some(latest) = assistants.iter().rposition(|(entry, _)| {
@@ -827,12 +889,9 @@ pub fn reasoning_over_budget(
     }
     if anthropic {
         if let Some(turn) = crate::pass::current_turn_start(entries) {
-            if let Some(first) = assistants
-                .iter()
-                .position(|(entry, _)| position_of(entry).is_some_and(|at| at >= turn))
-            {
-                exempt_from = exempt_from.min(first);
-            }
+            let ordinal = entries[turn].ordinal;
+            let first = assistants.partition_point(|(entry, _)| entry.ordinal < ordinal);
+            exempt_from = exempt_from.min(first);
         }
     }
     let (older, exempt) = assistants.split_at(exempt_from);
@@ -959,8 +1018,8 @@ pub fn duplicate_lookups(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey
         BTreeMap::new();
     let mut calls = Vec::new();
     for (entry, part, tool) in tool_parts(context) {
-        let name = tool.name.strip_prefix("mcp_").unwrap_or(&tool.name);
-        let (true, Some(tag)) = (DEDUP_TOOLS.contains(&name), part.tag) else {
+        let name = normalize_tool_name(&tool.name);
+        let (true, Some(tag)) = (DEDUP_TOOLS.contains(&name.as_str()), part.tag) else {
             continue;
         };
         let key = (
@@ -1350,7 +1409,7 @@ pub fn superseded_edits(
     let mut seen_files = BTreeSet::new();
     let mut parts = Vec::new();
     let edits: Vec<_> = tool_parts(context)
-        .filter(|(_, _, tool)| tool.name == "edit" || tool.name == "write")
+        .filter(|(_, _, tool)| matches!(normalize_tool_name(&tool.name).as_str(), "edit" | "write"))
         .collect();
     for (entry, part, tool) in edits.into_iter().rev() {
         // An edit an earlier view dropped is gone from the model's view, so
@@ -1436,6 +1495,17 @@ pub fn emergency_drop(
     emergency: &Emergency,
     failed_parts: &BTreeSet<PartKey>,
 ) -> Vec<(PartKey, Shape)> {
+    emergency_drop_excluding(context, cutoff, emergency, |entry, part| {
+        !failed_parts.is_empty() && failed_parts.contains(&(entry.mid.clone(), part.id.clone()))
+    })
+}
+
+pub(crate) fn emergency_drop_excluding(
+    context: &Context,
+    cutoff: Option<u64>,
+    emergency: &Emergency,
+    excluded: impl Fn(&Entry, &Part) -> bool,
+) -> Vec<(PartKey, Shape)> {
     if (emergency.prompt_tokens == 0 && emergency.request_tokens.unwrap_or(0) == 0)
         || (!emergency.over_limit && emergency.ceiling_tokens == 0)
     {
@@ -1490,15 +1560,14 @@ pub fn emergency_drop(
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
     // The tier reserve includes every output that could go, even in the
-    // protected tail. A part that already caused a refusal counts toward
-    // neither reserve nor reclaim.
+    // protected tail. A part the model chose to keep or that already caused
+    // a refusal counts toward neither reserve nor reclaim.
     let droppable: Vec<(&Entry, &Part, u8)> = tool_parts(context)
         .filter(|(entry, part, tool)| {
             is_finished(&tool.status)
                 && part.tag.is_some()
                 && !context.edited.covers(&entry.mid, &part.id)
-                && (failed_parts.is_empty()
-                    || !failed_parts.contains(&(entry.mid.clone(), part.id.clone())))
+                && !excluded(entry, part)
         })
         .map(|(entry, part, tool)| (entry, part, emergency_tier(&tool.name)))
         .collect();
@@ -1559,25 +1628,42 @@ pub fn emergency_drop(
 /// instructions from another agent), the session's first
 /// message when it keeps it, the selected parts, and the protected tail. The call's
 /// message and everything after it stay, so the model sees its own note.
+pub(crate) fn keep_call(index: &Index) -> Option<&Entry> {
+    index.entries().iter().rev().find(|entry| {
+        entry.parts.iter().any(|part| {
+            matches!(&part.body,
+            PartBody::Tool(tool) if normalize_tool_name(&tool.name) == "ctx_keep")
+        })
+    })
+}
+
 pub fn keep_drops(
     context: &Context,
     kept: &BTreeSet<PartKey>,
     cutoff: Option<u64>,
 ) -> Vec<(PartKey, Shape)> {
+    keep_drops_with_notice_marks(context, kept, cutoff, true)
+}
+
+pub(crate) fn keep_drops_with_notice_marks(
+    context: &Context,
+    kept: &BTreeSet<PartKey>,
+    cutoff: Option<u64>,
+    notice_keep: bool,
+) -> Vec<(PartKey, Shape)> {
     let entries = context.index.entries();
-    let Some(call_at) = entries.iter().rposition(|entry| {
-        entry
-            .parts
-            .iter()
-            .any(|part| matches!(&part.body, PartBody::Tool(tool) if tool.name == "ctx_keep"))
-    }) else {
+    let Some(call) = keep_call(context.index) else {
         return Vec::new();
     };
     let mut drops = Vec::new();
-    for (position, entry) in entries[..call_at].iter().enumerate() {
+    for (position, entry) in entries
+        .iter()
+        .take_while(|entry| entry.ordinal < call.ordinal)
+        .enumerate()
+    {
         if (position == 0 && context.keep_first_message)
             || protects_from_automatic_reclaim(entry)
-            || (entry.role == Role::User && entry.notice.is_none())
+            || (entry.role == Role::User && (entry.notice.is_none() || !notice_keep))
         {
             continue;
         }
@@ -1599,6 +1685,50 @@ mod tests {
 
     fn entry(ordinal: u64, role: Role, parts: Vec<Part>) -> Entry {
         Entry::new(ordinal, format!("m{ordinal}"), role, 0, parts)
+    }
+
+    #[test]
+    #[ignore = "manual transcript scaling measurement"]
+    fn reasoning_selector_scaling() {
+        use std::{hint::black_box, time::Instant};
+        let edited = Edited::default();
+        let protected_tools = BTreeMap::new();
+        for length in [1_024, 4_096, 16_384] {
+            let mut index = Index::default();
+            index.extend((1..=length).map(|n| {
+                entry(
+                    n,
+                    if n == length - 3 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    vec![part(
+                        "p",
+                        Some(n),
+                        Seal::None,
+                        PartBody::Text {
+                            text: "text".into(),
+                        },
+                    )],
+                )
+            }));
+            let context = Context {
+                index: &index,
+                edited: &edited,
+                protected_tools: &protected_tools,
+                keep_first_message: false,
+                signed_floor: None,
+            };
+            let samples: Vec<_> = (0..3)
+                .map(|_| {
+                    let start = Instant::now();
+                    assert!(black_box(reasoning_over_budget(&context, 1_000, true)).is_empty());
+                    start.elapsed().as_micros()
+                })
+                .collect();
+            eprintln!("{length} entries: {samples:?} microseconds");
+        }
     }
 
     fn read(tag: u64, output_bytes: u64) -> Part {

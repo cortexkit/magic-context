@@ -204,6 +204,9 @@ pub struct Session {
     /// What a `ctx_keep` call asked to keep. The next notice builds the view
     /// that keeps only that, whatever the usage: the model asked for it.
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
+    /// Last indexed keep call when the live tool request arrived. Wait for
+    /// a different call before consuming its selection.
+    pending_keep_after: Option<u64>,
     /// The highest notice number handled.
     seq: u64,
     /// The session's summaries, oldest first.
@@ -515,6 +518,8 @@ struct Before {
     summary_unshown: bool,
     #[serde(default)]
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
+    #[serde(skip)]
+    pending_keep_after: Option<u64>,
     /// Left out of the saved text while there is none, so rows saved before
     /// it existed and rows of runners that send no reading don't change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
