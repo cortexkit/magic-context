@@ -64,7 +64,8 @@ const REFIRE_TURN_GAP: u64 = 5;
 const HINT_MIN_TOKENS: u64 = 250;
 const HINT_COUNT: usize = 4;
 /// Coordination and control tools: poor suggestions for a reduction, though
-/// the model may still drop them.
+/// they still count as reclaimable. Person-facing tools are excluded from
+/// both the hints and the count by `protected_tool_parts`.
 const HINT_EXCLUDED_TOOLS: [&str; 8] = [
     "ask",
     "bash_kill",
@@ -614,6 +615,32 @@ mod tests {
             measurement.hints,
             [PartRef::new("m2", "p"), PartRef::new("m3", "p")]
         );
+    }
+
+    #[test]
+    fn person_facing_tools_count_toward_context_but_not_reclaimable_outputs_or_hints() {
+        let say = counted_entry(
+            2,
+            Role::Assistant,
+            PartBody::Tool(ToolPart::new(
+                "say-call",
+                "say",
+                json!({"text":"Progress report. ".repeat(4_000)}),
+                ToolStatus::Completed,
+            )),
+            PartTokens::tool(40_000, 10),
+        );
+        let entries = vec![
+            counted_text(1, Role::User, "Initial task", 5_000),
+            say,
+            counted_tool(3, "MCP_Notify", 26_000),
+            counted_tool(4, "read", 32_000),
+        ];
+        let measurement = measure_entries(entries, &lanes::Edited::default());
+        assert_eq!(measurement.t, 103_030);
+        assert_eq!(measurement.hints, [PartRef::new("m4", "p")]);
+        assert_eq!(measurement.u, 32_010);
+        assert_eq!(measurement.outputs, 1);
     }
 
     #[test]

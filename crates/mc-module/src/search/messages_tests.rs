@@ -53,6 +53,69 @@ fn set_watermark(conn: &Connection, session: &str, mark: i64) {
     .unwrap();
 }
 
+#[test]
+fn person_facing_new_message_is_searchable_under_the_assistant_role() {
+    use cortexkit_role_compaction::part::{Part, ToolPart, ToolStatus};
+    use serde_json::json;
+
+    let calls = [
+        (
+            "say",
+            json!({"text":"The verdigris release is ready.","quote":"notsearchable"}),
+        ),
+        (
+            "notify",
+            json!({"action":"send","title":"Dispatch ready","body":"Loaded the cobalt crates."}),
+        ),
+        (
+            "notify",
+            json!({"action":"resolve","resolution":"notsearchable"}),
+        ),
+    ];
+    let entries: Vec<_> = calls
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, input))| {
+            let ordinal = i as u64 + 1;
+            Entry::new(
+                ordinal,
+                format!("m{ordinal}"),
+                Role::Assistant,
+                0,
+                vec![Part::new(
+                    "p",
+                    PartBody::Tool(ToolPart::new("c", name, input, ToolStatus::Completed)),
+                )],
+            )
+        })
+        .collect();
+    let mut conn = crate::context_db::ContextDb::fresh_in_memory();
+    index(&mut conn, "mock", "spoken", &entries).unwrap();
+    let find = |text| {
+        search(
+            &conn,
+            "spoken",
+            &Query {
+                text,
+                limit: 10,
+                probes: &[],
+                dates: None,
+                visible: None,
+            },
+            i64::MAX,
+            false,
+            &Reach::Mapped,
+        )
+    };
+    for (query, message) in [("verdigris release", "m1"), ("dispatch cobalt", "m2")] {
+        let hits = find(query);
+        assert_eq!(hits.len(), 1, "{query}");
+        assert_eq!(hits[0].message_id, message);
+        assert_eq!(hits[0].role, "assistant");
+    }
+    assert!(find("notsearchable").is_empty());
+}
+
 /// A deterministic message of eight to twenty words; every message also
 /// names its own number, so `upkeep_store_7` finds message 7 verbatim.
 fn content(seed: &mut u64, ordinal: i64) -> String {

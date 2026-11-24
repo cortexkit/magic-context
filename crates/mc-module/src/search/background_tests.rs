@@ -993,6 +993,108 @@ async fn restart_finishes_a_failed_chunked_revert_from_its_durable_dirty_floor()
 }
 
 #[tokio::test]
+async fn person_facing_setup_reprojects_existing_search_rows_without_changing_the_runner_digest() {
+    use super::super::messages;
+    use crate::{module::Module, pass::Settings, route::Route};
+    use cortexkit_role_compaction::part::{ToolPart, ToolStatus};
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
+    use serde_json::json;
+
+    let f = Fixture::new(3);
+    let tool = |name, input| {
+        Part::new(
+            "tool",
+            PartBody::Tool(ToolPart::new("c", name, input, ToolStatus::Completed)),
+        )
+    };
+    let text = || {
+        Part::new(
+            "text",
+            PartBody::Text {
+                text: "sent".into(),
+            },
+        )
+    };
+    let ordinary = Entry::new(
+        1,
+        "ordinary",
+        Role::Assistant,
+        0,
+        vec![text(), tool("read", json!({"path":"a.rs"}))],
+    );
+    let spoken = Entry::new(
+        2,
+        "spoken",
+        Role::Assistant,
+        0,
+        vec![
+            text(),
+            tool(
+                "say",
+                json!({"text":"The sapphire deployment is complete."}),
+            ),
+        ],
+    );
+    f.client.entries.lock().unwrap()[..2].clone_from_slice(&[ordinary.clone(), spoken.clone()]);
+    let mut conn = Connection::open(&f.path).unwrap();
+    let stored = |conn: &Connection, id: &str| -> (String, String, i64) {
+        conn.query_row(
+            "SELECT source_version,normalized_content_hash,updated_at FROM message_history_source WHERE session_id=?1 AND message_id=?2",
+            params![f.key.session,id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap()
+    };
+    // Seed the pre-upgrade projection: the index saw only the text part,
+    // but stored the runner's digest for the whole message.
+    let mut old = spoken.clone();
+    old.parts.truncate(1);
+    messages::index(&mut conn, &f.key.harness, &f.key.session, &[ordinary, old]).unwrap();
+    conn.execute("UPDATE message_history_source SET updated_at=0", [])
+        .unwrap();
+    let before_ordinary = stored(&conn, "ordinary");
+    let before_spoken = stored(&conn, "spoken");
+    assert_eq!(before_spoken.0, spoken.digest.to_string());
+    assert!(messages::app_page(&conn, &f.key.session, "sapphire", 0, 10).is_empty());
+
+    let module = Module::new(
+        (*f.client).clone(),
+        Settings::default(),
+        Some(ContextDb::open(&f.path).unwrap()),
+        None,
+    );
+    module
+        .setup(
+            Route {
+                session: f.key.clone(),
+                project: None,
+                workdir: None,
+                agent_id: None,
+            },
+            SetupRequest::new(
+                "head",
+                ModelRef::new("test", "model"),
+                1_000_000,
+                128_000,
+                ProviderRules::new(SignedParts::None, EditCost::Suffix),
+                vec![],
+                1,
+            )
+            .with_newest(f.client.cursor().unwrap()),
+        )
+        .unwrap();
+    module.idle(&f.key).await.unwrap();
+    assert_eq!(
+        messages::app_page(&conn, &f.key.session, "sapphire", 0, 10).len(),
+        1
+    );
+    let after_spoken = stored(&conn, "spoken");
+    assert_eq!(after_spoken.0, before_spoken.0);
+    assert_ne!(after_spoken.1, before_spoken.1);
+    assert_eq!(stored(&conn, "ordinary"), before_ordinary);
+}
+
+#[tokio::test]
 async fn setup_reconciles_an_older_changed_tool_even_when_the_tip_id_did_not_change() {
     use crate::{module::Module, pass::Settings, route::Route};
     use cortexkit_role_compaction::part::{ToolPart, ToolStatus};

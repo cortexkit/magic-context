@@ -123,6 +123,7 @@ pub mod run_ends;
 pub mod runner_capabilities;
 pub mod search;
 pub mod session;
+mod spoken;
 pub mod store;
 mod store_text;
 pub mod summary;

@@ -11,3 +11,16 @@ pub fn string_from_utf16_prefix(units: &[u16], requested: usize) -> String {
     }
     String::from_utf16_lossy(&units[..end])
 }
+
+/// Tool argument excerpts keep at most 60 UTF-16 code units, then an ellipsis.
+pub(crate) fn truncate_arg(value: &str) -> String {
+    truncate_units(value, 60)
+}
+
+pub(crate) fn truncate_units(value: &str, max: usize) -> String {
+    let units: Vec<u16> = value.encode_utf16().collect();
+    if units.len() <= max {
+        return value.to_owned();
+    }
+    format!("{}…", string_from_utf16_prefix(&units, max))
+}
