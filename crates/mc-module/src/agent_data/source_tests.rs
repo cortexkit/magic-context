@@ -1015,6 +1015,34 @@ async fn export_admits_the_snapshot_in_pages_and_resumes_from_what_the_door_hold
     assert_eq!(f.door().admitted.len(), 3);
 }
 
+#[tokio::test]
+async fn prepare_refuses_a_torn_snapshot_left_by_an_aborted_export() {
+    let f = Fixture::new();
+    let conn = f.conn();
+    seed(&conn, "s1", &"x".repeat(MIB + MIB / 5));
+    f.bind("s1");
+    let session_ref = source::session_ref(&key("s1"));
+    f.prepare(CUT, &["s1"]).await.unwrap();
+    f.door().admits_left = Some(1);
+    assert_eq!(
+        f.export(CUT, &["s1"]).await.unwrap_err().code,
+        RefusalCode::Unavailable
+    );
+    f.abort(CUT, &["s1"]).await.unwrap();
+    assert_eq!(f.door().streams[&session_ref].len(), MIB);
+    assert!(!source::cut_folder(&f.db, CUT).exists());
+    f.door().admits_left = None;
+
+    let refused = f.prepare(OTHER_CUT, &["s1"]).await.unwrap_err();
+    assert_eq!(refused.code, RefusalCode::ParticipantFailed);
+    assert!(refused.message.contains(&session_ref), "{refused:?}");
+    assert!(refused.message.contains("torn snapshot"), "{refused:?}");
+    assert_eq!(f.status(OTHER_CUT).await, "none");
+    assert_eq!(f.moving("s1"), None);
+    assert!(!source::cut_folder(&f.db, OTHER_CUT).exists());
+    assert_eq!(f.door().streams[&session_ref].len(), MIB);
+}
+
 /// A later move of the same session appends its snapshot to the session's
 /// stream on the door, and the cut's digest covers every byte up to it.
 #[tokio::test]
@@ -1037,6 +1065,15 @@ async fn a_later_cut_of_a_session_builds_on_what_its_stream_already_holds() {
     assert_eq!(reply["items"][0]["digest"], sha256(&stream));
     f.export(OTHER_CUT, &["s1"]).await.unwrap();
     assert_eq!(f.door().streams[&session_ref], stream);
+    // The receiver's original stream walk must still find the new
+    // snapshot at the end of the bytes exported by a checked prepare.
+    let start = snapshot::last_in_stream(&stream).unwrap();
+    assert_eq!(start, earlier.len());
+    assert_eq!(&stream[start..], bytes);
+    assert_eq!(
+        snapshot::decode(&stream[start..]).unwrap().header.session,
+        "s1"
+    );
 }
 
 /// `release` turns the freeze into a tombstone naming the receiving
@@ -1592,21 +1629,44 @@ async fn the_cuts_digest_resumes_from_the_streams_floor() {
     f.abort(CUT, &["s1"]).await.unwrap();
     let session_ref = source::session_ref(&key("s1"));
     let earlier = f.door().streams[&session_ref].clone();
-    assert!(earlier.len() > 200);
+    let original = earlier.repeat(3);
+    let floor = earlier.len();
+    let raised_floor = 2 * floor;
     {
         let mut door = f.door();
-        door.floors.insert(session_ref.clone(), 70);
-        door.raise_floor_on_read = Some(130);
+        door.streams.insert(session_ref.clone(), original.clone());
+        door.cloud.insert(session_ref.clone(), original.len());
+        door.floors.insert(session_ref.clone(), floor);
+        door.raise_floor_on_read = Some(raised_floor);
     }
     let reply = f.prepare(OTHER_CUT, &["s1"]).await.unwrap();
     let snapshot = std::fs::read(source::snapshot_file(&f.db, OTHER_CUT, &session_ref)).unwrap();
-    let mut stream = earlier.clone();
+    let mut stream = original;
     stream.extend(&snapshot);
     assert_eq!(reply["items"][0]["digest"], sha256(&stream));
     assert_eq!(reply["items"][0]["endOffset"], stream.len());
     let door = f.door();
-    assert_eq!(door.reads, [70, 130], "nothing below the floor is read");
+    assert_eq!(door.reads, [floor as u64, raised_floor as u64]);
     assert_eq!(door.count("session.digest"), 2);
+}
+
+#[tokio::test]
+async fn prepare_refuses_a_trim_floor_that_splits_a_snapshot() {
+    let f = Fixture::new();
+    seed(&f.conn(), "s1", "content");
+    f.bind("s1");
+    f.prepare(CUT, &["s1"]).await.unwrap();
+    f.export(CUT, &["s1"]).await.unwrap();
+    f.abort(CUT, &["s1"]).await.unwrap();
+    let session_ref = source::session_ref(&key("s1"));
+    f.door().floors.insert(session_ref.clone(), 70);
+
+    let refused = f.prepare(OTHER_CUT, &["s1"]).await.unwrap_err();
+    assert_eq!(refused.code, RefusalCode::ParticipantFailed);
+    assert!(refused.message.contains(&session_ref), "{refused:?}");
+    assert!(refused.message.contains("trim floor 70"), "{refused:?}");
+    assert!(refused.message.contains("torn snapshot"), "{refused:?}");
+    assert_eq!(f.moving("s1"), None);
 }
 
 /// A door refusal on `session.admit` is answered by the table in `door.rs`:

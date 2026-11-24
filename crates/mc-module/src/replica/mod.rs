@@ -706,7 +706,8 @@ pub fn hold_status(conn: &Connection) -> rusqlite::Result<Option<EpochHold>> {
 /// Record that the stream is held for fleet epoch `epoch`, for `why`.
 /// Returns whether this is a new hold: the stream wasn't held for that
 /// epoch already. A hold for the same epoch keeps the time it began. The
-/// hold ends when a message is next applied ([`apply`]).
+/// hold ends when following passes the message or the restore queue is
+/// unblocked ([`apply`]).
 pub(crate) fn record_hold(conn: &Connection, epoch: u64, why: &str) -> rusqlite::Result<bool> {
     let changed = conn.execute(
         "UPDATE replica_state SET held_epoch = ?1, held_since = ?2, held_why = ?3

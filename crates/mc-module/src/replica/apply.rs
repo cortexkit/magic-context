@@ -289,12 +289,22 @@ impl Replica {
     /// Read again, by sequence, each message queued to be read again
     /// ([`reconcile`]), and apply it if it still decides its row.
     async fn restore(&self) -> Result<(), String> {
-        let queued: Vec<(String, u64)> = self
+        let (queued, restore_held): (Vec<(String, u64)>, bool) = self
             .db
             .with_connection(|conn| {
-                conn.prepare("SELECT global_id, seq FROM replica_restore ORDER BY seq")?
+                let queued = conn
+                    .prepare("SELECT global_id, seq FROM replica_restore ORDER BY seq")?
                     .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                // Restore holds have the "opening <seq> again: …" reason
+                // below, even in stores last opened by an older build.
+                let restore_held = conn.query_row(
+                    "SELECT COALESCE(held_why GLOB 'opening [0-9]* again: *', 0)
+                     FROM replica_state WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>((queued, restore_held))
             })
             .map_err(|error| error.to_string())?;
         for (global, seq) in queued {
@@ -346,6 +356,21 @@ impl Replica {
             for change in changes {
                 self.db.changed(change);
             }
+        }
+        // Restore does not advance the stream position. Clear its hold
+        // once the queue stops blocking, but keep a hold on a new arrival
+        // until following the stream actually passes that message.
+        if restore_held {
+            self.db
+                .with_connection(|conn| {
+                    conn.execute(
+                        "UPDATE replica_state
+                         SET held_epoch = NULL, held_since = NULL, held_why = NULL WHERE id = 1",
+                        [],
+                    )
+                })
+                .map_err(|error| format!("clearing the restore hold: {error}"))?;
+            self.release();
         }
         Ok(())
     }

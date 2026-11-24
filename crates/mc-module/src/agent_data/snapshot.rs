@@ -675,19 +675,7 @@ pub fn last_in_stream(stream: &[u8]) -> Result<usize, String> {
             .ok_or("the stream ends inside a snapshot's header")?;
         // Only the row counts are read here, so an earlier move's snapshot
         // of another version is skipped as long as it counts its rows.
-        let header: Value = serde_json::from_slice(header)
-            .map_err(|error| format!("a snapshot header in the stream cannot be read: {error}"))?;
-        let lines = header
-            .get("rows")
-            .and_then(Value::as_object)
-            .ok_or("a snapshot header in the stream counts no rows")?
-            .values()
-            .try_fold(0u64, |sum, count| {
-                count
-                    .as_u64()
-                    .and_then(|count| sum.checked_add(count))
-                    .ok_or("a snapshot header in the stream has a malformed row count")
-            })?;
+        let (_, lines) = stream_header(header)?;
         at += 4 + length;
         for _ in 0..lines {
             let end = stream[at..]
@@ -699,6 +687,125 @@ pub fn last_in_stream(stream: &[u8]) -> Result<usize, String> {
         if at == stream.len() {
             return Ok(start);
         }
+    }
+}
+
+fn stream_header(bytes: &[u8]) -> Result<(Value, u64), String> {
+    let header: Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("a snapshot header in the stream cannot be read: {error}"))?;
+    let lines = header
+        .get("rows")
+        .and_then(Value::as_object)
+        .ok_or("a snapshot header in the stream counts no rows")?
+        .values()
+        .try_fold(0u64, |sum, count| {
+            count
+                .as_u64()
+                .and_then(|count| sum.checked_add(count))
+                .ok_or("a snapshot header in the stream has a malformed row count")
+        })?;
+    Ok((header, lines))
+}
+
+/// Check the snapshots the door already holds as prepare reads back its
+/// stream. Keep only a header, not the earlier snapshots' rows or pages.
+/// The body digest catches a torn snapshot even if a later append already
+/// supplied enough newlines to satisfy its row count.
+pub(super) struct StreamBoundaries {
+    at: u64,
+    start: u64,
+    header: Vec<u8>,
+    remaining: u64,
+    body_digest: Option<(Sha256, String)>,
+}
+
+impl StreamBoundaries {
+    pub(super) fn new(floor: u64) -> Self {
+        Self {
+            at: floor,
+            start: floor,
+            header: Vec::new(),
+            remaining: 0,
+            body_digest: None,
+        }
+    }
+
+    pub(super) fn push(&mut self, mut page: &[u8]) -> Result<(), String> {
+        while !page.is_empty() {
+            if self.remaining == 0 {
+                self.take_header(&mut page, 4);
+                let Some(length) = self.header.as_slice().first_chunk::<4>() else {
+                    break;
+                };
+                let end = 4usize
+                    .checked_add(u32::from_be_bytes(*length) as usize)
+                    .ok_or("a snapshot header in the stream is too long")?;
+                self.take_header(&mut page, end);
+                if self.header.len() < end {
+                    break;
+                }
+                let (header, rows) = stream_header(&self.header[4..])?;
+                // Older formats can still be skipped by their row counts.
+                if header.get("format").and_then(Value::as_str) == Some(FORMAT) {
+                    let expected = header
+                        .get("bodySha256")
+                        .and_then(Value::as_str)
+                        .ok_or("a snapshot header in the stream has no body digest")?;
+                    self.body_digest = Some((Sha256::new(), expected.to_owned()));
+                }
+                self.remaining = rows;
+                self.header.clear();
+                if rows == 0 {
+                    self.end_snapshot()?;
+                    continue;
+                }
+            }
+            let newline = page.iter().position(|byte| *byte == b'\n');
+            let take = newline.map_or(page.len(), |end| end + 1);
+            if let Some((digest, _)) = self.body_digest.as_mut() {
+                digest.update(&page[..take]);
+            }
+            self.at += take as u64;
+            page = &page[take..];
+            if newline.is_some() {
+                self.remaining -= 1;
+                if self.remaining == 0 {
+                    self.end_snapshot()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn take_header(&mut self, page: &mut &[u8], end: usize) {
+        let take = end.saturating_sub(self.header.len()).min(page.len());
+        self.header.extend_from_slice(&page[..take]);
+        self.at += take as u64;
+        *page = &page[take..];
+    }
+
+    fn end_snapshot(&mut self) -> Result<(), String> {
+        if let Some((digest, expected)) = self.body_digest.take() {
+            if format!("{:x}", digest.finalize()) != expected {
+                return Err("the snapshot body does not match its digest".into());
+            }
+        }
+        self.start = self.at;
+        Ok(())
+    }
+
+    pub(super) fn end(&self) -> Result<(), String> {
+        if self.at == self.start {
+            Ok(())
+        } else if self.remaining > 0 {
+            Err("the stream ends inside the snapshot's body".into())
+        } else {
+            Err("the stream ends inside the snapshot's header".into())
+        }
+    }
+
+    pub(super) fn snapshot_start(&self) -> u64 {
+        self.start
     }
 }
 

@@ -685,6 +685,29 @@ async fn replica_health_reports_an_old_hold_and_unsent_count_before_the_hub_conn
 }
 
 #[cfg(feature = "memory-replica")]
+#[tokio::test]
+async fn replica_health_does_not_count_a_local_sighting_as_unsent() {
+    use super::hub::InMemoryHub;
+    use super::test_support::{memory, Computer};
+
+    let hub = InMemoryHub::new();
+    let a = Computer::new(&hub, 1);
+    memory(&a, "pj-a", "Seen again after it was sent.");
+    a.sync().await;
+    a.execute("UPDATE memories SET seen_count = seen_count + 1, revision = revision + 1");
+    a.sync().await;
+    assert_eq!(a.texts("SELECT state FROM replica_outbox"), ["raised"]);
+    assert_eq!(hub.messages().len(), 1);
+
+    let health = Arc::new(super::health::Health::default());
+    health.refresh(&a.db);
+    assert_eq!(
+        health_report(health).metrics.unwrap()["replica_unsent_count"],
+        0
+    );
+}
+
+#[cfg(feature = "memory-replica")]
 #[tokio::test(start_paused = true)]
 async fn replica_health_degrades_when_the_store_read_fails() {
     use subc_client_rs::HealthStatus;
