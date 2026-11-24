@@ -3543,7 +3543,9 @@ export async function registerContext(context: V2Context) {
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
             hostFoldIdle?.active(draft.sessionID);
-            // Maintenance children never issue side questions and should not evict user replays.
+            // A hidden maintenance run (summary or dreamer) never asks a `/btw`
+            // side question, so it prepares no replay, and it must not replace
+            // the replay saved for the person's own session.
             const hiddenChild = hiddenChildHook.owns(draft.sessionID);
             const anchor =
                 compactionOff || hiddenChild ? undefined : generateReplayAnchor(draft.messages);

@@ -60,8 +60,9 @@ export function piModelAcceptsImages(model: unknown): boolean {
  * text sent instead, or undefined while the image itself is sent. In a message
  * whose id the processed-image strip froze (`stripped`), a large image goes out
  * as the strip's marker; for a model without image input the host replaces
- * every image with a short note. Tag counts, the emergency planner, the
- * reclaim-distance walk and the local request estimate price images through it.
+ * every image with a short note. Everything that prices an image uses this
+ * rule: tag token counts, the emergency drop near the context limit, the
+ * measure of how old a tool output is, and the local request-size estimate.
  *
  * Known gap: Pi's `images.blockImages` setting also replaces every image with
  * "Image reading is disabled.", but Pi keeps it in its settings manager, which

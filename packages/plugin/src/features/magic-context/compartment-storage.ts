@@ -381,7 +381,7 @@ export function cachedHistoryCoversLatestCompartment(
  * `UNIQUE(session_id, sequence)`, NOT `(session_id, end_message_id)`, so
  * a future bug could in principle leave two rows sharing a boundary. The
  * marker drain's `validatePendingTarget` treats `length > 1` as a schema
- * invariant violation and bails to stale-skip (plan v6 section 5).
+ * invariant violation and skips the pending marker as stale.
  *
  * Normal path: exactly one match → caller treats it as the target row.
  */

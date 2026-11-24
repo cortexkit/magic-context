@@ -85,7 +85,8 @@ fn reasoning_budget_reads_native_message_ids_once() {
     let native = request.native_messages.as_mut().unwrap();
     let mut duplicate = native[1].clone();
     duplicate["info"]["tokens"]["reasoning"] = json!(1);
-    // Native messages need not line up with CK positions. The first matching ID
+    // The host's native messages need not be in the same order as the request's
+    // messages. The first matching ID
     // must win: a lower count from the duplicate would keep all 64 steps.
     native.reverse();
     native.push(duplicate);

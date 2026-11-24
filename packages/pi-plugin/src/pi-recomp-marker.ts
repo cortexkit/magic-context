@@ -39,9 +39,9 @@ function placeFirstKeptEntryId(
  * already fires drive the synthetic `<session-history>` render, not the native
  * marker that trims `getBranch()`; those are separate mechanisms.)
  *
- * Detached /ctx-recomp stages the marker because applying it eagerly
- * (`appendCompaction`) mutates `getBranch()` immediately and could alter a
- * cache-stable pass. Staging + deferred drain mirrors the background historian's
+ * /ctx-recomp runs in the background, outside any request pass, so it stages
+ * the marker. Applying it eagerly (`appendCompaction`) would change
+ * `getBranch()` at once and could alter a cache-stable pass. Staging + deferred drain mirrors the background historian's
  * `onPublished` signals so the marker rides the next genuine bust.
  *
  * The staged marker replaces any marker still pending for the compartments the

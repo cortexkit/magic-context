@@ -637,7 +637,8 @@ export function createToolDropTarget(
                     parts,
                 } as MessageLike);
             const before = count(served);
-            // Price a new drop, which strips attachments; legacy skeleton replay keeps them.
+            // A new drop removes the call's attachments, so price it without them.
+            // A placeholder recorded before that rule replays with its attachments.
             const stripAttachments = skeleton && hasAttachments();
             const retained = skeleton
                 ? parts.map((part) => skeletonRealToolPart(part, tagId, stripAttachments))
