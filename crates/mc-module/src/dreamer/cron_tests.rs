@@ -62,3 +62,50 @@ fn an_empty_invalid_or_impossible_schedule_is_never_due() {
         Some(local(2028, 2, 29, 0, 0))
     );
 }
+
+#[test]
+fn a_repeated_wall_clock_minute_matches_only_on_its_first_occurrence() {
+    const CHILD: &str = "MC_CRON_TEST_DST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let name =
+            format!("{module}::a_repeated_wall_clock_minute_matches_only_on_its_first_occurrence");
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--nocapture"])
+            .env("TZ", ":/usr/share/zoneinfo/America/New_York")
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let output = String::from_utf8_lossy(&result.stdout);
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            output.contains("running 1 test") && result.status.success(),
+            "{output}\n{error}"
+        );
+        return;
+    }
+    let chrono::LocalResult::Ambiguous(first, second) =
+        Local.with_ymd_and_hms(2026, 11, 1, 1, 30, 0)
+    else {
+        panic!("the test timezone must repeat 01:30");
+    };
+    assert_ne!(first.offset(), second.offset());
+    let mut slots = [first.timestamp_millis(), second.timestamp_millis()];
+    slots.sort_unstable();
+    let [first, second] = slots;
+    assert_eq!(second - first, 60 * MINUTE);
+    assert_eq!(
+        Local.timestamp_millis_opt(second).single().unwrap().hour(),
+        1,
+        "the later instant must really be the repeated 01:30"
+    );
+    assert_eq!(next_due("30 1 * * *", first - MINUTE), Some(first));
+    assert_eq!(
+        next_due("30 1 * * *", first + MINUTE),
+        Some(local(2026, 11, 2, 1, 30))
+    );
+    assert_eq!(
+        next_due("30 2 * * *", local(2026, 3, 8, 1, 59)),
+        Some(local(2026, 3, 9, 2, 30))
+    );
+}

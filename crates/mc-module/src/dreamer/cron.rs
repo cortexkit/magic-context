@@ -7,7 +7,7 @@
 //! never matches, and one repeated by it matches once: the minute is found on
 //! its first occurrence, and [`next_due`] starts after the slot it was given.
 
-use chrono::{Datelike, Local, TimeZone, Timelike};
+use chrono::{Datelike, Local, LocalResult, TimeZone, Timelike};
 
 const MINUTE: i64 = 60_000;
 /// How far ahead a schedule is searched: four years covers every month and
@@ -77,14 +77,25 @@ impl Cron {
         let [minute, hour, day, month, weekday] = tokens.as_slice() else {
             return None;
         };
-        Some(Self {
+        let cron = Self {
             minutes: field(minute, 0, 59, false)?,
             hours: field(hour, 0, 23, false)?,
             days: field(day, 1, 31, false)?,
             months: field(month, 1, 12, false)?,
             weekdays: field(weekday, 0, 7, true)?,
             either_day: !day.starts_with('*') && !weekday.starts_with('*'),
-        })
+        };
+        cron.has_calendar_day().then_some(cron)
+    }
+
+    fn has_calendar_day(&self) -> bool {
+        const LONGEST: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        self.either_day
+            || self.months.iter().any(|month| {
+                self.days
+                    .iter()
+                    .any(|day| *day <= LONGEST[*month as usize - 1])
+            })
     }
 
     fn matches(&self, at: &chrono::DateTime<Local>) -> bool {
@@ -110,18 +121,6 @@ pub fn next_due(expression: &str, after: i64) -> Option<i64> {
         return None;
     }
     let cron = Cron::parse(expression)?;
-    // A date no month has (`0 0 31 2 *`) would otherwise search four years
-    // of minutes before giving up.
-    const LONGEST: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    if !cron.either_day
-        && !cron.months.iter().any(|month| {
-            cron.days
-                .iter()
-                .any(|day| *day <= LONGEST[*month as usize - 1])
-        })
-    {
-        return None;
-    }
     let mut cursor = after
         .div_euclid(MINUTE)
         .checked_mul(MINUTE)?
@@ -129,7 +128,12 @@ pub fn next_due(expression: &str, after: i64) -> Option<i64> {
     let end = after.saturating_add(SEARCH);
     while cursor <= end {
         let at = Local.timestamp_millis_opt(cursor).single()?;
-        if cron.matches(&at) {
+        // Both real instants of a repeated wall time match the fields.
+        // Use the earlier instant regardless of the order of the offsets.
+        if cron.matches(&at)
+            && !matches!(Local.from_local_datetime(&at.naive_local()),
+                LocalResult::Ambiguous(a, b) if cursor > a.timestamp_millis().min(b.timestamp_millis()))
+        {
             return Some(cursor);
         }
         cursor += MINUTE;
