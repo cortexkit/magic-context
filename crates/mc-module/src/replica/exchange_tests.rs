@@ -1325,7 +1325,7 @@ async fn a_memory_too_large_to_send_never_beats_a_sent_one_for_its_fact() {
         ))
     };
     let sent = format!("{}.m1", "f".repeat(32));
-    assert_eq!(live(&b), [sent.clone()]);
+    assert_eq!(live(&b), std::slice::from_ref(&sent));
     assert_eq!(
         live(&a),
         [sent],
