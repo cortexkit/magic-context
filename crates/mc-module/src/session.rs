@@ -332,6 +332,7 @@ pub struct Session {
     /// first `ctx_memory` call if that comes first, and what its writes
     /// record from it.
     memory_context: Option<crate::memory_profile::MemoryContext>,
+    workspace_write_pending: bool,
     authority: Option<crate::memory_levels::Authority>,
     /// The decay classes of the memory profile `memory_context` resolves,
     /// which a fold ranks memories by; read once, and again when the

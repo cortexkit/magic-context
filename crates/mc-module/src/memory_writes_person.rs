@@ -202,15 +202,21 @@ pub(crate) fn edit(
     bump(&tx, target)?;
     match &change.content {
         Some(content) if *content != memory.content => {
-            update_content(&tx, target.id, content, &hash)?;
+            let category = change
+                .category
+                .as_ref()
+                .map(|(id, tag)| (id.as_str(), tag.as_str()));
+            update_text_and_category(&tx, target.id, content, &hash, category)?;
         }
-        _ => carry_evidence(&tx, target.id, target.revision, target.revision + 1)?,
-    }
-    if let Some((id, tag)) = &change.category {
-        tx.execute(
-            "UPDATE memories SET category = ?2, origin_category = ?3, updated_at = ?4 WHERE id = ?1",
-            params![target.id, id, tag, now_ms()],
-        )?;
+        _ => {
+            carry_evidence(&tx, target.id, target.revision, target.revision + 1)?;
+            if let Some((id, tag)) = &change.category {
+                tx.execute(
+                    "UPDATE memories SET category = ?2, origin_category = ?3, updated_at = ?4 WHERE id = ?1",
+                    params![target.id, id, tag, now_ms()],
+                )?;
+            }
+        }
     }
     if let Some(importance) = change.importance {
         tx.execute(

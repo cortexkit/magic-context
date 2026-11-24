@@ -2,7 +2,7 @@
 //! plugin keeps in `context.db`, and the search over it.
 //!
 //! Rows are keyed by host session id and message number (the runner's
-//! ordinal plus one), as the plugin keys them, so a moved session keeps
+//! one-based ordinal), as the plugin keys them, so a moved session keeps
 //! searching the rows the plugin wrote before the move. Only user and
 //! assistant text (including words sent through a tool) is indexed; tool
 //! output, reasoning, notices and agent relays are not.
@@ -344,12 +344,22 @@ fn insert(
     )?;
     drop(fts_timing);
     let _timing = crate::notice_cost_timing::span("search.rowid_insert");
-    conn.execute(
-        "INSERT OR REPLACE INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![session, number, conn.last_insert_rowid(), entry.written_at as i64],
+    let rowid = conn.last_insert_rowid();
+    let mapped = conn.execute(
+        "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
+         VALUES (?1, ?2, ?3, ?4) ON CONFLICT(session_id, message_ordinal) DO NOTHING",
+        params![session, number, rowid, entry.written_at as i64],
     )?;
-    Ok(true)
+    if mapped == 0 {
+        // Unlike a paired append, replacing a map entry can leave its old
+        // FTS row without a map entry.
+        conn.execute(
+            "UPDATE message_fts_rowid_map SET fts_rowid = ?3, message_time_ms = ?4
+             WHERE session_id = ?1 AND message_ordinal = ?2",
+            params![session, number, rowid, entry.written_at as i64],
+        )?;
+    }
+    Ok(mapped == 0)
 }
 
 /// Bring the session's index level with `entries` (the session's messages
@@ -446,8 +456,9 @@ pub fn forget_from(
 /// The schema fence keeps older plugin hosts from writing the store. Live
 /// session moves leave the index alone; the separate offline session mover
 /// can rewrite it and must not run while the module is serving the store.
-/// Pair each change at commit with the reader's first SQLite read, so a WAL
-/// snapshot cannot cache a proof under a generation it didn't actually see.
+/// A paired FTS/map append cannot change which FTS rows lack a mapping.
+/// Pair commits that can change that set with the reader's first SQLite
+/// read, so a WAL snapshot cannot cache coverage for a different generation.
 #[derive(Default)]
 pub(crate) struct IndexGeneration(std::sync::Mutex<u64>);
 
@@ -463,9 +474,9 @@ impl IndexGeneration {
     pub(super) fn commit(
         &self,
         tx: rusqlite::Transaction<'_>,
-        changed: bool,
+        coverage_changed: bool,
     ) -> rusqlite::Result<()> {
-        if !changed {
+        if !coverage_changed {
             return tx.commit();
         }
         let mut generation = self

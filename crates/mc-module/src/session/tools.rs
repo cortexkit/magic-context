@@ -470,11 +470,12 @@ impl Session {
         };
         let started = std::time::Instant::now();
         let deadline = std::time::Duration::from_millis(crate::pre_user::AUTO_SEARCH_TIMEOUT_MS);
+        let embed_budget = std::time::Duration::from_millis(200);
         let search = async {
             let embedded = match &settings.embedding {
                 Some(provider) => tokio::time::timeout(
-                    std::time::Duration::from_millis(200),
-                    provider.embed_query(&prompt),
+                    embed_budget,
+                    provider.embed_query_with_budget(&prompt, embed_budget),
                 )
                 .await
                 .ok()

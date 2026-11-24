@@ -188,6 +188,61 @@ fn a_workspace_hit_names_its_level_and_a_project_hit_reads_as_before() {
 }
 
 #[test]
+fn visible_word_matches_do_not_use_up_the_hidden_candidate_limit() {
+    let conn = crate::context_db::ContextDb::fresh_in_memory();
+    for id in 1..=51_i64 {
+        let (content, updated) = if id == 51 {
+            ("zebra hidden", 0)
+        } else {
+            ("zebra visible", 1)
+        };
+        conn.execute("INSERT INTO memories (id, level, owner_id, category, origin_category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
+                      VALUES (?1, 'project', 'pj-a', 'swe:constraints', 'CONSTRAINTS', ?2, ?3, 0, 0, ?4, 0)",
+            params![id, content, format!("key-{id}"), updated]).unwrap();
+    }
+    let owners = sources::MemoryOwners {
+        project: Some("pj-a"),
+        workspace: None,
+    };
+    let visible = (1..=50).collect();
+    let mut halves = sources::Halves::default();
+    let (hits, suppressed) = sources::search_memories(
+        &conn,
+        owners,
+        "zebra",
+        1,
+        &visible,
+        None,
+        None,
+        Some(&mut halves),
+    );
+    assert_eq!(hits.first().map(|hit| hit.id), Some(51));
+    assert_eq!(halves.words.first().map(|hit| hit.id), Some(51));
+    assert_eq!(suppressed.len(), 50);
+}
+
+#[test]
+fn turn_two_reads_only_live_unexpired_memory_vectors() {
+    let conn = store();
+    for (id, status, expires) in [
+        (6, "archived", None),
+        (7, "active", Some(1)),
+        (8, "permanent", None),
+    ] {
+        conn.execute(
+            "INSERT INTO memories (id, level, owner_id, category, origin_category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at, status, expires_at)
+             VALUES (?1, 'project', 'pj-a', 'swe:constraints', 'CONSTRAINTS', 'another memory', ?1, 0, 0, 0, 0, ?2, ?3)",
+            params![id, status, expires],
+        ).unwrap();
+        conn.execute("INSERT INTO memory_embeddings SELECT ?1, embedding, model_id FROM memory_embeddings WHERE memory_id = 1", [id]).unwrap();
+    }
+    let ids: Vec<_> = sources::memory_vectors(&conn, "pj-a", "test")
+        .into_keys()
+        .collect();
+    assert_eq!(ids, [PROJECT, 8]);
+}
+
+#[test]
 fn memories_the_head_shows_in_full_are_suppressed_at_either_level() {
     let mut conn = store();
     // The head's own read and fold for this session: its `seen` holds the

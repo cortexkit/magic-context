@@ -39,6 +39,7 @@ mod key;
 mod memories;
 mod pool;
 mod store;
+pub(crate) use store::keys_with_rows;
 
 #[cfg(test)]
 mod pool_size_tests;
@@ -199,7 +200,7 @@ impl Mover {
         };
         // The keys are read first and the git calls made without holding the
         // store, which sessions share.
-        let with_rows = match db.with_connection(|conn| store::keys_with_rows(conn)) {
+        let with_rows = match db.legacy_project_keys() {
             Ok(keys) => keys,
             Err(error) => {
                 tracing::warn!(
@@ -267,7 +268,7 @@ impl Mover {
             };
             report.pools.insert(key.clone(), outcome);
         }
-        report.left = match db.with_connection(|conn| store::keys_with_rows(conn)) {
+        report.left = match db.legacy_project_keys() {
             Ok(keys) => !keys.is_empty(),
             Err(_) => true,
         };
@@ -366,10 +367,11 @@ pub(crate) async fn round<C: RunnerClient>(
     db: &Arc<ContextDb>,
     mover: &mut Mover,
 ) -> Round {
-    match db.with_connection(|conn| store::keys_with_rows(conn)) {
-        Ok(keys) if keys.is_empty() => return Round::Finished,
-        Ok(_) => {}
-        Err(_) => return Round::Retry,
+    let reader = Arc::clone(db);
+    match tokio::task::spawn_blocking(move || reader.legacy_project_keys()).await {
+        Ok(Ok(keys)) if keys.is_empty() => return Round::Finished,
+        Ok(Ok(_)) => {}
+        _ => return Round::Retry,
     }
     let Some(reply) = enumerate(client).await else {
         return Round::Retry;

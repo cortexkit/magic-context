@@ -483,7 +483,7 @@ pub fn candidate_texts(
                     );
                     (
                         chunk.title.clone(),
-                        chunk_text(conn, session, chunk.start, chunk.end),
+                        chunk_text(conn, session, chunk.window.0.max(chunk.start), chunk.window.1.min(chunk.end)),
                     )
                 }
             };
@@ -516,7 +516,7 @@ fn chunk_text(conn: &Connection, session: &str, start: i64, end: i64) -> String 
                FROM message_fts_rowid_map AS map
               CROSS JOIN message_history_fts AS fts ON fts.rowid = map.fts_rowid
               WHERE map.session_id = ?1 AND map.message_ordinal BETWEEN ?2 AND ?3
-                AND fts.role IN ('user', 'assistant')
+                 AND fts.session_id = ?1 AND fts.role IN ('user', 'assistant')
               ORDER BY map.message_ordinal ASC",
         )?;
         let rows = statement.query_map(params![session, start, end], |row| {
@@ -846,12 +846,7 @@ pub async fn remote_scores(
     } else {
         json!({"model": remote.model, "query": query, "documents": texts})
     };
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .timeout(Duration::from_millis(remote.timeout_ms))
-        .build()
-        .map_err(|_| skipped("remote_error"))?;
+    let client = crate::embedding::client_for(endpoint).ok_or_else(|| skipped("remote_error"))?;
     let url = format!("{endpoint}/rerank");
     let body = body.to_string();
     // A vault key the endpoint refuses with 401 is read again and the
@@ -859,7 +854,10 @@ pub async fn remote_scores(
     let sent = crate::vault::send_with_key(remote.api_key.as_ref(), |key| {
         let (client, url, body) = (&client, &url, &body);
         async move {
-            let mut request = client.post(url).header("content-type", "application/json");
+            let mut request = client
+                .post(url)
+                .timeout(Duration::from_millis(remote.timeout_ms))
+                .header("content-type", "application/json");
             if let Some(key) = key {
                 let Some(authorization) = key.authorization() else {
                     return Sent::Answered(Err(skipped("remote_error")));
@@ -995,10 +993,56 @@ mod tests {
             title: format!("summary {id}"),
             start,
             end,
+            window: (start, end),
             score: 0.5,
             match_type: "semantic",
             snippet: None,
         })
+    }
+
+    #[test]
+    fn a_compartment_reranks_on_the_window_that_matched() {
+        let conn = crate::context_db::ContextDb::fresh_in_memory();
+        conn.execute_batch(
+            "INSERT INTO compartments (id, session_id, sequence, start_message, end_message, title, content, p1, created_at, harness)
+                VALUES (7, 's', 0, 1, 2, 'Routine debugging', 'Summary.', 'Body.', 1, 'mock');",
+        ).unwrap();
+        for (ordinal, content, vector) in [
+            (1, "boilerplate ".repeat(200), [0.5, 0.5]),
+            (
+                2,
+                "The uniquemariner command enables offline indexing.".into(),
+                [1.0, 0.0],
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content)
+                  VALUES ('s', ?1, ?1, 'user', ?2)", params![ordinal, content],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
+                  VALUES ('s', ?1, ?2, 1)", params![ordinal, conn.last_insert_rowid()],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness,
+                     window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+                  VALUES (7, 's', 'p', 'mock', ?1 - 1, ?1, ?1, 'hash', 'model', 2, ?2, 1)",
+                params![ordinal, crate::embedding::encode(&vector)],
+            ).unwrap();
+        }
+        let semantic = super::super::sources::Semantic {
+            vector: &[1.0, 0.0],
+            model_id: "model",
+            chunk_model_id: "model",
+        };
+        let chunks = super::super::sources::search_chunks(&conn, "s", "p", 1, 2, None, semantic)
+            .into_iter()
+            .map(Hit::Chunk)
+            .collect::<Vec<_>>();
+        let docs = candidate_texts(&conn, "s", "p", &chunks);
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].contains("uniquemariner"), "{}", docs[0]);
+        assert!(!docs[0].contains("boilerplate"), "{}", docs[0]);
     }
 
     #[test]
@@ -1138,69 +1182,78 @@ mod tests {
 
     /// A `/rerank` endpoint shaped like Voyage's: it refuses a request that
     /// carries `top_n` with 400, and answers its rows under `data`.
-    async fn voyage_endpoint() -> String {
+    async fn voyage_endpoint() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = connections.clone();
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
-                let mut raw = Vec::new();
-                let mut chunk = [0u8; 8192];
-                let body = loop {
-                    let read = socket.read(&mut chunk).await.unwrap_or(0);
-                    if read == 0 {
-                        break None;
-                    }
-                    raw.extend_from_slice(&chunk[..read]);
-                    let text = String::from_utf8_lossy(&raw).into_owned();
-                    let Some(end) = text.find("\r\n\r\n") else {
-                        continue;
-                    };
-                    let length = text[..end]
-                        .lines()
-                        .find_map(|line| {
-                            line.to_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(str::to_owned)
-                        })
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if raw.len() >= end + 4 + length {
-                        break Some(text[end + 4..].to_owned());
-                    }
-                };
-                let Some(body) = body else { continue };
-                let request: Value = serde_json::from_str(&body).unwrap();
-                let (status, reply) = if request.get("top_n").is_some() {
-                    (
-                        "400 Bad Request",
-                        json!({"detail": "Argument 'top_n' is not supported"}),
-                    )
-                } else {
-                    let rows: Vec<_> = (0..request["documents"].as_array().map_or(0, Vec::len))
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::spawn(async move {
+                    loop {
+                        let mut raw = Vec::new();
+                        let mut chunk = [0u8; 8192];
+                        let body = loop {
+                            let read = socket.read(&mut chunk).await.unwrap_or(0);
+                            if read == 0 {
+                                break None;
+                            }
+                            raw.extend_from_slice(&chunk[..read]);
+                            let text = String::from_utf8_lossy(&raw).into_owned();
+                            let Some(end) = text.find("\r\n\r\n") else {
+                                continue;
+                            };
+                            let length = text[..end]
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(str::to_owned)
+                                })
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if raw.len() >= end + 4 + length {
+                                break Some(text[end + 4..].to_owned());
+                            }
+                        };
+                        let Some(body) = body else { break };
+                        let request: Value = serde_json::from_str(&body).unwrap();
+                        let (status, reply) = if request.get("top_n").is_some() {
+                            (
+                                "400 Bad Request",
+                                json!({"detail": "Argument 'top_n' is not supported"}),
+                            )
+                        } else {
+                            let rows: Vec<_> = (0..request["documents"].as_array().map_or(0, Vec::len))
                         .rev()
                         .map(|index| json!({"relevance_score": index as f64, "index": index}))
                         .collect();
-                    (
-                        "200 OK",
-                        json!({"object": "list", "data": rows, "model": "rerank-3-lite"}),
-                    )
-                };
-                let reply = reply.to_string();
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                            (
+                                "200 OK",
+                                json!({"object": "list", "data": rows, "model": "rerank-3-lite"}),
+                            )
+                        };
+                        let reply = reply.to_string();
+                        let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
                     reply.len()
                 );
-                let _ = socket.write_all(response.as_bytes()).await;
+                        if socket.write_all(response.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
             }
         });
-        format!("http://{address}")
+        (format!("http://{address}"), connections)
     }
 
     #[tokio::test]
     async fn a_voyage_endpoint_scores_without_top_n_and_answers_under_data() {
         let remote = Remote {
-            endpoint: Some(voyage_endpoint().await),
+            endpoint: Some(voyage_endpoint().await.0),
             model: Some("rerank-3-lite".into()),
             api_key: None,
             timeout_ms: 5_000,
@@ -1209,6 +1262,23 @@ mod tests {
         let texts = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
         let scores = remote_scores(&remote, "q", &texts).await.unwrap();
         assert_eq!(scores, [0.0, 1.0, 2.0]);
+    }
+
+    #[tokio::test]
+    async fn hosted_reranking_reuses_the_endpoint_connection() {
+        let (endpoint, connections) = voyage_endpoint().await;
+        let remote = Remote {
+            endpoint: Some(endpoint),
+            model: Some("rerank-3-lite".into()),
+            api_key: None,
+            timeout_ms: 5_000,
+            top_n: POOL,
+        };
+        let texts = ["one result".to_owned()];
+        for query in ["first search", "second search"] {
+            assert_eq!(remote_scores(&remote, query, &texts).await.unwrap(), [0.0]);
+        }
+        assert_eq!(connections.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }
 

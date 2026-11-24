@@ -1186,17 +1186,21 @@ impl Store {
     /// Record the workspace a session's project is in now. It is the one
     /// part of a stored memory context that follows Entorhinal
     /// ([`crate::session::Session::follow_workspace`]).
-    pub fn set_memory_workspace(&self, key: &SessionRef, workspace: Option<&str>) {
+    pub fn set_memory_workspace(&self, key: &SessionRef, workspace: Option<&str>) -> bool {
         let result = self.lock().execute(
             "UPDATE memory_contexts SET context = json_set(context, '$.workspace_id', ?4)
               WHERE runner = ?1 AND harness = ?2 AND session = ?3",
             params![key.runner, key.harness, key.session, workspace],
         );
-        if let Err(error) = result {
-            tracing::warn!(
-                "ck-mc: session {}: saving its new workspace failed: {error}",
-                key.session
-            );
+        match result {
+            Ok(changed) => changed != 0,
+            Err(error) => {
+                tracing::warn!(
+                    "ck-mc: session {}: saving its new workspace failed: {error}",
+                    key.session
+                );
+                false
+            }
         }
     }
 

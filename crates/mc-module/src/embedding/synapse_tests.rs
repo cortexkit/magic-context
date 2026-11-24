@@ -708,3 +708,135 @@ async fn upkeep_embeds_memories_on_its_first_round() {
         identity("qwen3-embedding-0.6b-cuda", &"c".repeat(64))
     );
 }
+
+#[tokio::test]
+async fn source_project_upkeep_refreshes_workspace_vectors_for_each_model_identity() {
+    use crate::memory_levels::Authority;
+    use crate::memory_writes::Writer;
+    use crate::search::sources::{search_memories, MemoryOwners, Semantic};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        crate::context_db::ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+    let save = |project: &str, content: &str| {
+        let authority = Authority {
+            project_id: Some(project.into()),
+            workspace_id: Some("team".into()),
+            profile: None,
+            state: "resolved".into(),
+            snapshot_digest: None,
+            category_ids: [("CONSTRAINTS".into(), "swe:constraints".into())].into(),
+            category_levels: [("swe:constraints".into(), vec!["workspace".into()])].into(),
+        };
+        let who = Writer {
+            harness: "mock",
+            session: "s",
+            project,
+            authority: Some(&authority),
+            line: None,
+        };
+        db.with_connection(|conn| {
+            let reply = crate::memory_tool::run(conn, &who, &json!({"action": "write", "level": "workspace", "category": "CONSTRAINTS", "content": content})).unwrap();
+            assert!(reply.starts_with("Saved workspace memory"), "{reply}");
+        });
+    };
+    let text = "Use the narrow bridge for deliveries.";
+    save("pj-source", text);
+    save("pj-other", "Keep emergency exits clear.");
+    let mut old_model = None;
+    for serving in [[false, false, true, true], [true, true, true, true]] {
+        let fake = Fake::serving(lanes(DEFAULT_MODEL, serving));
+        let provider = linked(&Link::over(Arc::clone(&fake)));
+        let plan = crate::upkeep::Plan {
+            memory: true,
+            embedding: Some(provider.clone()),
+            git: None,
+        };
+        let report =
+            crate::upkeep::run_project(&db, "pj-source", dir.path(), &plan, &|| 1_000).await;
+        assert_eq!(report.memories_embedded, 1);
+        let model = provider.model_id();
+        assert_ne!(old_model.as_ref(), Some(&model));
+        old_model = Some(model.clone());
+        let paraphrase = "routing shipments";
+        let vector = provider.embed_search_query(paraphrase).await.unwrap();
+        let find = |semantic| {
+            db.with_connection(|conn| {
+                search_memories(
+                    conn,
+                    MemoryOwners {
+                        project: None,
+                        workspace: Some("team"),
+                    },
+                    paraphrase,
+                    10,
+                    &Default::default(),
+                    None,
+                    semantic,
+                    None,
+                )
+                .0
+            })
+        };
+        assert!(find(None).is_empty());
+        let hits = find(Some(Semantic {
+            vector: &vector,
+            model_id: &model,
+            chunk_model_id: &model,
+        }));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].content, text);
+        assert_eq!(fake.params("embed.batch")[0]["items"][0]["text"], text);
+    }
+}
+
+#[tokio::test]
+async fn automatic_search_caps_the_deadline_sent_to_synapse() {
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        crate::context_db::ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap(),
+    );
+    let fake = Fake::serving(lanes(DEFAULT_MODEL, [true; 4]));
+    let provider = linked(&Link::over(Arc::clone(&fake)));
+    let session = crate::session::Session::new(
+        &crate::route::Route {
+            session: SessionRef::new("test", "mock", "s"),
+            project: None,
+            workdir: None,
+            agent_id: None,
+        },
+        &SetupRequest::new(
+            "head",
+            ModelRef::new("test", "test"),
+            100_000,
+            1_000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            Vec::new(),
+            1,
+        ),
+        crate::preset::Features {
+            auto_memory: true,
+            ..crate::preset::Features::NONE
+        },
+        Some(db),
+    );
+    let mut settings = crate::pass::Settings {
+        embedding: Some(provider),
+        ..Default::default()
+    };
+    settings.auto_search.enabled = true;
+    settings.auto_search.min_prompt_chars = 1;
+    session
+        .pre_user(
+            &settings,
+            "How do workspace facts reach the semantic search index?",
+            1,
+        )
+        .await;
+    let calls = fake.params("embed.query");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["deadline_ms"], 200);
+}

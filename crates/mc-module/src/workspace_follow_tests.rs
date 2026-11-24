@@ -41,6 +41,45 @@ fn context(workspace: Option<&str>) -> MemoryContext {
 }
 
 #[test]
+fn docs_are_not_reread_for_a_flush_but_update_on_the_next_fold() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ARCHITECTURE.md");
+    std::fs::write(&path, "Original docs").unwrap();
+    let mut session = session_with(None);
+    session.project = Some(Project {
+        id: "pj-a".into(),
+        root: dir.path().display().to_string(),
+    });
+    let settings = Settings::default();
+    session.render_head(&settings);
+    let first = session.next_baseline.take().unwrap();
+    assert!(first.m0.contains("Original docs"));
+    session.baseline = Some(first.clone());
+    session.fold_due = false;
+    std::fs::write(&path, "Updated docs").unwrap();
+
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = reads.clone();
+    crate::project_docs::tests::with_hook(
+        move |_| observed.set(observed.get() + 1),
+        || {
+            session.render_flushed_head_for_test(&settings);
+            assert_eq!(session.next_baseline.as_ref().unwrap().m0, first.m0);
+        },
+    );
+    assert_eq!(reads.get(), 0);
+
+    session.fold_due = true;
+    session.render_head(&settings);
+    assert!(session
+        .next_baseline
+        .as_ref()
+        .unwrap()
+        .m0
+        .contains("Updated docs"));
+}
+
+#[test]
 fn a_session_follows_its_project_to_another_workspace_and_keeps_it_stored() {
     let dir = std::env::temp_dir().join(format!("ck-mc-workspace-follow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -91,6 +130,36 @@ fn a_session_without_a_memory_context_follows_nothing() {
     let mut session = session_with(None);
     assert!(!session.follow_workspace(Some("pj-a"), Some("team".into())));
     assert!(session.memory_context.is_none());
+}
+
+#[test]
+fn the_same_workspace_answer_retries_a_departure_blocked_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mode3.db");
+    let store = Arc::new(crate::store::Store::open(&path).unwrap());
+    let key = SessionRef::new("test", "mock", "s1");
+    let mut session = session_with(Some(Arc::clone(&store)));
+    session.set_memory_context(store.keep_memory_context(&key, context(Some("team"))));
+
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(session.follow_workspace(Some("pj-a"), None));
+    assert!(session.authority.as_ref().unwrap().workspace_id.is_none());
+    assert_eq!(
+        store.memory_context(&key).unwrap().workspace_id.as_deref(),
+        Some("team")
+    );
+    blocker.execute_batch("ROLLBACK").unwrap();
+    // A reply for another project cannot persist a workspace change here.
+    assert!(!session.follow_workspace(Some("pj-b"), None));
+    assert!(!session.follow_workspace(Some("pj-a"), None));
+
+    drop(session);
+    drop(store);
+    let reopened = Arc::new(crate::store::Store::open(&path).unwrap());
+    let mut restored = session_with(Some(Arc::clone(&reopened)));
+    restored.set_memory_context(reopened.memory_context(&key).unwrap());
+    assert!(restored.authority.as_ref().unwrap().workspace_id.is_none());
 }
 
 /// `ctx_search` reads the workspace the session is in now: after its

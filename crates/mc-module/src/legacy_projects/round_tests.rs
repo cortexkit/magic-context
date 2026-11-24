@@ -430,6 +430,36 @@ async fn rounds_stop_once_no_legacy_rows_are_left() {
 }
 
 #[tokio::test]
+async fn discovery_can_finish_while_the_shared_writer_connection_is_busy() {
+    let fixture = Fixture::new();
+    fixture.memory(
+        "dir:/no-longer-present",
+        "An unclaimed memory keeps discovery running.",
+    );
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let db = Arc::clone(&fixture.db);
+    let blocker = std::thread::spawn(move || {
+        db.with_connection(|_| {
+            entered.send(()).unwrap();
+            // Let the test finish even if discovery incorrectly waits for
+            // the writer. Only a completed round sends the release signal.
+            held.recv_timeout(Duration::from_secs(5)).is_ok()
+        })
+    });
+    ready.recv().unwrap();
+    let client = Entorhinal::default();
+    let result = round(&client, &fixture.db, &mut Mover::default()).await;
+    let _ = release.send(());
+    assert!(
+        blocker.join().unwrap(),
+        "discovery waited for the shared writer connection"
+    );
+    assert!(matches!(result, Round::Retry));
+    assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn a_move_into_a_project_wakes_it_once_with_a_higher_revision() {
     let test_bus = crate::bus::tests::TestBus::new();
     let (_store, db, wakes, mut publisher) = crate::memory_changed::tests::watched(&test_bus);

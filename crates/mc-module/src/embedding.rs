@@ -236,6 +236,27 @@ impl Provider {
         }
     }
 
+    /// A query whose caller has a shorter budget than the provider's default.
+    pub(crate) async fn embed_query_with_budget(
+        &self,
+        query: &str,
+        budget: Duration,
+    ) -> Option<Vec<f32>> {
+        match self {
+            Self::Http(http) => {
+                http.query_with_timeout(query, budget.min(http.fetch_timeout))
+                    .await
+                    .0
+            }
+            Self::Synapse(provider) => {
+                provider
+                    .query(query, budget.min(provider.fetch_timeout()))
+                    .await
+                    .0
+            }
+        }
+    }
+
     /// Explicit search has a shorter semantic budget; expiry is a provider
     /// timeout, not cancellation of the keyword search.
     pub async fn embed_search_query(&self, query: &str) -> Option<Vec<f32>> {
@@ -683,7 +704,7 @@ impl RequestFailure {
 /// then reuse its open connections instead of paying a new TCP and TLS
 /// handshake each time. `None` when a client cannot be built; the next
 /// request tries again.
-fn client_for(endpoint: &str) -> Option<reqwest::Client> {
+pub(crate) fn client_for(endpoint: &str) -> Option<reqwest::Client> {
     static CLIENTS: OnceLock<Mutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
     let mut clients = CLIENTS
         .get_or_init(Mutex::default)

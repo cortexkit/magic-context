@@ -113,13 +113,6 @@ impl Session {
         if flush && self.baseline.is_none() {
             return self.head_as_shown("a flush cannot create a baseline");
         }
-        let docs = self
-            .project
-            .as_ref()
-            .map(|project| {
-                crate::project_docs::read_project_docs_canonical(&project.root).rendered_block
-            })
-            .unwrap_or_default();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as i64);
@@ -159,7 +152,7 @@ impl Session {
         let fold_inputs = head::Inputs {
             counter: crate::count::Counter::for_model(Some(&model_key)),
             summaries: &[],
-            docs: &docs,
+            docs: "",
             rows: &rows,
             classes: &classes,
             now_ms: now,
@@ -192,7 +185,18 @@ impl Session {
         // it was folded with, as in the plugin.
         let mut drawn: Option<Option<crate::mural::Mural>> = None;
         let mut folded = |inputs: &head::Inputs| {
-            let chosen = head::chosen_at_fold(inputs);
+            let docs = self
+                .project
+                .as_ref()
+                .map(|project| {
+                    crate::project_docs::read_project_docs_canonical(&project.root).rendered_block
+                })
+                .unwrap_or_default();
+            let inputs = head::Inputs {
+                docs: &docs,
+                ..*inputs
+            };
+            let chosen = head::chosen_at_fold(&inputs);
             let mural = drawn.get_or_insert_with(|| {
                 self.draw_mural(
                     settings,
@@ -202,7 +206,7 @@ impl Session {
                 )
             });
             let mut base = head::fold_with(
-                inputs,
+                &inputs,
                 &chosen.shown,
                 mural.as_ref().map(|mural| mural.content_hash.as_str()),
             );
@@ -322,6 +326,11 @@ impl Session {
             _ => Arc::new(next),
         });
         ops
+    }
+
+    #[cfg(test)]
+    pub(super) fn render_flushed_head_for_test(&mut self, settings: &Settings) -> Vec<EditOp> {
+        self.render_head_for(settings, true)
     }
 
     /// The days the served `m[1]` heads its summaries with, which a fold
