@@ -56,7 +56,7 @@ impl Health {
             .with_connection(|conn| {
                 conn.query_row(
                     "SELECT (SELECT COUNT(*) FROM replica_outbox
-                              WHERE state IN ('pending', 'sending', 'too_large', 'unaddressable', 'raised')),
+                              WHERE state IN ('pending', 'sending', 'too_large', 'unaddressable')),
                             held_epoch, held_since FROM replica_state WHERE id = 1",
                     [],
                     |row| {
