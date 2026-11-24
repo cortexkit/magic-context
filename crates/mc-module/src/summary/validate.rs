@@ -692,7 +692,7 @@ pub fn validate_historian_output(
         .map(|compartment| compartment.start_message)
         .chain(parsed.unprocessed_from)
         .find(|&start| {
-            // If prior publication stopped just before the frame, the first
+            // If prior publication stopped just before a message with mid-turn words, the first
             // compartment has to start there to keep coverage contiguous.
             start != chunk.start_index
                 && chunk
