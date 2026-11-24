@@ -128,6 +128,38 @@ async fn user_commands_refused_flush_saves_the_runners_move_floor() {
 }
 
 #[tokio::test]
+async fn refused_flush_keeps_the_numbers_floor_the_runner_reports() {
+    let (mut session, client, settings) = ready();
+    session.features.summarizer = true;
+    *client.refuse.lock().unwrap() = true;
+    *client.refusal.lock().unwrap() = Some(ViewRefusal::CutBeforeNumbers {
+        unknown_through: "old".into(),
+    });
+    let p = preview(&mut session, &client, &settings, "flush").await;
+    assert!(p.available, "{p:?}");
+    let request = wire::ModuleRunRequest::new(
+        preview_request(&session, "flush"),
+        p.version,
+        "refused-flush-numbers-floor",
+    );
+    assert_eq!(
+        session
+            .command_run(&client, &settings, &request)
+            .await
+            .unwrap()
+            .outcome,
+        "failed"
+    );
+    assert_eq!(
+        session.numbers_refused,
+        Some(MoveFloor {
+            ordinal: 1,
+            mid: "old".into()
+        })
+    );
+}
+
+#[tokio::test]
 async fn user_commands_preview_keeps_the_complete_saved_document_byte_identical() {
     for already_covered in [false, true] {
         let (mut session, client, settings) = ready();

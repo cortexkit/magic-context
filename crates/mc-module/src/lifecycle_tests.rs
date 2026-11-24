@@ -2485,3 +2485,466 @@ async fn lifecycle_a_quiet_session_is_freed_whatever_a_failed_read_or_refusal_le
         );
     }
 }
+
+#[tokio::test]
+async fn adopting_an_older_view_restores_only_stamps_it_does_not_cover() {
+    for older_view in [false, true] {
+        let (mut session, client, _, _, settings) = fixture();
+        let entries: Vec<_> = (1..=6).map(|n| text(n, &format!("m{n}"))).collect();
+        session.index.extend(entries.clone());
+        *client.entries.lock().unwrap() = entries;
+        let mut confirmed = Vec::new();
+        for tag in ["1", "2"] {
+            session
+                .ctx_reduce(&client, &serde_json::json!({ "drop": tag }))
+                .await
+                .unwrap();
+            let view = session.build(&settings, None, false, None).0.unwrap();
+            assert!(session.publish(&client, view.clone()).await);
+            session.settle_unconfirmed(Some(&view.applied()), &[]);
+            confirmed.push(view);
+        }
+        session
+            .ctx_reduce(&client, &serde_json::json!({ "drop": "3" }))
+            .await
+            .unwrap();
+        let pending = session.build(&settings, None, false, None).0.unwrap();
+        assert!(session.publish(&client, pending).await);
+        assert!(session.queued.is_empty());
+        let v1 = older_view.then(|| confirmed.remove(0));
+        *client.applied.lock().unwrap() =
+            Some(AppliedViewAnswer::new().with_applied_by(crate::MODULE_ID));
+        client.applied.lock().unwrap().as_mut().unwrap().view = v1.clone();
+        session.adopt_runner_view(&client).await;
+        assert_eq!(session.latest, v1);
+        assert!(session.unconfirmed.is_empty());
+        assert_eq!(
+            session.queued,
+            BTreeSet::from([("m3".to_owned(), "p".to_owned())])
+        );
+    }
+}
+
+fn keep_call(n: u64, name: &str) -> Entry {
+    let tool = cortexkit_role_compaction::part::ToolPart::new(
+        format!("call-{n}"),
+        name,
+        serde_json::json!({"tags": "", "note": "continue"}),
+        cortexkit_role_compaction::part::ToolStatus::Completed,
+    );
+    Entry::new(
+        n,
+        format!("keep-{n}"),
+        Role::Assistant,
+        n,
+        vec![crate::neutral::part(
+            "k",
+            Some(n),
+            cortexkit_role_compaction::part::Seal::None,
+            PartBody::Tool(tool),
+        )],
+    )
+}
+
+fn assistant_text(n: u64, name: &str) -> Entry {
+    let mut entry = text(n, name);
+    entry.role = Role::Assistant;
+    entry
+}
+
+#[tokio::test]
+async fn pending_keep_waits_for_its_call_during_a_permitted_ride() {
+    let (mut session, client, _, _, settings) = fixture();
+    let mut entries = vec![
+        text(1, "task"),
+        assistant_text(2, "drop me"),
+        assistant_text(3, "keep me"),
+    ];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries.clone();
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"3","note":"continue"}),
+        )
+        .await
+        .unwrap();
+    let ride = RideRequest::new(
+        vec![RideCause::EffortChange],
+        1000,
+        session.conditions.clone(),
+    );
+    assert!(session.ride(&settings, &ride).is_none());
+    assert!(
+        session.pending_keep.is_some(),
+        "the call has not appeared in the index"
+    );
+    entries.push(keep_call(4, "mcp_ctx_keep"));
+    *client.entries.lock().unwrap() = entries.clone();
+    let mut request = notice(&session, 1, entries.last().map(cursor));
+    request.entries = entries;
+    session.notice(&client, &settings, request).await;
+    let offered = client.offered.lock().unwrap();
+    assert_eq!(offered.len(), 1);
+    assert!(view_edits_message(&offered[0], "drop me"));
+    assert!(!view_edits_message(&offered[0], "keep me"));
+}
+
+#[tokio::test]
+async fn pending_keep_uses_an_indexed_call_even_if_its_arguments_differ() {
+    let (mut session, client, _, _, settings) = fixture();
+    session.index.extend([
+        text(1, "task"),
+        assistant_text(2, "drop me"),
+        assistant_text(3, "keep me"),
+        keep_call(4, "ctx_keep"),
+    ]);
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"3","note":"continue"}),
+        )
+        .await
+        .unwrap();
+    let ride = RideRequest::new(
+        vec![RideCause::EffortChange],
+        1000,
+        session.conditions.clone(),
+    );
+    let view = session
+        .ride(&settings, &ride)
+        .expect("the indexed call can anchor the keep");
+    assert!(view_edits_message(&view, "drop me"));
+    assert!(!view_edits_message(&view, "keep me"));
+    assert!(session.pending_keep.is_none());
+}
+
+#[tokio::test]
+async fn pending_keep_uses_its_boundary_after_notice_growth_without_a_new_call() {
+    let (mut session, client, _, _, settings) = fixture();
+    let mut entries = vec![
+        text(1, "task"),
+        assistant_text(2, "drop me"),
+        assistant_text(3, "keep me"),
+        keep_call(4, "ctx_keep"),
+        text(5, "already indexed"),
+    ];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries.clone();
+    session.handled_keep_call = Some(4);
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"3","note":"continue"}),
+        )
+        .await
+        .unwrap();
+    let ride = RideRequest::new(
+        vec![RideCause::EffortChange],
+        1000,
+        session.conditions.clone(),
+    );
+    assert!(session.ride(&settings, &ride).is_none());
+    let unchanged = notice(&session, 1, entries.last().map(cursor));
+    session.notice(&client, &settings, unchanged).await;
+    assert!(
+        client.offered.lock().unwrap().is_empty(),
+        "an unchanged notice has not passed the wait boundary"
+    );
+    let new = assistant_text(6, "new step");
+    entries.push(new.clone());
+    *client.entries.lock().unwrap() = entries.clone();
+    let mut grown = notice(&session, 2, Some(cursor(&new)));
+    grown.entries = vec![new];
+    session.notice(&client, &settings, grown).await;
+    let offered = client.offered.lock().unwrap();
+    let view = offered
+        .last()
+        .expect("a grown notice must not leave the keep waiting");
+    assert!(view_edits_message(view, "drop me"));
+    assert!(!view_edits_message(view, "keep me"));
+    assert!(!view_edits_message(view, "new step"));
+    assert!(session.pending_keep.is_none());
+}
+
+#[test]
+fn pending_keep_waits_when_a_ride_has_to_reload_the_transcript() {
+    let (mut session, _, _, _, settings) = fixture();
+    session.cut = Some(2);
+    session.index = Index::starting_at(3);
+    session
+        .index
+        .extend([assistant_text(3, "older"), keep_call(4, "ctx_keep")]);
+    session.index_ready = true;
+    session.pending_keep = Some(BTreeSet::new());
+    session.summaries_missing = Some(vec![1]);
+    let ride = RideRequest::new(
+        vec![RideCause::ModelChange],
+        1000,
+        session.conditions.clone(),
+    );
+    assert!(session.ride(&settings, &ride).is_none());
+    assert!(!session.index_ready);
+    assert_eq!(session.pending_keep, Some(BTreeSet::new()));
+}
+
+fn view_edits_message(view: &View, name: &str) -> bool {
+    view.edits.iter().any(|edit| {
+        matches!(&edit.op,
+        EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } if mid == name)
+    })
+}
+
+#[tokio::test]
+async fn refused_keep_does_not_overwrite_a_newer_acknowledged_keep() {
+    let (mut session, client, _, _, settings) = fixture();
+    let mut entries = vec![
+        text(1, "task"),
+        assistant_text(2, "old choice"),
+        assistant_text(3, "new choice"),
+    ];
+    session.index.extend(entries.clone());
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"2","note":"first"}),
+        )
+        .await
+        .unwrap();
+    entries.push(keep_call(4, "ctx_keep"));
+    session.index.extend(entries.clone());
+    let old = session
+        .ride(
+            &settings,
+            &RideRequest::new(
+                vec![RideCause::EffortChange],
+                1000,
+                session.conditions.clone(),
+            ),
+        )
+        .unwrap();
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"3","note":"second"}),
+        )
+        .await
+        .unwrap();
+    entries.push(keep_call(5, "ctx_keep"));
+    *client.entries.lock().unwrap() = entries.clone();
+    let refusal = ViewRefusal::StaleVersion {
+        version: old.version,
+        latest: 0,
+    };
+    let mut request = notice(&session, 1, entries.last().map(cursor));
+    request.entries = entries;
+    request.events = vec![Event::ViewRefused {
+        version: old.version,
+        refusal,
+    }];
+    session.notice(&client, &settings, request).await;
+    let offered = client.offered.lock().unwrap();
+    let view = offered.last().expect("the second keep was offered");
+    assert!(view_edits_message(view, "old choice"));
+    assert!(!view_edits_message(view, "new choice"));
+}
+
+#[tokio::test]
+async fn restamping_a_failed_automatic_part_still_lands() {
+    let (mut session, client, _, _, settings) = fixture();
+    session
+        .index
+        .extend([text(1, "task"), text(2, "requested"), text(3, "latest")]);
+    session
+        .failed_parts
+        .insert(("requested".into(), "p".into()));
+    let reply = session
+        .ctx_reduce(&client, &serde_json::json!({"drop":"2"}))
+        .await
+        .unwrap();
+    assert!(reply.contains("1 tag stamped"));
+    let view = session
+        .build(&settings, None, false, None)
+        .0
+        .expect("the explicit retry lands");
+    assert!(view_edits_message(&view, "requested"));
+}
+
+#[tokio::test]
+async fn stamped_images_and_other_files_leave_the_view() {
+    for mime in ["image/png", "text/plain"] {
+        let (mut session, client, _, _, settings) = fixture();
+        let mut attachment = text(2, "attachment");
+        attachment.parts[0].body = PartBody::File(
+            cortexkit_role_compaction::part::FileMedia::inline(mime, Some(40_000)),
+        );
+        let entries = vec![text(1, "task"), attachment, text(3, "latest")];
+        *client.entries.lock().unwrap() = entries.clone();
+        session.index.extend(entries);
+        assert!(
+            session.build(&settings, None, false, None).0.is_none(),
+            "no automatic drop"
+        );
+        let reply = session
+            .ctx_reduce(&client, &serde_json::json!({"drop":"2"}))
+            .await
+            .unwrap();
+        assert!(reply.contains("1 tag stamped"));
+        let view = session
+            .build(&settings, None, false, None)
+            .0
+            .expect("file stamp lands");
+        assert!(view_edits_message(&view, "attachment"));
+        assert!(view.edits.iter().any(|edit| matches!(&edit.op,
+            EditOp::Replace { mid, field, value, .. }
+                if mid == "attachment" && field == "text" && value == "[dropped §2§]")));
+        session.accept(view);
+        let recovered = session
+            .tool(
+                &client,
+                &settings,
+                "ctx_expand",
+                &serde_json::json!({"message":2}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            recovered.contains(mime),
+            "the original attachment metadata is still available"
+        );
+    }
+}
+
+#[tokio::test]
+async fn keep_leaves_user_notices_when_the_runner_cannot_mark_them() {
+    let (mut session, client, _, _, settings) = fixture();
+    let notice = text(2, "person's words")
+        .with_notice(cortexkit_role_compaction::read::NoticeOrigin::new("host"));
+    let reminder = text(3, "reminder").with_notice(
+        cortexkit_role_compaction::read::NoticeOrigin::new(crate::MODULE_ID),
+    );
+    session.index.extend([
+        text(1, "task"),
+        notice,
+        reminder,
+        assistant_text(4, "discard"),
+    ]);
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"1","note":"continue"}),
+        )
+        .await
+        .unwrap();
+    session.index.extend([keep_call(5, "ctx_keep")]);
+    let ride = RideRequest::new(
+        vec![RideCause::EffortChange],
+        1000,
+        session.conditions.clone(),
+    );
+    let view = session
+        .ride(&settings, &ride)
+        .expect("the keep has work to do");
+    assert!(view_edits_message(&view, "discard"));
+    assert!(view_edits_message(&view, "reminder"));
+    assert!(!view_edits_message(&view, "person's words"));
+}
+
+#[tokio::test]
+async fn over_limit_keep_selects_an_unkept_fallback_instead_of_stopping_at_the_kept_result() {
+    use cortexkit_role_compaction::part::{ToolPart, ToolStatus};
+    let (mut session, client, _, _, settings) = fixture();
+    let result = |n, mid, bytes| {
+        let tool = ToolPart::new(
+            format!("call-{n}"),
+            "build",
+            serde_json::json!({}),
+            ToolStatus::Completed,
+        )
+        .with_output_bytes(bytes);
+        Entry::new(
+            n,
+            mid,
+            Role::Assistant,
+            n,
+            vec![Part::new("p", PartBody::Tool(tool)).with_tag(n)],
+        )
+    };
+    session
+        .index
+        .extend([text(1, "task"), result(2, "kept", 60_000)]);
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"2","note":"continue"}),
+        )
+        .await
+        .unwrap();
+    session.index.extend([
+        keep_call(3, "ctx_keep"),
+        result(4, "fallback", 20_000),
+        text(5, "latest"),
+    ]);
+    let ride = RideRequest::new(vec![RideCause::OverLimit], 1000, session.conditions.clone())
+        .with_request_tokens(100_000);
+    let view = session
+        .ride(&settings, &ride)
+        .expect("the fallback result can be removed");
+    assert!(view_edits_message(&view, "fallback"));
+    assert!(!view_edits_message(&view, "kept"));
+}
+
+#[tokio::test]
+async fn prefixed_reduce_calls_are_recognized_as_self_stamps() {
+    let (mut session, client, _, _, _) = fixture();
+    session.index.extend([
+        text(1, "task"),
+        keep_call(2, "MCP_ctx_reduce"),
+        text(3, "latest"),
+    ]);
+    let result = session
+        .ctx_reduce(&client, &serde_json::json!({"drop":"2"}))
+        .await
+        .unwrap();
+    assert!(
+        session.queued.is_empty(),
+        "self-stamp does not queue a drop: {result}"
+    );
+}
+
+#[test]
+fn prefixed_keep_call_anchors_the_same_edits_as_a_plain_call() {
+    use cortexkit_role_compaction::read::Role;
+    for name in ["ctx_keep", "MCP_ctx_keep"] {
+        let mut index = Index::default();
+        let mut discarded = text(2, "discarded");
+        discarded.role = Role::Assistant;
+        index.extend([text(1, "task"), discarded, keep_call(3, name)]);
+        let ctx = lanes::Context {
+            index: &index,
+            edited: &lanes::Edited::default(),
+            protected_tools: &std::collections::BTreeMap::new(),
+            keep_first_message: true,
+            signed_floor: None,
+        };
+        assert_eq!(
+            lanes::keep_drops(&ctx, &BTreeSet::new(), None),
+            vec![(("discarded".into(), "p".into()), lanes::Shape::Whole)],
+            "{name}"
+        );
+    }
+}

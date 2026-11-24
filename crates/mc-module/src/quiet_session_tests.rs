@@ -135,15 +135,21 @@ struct Fixture {
 
 impl Fixture {
     async fn new(preset: &str, hold: bool) -> Self {
+        Self::configured(preset, hold, None).await
+    }
+
+    async fn configured(preset: &str, hold: bool, user: Option<&str>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
         let store = Store::open(&dir.path().join("mode3.db")).unwrap();
-        let module = Module::new(
-            Client::default(),
-            Settings::default(),
-            Some(db),
-            Some(store),
-        );
+        let config = if let Some(user) = user {
+            let path = dir.path().join("magic-context.jsonc");
+            std::fs::write(&path, user).unwrap();
+            Config::Files(crate::config::Loader::with_user_path(path))
+        } else {
+            Settings::default().into()
+        };
+        let module = Module::new(Client::default(), config, Some(db), Some(store));
         let route = Route {
             session: SessionRef::new("runner", "mock", "s1"),
             project: None,

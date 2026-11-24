@@ -7,6 +7,77 @@
 use super::*;
 use cortexkit_role_compaction::ride::RideCause;
 
+#[tokio::test(start_paused = true)]
+async fn quiet_worker_retries_its_last_failed_checkpoint_without_a_new_job() {
+    let f = Fixture::new("worker", false).await;
+    f.drain_quiet_prerequisites().await;
+    let db = rusqlite::Connection::open(f._dir.path().join("mode3.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL, 'checkpoint test failure'); END;").unwrap();
+    let reply = f
+        .module
+        .tool(&f.route, "ctx_reduce", json!({"drop":"2"}))
+        .await
+        .unwrap();
+    assert!(reply.contains("1 tag stamped"));
+    settle().await;
+    let store = f.module.inner.store.as_ref().unwrap();
+    assert!(
+        store.load(f.key()).unwrap().queued.is_empty(),
+        "the injected write failed"
+    );
+    db.execute_batch("DROP TRIGGER fail_checkpoint").unwrap();
+    wait_past_quiet_deadline(QUIET_AFTER).await;
+    assert_eq!(
+        store.load(f.key()).unwrap().queued,
+        [("b".into(), "p".into())].into()
+    );
+    assert!(
+        f.quiet(),
+        "the checkpoint retried and the live worker was released"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn worker_uses_new_window_for_the_first_notice_or_ride() {
+    for via_notice in [true, false] {
+        let f = Fixture::configured(
+            "worker",
+            true,
+            Some(r#"{"execute_threshold_tokens":{"default":50000},"protected_tokens":4000}"#),
+        )
+        .await;
+        let mut newest = text(5, "long tail");
+        newest.parts[0].body = PartBody::Text {
+            text: "x".repeat(24_000).into(),
+        };
+        f.notice(1, Some(newest), Some(20_000)).await;
+        assert!(f
+            .module
+            .tool(&f.route, "ctx_reduce", json!({"drop":"2"}))
+            .await
+            .unwrap()
+            .contains("1 tag stamped"));
+        let mut grown = f.conditions.clone();
+        grown.context_window = 200_000;
+        grown.statement_seq = Some(4);
+        grown.last_prompt_tokens = Some(60_000);
+        let output = if via_notice {
+            let mut notice = NoticeRequest::new(2, grown);
+            notice.newest = f.client().entries.lock().unwrap().last().map(cursor);
+            f.module.notice(f.key(), notice).unwrap();
+            f.module.idle_foreground(f.key()).await.unwrap();
+            f.client().offered.lock().unwrap().last().cloned()
+        } else {
+            let ride = RideRequest::new(vec![RideCause::CacheExpired], 1_500, grown);
+            match f.module.ride(f.key(), ride).await.unwrap() {
+                RideAnswer::View { view, .. } => Some(view),
+                _ => None,
+            }
+        };
+        assert!(output.is_some(), "the 50k absolute threshold applies to the first pass with the new window (notice: {via_notice})");
+    }
+}
+
 /// The Setup the fixture sent, sent again under the same statement epoch
 /// with the stamp `seq`: a runner that sets its sessions up again, as after
 /// it restarted.

@@ -40,7 +40,7 @@ use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 
 use cortexkit_role_compaction::part::PartBody;
-use cortexkit_role_compaction::read::{Entry, Role};
+use cortexkit_role_compaction::read::Entry;
 use cortexkit_role_llm_runner::delivery_order::{
     template_digest, Mode, PartRef, PlanSender, Slot, Template, TemplateUse,
 };
@@ -290,6 +290,7 @@ pub fn measure(
 ) -> Measurement {
     let _timing = crate::notice_cost_timing::span("nudges.measure");
     let protected_tools = lanes::protected_tool_parts(context.index, context.protected_tools);
+    let stamp_room = lanes::StampRoom::new(context.index);
     let first = context
         .keep_first_message
         .then(|| {
@@ -333,11 +334,15 @@ pub fn measure(
             if protected || queued.contains(&key) || Some(entry.mid.as_str()) == first {
                 continue;
             }
-            measurement.u += weight;
+            let reclaimable = stamp_room.tokens(entry, part, tag, weight);
+            if reclaimable == 0 {
+                continue;
+            }
+            measurement.u += reclaimable;
             if let Some(tool) = tool {
                 measurement.outputs += 1;
                 let name = lanes::normalize_tool_name(&tool.name);
-                if weight >= HINT_MIN_TOKENS
+                if tokens::tool_result(part, tool) >= HINT_MIN_TOKENS
                     && !name.starts_with("ctx_")
                     && !HINT_EXCLUDED_TOOLS.contains(&name.as_str())
                 {
@@ -494,13 +499,7 @@ impl State {
 pub fn person_turns(entries: &[Entry]) -> u64 {
     entries
         .iter()
-        .filter(|entry| {
-            entry.role == Role::User
-                && entry.notice.is_none()
-                && crate::neutral::host_frame_words(entry).is_none()
-                && (entry.host_parts.is_empty()
-                    || crate::neutral::authored_parts(entry).next().is_some())
-        })
+        .filter(|entry| lanes::starts_user_turn(entry))
         .count() as u64
 }
 
@@ -534,6 +533,7 @@ mod tests {
     use super::*;
     use cortexkit_role_compaction::part::{Seal, ToolPart, ToolStatus};
     use cortexkit_role_compaction::read::NoticeOrigin;
+    use cortexkit_role_compaction::read::Role;
     use cortexkit_role_compaction::tokens::PartTokens;
 
     fn counted_entry(number: u64, role: Role, body: PartBody, count: PartTokens) -> Entry {
@@ -609,7 +609,7 @@ mod tests {
         let measurement = measure_entries(entries, &lanes::Edited::default());
 
         assert_eq!(measurement.t, 68_020);
-        assert_eq!(measurement.u, 63_020);
+        assert_eq!(measurement.u, 63_000);
         assert_eq!(measurement.level(), Some(Level::Urgent));
         assert!(measurement.at_ceiling());
         assert_eq!(measurement.outputs, 2);
@@ -641,7 +641,7 @@ mod tests {
         let measurement = measure_entries(entries, &lanes::Edited::default());
         assert_eq!(measurement.t, 103_030);
         assert_eq!(measurement.hints, [PartRef::new("m4", "p")]);
-        assert_eq!(measurement.u, 32_010);
+        assert_eq!(measurement.u, 32_000);
         assert_eq!(measurement.outputs, 1);
     }
 
@@ -673,6 +673,57 @@ mod tests {
         assert_eq!(measurement.t, 40_300);
         assert_eq!(measurement.u, 200);
         assert_eq!(measurement.level(), None);
+    }
+
+    #[test]
+    fn reminder_excludes_running_calls_and_input_that_a_stamp_cannot_remove() {
+        let tool = |n, name, status, input, output| {
+            counted_entry(
+                n,
+                Role::Assistant,
+                PartBody::Tool(ToolPart::new(format!("c{n}"), name, json!({}), status)),
+                PartTokens::tool(input, output),
+            )
+        };
+        let mut entries = vec![
+            counted_text(1, Role::User, "Task", 1_000),
+            tool(2, "read", ToolStatus::Completed, 5_000, 50),
+        ];
+        entries.extend((3..=23).map(|n| tool(n, "read", ToolStatus::Completed, 0, 0)));
+        entries.extend([
+            tool(24, "read", ToolStatus::Completed, 55_000, 10),
+            tool(25, "read", ToolStatus::Running, 56_000, 0),
+            counted_text(26, Role::User, "Peer note", 200).with_notice(NoticeOrigin::new("peer")),
+            tool(27, "read", ToolStatus::Completed, 57_000, 15),
+        ]);
+        let measurement = measure_entries(entries, &lanes::Edited::default());
+        assert_eq!(measurement.t, 174_275);
+        assert_eq!(
+            measurement.u, 5_275,
+            "old whole call, recent and final results, and the notice"
+        );
+        assert!(
+            measurement.hints.is_empty(),
+            "none has a substantial output"
+        );
+        assert!(!measurement.at_ceiling());
+    }
+
+    #[test]
+    fn reminder_cadence_counts_user_inputs_not_user_role_frames() {
+        let entries = [
+            counted_text(1, Role::User, "Task", 50),
+            Entry::new(2, "empty", Role::User, 0, vec![]),
+            counted_entry(
+                3,
+                Role::User,
+                PartBody::Tool(ToolPart::new("c", "read", json!({}), ToolStatus::Completed)),
+                PartTokens::tool(0, 100),
+            ),
+            counted_text(4, Role::User, "Peer update", 100).with_notice(NoticeOrigin::new("peer")),
+            counted_text(5, Role::User, "Worker brief", 100),
+        ];
+        assert_eq!(person_turns(&entries), 2);
     }
 
     fn at(u: u64, t: u64) -> Measurement {

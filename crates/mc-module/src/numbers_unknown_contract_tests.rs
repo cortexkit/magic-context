@@ -398,6 +398,34 @@ async fn review_probe_over_limit_reselects_after_cut_refusal() {
 }
 
 #[tokio::test]
+async fn confirmed_numbers_only_cut_does_not_rebuild_on_a_warm_notice() {
+    let dir = scratch("confirmed-numbers-only-cut");
+    let (_, marked_notice) = transition();
+    let mut entries = vec![marked_notice];
+    entries.extend((2..=6).map(|n| text(n, &format!("m{n}"))));
+    let newest = entries.last().map(cursor);
+    let (mut session, client, settings) = head(&dir, entries, &[]).await;
+    assert!(session.summary_due(&settings).is_none());
+    let view = session.build(&settings, None, false, None).0.unwrap();
+    assert_eq!(cut_through(&view), Some("message-a"));
+    session.accept(view.clone());
+    for seq in 1..=2 {
+        if seq == 2 {
+            session.queued.insert(("m4".into(), "p".into()));
+        }
+        let mut request = notice(&session, seq, newest.clone());
+        request.conditions.last_prompt_tokens = Some(10_000);
+        request.conditions.last_prompt_view = Some(view.version);
+        request.applied_view = Some(view.applied());
+        session.notice(&client, &settings, request).await;
+    }
+    assert!(client.offered.lock().unwrap().is_empty());
+    assert!(session.queued.contains(&("m4".into(), "p".into())));
+    assert_eq!(session.cut, None, "no summary backs the numbers-only cut");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn review_probe_numbers_only_cut_preserves_pending_stamp_on_restore() {
     let dir = scratch("coverage-cut");
     let (_, marked_notice) = transition();

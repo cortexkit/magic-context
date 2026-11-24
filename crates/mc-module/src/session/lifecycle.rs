@@ -85,6 +85,8 @@ impl Session {
             failed_parts: BTreeSet::new(),
             keep_requested: false,
             pending_keep: None,
+            pending_keep_after: None,
+            handled_keep_call: None,
             seq: 0,
             summaries: Summaries::default(),
             summaries_unread: false,
@@ -284,11 +286,22 @@ impl Session {
     /// What the session's settings depend on: its folder, its model
     /// as `provider/model`, and its usable window.
     pub fn config_inputs(&self) -> (Option<&str>, String, u64) {
-        let model = &self.conditions.model;
+        self.config_inputs_for(None)
+    }
+
+    /// Resolve settings for the geometry this job will actually take.
+    pub(crate) fn config_inputs_for(
+        &self,
+        incoming: Option<&Conditions>,
+    ) -> (Option<&str>, String, u64) {
+        let conditions = incoming
+            .filter(|conditions| self.standing(conditions) == Some(Standing::Current))
+            .unwrap_or(&self.conditions);
+        let model = &conditions.model;
         (
             self.workdir.as_deref(),
             format!("{}/{}", model.provider, model.model),
-            crate::pass::usable_window(&self.conditions),
+            crate::pass::usable_window(conditions),
         )
     }
 
@@ -358,6 +371,8 @@ impl Session {
             self.conditions = conditions;
         }
         self.pending_keep = durable.pending_keep;
+        self.pending_keep_after = None;
+        self.handled_keep_call = None;
         self.head_stale = durable.head_stale;
         self.marker_possible = durable.marker_possible;
         self.reminder_counter = durable.reminder_counter;
@@ -643,7 +658,8 @@ impl Session {
         // floor too.
         self.load_move_floor(client).await;
         self.judge_acceptance_afresh();
-        self.offer_unconfirmed_again(client).await;
+        self.offer_unconfirmed_again(client, StatedView::Now(request.applied_view.as_ref()))
+            .await;
         let lost = self.runner_lost_view_at_setup(request.applied_view.as_ref(), applied_before);
         let Some(forget_from) = forget_from else {
             self.index_ready = false;
@@ -674,7 +690,13 @@ impl Session {
         // After the read, so the cut message of the view the runner applies
         // is in the index.
         if self.runner_differs(request.applied_view.as_ref()) {
-            self.adopt_runner_view(client).await;
+            if request.applied_view.is_none() {
+                // Setup already tells us there is no applied view to read.
+                self.install_applied_view(client, AppliedViewAnswer::new())
+                    .await;
+            } else {
+                self.adopt_runner_view(client).await;
+            }
             if !self.index_ready {
                 return;
             }
@@ -763,15 +785,7 @@ impl Session {
             return;
         }
         match applied {
-            // The Setup states that the runner applies no view, so a view
-            // that couldn't be read back is none.
-            None => {
-                if self.latest_unknown {
-                    self.latest_unknown = false;
-                    self.latest = None;
-                }
-                self.lost_view_due = true;
-            }
+            None => self.lost_view_due = true,
             Some(_)
                 if self.latest_unknown || (self.latest.is_none() && self.newest_applied != 0) =>
             {

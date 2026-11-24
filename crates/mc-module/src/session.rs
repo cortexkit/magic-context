@@ -15,8 +15,8 @@ use cortexkit_role_compaction::ride::{RideCause, RideRequest};
 use cortexkit_role_compaction::rules::RuleBreak;
 use cortexkit_role_compaction::setup::SetupRequest;
 use cortexkit_role_compaction::view::{
-    AppliedView, ApplyViewAnswer, ApplyViewRequest, EditOp, InsertedImage, View, ViewRefusal,
-    MAX_VIEW_BYTES,
+    AppliedView, AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, EditOp, InsertedImage, View,
+    ViewRefusal, MAX_VIEW_BYTES,
 };
 use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, TemplateUse};
 use cortexkit_role_llm_runner::send::SendRequest;
@@ -204,6 +204,11 @@ pub struct Session {
     /// What a `ctx_keep` call asked to keep. The next notice builds the view
     /// that keeps only that, whatever the usage: the model asked for it.
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
+    /// When the last indexed keep call was already handled, wait for the
+    /// new call or a notice that advances beyond the transcript seen then.
+    pending_keep_after: Option<KeepWait>,
+    /// The last indexed call whose `ctx_keep` selection we already handled.
+    handled_keep_call: Option<u64>,
     /// The highest notice number handled.
     seq: u64,
     /// The session's summaries, oldest first.
@@ -429,6 +434,11 @@ pub struct Unconfirmed {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     cut_covered: Vec<lanes::PartKey>,
     before: Before,
+    /// The applied view reported just before a retry handed this view over.
+    /// A missing inner view means the runner reported applying none. This
+    /// differs from the rollback base when the runner lost or restored a view.
+    #[serde(skip)]
+    reoffered_from: Option<Option<AppliedView>>,
     /// The ordinal of the newest entry the index held when the view was
     /// built. A refusal naming a part beyond it names an entry the view
     /// could not have known.
@@ -486,6 +496,12 @@ pub struct Unconfirmed {
     handed_over_ms: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeepWait {
+    call_ordinal: u64,
+    indexed_through: u64,
+}
+
 /// The state a view's acceptance replaced.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Before {
@@ -511,6 +527,8 @@ struct Before {
     summary_unshown: bool,
     #[serde(default)]
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
+    #[serde(skip)]
+    pending_keep_after: Option<KeepWait>,
     /// Left out of the saved text while there is none, so rows saved before
     /// it existed and rows of runners that send no reading don't change.
     #[serde(default, skip_serializing_if = "Option::is_none")]

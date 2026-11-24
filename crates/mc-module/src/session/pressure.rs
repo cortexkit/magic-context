@@ -11,17 +11,20 @@ impl Session {
         }
         // Accepted views can wait for the next step. Until the runner says
         // it applied one, its drops cannot release the thinking hold.
-        let view = self
-            .latest
+        let view = self.applied_copy()?;
+        let rendered = self.rendered_view(Some(view))?;
+        Some(lanes::Edited::of(Some(&rendered), &self.index, None))
+    }
+
+    pub(super) fn applied_copy(&self) -> Option<&View> {
+        self.latest
             .iter()
             .chain(
                 self.unconfirmed
                     .iter()
                     .filter_map(|p| p.before.latest.as_ref()),
             )
-            .find(|view| view.version == self.newest_applied)?;
-        let rendered = self.rendered_view(Some(view))?;
-        Some(lanes::Edited::of(Some(&rendered), &self.index, None))
+            .find(|view| view.version == self.newest_applied)
     }
 
     pub(super) fn signed_thinking_held(&self, pressure: &Conditions, settings: &Settings) -> bool {

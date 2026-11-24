@@ -569,6 +569,19 @@ impl Session {
             answer.push_str(&format!(" Not found: {}.", list(&missing)));
         }
         self.pending_keep = Some(kept);
+        // The runner may index the call before invoking the tool. Its stored
+        // arguments can differ from the invocation; only a call already used
+        // by an earlier keep needs to wait for a new boundary.
+        self.pending_keep_after = lanes::keep_call(&self.index)
+            .filter(|entry| self.handled_keep_call == Some(entry.ordinal))
+            .map(|entry| KeepWait {
+                call_ordinal: entry.ordinal,
+                indexed_through: self
+                    .index
+                    .entries()
+                    .last()
+                    .map_or(entry.ordinal, |last| last.ordinal),
+            });
         Ok(answer)
     }
 
@@ -653,7 +666,11 @@ impl Session {
             let (entry, part) = find(tag).expect("all tags resolved");
             if crate::neutral::protects_from_explicit_drop(entry) {
                 skipped.push(format!("§{tag}§ is a kept notice from the person"));
-            } else if matches!(&part.body, PartBody::Tool(tool) if tool.name.eq_ignore_ascii_case("ctx_reduce"))
+            } else if matches!(&part.body, PartBody::File(_))
+                && crate::neutral::protects_from_automatic_reclaim(entry)
+            {
+                skipped.push(format!("§{tag}§ is a file in a protected message"));
+            } else if matches!(&part.body, PartBody::Tool(tool) if lanes::normalize_tool_name(&tool.name) == "ctx_reduce")
             {
                 self_stamps += 1;
             } else if entry.role == cortexkit_role_compaction::read::Role::Assistant

@@ -237,9 +237,9 @@ async fn audit_ctx_keep_must_win_over_automatic_age_reclaim() {
         "read",
         &"source still needed\n".repeat(200),
     );
-    for _ in 0..3 {
-        tool(&mut transcript, "read", "short result");
-    }
+    let expendable: Vec<_> = (0..3)
+        .map(|_| tool(&mut transcript, "read", "short result"))
+        .collect();
     for prompt in [
         "Explain it",
         "Check it",
@@ -247,6 +247,9 @@ async fn audit_ctx_keep_must_win_over_automatic_age_reclaim() {
     ] {
         person(&mut transcript, prompt);
     }
+    let tag = needed.parts[0].tag.unwrap();
+    let input =
+        json!({"tags": tag.to_string(), "note": "The next edit requires this exact source."});
     tool(&mut transcript, "ctx_keep", "keeping the selected source");
     let runner = AuditRunner::new(transcript);
     let settings = Settings {
@@ -255,16 +258,8 @@ async fn audit_ctx_keep_must_win_over_automatic_age_reclaim() {
     };
     let mut session = enroll(&runner, "worker", &settings, None).await;
     assert!(cold_ride(&mut session, &runner, &settings).await.is_none());
-    let tag = needed.parts[0].tag.unwrap();
     let answer = session
-        .tool(
-            &runner,
-            &settings,
-            "ctx_keep",
-            &json!({
-                "tags": tag.to_string(), "note": "The next edit requires this exact source."
-            }),
-        )
+        .tool(&runner, &settings, "ctx_keep", &input)
         .await
         .unwrap();
     assert!(answer.starts_with(&format!("Keeping §{tag}§")), "{answer}");
@@ -275,6 +270,7 @@ async fn audit_ctx_keep_must_win_over_automatic_age_reclaim() {
         !changes_part(&view, &needed),
         "ctx_keep promised {answer}, but emitted {view:?}"
     );
+    assert!(expendable.iter().any(|entry| changes_part(&view, entry)));
 }
 
 fn database() -> (tempfile::TempDir, Arc<ContextDb>) {

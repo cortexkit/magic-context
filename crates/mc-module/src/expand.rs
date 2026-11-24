@@ -541,8 +541,9 @@ fn recovery_blocks(
     ];
     if truncated {
         out.push(String::new());
+        let mode = if preview { " verbose=true" } else { "" };
         out.push(format!(
-            "Truncated at message {last} (budget: ~{TOKEN_BUDGET} tokens or 65,536 bytes). Call again with start={} end={end} verbose=true for more.",
+            "Truncated at message {last} (budget: ~{TOKEN_BUDGET} tokens or 65,536 bytes). Call again with start={} end={end}{mode} for more.",
             last + 1
         ));
     }

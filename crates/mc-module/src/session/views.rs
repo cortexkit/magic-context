@@ -99,7 +99,7 @@ impl Session {
         }
         // A `ctx_keep` waiting for the next notice lands in this rewrite. On a
         // ride that answers nothing it stays waiting for that notice.
-        let kept = self.pending_keep.take_if(|_| !self.latest_unknown);
+        let kept = self.ready_keep(false).cloned();
         let view = self
             .build(settings, over_limit, prefix_changes, kept.as_ref())
             .0?;
@@ -259,6 +259,36 @@ impl Session {
         self.build_for(settings, over_limit, prefix_changes, keep, false)
     }
 
+    pub(super) fn ready_keep(&self, after_notice: bool) -> Option<&BTreeSet<lanes::PartKey>> {
+        let kept = self.pending_keep.as_ref()?;
+        let call = lanes::keep_call(&self.index)?;
+        let ready = self.pending_keep_after.is_none_or(|wait| {
+            call.ordinal > wait.call_ordinal
+                // If a notice has already added more transcript without the
+                // new call, use the last known boundary rather than shield
+                // the selection indefinitely. Only notices trigger this fallback.
+                || (after_notice && call.ordinal == wait.call_ordinal
+                    && self.index.entries().last().is_some_and(|last| last.ordinal > wait.indexed_through))
+        });
+        (!self.latest_unknown && ready).then_some(kept)
+    }
+
+    /// A `ctx_keep` leaves the queue only after a pass with a call boundary
+    /// has built a view or found nothing to remove.
+    pub(super) fn take_landed_keep(
+        &mut self,
+    ) -> (Option<BTreeSet<lanes::PartKey>>, Option<KeepWait>) {
+        let keep = self.next_keep.take();
+        let after = if keep.is_some() && self.pending_keep == keep {
+            self.pending_keep = None;
+            self.handled_keep_call = lanes::keep_call(&self.index).map(|entry| entry.ordinal);
+            self.pending_keep_after.take()
+        } else {
+            None
+        };
+        (keep, after)
+    }
+
     pub(super) fn build_for(
         &mut self,
         settings: &Settings,
@@ -270,9 +300,6 @@ impl Session {
         // The recovery is saved before handover. Until the runner holds it,
         // another build must not spend the same immediate attempt again.
         if self.recovery_in_flight() {
-            if let Some(kept) = keep {
-                self.pending_keep = Some(kept.clone());
-            }
             return (None, 0);
         }
         self.next_flush = flush;
@@ -296,9 +323,6 @@ impl Session {
         // summaries end, before the floor. A `ctx_keep` this pass carried
         // waits for a view that can land it.
         if self.short_of_move_floor() {
-            if let Some(kept) = keep {
-                self.pending_keep = Some(kept.clone());
-            }
             self.hold_below_move_floor("a cut where the summaries end");
             return (None, 0);
         }
@@ -307,9 +331,6 @@ impl Session {
         // without a summarizer whose view was refused for it waits for the
         // next Setup.
         if self.short_of_numbers_floor() || self.numbers_views_held {
-            if let Some(kept) = keep {
-                self.pending_keep = Some(kept.clone());
-            }
             if !self.numbers_views_held {
                 self.hold_below_numbers_floor("a cut where the summaries end");
             }
@@ -371,7 +392,7 @@ impl Session {
         history: &[EditOp],
         cut: Option<u64>,
     ) -> (Sealed, u64) {
-        let keep = self.next_keep.as_ref();
+        let keep = self.next_keep.as_ref().or(self.pending_keep.as_ref());
         let flush = self.next_flush;
         let lanes_timing = crate::notice_cost_timing::span("build.lanes");
         let edited = self.edited(cut);
@@ -394,8 +415,13 @@ impl Session {
             .filter(|key| !lanes::in_protected_tail(&context, key, cutoff))
             .map(|key| (key.clone(), lanes::Shape::Requested))
             .collect();
-        if let Some(kept) = keep {
-            wanted.extend(lanes::keep_drops(&context, kept, cutoff));
+        if let Some(kept) = self.next_keep.as_ref() {
+            wanted.extend(lanes::keep_drops_with_notice_marks(
+                &context,
+                kept,
+                cutoff,
+                self.notice_keep,
+            ));
         }
         let injected = lanes::injected_text(&context, cutoff);
         // Parts whose only edit is a stripped injection: caveman may compress
@@ -433,7 +459,9 @@ impl Session {
             settings.keep_reasoning_tokens,
             anthropic,
         ));
-        wanted.retain(|(key, _)| !self.failed_parts.contains(key));
+        wanted.retain(|(key, shape)| {
+            *shape == lanes::Shape::Requested || !self.failed_parts.contains(key)
+        });
         // On a `ctx_keep` pass the parts the model chose stay whole: the
         // other lanes still land, but none of them takes a kept part.
         let kept = |key: &lanes::PartKey| keep.is_some_and(|kept| kept.contains(key));
@@ -473,9 +501,18 @@ impl Session {
                 edited: &emergency_edited,
                 ..context
             };
-            let mut selected =
-                lanes::emergency_drop(&emergency_context, cutoff, &emergency, &self.failed_parts);
-            selected.retain(|(key, _)| !kept(key));
+            let selected = lanes::emergency_drop_excluding(
+                &emergency_context,
+                cutoff,
+                &emergency,
+                |entry, part| {
+                    if self.failed_parts.is_empty() && keep.is_none() {
+                        return false;
+                    }
+                    let key = (entry.mid.clone(), part.id.clone());
+                    self.failed_parts.contains(&key) || kept(&key)
+                },
+            );
             if !selected.is_empty() {
                 // An over-limit request drops calls whole, whatever shape an
                 // earlier lane asked for.
@@ -594,7 +631,7 @@ impl Session {
             && ops.is_empty()
             && !prefix_changes
             && over_limit.is_none()
-            && keep.is_none()
+            && self.next_keep.is_none()
             && !self.summary_unshown
             && !self.head_stale
             && self.only_m1_changes(history)
@@ -750,6 +787,7 @@ impl Session {
             // left pending, it would rewrite `m[0]` on a later pass whose
             // cache is still warm.
             Ok(None) => {
+                self.take_landed_keep();
                 self.commit_bookmark();
                 let flush = std::mem::take(&mut self.next_flush);
                 self.forget_queued(&covered);

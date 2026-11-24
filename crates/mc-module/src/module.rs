@@ -1639,6 +1639,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 None => break,
                             },
                             () = tokio::time::sleep_until(quiet_at) => {
+                                if retry_save && held.is_empty() && unread.is_empty() {
+                                    retry_save = !retry_checkpoint(inner.store.as_deref(), session.as_ref(), &mut saved);
+                                }
                                 let freed = held.is_empty()
                                     && unread.is_empty()
                                     && !retry_save
@@ -1781,8 +1784,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             .context_window
                             .saturating_sub(request.output_reserve),
                     ),
-                    (_, Some(session)) => {
-                        let (root, model_key, usable) = session.config_inputs();
+                    (job, Some(session)) => {
+                        let incoming = match job {
+                            Job::Notice(notice) => Some(&notice.conditions),
+                            Job::Ride(ride, _) => Some(&ride.conditions),
+                            _ => None,
+                        };
+                        let (root, model_key, usable) = session.config_inputs_for(incoming);
                         let project = session.config_project_id();
                         inner
                             .config
@@ -2203,18 +2211,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                     Job::Idle(reply) => {
                         if retry_save {
-                            if let (Some(store), Some(session)) =
-                                (&inner.store, session.as_ref().filter(|s| s.compacting()))
-                            {
-                                let durable = session.durable();
-                                match store.save(session.key(), &durable) {
-                                    Ok(()) => {
-                                        saved = Some(durable);
-                                        retry_save = false;
-                                    }
-                                    Err(error) => tracing::warn!("ck-mc: {error}"),
-                                }
-                            }
+                            retry_save = !retry_checkpoint(
+                                inner.store.as_deref(),
+                                session.as_ref(),
+                                &mut saved,
+                            );
                         }
                         let _ = reply.send(());
                         // A barrier changes no session state. The preceding
@@ -2266,6 +2267,28 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 }
             }
         });
+    }
+}
+
+/// Retry a failed end-of-job write before releasing the live session.
+fn retry_checkpoint(
+    store: Option<&Store>,
+    session: Option<&Session>,
+    saved: &mut Option<crate::store::Durable>,
+) -> bool {
+    let (Some(store), Some(session)) = (store, session.filter(|s| s.compacting())) else {
+        return false;
+    };
+    let durable = session.durable();
+    match store.save(session.key(), &durable) {
+        Ok(()) => {
+            *saved = Some(durable);
+            true
+        }
+        Err(error) => {
+            tracing::warn!("ck-mc: {error}");
+            false
+        }
     }
 }
 

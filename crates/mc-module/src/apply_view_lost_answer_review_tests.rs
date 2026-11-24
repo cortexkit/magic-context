@@ -95,7 +95,9 @@ async fn lost_answer_review_a_refused_offer_again_sets_aside_only_the_named_part
         part: "p".into(),
     });
     // What the next notice does first while `reoffer_pending` is set.
-    session.offer_unconfirmed_again(&client).await;
+    session
+        .offer_unconfirmed_again(&client, StatedView::Older)
+        .await;
     assert_eq!(offers_of(&client, view.version), 2);
     assert!(session.unconfirmed.is_empty(), "the refusal rolls it back");
     assert_eq!(session.queued, queued_refusal_parts());
@@ -124,7 +126,9 @@ async fn lost_answer_review_an_offer_again_refused_for_a_newer_runner_view_blame
         version: view.version,
         latest: newer,
     });
-    session.offer_unconfirmed_again(&client).await;
+    session
+        .offer_unconfirmed_again(&client, StatedView::Older)
+        .await;
     assert!(session.unconfirmed.is_empty());
     assert!(
         session.failed_parts.is_empty(),

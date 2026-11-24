@@ -114,7 +114,7 @@ impl Session {
         // which the view leaves the session's messages out), or if the
         // answer to applying it was lost.
         if self.reoffer_pending {
-            self.offer_unconfirmed_again(client).await;
+            self.offer_unconfirmed_again(client, stated).await;
         }
         self.rebuild_when_runner_lost_view(held);
         self.take_render_failures(&notice.events);
@@ -302,8 +302,9 @@ impl Session {
         }
         let short_of_move_floor = self.short_of_move_floor() || self.short_of_numbers_floor();
         if let Some(kept) = self
-            .pending_keep
-            .take_if(|_| !self.latest_unknown && !short_of_move_floor)
+            .ready_keep(true)
+            .filter(|_| !short_of_move_floor)
+            .cloned()
         {
             let (view, _) = self.build(settings, None, false, Some(&kept));
             if let Some(view) = view {

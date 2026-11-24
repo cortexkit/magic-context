@@ -512,3 +512,83 @@ async fn reoffer_review_a_moved_session_without_its_view_gets_one_at_setup() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn lost_view_setup_replaces_the_head_when_readback_fails() {
+    let dir = scratch("lost-view-setup-readback-failure");
+    let (mut session, client, settings) = view_2_applied(&dir, transcript()).await;
+    let before = offered_count(&client);
+    *client.fail_applied_view.lock().unwrap() = true;
+    set_up(&mut session, &client, &settings, None).await;
+    let offered = offered_since(&client, before);
+    assert_eq!(offered.len(), 1, "the runner cannot step without a head");
+    assert_eq!(move_floor::cut_of(&offered[0]), Some(mid(18).as_str()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn reoffered_view_remains_the_base_before_the_runner_can_apply_it() {
+    for reoffer_on_setup in [true, false] {
+        let dir = scratch("reoffered-view-is-the-base");
+        let (mut session, client, settings) = view_2_applied(&dir, transcript()).await;
+        let confirmed = session.latest.clone().unwrap();
+        let pending = build_view_3(&mut session, &settings);
+        if !reoffer_on_setup {
+            *client.lose_apply_answers.lock().unwrap() = 1;
+        }
+        assert!(session.publish(&client, pending.clone()).await);
+        let before = offered_count(&client);
+        if reoffer_on_setup {
+            set_up(&mut session, &client, &settings, None).await;
+        } else {
+            notice_applying(&mut session, &client, &settings, 1, None, vec![]).await;
+        }
+        assert_eq!(offered_since(&client, before), [pending.clone()]);
+        assert_eq!(session.latest.as_ref(), Some(&pending));
+        assert_eq!(session.unconfirmed.len(), 1);
+        assert_eq!(session.newest_applied, 0);
+        session.queued.insert((mid(21), "0".to_owned()));
+        let request = RideRequest::new(
+            vec![RideCause::EffortChange],
+            1000,
+            session.conditions.clone(),
+        );
+        let view = session
+            .ride(&settings, &request)
+            .expect("ride with a queued drop");
+        assert!(view.edits.iter().any(|e| matches!(&e.op, EditOp::Drop { mid: id, .. } | EditOp::Replace { mid: id, .. } if id == &mid(20))));
+        assert_eq!(move_floor::cut_of(&view), move_floor::cut_of(&confirmed));
+        notice_applying(&mut session, &client, &settings, 2, None, vec![]).await;
+        assert_eq!(session.latest.as_ref(), Some(&view));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn adopting_a_cut_restores_stamps_only_beyond_the_adopted_cut() {
+    let dir = scratch("adoption-cut-covered-stamps");
+    let (mut session, client, settings) = view_2_applied(&dir, transcript()).await;
+    summary(session.db.as_ref().unwrap(), 3, 19, 21);
+    session.load_summaries();
+    session.summary_unshown = true;
+    let key = |ordinal| (mid(ordinal), "0".to_owned());
+    session.queued.extend([key(19), key(20)]);
+    let (view, _) = session.build(&settings, None, false, None);
+    let view = view.expect("the new summary advances the cut");
+    assert_eq!(move_floor::cut_of(&view), Some(mid(21).as_str()));
+    assert!(session.publish(&client, view).await);
+    assert!(session.queued.is_empty());
+    let adopted = View::seal(
+        1,
+        vec![cortexkit_role_compaction::view::Edit::new(
+            1,
+            EditOp::Cut { through: mid(19) },
+        )],
+    );
+    runner_applies(&client, Some(&adopted));
+    session.adopt_runner_view(&client).await;
+    assert_eq!(session.latest, Some(adopted));
+    assert_eq!(session.queued, BTreeSet::from([key(20)]));
+    assert!(session.index.find(&mid(20), "0").is_some());
+    std::fs::remove_dir_all(dir).unwrap();
+}
