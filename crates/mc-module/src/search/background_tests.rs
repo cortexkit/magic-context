@@ -1045,7 +1045,7 @@ async fn person_facing_setup_reprojects_existing_search_rows_without_changing_th
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap()
     };
-    // Seed the pre-upgrade projection: the index saw only the text part,
+    // Seed a row as an older build projected it: the index saw only the text part,
     // but stored the runner's digest for the whole message.
     let mut old = spoken.clone();
     old.parts.truncate(1);
