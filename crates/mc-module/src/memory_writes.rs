@@ -210,6 +210,19 @@ pub(crate) fn memory_by_hash_at(
     .optional()
 }
 
+// The fact index puts category before hash. Seek to the next category at
+// each step, then probe its full key instead of walking every memory row.
+const CROSS_CATEGORY_LOOKUP: &str = "WITH RECURSIVE categories(category) AS (
+    SELECT (SELECT MIN(category) FROM memories INDEXED BY idx_memories_fact WHERE level = ?1 AND owner_id = ?2)
+    UNION ALL
+    SELECT (SELECT MIN(category) FROM memories INDEXED BY idx_memories_fact
+             WHERE level = ?1 AND owner_id = ?2 AND category > categories.category)
+      FROM categories WHERE category IS NOT NULL
+)
+SELECT m.id FROM categories c CROSS JOIN memories m INDEXED BY idx_memories_fact
+ WHERE m.level = ?1 AND m.owner_id = ?2 AND m.category = c.category AND c.category <> ?3
+   AND m.normalized_hash = ?4 AND m.content = ?5 AND m.status != 'archived' ORDER BY m.id LIMIT 1";
+
 /// A live memory of `owner` in another category with exactly this text.
 fn cross_category_match(
     tx: &Transaction,
@@ -219,13 +232,49 @@ fn cross_category_match(
     content: &str,
 ) -> rusqlite::Result<Option<i64>> {
     tx.query_row(
-        "SELECT id FROM memories
-          WHERE level = ?1 AND owner_id = ?2 AND category != ?3 AND normalized_hash = ?4
-            AND content = ?5 AND status != 'archived' ORDER BY id LIMIT 1",
+        CROSS_CATEGORY_LOOKUP,
         params![owner.kind, owner.id, category_id, hash, content],
         |row| row.get(0),
     )
     .optional()
+}
+
+#[cfg(test)]
+#[test]
+fn a_missing_cross_category_hash_does_not_scan_the_owners_memories() {
+    use rusqlite::StatementStatus;
+
+    let conn = crate::context_db::ContextDb::fresh_in_memory();
+    conn.execute_batch("WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n < 48000)
+        INSERT INTO memories (level, owner_id, category, origin_category, content, normalized_hash,
+                              first_seen_at, created_at, updated_at, last_seen_at)
+        SELECT 'project', 'p', 'test:' || (n % 5), 'NAMING', 'text-' || n, 'hash-' || n, 1, 1, 1, 1 FROM numbers").unwrap();
+    let bindings = params!["project", "p", "test:0", "missing-hash", "missing text"];
+    let plan: Vec<String> = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {CROSS_CATEGORY_LOOKUP}"))
+        .unwrap()
+        .query_map(bindings, |row| row.get(3))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let mut query = conn.prepare(CROSS_CATEGORY_LOOKUP).unwrap();
+    assert_eq!(
+        query
+            .query_row(bindings, |row| row.get::<_, i64>(0))
+            .optional()
+            .unwrap(),
+        None
+    );
+    let work = query.get_status(StatementStatus::VmStep);
+    assert!(
+        work < 1_000,
+        "{work} VM steps for a missing hash; {plan:#?}"
+    );
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("category=? AND normalized_hash=?")),
+        "{plan:#?}"
+    );
 }
 
 fn project_owner(project: &str) -> Owner {
