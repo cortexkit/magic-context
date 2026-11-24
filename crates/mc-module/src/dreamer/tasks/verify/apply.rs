@@ -67,6 +67,7 @@ use super::{Absence, Read, VerifyBatch, CHECKED_REVISION_KEY, NOT_CODE_KEY};
 use crate::dreamer::branches::short;
 use crate::dreamer::checkout::{Checkout, RecentBranches, GIT_TIMEOUT};
 use crate::dreamer::task::Applied;
+use crate::dreamer::tasks::directive::directive_shaped_rule as directive;
 use crate::dreamer::tasks::map_memories::{
     mapping_json, mapping_rows, put_mapping, MappingRow, MAPPER,
 };
@@ -78,9 +79,6 @@ use crate::memory_writes::{
 /// A memory's mapping before and after a write, as the journal records it.
 type MappingChange = (i64, Vec<MappingRow>, Vec<MappingRow>);
 
-/// The category of project rules, whose directive-shaped memories 0.49 kept
-/// from being rewritten or archived on the code's evidence.
-const RULES_CATEGORY: &str = "swe:project-rules";
 /// The longest text an update may write, in UTF-16 units as the plugin
 /// counted.
 const MAX_CONTENT: usize = 20_000;
@@ -158,42 +156,6 @@ impl ArchiveBranches {
         }
         Ok(None)
     }
-}
-
-/// Whether a project rule reads as a behavioural directive (when to act, how
-/// to work, who decides): 0.49's patterns, compiled with the JavaScript
-/// semantics the plugin's verifier had (ASCII word boundaries and digits,
-/// JavaScript's whitespace).
-fn directive(category: &str, content: &str) -> bool {
-    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-    if category != RULES_CATEGORY {
-        return false;
-    }
-    let patterns = PATTERNS.get_or_init(|| {
-        [
-            r"(?:^|[.!?]\s+|\n\s*)(?:[-*]\s+|\d+[.)]\s+)?(?:you\s+|we\s+)?(?:must(?:\s+not)?|never|always|do\s+not|don't|shall\s+not)\b",
-            r"\b(?:you|we|agents?|masons?|workers?|operators?|users?|maintainers?)\s+(?:must(?:\s+not)?|should(?:\s+not)?|need\s+to|shall(?:\s+not)?|cannot|can't|may\s+not)\b",
-            r"\bwhen\s+(?:you(?:'re|\s+are)?|we(?:'re|\s+are)?|told|asked|requested|working|debugging|reviewing|checking|verifying|investigating|using|running|editing|changing)\b",
-            r"(?:^|[.!?]\s+|\n\s*)(?:[-*]\s+|\d+[.)]\s+)?(?:please\s+)?(?:run|use|check|ask|avoid|prefer|ensure|keep|follow|brief|report|inspect|search|open|read|review|validate|confirm|delegate|stop|start|remember)\b",
-            r"\b(?:the\s+)?(?:user|operator|maintainer|owner)\s+(?:decides|chooses|approves|has\s+(?:the\s+)?final\s+say)\b",
-        ]
-        .iter()
-        .map(|pattern| {
-            Regex::new(
-                &format!("(?i){pattern}")
-                    .replace("\\b", r"(?-u:\b)")
-                    .replace("\\d", "[0-9]")
-                    .replace(
-                        "\\s",
-                        r"[\t\n\x0B\x0C\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]",
-                    ),
-            )
-            .expect("a fixed directive pattern")
-        })
-        .collect()
-    });
-    let text = js_trim(content);
-    patterns.iter().any(|pattern| pattern.is_match(text))
 }
 
 /// The labels the verify prompt has a model start a skip's reason with when

@@ -63,6 +63,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, Transaction};
 use serde_json::Value;
 
+use super::LIVE_MEMORY;
 use crate::dreamer::branches::{main_checkout, Refs};
 use crate::dreamer::checkout::{Checkout, Limits, SEARCH_LIMITS};
 use crate::dreamer::run::{StepCap, TaskInput, TaskReply, STEP_CAP};
@@ -189,27 +190,29 @@ pub(crate) fn live_memories(
             mappings.entry(id).or_default().push((file, at));
         }
     }
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare(&format!(
         "SELECT id, origin_category, category, content, revision, COALESCE(verified_at, 0), metadata_json,
                 source_branch, verify_commit
            FROM memories
-          WHERE level = 'project' AND owner_id = ?1 AND status IN ('active', 'permanent')
-            AND superseded_by_memory_id IS NULL AND (expires_at IS NULL OR expires_at > ?2)
-          ORDER BY origin_category, updated_at DESC, id",
+          WHERE level = 'project' AND owner_id = :project AND {LIVE_MEMORY}
+          ORDER BY origin_category, updated_at DESC, id"
+    ))?;
+    let rows = statement.query_map(
+        rusqlite::named_params! {":project": project, ":now": now},
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        },
     )?;
-    let rows = statement.query_map(params![project, now], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<String>>(7)?,
-            row.get::<_, Option<String>>(8)?,
-        ))
-    })?;
     let mut memories = Vec::new();
     for row in rows {
         let (

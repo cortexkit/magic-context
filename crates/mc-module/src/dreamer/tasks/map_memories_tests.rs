@@ -351,6 +351,33 @@ fn seed_attempt(store: &Store, id: i64, age_days: i64) {
 }
 
 #[test]
+fn mapping_only_sends_live_memories() {
+    let store = store(&[row(1), row(2), row(3), row(4)]);
+    store.execute("UPDATE memories SET expires_at = 1 WHERE id = 1; UPDATE memories SET superseded_by_memory_id = 4 WHERE id = 2; UPDATE memories SET status = 'archived' WHERE id = 3;");
+    assert_eq!(
+        store.batches().iter().flat_map(ids).collect::<Vec<_>>(),
+        [4]
+    );
+}
+
+#[test]
+fn mapping_uses_the_same_javascript_directive_boundaries_as_verify() {
+    for (text, directive) in [
+        ("1. Never edit a file.", true),
+        ("١) Never edit a file.", false),
+        ("Neveré edit a file.", true),
+        ("\u{feff}Never edit a file.", true),
+        ("\u{85}Never edit a file.", false),
+    ] {
+        assert_eq!(
+            directive_shaped_rule("swe:project-rules", text),
+            directive,
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
 fn retry_planning_skips_an_unchanged_memory_tried_within_seven_days() {
     let store = store(&[row(1), row(2)]);
     seed_attempt(&store, 1, 6);
@@ -358,6 +385,32 @@ fn retry_planning_skips_an_unchanged_memory_tried_within_seven_days() {
         store.batches().iter().flat_map(ids).collect::<Vec<_>>(),
         [2]
     );
+}
+
+#[test]
+fn a_model_empty_mapping_waits_before_it_is_sent_for_repair() {
+    for repair in [true, false] {
+        let store = store(&[Row {
+            content: "Fact 1 lives in `src/view.rs`.".into(),
+            ..row(1)
+        }]);
+        if repair {
+            store.map(1, &[mapped("", MAPPER)]);
+        }
+        let batch = store.batches().remove(0);
+        let applied = store.apply(&batch, &manifest(&[(1, "independent=\"true\"")]), 1);
+        assert_eq!(applied.applied, usize::from(!repair));
+        assert_eq!(store.mapped(1), [mapped("", MAPPER)]);
+        assert!(
+            store.batches().is_empty(),
+            "resent an empty mapping, repair: {repair}"
+        );
+        seed_attempt(&store, 1, 7);
+        assert_eq!(
+            store.batches().iter().flat_map(ids).collect::<Vec<_>>(),
+            [1]
+        );
+    }
 }
 
 #[test]
