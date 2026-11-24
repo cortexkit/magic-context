@@ -78,6 +78,39 @@ fn review_reasoning_budget_reported_count_survives_an_empty_summary() {
 }
 
 #[test]
+fn reasoning_budget_reads_native_message_ids_once() {
+    let steps = 64;
+    let mut request = opencode_openai_removal_request(steps, "openai", "gpt-6.1-sol");
+    request.keep_reasoning_tokens_effective = Some((steps as u64 - 1) * 100 + 50);
+    let native = request.native_messages.as_mut().unwrap();
+    let mut duplicate = native[1].clone();
+    duplicate["info"]["tokens"]["reasoning"] = json!(1);
+    // Native messages need not line up with CK positions. The first matching ID
+    // must win: a lower count from the duplicate would keep all 64 steps.
+    native.reverse();
+    native.push(duplicate);
+    let native_count = native.len();
+    let tags = (0..steps)
+        .map(|step| (format!("a{step}"), step as u64 + 1))
+        .collect();
+
+    crate::per_pass_profile::begin_pass();
+    let cutoff = reasoning_budget_cutoff(
+        &request,
+        &tags,
+        &CoreState::default(),
+        ReasoningBudgetScope::default(),
+    );
+    let spans = crate::per_pass_profile::end_pass();
+
+    assert_eq!(cutoff, 1, "the oldest step does not fit the token budget");
+    assert_eq!(
+        spans["reasoning_budget_native_id"].calls,
+        native_count as u64
+    );
+}
+
+#[test]
 fn review_reasoning_clear_never_restores_a_frozen_block_on_exemption_change() {
     let request = reasoning_clear_fixture();
     let mut core = CoreState::default();
