@@ -5,6 +5,7 @@ import {
     CACHED_TRIM_PARTIAL_SQL,
     type Compartment,
     type CompartmentDateRanges,
+    cachedHistoryCoversLatestCompartment,
     escapeXmlAttr,
     escapeXmlContent,
     getCompartments,
@@ -1169,6 +1170,8 @@ export interface InjectM0M1Result {
     prependedMessageCount: number;
     m0RematerializedThisPass: boolean;
     materializationContentionRetryExhausted: boolean;
+    /** The replayed history markers did not confirm that the cached pair includes the newest summary. */
+    wrapupPublicationUnconfirmed?: boolean;
     decision: MaterializeDecision;
     m0Bytes: Buffer | null;
     m1Text: string | null;
@@ -3063,6 +3066,7 @@ interface RenderM1Result {
     text: string;
     memoryUpdateCount: number;
     renderedMemoryIds: number[];
+    wrapupPublicationUnconfirmed?: boolean;
 }
 
 function renderM1WithMetadata(
@@ -3442,6 +3446,13 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
                 text: replayCachedM1(options.state),
                 memoryUpdateCount: 0,
                 renderedMemoryIds: [],
+                wrapupPublicationUnconfirmed:
+                    options.skipPressureRefold === true &&
+                    !cachedHistoryCoversLatestCompartment(
+                        getCompartments(options.db, options.sessionId),
+                        options.state.cachedM0MaxCompartmentSeq ?? -1,
+                        options.state.cachedM0TrimBoundaryId ?? null,
+                    ),
             };
         }
 
@@ -4517,6 +4528,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     let m1Text: string;
     let memoryUpdateCount = 0;
     let m1Recomputed = m1Render !== null;
+    let wrapupPublicationUnconfirmed: boolean | undefined;
 
     if (m1Render) {
         m1Text = m1Render.text;
@@ -4538,6 +4550,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             m1Text = refreshed.text;
             memoryUpdateCount = refreshed.memoryUpdateCount;
             m1Recomputed = true;
+            wrapupPublicationUnconfirmed = refreshed.wrapupPublicationUnconfirmed;
             m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
         } catch (error) {
             if (!options.allowFreshContentionFallback) throw error;
@@ -4620,6 +4633,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             rematerialized = true;
             m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
             m1Text = refolded.m1Text;
+            wrapupPublicationUnconfirmed = undefined;
         } catch (error) {
             // Contention during the drift refold is non-fatal: keep the current
             // (un-refolded) m[0]/m[1]; the next pass retries the fold.
@@ -4702,6 +4716,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         prependedMessageCount,
         m0RematerializedThisPass: rematerialized,
         materializationContentionRetryExhausted: contentionExhausted,
+        wrapupPublicationUnconfirmed,
         decision,
         m0Bytes: options.state.cachedM0Bytes,
         m1Text,

@@ -179,12 +179,12 @@ export function createPiTranscript(
 		/** Optional bulk persistence of the same decisions requested during measurement. */
 		authorizeToolRemovals?: (callIds: readonly string[]) => void;
 		/**
-		 * Token cost of the image block at `partIndex` of the tool result at
+		 * Token cost of the image block at `partIndex` of the message at
 		 * `messageIndex`, as the request carries it. Defaults to PI_IMAGE_TOKENS;
 		 * the context handler passes a placeholder's cost for an image the request
 		 * does not carry (see piToolImageWireTokens).
 		 */
-		toolImageTokens?: (messageIndex: number, partIndex: number) => number;
+		imageTokens?: (messageIndex: number, partIndex: number) => number;
 	} = {},
 ): Transcript & {
 	/**
@@ -227,8 +227,7 @@ export function createPiTranscript(
 	toolRemovals.set(working, removals);
 	if (options.authorizeToolRemoval)
 		toolRemovalAuthorization.set(working, options.authorizeToolRemoval);
-	if (options.toolImageTokens)
-		toolImageTokenCost.set(working, options.toolImageTokens);
+	if (options.imageTokens) imageTokenCost.set(working, options.imageTokens);
 	const emptyRemovedMessages = new Set<unknown>();
 	const toolInputChanges = new Map<number, Set<string>>();
 
@@ -691,7 +690,8 @@ function createPiUserArrayPart(
 		imageTokens() {
 			const current = (working[messageIndex] as PiUserMessage).content;
 			return Array.isArray(current) && current[partIndex]?.type === "image"
-				? PI_IMAGE_TOKENS
+				? (imageTokenCost.get(working)?.(messageIndex, partIndex) ??
+						PI_IMAGE_TOKENS)
 				: 0;
 		},
 		// User array parts are not tool/content units. Text is keyed by parent
@@ -969,8 +969,10 @@ function createPiToolResultPart(
 					?.type !== "image"
 			)
 				return 0;
-			const cost = toolImageTokenCost.get(working);
-			return cost ? cost(messageIndex, partIndex) : PI_IMAGE_TOKENS;
+			return (
+				imageTokenCost.get(working)?.(messageIndex, partIndex) ??
+				PI_IMAGE_TOKENS
+			);
 		},
 		remove(): boolean {
 			return markToolRemoval(working, messageIndex, partIndex);
@@ -1114,8 +1116,8 @@ const toolRemovalAuthorization = new WeakMap<
 	PiAgentMessage[],
 	(callId: string) => boolean | "defer"
 >();
-/** Per-transcript override of a tool-result image's token cost (createPiTranscript's toolImageTokens). */
-const toolImageTokenCost = new WeakMap<
+/** Per-transcript override of an image's token cost (createPiTranscript's imageTokens). */
+const imageTokenCost = new WeakMap<
 	PiAgentMessage[],
 	(messageIndex: number, partIndex: number) => number
 >();

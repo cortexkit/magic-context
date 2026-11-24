@@ -71,7 +71,7 @@ test("generate captures the final request with id-less tool tails without duplic
     );
     const anchor = generateReplayAnchor(raw.messages);
     expect(anchor?.id).toBe("a");
-    expect(anchor?.tail).toEqual(raw.messages.slice(2));
+    expect(anchor?.tailCount).toBe(2);
     const served = structuredClone(raw);
     served.system = [{ text: "final system" }];
     served.tools = { tool: { description: "final description", input: {} } };
@@ -95,7 +95,7 @@ test("generate captures the final request with id-less tool tails without duplic
     expect(input.system).toEqual(served.system);
     expect(input.tools).toEqual(served.tools);
     input.messages[2]!.content[0]!.result = "caller mutation";
-    anchor!.tail[0]!.content[0]!.result = "anchor mutation";
+    raw.messages[2]!.content[0]!.result = "raw mutation after capture";
     expect(replay.apply(next)).toBe(true);
     expect(next.messages).toEqual([...served.messages, ...live]);
 });
@@ -139,6 +139,42 @@ test("generate leaves an earlier host edit intact even when the anchor and tail 
     const applied = replay.apply(input);
     expect(JSON.stringify(input)).toBe(bytes);
     expect(applied).toBe(false);
+});
+
+test("generate leaves an edited anchor intact even when its ID and surrounding history match", () => {
+    const replay = new V2GenerateReplay();
+    const raw = draft();
+    raw.messages.push(
+        { id: "a", role: "assistant", content: [{ type: "text", text: "original answer" }] },
+        { role: "tool", content: [{ type: "tool-result", id: "call", result: "raw" }] },
+    );
+    const served = structuredClone(raw);
+    served.messages[0]!.content[0]!.text = "managed question";
+    replay.capture(served, generateReplayAnchor(raw.messages));
+
+    const input = structuredClone(raw);
+    input.messages[1]!.content[0]!.text = "edited answer";
+    input.messages.push({ role: "user", content: [{ type: "text", text: "btw" }] });
+    const bytes = JSON.stringify(input);
+    const applied = replay.apply(input);
+    expect(JSON.stringify(input)).toBe(bytes);
+    expect(applied).toBe(false);
+});
+
+test("generate rejects changes to binary content in the id-less captured tail", () => {
+    const replay = new V2GenerateReplay();
+    const raw = draft();
+    raw.messages.push({
+        role: "user",
+        content: [{ type: "media", media: new Uint8Array([1]).buffer }],
+    });
+    replay.capture(raw, generateReplayAnchor(raw.messages));
+
+    const input = structuredClone(raw);
+    input.messages[1]!.content[0]!.media = new Uint8Array([2]).buffer;
+    input.messages.push({ role: "user", content: [{ type: "text", text: "btw" }] });
+    expect(replay.apply(input)).toBe(false);
+    expect(new Uint8Array(input.messages[1]!.content[0]!.media as ArrayBuffer)[0]).toBe(2);
 });
 
 test("generate logs each capture and apply skip once", () => {
@@ -202,7 +238,9 @@ const sideQuestion = (sessionID: string, chars = 100): SessionContext => {
 };
 
 const capture = (replay: V2GenerateReplay, served: SessionContext) => {
-    const anchor = generateReplayAnchor(served.messages);
+    const anchor = generateReplayAnchor(
+        sized(served.sessionID, served.messages[0]!.content[0]!.text.length, "raw").messages,
+    );
     replay.capture(served, anchor);
 };
 
@@ -309,7 +347,7 @@ test("generate replay hands back host class instances by reference, as the host 
     const replay = new V2GenerateReplay();
     const served = sized("s", 10);
     served.messages[0]!.content.push({ type: "media", media: asset });
-    capture(replay, served);
+    replay.capture(served, generateReplayAnchor(served.messages));
     expect(replay.stats().totalBytes).toBeGreaterThan(4096);
     const input = structuredClone(served);
     input.messages.push({ role: "user", content: [{ type: "text", text: "btw" }] });

@@ -265,7 +265,7 @@ function rebuildFileContent(value: Part[], output: string, attachments?: unknown
  */
 export function adaptPayload(
     draft: SessionContext,
-    admittedIDs: ReadonlySet<string> = new Set(),
+    syntheticIDs: ReadonlySet<string> = new Set(),
     messageTimes: ReadonlyMap<string, MessageLike["info"]["time"]> = new Map(),
     /**
      * Attach the times as a non-enumerable `info.time`: readable by the saved
@@ -419,7 +419,7 @@ export function adaptPayload(
                     modelAcceptsEmptyContent(draft.model.providerID),
                 );
             }
-            if (message.id && admittedIDs.has(message.id)) part.synthetic = true;
+            if (message.id && syntheticIDs.has(message.id)) part.synthetic = true;
             parts.push(part);
         }
         if (!parts.length && message.content.length) continue;

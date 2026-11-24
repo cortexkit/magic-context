@@ -637,7 +637,11 @@ export function createToolDropTarget(
                     parts,
                 } as MessageLike);
             const before = count(served);
-            const retained = skeleton ? parts.map((part) => skeletonRealToolPart(part, tagId)) : [];
+            // Price a new drop, which strips attachments; legacy skeleton replay keeps them.
+            const stripAttachments = skeleton && hasAttachments();
+            const retained = skeleton
+                ? parts.map((part) => skeletonRealToolPart(part, tagId, stripAttachments))
+                : [];
             const after = count(retained);
             // Several calls can share one thinking block; credit only tool I/O here to avoid reclaiming it twice.
             return {

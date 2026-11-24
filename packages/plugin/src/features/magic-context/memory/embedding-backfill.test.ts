@@ -230,6 +230,55 @@ describe("ensureMemoryEmbeddings (read-path backfill)", () => {
         });
     });
 
+    it("semantic search reaches newer memories after a full batch of missing vectors", async () => {
+        const db = useTempDb();
+        const projectIdentity = "git:backfill-progress";
+        const older = seedVectorlessMemories(db, projectIdentity, 50);
+        const target = insertMemory(db, {
+            projectPath: projectIdentity,
+            category: "CONSTRAINTS",
+            content: "Packaging requires an explicit runtime version",
+        });
+        const requests: string[][] = [];
+        _setTestProviderFactoryForProject(
+            () =>
+                new (class extends FakeEmbeddingProvider {
+                    override async embedBatch(texts: string[]): Promise<(Float32Array | null)[]> {
+                        requests.push(texts);
+                        return texts.map((text) =>
+                            text === target.content ? new Float32Array([1, 0]) : null,
+                        );
+                    }
+                })("model-a"),
+        );
+        const { modelId } = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/own",
+        );
+
+        await searchMemory(db, projectIdentity, "quasizymology");
+        expect(requests.flat()).toEqual(older.map((memory) => memory.content));
+        requests.length = 0;
+
+        const results = await searchMemory(db, projectIdentity, "quasizymology");
+        expect(requests.flat()).toContain(target.content);
+        expect(requests.flat().length).toBeLessThanOrEqual(50);
+        expect(requests.every((batch) => batch.length <= 10)).toBe(true);
+        expect(loadAllEmbeddings(db, projectIdentity, modelId).has(target.id)).toBe(true);
+        expect(results[0]).toMatchObject({
+            source: "memory",
+            memoryId: target.id,
+            matchType: "semantic",
+        });
+
+        requests.length = 0;
+        await searchMemory(db, projectIdentity, "quasizymology");
+        expect(requests.flat()).toEqual(older.map((memory) => memory.content));
+    });
+
     it("discards the stale vector, skips the cache, and leaves the row for the guarded drain when the memory is edited mid-flight", async () => {
         let release: (() => void) | undefined;
         let batchStarted: (() => void) | undefined;
