@@ -40,12 +40,19 @@ fn now_ms() -> i64 {
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 
-fn role_name(role: &Role) -> &str {
-    role.as_str()
+fn role_name(entry: &Entry) -> &str {
+    if crate::neutral::host_frame_words(entry).is_some() {
+        "user"
+    } else {
+        entry.role.as_str()
+    }
 }
 
 /// What `entry` adds to the index, or empty.
 fn content_of(entry: &Entry) -> String {
+    if let Some(words) = crate::neutral::host_frame_words(entry) {
+        return super::text::collapse_whitespace(words);
+    }
     if entry.notice.is_some() || entry.speaks_for.is_some() {
         return String::new();
     }
@@ -68,6 +75,53 @@ mod reach_tests;
 
 #[cfg(test)]
 mod attribution_tests {
+    #[test]
+    fn host_frame_search_reprojects_the_held_system_row_as_user_words() {
+        use cortexkit_role_compaction::{
+            part::{Part, PartBody},
+            read::{Entry, HostFrame, Role},
+        };
+        use cortexkit_role_llm_runner::attribution::host_frames::{
+            CLAUDE_CODE_MID_TURN, CLAUDE_CODE_MID_TURN_HEAD as HEAD,
+            CLAUDE_CODE_MID_TURN_TAIL as TAIL,
+        };
+        let mut conn = crate::context_db::ContextDb::fresh_in_memory();
+        let words = "Please keep the sapphire branch";
+        let entry = Entry::new(
+            1,
+            "steer",
+            Role::System,
+            1,
+            vec![Part::new(
+                "p",
+                PartBody::Text {
+                    text: format!("{HEAD}{words}{TAIL}").into(),
+                },
+            )],
+        );
+        super::index(&mut conn, "mock", "s", std::slice::from_ref(&entry)).unwrap();
+        let digest = entry.digest.clone();
+        let marked = entry
+            .with_host_frame(
+                HostFrame::new(
+                    "p",
+                    CLAUDE_CODE_MID_TURN,
+                    HEAD.len() as u32,
+                    TAIL.len() as u32,
+                ),
+                true,
+            )
+            .unwrap();
+        assert_eq!(marked.digest, digest);
+        super::reconcile(&mut conn, &Default::default(), "mock", "s", &[marked]).unwrap();
+        let hits = super::app_page(&conn, "s", "sapphire", 0, 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].role, "user");
+        assert_eq!(hits[0].content, words);
+        assert!(super::app_page(&conn, "s", "alongside", 0, 10).is_empty());
+        assert!(super::app_page(&conn, "s", "working", 0, 10).is_empty());
+    }
+
     #[test]
     fn host_parts_search_reconcile_refreshes_unchanged_digest() {
         use cortexkit_role_compaction::{
@@ -223,10 +277,15 @@ pub(super) fn reconcile(
     let mark = watermark(conn, session)?.max(0) as u64;
     let mut changed = Vec::new();
     for entry in entries.iter().filter(|entry| entry.ordinal <= mark) {
-        let stored:Option<(String,String,String)>=conn.query_row("SELECT message_id,source_version,normalized_content_hash FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",params![session,entry.ordinal as i64],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        if stored.as_ref().is_none_or(|(mid, digest, hash)| {
+        let stored: Option<(String, String, String, String)> = conn.query_row(
+            "SELECT message_id,source_version,normalized_content_hash,role FROM message_history_source WHERE session_id=?1 AND message_ordinal=?2",
+            params![session, entry.ordinal as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).optional()?;
+        if stored.as_ref().is_none_or(|(mid, digest, hash, role)| {
             mid != &entry.mid
                 || digest != &entry.digest
+                || role != role_name(entry)
                 || hash != &content_hash(&content_of(entry))
         }) {
             changed.push(entry);
@@ -261,7 +320,7 @@ fn insert(
     content: &str,
 ) -> rusqlite::Result<bool> {
     let number = entry.ordinal as i64;
-    let role = role_name(&entry.role);
+    let role = role_name(entry);
     let source_timing = crate::notice_cost_timing::span("search.source_insert");
     conn.execute(
         "INSERT INTO message_history_source
@@ -337,16 +396,18 @@ pub(super) fn index_with_generation(
             let content = content_of(entry);
             if number == mark {
                 let lookup_timing = crate::notice_cost_timing::span("search.boundary_lookup");
-                let stored: Option<(String, String)> = tx
+                let stored: Option<(String, String, String)> = tx
                     .query_row(
-                        "SELECT message_id, normalized_content_hash FROM message_history_source
+                        "SELECT message_id, normalized_content_hash, role FROM message_history_source
                           WHERE session_id = ?1 AND message_ordinal = ?2",
                         params![session, number],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
                 drop(lookup_timing);
-                if stored == Some((entry.mid.clone(), content_hash(&content))) {
+                if stored.is_some_and(|(mid, hash, role)| {
+                    mid == entry.mid && role == role_name(entry) && hash == content_hash(&content)
+                }) {
                     continue;
                 }
                 index_changed |= delete_from(&tx, session, number)?;

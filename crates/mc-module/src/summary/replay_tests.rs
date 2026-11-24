@@ -524,6 +524,7 @@ fn recorded_case(dir: &Path, index: u64) -> Result<Case, String> {
                     ordinal: *ordinal,
                     message_id: id.clone(),
                     anchorable: true,
+                    mid_turn: false,
                 })
                 .collect(),
             present_ordinals: present,

@@ -1,7 +1,9 @@
 //! Derived trigger inputs. Pressure, floor marks, reservations and logging stay
 //! in Session; this cache contains only functions of the indexed window.
 
-use cortexkit_role_compaction::{part::PartBody, read::Entry};
+#[cfg(test)]
+use cortexkit_role_compaction::part::PartBody;
+use cortexkit_role_compaction::read::Entry;
 
 use super::{chunk, trigger};
 use crate::count::Counter;
@@ -326,9 +328,7 @@ impl Window {
         for (i, entry) in entries.iter().enumerate().skip(low) {
             let before = self.facts.last();
             let meaningful = trigger::is_meaningful_user(entry);
-            let opens = meaningful
-                || crate::neutral::authored_parts(entry)
-                    .any(|part| matches!(part.body, PartBody::Tool(_)));
+            let opens = meaningful || trigger::opens_tool_work(entry);
             let rendered = chunk::render_entry(entry, false);
             let body = rendered
                 .as_ref()

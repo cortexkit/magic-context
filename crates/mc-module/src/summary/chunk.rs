@@ -487,6 +487,10 @@ fn count_identity(entry: &Entry) -> String {
     if !entry.host_parts.is_empty() {
         identity.push_str(&serde_json::to_string(&entry.host_parts).expect("host facts serialize"));
     }
+    if crate::neutral::host_frame_words(entry).is_some() {
+        identity
+            .push_str(&serde_json::to_string(&entry.host_frame).expect("host frame serializes"));
+    }
     identity
 }
 
@@ -553,6 +557,7 @@ fn build_counted(
             ordinal: number,
             message_id: entry.mid.clone(),
             anchorable: true,
+            mid_turn: crate::neutral::host_frame_words(entry).is_some(),
         };
         let Some((role, mut parts, commits, narrative)) = render_entry(entry, per_message) else {
             present.push(number);
@@ -745,6 +750,10 @@ pub(super) fn render_entry(
     verbatim: bool,
 ) -> Option<(char, Vec<String>, Vec<String>, bool)> {
     let _timing = crate::notice_cost_timing::span("trigger.render_entry");
+    if let Some(words) = crate::neutral::host_frame_words(entry) {
+        let words = normalize(words);
+        return (!words.is_empty()).then(|| ('U', vec![words], Vec::new(), true));
+    }
     match entry.role {
         Role::User => {
             let raw_texts: Vec<&str> = crate::neutral::authored_parts(entry)

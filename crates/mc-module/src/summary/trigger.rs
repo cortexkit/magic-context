@@ -64,13 +64,14 @@ pub fn protected_tail_tokens(
     ceiling.min(floor.min(ceiling).max(raw))
 }
 
-/// Whether a user message carries the person's own words: not an unkept notice
-/// or relay, and with text left once injected regions are stripped.
+/// Whether this is a prompt from the person, not a mid-turn message, an
+/// unkept notice or a relay, with text left after stripping injected regions.
 pub fn is_meaningful_user(entry: &Entry) -> bool {
     let _timing = crate::notice_cost_timing::span("trigger.meaningful_user");
     entry.role == Role::User
         && !crate::neutral::is_unkept_notice(entry)
         && entry.speaks_for.is_none()
+        && crate::neutral::host_frame_words(entry).is_none()
         && !super::chunk::is_relayed_wake(
             &crate::neutral::authored_parts(entry)
                 .filter_map(|part| match &part.body {
@@ -88,6 +89,11 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
                 .is_empty(),
             _ => false,
         })
+}
+
+pub(super) fn opens_tool_work(entry: &Entry) -> bool {
+    crate::neutral::host_frame_words(entry).is_none()
+        && crate::neutral::authored_parts(entry).any(|part| matches!(part.body, PartBody::Tool(_)))
 }
 
 /// The first ordinal the summarizer must not read, given that everything
@@ -160,15 +166,10 @@ fn semantic_snap(
     boundary: u64,
     tail_tokens: u64,
 ) -> u64 {
-    let opens_work = |entry: &Entry| {
-        is_meaningful_user(entry)
-            || crate::neutral::authored_parts(entry)
-                .any(|part| matches!(part.body, PartBody::Tool(_)))
-    };
     let Some(snapped) = entries
         .iter()
         .filter(|entry| entry.ordinal >= from && entry.ordinal <= boundary)
-        .rfind(|entry| opens_work(entry))
+        .rfind(|entry| is_meaningful_user(entry) || opens_tool_work(entry))
     else {
         return boundary;
     };

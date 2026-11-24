@@ -14,6 +14,11 @@ pub(crate) fn host_part<'a>(entry: &'a Entry, part: &Part) -> Option<&'a HostPar
     entry.host_parts.iter().find(|fact| fact.part == part.id)
 }
 
+/// Person-authored words the runner recorded inside a verified host wrapper.
+pub(crate) fn host_frame_words(entry: &Entry) -> Option<&str> {
+    entry.host_frame.as_ref().and_then(|fact| fact.words(entry))
+}
+
 /// Parts eligible for attribution to the entry's user or assistant speaker.
 pub(crate) fn authored_parts(entry: &Entry) -> impl Iterator<Item = &Part> {
     entry
@@ -34,6 +39,14 @@ pub(crate) fn without_tool_prefix(name: &str) -> &str {
 /// verbatim until a summary covers them, rather than being reclaimed as notices.
 pub(crate) fn is_kept_notice(entry: &Entry) -> bool {
     entry.notice.as_ref().is_some_and(|notice| notice.keep)
+}
+
+pub(crate) fn protects_from_automatic_reclaim(entry: &Entry) -> bool {
+    is_kept_notice(entry) || host_frame_words(entry).is_some()
+}
+
+pub(crate) fn protects_from_explicit_drop(entry: &Entry) -> bool {
+    is_kept_notice(entry) && host_frame_words(entry).is_none()
 }
 
 pub(crate) fn is_unkept_notice(entry: &Entry) -> bool {

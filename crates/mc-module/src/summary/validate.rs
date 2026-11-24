@@ -41,6 +41,9 @@ pub struct ChunkLine {
     /// anchorable block so publication cannot mint an impossible coverage boundary.
     #[serde(default = "chunk_line_anchorable_by_default")]
     pub anchorable: bool,
+    /// Mid-turn words may end a compartment but cannot open a new one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mid_turn: bool,
 }
 
 fn chunk_line_anchorable_by_default() -> bool {
@@ -681,6 +684,26 @@ pub fn validate_historian_output(
         return Err(validation_error(
             "Historian returned no usable compartments.",
         ));
+    }
+
+    if let Some(start) = parsed
+        .compartments
+        .iter()
+        .map(|compartment| compartment.start_message)
+        .chain(parsed.unprocessed_from)
+        .find(|&start| {
+            // If prior publication stopped just before the frame, the first
+            // compartment has to start there to keep coverage contiguous.
+            start != chunk.start_index
+                && chunk
+                    .lines
+                    .iter()
+                    .any(|line| line.ordinal == start && line.mid_turn)
+        })
+    {
+        return Err(validation_error(format!(
+            "Message {start} carries mid-turn words and cannot start a new compartment or uncovered range. Include it in the preceding compartment and start the next range at the following message."
+        )));
     }
 
     heal_compartment_gaps(
@@ -1950,6 +1973,7 @@ mod tests {
                     ordinal,
                     message_id: format!("msg-{ordinal}"),
                     anchorable: true,
+                    mid_turn: false,
                 })
                 .collect(),
             present_ordinals: (start..=end).collect(),
@@ -2318,16 +2342,19 @@ full narrative
                     ordinal: 1,
                     message_id: "m1#0".into(),
                     anchorable: true,
+                    mid_turn: false,
                 },
                 ChunkLine {
                     ordinal: 1,
                     message_id: "m1-dup#0".into(),
                     anchorable: true,
+                    mid_turn: false,
                 },
                 ChunkLine {
                     ordinal: 2,
                     message_id: "m2#0".into(),
                     anchorable: true,
+                    mid_turn: false,
                 },
             ],
             present_ordinals: vec![1, 1, 2],
@@ -2346,16 +2373,19 @@ full narrative
                     ordinal: 1,
                     message_id: "m1#0".into(),
                     anchorable: true,
+                    mid_turn: false,
                 },
                 ChunkLine {
                     ordinal: 3,
                     message_id: "m3#0".into(),
                     anchorable: true,
+                    mid_turn: false,
                 },
                 ChunkLine {
                     ordinal: 2,
                     message_id: "m2#0".into(),
                     anchorable: true,
+                    mid_turn: false,
                 },
             ],
             present_ordinals: vec![1, 2, 3],
@@ -2513,6 +2543,7 @@ full narrative
                     ordinal,
                     message_id: format!("m{ordinal}#0"),
                     anchorable: true,
+                    mid_turn: false,
                 })
                 .collect(),
             present_ordinals: vec![1, 2, 100],

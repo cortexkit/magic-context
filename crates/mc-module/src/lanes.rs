@@ -18,7 +18,8 @@ use serde_json::{json, Value};
 use crate::index::Index;
 use crate::injection::{self, Stripped};
 use crate::neutral::{
-    is_finished, is_kept_notice, is_known, is_unkept_notice, without_tool_prefix,
+    host_frame_words, is_finished, is_known, is_unkept_notice, protects_from_automatic_reclaim,
+    protects_from_explicit_drop, without_tool_prefix,
 };
 use crate::spoken::is_person_facing_tool;
 use crate::tokens;
@@ -289,7 +290,10 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
     for (key, shape) in shapes {
         let (mid, part_id) = key;
         let found = index.find(mid, part_id);
-        if found.is_some_and(|(entry, _)| is_kept_notice(entry)) {
+        if found.is_some_and(|(entry, _)| match shape {
+            Shape::Requested => protects_from_explicit_drop(entry),
+            _ => protects_from_automatic_reclaim(entry),
+        }) {
             continue;
         }
         if context.edited.covers(mid, part_id) {
@@ -557,6 +561,7 @@ pub fn normalize_tool_name(name: &str) -> String {
 pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
+        && host_frame_words(entry).is_none()
         && crate::neutral::authored_parts(entry).any(|part| match &part.body {
             PartBody::Text { text } => !text.trim().is_empty(),
             PartBody::File(_) => true,
@@ -568,7 +573,7 @@ pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
 /// own words. Only runner-marked user entries without a keep mark may lose
 /// text to the age sweep; kept notices can carry the person's own words.
 fn is_sweepable_notice(entry: &Entry) -> bool {
-    entry.role == Role::User && is_unkept_notice(entry)
+    entry.role == Role::User && is_unkept_notice(entry) && host_frame_words(entry).is_none()
 }
 
 /// The highest tag number below which every tool output is far behind: three
@@ -582,7 +587,10 @@ pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
     far_behind_matching(
         context,
         usable_window,
-        |_, part| matches!(&part.body, PartBody::Tool(tool) if !is_person_facing_tool(&tool.name)),
+        |entry, part| {
+            matches!(&part.body, PartBody::Tool(tool) if !is_person_facing_tool(&tool.name))
+                && host_frame_words(entry).is_none()
+        },
         starts_user_turn,
     )
 }
@@ -599,6 +607,7 @@ pub fn notice_far_behind_bookmark(context: &Context, usable_window: u64) -> u64 
         // waiting for the person to speak; tools still count actionable turns.
         |entry| {
             entry.role == Role::User
+                && host_frame_words(entry).is_none()
                 && (entry.host_parts.is_empty()
                     || crate::neutral::authored_parts(entry).next().is_some())
         },
@@ -665,7 +674,7 @@ pub fn age_sweep(
         .index
         .entries()
         .iter()
-        .filter(|entry| !is_kept_notice(entry))
+        .filter(|entry| !protects_from_automatic_reclaim(entry))
     {
         for part in &entry.parts {
             let Some(tag) = part.tag else {
@@ -918,7 +927,7 @@ fn tool_parts<'a>(
         .index
         .entries()
         .iter()
-        .filter(|entry| !is_kept_notice(entry))
+        .filter(|entry| !protects_from_automatic_reclaim(entry))
         .flat_map(|entry| {
             entry.parts.iter().filter_map(move |part| match &part.body {
                 PartBody::Tool(tool) if !is_person_facing_tool(&tool.name) => {
@@ -980,7 +989,7 @@ pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Sh
         .iter()
         // A notice is already a distinct instruction from the runner, not
         // injected framing inside a person's prompt. Keep it actionable.
-        .filter(|entry| entry.notice.is_none())
+        .filter(|entry| entry.notice.is_none() && host_frame_words(entry).is_none())
         .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
         .filter(|(entry, part)| {
             !in_tail(part, cutoff) && !context.edited.touches(&entry.mid, &part.id)
@@ -1063,7 +1072,7 @@ pub fn caveman(
         .index
         .entries()
         .iter()
-        .filter(|entry| entry.role != Role::System && !is_kept_notice(entry))
+        .filter(|entry| entry.role != Role::System && !protects_from_automatic_reclaim(entry))
         .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
         .filter_map(|(entry, part)| {
             let (PartBody::Text { text }, Some(tag)) = (&part.body, part.tag) else {
@@ -1224,7 +1233,9 @@ pub fn answered_images(context: &Context, images: &Images) -> (Vec<EditOp>, Vec<
             && age <= images.watermark
             && (images.over_limit || images.cutoff.is_none_or(|cutoff| age < cutoff))
             && !(context.keep_first_message && position == 0);
-        if !eligible || is_kept_notice(entry) || !matches!(entry.role, Role::User | Role::Assistant)
+        if !eligible
+            || protects_from_automatic_reclaim(entry)
+            || !matches!(entry.role, Role::User | Role::Assistant)
         {
             continue;
         }
@@ -1565,7 +1576,7 @@ pub fn keep_drops(
     let mut drops = Vec::new();
     for (position, entry) in entries[..call_at].iter().enumerate() {
         if (position == 0 && context.keep_first_message)
-            || is_kept_notice(entry)
+            || protects_from_automatic_reclaim(entry)
             || (entry.role == Role::User && entry.notice.is_none())
         {
             continue;

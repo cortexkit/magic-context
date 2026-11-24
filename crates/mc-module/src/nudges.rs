@@ -303,6 +303,7 @@ pub fn measure(
     let mut measurement = Measurement::default();
     let mut candidates: Vec<(u8, u64, PartRef)> = Vec::new();
     for entry in context.index.entries() {
+        let protected_entry = crate::neutral::protects_from_automatic_reclaim(entry);
         for part in crate::neutral::authored_parts(entry) {
             if context.edited.covers(&entry.mid, &part.id) {
                 continue;
@@ -315,7 +316,7 @@ pub fn measure(
             measurement.t += weight;
             // The conversation takes up space, but only unkept notices count
             // as text the model could reclaim with ctx_reduce.
-            if crate::neutral::is_kept_notice(entry)
+            if protected_entry
                 || (matches!(&part.body, PartBody::Text { .. }) && entry.notice.is_none())
             {
                 continue;
@@ -496,6 +497,7 @@ pub fn person_turns(entries: &[Entry]) -> u64 {
         .filter(|entry| {
             entry.role == Role::User
                 && entry.notice.is_none()
+                && crate::neutral::host_frame_words(entry).is_none()
                 && (entry.host_parts.is_empty()
                     || crate::neutral::authored_parts(entry).next().is_some())
         })

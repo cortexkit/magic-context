@@ -114,6 +114,9 @@ pub fn mode(input: &Value) -> Result<Mode, String> {
 }
 
 fn role_label(entry: &Entry) -> String {
+    if crate::neutral::host_frame_words(entry).is_some() {
+        return "host-framed message".to_owned();
+    }
     if !entry.host_parts.is_empty() && crate::neutral::authored_parts(entry).next().is_none() {
         return "H (host)".to_owned();
     }
@@ -141,6 +144,20 @@ fn recovered_part(
         Some(counter) => render_part_preview(&part.body, counter),
         None => render_part_full(&part.body),
     }?;
+    if let Some(words) = crate::neutral::host_frame_words(entry).filter(|_| {
+        entry
+            .host_frame
+            .as_ref()
+            .is_some_and(|fact| fact.part == part.id)
+    }) {
+        let words = match preview {
+            Some(_) => truncate(words, 200),
+            None => words.to_owned(),
+        };
+        return Some(format!(
+            "[stored text, including host wrapper]\n{rendered}\n[person's mid-turn words]\n{words}"
+        ));
+    }
     Some(match crate::neutral::host_part(entry, part) {
         Some(fact) => format!("{}\n{rendered}", crate::neutral::host_label(fact)),
         None => rendered,
@@ -400,7 +417,9 @@ async fn range<C: RunnerClient>(
     .await?;
     // Historian lines intentionally omit host text. Raw recovery must keep it,
     // so a marked range uses per-part labels instead of the historian renderer.
-    if entries.iter().any(|entry| !entry.host_parts.is_empty()) {
+    if entries.iter().any(|entry| {
+        !entry.host_parts.is_empty() || crate::neutral::host_frame_words(entry).is_some()
+    }) {
         return Ok(recovery_blocks(&entries, start, end, counter, false));
     }
     let Some(mut chunk) = chunk::build(&entries, TOKEN_BUDGET, counter) else {

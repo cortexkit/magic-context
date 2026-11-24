@@ -326,6 +326,18 @@ impl Index {
                     held.host_parts = entry.host_parts.clone();
                     self.app_changed.insert(entry.ordinal);
                 }
+                // A host frame can arrive later without changing a checksum.
+                // Keep it when a later read omits the fact and refresh summaries
+                // only when it changes the verified words.
+                if held.host_frame.is_none() && entry.host_frame.is_some() {
+                    if crate::neutral::host_frame_words(&entry).is_some() {
+                        self.summary_changed = Some(
+                            self.summary_changed
+                                .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
+                        );
+                    }
+                    held.host_frame = entry.host_frame.clone();
+                }
                 if refresh_counts(held, &entry) {
                     self.summary_changed = Some(
                         self.summary_changed

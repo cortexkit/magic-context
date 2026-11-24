@@ -650,7 +650,7 @@ impl Session {
         let mut selected = Vec::new();
         for tag in tags {
             let (entry, part) = find(tag).expect("all tags resolved");
-            if crate::neutral::is_kept_notice(entry) {
+            if crate::neutral::protects_from_explicit_drop(entry) {
                 skipped.push(format!("§{tag}§ is a kept notice from the person"));
             } else if matches!(&part.body, PartBody::Tool(tool) if tool.name.eq_ignore_ascii_case("ctx_reduce"))
             {
