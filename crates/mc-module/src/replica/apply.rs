@@ -834,6 +834,17 @@ fn apply_body(
                     [&body.global_id],
                 )?;
             }
+            // The row's own snapshot decides it now, and it carried the
+            // row's links as they stood here: a link an older arrival named
+            // to a memory not here yet went out as none. That link no
+            // longer belongs to the row, so its target arriving later must
+            // not set it ([`resolve_pending`]).
+            if let (Some(local), true) = (local, table.kind == MEMORIES.kind) {
+                tx.execute(
+                    "DELETE FROM replica_pending_links WHERE kind = 'memory' AND local_id = ?1",
+                    [local],
+                )?;
+            }
         }
         if let Some(local) = local {
             changes.extend(reconcile(tx, box_id, table, local)?);
@@ -1841,6 +1852,12 @@ fn conflict(tx: &Connection, one: i64, other: i64, key: &str) -> rusqlite::Resul
 /// Make the links that waited for `global`, now that it names `target`. A
 /// memory archived because another holds its fact keeps the successor it
 /// waited for aside, as its own, until it is live again.
+///
+/// A link waits with the arrival that named it. While a change of this
+/// computer's own written over that arrival is still to come back from the
+/// stream, the row shows that change, which sends the link as none, so the
+/// link keeps waiting: it is dropped once the own change decides the row,
+/// and named again by the arrival that decides it otherwise.
 fn resolve_pending(tx: &Connection, global: &str, target: i64) -> rusqlite::Result<()> {
     let waiting: Vec<(i64, String, Option<String>)> = tx
         .prepare(
@@ -1850,6 +1867,14 @@ fn resolve_pending(tx: &Connection, global: &str, target: i64) -> rusqlite::Resu
         .query_map([global], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (local, field, detail) in waiting {
+        if exists(tx, &MEMORIES, local)? && !own_changes(tx, &MEMORIES, local)?.is_empty() {
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM replica_pending_links
+              WHERE target_global_id = ?1 AND kind = 'memory' AND local_id = ?2 AND field = ?3",
+            params![global, local, field],
+        )?;
         if !exists(tx, &MEMORIES, local)? || !exists(tx, &MEMORIES, target)? {
             continue;
         }
@@ -1899,10 +1924,6 @@ fn resolve_pending(tx: &Connection, global: &str, target: i64) -> rusqlite::Resu
             _ => {}
         }
     }
-    tx.execute(
-        "DELETE FROM replica_pending_links WHERE target_global_id = ?1 AND kind = 'memory'",
-        [global],
-    )?;
     Ok(())
 }
 

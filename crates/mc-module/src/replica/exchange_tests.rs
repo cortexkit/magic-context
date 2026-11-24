@@ -1222,3 +1222,69 @@ async fn a_copy_taken_while_a_change_was_being_sent_settles_it_and_takes_later_c
         );
     }
 }
+
+/// Each memory's state and successor, by global ids, so two computers'
+/// rows can be compared.
+fn successors(computer: &Computer) -> Vec<String> {
+    computer.texts(
+        "SELECT m.global_id || ':' || m.status || ':' || COALESCE(s.global_id, '-')
+           FROM memories m LEFT JOIN memories s ON s.id = m.superseded_by_memory_id
+          ORDER BY m.global_id",
+    )
+}
+
+/// A link to a memory that isn't here yet waits for it, on behalf of the
+/// arrival that named it. A change of the linking memory made here, which
+/// went out with the link as none and decides the row, drops the link: the
+/// target arriving later must not set it on this computer alone. That holds
+/// whether the target arrives after the change came back or between its
+/// send and its return.
+#[tokio::test]
+async fn a_waiting_link_is_dropped_once_a_change_made_here_decides_its_memory() {
+    for target_first in [false, true] {
+        let hub = InMemoryHub::new();
+        let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
+        let older = memory(&a, "pj-a", "Use the old parser.");
+        a.sync().await;
+        b.sync().await;
+        // A's change of the older memory is queued before the newer memory
+        // that replaces it, so it is sent first, and the newer one's send is
+        // refused.
+        a.execute(&format!(
+            "UPDATE memories SET importance = 70 WHERE id = {older}"
+        ));
+        let newer = memory(&a, "pj-a", "Use the new parser.");
+        a.execute(&format!(
+            "UPDATE memories SET status = 'archived', superseded_by_memory_id = {newer}
+              WHERE id = {older}"
+        ));
+        hub.refuse_after(1);
+        assert_eq!(a.replica.publish().await.unwrap().sent, 1);
+        b.follow_all().await;
+        assert_eq!(
+            b.value::<i64>("SELECT COUNT(*) FROM replica_pending_links"),
+            1,
+            "the successor isn't on B yet"
+        );
+        // The person restores the older memory on B.
+        b.execute("UPDATE memories SET status = 'active', superseded_by_memory_id = NULL");
+        if target_first {
+            a.publish_all().await;
+            b.publish_all().await;
+        } else {
+            b.sync().await;
+            a.publish_all().await;
+        }
+        b.follow_all().await;
+        a.follow_all().await;
+        assert_eq!(
+            successors(&b),
+            successors(&a),
+            "the successor arrived first: {target_first}"
+        );
+        assert_eq!(
+            b.value::<i64>("SELECT COUNT(*) FROM replica_pending_links"),
+            0
+        );
+    }
+}
