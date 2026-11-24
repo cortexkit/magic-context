@@ -744,6 +744,19 @@ impl ContextDb {
         apply(&mut connection)
     }
 
+    /// Discover legacy keys in one read transaction, without leasing either
+    /// the shared writer connection or a search reader.
+    pub(crate) fn legacy_project_keys(
+        &self,
+    ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+        let mut conn = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let tx = conn.transaction()?;
+        crate::legacy_projects::keys_with_rows(&tx)
+    }
+
     /// Run `read`, a search's reads, on a read-only connection of its own
     /// (see `context_db_readers.rs`), so a long search never holds the
     /// connection every other call uses. `read` runs inside one read
@@ -1075,13 +1088,22 @@ impl ContextDb {
         session: &str,
         sequence: i64,
     ) -> Result<(), String> {
-        self.lock()
-            .execute(
+        self.with_connection(|conn| -> rusqlite::Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // An event without a compartment id cannot be attributed to
+            // one of the summaries being removed.
+            tx.execute(
+                "DELETE FROM compartment_events WHERE session_id = ?1 AND harness = ?2
+                  AND compartment_id IN (SELECT id FROM compartments
+                   WHERE session_id = ?1 AND harness = ?2 AND sequence >= ?3)",
+                params![session, harness, sequence],
+            )?;
+            tx.execute(
                 "DELETE FROM compartments WHERE session_id = ?1 AND harness = ?2 AND sequence >= ?3",
                 params![session, harness, sequence],
-            )
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+            )?;
+            tx.commit()
+        }).map_err(|error| error.to_string())
     }
 
     #[cfg(not(feature = "context-db-timing"))]
@@ -1294,6 +1316,75 @@ mod tests {
             assert_eq!(rows, vec![("s1".into(), "pj-b".into(), 5)]);
         });
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reverting_a_summary_removes_only_its_linked_events_before_republication() {
+        use crate::summary::validate::ParsedEvent;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
+        let publish = |harness: &str, sequence: u64, kind: &str, now: i64, unlinked: bool| {
+            let summary = ValidatedCompartment {
+                sequence,
+                start_message: 1 + sequence * 10,
+                end_message: 10 + sequence * 10,
+                start_message_id: format!("m{sequence}a"),
+                end_message_id: format!("m{sequence}b"),
+                title: "Work".into(),
+                content: "Did work.".into(),
+                p1: Some("Did work.".into()),
+                p2: None,
+                p3: None,
+                p4: None,
+                importance: Some(50),
+                episode_type: None,
+            };
+            let event = |kind: &str, at_compartment| ParsedEvent {
+                kind: kind.into(),
+                at_compartment,
+                fields: Default::default(),
+            };
+            let mut events = vec![event(kind, Some(1))];
+            if unlinked {
+                events.push(event("unlinked", None));
+            }
+            db.publish_summaries(
+                harness,
+                "shared-session-id",
+                &[summary],
+                None,
+                &Recall {
+                    events,
+                    ..Recall::default()
+                },
+                now,
+            )
+            .unwrap();
+        };
+        publish("opencode", 1, "earlier", 1, false);
+        publish("opencode", 2, "replaced", 2, true);
+        publish("pi", 3, "other-harness", 3, false);
+        db.delete_compartments_from("opencode", "shared-session-id", 2)
+            .unwrap();
+        publish("opencode", 2, "replaced", 4, false);
+        let events: Vec<(String, i64)> = db.with_connection(|conn| {
+            conn.prepare("SELECT kind, created_at FROM compartment_events ORDER BY id")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        });
+        assert_eq!(
+            events,
+            [
+                ("earlier".into(), 1),
+                ("unlinked".into(), 2),
+                ("other-harness".into(), 3),
+                ("replaced".into(), 4)
+            ]
+        );
     }
 
     #[test]
