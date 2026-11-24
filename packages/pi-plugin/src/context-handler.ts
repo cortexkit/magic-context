@@ -563,9 +563,9 @@ import {
 } from "./served-array-ledger";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import {
+	piImageWireTokens,
 	piMessagesWithWireImages,
 	piModelAcceptsImages,
-	piToolImageWireTokens,
 	stripPiProcessedImages,
 } from "./strip-processed-images-pi";
 import {
@@ -10493,14 +10493,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					saved: nativeRemovalInputs,
 					canApply: isCacheBustingPass,
 				}),
-			// A tool result's token count is what the request carries for it: an
+			// Price images by what the request carries: an
 			// image the processed-image strip froze, or one the model cannot take,
 			// counts as the text sent in its place.
-			toolImageTokens: (messageIndex, partIndex) => {
+			imageTokens: (messageIndex, partIndex) => {
 				const message = args.messages[messageIndex] as
-					| { content?: unknown }
+					| { role?: unknown; content?: unknown }
 					| undefined;
-				return piToolImageWireTokens({
+				return piImageWireTokens({
+					role: message?.role,
 					block: Array.isArray(message?.content)
 						? message.content[partIndex]
 						: undefined,
