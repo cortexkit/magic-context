@@ -450,12 +450,36 @@ pub(crate) fn update_content(
     content: &str,
     hash: &str,
 ) -> rusqlite::Result<()> {
+    update_text_and_category(tx, id, content, hash, None)
+}
+
+pub(super) fn update_text_and_category(
+    tx: &Transaction,
+    id: i64,
+    content: &str,
+    hash: &str,
+    category: Option<(&str, &str)>,
+) -> rusqlite::Result<()> {
+    let (category_id, tag) = category.unzip();
+    // Category and hash are one unique key. SQLite checks it on each write,
+    // so neither intermediate key may be written to the row.
+    use crate::dreamer::tasks::verify::{spans::STORED_KEY, CHECKED_REVISION_KEY, NOT_CODE_KEY};
     tx.execute(
-        "UPDATE memories SET content = ?2, normalized_hash = ?3, updated_at = ?4, shareable = 0,
+        &format!("UPDATE memories SET content = ?2, normalized_hash = ?3, updated_at = ?4, shareable = 0,
                 classified_at = NULL, mural_cue = NULL, mural_cue_hash = NULL, mural_cue_at = NULL,
-                mural_cue_rejection_count = 0
-          WHERE id = ?1",
-        params![id, content, hash, now_ms()],
+                mural_cue_rejection_count = 0,
+                category = COALESCE(?5, category), origin_category = COALESCE(?6, origin_category),
+                verification_status = CASE WHEN content <> ?2 THEN 'unverified' ELSE verification_status END,
+                verified_at = CASE WHEN content <> ?2 THEN NULL ELSE verified_at END,
+                verify_result = CASE WHEN content <> ?2 THEN NULL ELSE verify_result END,
+                verify_files_json = CASE WHEN content <> ?2 THEN NULL ELSE verify_files_json END,
+                verify_commit = CASE WHEN content <> ?2 THEN NULL ELSE verify_commit END,
+                metadata_json = CASE WHEN content <> ?2 AND json_valid(metadata_json) THEN
+                    json_remove(metadata_json, '$.{STORED_KEY}', '$.dreamerVerifiedAt', '$.dreamerVerifiedCommit',
+                        '$.dreamerCheckedAt', '$.{CHECKED_REVISION_KEY}', '$.{NOT_CODE_KEY}')
+                    ELSE metadata_json END
+          WHERE id = ?1"),
+        params![id, content, hash, now_ms(), category_id, tag],
     )?;
     if table_exists(tx, "memory_verifications")? {
         tx.execute(
@@ -889,6 +913,7 @@ pub fn mutate(
     let duplicate = match (&hash, operation) {
         (Some(hash), Operation::Update | Operation::Merge) => {
             memory_by_hash_at(&tx, &first_owner, &category_id, hash)?
+                .filter(|memory| matches!(memory.status.as_str(), "active" | "permanent"))
         }
         _ => None,
     };
@@ -935,10 +960,12 @@ pub fn mutate(
     match operation {
         Operation::Update => {
             let content = content.expect("checked");
-            update_content(&tx, first.id, content, hash.as_deref().expect("checked"))?;
-            tx.execute(
-                "UPDATE memories SET category = ?2, origin_category = ?3 WHERE id = ?1",
-                params![first.id, category_id, category],
+            update_text_and_category(
+                &tx,
+                first.id,
+                content,
+                hash.as_deref().expect("checked"),
+                Some((&category_id, &category)),
             )?;
             // The agent wrote the new text in its session, on its line.
             crate::memory_line::stamp(&tx, first.id, who.line)?;
@@ -964,12 +991,13 @@ pub fn mutate(
                 None => {
                     before.push(None);
                     let placer = who.placer();
-                    let new_row = crate::memory_levels::NewRow::decide(
+                    let mut new_row = crate::memory_levels::NewRow::decide(
                         &placer,
                         who.project,
                         merge_owner.as_ref(),
                         &category,
                     )?;
+                    new_row.category_id = category_id;
                     insert_memory(
                         &tx,
                         &new_row,

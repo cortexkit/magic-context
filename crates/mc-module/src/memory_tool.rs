@@ -502,6 +502,278 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const WRITER: Writer<'static> = Writer {
+        harness: "mode3",
+        session: "memory-edit-session",
+        project: "dir:memory-edit-project",
+        authority: None,
+        line: None,
+    };
+
+    fn write_memory(conn: &mut Connection, content: &str, category: &str) -> i64 {
+        let reply = run(
+            conn,
+            &WRITER,
+            &json!({"action": "write", "content": content, "category": category}),
+        )
+        .unwrap();
+        assert!(reply.starts_with("Saved memory [ID:"), "{reply}");
+        conn.query_row(
+            "SELECT id FROM memories WHERE content = ?1",
+            [content],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rewriting_a_memory_invalidates_the_old_cited_confirmation() {
+        use crate::dreamer::tasks::verify::spans::{cites_its_confirmation, Cited, Confirmation};
+        use crate::memory_writes::person::{self, Edit, OwnerRef, Target};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        drop(crate::context_db::ContextDb::create_for_tests(&path).unwrap());
+        let mut conn = Connection::open(path).unwrap();
+        let original = "Retries are disabled.";
+        let id = write_memory(&mut conn, original, "ARCHITECTURE");
+        let spans = Confirmation {
+            commit: "a".repeat(40),
+            spans: vec![Cited {
+                path: "src/retries.rs".into(),
+                start: 1,
+                end: 1,
+                text: "retries = false;".into(),
+            }],
+            derive: None,
+        }
+        .json(5);
+        let metadata =
+            json!({"dreamerVerifiedAt": 5, "dreamerVerifiedSpans": spans, "keep": "unrelated"});
+        conn.execute("UPDATE memories SET verification_status = 'verified', verified_at = 5, metadata_json = ?2 WHERE id = ?1", rusqlite::params![id, metadata.to_string()]).unwrap();
+
+        let get = json!({"action": "get", "ids": [id]});
+        assert!(run(&mut conn, &WRITER, &get)
+            .unwrap()
+            .contains("| verified |"));
+        let row = memory_writes::get_memory(&conn, id).unwrap().unwrap();
+        person::edit(
+            &mut conn,
+            &OwnerRef {
+                level: "project".into(),
+                owner_id: WRITER.project.into(),
+            },
+            Target {
+                id,
+                revision: row.revision,
+            },
+            &Edit {
+                importance: Some(90),
+                ..Edit::default()
+            },
+        )
+        .unwrap();
+        assert!(run(&mut conn, &WRITER, &get)
+            .unwrap()
+            .contains("| verified |"));
+
+        let reply = run(
+            &mut conn,
+            &WRITER,
+            &json!({"action": "update", "ids": [id], "content": "Retries are mandatory."}),
+        )
+        .unwrap();
+        assert!(reply.starts_with("Updated memory"), "{reply}");
+        let shown = run(&mut conn, &WRITER, &get).unwrap();
+        assert!(shown.contains("| unverified |"), "{shown}");
+        let row = memory_writes::get_memory(&conn, id).unwrap().unwrap();
+        assert!(!cites_its_confirmation(row.metadata_json.as_deref()));
+        let verified_at: Option<i64> = conn
+            .query_row(
+                "SELECT verified_at FROM memories WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(verified_at, None);
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.metadata_json.unwrap()).unwrap(),
+            json!({"keep": "unrelated"})
+        );
+    }
+
+    #[test]
+    fn a_merge_without_a_category_keeps_the_stored_category_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        drop(crate::context_db::ContextDb::create_for_tests(&path).unwrap());
+        let mut conn = Connection::open(path).unwrap();
+        let a = write_memory(&mut conn, "The cache uses its own name.", "NAMING");
+        let b = write_memory(&mut conn, "The queue uses its own name.", "NAMING");
+        let collision = write_memory(&mut conn, "Names are local to each component.", "NAMING");
+        conn.execute(
+            "UPDATE memories SET category = 'domain:terminology' WHERE id IN (?1, ?2, ?3)",
+            [a, b, collision],
+        )
+        .unwrap();
+        let reply = run(
+            &mut conn,
+            &WRITER,
+            &json!({"action": "merge", "ids": [a, b], "content": "Names are local to each component."}),
+        );
+        assert!(reply
+            .unwrap_err()
+            .contains(&format!("already exists as ID {collision}")));
+        let content = "Cache and queue names are local to each component.";
+        run(
+            &mut conn,
+            &WRITER,
+            &json!({"action": "merge", "ids": [a, b], "content": content}),
+        )
+        .unwrap();
+        let category: String = conn
+            .query_row(
+                "SELECT category FROM memories WHERE content = ?1",
+                [content],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(category, "domain:terminology");
+    }
+
+    #[test]
+    fn edits_check_uniqueness_on_the_final_content_and_category_together() {
+        use crate::memory_writes::person::{self, Edit, OwnerRef, Target};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        drop(crate::context_db::ContextDb::create_for_tests(&path).unwrap());
+        let mut conn = Connection::open(path).unwrap();
+        let before = "Text before the edit.";
+        let after = "Text after the edit.";
+        let id = write_memory(&mut conn, before, "NAMING");
+        let new_content_old_category = write_memory(&mut conn, after, "NAMING");
+        // The tool refuses cross-category saves of identical text; seed this
+        // existing row under a different text and then give it the old text.
+        let old_content_new_category = write_memory(&mut conn, "Other content.", "ARCHITECTURE");
+        conn.execute(
+            "UPDATE memories SET content = ?2, normalized_hash = ?3 WHERE id = ?1",
+            rusqlite::params![
+                old_content_new_category,
+                before,
+                memory_writes::normalized_hash(before)
+            ],
+        )
+        .unwrap();
+
+        let reply = run(
+            &mut conn,
+            &WRITER,
+            &json!({"action": "update", "ids": [id], "content": after, "category": "ARCHITECTURE"}),
+        )
+        .unwrap();
+        assert!(reply.starts_with("Updated memory"), "{reply}");
+        let row = memory_writes::get_memory(&conn, id).unwrap().unwrap();
+        assert_eq!(
+            (row.content.as_str(), row.category.as_str()),
+            (after, "ARCHITECTURE")
+        );
+        let reply = run(
+            &mut conn,
+            &WRITER,
+            &json!({"action": "update", "ids": [id], "content": after, "category": "NAMING"}),
+        );
+        assert!(reply
+            .unwrap_err()
+            .contains(&format!("already exists as ID {new_content_old_category}")));
+
+        // Move the same row back across both intermediate collisions through
+        // the person's edit path, leaving the final key free.
+        let owner = OwnerRef {
+            level: "project".into(),
+            owner_id: WRITER.project.into(),
+        };
+        let target = Target {
+            id,
+            revision: row.revision,
+        };
+        let naming = Some(("swe:naming".into(), "NAMING".into()));
+        assert!(matches!(
+            person::edit(
+                &mut conn,
+                &owner,
+                target,
+                &Edit {
+                    category: naming.clone(),
+                    ..Edit::default()
+                }
+            ),
+            Err(person::PersonError::Duplicate)
+        ));
+        person::edit(
+            &mut conn,
+            &owner,
+            target,
+            &Edit {
+                content: Some(before.into()),
+                category: naming,
+                importance: None,
+            },
+        )
+        .unwrap();
+        let row = memory_writes::get_memory(&conn, id).unwrap().unwrap();
+        assert_eq!(
+            (row.content.as_str(), row.category.as_str()),
+            (before, "NAMING")
+        );
+    }
+
+    #[test]
+    fn archived_text_does_not_prevent_updating_or_merging_live_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        drop(crate::context_db::ContextDb::create_for_tests(&path).unwrap());
+        let mut conn = Connection::open(path).unwrap();
+        let archived_text = "The queue drains at the end of a turn.";
+        let archived = write_memory(&mut conn, archived_text, "ARCHITECTURE");
+        let a = write_memory(&mut conn, "The queue drains eagerly.", "ARCHITECTURE");
+        let b = write_memory(&mut conn, "The queue drains periodically.", "ARCHITECTURE");
+        run(
+            &mut conn,
+            &WRITER,
+            &json!({"action": "archive", "ids": [archived]}),
+        )
+        .unwrap();
+        let reply = run(
+            &mut conn,
+            &WRITER,
+            &json!({"action": "update", "ids": [a], "content": archived_text}),
+        )
+        .unwrap();
+        assert!(reply.starts_with("Updated memory"), "{reply}");
+        let reply = run(
+            &mut conn,
+            &WRITER,
+            &json!({"action": "merge", "ids": [a, b], "content": archived_text}),
+        )
+        .unwrap();
+        assert!(reply.starts_with("Merged"), "{reply}");
+        assert_eq!(
+            memory_writes::get_memory(&conn, archived)
+                .unwrap()
+                .unwrap()
+                .status,
+            "archived"
+        );
+        assert_eq!(
+            memory_writes::get_memory(&conn, a)
+                .unwrap()
+                .unwrap()
+                .content,
+            archived_text
+        );
+    }
+
     #[test]
     fn accepts_required_placeholder_arguments_for_write_get_and_archive() {
         let dir = tempfile::tempdir().unwrap();
