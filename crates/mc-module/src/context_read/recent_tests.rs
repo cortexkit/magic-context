@@ -327,6 +327,40 @@ fn read_count(fixture: &Fixture) -> usize {
 }
 
 #[tokio::test]
+async fn person_facing_recent_reads_the_words_sent_through_say() {
+    let fixture = Fixture::new("ses_live", &[]);
+    fixture.runner.0.entries.lock().unwrap().extend([
+        entry(11, Role::User, vec![text("Which path should I take?")]),
+        entry(
+            12,
+            Role::Assistant,
+            vec![
+                tool(
+                    "s12",
+                    "say",
+                    json!({"text":"Use the northern route.","reply_to":110}),
+                ),
+                text("sent"),
+            ],
+        ),
+    ]);
+    let key = SessionRef::new("thalamus-harness", HARNESS, "ses_live");
+    fixture.set_up(&key).await;
+    let answer = fixture
+        .read("context.recent", recent_params("ses_live", 32_768))
+        .await
+        .unwrap();
+    let text = answer["text"].as_str().unwrap();
+    assert!(
+        text.ends_with(
+            "[11] U: Which path should I take?\n[12] A: (to §110§) Use the northern route."
+        ),
+        "{text}"
+    );
+    assert_eq!(answer["through_message"], 12);
+}
+
+#[tokio::test]
 async fn recent_lines_are_the_summarizers_lines_for_the_newest_messages_within_budget() {
     let fixture = Fixture::new("ses_live", &[]);
     let key = SessionRef::new("thalamus-harness", HARNESS, "ses_live");

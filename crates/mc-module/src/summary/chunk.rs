@@ -3,7 +3,7 @@
 //!
 //! A message's number is the runner's ordinal, which counts from 1. Consecutive messages
 //! of the same role merge into one line: `[3-5] A: first / second`. An
-//! assistant message with no text shows its tool calls instead
+//! assistant message with neither text nor words sent through a tool shows its calls instead
 //! (`TC: read(src/a.rs)`), and such a line counts as tool-only, a range the
 //! summarizer may skip. Reasoning is never shown.
 //!
@@ -13,6 +13,8 @@
 //! a user's reply to an explicit ask for a decision, which carries that decision.
 
 mod relayed_wake;
+#[cfg(test)]
+mod spoken_samples_tests;
 
 use std::sync::OnceLock;
 
@@ -22,6 +24,8 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::validate::{ChunkLine, HistorianChunk, MessageRange};
+use crate::js_text::{truncate_arg, truncate_units};
+use crate::spoken::{self, Format};
 
 pub(super) const MAX_COMMITS_PER_BLOCK: usize = 5;
 const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: MAGIC-CONTEXT";
@@ -741,14 +745,14 @@ pub(super) fn render_entry(
     verbatim: bool,
 ) -> Option<(char, Vec<String>, Vec<String>, bool)> {
     let _timing = crate::notice_cost_timing::span("trigger.render_entry");
-    let raw_texts: Vec<&str> = crate::neutral::authored_parts(entry)
-        .filter_map(|part| match &part.body {
-            PartBody::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
     match entry.role {
         Role::User => {
+            let raw_texts: Vec<&str> = crate::neutral::authored_parts(entry)
+                .filter_map(|part| match &part.body {
+                    PartBody::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
             let whole_text = raw_texts.join("\n");
             if is_relayed_wake(&whole_text) {
                 let parts = relayed_wake::lines(&whole_text);
@@ -787,11 +791,24 @@ pub(super) fn render_entry(
             (!parts.is_empty()).then(|| ('U', parts, Vec::new(), true))
         }
         Role::Assistant => {
-            let texts: Vec<String> = raw_texts
-                .iter()
-                .map(|text| normalize(text))
-                .filter(|text| !text.is_empty())
+            let mut has_spoken = false;
+            let mut texts: Vec<_> = crate::neutral::authored_parts(entry)
+                .filter_map(|part| match &part.body {
+                    PartBody::Text { text } => Some((normalize(text), text.trim() == "sent")),
+                    PartBody::Tool(tool) => {
+                        let text = spoken::spoken_text(tool, Format::Transcript)?;
+                        has_spoken = true;
+                        Some((normalize(&text), false))
+                    }
+                    _ => None,
+                })
+                .filter(|(text, _)| !text.is_empty())
                 .collect();
+            // `sent` acknowledges delivery, but in a reply with other ordinary
+            // prose and no spoken parts it can be part of what the agent wrote.
+            if has_spoken || texts.iter().all(|(_, ack)| *ack) {
+                texts.retain(|(_, ack)| !ack);
+            }
             if texts.is_empty() {
                 let calls: Vec<String> = crate::neutral::authored_parts(entry)
                     .filter_map(|part| match &part.body {
@@ -802,7 +819,11 @@ pub(super) fn render_entry(
                 return (!calls.is_empty())
                     .then(|| ('A', vec![calls.join(" / ")], Vec::new(), false));
             }
-            let joined = texts.join(" / ");
+            let joined = texts
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>()
+                .join(" / ");
             let (compacted, commits) = compact_text_for_summary(&joined);
             // Evidence keeps the hashes in place; the line's prefix still
             // lists them.
@@ -852,20 +873,6 @@ fn tool_summary(name: &str, input: &Value) -> String {
 /// `extractKeyArg`. A shell command often opens with `cd <absolute path> &&`,
 /// which alone can fill the 60 units other key arguments keep.
 const COMMAND_ARG_MAX_UNITS: usize = 200;
-
-/// At most 60 UTF-16 code units, then an ellipsis.
-fn truncate_arg(value: &str) -> String {
-    truncate_units(value, 60)
-}
-
-/// At most `max` UTF-16 code units, then an ellipsis.
-fn truncate_units(value: &str, max: usize) -> String {
-    let units: Vec<u16> = value.encode_utf16().collect();
-    if units.len() <= max {
-        return value.to_owned();
-    }
-    format!("{}…", crate::js_text::string_from_utf16_prefix(&units, max))
-}
 
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -1030,6 +1037,120 @@ mod tests {
 
     fn text(text: &str) -> PartBody {
         PartBody::Text { text: text.into() }
+    }
+
+    fn call(name: &str, input: Value) -> PartBody {
+        PartBody::Tool(ToolPart::new(name, name, input, ToolStatus::Completed))
+    }
+
+    #[test]
+    fn person_facing_say_is_narrative_even_without_a_result_or_if_refused() {
+        let no_result = ToolPart::new(
+            "pending",
+            "say",
+            json!({"text":"I'll check."}),
+            ToolStatus::Running,
+        );
+        let refused = ToolPart::new(
+            "refused",
+            "say",
+            json!({"text":"I'll check."}),
+            ToolStatus::Denied,
+        )
+        .with_output("You are not allowed to speak here. Nothing was sent.");
+        for tool in [no_result, refused] {
+            let assistant = entry(1, Role::Assistant, false, vec![PartBody::Tool(tool)]);
+            let chunk = build(
+                std::slice::from_ref(&assistant),
+                10_000,
+                crate::count::Counter::for_model(None),
+            )
+            .unwrap();
+            assert_eq!(chunk.input, "Messages 1-1:\n\n[1] A: I'll check.");
+            assert!(render_entry(&assistant, false).unwrap().3);
+        }
+    }
+
+    #[test]
+    fn person_facing_say_preserves_part_order_and_formats_reply_and_media() {
+        let quote = "x".repeat(61);
+        let path = "p".repeat(61);
+        let assistant = entry(
+            1,
+            Role::Assistant,
+            false,
+            vec![
+                text("Before."),
+                call("read", json!({"path":"not narrative"})),
+                call(
+                    "MCP_Say",
+                    json!({"text":"Here\n is the fix.","reply_to":17,
+                "quote":quote,"media":[{"path":path,"url":"ignored"},{"url":"https://example.test"},
+                    {"artifact_id":"artifact-2"},{"id":"diff-3"},"README.md",{"other":"ignored"}],
+                "level":"urgent","key":"build","done":true}),
+                ),
+                text(" sent \n"),
+                text("After."),
+                call("say", json!({"text":"Another answer.","reply_to":18})),
+            ],
+        );
+        assert_eq!(render_entry(&assistant, false), Some(('A', vec![format!(
+            "Before. / (to §17§ \"{}…\") Here is the fix. [media: {}…, https://example.test, artifact-2, diff-3, README.md] / After. / (to §18§) Another answer.",
+            "x".repeat(60), "p".repeat(60)
+        )], vec![], true)));
+    }
+
+    #[test]
+    fn person_facing_sent_without_any_other_words_prints_nothing() {
+        let assistant = |parts| entry(1, Role::Assistant, false, parts);
+        assert_eq!(
+            render_entry(&assistant(vec![text(" sent \n"), text(" ")]), false),
+            None
+        );
+        assert_eq!(
+            render_entry(
+                &assistant(vec![text("sent"), text("The parcel arrived.")]),
+                false
+            ),
+            Some(('A', vec!["sent / The parcel arrived.".into()], vec![], true))
+        );
+    }
+
+    #[test]
+    fn person_facing_notify_only_speaks_on_send_and_compacts_commit_hashes() {
+        let assistant = |part| entry(1, Role::Assistant, false, vec![part]);
+        let sent = assistant(call(
+            "notify",
+            json!({"action":"send","title":"Patch ready",
+            "body":"Committed 1a2b3c4.","severity":"urgent","key":"patch"}),
+        ));
+        assert_eq!(
+            render_entry(&sent, false),
+            Some((
+                'A',
+                vec!["Patch ready Committed.".into()],
+                vec!["1a2b3c4".into()],
+                true
+            ))
+        );
+        assert_eq!(
+            render_entry(&sent, true).unwrap().1,
+            ["Patch ready Committed 1a2b3c4."]
+        );
+        for (name, action, expected) in [
+            ("notify", "list", "TC: notify(list)"),
+            ("notify", "resolve", "TC: notify(resolve)"),
+            ("provider_notify", "send", "TC: provider_notify(send)"),
+        ] {
+            let ordinary = assistant(call(
+                name,
+                json!({"action":action,"title":"Not dialogue","resolution":"Closed"}),
+            ));
+            assert_eq!(
+                render_entry(&ordinary, false),
+                Some(('A', vec![expected.into()], vec![], false))
+            );
+        }
     }
 
     #[test]

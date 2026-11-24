@@ -22,6 +22,14 @@ pub(crate) fn authored_parts(entry: &Entry) -> impl Iterator<Item = &Part> {
         .filter(|part| host_part(entry, part).is_none())
 }
 
+/// Runners can prefix tool names with `mcp_`; the prefix is case-insensitive.
+pub(crate) fn without_tool_prefix(name: &str) -> &str {
+    match name.get(..4) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("mcp_") => &name[4..],
+        _ => name,
+    }
+}
+
 /// The runner marks notices carrying the person's own words. They stay
 /// verbatim until a summary covers them, rather than being reclaimed as notices.
 pub(crate) fn is_kept_notice(entry: &Entry) -> bool {

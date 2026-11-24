@@ -17,7 +17,10 @@ use serde_json::{json, Value};
 
 use crate::index::Index;
 use crate::injection::{self, Stripped};
-use crate::neutral::{is_finished, is_kept_notice, is_known, is_unkept_notice};
+use crate::neutral::{
+    is_finished, is_kept_notice, is_known, is_unkept_notice, without_tool_prefix,
+};
+use crate::spoken::is_person_facing_tool;
 use crate::tokens;
 
 /// A part, by message id and part id.
@@ -516,7 +519,8 @@ pub fn edit_marker(name: &str, value: &Value) -> Option<String> {
     ))
 }
 
-/// The newest results of each protected tool, by part.
+/// The newest results of each configured protected tool, plus all calls to
+/// person-facing tools. Their inputs can be the agent's only reply text.
 pub fn protected_tool_parts(index: &Index, counts: &BTreeMap<String, u64>) -> BTreeSet<PartKey> {
     let _timing = crate::notice_cost_timing::span("lanes.protected_tool_parts");
     let mut left: BTreeMap<String, u64> = counts.clone();
@@ -526,6 +530,10 @@ pub fn protected_tool_parts(index: &Index, counts: &BTreeMap<String, u64>) -> BT
             let PartBody::Tool(tool) = &part.body else {
                 continue;
             };
+            if is_person_facing_tool(&tool.name) {
+                protected.insert((entry.mid.clone(), part.id.clone()));
+                continue;
+            }
             let name = normalize_tool_name(&tool.name);
             if let Some(count) = left.get_mut(&name) {
                 if *count > 0 {
@@ -540,11 +548,7 @@ pub fn protected_tool_parts(index: &Index, counts: &BTreeMap<String, u64>) -> BT
 
 /// Tool names compare without case and without an `mcp_` prefix.
 pub fn normalize_tool_name(name: &str) -> String {
-    let lower = name.to_lowercase();
-    lower
-        .strip_prefix("mcp_")
-        .map(str::to_owned)
-        .unwrap_or(lower)
+    without_tool_prefix(name).to_lowercase()
 }
 
 /// Whether an entry starts an actionable user turn: a person's message or
@@ -578,7 +582,7 @@ pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
     far_behind_matching(
         context,
         usable_window,
-        |_, part| matches!(part.body, PartBody::Tool(_)),
+        |_, part| matches!(&part.body, PartBody::Tool(tool) if !is_person_facing_tool(&tool.name)),
         starts_user_turn,
     )
 }
@@ -917,7 +921,9 @@ fn tool_parts<'a>(
         .filter(|entry| !is_kept_notice(entry))
         .flat_map(|entry| {
             entry.parts.iter().filter_map(move |part| match &part.body {
-                PartBody::Tool(tool) => Some((entry, part, tool)),
+                PartBody::Tool(tool) if !is_person_facing_tool(&tool.name) => {
+                    Some((entry, part, tool))
+                }
                 _ => None,
             })
         })
@@ -1154,6 +1160,7 @@ pub fn image_results(index: &Index, edited: &Edited) -> Vec<PartKey> {
             PartBody::Tool(tool) => {
                 tool.status == ToolStatus::Completed
                     && !tool.provider_executed
+                    && !is_person_facing_tool(&tool.name)
                     && part.seal == Seal::None
                     && image_attachments(tool) > 0
                     && !edited.touches(&entry.mid, &part.id)
@@ -1662,6 +1669,191 @@ mod tests {
 
     fn key(mid: &str, part: &str) -> PartKey {
         (mid.to_owned(), part.to_owned())
+    }
+
+    fn person_facing_index() -> Index {
+        let tool = |tag: u64, name, input| {
+            part(
+                format!("p{tag}"),
+                Some(tag),
+                Seal::None,
+                PartBody::Tool(
+                    ToolPart::new(format!("c{tag}"), name, input, ToolStatus::Completed)
+                        .with_output_bytes(40_000),
+                ),
+            )
+        };
+        let mut index = Index::default();
+        index.extend([
+            entry(
+                1,
+                Role::Assistant,
+                vec![tool(
+                    1,
+                    "say",
+                    json!({"text":"Review notes. ".repeat(5_000)}),
+                )],
+            ),
+            entry(
+                2,
+                Role::Assistant,
+                vec![tool(2, "MCP_Notify", json!({"action":"list"}))],
+            ),
+            entry(
+                3,
+                Role::Assistant,
+                vec![tool(3, "bash", json!({"command":"echo done"}))],
+            ),
+            entry(
+                4,
+                Role::User,
+                vec![part(
+                    "p4",
+                    Some(4),
+                    Seal::None,
+                    PartBody::Text {
+                        text: "Next question.".into(),
+                    },
+                )],
+            ),
+        ]);
+        index
+    }
+
+    #[test]
+    fn person_facing_tools_are_not_selected_by_age_but_can_be_explicitly_stamped() {
+        let index = person_facing_index();
+        let (edited, tools) = (Edited::default(), BTreeMap::new());
+        let ctx = context(&index, &edited, &tools);
+        assert_eq!(
+            age_sweep(&ctx, 3, 0, None),
+            [(key("m3", "p3"), Shape::Default)]
+        );
+        let (_, covered) = drop_ops(
+            &ctx,
+            &[
+                (key("m1", "p1"), Shape::Requested),
+                (key("m2", "p2"), Shape::Requested),
+            ],
+        );
+        assert_eq!(covered, [key("m1", "p1"), key("m2", "p2")]);
+    }
+
+    #[test]
+    fn person_facing_tools_are_excluded_from_force_band_and_emergency_reclaim() {
+        let index = person_facing_index();
+        let (edited, tools) = (Edited::default(), BTreeMap::new());
+        let ctx = context(&index, &edited, &tools);
+        for over_limit in [false, true] {
+            let emergency = Emergency {
+                prompt_tokens: 55_000,
+                request_tokens: None,
+                notes: Default::default(),
+                ceiling_tokens: 40_000,
+                usable_tokens: 60_000,
+                over_limit,
+                priced: true,
+                removed_tokens: 0,
+            };
+            let drops = emergency_drop(&ctx, None, &emergency, &BTreeSet::new());
+            assert_eq!(
+                drops,
+                [(
+                    key("m3", "p3"),
+                    if over_limit {
+                        Shape::Whole
+                    } else {
+                        Shape::Default
+                    }
+                )],
+                "over_limit={over_limit}"
+            );
+        }
+    }
+
+    #[test]
+    fn person_facing_tool_attachments_are_not_automatically_stripped() {
+        use cortexkit_role_compaction::part::Attachment;
+
+        let tool = |tag, name| {
+            let mut tool = ToolPart::new(
+                format!("c{tag}"),
+                name,
+                json!({"text":"See the image."}),
+                ToolStatus::Completed,
+            );
+            tool.set_attachments(vec![Attachment::new(
+                "image",
+                AttachmentItem::File(FileMedia::inline("image/png", Some(300))),
+            )]);
+            entry(
+                tag,
+                Role::Assistant,
+                vec![part("p", Some(tag), Seal::None, PartBody::Tool(tool))],
+            )
+        };
+        let mut index = Index::default();
+        index.extend([
+            tool(1, "say"),
+            tool(2, "read"),
+            entry(3, Role::Assistant, vec![read(3, 0)]),
+        ]);
+        let (edited, tools) = (Edited::default(), BTreeMap::new());
+        let ctx = context(&index, &edited, &tools);
+        let images = Images {
+            outputs: &BTreeMap::from([
+                (key("m1", "p"), "sent".into()),
+                (key("m2", "p"), "read".into()),
+            ]),
+            watermark: 3,
+            cutoff: None,
+            over_limit: false,
+            skip: &[],
+        };
+        assert_eq!(answered_images(&ctx, &images).1, [key("m2", "p")]);
+        assert_eq!(image_results(&index, &edited), [key("m2", "p")]);
+    }
+
+    #[test]
+    fn ordinary_tool_view_and_chunk_stay_byte_identical() {
+        use crate::view_builder::{next_view_cached, ViewPolicy};
+        use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+
+        let index = index();
+        let (edited, tools) = (Edited::default(), BTreeMap::new());
+        let ctx = context(&index, &edited, &tools);
+        let (ops, _) = drop_ops(&ctx, &duplicate_lookups(&ctx, Some(4)));
+        let view = next_view_cached(
+            None,
+            index.entries(),
+            ops,
+            ViewPolicy {
+                rules: &ProviderRules::new(SignedParts::None, EditCost::Suffix),
+                version: 1,
+                built_through: Some("m5".into()),
+                new_signed: None,
+                signed_floor: None,
+                force: false,
+            },
+            |_| false,
+            &mut Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let chunk = crate::summary::chunk::build(
+            index.entries(),
+            10_000,
+            crate::count::Counter::for_model(None),
+        )
+        .unwrap();
+        assert_eq!(chunk.input, "Messages 1-5:\n\n[1] U: Go.\n[2-5] A: TC: read(b.rs) / TC: read(b.rs) / TC: read(b.rs) / TC: read(b.rs) / TC: read(b.rs)");
+        assert_eq!(
+            serde_json::to_string(&view).unwrap(),
+            concat!(
+                r#"{"version":1,"checksum":"af803744f200c99ff3abfff9788ff365947458aee8501be20fb2d3889bcf3e59","#,
+                r#""edits":[{"since":1,"op":"drop","mid":"m2","part":"p2"}],"built_through":"m5"}"#,
+            )
+        );
     }
 
     fn notice_text(tag: u64, bytes: usize) -> Entry {

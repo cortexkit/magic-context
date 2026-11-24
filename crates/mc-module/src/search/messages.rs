@@ -4,14 +4,18 @@
 //! Rows are keyed by host session id and message number (the runner's
 //! ordinal plus one), as the plugin keys them, so a moved session keeps
 //! searching the rows the plugin wrote before the move. Only user and
-//! assistant text is indexed; tool output, reasoning, notices and agent relays are not.
+//! assistant text (including words sent through a tool) is indexed; tool
+//! output, reasoning, notices and agent relays are not.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use cortexkit_role_compaction::part::PartBody;
 use cortexkit_role_compaction::read::{Entry, Role};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+
+use crate::spoken::{self, Format};
 
 use super::text::{
     contains_probe_verbatim, indexable_content, matched_snippet, preview, relaxed_fts_query,
@@ -45,13 +49,17 @@ fn content_of(entry: &Entry) -> String {
     if entry.notice.is_some() || entry.speaks_for.is_some() {
         return String::new();
     }
-    let texts: Vec<&str> = crate::neutral::authored_parts(entry)
+    let texts: Vec<_> = crate::neutral::authored_parts(entry)
         .filter_map(|part| match &part.body {
-            PartBody::Text { text } => Some(text.as_str()),
+            PartBody::Text { text } => Some(Cow::Borrowed(text.as_str())),
+            PartBody::Tool(tool) if entry.role == Role::Assistant => {
+                spoken::spoken_text(tool, Format::Words).map(Cow::Owned)
+            }
             _ => None,
         })
         .collect();
-    indexable_content(entry.role == Role::User, &texts)
+    let borrowed: Vec<_> = texts.iter().map(|text| text.as_ref()).collect();
+    indexable_content(entry.role == Role::User, &borrowed)
 }
 
 #[cfg(test)]
