@@ -120,6 +120,7 @@ impl Session {
             reservation: None,
             image_outputs: std::collections::BTreeMap::new(),
             memory_context: None,
+            workspace_write_pending: false,
             authority: None,
             head_classes: None,
             unconfirmed: Vec::new(),
@@ -171,22 +172,29 @@ impl Session {
         let Some(context) = self.memory_context.as_mut() else {
             return false;
         };
-        if context.project_id.as_deref() != project || context.workspace_id == workspace {
+        if context.project_id.as_deref() != project {
             return false;
         }
-        tracing::info!(
-            "ck-mc: session {}: its project {} is now in workspace {}, was {}; the head shows the change at its next memory update",
-            self.key.session,
-            project.unwrap_or("(none)"),
-            workspace.as_deref().unwrap_or("(none)"),
-            context.workspace_id.as_deref().unwrap_or("(none)"),
-        );
-        context.workspace_id = workspace;
-        self.authority = crate::memory_levels::Authority::from_context(context);
-        if let Some(store) = &self.store {
-            store.set_memory_workspace(&self.key, context.workspace_id.as_deref());
+        let changed = context.workspace_id != workspace;
+        if changed {
+            tracing::info!(
+                "ck-mc: session {}: its project {} is now in workspace {}, was {}; the head shows the change at its next memory update",
+                self.key.session,
+                project.unwrap_or("(none)"),
+                workspace.as_deref().unwrap_or("(none)"),
+                context.workspace_id.as_deref().unwrap_or("(none)"),
+            );
+            context.workspace_id = workspace;
+            self.authority = crate::memory_levels::Authority::from_context(context);
+            self.workspace_write_pending = true;
         }
-        true
+        // Memory authority takes effect now even if SQLite is busy. An
+        // identical answer must retry saving without reporting a move again.
+        if let Some(store) = self.store.as_ref().filter(|_| self.workspace_write_pending) {
+            self.workspace_write_pending =
+                !store.set_memory_workspace(&self.key, context.workspace_id.as_deref());
+        }
+        changed
     }
 
     /// Take the session's memory context. Only its workspace changes

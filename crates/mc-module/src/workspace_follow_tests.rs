@@ -93,6 +93,36 @@ fn a_session_without_a_memory_context_follows_nothing() {
     assert!(session.memory_context.is_none());
 }
 
+#[test]
+fn the_same_workspace_answer_retries_a_departure_blocked_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mode3.db");
+    let store = Arc::new(crate::store::Store::open(&path).unwrap());
+    let key = SessionRef::new("test", "mock", "s1");
+    let mut session = session_with(Some(Arc::clone(&store)));
+    session.set_memory_context(store.keep_memory_context(&key, context(Some("team"))));
+
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(session.follow_workspace(Some("pj-a"), None));
+    assert!(session.authority.as_ref().unwrap().workspace_id.is_none());
+    assert_eq!(
+        store.memory_context(&key).unwrap().workspace_id.as_deref(),
+        Some("team")
+    );
+    blocker.execute_batch("ROLLBACK").unwrap();
+    // A reply for another project cannot persist a workspace change here.
+    assert!(!session.follow_workspace(Some("pj-b"), None));
+    assert!(!session.follow_workspace(Some("pj-a"), None));
+
+    drop(session);
+    drop(store);
+    let reopened = Arc::new(crate::store::Store::open(&path).unwrap());
+    let mut restored = session_with(Some(Arc::clone(&reopened)));
+    restored.set_memory_context(reopened.memory_context(&key).unwrap());
+    assert!(restored.authority.as_ref().unwrap().workspace_id.is_none());
+}
+
 /// `ctx_search` reads the workspace the session is in now: after its
 /// project moves, the new workspace's memories and not the old one's.
 #[test]
