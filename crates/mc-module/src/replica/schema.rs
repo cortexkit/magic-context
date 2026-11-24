@@ -464,13 +464,12 @@ fn update_change(table: &Table) -> String {
 /// The capture triggers of one replicated table.
 fn table_triggers(table: &Table) -> String {
     let (name, kind) = (table.name, table.kind);
-    // Agent-level memories never replicate: an agent lives on one computer,
-    // and its memories travel with it through the agent-data move. A row
-    // that moves from the agent level to another level is captured then, as
-    // a create. A sent row moved into the agent level is not captured at
-    // all, so the other computers keep it at its old level. No writer moves
-    // a memory into the agent level today; one that ever does must send a
-    // tombstone for the row's global id, as a delete does.
+    // Agent-level memories stay local: neither replication nor agent-data
+    // moves carry them. A row that moves from the agent level to another
+    // level is captured then, as a create. Moving a sent row into the agent
+    // level would leave the other computers holding it at its old level.
+    // No writer does that today; one that ever does must send a tombstone
+    // for the row's global id, as a delete does.
     let (new_level, old_level) = if kind == "memory" {
         ("NEW.level <> 'agent' AND ", "OLD.level <> 'agent' AND ")
     } else {
