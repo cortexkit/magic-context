@@ -65,8 +65,8 @@ fn live_branches_are_the_default_branch_and_the_named_branches_once_per_commit()
     // unless it is named.
     let (_side, side) = repo.worktree("side");
     commit_at(&side, &[("a.rs", "side\n")], "side");
-    // A named branch at the default branch's commit, one the default branch
-    // contains, and one git doesn't know are left out.
+    // A named branch at the default branch's commit and one git doesn't
+    // know are left out.
     repo.git(&["branch", "parked"]);
     let refs = Refs::read(repo.path()).unwrap();
     assert_eq!(
@@ -97,17 +97,24 @@ fn live_branches_are_the_default_branch_and_the_named_branches_once_per_commit()
 }
 
 #[test]
-fn a_named_branch_the_default_branch_already_contains_is_not_live() {
+fn a_named_branch_at_an_ancestor_of_the_default_tip_is_live() {
     let repo = Repo::on("master", &[("a.rs", "one\n")]);
+    let first = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     repo.git(&["branch", "old"]);
     let second = commit_at(repo.path(), &[("a.rs", "two\n")], "second");
     let refs = Refs::read(repo.path()).unwrap();
     assert_eq!(
         refs.lines(repo.path(), &["old".to_owned()]).unwrap(),
-        [LiveBranch {
-            name: "master".into(),
-            commit: second
-        }]
+        [
+            LiveBranch {
+                name: "master".into(),
+                commit: second
+            },
+            LiveBranch {
+                name: "old".into(),
+                commit: first
+            },
+        ]
     );
 }
 

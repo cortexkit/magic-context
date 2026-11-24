@@ -317,7 +317,6 @@ impl Changes {
             .chain(
                 mapped
                     .iter()
-                    .filter(|memory| memory.verified_at == 0)
                     .filter_map(|memory| memory.checked_commit.as_deref()),
             )
             .collect();
@@ -894,6 +893,7 @@ impl Verify {
                     .memories
                     .iter()
                     .map(|memory| Read {
+                        category: memory.category.clone(),
                         id: memory.id,
                         revision: memory.revision,
                         files: memory.files.clone(),
@@ -1010,13 +1010,11 @@ impl Verify {
             }
         }
         stale.retain(&mut send);
-        let never: Vec<&Memory> = never.into_iter().filter(&mut send).collect();
-        let before = never.len();
-        let never: Vec<&Memory> = never
-            .into_iter()
-            .filter(|memory| !waits(memory, &changes, now))
-            .collect();
-        let held = before - never.len();
+        let mut never: Vec<&Memory> = never.into_iter().filter(&mut send).collect();
+        let before = stale.len() + never.len();
+        stale.retain(|memory| !waits(memory, &changes, now));
+        never.retain(|memory| !waits(memory, &changes, now));
+        let held = before - stale.len() - never.len();
         let mut read: Vec<&Memory> = Vec::new();
         for chunk in stale.chunks(DIFF_BATCH_SIZE) {
             match evidence(checkout, chunk) {
@@ -1043,7 +1041,7 @@ impl Verify {
     }
 }
 
-/// Whether `memory`, never confirmed with cited lines, waits instead of
+/// Whether `memory`, without a confirmation that still holds, waits instead of
 /// going to a model this run: a verify run decided this same revision less
 /// than [`RECHECK_AFTER_MS`] ago and none of its files changed since the
 /// commit that run read. A memory a model could not confirm, or whose
@@ -1063,10 +1061,9 @@ fn waits(memory: &Memory, changes: &Changes, now: i64) -> bool {
     else {
         return false;
     };
-    !memory
-        .files
-        .iter()
-        .any(|file| changed.contains(file) || changes.missing.contains(file))
+    // The diff reports new removals too; a path already gone when the
+    // model checked it is not fresh evidence.
+    !watched(memory).iter().any(|file| changed.contains(*file))
 }
 
 /// A confirmed memory whose cited lines are unchanged, as a re-check found
@@ -1210,6 +1207,7 @@ impl Task for Verify {
 pub(crate) struct Read {
     pub id: i64,
     pub revision: i64,
+    pub category: String,
     /// The files it was mapped to.
     pub files: Vec<String>,
     /// Its text as the batch sent it.

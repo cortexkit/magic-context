@@ -164,9 +164,9 @@ impl ArchiveBranches {
 /// to work, who decides): 0.49's patterns, compiled with the JavaScript
 /// semantics the plugin's verifier had (ASCII word boundaries and digits,
 /// JavaScript's whitespace).
-fn directive(memory: &MemoryRow) -> bool {
+fn directive(category: &str, content: &str) -> bool {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-    if memory.category_id != RULES_CATEGORY {
+    if category != RULES_CATEGORY {
         return false;
     }
     let patterns = PATTERNS.get_or_init(|| {
@@ -192,7 +192,7 @@ fn directive(memory: &MemoryRow) -> bool {
         })
         .collect()
     });
-    let text = js_trim(&memory.content);
+    let text = js_trim(content);
     patterns.iter().any(|pattern| pattern.is_match(text))
 }
 
@@ -362,7 +362,10 @@ impl VerifyBatch {
                 Decision::Verified | Decision::Skip => None,
             }
             .or_else(|| self.check_lines(verdict, read))
-            .or_else(|| self.check_change_evidence(verdict, &current.content).err())
+            .or_else(|| {
+                self.check_change_evidence(verdict, &current.category_id, &current.content)
+                    .err()
+            })
             .or_else(|| {
                 if verdict.decision != Decision::Archive {
                     return None;
@@ -416,7 +419,9 @@ impl VerifyBatch {
     /// Read change evidence before taking the store's write lock.
     pub(super) fn warm_change(&self, verdict: &Verdict, read: &Read) {
         if self.check_lines(verdict, read).is_none()
-            && self.check_change_evidence(verdict, &read.content).is_ok()
+            && self
+                .check_change_evidence(verdict, &read.category, &read.content)
+                .is_ok()
             && verdict.decision == Decision::Archive
         {
             self.archive_branches.refusal(
@@ -434,7 +439,7 @@ impl VerifyBatch {
     ) -> rusqlite::Result<Option<String>> {
         let content = js_trim(&verdict.content);
         let length = content.encode_utf16().count();
-        if directive(current) {
+        if directive(&current.category_id, &current.content) {
             return Ok(Some(
                 "a project rule that reads as a behavioural directive is only verified or skipped"
                     .into(),
@@ -469,36 +474,52 @@ impl VerifyBatch {
     }
 
     fn check_archive(&self, verdict: &Verdict, current: &MemoryRow) -> Option<String> {
-        (verdict.missing.is_none() && directive(current)).then(|| {
+        (verdict.missing.is_none() && directive(&current.category_id, &current.content)).then(|| {
             "a project rule that reads as a behavioural directive is archived only with missing=, once everything it cites is gone".into()
         })
     }
 
-    fn check_change_evidence(&self, verdict: &Verdict, old: &str) -> Result<(), String> {
+    fn check_change_evidence(
+        &self,
+        verdict: &Verdict,
+        category: &str,
+        old: &str,
+    ) -> Result<(), String> {
         if !matches!(verdict.decision, Decision::Archive | Decision::Update) {
             return Ok(());
         }
         let missing = verdict.missing.as_deref();
         if let Some(missing) = missing {
-            let cite = cites_all(old, self.checkout.top_level())
-                .into_iter()
+            let mut subjects = cites_all(old, self.checkout.top_level());
+            let cite = subjects
+                .iter()
                 .find(|cite| cite.text() == missing)
+                .cloned()
                 .or_else(|| quoted_literal(old, missing).then(|| Cite::Name(missing.into())))
                 .ok_or_else(|| {
                     format!("missing={missing:?} is not a path or name the memory cites")
                 })?;
+            if verdict.decision == Decision::Archive && directive(category, old) {
+                // A directive still applies if any of its subjects survives, including
+                // a name that moved to a file outside the verdict's reading scope.
+                if !subjects.contains(&cite) {
+                    subjects.push(cite);
+                }
+                if subjects.len() > super::cites::MAX_CITES {
+                    return Err(
+                        "the directive cites too many subjects to prove all were removed".into(),
+                    );
+                }
+                for subject in subjects {
+                    self.require_removal(&subject, &[])?;
+                }
+                return Ok(());
+            }
             let files = match cite {
                 Cite::Name(_) => verdict.files.as_slice(),
                 Cite::Path(_) => &[],
             };
-            match self.absence(&cite, files) {
-                Absence::Absent => (),
-                Absence::Present => return Err(format!("{missing} is still in the checkout")),
-                Absence::Never => return Err(format!("{missing} was never in this repository")),
-                Absence::Undecided(why) => {
-                    return Err(format!("whether {missing} is gone is undecided: {why}"))
-                }
-            }
+            self.require_removal(&cite, files)?;
             if verdict.decision == Decision::Archive {
                 return Ok(());
             }
@@ -532,6 +553,18 @@ impl VerifyBatch {
             );
         }
         Ok(())
+    }
+
+    fn require_removal(&self, cite: &Cite, files: &[String]) -> Result<(), String> {
+        let subject = cite.text();
+        match self.absence(cite, files) {
+            Absence::Absent => Ok(()),
+            Absence::Present => Err(format!("{subject} is still in the checkout")),
+            Absence::Never => Err(format!("{subject} was never in this repository")),
+            Absence::Undecided(why) => {
+                Err(format!("whether {subject} is gone is undecided: {why}"))
+            }
+        }
     }
 
     /// The tracked files among `named`, in order and once each.

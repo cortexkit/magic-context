@@ -807,6 +807,63 @@ fn an_archive_without_missing_needs_cited_subject_lines_and_is_refused_for_a_dir
 }
 
 #[test]
+fn a_missing_file_cannot_archive_a_rule_that_still_names_a_live_file() {
+    let fixture = Fixture::new(&[("live_settings.toml", "x = 1\n")]);
+    fixture
+        .repo
+        .add_then_remove(&[("gone_settings.toml", "x = 1\n")]);
+    fixture.insert(&[Row {
+        tag: "PROJECT_RULES",
+        ..row(
+            1,
+            "Never edit `gone_settings.toml` or `live_settings.toml` by hand.",
+        )
+    }]);
+
+    let batch = plan_one(&fixture);
+    let applied = fixture.apply(
+        &batch,
+        &manifest(r#"<archive id="1" missing="gone_settings.toml"/>"#),
+    );
+    assert_eq!(fixture.memory(1).0, "active");
+    assert_eq!(
+        applied.dropped,
+        ["memory 1: live_settings.toml is still in the checkout"]
+    );
+}
+
+#[test]
+fn a_configured_release_protects_an_unlined_memory_after_main_removes_its_code() {
+    for with_worktree in [false, true] {
+        let mut fixture = Fixture::new(&[("release_only.rs", "fn release_only() {}\n")]);
+        let _worktree = if with_worktree {
+            Some(fixture.repo.worktree("release"))
+        } else {
+            fixture.repo.git(&["branch", "release"]);
+            None
+        };
+        fixture.repo.git(&["rm", "release_only.rs"]);
+        fixture
+            .repo
+            .commit("remove the release code from the default branch");
+        fixture.branches = vec!["release".into()];
+        fixture.insert(&[row(1, "The release handler is in `release_only.rs`.")]);
+
+        let applied = fixture.apply(
+            &plan_one(&fixture),
+            &manifest(r#"<archive id="1" missing="release_only.rs"/>"#),
+        );
+        assert_eq!(
+            fixture.memory(1).0,
+            "active",
+            "with worktree: {with_worktree}"
+        );
+        assert_eq!(applied.applied, 0);
+        assert!(applied.dropped[0].contains("live"), "{applied:?}");
+    }
+}
+
+#[test]
 fn a_protected_memory_is_never_archived_but_may_be_verified_updated_or_skipped() {
     let fixture = Fixture::new(&[("src/live.rs", "fn live_function() {}\n")]);
     fixture

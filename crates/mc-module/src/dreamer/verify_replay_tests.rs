@@ -579,18 +579,23 @@ fn apply_replies(args: &ApplyArgs) -> Value {
                 .flatten()
                 .map(|memory| {
                     let id = memory["id"].as_i64().expect("a memory id");
-                    let content = match memory["content"].as_str() {
-                        Some(content) => content.to_owned(),
-                        None => {
-                            get_memory(&tx, id)
-                                .expect("read the store copy")
+                    let stored = get_memory(&tx, id).expect("read the store copy");
+                    let category = stored
+                        .as_ref()
+                        .map(|row| row.category_id.clone())
+                        .unwrap_or_default();
+                    let content = memory["content"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            stored
                                 .unwrap_or_else(|| panic!("memory {id} is not in the store copy"))
                                 .content
-                        }
-                    };
+                        });
                     Read {
                         id,
                         revision: memory["readRevision"].as_i64().unwrap_or_default(),
+                        category,
                         files: memory["files"]
                             .as_array()
                             .into_iter()

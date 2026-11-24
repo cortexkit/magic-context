@@ -1108,6 +1108,57 @@ fn a_confirmation_whose_cited_lines_changed_goes_to_the_model_with_them() {
     );
 }
 
+#[test]
+fn an_unsure_or_refused_recheck_of_a_stale_confirmation_waits() {
+    for verdict in [
+        r#"<skip id="1" reason="unsure: the cap changed"/>"#,
+        r#"<update id="1">`CAP` is 32_000.</update>"#,
+    ] {
+        let fixture = Fixture::new(&[
+            ("src/a.rs", "fn uses_cap() {}\n"),
+            ("src/b.rs", "const CAP: u64 = 64_000;\n"),
+        ]);
+        let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+        fixture
+            .repo
+            .write(&[("src/b.rs", "const CAP: u64 = 32_000;\n")]);
+        fixture.repo.commit("halve the cap");
+        fixture.insert(&[Row {
+            files: vec!["src/a.rs"],
+            verified: Some((1_000, Some(first))),
+            spans: vec![("src/b.rs", 1, 1, "const CAP: u64 = 64_000;")],
+            ..row(1, "`uses_cap` reads `CAP`, which is 64k.")
+        }]);
+
+        let batch = fixture.batches(false).remove(0);
+        fixture.apply(&batch, &format!("<verify>{verdict}</verify>"));
+        assert!(
+            fixture.batches(false).is_empty(),
+            "sent again after {verdict}"
+        );
+
+        fixture
+            .repo
+            .write(&[("src/b.rs", "const CAP: u64 = 16_000;\n")]);
+        fixture.repo.commit("change the evidence again");
+        let batch = fixture.batches(false).remove(0);
+        fixture.apply(&batch, &format!("<verify>{verdict}</verify>"));
+        assert!(fixture.batches(false).is_empty());
+        fixture.execute(&format!(
+            "UPDATE memories SET metadata_json = json_set(metadata_json, '$.dreamerCheckedAt', {}) WHERE id = 1",
+            crate::memory_writes::now_ms() - RECHECK_AFTER_MS - 1,
+        ));
+        assert_eq!(
+            fixture
+                .batches(false)
+                .iter()
+                .flat_map(ids)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+    }
+}
+
 /// Diff messages hold up to twenty memories; a memory checked by reading
 /// goes alone.
 #[test]
