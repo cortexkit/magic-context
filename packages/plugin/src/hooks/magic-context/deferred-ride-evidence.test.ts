@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import {
     getActiveTagsBySession,
@@ -13,6 +13,7 @@ import { adaptPayload } from "../../v2/hooks/payload";
 import type { SessionContext } from "../../v2/hooks/types";
 import { createAutoSearchReplayFixture } from "./auto-search-replay.fixture";
 import { type CompartmentTriggerResult, checkCompartmentTrigger } from "./compartment-trigger";
+import * as injection from "./inject-compartments";
 import { opencode1ToModelMessages } from "./opencode1-to-model-messages.fixture";
 import {
     hasPendingMaterializationOrigin,
@@ -373,6 +374,42 @@ function firstDifference(previous: unknown[], next: unknown[]) {
 }
 
 for (const host of ["opencode", "opencode2"] as const) {
+    test(`${host} wrapup keeps its grant when a soft refresh serves the old history head`, async () => {
+        const h = openCodeRideHarness(host);
+        const injectM0M1 = injection.injectM0M1;
+        let writes = 0;
+        const inject = spyOn(injection, "injectM0M1");
+        try {
+            h.setMemoryEnabled(true);
+            const before = await h.pass(40);
+            h.publish();
+            h.wrapup();
+            inject.mockImplementation((options) =>
+                injectM0M1({
+                    ...options,
+                    beforeCacheCommitForTest: () => {
+                        if (writes++ !== 0) return;
+                        h.db
+                            .prepare(
+                                "UPDATE session_meta SET cached_m0_materialized_at = cached_m0_materialized_at + 1 WHERE session_id = ?",
+                            )
+                            .run(h.id);
+                    },
+                }),
+            );
+            expect(await h.pass(40)).toEqual(before);
+            expect(writes).toBe(1);
+            expect(h.wrapupPending).toBe(true);
+            const after = await h.pass(40);
+            expect(JSON.stringify(after)).toContain("New history facts.");
+            expect(h.wrapupPending).toBe(false);
+            expect(await h.pass(40)).toEqual(after);
+        } finally {
+            inject.mockRestore();
+            h.close();
+        }
+    });
+
     test(`${host} wrapup spends the grant when it safely refuses the trim`, async () => {
         const h = openCodeRideHarness(host);
         try {

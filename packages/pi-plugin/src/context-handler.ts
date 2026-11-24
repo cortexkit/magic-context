@@ -12521,7 +12521,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					isCacheBustingPass &&
 					!protectedSignedPrefix &&
 					wireInjectionResult.injected &&
-					!wireInjectionResult.contentionExhausted
+					!wireInjectionResult.contentionExhausted &&
+					!wireInjectionResult.softRefreshReplayed
 				) {
 					clearPendingMaterializationOrigin(
 						pendingMaterializationSessions,

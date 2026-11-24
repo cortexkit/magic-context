@@ -4612,7 +4612,8 @@ export async function runPostTransformPhase(
         isCacheBustingPass &&
         !freezeM0M1 &&
         deliveredPrefix?.injected === true &&
-        !deliveredPrefix.materializationContentionRetryExhausted;
+        !deliveredPrefix.materializationContentionRetryExhausted &&
+        !deliveredPrefix.softRefreshReplayed;
     if (wrapupServed) {
         clearPendingMaterializationOrigin(
             args.pendingMaterializationSessions,

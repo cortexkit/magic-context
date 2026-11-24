@@ -26,6 +26,7 @@ import {
 	signalPiSystemHashChange,
 } from "./context-handler";
 import { signalPiDeferredCompactionMarkerDrain } from "./index";
+import { injectM0M1Pi } from "./inject-compartments-pi";
 import {
 	assistantMessage,
 	assistantToolCall,
@@ -314,6 +315,44 @@ test("Pi wrapup serves the new summary and cut once without a pressure-backstop 
 		expect(hasPendingMaterialization(h.id)).toBe(false);
 		expect(JSON.stringify(await h.pass(40))).toBe(JSON.stringify(after));
 	} finally {
+		h.close();
+	}
+});
+
+test("Pi wrapup keeps its grant when a soft refresh serves the old history head", async () => {
+	const h = rideHarness();
+	let writes = 0;
+	let race = false;
+	const restore = __test.setInjectM0M1PiForTests((state, ...args) =>
+		injectM0M1Pi(
+			{
+				...state,
+				beforeCacheCommitForTest: () => {
+					if (!race || writes++ !== 0) return;
+					h.db
+						.query(
+							"UPDATE session_meta SET cached_m0_materialized_at = cached_m0_materialized_at + 1 WHERE session_id = ?",
+						)
+						.run(h.id);
+				},
+			},
+			...args,
+		),
+	);
+	try {
+		const before = JSON.stringify(await h.pass(40));
+		h.publish();
+		signalPiPendingMaterialization(h.id, "user_wrapup");
+		race = true;
+		expect(JSON.stringify(await h.pass(40))).toBe(before);
+		expect(writes).toBe(1);
+		expect(hasPendingMaterialization(h.id)).toBe(true);
+		const after = JSON.stringify(await h.pass(40));
+		expect(after).toContain("Newly published facts");
+		expect(hasPendingMaterialization(h.id)).toBe(false);
+		expect(JSON.stringify(await h.pass(40))).toBe(after);
+	} finally {
+		restore();
 		h.close();
 	}
 });

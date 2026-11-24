@@ -897,6 +897,8 @@ export interface PiM0M1InjectionResult extends PiInjectionResult {
 	 * not match the latest saved compartment snapshot.
 	 */
 	contentionExhausted: boolean;
+	/** An m[1] refresh failed its write check and served the cached pair instead. */
+	softRefreshReplayed?: true;
 	/** The compartment boundary actually represented by the m[0]/m[1] pair sent. */
 	renderedBoundary: PiRenderedCompartmentBoundary;
 	/**
@@ -2972,6 +2974,7 @@ export function injectM0M1Pi(
 	let contentionExhausted = false;
 	let memoryUpdateCount = 0;
 	let m1Recomputed = false;
+	let softRefreshReplayed: true | undefined;
 	let freshFallbackRenderedMemoryIds: number[] | null = null;
 
 	if (decision.value) {
@@ -3108,6 +3111,7 @@ export function injectM0M1Pi(
 			markers = refreshed.markers;
 			memoryUpdateCount = refreshed.memoryUpdateCount;
 			m1Recomputed = refreshed.recomputed;
+			if (!m1Recomputed) softRefreshReplayed = true;
 		} catch (error) {
 			if (!state.allowFreshContentionFallback) throw error;
 			// Force recovery cannot depend on winning the soft-refresh write lock.
@@ -3303,6 +3307,7 @@ export function injectM0M1Pi(
 		m0Bytes: m0.length,
 		m1Bytes: m1.length,
 		contentionExhausted,
+		softRefreshReplayed,
 		renderedBoundary,
 		m1RenderedCoverage,
 		// Skip entries before the retained message tail and Magic Context's two
