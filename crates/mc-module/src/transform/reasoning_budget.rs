@@ -19,6 +19,11 @@ fn reasoning_inline_pattern() -> &'static regex::Regex {
     })
 }
 
+fn reasoning_budget_native_id(native: &Value) -> Option<&str> {
+    profile_start!(_perf_native_id, "reasoning_budget_native_id");
+    native.pointer("/info/id").and_then(Value::as_str)
+}
+
 /// Newest-first whole-step fit. Previously compartmentalised history costs nothing;
 /// a retained lineage anchor still costs tokens but keeps its existing render exemption.
 fn reasoning_budget_cutoff(
@@ -53,6 +58,9 @@ fn reasoning_budget_cutoff(
             || in_active_anthropic_turn(&route, message.mid.as_str())
     };
     let off_wire = |message: &CkIngressMessage| removed.contains(message.mid.as_str());
+    // The budget can visit every assistant, including text-only steps. Index native
+    // messages on the first cost lookup rather than scanning the full array per step.
+    let native_by_id = std::cell::OnceCell::new();
     let cost = |message: &CkIngressMessage| {
         let typed_gone = off_wire(message);
         let mut text = String::new();
@@ -106,9 +114,19 @@ fn reasoning_budget_cutoff(
                 _ => {}
             }
         }
-        let native = req.native_messages.iter().flatten().find(|native| {
-            native.pointer("/info/id").and_then(Value::as_str) == Some(message.mid.as_str())
-        });
+        let native = native_by_id
+            .get_or_init(|| {
+                let mut index = HashMap::new();
+                for native in req.native_messages.iter().flatten() {
+                    if let Some(id) = reasoning_budget_native_id(native) {
+                        // Match the first occurrence, as a direct search would.
+                        index.entry(id).or_insert(native);
+                    }
+                }
+                index
+            })
+            .get(message.mid.as_str())
+            .copied();
         if let Some(parts) = native
             .filter(|_| !typed_gone)
             .and_then(|native| native.get("parts"))
