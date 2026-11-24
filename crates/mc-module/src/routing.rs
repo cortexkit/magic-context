@@ -325,10 +325,14 @@ pub fn model_of(answer: &SelectAnswer) -> ModelRef {
 }
 
 /// A report of how a decision's run went, with what the run reported.
-pub fn report(decision_id: &str, outcome: Outcome, usage: Option<&StepUsage>) -> ReportRequest {
+pub fn report(
+    decision_id: &str,
+    outcome: Outcome,
+    usage: Option<(&str, &StepUsage)>,
+) -> ReportRequest {
     let mut request = ReportRequest::new(decision_id, outcome);
-    request.usage = usage.map(|usage| {
-        let mut reported = Usage::default();
+    request.usage = usage.map(|(run_id, usage)| {
+        let mut reported = Usage::default().with_run_id(run_id);
         // Routing counts input without the cache reads and writes.
         reported.input_tokens = usage.prompt_tokens.map(|prompt| {
             prompt
@@ -342,6 +346,25 @@ pub fn report(decision_id: &str, outcome: Outcome, usage: Option<&StepUsage>) ->
         reported
     });
     request
+}
+
+/// Settle the decision with the final outcome and the usage of each distinct
+/// run. The first report settles health; subsequent ids only add usage.
+pub async fn report_runs<C: Router>(
+    client: &C,
+    decision_id: &str,
+    outcome: Outcome,
+    runs: &[(String, StepUsage)],
+) {
+    if runs.is_empty() {
+        client.report(report(decision_id, outcome, None)).await;
+    } else {
+        for (id, usage) in runs {
+            client
+                .report(report(decision_id, outcome.clone(), Some((id, usage))))
+                .await;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -49,6 +49,7 @@ pub(super) fn job(authority: Option<Authority>) -> Job {
             model: ModelRef::new("provider", "model"),
             decision_id: "decision".into(),
             output_tokens: 1_000,
+            history: None,
             language: None,
             publication_id: "publication".into(),
         },

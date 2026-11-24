@@ -146,6 +146,41 @@ fn host_frame_is_not_a_prompt_turn_or_floor_mark() {
 }
 
 #[test]
+fn historian_marks_verified_mid_turn_words_without_changing_evidence() {
+    let build = |middle| {
+        chunk::build_with(
+            &[text(1, "original prompt"), middle, text(3, "next prompt")],
+            10_000,
+            chunk::Lines::PerMessage,
+            counter(),
+        )
+        .unwrap()
+    };
+    let ordinary = build(raw(2, Role::User, WORDS));
+    let verified = build(frame(2, Role::System));
+    assert_eq!(
+        ordinary.input,
+        format!("Messages 1-3:\n\n[1] U: original prompt\n[2] U: {WORDS}\n[3] U: next prompt")
+    );
+    assert_eq!(
+        verified.input,
+        ordinary.input.replace("[2] U:", "[2] U (mid-turn):")
+    );
+    assert!(!ordinary.validation.lines[1].mid_turn);
+    assert!(verified.validation.lines[1].mid_turn);
+    let evidence = chunk::blocks_sent(&verified, &verified.input);
+    assert_eq!(
+        (
+            evidence[1].start,
+            evidence[1].end,
+            evidence[1].role.as_str()
+        ),
+        (2, 2, "U")
+    );
+    assert_eq!(evidence[1].parts, [WORDS]);
+}
+
+#[test]
 fn host_frame_is_not_a_historian_split_but_can_end_or_open_coverage() {
     use validate::{validate_historian_output, StoredCompartmentRange, ValidateOptions};
     let entries = [

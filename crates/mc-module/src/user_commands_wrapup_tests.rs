@@ -220,6 +220,14 @@ async fn publish(
     from: u64,
     until: u64,
 ) {
+    let result = publication(session, from, until);
+    *client.entries.lock().unwrap() = session.index.entries().to_vec();
+    session
+        .summary_finished(client, settings, Ok(Some(result)), 100)
+        .await;
+}
+
+fn publication(session: &Session, from: u64, until: u64) -> run::Summarized {
     let compartment = serde_json::from_value(json!({
         "sequence": session.summaries.len(), "start_message": from, "end_message": until - 1,
         "start_message_id": format!("m{from}"), "end_message_id": format!("m{}", until - 1),
@@ -227,22 +235,137 @@ async fn publish(
     }))
     .unwrap();
     let source = run::PublicationSource::new(from, until, session.index.entries());
+    run::Summarized {
+        validated: crate::summary::validate::ValidatedChunk {
+            compartments: vec![compartment],
+            ..Default::default()
+        },
+        source,
+        publication: None,
+        continuation: None,
+    }
+}
+
+#[tokio::test]
+async fn fresh_publication_checks_the_runner_before_storing_coverage() {
+    use crate::summary::chunk::PrintedBlock;
+    use crate::summary::two_pass::turn_one::{self, Publication, SendInput};
+    use crate::summary::validate::{FactCandidate, FactSourceRange};
+    for changed in [true, false] {
+        let (mut session, client, settings) = ready();
+        let (_dir, db) = block_summary_store();
+        unblock_summary_store(&db);
+        session.db = Some(db.clone());
+        let mut result = publication(&session, 1, 5);
+        let send = db
+            .with_connection(|conn| {
+                turn_one::allocate(
+                    conn,
+                    &SendInput {
+                        project: "test-project",
+                        session: &session.key.session,
+                        harness: &session.key.harness,
+                        carrier: "ck-mc:test",
+                        chunk: (1, 4),
+                        model: json!({}),
+                        child: "child",
+                    },
+                    1,
+                )
+            })
+            .unwrap();
+        result.publication = Some(Publication {
+            send,
+            project: "test-project".into(),
+            session: session.key.session.clone(),
+            blocks: vec![PrintedBlock {
+                role: "A".into(),
+                start: 2,
+                end: 2,
+                parts: vec!["original answer".into()],
+                text_end: 30,
+            }],
+            candidates: vec![FactCandidate {
+                category: "CONSTRAINTS".into(),
+                content: "Original fact".into(),
+                origin_compartment_index: None,
+                source_ranges: vec![FactSourceRange { start: 2, end: 2 }],
+            }],
+        });
+        let cut = session.cut_ordinal();
+        let mut entries = session.index.entries().to_vec();
+        if changed {
+            // The session has not received the edit notice, and the range's
+            // start and end message IDs are unchanged.
+            entries[1] = Entry::new(
+                2,
+                "m2",
+                Role::Assistant,
+                2,
+                vec![Part::new(
+                    "p",
+                    PartBody::Text {
+                        text: "rewritten answer".into(),
+                    },
+                )],
+            );
+        }
+        *client.entries.lock().unwrap() = entries;
+        session
+            .summary_finished(&client, &settings, Ok(Some(result)), 100)
+            .await;
+        let rows: i64 = db
+            .with_connection(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM compartments", [], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(
+            rows,
+            i64::from(!changed),
+            "stale history must never reach SQLite"
+        );
+        let facts: i64 = db
+            .with_connection(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM memory_pending_facts", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            facts,
+            i64::from(!changed),
+            "facts must settle with their coverage"
+        );
+        assert_eq!(session.summaries.len(), usize::from(!changed));
+        assert!(!session.has_pending_publication());
+        if changed {
+            assert_eq!(session.cut_ordinal(), cut);
+        }
+    }
+}
+
+#[tokio::test]
+async fn fresh_publication_holds_when_it_cannot_read_the_runner() {
+    let (mut session, client, settings) = ready();
+    let (_dir, db) = block_summary_store();
+    unblock_summary_store(&db);
+    session.db = Some(db.clone());
+    let result = publication(&session, 1, 5);
+    client
+        .pages
+        .lock()
+        .unwrap()
+        .push_back(Err(crate::client::ClientError::new("read unavailable")));
     session
-        .summary_finished(
-            client,
-            settings,
-            Ok(Some(run::Summarized {
-                validated: crate::summary::validate::ValidatedChunk {
-                    compartments: vec![compartment],
-                    ..Default::default()
-                },
-                source,
-                publication: None,
-                continuation: None,
-            })),
-            100,
-        )
+        .summary_finished(&client, &settings, Ok(Some(result)), 100)
         .await;
+    assert!(session.has_pending_publication());
+    assert!(session.summaries.is_empty());
+    assert_eq!(session.app.failures, 0);
+    *client.entries.lock().unwrap() = session.index.entries().to_vec();
+    session.retry_summary_publication(&client, 200).await;
+    assert!(!session.has_pending_publication());
+    assert_eq!(session.summaries.len(), 1);
 }
 
 #[tokio::test(start_paused = true)]

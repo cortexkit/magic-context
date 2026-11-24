@@ -232,6 +232,23 @@ pub trait RunnerClient: Send + Sync + 'static {
     ) -> impl Future<Output = Result<bool, ClientError>> + Send {
         async { Ok(false) }
     }
+    /// Withdraw a queued child submission that has not started. A runner
+    /// without `retract` cannot confirm withdrawal.
+    fn retract_child_send(
+        &self,
+        _child: &Child,
+        _submission_id: &str,
+    ) -> impl Future<Output = Result<bool, ClientError>> + Send {
+        async { Ok(false) }
+    }
+    /// Add a continuation's usage to a decision already settled by its
+    /// first turn. Clients without routing do not send these reports.
+    fn report_child_usage(
+        &self,
+        _request: cortexkit_role_routing::report::ReportRequest,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
     /// One call to a Synapse module's management surface on the session's
     /// behalf, for `ctx_search`'s rerank (`models.list`, `rerank.score`),
     /// within [`crate::search::rerank::SYNAPSE_DEADLINE`]. `module` is the

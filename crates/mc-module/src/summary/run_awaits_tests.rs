@@ -30,6 +30,11 @@ struct Runner {
     reads: Mutex<usize>,
     failed_reads: usize,
     reports: Mutex<Vec<Outcome>>,
+    selects: Mutex<usize>,
+    queued: bool,
+    withdrawn: Mutex<Vec<String>>,
+    select_delay: Duration,
+    report_delay: Duration,
 }
 
 impl Runner {
@@ -46,6 +51,11 @@ impl Runner {
             reads: Mutex::new(0),
             failed_reads: 0,
             reports: Mutex::new(Vec::new()),
+            selects: Mutex::new(0),
+            queued: false,
+            withdrawn: Mutex::new(Vec::new()),
+            select_delay: Duration::ZERO,
+            report_delay: Duration::ZERO,
         }
     }
 
@@ -85,6 +95,11 @@ impl RunnerClient for Runner {
     }
     async fn send_child(&self, _: &Child, _: SendRequest) -> Result<SendReply, ClientError> {
         *self.sends.lock().unwrap() += 1;
+        if self.queued {
+            let mut reply = SendReply::new(send_states::PENDING);
+            reply.submission_id = Some("queued-1".into());
+            return Ok(reply);
+        }
         let mut reply = SendReply::new(states::ACTIVE);
         reply.run_id = Some("r1".into());
         Ok(reply)
@@ -117,14 +132,83 @@ impl RunnerClient for Runner {
         }
         Ok(self.cancels)
     }
+    async fn retract_child_send(&self, _: &Child, id: &str) -> Result<bool, ClientError> {
+        self.withdrawn.lock().unwrap().push(id.to_owned());
+        Ok(true)
+    }
 }
 
 impl Router for Runner {
     async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, routing::RouteError> {
+        *self.selects.lock().unwrap() += 1;
+        if !self.select_delay.is_zero() {
+            tokio::time::sleep(self.select_delay).await;
+        }
         self.base.select(request).await
     }
     async fn report(&self, request: ReportRequest) {
         self.reports.lock().unwrap().push(request.outcome);
+        if !self.report_delay.is_zero() {
+            tokio::time::sleep(self.report_delay).await;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_withdraws_a_queued_send_by_submission_id() {
+    let client = Runner {
+        queued: true,
+        ..Runner::ended(RunResult::new("r1", states::ACTIVE))
+    };
+    let error = send_error(&client, SendKind::TurnTwo).await;
+    assert_eq!(*client.withdrawn.lock().unwrap(), ["queued-1"]);
+    assert!(matches!(error, SummaryError::NeverRan(_)), "{error:?}");
+    assert_eq!(*client.cancelled.lock().unwrap(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn overall_deadline_stops_fallback_selection_and_sends() {
+    let client = Runner::ended(RunResult::new("r1", states::ACTIVE));
+    let failure = run(&client, None, &account_wait_send_tests::job())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(failure, SummaryError::Failed(error) if error.contains("did not finish in time"))
+    );
+    assert_eq!(*client.sends.lock().unwrap(), 1);
+    assert_eq!(*client.selects.lock().unwrap(), 1);
+    assert_eq!(*client.reports.lock().unwrap(), vec![Outcome::Failed]);
+    assert_eq!(*client.cancelled.lock().unwrap(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn overall_deadline_bounds_slow_route_selection_and_reporting() {
+    for (select, report) in [
+        (RUN_TIMEOUT * 2, Duration::ZERO),
+        (Duration::ZERO, RUN_TIMEOUT * 2),
+    ] {
+        let client = Runner {
+            select_delay: select,
+            report_delay: report,
+            ..Runner::ended(RunResult::new("r1", states::ACTIVE))
+        };
+        let start = tokio::time::Instant::now();
+        run(&client, None, &account_wait_send_tests::job())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            start.elapsed(),
+            if select.is_zero() {
+                RUN_TIMEOUT + CLEANUP_GRACE
+            } else {
+                RUN_TIMEOUT
+            }
+        );
+        assert_eq!(*client.selects.lock().unwrap(), 1);
+        let started = usize::from(select.is_zero());
+        assert_eq!(*client.sends.lock().unwrap(), started);
+        assert_eq!(*client.cancelled.lock().unwrap(), started);
+        assert_eq!(client.reports.lock().unwrap().len(), started);
     }
 }
 
@@ -529,9 +613,14 @@ async fn attempt_on(
         "summary",
         "prompt",
         &call_on,
-        &mut None,
+        &mut Vec::new(),
     )
     .await
+    .map_err(|failure| match failure {
+        Failure::AccountWait(wait) => SummaryError::AccountWait(wait),
+        Failure::Failed(error) => SummaryError::Failed(error),
+        _ => panic!("unexpected retry outcome"),
+    })
 }
 
 #[tokio::test(start_paused = true)]

@@ -1117,6 +1117,7 @@ const TEMPLATE_DATA = [
 "prefix trim: boundary \x01; pass=priced; no in-pass trim applied (target_not_owned)",
 "exact ordinal read unavailable (\x01: \x01); the historian start waits for a later pass",
 "ck-mc: Synapse \x01 for embeddings failed (\x01); that request falls back to words only",
+"ck-mc: queued summarizer submission \x01 in \x01 timed out without confirmed withdrawal",
 "transform: model change since last usage (\x01 -> \x01), clearing stale per-model state\x020m",
 "transform: first pass reset — percentage=\x01% tokens=\x01 — clearing stale usage state",
 "[magic-context] Pi process scan: skipping ancestor PID \x01 (session launcher shim)",

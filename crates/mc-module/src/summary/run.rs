@@ -49,6 +49,8 @@ const TEMPERATURE: f64 = 0.1;
 const MAX_OUTPUT_TOKENS: u64 = 65_536;
 /// How long a run may take before it counts as failed.
 const RUN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const CLEANUP_GRACE: Duration = Duration::from_secs(5);
+const TIMED_OUT: &str = "the run did not finish in time";
 /// What a child session's id adds to its parent's: each summarizer attempt
 /// runs in a child of its own, `<parent session>:mc-summary:<attempt>`, so
 /// the summarizer sees exactly its system prompt and one user message, and a
@@ -169,6 +171,7 @@ pub struct Continuation {
     pub model: ModelRef,
     pub decision_id: String,
     pub output_tokens: u64,
+    pub history: Option<fit::ContinuationWindow>,
     /// The user's `language`, which the system prompt both turns run under
     /// carries.
     pub language: Option<String>,
@@ -235,7 +238,11 @@ pub async fn run<C: RunnerClient + Router>(
     db: Option<&ContextDb>,
     job: &Request,
 ) -> Result<Option<Summarized>, SummaryError> {
-    let entries = read_range(client, job).await?;
+    // The same deadline covers preparation, retries and route fallbacks.
+    let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
+    let entries = tokio::time::timeout_at(deadline, read_range(client, job))
+        .await
+        .map_err(|_| TIMED_OUT)??;
     if entries.is_empty() {
         return Ok(None);
     }
@@ -275,19 +282,23 @@ pub async fn run<C: RunnerClient + Router>(
         db,
         purpose: &purpose,
     });
-    // One deadline for the whole run, retries and fallbacks included.
-    let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     for _ in 0..=MAX_FALLBACKS {
-        let answer = match client
-            .select(routing::summary_select(
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let answer = match tokio::time::timeout_at(
+            deadline,
+            client.select(routing::summary_select(
                 &job.session.runner,
                 child_harness,
                 &tried,
-            ))
-            .await
+            )),
+        )
+        .await
         {
-            Ok(answer) => answer,
-            Err(error) => {
+            Ok(Ok(answer)) if tokio::time::Instant::now() < deadline => answer,
+            Ok(Ok(_)) | Err(_) => break,
+            Ok(Err(error)) => {
                 // Waiting charges no failure, so a fallback refusal must not
                 // erase the route failure that made the fallback necessary.
                 if paid_failure.is_none() && failure.is_none() {
@@ -334,7 +345,7 @@ pub async fn run<C: RunnerClient + Router>(
             }),
             _ => None,
         };
-        let mut usage = None;
+        let mut usage = Vec::new();
         let call = Call {
             target: &target,
             child_harness,
@@ -354,16 +365,22 @@ pub async fn run<C: RunnerClient + Router>(
             Err(Failure::NotSent(_)) => Outcome::Cancelled,
             // An unavailable account or a person-owned wait says nothing
             // against the route, even if the run had already started.
-            Err(Failure::AccountWait(_) | Failure::NeverRan(_)) => Outcome::Cancelled,
-            Err(Failure::Failed(_)) => Outcome::Failed,
+            Err(Failure::AccountWait(_) | Failure::NeverRan(_) | Failure::HostRefused(_)) => {
+                Outcome::Cancelled
+            }
+            Err(Failure::Uncertain(_)) if usage.is_empty() => Outcome::Cancelled,
+            Err(Failure::Failed(_) | Failure::Uncertain(_) | Failure::PaidThenWait { .. }) => {
+                Outcome::Failed
+            }
         };
-        client
-            .report(routing::report(
-                &answer.decision_id,
-                reported,
-                usage.as_ref(),
-            ))
-            .await;
+        // Give the active route one bounded settlement even at expiry.
+        let report_deadline =
+            (deadline + 3 * CLEANUP_GRACE).min(tokio::time::Instant::now() + CLEANUP_GRACE);
+        let _ = tokio::time::timeout_at(
+            report_deadline,
+            routing::report_runs(client, &answer.decision_id, reported, &usage),
+        )
+        .await;
         match outcome {
             Ok(result) => return Ok(result),
             // Another model would draw on the same accounts, and the
@@ -376,11 +393,20 @@ pub async fn run<C: RunnerClient + Router>(
             Err(Failure::NeverRan(wait)) => {
                 return Err(paid_failure.map_or(SummaryError::NeverRan(wait), SummaryError::Failed));
             }
+            Err(Failure::PaidThenWait { error, wait }) => {
+                return Err(SummaryError::PaidThenWait { error, wait })
+            }
+            Err(Failure::HostRefused(error) | Failure::Uncertain(error)) => {
+                return Err(SummaryError::Failed(error))
+            }
             Err(Failure::NotSent(error)) => failure = Some(error),
             Err(Failure::Failed(error)) => paid_failure = Some(error),
         }
     }
-    Err(paid_failure.or(failure).unwrap_or_default().into())
+    Err(paid_failure
+        .or(failure)
+        .unwrap_or_else(|| TIMED_OUT.into())
+        .into())
 }
 
 /// Why a summarizer send, or a whole run, produced no reply.
@@ -392,6 +418,11 @@ pub enum SummaryError {
     /// The runner proved the words never ran. Retry after a transient wait,
     /// without spending a summary attempt or blaming the model.
     NeverRan(AccountWait),
+    /// Delivery may have happened: reattach to the same send ID instead of
+    /// starting another request.
+    Uncertain(String),
+    /// A retry met a wait after a previous request already used the route.
+    PaidThenWait { error: String, wait: AccountWait },
     /// Any other failure, as text.
     Failed(String),
 }
@@ -407,7 +438,9 @@ impl std::fmt::Display for SummaryError {
                 wait.send.name(),
                 wait.until_ms
             ),
-            Self::Failed(error) => f.write_str(error),
+            Self::Failed(error) | Self::Uncertain(error) | Self::PaidThenWait { error, .. } => {
+                f.write_str(error)
+            }
         }
     }
 }
@@ -434,6 +467,12 @@ enum Failure {
     AccountWait(AccountWait),
     /// The runner retired the send or could not hand its words to the host.
     NeverRan(AccountWait),
+    HostRefused(String),
+    Uncertain(String),
+    PaidThenWait {
+        error: String,
+        wait: AccountWait,
+    },
 }
 
 impl From<SummaryError> for Failure {
@@ -442,6 +481,8 @@ impl From<SummaryError> for Failure {
             SummaryError::AccountWait(wait) => Self::AccountWait(wait),
             SummaryError::NeverRan(wait) => Self::NeverRan(wait),
             SummaryError::Failed(error) => Self::Failed(error),
+            SummaryError::Uncertain(error) => Self::Uncertain(error),
+            SummaryError::PaidThenWait { error, wait } => Self::PaidThenWait { error, wait },
         }
     }
 }
@@ -513,7 +554,7 @@ async fn summarize_on<C: RunnerClient>(
     entries: &[cortexkit_role_compaction::read::Entry],
     call: &Call<'_>,
     records: Option<&Records<'_>>,
-    usage: &mut Option<StepUsage>,
+    usage: &mut Vec<(String, StepUsage)>,
 ) -> Result<Option<Summarized>, Failure> {
     let (target, window, system) = (call.target, call.window, call.system);
     // Facts carry anchors only when memory is on: with memory off the
@@ -564,7 +605,10 @@ async fn summarize_on<C: RunnerClient>(
         anchored_facts: anchored,
         turn_one_instruction: &call.prompts.turn_one,
     });
-    let prompt = format!("{prompt}\n\n{}", turn_one::FORMAT_INSTRUCTION);
+    let mut prompt = format!("{prompt}\n\n{}", turn_one::FORMAT_INSTRUCTION);
+    if chunk.marks_mid_turn {
+        prompt.push_str("\n\n`U (mid-turn):` marks words the person spoke during an ongoing turn. Include them in the preceding compartment: do not start a compartment or set `<unprocessed_from>` at that message unless it is the first message in this chunk.");
+    }
     // The model is part of the child's name, so a fallback model never
     // continues another model's conversation.
     let range = format!(
@@ -595,6 +639,9 @@ async fn summarize_on<C: RunnerClient>(
             "prompt_over_window: the summarizer prompt does not fit the model".into(),
         ));
     }
+    if tokio::time::Instant::now() >= call.deadline {
+        return Err(Failure::NotSent(TIMED_OUT.into()));
+    }
     let label = format!("{range}:turn-one");
     let send = match records {
         Some(records) => Some(
@@ -619,9 +666,7 @@ async fn summarize_on<C: RunnerClient>(
         ),
         None => None,
     };
-    let (reply, answered_in) = attempt(client, job, &label, &prompt, call, usage)
-        .await
-        .map_err(Failure::from)?;
+    let (reply, answered_in) = attempt(client, job, &label, &prompt, call, usage).await?;
     // An invalid reply fails this model; the run moves on to the next one.
     let hashes = super::hashes::by_ordinal(entries);
     let mut validated = turn_one::parse_reply(&reply)
@@ -654,6 +699,14 @@ async fn summarize_on<C: RunnerClient>(
         model: target.model.clone(),
         decision_id: target.decision_id.clone(),
         output_tokens: target.output_tokens,
+        history: Some(fit::ContinuationWindow {
+            window,
+            system_tokens: window.counter.count(system),
+            history_tokens: window
+                .counter
+                .count(&prompt)
+                .saturating_add(window.counter.count(&reply)),
+        }),
         language: job.language.clone(),
         publication_id: send.publication_id.clone(),
         prompts: call.prompts.clone(),
@@ -677,6 +730,13 @@ fn child_name(job: &Request, label: &str, retry: usize) -> String {
     }
 }
 
+pub(super) fn summary_run_id(child: &str) -> &str {
+    child
+        .rsplit_once(":retry")
+        .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(child, |(root, _)| root)
+}
+
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -692,10 +752,21 @@ async fn attempt<C: RunnerClient>(
     label: &str,
     prompt: &str,
     call_on: &Call<'_>,
-    usage: &mut Option<StepUsage>,
-) -> Result<(String, Child), SummaryError> {
+    usage: &mut Vec<(String, StepUsage)>,
+) -> Result<(String, Child), Failure> {
     let mut retry = 0;
+    let mut paid_failure = None;
+    let wait_after_retry = |paid: Option<String>, wait, never_ran| match paid {
+        Some(error) => Failure::PaidThenWait { error, wait },
+        None if never_ran => Failure::NeverRan(wait),
+        None => Failure::AccountWait(wait),
+    };
     loop {
+        if tokio::time::Instant::now() >= call_on.deadline {
+            return Err(Failure::Failed(
+                paid_failure.unwrap_or_else(|| TIMED_OUT.into()),
+            ));
+        }
         let child = Child {
             session: SessionRef::new(
                 job.session.runner.clone(),
@@ -707,25 +778,38 @@ async fn attempt<C: RunnerClient>(
         // The first send to a child is identified by the child itself, so a
         // retry after a lost answer finds the run already started.
         let send_id = child.session.session.clone();
-        match call(client, &child, &send_id, prompt, call_on, usage).await {
+        let mut spent = None;
+        let result = call(client, &child, &send_id, prompt, call_on, &mut spent).await;
+        let paid = spent.is_some();
+        if let Some(spent) = spent {
+            let root = summary_run_id(&send_id);
+            let id = if retry == 0 {
+                format!("{root}:turn1")
+            } else {
+                format!("{root}:turn1:retry{retry}")
+            };
+            usage.push((id, spent));
+        }
+        match result {
             Ok(text) => return Ok((text, child)),
             Err(CallError::RetryAt { next_ms, error }) => {
                 let remaining = call_on
                     .deadline
                     .saturating_duration_since(tokio::time::Instant::now());
                 let floor = Duration::from_millis(next_ms.saturating_sub(now_ms().max(0) as u64));
-                if floor > remaining {
-                    return Err(SummaryError::AccountWait(AccountWait::retry_at(
-                        next_ms,
-                        SendKind::TurnOne,
-                        now_ms(),
-                    )));
+                let error = format!("{error} (child {})", child.session.session);
+                if paid {
+                    paid_failure = Some(error.clone());
+                }
+                if floor >= remaining {
+                    return Err(wait_after_retry(
+                        paid_failure,
+                        AccountWait::retry_at(next_ms, SendKind::TurnOne, now_ms()),
+                        false,
+                    ));
                 }
                 if retry == MAX_RETRIES {
-                    return Err(SummaryError::Failed(format!(
-                        "{error} (child {})",
-                        child.session.session
-                    )));
+                    return Err(Failure::Failed(error));
                 }
                 tokio::time::sleep(backoff(retry).max(floor).min(remaining)).await;
                 retry += 1;
@@ -733,7 +817,18 @@ async fn attempt<C: RunnerClient>(
             Err(CallError::Summary(SummaryError::Failed(error)))
                 if retry < MAX_RETRIES && retryable(&error) =>
             {
-                tokio::time::sleep(backoff(retry)).await;
+                let remaining = call_on
+                    .deadline
+                    .saturating_duration_since(tokio::time::Instant::now());
+                let delay = backoff(retry);
+                let error = format!("{error} (child {})", child.session.session);
+                if paid {
+                    paid_failure = Some(error.clone());
+                }
+                if delay >= remaining {
+                    return Err(Failure::Failed(error));
+                }
+                tokio::time::sleep(delay).await;
                 retry += 1;
             }
             Err(CallError::Summary(SummaryError::NeverRan(wait)))
@@ -744,7 +839,7 @@ async fn attempt<C: RunnerClient>(
                     .saturating_duration_since(tokio::time::Instant::now());
                 let delay = backoff(retry);
                 if delay >= remaining {
-                    return Err(SummaryError::NeverRan(wait));
+                    return Err(wait_after_retry(paid_failure, wait, true));
                 }
                 tokio::time::sleep(delay).await;
                 retry += 1;
@@ -752,16 +847,23 @@ async fn attempt<C: RunnerClient>(
             // The child names the run to the runner's owner, who can match it
             // against the runner's own records.
             Err(CallError::Summary(SummaryError::Failed(error))) => {
-                return Err(SummaryError::Failed(format!(
+                return Err(Failure::Failed(format!(
                     "{error} (child {})",
                     child.session.session
                 )))
             }
             // An account wait is never retried here: the runner named when
             // to send again, and that is minutes or hours away.
-            Err(CallError::Summary(
-                wait @ (SummaryError::AccountWait(_) | SummaryError::NeverRan(_)),
-            )) => return Err(wait),
+            Err(CallError::Summary(SummaryError::AccountWait(wait))) => {
+                return Err(wait_after_retry(paid_failure, wait, false))
+            }
+            Err(CallError::Summary(SummaryError::NeverRan(wait))) => {
+                return Err(wait_after_retry(paid_failure, wait, true))
+            }
+            Err(CallError::HostRefused(error)) => {
+                return Err(Failure::HostRefused(error));
+            }
+            Err(CallError::Summary(error)) => return Err(error.into()),
         }
     }
 }
@@ -890,6 +992,7 @@ impl Ended {
 #[derive(Debug)]
 enum CallError {
     Summary(SummaryError),
+    HostRefused(String),
     RetryAt { next_ms: u64, error: String },
 }
 
@@ -937,6 +1040,7 @@ pub(crate) async fn send_and_wait_stepped<C: RunnerClient>(
     match send_and_wait_inner(client, child, send_id, prompt, how, usage).await {
         Ok(reply) => Ok(reply),
         Err(CallError::Summary(error)) => Err(error),
+        Err(CallError::HostRefused(error)) => Err(SummaryError::Failed(error)),
         Err(CallError::RetryAt { next_ms, .. }) => Err(SummaryError::AccountWait(
             AccountWait::retry_at(next_ms, how.send, now_ms()),
         )),
@@ -951,37 +1055,51 @@ async fn send_and_wait_inner<C: RunnerClient>(
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<Ended, CallError> {
-    let with_temperature = client.child_temperature(child).await;
-    let session_class = if how.creates_child && client.child_session_class(child).await {
-        Some(how.send.session_class().to_owned())
-    } else {
-        None
-    };
-    // The runner freezes a child's storage policy on the send that creates
-    // it, so only that send carries one. Runners without the
-    // session_retention group refuse the member and are never sent it.
-    let retention_policy = if how.creates_child {
-        client.child_session_retention(child).await.map(|limits| {
-            if how.keep_child {
-                limits.keep_for(KEPT_CHILD_DAYS)
+    if tokio::time::Instant::now() >= how.deadline {
+        return Err(TIMED_OUT.to_owned().into());
+    }
+    let (with_temperature, session_class, retention_policy, cache) =
+        tokio::time::timeout_at(how.deadline, async {
+            let with_temperature = client.child_temperature(child).await;
+            let session_class = if how.creates_child && client.child_session_class(child).await {
+                Some(how.send.session_class().to_owned())
             } else {
-                limits.keep_none()
-            }
+                None
+            };
+            // The runner freezes a child's storage policy on the send that creates
+            // it, so only that send carries one. Runners without the
+            // session_retention group refuse the member and are never sent it.
+            let retention_policy = if how.creates_child {
+                client.child_session_retention(child).await.map(|limits| {
+                    if how.keep_child {
+                        limits.keep_for(KEPT_CHILD_DAYS)
+                    } else {
+                        limits.keep_none()
+                    }
+                })
+            } else {
+                None
+            };
+            // A cache policy is set only for a planless session; a planned one
+            // takes the runner's.
+            let cache = if !how.continuation
+                && how.plan.is_none()
+                && client.child_cache_policy(child).await
+            {
+                let mut cache = cortexkit_role_llm_runner::cache::Cache::new();
+                cache.ttl = Some(how.cache_ttl);
+                cache.keep_warm = Some(cortexkit_role_llm_runner::cache::KeepWarm::Off);
+                Some(cache)
+            } else {
+                None
+            };
+            (with_temperature, session_class, retention_policy, cache)
         })
-    } else {
-        None
-    };
-    // A cache policy is set only for a planless session; a planned one
-    // takes the runner's.
-    let cache = if !how.continuation && how.plan.is_none() && client.child_cache_policy(child).await
-    {
-        let mut cache = cortexkit_role_llm_runner::cache::Cache::new();
-        cache.ttl = Some(how.cache_ttl);
-        cache.keep_warm = Some(cortexkit_role_llm_runner::cache::KeepWarm::Off);
-        Some(cache)
-    } else {
-        None
-    };
+        .await
+        .map_err(|_| TIMED_OUT.to_owned())?;
+    if tokio::time::Instant::now() >= how.deadline {
+        return Err(TIMED_OUT.to_owned().into());
+    }
     let mut request = SendRequest::new(prompt, send_id.to_owned());
     request.session_class = session_class;
     request.cache = cache;
@@ -1006,12 +1124,53 @@ async fn send_and_wait_inner<C: RunnerClient>(
         }
     }
     let mut resent = false;
+    let mut reattachments = 0;
+    let mut pending = false;
+    let mut submission = None;
     let reply = loop {
+        if tokio::time::Instant::now() >= how.deadline {
+            if pending {
+                return Err(
+                    queued_timeout(client, child, submission.as_deref(), how.send)
+                        .await
+                        .into(),
+                );
+            }
+            return Err(SummaryError::Failed(TIMED_OUT.into()).into());
+        }
         let reply =
-            tokio::time::timeout_at(how.deadline, client.send_child(child, request.clone()))
+            match tokio::time::timeout_at(how.deadline, client.send_child(child, request.clone()))
                 .await
-                .map_err(|_| "the run did not finish in time".to_owned())?
-                .map_err(|error| send_refused(&error, how.send))?;
+            {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(_)) if submission.is_some() => {
+                    crate::run_ends::pause(watch.as_ref(), how.deadline).await;
+                    continue;
+                }
+                Ok(Err(error)) if error.outcome_unknown || pending => {
+                    // Only replay the identical send. Another route or child
+                    // cannot tell whether the runner already accepted these words.
+                    let delay = backoff(reattachments);
+                    if how.send == SendKind::TurnOne
+                        && reattachments < MAX_RETRIES
+                        && tokio::time::Instant::now() + delay < how.deadline
+                    {
+                        reattachments += 1;
+                        pending = true;
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(SummaryError::Uncertain(send_error(&error)).into());
+                }
+                Ok(Err(error)) => return Err(send_refused(&error, how.send).into()),
+                Err(_) => {
+                    return Err(
+                        queued_timeout(client, child, submission.as_deref(), how.send)
+                            .await
+                            .into(),
+                    )
+                }
+            };
         if reply.state == send_states::NOT_DELIVERED {
             // A host that refused the words themselves (an unreadable
             // attachment, invalid host configuration, an unsupported host
@@ -1021,11 +1180,10 @@ async fn send_and_wait_inner<C: RunnerClient>(
             // same refusal forever.
             if reply.reason.as_deref() == Some(cortexkit_role_llm_runner::send::REASON_HOST_REFUSED)
             {
-                return Err(format!(
+                return Err(CallError::HostRefused(format!(
                     "the host refused the {} send; it is not resent (host_refused)",
                     how.send.name()
-                )
-                .into());
+                )));
             }
             // Every other reason, including a future one, proves final
             // non-delivery. Only that proof permits a new id; an unknown
@@ -1046,11 +1204,14 @@ async fn send_and_wait_inner<C: RunnerClient>(
             request.plan = None;
             request.runner_params.remove("tools");
             resent = true;
+            pending = false;
+            submission = None;
         } else if reply.state == send_states::PENDING && reply.run_id.is_none() {
             // Interrupting another turn does not retire this queued send.
             // Replay its identical id until the runner names its own run.
-            if tokio::time::Instant::now() >= how.deadline {
-                return Err("the run did not finish in time".to_owned().into());
+            pending = true;
+            if reply.submission_id.is_some() {
+                submission = reply.submission_id;
             }
             crate::run_ends::pause(watch.as_ref(), how.deadline).await;
         } else {
@@ -1109,6 +1270,14 @@ async fn send_and_wait_inner<C: RunnerClient>(
             return Err(CallError::RetryAt { next_ms, error });
         }
         let failure = format!("the run ended {}: {error}", result.state);
+        if result.state == states::ERROR
+            && result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.class == "host_refused")
+        {
+            return Err(CallError::HostRefused(failure));
+        }
         if result.state == states::MAX_STEPS {
             return Ok(Ended {
                 reply: Reply {
@@ -1137,6 +1306,24 @@ async fn send_and_wait_inner<C: RunnerClient>(
         step_capped: false,
         failure: String::new(),
     })
+}
+
+async fn queued_timeout<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    submission: Option<&str>,
+    send: SendKind,
+) -> SummaryError {
+    if let Some(submission) = submission {
+        if matches!(
+            tokio::time::timeout(CLEANUP_GRACE, client.retract_child_send(child, submission)).await,
+            Ok(Ok(true))
+        ) {
+            return never_ran(send_states::NOT_DELIVERED, send);
+        }
+        tracing::warn!("ck-mc: queued summarizer submission {submission} in {} timed out without confirmed withdrawal", child.session.session);
+    }
+    SummaryError::Uncertain(TIMED_OUT.into())
 }
 
 /// Reuse the session's wait scheduler, but not its failure accounting or
@@ -1450,7 +1637,19 @@ async fn wait_for<C: RunnerClient>(
             }
             Ok(Err(_)) | Err(_) => break,
         };
-        if let Some(current) = &result.usage {
+        if let Some(current) = result.usage.as_ref().filter(|usage| {
+            usage.steps > 0
+                || [
+                    usage.input_tokens,
+                    usage.cached_input_tokens,
+                    usage.cache_write_tokens,
+                    usage.output_tokens,
+                    usage.reasoning_tokens,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|tokens| tokens > 0)
+        }) {
             // Each read reports usage for the whole child run, not a delta.
             reported = Some(step_usage(current));
         }
@@ -1488,17 +1687,20 @@ async fn timed_out<C: RunnerClient>(
     if let Some(result) = last.as_ref().filter(|result| !still_running(&result.state)) {
         return Ok(result.clone());
     }
-    let status = client
-        .child_status(child, RunStatusRequest::new().with_run_id(run_id))
-        .await
-        .ok();
+    let status = tokio::time::timeout(
+        CLEANUP_GRACE,
+        client.child_status(child, RunStatusRequest::new().with_run_id(run_id)),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
     let resume = status
         .as_ref()
         .and_then(|status| status.resume_not_before_ms);
     let mut run = last.unwrap_or_else(|| RunResult::new(run_id, states::ACTIVE));
     let cancel = status.as_ref().map_or_else(
         || still_running(&run.state),
-        |status| still_running(&status.state),
+        |status| still_running(&status.state) || status.state == "unknown",
     );
     if let Some(status) = status {
         // Without a caller- or person-owned wait, keep the run result's
@@ -1539,20 +1741,24 @@ async fn timed_out<C: RunnerClient>(
                 })
                 .map(|next| AccountWait::retry_at(next, send, now))
         });
-    if cancel || person.is_some() {
-        cancel_waiting(client, child, run_id).await;
-    }
+    let cancelled = (cancel || person.is_some()) && cancel_waiting(client, child, run_id).await;
     Err(match wait {
         Some(wait) => SummaryError::AccountWait(wait),
-        None => SummaryError::Failed("the run did not finish in time".into()),
+        None if cancel && !cancelled => SummaryError::Uncertain(TIMED_OUT.into()),
+        None => SummaryError::Failed(TIMED_OUT.into()),
     })
 }
 
 /// Cancel a run whose caller has stopped waiting, when the runner
 /// serves `run.cancel`. Best effort: a cancel that fails is logged and
 /// changes nothing else.
-async fn cancel_waiting<C: RunnerClient>(client: &C, child: &Child, run_id: &str) {
-    match client.cancel_child_run(child, run_id).await {
+async fn cancel_waiting<C: RunnerClient>(client: &C, child: &Child, run_id: &str) -> bool {
+    let Ok(cancelled) =
+        tokio::time::timeout(CLEANUP_GRACE, client.cancel_child_run(child, run_id)).await
+    else {
+        return false;
+    };
+    match &cancelled {
         Ok(true) => tracing::info!(
             "ck-mc: child run {run_id} in {} no longer has a reader; cancelled it",
             child.session.session
@@ -1563,6 +1769,7 @@ async fn cancel_waiting<C: RunnerClient>(client: &C, child: &Child, run_id: &str
             child.session.session
         ),
     }
+    matches!(cancelled, Ok(true))
 }
 
 #[cfg(test)]

@@ -55,8 +55,12 @@ fn helper() -> Option<cortexkit_role_compaction::read::SpeaksFor> {
 
 /// One new message of a randomly chosen kind at `ordinal`.
 fn message(rng: &mut Rng, ordinal: u64, serial: u64) -> Entry {
+    use cortexkit_role_compaction::read::HostFrame;
+    use cortexkit_role_llm_runner::attribution::host_frames::{
+        CLAUDE_CODE_MID_TURN, CLAUDE_CODE_MID_TURN_HEAD, CLAUDE_CODE_MID_TURN_TAIL,
+    };
     let mid = format!("m{ordinal}-{serial}");
-    let kind = rng.below(13);
+    let kind = rng.below(17);
     let words = 1 + rng.below(40) as usize;
     let (role, parts) = match kind {
         0 | 1 => (
@@ -133,6 +137,13 @@ fn message(rng: &mut Rng, ordinal: u64, serial: u64) -> Entry {
             Role::User,
             vec![text_part("p", "Huge pasted log line. ".repeat(words * 40))],
         ),
+        13 => (Role::System, vec![text_part("p", format!("{CLAUDE_CODE_MID_TURN_HEAD}Please keep the parser branch.{CLAUDE_CODE_MID_TURN_TAIL}"))]),
+        14 => (Role::User, vec![text_part("p", "Keep the parser changes.".into())]),
+        15 | 16 => (Role::Assistant, vec![Part::new("t", PartBody::Tool(ToolPart::new(
+            format!("c{ordinal}"), if kind == 15 { "say" } else { "notify" },
+            serde_json::json!({"text":"Parser ready for review.", "action":"send", "body":"Parser ready for review."}),
+            ToolStatus::Completed,
+        )))]),
         _ => (
             Role::Assistant,
             vec![text_part(
@@ -145,6 +156,20 @@ fn message(rng: &mut Rng, ordinal: u64, serial: u64) -> Entry {
     match kind {
         1 if rng.below(2) == 0 => entry = entry.with_notice(NoticeOrigin::new("runner")),
         10 if rng.below(2) == 0 => entry.speaks_for = helper(),
+        13 => {
+            entry = entry
+                .with_host_frame(
+                    HostFrame::new(
+                        "p",
+                        CLAUDE_CODE_MID_TURN,
+                        CLAUDE_CODE_MID_TURN_HEAD.len() as u32,
+                        CLAUDE_CODE_MID_TURN_TAIL.len() as u32,
+                    ),
+                    true,
+                )
+                .unwrap()
+        }
+        14 => entry = entry.with_notice(NoticeOrigin::new("runner").with_keep(true)),
         _ => {}
     }
     if kind == 8 || kind == 11 {

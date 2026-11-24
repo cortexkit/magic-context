@@ -910,6 +910,7 @@ async fn second_turn(
             model: ModelRef::new("replay", "replay"),
             decision_id: "replay".into(),
             output_tokens: OUTPUT_TOKENS,
+            history: None,
             language: language.map(str::to_owned),
             publication_id: send.publication_id.clone(),
             prompts: arm_prompts(arm),
