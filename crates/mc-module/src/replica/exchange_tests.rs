@@ -1288,3 +1288,47 @@ async fn a_waiting_link_is_dropped_once_a_change_made_here_decides_its_memory() 
         );
     }
 }
+
+/// A memory too large to send never reaches the other computers, so it
+/// never decides a fact here either: the same fact from another computer
+/// stays live here, as it does everywhere else, though the large memory's
+/// global id sorts first.
+#[tokio::test]
+async fn a_memory_too_large_to_send_never_beats_a_sent_one_for_its_fact() {
+    let hub = InMemoryHub::new();
+    let (a, b) = (Computer::new(&hub, 1), Computer::new(&hub, 2));
+    a.sync().await;
+    b.sync().await;
+    // A's global ids sort before B's.
+    a.execute(&format!(
+        "UPDATE replica_state SET store_id = '{}'",
+        "1".repeat(32)
+    ));
+    b.execute(&format!(
+        "UPDATE replica_state SET store_id = '{}'",
+        "f".repeat(32)
+    ));
+    memory(&a, "pj-a", "Use Bun.");
+    a.execute(
+        "UPDATE memories
+            SET metadata_json = json_object('note', replace(hex(zeroblob(40000)), '0', 'x'))",
+    );
+    assert_eq!(a.replica.publish().await.unwrap().too_large, 1);
+    assert!(hub.messages().is_empty());
+    memory(&b, "pj-a", "Use Bun.");
+    b.sync().await;
+    a.sync().await;
+    let live = |computer: &Computer| {
+        computer.texts(&format!(
+            "SELECT global_id FROM memories WHERE {} ORDER BY global_id",
+            crate::context_migrations::LIVE
+        ))
+    };
+    let sent = format!("{}.m1", "f".repeat(32));
+    assert_eq!(live(&b), [sent.clone()]);
+    assert_eq!(
+        live(&a),
+        [sent],
+        "the memory no other computer holds doesn't keep the fact here"
+    );
+}
