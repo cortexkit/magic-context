@@ -83,12 +83,11 @@ fn hybrid(semantic: Option<f64>, fts: Option<f64>) -> Option<(f64, &'static str)
 fn vectors<K: Ord + rusqlite::types::FromSql>(
     conn: &Connection,
     sql: &str,
-    project: &str,
-    model_id: &str,
+    bindings: impl rusqlite::Params,
 ) -> BTreeMap<K, Vec<f32>> {
     let read = || -> rusqlite::Result<BTreeMap<K, Vec<f32>>> {
         let mut statement = conn.prepare_cached(sql)?;
-        let rows = statement.query_map(params![project, model_id], |row| {
+        let rows = statement.query_map(bindings, |row| {
             Ok((row.get::<_, K>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
         let mut found = BTreeMap::new();
@@ -223,7 +222,7 @@ pub(crate) fn memory_words(
     ids
 }
 
-/// Every vector the project's memories have under `model_id`.
+/// Vectors of the project's current memories under `model_id`.
 pub(crate) fn memory_vectors(
     conn: &Connection,
     project: &str,
@@ -233,9 +232,10 @@ pub(crate) fn memory_vectors(
         conn,
         "SELECT e.memory_id, e.embedding FROM memory_embeddings e
            JOIN memories m ON m.id = e.memory_id
-          WHERE m.level = 'project' AND m.owner_id = ?1 AND e.model_id = ?2",
-        project,
-        model_id,
+          WHERE m.level = 'project' AND m.owner_id = ?1 AND e.model_id = ?2
+            AND m.status IN ('active', 'permanent')
+            AND (m.expires_at IS NULL OR m.expires_at > ?3)",
+        params![project, model_id, now_ms()],
     )
 }
 
@@ -244,6 +244,7 @@ fn memory_fts_ids(
     owners: MemoryOwners<'_>,
     fts: &str,
     dates: Option<DateRange>,
+    limit: usize,
 ) -> Vec<i64> {
     let read = || -> rusqlite::Result<Vec<i64>> {
         let mut statement = conn.prepare_cached(&format!(
@@ -262,7 +263,7 @@ fn memory_fts_ids(
                 from,
                 to,
                 fts,
-                MEMORY_FTS_CANDIDATES as i64
+                limit as i64
             ],
             |row| row.get(0),
         )?;
@@ -331,15 +332,40 @@ pub fn search_memories(
         return (Vec::new(), Vec::new());
     }
     let trimmed = query.trim();
-    let mut ids = memory_fts_ids(conn, owners, &sanitize_fts_query(trimmed), dates);
-    if ids.is_empty() {
-        ids = memory_fts_ids(conn, owners, &relaxed_fts_query(trimmed), dates);
-    }
-    let fts: BTreeMap<i64, f64> = ids
-        .iter()
+    // At most `visible.len()` rows can occupy slots meant for hidden hits.
+    // Keep the original ranks and report visible matches from the original
+    // candidate window; only hidden candidates can use the extra slots.
+    let word_scores = |fts: &str| {
+        let mut hidden = 0;
+        memory_fts_ids(
+            conn,
+            owners,
+            fts,
+            dates,
+            MEMORY_FTS_CANDIDATES + visible.len(),
+        )
+        .into_iter()
         .enumerate()
-        .map(|(rank, id)| (*id, 1.0 / (rank as f64 + 1.0)))
-        .collect();
+        .filter_map(|(rank, id)| {
+            let include = if visible.contains(&id) {
+                rank < MEMORY_FTS_CANDIDATES
+            } else {
+                hidden += 1;
+                hidden <= MEMORY_FTS_CANDIDATES
+            };
+            include.then_some((id, 1.0 / (rank as f64 + 1.0)))
+        })
+        .collect::<BTreeMap<_, _>>()
+    };
+    let mut fts = word_scores(&sanitize_fts_query(trimmed));
+    if fts.keys().all(|id| visible.contains(id)) {
+        let relaxed = word_scores(&relaxed_fts_query(trimmed));
+        if fts.is_empty() {
+            fts = relaxed;
+        } else {
+            fts.extend(relaxed.into_iter().filter(|(id, _)| !visible.contains(id)));
+        }
+    }
     let mut meaning: BTreeMap<i64, f64> = BTreeMap::new();
     if let Some(semantic) = semantic {
         let stored: BTreeMap<i64, Vec<f32>> = vectors(
@@ -347,9 +373,11 @@ pub fn search_memories(
             "SELECT e.memory_id, e.embedding FROM memory_embeddings e
                JOIN memories m ON m.id = e.memory_id
               WHERE m.id IN (SELECT value FROM json_each(?1)) AND e.model_id = ?2",
-            &serde_json::to_string(&memories.iter().map(|memory| memory.id).collect::<Vec<_>>())
-                .unwrap(),
-            semantic.model_id,
+            params![
+                serde_json::to_string(&memories.iter().map(|memory| memory.id).collect::<Vec<_>>())
+                    .unwrap(),
+                semantic.model_id
+            ],
         );
         for memory in &memories {
             if let Some(vector) = stored.get(&memory.id) {
@@ -695,8 +723,7 @@ pub fn search_commits(
             "SELECT e.sha, e.embedding FROM git_commit_embeddings e
                JOIN git_commits c ON c.project_path = e.project_path AND c.sha = e.sha
               WHERE c.project_path = ?1 AND e.model_id = ?2",
-            project,
-            semantic.model_id,
+            params![project, semantic.model_id],
         );
         for (sha, vector) in &stored {
             let similarity = embedding::similarity(semantic.vector, vector);
