@@ -424,6 +424,15 @@ impl Session {
         self.index_ready = self.read_until(client, None, true).await;
     }
 
+    /// A retry after an unavailable transcript must actually read it again.
+    /// A worker that already has its index answers without runner I/O.
+    pub(crate) async fn ensure_recent_index<C: RunnerClient>(&mut self, client: &C) -> bool {
+        if !self.index_ready {
+            self.restore_for_tools(client).await;
+        }
+        self.index_ready
+    }
+
     /// The session without what [`Session::resume_quiet`] reads again from
     /// the stores or builds again, when nothing of it is in flight; the
     /// session unchanged otherwise. It drops its summaries but the newest,

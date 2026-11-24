@@ -263,6 +263,50 @@ async fn a_watch_resumed_from_its_cursor_hears_each_owner_change_once() {
 }
 
 #[tokio::test]
+async fn an_interrupted_watch_replay_cannot_lose_owner_changes() {
+    let mut replica = super::tests::replica(None);
+    let mut params =
+        json!({"sessions":[head()],"projects":[PROJECT],"workspaces":["ws-a"],"global":true});
+    let mut watch = replica.subscribe("direct".into(), &params).unwrap();
+    params["cursor"] = watch.recv().await.unwrap().unwrap()["cursor"].clone();
+    drop(watch);
+    replica.watches.publish(Change::project_memories(PROJECT));
+    replica.watches.changed(head());
+    replica.watches.publish(Change::Memories {
+        level: "workspace".into(),
+        owner: "ws-a".into(),
+    });
+    replica.watches.publish(Change::global_memories());
+
+    for boundary in 1..=4 {
+        let mut watch = replica.subscribe("direct".into(), &params).unwrap();
+        let mut owners = std::collections::BTreeSet::new();
+        let mut resume = params.clone();
+        for _ in 0..boundary {
+            let frame = watch.recv().await.unwrap().unwrap();
+            if let Some(level) = frame["level"].as_str() {
+                owners.insert(level.to_owned());
+            }
+            resume["cursor"] = frame["cursor"].clone();
+        }
+        drop(watch);
+        let mut watch = replica.subscribe("direct".into(), &resume).unwrap();
+        while let Ok(Ok(Some(frame))) =
+            tokio::time::timeout(std::time::Duration::ZERO, watch.recv()).await
+        {
+            if let Some(level) = frame["level"].as_str() {
+                owners.insert(level.to_owned());
+            }
+        }
+        assert_eq!(
+            owners.into_iter().collect::<Vec<_>>(),
+            ["global", "project", "workspace"],
+            "disconnect after frame {boundary}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_modules_writers_tell_the_watch_what_they_changed() {
     let fixture = Fixture::new();
     let path = fixture.dir.path().join("context.db");

@@ -861,14 +861,6 @@ impl Bus {
         }
     }
 
-    /// Drop the current session, so the next caller opens a fresh one: a
-    /// watch on it ended, so its connection may be gone.
-    pub(crate) async fn discard(&self) {
-        let mut session = self.session.lock().await;
-        *session = None;
-        self.connected.store(false, Ordering::Relaxed);
-    }
-
     /// This computer's box id, as ck-bus names it in the module's bus
     /// account (`box_<box id>`); modules never derive it themselves. It
     /// names this computer as the writer of the memories it shares
@@ -878,10 +870,16 @@ impl Bus {
         box_of_account(session.account.account())
     }
 
-    /// Drop the session after the run-end reader found its connection lost,
+    /// Capture the generation while the connection is still locked.
+    pub(crate) async fn session_with_generation(&self) -> Result<(SessionGuard<'_>, u64), String> {
+        let session = self.session().await?;
+        Ok((session, self.generation.load(Ordering::SeqCst)))
+    }
+
+    /// Drop the session after a reader found its connection lost,
     /// unless it got a new connection after `generation`, which another user
     /// may already be using.
-    async fn forget(&self, generation: u64) {
+    pub(crate) async fn forget(&self, generation: u64) {
         let mut session = self.session.lock().await;
         if self.generation.load(Ordering::SeqCst) == generation {
             *session = None;
@@ -1045,12 +1043,14 @@ impl AttributionEvents {
             return;
         }
         let result = async {
-            let session = self.bus.session().await?;
-            let Some(payloads) = session.payloads.as_deref() else {
-                return Err("nats_connection_absent".to_owned());
-            };
             let mut total = 0;
             loop {
+                // Let consumers of runner completion events and other
+                // publishers use the connection between batches.
+                let session = self.bus.session().await?;
+                let Some(payloads) = session.payloads.as_deref() else {
+                    return Err("nats_connection_absent".to_owned());
+                };
                 match publish_unsent_facts(db, &session.account, payloads).await {
                     Ok(published) => {
                         total += published;

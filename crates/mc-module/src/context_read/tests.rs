@@ -121,6 +121,34 @@ impl Fixture {
 }
 
 #[test]
+#[ignore = "manual read-cost measurement"]
+fn folded_summary_read_cost() {
+    let fixture = Fixture::new();
+    let mut db = Connection::open(fixture.reader.context.as_ref().unwrap()).unwrap();
+    for count in [250, 1000, 4000] {
+        let tx = db.transaction().unwrap();
+        tx.execute("DELETE FROM compartments", []).unwrap();
+        let detail = "The engineer reviewed the parser and wrote a regression test. ".repeat(8);
+        for sequence in 0..count {
+            tx.execute("INSERT INTO compartments(session_id,harness,sequence,start_message,end_message,title,content,p1,p2,p3,p4,importance,created_at) VALUES('plugin','opencode',?1,?2,?3,?4,?5,?5,'short fact','anchor fact','tiny fact',50,0)", params![sequence, sequence*10+1,sequence*10+10,format!("Summary {sequence}"),detail]).unwrap();
+        }
+        tx.commit().unwrap();
+        let start = std::time::Instant::now();
+        let mut shown = 0;
+        for _ in 0..10 {
+            shown = fixture.read("context.summaries", params())["summaries"]
+                .as_array()
+                .unwrap()
+                .len();
+        }
+        println!(
+            "summaries={count} shown={shown} per_read={:?}",
+            start.elapsed() / 10
+        );
+    }
+}
+
+#[test]
 fn context_read_unknown_session_precedes_any_other_store_or_content_read() {
     let mut fixture = Fixture::new();
     fixture.reader.store = Some(fixture._dir.path().join("does-not-exist.db"));

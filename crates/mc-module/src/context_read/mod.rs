@@ -41,7 +41,14 @@ const RECENT_MIN_BUDGET: u64 = 256;
 const NEWEST_MAX: u64 = 16;
 
 type Reply = Result<Value, Refusal>;
-type Command = (Vec<u8>, oneshot::Sender<Routed>);
+enum Command {
+    Read(Vec<u8>, oneshot::Sender<Routed>),
+    SavedRunners {
+        harness: String,
+        session: String,
+        reply: oneshot::Sender<Result<Vec<String>, Refusal>>,
+    },
+}
 type Projects = Arc<Mutex<HashMap<SessionRef, Project>>>;
 
 /// Answers `context.recent` from the session's worker, which the module owns.
@@ -60,10 +67,6 @@ pub(crate) struct Recent {
     pub harness: String,
     pub session: String,
     pub budget: u64,
-    /// The names of the runners mode3.db keeps this session's saved state
-    /// under, sorted, for a session with no live worker; a refusal when
-    /// mode3.db could not be read.
-    pub saved: Result<Vec<String>, Refusal>,
 }
 
 #[derive(Clone)]
@@ -72,6 +75,8 @@ pub struct ContextRead {
     recent: Arc<OnceLock<RecentHandler>>,
     #[cfg(test)]
     reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    saved_lookups: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ContextRead {
@@ -83,6 +88,10 @@ impl ContextRead {
         gate: Arc<crate::agent_data::Gate>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Command>();
+        #[cfg(test)]
+        let saved_lookups = Arc::<std::sync::atomic::AtomicUsize>::default();
+        #[cfg(test)]
+        let reader_lookups = Arc::clone(&saved_lookups);
         std::thread::Builder::new()
             .name("mc-context-read".into())
             .spawn(move || {
@@ -93,8 +102,21 @@ impl ContextRead {
                     projects,
                     gate,
                 };
-                while let Ok((body, reply)) = rx.recv() {
-                    let _ = reply.send(reader.route(&body));
+                while let Ok(command) = rx.recv() {
+                    match command {
+                        Command::Read(body, reply) => {
+                            let _ = reply.send(reader.route(&body));
+                        }
+                        Command::SavedRunners {
+                            harness,
+                            session,
+                            reply,
+                        } => {
+                            #[cfg(test)]
+                            reader_lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let _ = reply.send(reader.saved_runners(&harness, &session));
+                        }
+                    }
                 }
             })
             .expect("context read worker");
@@ -103,6 +125,8 @@ impl ContextRead {
             recent: Default::default(),
             #[cfg(test)]
             reads: Default::default(),
+            #[cfg(test)]
+            saved_lookups,
         }
     }
 
@@ -117,7 +141,7 @@ impl ContextRead {
         self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send((body.to_vec(), tx))
+            .send(Command::Read(body.to_vec(), tx))
             .map_err(|_| unavailable())?;
         match rx.await.map_err(|_| unavailable())? {
             Routed::Reply(reply) => reply,
@@ -126,6 +150,19 @@ impl ContextRead {
                 None => Err(unavailable()),
             },
         }
+    }
+
+    /// Saved state is only consulted after admission and a live worker miss.
+    pub(crate) async fn saved_runners(&self, recent: &Recent) -> Result<Vec<String>, Refusal> {
+        let (reply, answer) = oneshot::channel();
+        self.tx
+            .send(Command::SavedRunners {
+                harness: recent.harness.clone(),
+                session: recent.session.clone(),
+                reply,
+            })
+            .map_err(|_| unavailable())?;
+        answer.await.map_err(|_| unavailable())?
     }
 
     #[cfg(test)]
@@ -253,7 +290,6 @@ impl Reader {
                 harness: harness.to_owned(),
                 session: session.to_owned(),
                 budget,
-                saved: self.saved_runners(harness, session),
             }));
         }
         let newest = match p.get("newest") {
@@ -577,10 +613,7 @@ impl Reader {
                 json!({"id": row.id, "category": row.tag, "text": row.content, "tokens": counter.count(&row.content)})
             }).collect());
         } else {
-            // Each summary to show, newest first, with the tier it is shown at.
-            let shown: Vec<(&StoredCompartment, u8)> = if newest.is_some() {
-                snapshot.summaries.iter().rev().map(|s| (s, 1)).collect()
-            } else {
+            let folded = newest.is_none().then(|| {
                 let history_budget =
                     (snapshot.usable as f64 * settings.execute_threshold_percentage / 100.0
                         * settings.history_budget_percentage) as u64;
@@ -600,24 +633,35 @@ impl Reader {
                     memory_budget_tokens: 0,
                     profile_budget_tokens: 0,
                 };
-                let baseline = head::fold(&inputs, None);
-                baseline
-                    .summary_items
+                head::fold(&inputs, None)
+            });
+            // Index the source rows once, and pair only the rendered items
+            // reached before the requested budget is full.
+            let by_sequence = folded.as_ref().map(|_| {
+                snapshot
+                    .summaries
                     .iter()
-                    .rev()
-                    .map(|item| {
-                        let summary = snapshot
-                            .summaries
-                            .iter()
-                            .find(|s| s.sequence.to_string() == item.compartment_id)
-                            .expect("rendered summary");
-                        (summary, item.tier)
-                    })
-                    .collect()
-            };
+                    .map(|summary| (summary.sequence, summary))
+                    .collect::<HashMap<_, _>>()
+            });
+            let items = folded
+                .as_ref()
+                .map(|baseline| baseline.summary_items.as_ref());
+            let count = items.map_or(snapshot.summaries.len(), <[_]>::len);
             let mut used = 0;
             let mut summaries = Vec::new();
-            for (summary, tier) in shown {
+            for index in (0..count).rev() {
+                let (summary, tier) =
+                    if let Some((items, by_sequence)) = items.zip(by_sequence.as_ref()) {
+                        let item = &items[index];
+                        let id = item
+                            .compartment_id
+                            .parse()
+                            .expect("rendered summary sequence");
+                        (by_sequence[&id], item.tier)
+                    } else {
+                        (&snapshot.summaries[index], 1)
+                    };
                 let text = render::render_compartment_at_tier(
                     &render::DecayRenderCompartment::from(summary),
                     tier,

@@ -2,6 +2,7 @@ use super::*;
 use crate::child_scopes::ChildScopes;
 use crate::config::Loader;
 use crate::transport::{Handler, SubcRunnerClient};
+use cortexkit_role_compaction::setup::ModelRef;
 use serde_json::json;
 use subc_client_rs::{HealthStatus, ModuleHandler};
 
@@ -17,11 +18,27 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
         Some(Store::open(&dir.path().join("mode3.db")).unwrap()),
     );
     module
-        .inner
-        .set_up
-        .lock()
-        .unwrap()
-        .insert(SessionRef::new("runner", "fixture", "session"), None);
+        .setup(
+            Route {
+                session: SessionRef::new("runner", "fixture", "session"),
+                project: None,
+                workdir: None,
+                agent_id: None,
+            },
+            SetupRequest::new(
+                "worker",
+                ModelRef::new("anthropic", "claude-opus-5-5"),
+                200_000,
+                1_000,
+                cortexkit_role_compaction::rules::ProviderRules::new(
+                    cortexkit_role_compaction::rules::SignedParts::None,
+                    cortexkit_role_compaction::rules::EditCost::Suffix,
+                ),
+                Vec::new(),
+                1,
+            ),
+        )
+        .unwrap();
     let report = Handler::new(module).health().await;
 
     assert_eq!(report.status, HealthStatus::Ok);
@@ -72,6 +89,25 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
     assert_eq!(metrics["replica"]["enabled"], false);
     #[cfg(not(feature = "memory-replica"))]
     assert!(metrics.get("replica").is_none());
+}
+
+#[tokio::test]
+async fn health_remains_healthy_while_a_statement_holds_the_setup_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = test_module(
+        Settings::default(),
+        Some(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap()),
+        Some(Store::open(&dir.path().join("mode3.db")).unwrap()),
+    );
+    let idle = module.health(false);
+    let statement = module.inner.set_up.lock().unwrap();
+    let busy = module.health(false);
+    drop(statement);
+    assert_eq!(busy.status, HealthStatus::Ok);
+    assert_eq!(
+        busy.metrics.unwrap()["session_count"],
+        idle.metrics.unwrap()["session_count"]
+    );
 }
 
 #[tokio::test]

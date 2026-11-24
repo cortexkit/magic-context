@@ -8,7 +8,7 @@ use crate::config::SettingsSource;
 pub(crate) struct Health {
     pub(crate) context_open: bool,
     pub(crate) mode3_open: bool,
-    pub(crate) session_count: Option<usize>,
+    pub(crate) session_count: usize,
     pub(crate) dreamer_enabled: bool,
     pub(crate) bus_connected: bool,
     pub(crate) settings_source: SettingsSource,
@@ -24,9 +24,6 @@ impl Health {
         }
         if !self.mode3_open {
             reasons.push("mode3.db was not opened".into());
-        }
-        if self.session_count.is_none() {
-            reasons.push("session count unavailable".into());
         }
         #[cfg(feature = "managed-settings")]
         if self.settings_source == SettingsSource::Defaults {

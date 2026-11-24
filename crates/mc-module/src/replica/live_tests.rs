@@ -625,7 +625,7 @@ fn health_report(health: Arc<super::health::Health>) -> subc_client_rs::HealthRe
     crate::health::Health {
         context_open: true,
         mode3_open: true,
-        session_count: Some(0),
+        session_count: 0,
         dreamer_enabled: false,
         bus_connected: false,
         settings_source: crate::config::SettingsSource::Unmanaged,

@@ -260,10 +260,18 @@ impl Hub {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let _ = tx.try_send(self.notice("changes", &changed));
+                // The session notice may cover later events than the owner
+                // hints that follow it. Commit the batch's cursor only on
+                // its last frame, so reconnecting mid-batch replays any
+                // missing hints rather than skipping them.
+                let previous = json!(cursor.expect("replay has a valid cursor"));
+                let mut notice = self.notice("changes", &changed);
                 for change in replayed.unwrap_or_default() {
-                    let _ = tx.try_send(self.change_notice(&change));
+                    notice["cursor"] = previous.clone();
+                    let _ = tx.try_send(notice);
+                    notice = self.change_notice(&change);
                 }
+                let _ = tx.try_send(notice);
             }
             None => {
                 let mut notice = self.notice("resync", &sessions);
