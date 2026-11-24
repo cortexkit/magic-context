@@ -1843,14 +1843,14 @@ impl Handler {
             // catalog produced, never re-serialized.
             RouteRole::Tools => {
                 return self
-                    .tool_at(&bound.route, body, arrived)
+                    .tool_at(&bound.route, body, arrived, handle)
                     .await
                     .map_err(|mut refusal| {
                         refusal.message = crate::tool_output::bounded(refusal.message);
                         refusal
                     });
             }
-            RouteRole::Discovery => return self.discovery(&bound.route, body),
+            RouteRole::Discovery => return self.discovery(&bound.route, body, handle).await,
             RouteRole::Hooks => self.hook(&bound.route, body).await?,
         };
         Ok(serde_json::to_vec(&answer).expect("answers serialize"))
@@ -1891,7 +1891,12 @@ impl Handler {
 
     /// `role.describe` or `tool.catalog`, by name in the role's
     /// `{name, arguments}` envelope; `None` for any other name.
-    fn role_op(&self, route: &Route, call: &ToolCallRequest) -> Option<Result<Vec<u8>, Refusal>> {
+    async fn role_op(
+        &self,
+        route: &Route,
+        call: &ToolCallRequest,
+        _handle: Option<&subc_client_rs::ModuleHandle>,
+    ) -> Option<Result<Vec<u8>, Refusal>> {
         let answer = match call.name.as_str() {
             cortexkit_role_tool_provider::ops::ROLE_DESCRIBE => {
                 crate::catalog::role_describe_bytes()
@@ -1903,6 +1908,12 @@ impl Handler {
                     .map(|project| project.root.as_str())
                     .or(route.workdir.as_deref());
                 let project = route.project.as_ref().map(|project| project.id.as_str());
+                #[cfg(feature = "managed-settings")]
+                if let (Some(handle), Some(id), Some(loader)) =
+                    (_handle, project, self.module.config().loader())
+                {
+                    loader.await_catalog_project_config(handle, id).await;
+                }
                 self.module
                     .catalog_for_project(root, project, &call.arguments)
             }
@@ -1912,9 +1923,14 @@ impl Handler {
     }
 
     /// An op on a route that declared no role: only the two role ops.
-    fn discovery(&self, route: &Route, body: &[u8]) -> Result<Vec<u8>, Refusal> {
+    async fn discovery(
+        &self,
+        route: &Route,
+        body: &[u8],
+        handle: Option<&subc_client_rs::ModuleHandle>,
+    ) -> Result<Vec<u8>, Refusal> {
         let call = tool_call(body)?;
-        self.role_op(route, &call).unwrap_or_else(|| {
+        self.role_op(route, &call, handle).await.unwrap_or_else(|| {
             Err(Refusal::new(
                 codes::UNKNOWN_ROUTE_ROLE,
                 format!("`{}` needs a route opened for tool-provider/v1", call.name),
@@ -1926,7 +1942,7 @@ impl Handler {
     /// [`Handler::tool_at`] for a call received at `Instant::now()`.
     #[cfg(test)]
     async fn tool(&self, route: &Route, body: &[u8]) -> Result<Vec<u8>, Refusal> {
-        self.tool_at(route, body, Instant::now()).await
+        self.tool_at(route, body, Instant::now(), None).await
     }
 
     /// An op on a `tool-provider/v1` route: a role op by name, or a model's
@@ -1938,9 +1954,10 @@ impl Handler {
         route: &Route,
         body: &[u8],
         arrived: Instant,
+        handle: Option<&subc_client_rs::ModuleHandle>,
     ) -> Result<Vec<u8>, Refusal> {
         let call = tool_call(body)?;
-        if let Some(answer) = self.role_op(route, &call) {
+        if let Some(answer) = self.role_op(route, &call, handle).await {
             return answer;
         }
         // A tool call acts on the session its route is bound to; a route
@@ -2699,6 +2716,10 @@ mod outcome_tests;
 #[path = "transport_declare_tests.rs"]
 mod declare_tests;
 
+#[cfg(all(test, feature = "managed-settings"))]
+#[path = "transport_project_catalog_tests.rs"]
+mod project_catalog_tests;
+
 #[cfg(test)]
 #[path = "tool_conformance_tests.rs"]
 mod tool_conformance_tests;
@@ -2748,8 +2769,8 @@ mod config_tests {
         assert_eq!(body["params"], params);
     }
 
-    #[test]
-    fn folder_only_catalog_uses_project_tier() {
+    #[tokio::test]
+    async fn folder_only_catalog_uses_project_tier() {
         let root =
             std::env::temp_dir().join(format!("ck-mc-folder-catalog-{}", std::process::id()));
         std::fs::create_dir_all(root.join(".cortexkit")).unwrap();
@@ -2787,7 +2808,10 @@ mod config_tests {
             .catalog(route.workdir.as_deref(), &arguments)
             .unwrap();
         assert_ne!(expected, handler.module.catalog(None, &arguments).unwrap());
-        assert_eq!(handler.role_op(&route, &call).unwrap().unwrap(), expected);
+        assert_eq!(
+            handler.role_op(&route, &call, None).await.unwrap().unwrap(),
+            expected
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -96,6 +96,7 @@ pub struct Managed {
     // Health probes cannot wait for settings resolution or view delivery.
     source: AtomicU8,
     changed: Condvar,
+    project_changed: tokio::sync::Notify,
     /// Where an applied view is saved.
     view_path: PathBuf,
     /// Whether a resolution may wait for the daemon: never for a command
@@ -128,6 +129,7 @@ impl Managed {
             projects_unsupported: AtomicBool::new(false),
             projects_advertised: AtomicBool::new(false),
             changed: Condvar::new(),
+            project_changed: tokio::sync::Notify::new(),
             view_path,
             wait,
             logged: AtomicBool::new(false),
@@ -281,6 +283,13 @@ impl Managed {
             .cloned()
     }
 
+    fn first_state_deadline(&self) -> Instant {
+        match &mut *self.lock() {
+            State::Waiting { since } => *since.get_or_insert_with(Instant::now) + FIRST_STATE_WAIT,
+            _ => Instant::now() + FIRST_STATE_WAIT,
+        }
+    }
+
     fn apply_project(&self, id: &str, view: &ConfigView) -> Result<(), Vec<String>> {
         let mut tiers = Tiers::default();
         for snapshot in &view.layers {
@@ -310,6 +319,7 @@ impl Managed {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id.to_owned(), tiers);
+        self.project_changed.notify_waiters();
         Ok(())
     }
 
@@ -322,6 +332,7 @@ impl Managed {
             && !self.projects_unsupported.swap(true, Ordering::Relaxed)
         {
             tracing::info!("ck-mc: daemon does not serve project settings; using the user view");
+            self.project_changed.notify_waiters();
         }
     }
 
@@ -564,16 +575,52 @@ impl Loader {
         Ok(())
     }
 
-    pub(crate) fn refresh_project_config(&self, handle: &subc_client_rs::ModuleHandle, id: &str) {
+    pub(crate) fn refresh_project_config(
+        &self,
+        handle: &subc_client_rs::ModuleHandle,
+        id: &str,
+    ) -> bool {
         if let Some(managed) = &self.managed {
             let advertised = handle.daemon_supports("config.settings.projects/v1");
             if advertised {
                 managed.projects_advertised.store(true, Ordering::Relaxed);
             }
             if advertised || self.project_settings_available() {
-                handle.refresh_project_config(id);
+                return handle.refresh_project_config(id);
             }
         }
+        false
+    }
+
+    /// Catalog composition can precede Setup, or happen without it. Use the
+    /// same first-answer budget for both tiers, and let SDK callbacks run
+    /// while waiting. A missing or refused view still falls back to the user.
+    pub(crate) async fn await_catalog_project_config(
+        &self,
+        handle: &subc_client_rs::ModuleHandle,
+        id: &str,
+    ) {
+        let Some(managed) = self.managed.as_ref().filter(|managed| managed.wait) else {
+            return;
+        };
+        if managed.project_tiers(id).is_some() || !self.refresh_project_config(handle, id) {
+            return;
+        }
+        let deadline = managed.first_state_deadline();
+        let wait = async {
+            loop {
+                // Register before checking the cache so a delivery between
+                // the check and the await can't leave this request asleep.
+                let changed = managed.project_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if managed.project_tiers(id).is_some() || !self.project_settings_available() {
+                    return;
+                }
+                changed.await;
+            }
+        };
+        let _ = tokio::time::timeout_at(deadline.into(), wait).await;
     }
 
     fn project_settings_available(&self) -> bool {
