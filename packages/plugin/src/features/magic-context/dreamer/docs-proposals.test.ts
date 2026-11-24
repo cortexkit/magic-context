@@ -174,6 +174,32 @@ describe("docs proposals", () => {
         expect(result.diffs).not.toContain("+## New");
     });
 
+    test("keeps non-growing corrections when the docs still exceed the budget", () => {
+        const dir = liveFixture(
+            `# Architecture\n\n## Live\n\n### A\n${"A".repeat(200)}\n\n### B\nOther text.\n`,
+        );
+        const shrink = liveChange("### A", `### A\n${"B".repeat(160)}\n\n`);
+        const equal = liveChange("### B", "### B\nFixed text.\n");
+        const grow = liveChange("## New", "## New\nNew section.", "add");
+        const hashes = docsBaseHashes(dir);
+        const budget = 30;
+        const before = validateDocsProposal(dir, "[]", budget, hashes).tokens;
+        const result = validateDocsProposal(
+            dir,
+            JSON.stringify([shrink, equal, grow]),
+            budget,
+            hashes,
+        );
+        expect(result.changes).toEqual([shrink, equal]);
+        expect(result.dropped).toEqual([
+            { index: 2, reason: expect.stringContaining("over budget") },
+        ]);
+        expect(result.tokens).toBeGreaterThan(budget);
+        expect(result.tokens).toBeLessThan(before);
+        expect(result.diffs).toContain("+Fixed text.");
+        expect(result.diffs).not.toContain("+## New");
+    });
+
     test("keeps multiple reductions that bring oversized docs back under budget", () => {
         const dir = liveFixture(
             `# Architecture\n\n## Live\n\n### A\n${"A".repeat(200)}\n\n### B\n${"B".repeat(200)}\n`,
@@ -181,7 +207,9 @@ describe("docs proposals", () => {
         const hashes = docsBaseHashes(dir);
         const first = liveChange("### A", "### A\nShort A.");
         const second = liveChange("### B", "### B\nShort B.");
-        expect(validateDocsProposal(dir, JSON.stringify([first]), 50, hashes).diffs).toBe("");
+        const partial = validateDocsProposal(dir, JSON.stringify([first]), 50, hashes);
+        expect(partial.changes).toEqual([first]);
+        expect(partial.tokens).toBeGreaterThan(50);
         const result = validateDocsProposal(dir, JSON.stringify([first, second]), 50, hashes);
         expect(result.changes).toEqual([first, second]);
         expect(result.dropped).toEqual([]);

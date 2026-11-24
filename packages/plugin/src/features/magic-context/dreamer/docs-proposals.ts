@@ -439,8 +439,9 @@ export function validateDocsProposal(
     while (result.tokens > budget && result.kept.length) {
         const reason = `over budget: ${result.tokens} > ${budget}`;
         const latestGrowth = [...result.kept].reverse().find((item) => item.grew);
-        if (latestGrowth) overBudget.set(latestGrowth.index, reason);
-        else for (const item of result.kept) overBudget.set(item.index, reason);
+        // An already-oversized base can still be corrected without adding to it.
+        if (!latestGrowth) break;
+        overBudget.set(latestGrowth.index, reason);
         // Replay in proposal order: later changes may target a section we just dropped.
         result = applyChanges(items, originals, overBudget);
     }
