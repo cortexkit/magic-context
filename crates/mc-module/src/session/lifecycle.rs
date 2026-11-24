@@ -626,7 +626,8 @@ impl Session {
         // floor too.
         self.load_move_floor(client).await;
         self.judge_acceptance_afresh();
-        self.offer_unconfirmed_again(client).await;
+        self.offer_unconfirmed_again(client, StatedView::Now(request.applied_view.as_ref()))
+            .await;
         let lost = self.runner_lost_view_at_setup(request.applied_view.as_ref(), applied_before);
         let Some(forget_from) = forget_from else {
             self.index_ready = false;
@@ -657,7 +658,13 @@ impl Session {
         // After the read, so the cut message of the view the runner applies
         // is in the index.
         if self.runner_differs(request.applied_view.as_ref()) {
-            self.adopt_runner_view(client).await;
+            if request.applied_view.is_none() {
+                // Setup already tells us there is no applied view to read.
+                self.install_applied_view(client, AppliedViewAnswer::new())
+                    .await;
+            } else {
+                self.adopt_runner_view(client).await;
+            }
             if !self.index_ready {
                 return;
             }
@@ -746,15 +753,7 @@ impl Session {
             return;
         }
         match applied {
-            // The Setup states that the runner applies no view, so a view
-            // that couldn't be read back is none.
-            None => {
-                if self.latest_unknown {
-                    self.latest_unknown = false;
-                    self.latest = None;
-                }
-                self.lost_view_due = true;
-            }
+            None => self.lost_view_due = true,
             Some(_)
                 if self.latest_unknown || (self.latest.is_none() && self.newest_applied != 0) =>
             {

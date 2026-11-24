@@ -15,8 +15,8 @@ use cortexkit_role_compaction::ride::{RideCause, RideRequest};
 use cortexkit_role_compaction::rules::RuleBreak;
 use cortexkit_role_compaction::setup::SetupRequest;
 use cortexkit_role_compaction::view::{
-    AppliedView, ApplyViewAnswer, ApplyViewRequest, EditOp, InsertedImage, View, ViewRefusal,
-    MAX_VIEW_BYTES,
+    AppliedView, AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, EditOp, InsertedImage, View,
+    ViewRefusal, MAX_VIEW_BYTES,
 };
 use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, TemplateUse};
 use cortexkit_role_llm_runner::send::SendRequest;
@@ -428,6 +428,11 @@ pub struct Unconfirmed {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     cut_covered: Vec<lanes::PartKey>,
     before: Before,
+    /// The applied view reported just before a retry handed this view over.
+    /// A missing inner view means the runner reported applying none. This
+    /// differs from the rollback base when the runner lost or restored a view.
+    #[serde(skip)]
+    reoffered_from: Option<Option<AppliedView>>,
     /// The ordinal of the newest entry the index held when the view was
     /// built. A refusal naming a part beyond it names an entry the view
     /// could not have known.

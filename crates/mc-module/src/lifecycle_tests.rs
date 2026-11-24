@@ -2485,3 +2485,42 @@ async fn lifecycle_a_quiet_session_is_freed_whatever_a_failed_read_or_refusal_le
         );
     }
 }
+
+#[tokio::test]
+async fn adopting_an_older_view_restores_only_stamps_it_does_not_cover() {
+    for older_view in [false, true] {
+        let (mut session, client, _, _, settings) = fixture();
+        let entries: Vec<_> = (1..=6).map(|n| text(n, &format!("m{n}"))).collect();
+        session.index.extend(entries.clone());
+        *client.entries.lock().unwrap() = entries;
+        let mut confirmed = Vec::new();
+        for tag in ["1", "2"] {
+            session
+                .ctx_reduce(&client, &serde_json::json!({ "drop": tag }))
+                .await
+                .unwrap();
+            let view = session.build(&settings, None, false, None).0.unwrap();
+            assert!(session.publish(&client, view.clone()).await);
+            session.settle_unconfirmed(Some(&view.applied()), &[]);
+            confirmed.push(view);
+        }
+        session
+            .ctx_reduce(&client, &serde_json::json!({ "drop": "3" }))
+            .await
+            .unwrap();
+        let pending = session.build(&settings, None, false, None).0.unwrap();
+        assert!(session.publish(&client, pending).await);
+        assert!(session.queued.is_empty());
+        let v1 = older_view.then(|| confirmed.remove(0));
+        *client.applied.lock().unwrap() =
+            Some(AppliedViewAnswer::new().with_applied_by(crate::MODULE_ID));
+        client.applied.lock().unwrap().as_mut().unwrap().view = v1.clone();
+        session.adopt_runner_view(&client).await;
+        assert_eq!(session.latest, v1);
+        assert!(session.unconfirmed.is_empty());
+        assert_eq!(
+            session.queued,
+            BTreeSet::from([("m3".to_owned(), "p".to_owned())])
+        );
+    }
+}

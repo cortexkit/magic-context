@@ -394,7 +394,9 @@ async fn reoffering(through: &str) -> (Session, Client, Settings, View) {
 #[tokio::test]
 async fn move_floor_a_reoffered_view_cutting_at_the_floor_reads_nothing() {
     let (mut session, client, _, view) = reoffering(FLOOR.1).await;
-    session.offer_unconfirmed_again(&client).await;
+    session
+        .offer_unconfirmed_again(&client, StatedView::Older)
+        .await;
     assert!(
         client.reads.lock().unwrap().is_empty(),
         "the floor entry was read to place it"
@@ -416,7 +418,9 @@ async fn move_floor_a_transient_refusal_offers_the_view_again_later() {
             "transient",
             "index_filling",
         )));
-    session.offer_unconfirmed_again(&client).await;
+    session
+        .offer_unconfirmed_again(&client, StatedView::Older)
+        .await;
     assert!(client.offered.lock().unwrap().is_empty());
     assert_eq!(session.unconfirmed.len(), 1, "the view was rolled back");
     assert_eq!(session.latest.as_ref(), Some(&view));

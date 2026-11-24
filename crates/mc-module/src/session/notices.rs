@@ -114,7 +114,7 @@ impl Session {
         // which the view leaves the session's messages out), or if the
         // answer to applying it was lost.
         if self.reoffer_pending {
-            self.offer_unconfirmed_again(client).await;
+            self.offer_unconfirmed_again(client, stated).await;
         }
         self.rebuild_when_runner_lost_view(held);
         self.take_render_failures(&notice.events);

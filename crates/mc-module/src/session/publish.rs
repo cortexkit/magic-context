@@ -114,7 +114,11 @@ impl Session {
     /// Which unconfirmed views the runner holds is judged afresh only after
     /// a Setup or a resume ([`Session::judge_acceptance_afresh`]), not when
     /// an ordinary notice offers a waiting view again.
-    pub(super) async fn offer_unconfirmed_again<C: RunnerClient>(&mut self, client: &C) {
+    pub(super) async fn offer_unconfirmed_again<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        applied: StatedView<'_>,
+    ) {
         if self.adoption_retry.is_some() {
             return;
         }
@@ -142,6 +146,9 @@ impl Session {
             );
             self.roll_back(oldest, false, None);
             return;
+        }
+        if let StatedView::Now(applied) = applied {
+            self.unconfirmed.last_mut().unwrap().reoffered_from = Some(applied.cloned());
         }
         // Saved by a build from before the move floor was known, a view may
         // cut before it. Such a view is not offered again: ck-mc puts back
@@ -241,6 +248,7 @@ impl Session {
         for pending in &mut self.unconfirmed {
             pending.accepted = false;
             pending.excused.clear();
+            pending.reoffered_from = None;
         }
     }
 
@@ -442,6 +450,7 @@ impl Session {
             covered: covered.clone(),
             cut_covered: cut_covered.clone(),
             before,
+            reoffered_from: None,
             built_through: self.index.cursor().map(|cursor| cursor.ordinal),
             accepted: false,
             excused: Vec::new(),
@@ -711,20 +720,7 @@ impl Session {
         if self.latest.as_ref().is_some_and(|view| !view.verify()) {
             self.latest_unknown = true;
         }
-        // Restore only work removed by the undone views. The live queue can
-        // contain parts added after the first view was handed over; a later
-        // undone view may already have covered some of those parts too.
-        for pending in &undone {
-            for part in pending.covered.iter().chain(&pending.cut_covered) {
-                if pending.before.queued.contains(part) {
-                    self.queued.insert(part.clone());
-                    self.app_projection.dirty.insert(part.0.clone());
-                    if pending.before.refused_once.contains(part) {
-                        self.refused_once.insert(part.clone());
-                    }
-                }
-            }
-        }
+        self.restore_unconfirmed_stamps(&undone, |_| true);
         self.transcript_retry = before.transcript_retry;
         self.emergency_latched = before.emergency_latched;
         self.summary_unshown |= before.summary_unshown;
@@ -769,6 +765,26 @@ impl Session {
         }
     }
 
+    /// Restore `ctx_reduce` drops removed from the queue by the discarded
+    /// views, leaving later queued drops untouched.
+    fn restore_unconfirmed_stamps(
+        &mut self,
+        discarded: &[Unconfirmed],
+        restore: impl Fn(&lanes::PartKey) -> bool,
+    ) {
+        for pending in discarded {
+            for part in pending.covered.iter().chain(&pending.cut_covered) {
+                if pending.before.queued.contains(part) && restore(part) {
+                    self.queued.insert(part.clone());
+                    self.app_projection.dirty.insert(part.0.clone());
+                    if pending.before.refused_once.contains(part) {
+                        self.refused_once.insert(part.clone());
+                    }
+                }
+            }
+        }
+    }
+
     /// A ride's view whose answer never reached the runner (its deadline
     /// passed): the runner never had it.
     pub fn ride_undelivered(&mut self, version: u64) {
@@ -776,7 +792,8 @@ impl Session {
     }
 
     /// Whether the runner applies a view ck-mc does not expect: neither its
-    /// latest nor, while views wait for confirmation, the one before them.
+    /// latest nor, while views wait for confirmation, the one before them
+    /// or the one the runner reported just before accepting a retry.
     pub(super) fn runner_differs(&self, applied: Option<&AppliedView>) -> bool {
         // After a restart ck-mc must read the view back before building.
         if self.latest_unknown {
@@ -791,7 +808,15 @@ impl Session {
             .unconfirmed
             .first()
             .map(|pending| pending.before.latest.as_ref());
-        !(expected(self.latest.as_ref()) || waiting.is_some_and(expected))
+        !(expected(self.latest.as_ref())
+            || waiting.is_some_and(expected)
+            || self.unconfirmed.iter().any(|pending| {
+                (pending.accepted || self.reoffer_pending)
+                    && pending
+                        .reoffered_from
+                        .as_ref()
+                        .is_some_and(|base| base.as_ref() == applied)
+            }))
     }
 
     /// Take the view the runner applies as ck-mc's own: after a refusal, or
@@ -805,47 +830,7 @@ impl Session {
             .fetch_add(1, Ordering::Relaxed);
         match client.applied_view(&self.key).await {
             Ok(answer) => {
-                let own = answer
-                    .applied_by
-                    .as_deref()
-                    .is_none_or(|id| id == crate::MODULE_ID);
-                if let Some(view) = answer.view.as_ref().filter(|_| own) {
-                    if !self
-                        .index_adopted_cut(client, move_floor::cut_of(view))
-                        .await
-                    {
-                        self.defer_adoption();
-                        return;
-                    }
-                }
-                self.adoption_retry = None;
-                self.keep_spent_reading_for(&answer);
-                // The runner's own answer is what it applies now. It replaces
-                // the newest version rather than raising it: a runner whose
-                // state went back (a restore) measures under the view it
-                // applies, and a higher remembered version would make every
-                // reading it sends look stale.
-                self.newest_applied = answer.view.as_ref().map_or(0, |view| view.version);
-                // The runner's view now stands for itself.
-                self.unconfirmed.clear();
-                if let Some(view) = &answer.view {
-                    self.reset_transcript_retry();
-                    self.version = self.version.max(view.version);
-                    // A different provider owns its cut and edits. Only its
-                    // version is a floor for our whole replacement.
-                    if !own {
-                        self.latest = None;
-                        self.latest_unknown = false;
-                        self.app_adopt_head();
-                        return;
-                    }
-                    self.apply_cut(view);
-                    let cut = cuts(view);
-                    self.runner_applies_own_view(cut);
-                }
-                self.latest = answer.view;
-                self.latest_unknown = false;
-                self.app_adopt_head();
+                self.install_applied_view(client, answer).await;
             }
             Err(error) => {
                 self.runner_reads
@@ -857,6 +842,88 @@ impl Session {
                 }
             }
         }
+    }
+
+    pub(super) async fn install_applied_view<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        answer: AppliedViewAnswer,
+    ) {
+        let own = answer
+            .applied_by
+            .as_deref()
+            .is_none_or(|id| id == crate::MODULE_ID);
+        let adopted = answer.view.as_ref().filter(|_| own);
+        if let Some(view) = adopted {
+            if !self
+                .index_adopted_cut(client, move_floor::cut_of(view))
+                .await
+            {
+                self.defer_adoption();
+                return;
+            }
+        } else if let Some(before) = self.unconfirmed.first().map(|pending| pending.before.cut) {
+            // A discarded offer may have pruned beyond the last confirmed
+            // cut. Read back that suffix so stamps hidden by the offer can
+            // land again. A confirmed cut can still be the host's marker.
+            if !self.rewind_unconfirmed_cut(client, before).await {
+                self.defer_adoption();
+                return;
+            }
+        }
+        self.adoption_retry = None;
+        self.keep_spent_reading_for(&answer);
+        // A restore can move the applied version backwards. Only the
+        // runner's current view determines which readings are stale.
+        self.newest_applied = answer.view.as_ref().map_or(0, |view| view.version);
+        if !self.unconfirmed.is_empty() {
+            let edited = lanes::Edited::of(adopted, &self.index, None);
+            let pending = std::mem::take(&mut self.unconfirmed);
+            self.restore_unconfirmed_stamps(&pending, |key| !edited.covers(&key.0, &key.1));
+            if self.pending_keep.is_none()
+                && !adopted.is_some_and(|view| pending.iter().any(|p| p.view == *view))
+            {
+                self.pending_keep = pending
+                    .into_iter()
+                    .rev()
+                    .find_map(|p| p.before.pending_keep);
+            }
+        }
+        if let Some(view) = &answer.view {
+            self.reset_transcript_retry();
+            self.version = self.version.max(view.version);
+            // A different provider owns its cut and edits. Only its
+            // version is a floor for our whole replacement.
+            if own {
+                self.apply_cut(view);
+                self.runner_applies_own_view(cuts(view));
+            }
+        }
+        self.latest = answer.view.filter(|_| own);
+        self.latest_unknown = false;
+        self.app_adopt_head();
+    }
+
+    async fn rewind_unconfirmed_cut<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        cut: Option<u64>,
+    ) -> bool {
+        let base = cut
+            .unwrap_or(1)
+            .max(self.move_floor.as_ref().map_or(1, |floor| floor.ordinal));
+        if base < self.index.base() {
+            let before = std::mem::replace(&mut self.index, Index::starting_at(base));
+            if !self
+                .read_until_from(client, None, true, base.checked_sub(1).filter(|n| *n > 0))
+                .await
+            {
+                self.index = before;
+                return false;
+            }
+        }
+        self.cut = cut;
+        true
     }
 
     /// A runner restored to an earlier cut serves entries that the newer

@@ -452,7 +452,7 @@ impl Session {
         self.settle_stated(applied, &[]);
         self.load_move_floor(client).await;
         self.judge_acceptance_afresh();
-        self.offer_unconfirmed_again(client).await;
+        self.offer_unconfirmed_again(client, applied).await;
         if let Some(ordinal) = forget_from {
             self.invalidate_transcript_from(ordinal);
         }
