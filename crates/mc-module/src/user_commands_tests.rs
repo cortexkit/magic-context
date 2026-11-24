@@ -693,8 +693,7 @@ async fn user_commands_status_waits_and_project_memory_count_use_contract_units(
     }
 }
 
-#[tokio::test]
-async fn user_commands_new_memory_alone_lands_in_m1_without_folding_m0() {
+fn head_with_unshown_memory() -> (Session, Client, Settings, tempfile::TempDir) {
     let (mut session, client, settings) = ready();
     session.queued.clear();
     session.features.summarizer = true;
@@ -714,10 +713,37 @@ async fn user_commands_new_memory_alone_lands_in_m1_without_folding_m0() {
             .collect(),
     ));
     session.version = 1;
-    let baseline = session.baseline.clone().unwrap();
     db.with_connection(|conn| conn.execute(
         "INSERT INTO memories(level, owner_id, category, origin_category, content, status, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('project', 'project', 'swe:architecture', 'ARCHITECTURE', 'A newly published memory', 'active', 'hash1', 1, 1, 1, 1)", [],
     )).unwrap();
+    (session, client, settings, dir)
+}
+
+#[tokio::test]
+async fn waiting_keep_does_not_publish_an_m1_only_memory_refresh() {
+    let (mut session, client, settings, _dir) = head_with_unshown_memory();
+    assert!(session.build(&settings, None, false, None).0.is_none());
+    let answer = session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &json!({"tags":"1","note":"continue"}),
+        )
+        .await
+        .unwrap();
+    assert!(answer.starts_with("Keeping §1§"));
+    assert!(
+        session.build(&settings, None, false, None).0.is_none(),
+        "a waiting keep cannot spend a rebuild on a memory-only refresh"
+    );
+    assert!(session.pending_keep.is_some());
+}
+
+#[tokio::test]
+async fn user_commands_new_memory_alone_lands_in_m1_without_folding_m0() {
+    let (mut session, client, settings, _dir) = head_with_unshown_memory();
+    let baseline = session.baseline.clone().unwrap();
     let p = preview(&mut session, &client, &settings, "flush").await;
     assert!(p.available, "{p:?}");
     let request =

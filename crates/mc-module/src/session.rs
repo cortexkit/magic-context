@@ -204,9 +204,9 @@ pub struct Session {
     /// What a `ctx_keep` call asked to keep. The next notice builds the view
     /// that keeps only that, whatever the usage: the model asked for it.
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
-    /// Last indexed keep call when the live tool request arrived. Wait for
-    /// a different call before consuming its selection.
-    pending_keep_after: Option<u64>,
+    /// When the last indexed keep call was already handled, wait for the
+    /// new call or a notice that advances beyond the transcript seen then.
+    pending_keep_after: Option<KeepWait>,
     /// The last indexed call whose `ctx_keep` selection we already handled.
     handled_keep_call: Option<u64>,
     /// The highest notice number handled.
@@ -495,6 +495,12 @@ pub struct Unconfirmed {
     handed_over_ms: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeepWait {
+    call_ordinal: u64,
+    indexed_through: u64,
+}
+
 /// The state a view's acceptance replaced.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Before {
@@ -521,7 +527,7 @@ struct Before {
     #[serde(default)]
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
     #[serde(skip)]
-    pending_keep_after: Option<u64>,
+    pending_keep_after: Option<KeepWait>,
     /// Left out of the saved text while there is none, so rows saved before
     /// it existed and rows of runners that send no reading don't change.
     #[serde(default, skip_serializing_if = "Option::is_none")]

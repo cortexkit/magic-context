@@ -2592,6 +2592,87 @@ async fn pending_keep_waits_for_its_call_during_a_permitted_ride() {
     assert!(!view_edits_message(&offered[0], "keep me"));
 }
 
+#[tokio::test]
+async fn pending_keep_uses_an_indexed_call_even_if_its_arguments_differ() {
+    let (mut session, client, _, _, settings) = fixture();
+    session.index.extend([
+        text(1, "task"),
+        assistant_text(2, "drop me"),
+        assistant_text(3, "keep me"),
+        keep_call(4, "ctx_keep"),
+    ]);
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"3","note":"continue"}),
+        )
+        .await
+        .unwrap();
+    let ride = RideRequest::new(
+        vec![RideCause::EffortChange],
+        1000,
+        session.conditions.clone(),
+    );
+    let view = session
+        .ride(&settings, &ride)
+        .expect("the indexed call can anchor the keep");
+    assert!(view_edits_message(&view, "drop me"));
+    assert!(!view_edits_message(&view, "keep me"));
+    assert!(session.pending_keep.is_none());
+}
+
+#[tokio::test]
+async fn pending_keep_uses_its_boundary_after_notice_growth_without_a_new_call() {
+    let (mut session, client, _, _, settings) = fixture();
+    let mut entries = vec![
+        text(1, "task"),
+        assistant_text(2, "drop me"),
+        assistant_text(3, "keep me"),
+        keep_call(4, "ctx_keep"),
+        text(5, "already indexed"),
+    ];
+    session.index.extend(entries.clone());
+    *client.entries.lock().unwrap() = entries.clone();
+    session.handled_keep_call = Some(4);
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &serde_json::json!({"tags":"3","note":"continue"}),
+        )
+        .await
+        .unwrap();
+    let ride = RideRequest::new(
+        vec![RideCause::EffortChange],
+        1000,
+        session.conditions.clone(),
+    );
+    assert!(session.ride(&settings, &ride).is_none());
+    let unchanged = notice(&session, 1, entries.last().map(cursor));
+    session.notice(&client, &settings, unchanged).await;
+    assert!(
+        client.offered.lock().unwrap().is_empty(),
+        "an unchanged notice has not passed the wait boundary"
+    );
+    let new = assistant_text(6, "new step");
+    entries.push(new.clone());
+    *client.entries.lock().unwrap() = entries.clone();
+    let mut grown = notice(&session, 2, Some(cursor(&new)));
+    grown.entries = vec![new];
+    session.notice(&client, &settings, grown).await;
+    let offered = client.offered.lock().unwrap();
+    let view = offered
+        .last()
+        .expect("a grown notice must not leave the keep waiting");
+    assert!(view_edits_message(view, "drop me"));
+    assert!(!view_edits_message(view, "keep me"));
+    assert!(!view_edits_message(view, "new step"));
+    assert!(session.pending_keep.is_none());
+}
+
 #[test]
 fn pending_keep_waits_when_a_ride_has_to_reload_the_transcript() {
     let (mut session, _, _, _, settings) = fixture();

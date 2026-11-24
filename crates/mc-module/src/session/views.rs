@@ -99,7 +99,7 @@ impl Session {
         }
         // A `ctx_keep` waiting for the next notice lands in this rewrite. On a
         // ride that answers nothing it stays waiting for that notice.
-        let kept = self.ready_keep().cloned();
+        let kept = self.ready_keep(false).cloned();
         let view = self
             .build(settings, over_limit, prefix_changes, kept.as_ref())
             .0?;
@@ -259,23 +259,29 @@ impl Session {
         self.build_for(settings, over_limit, prefix_changes, keep, false)
     }
 
-    pub(super) fn ready_keep(&self) -> Option<&BTreeSet<lanes::PartKey>> {
+    pub(super) fn ready_keep(&self, after_notice: bool) -> Option<&BTreeSet<lanes::PartKey>> {
         let kept = self.pending_keep.as_ref()?;
-        (!self.latest_unknown
-            && lanes::keep_call(&self.index).is_some_and(|(entry, _)| {
-                self.pending_keep_after
-                    .is_none_or(|previous| entry.ordinal > previous)
-            }))
-        .then_some(kept)
+        let call = lanes::keep_call(&self.index)?;
+        let ready = self.pending_keep_after.is_none_or(|wait| {
+            call.ordinal > wait.call_ordinal
+                // If a notice has already added more transcript without the
+                // new call, use the last known boundary rather than shield
+                // the selection indefinitely. Only notices trigger this fallback.
+                || (after_notice && call.ordinal == wait.call_ordinal
+                    && self.index.entries().last().is_some_and(|last| last.ordinal > wait.indexed_through))
+        });
+        (!self.latest_unknown && ready).then_some(kept)
     }
 
-    /// A `ctx_keep` leaves the live queue only after the pass with its call
-    /// has produced a view or determined there is nothing left to remove.
-    pub(super) fn take_landed_keep(&mut self) -> (Option<BTreeSet<lanes::PartKey>>, Option<u64>) {
+    /// A `ctx_keep` leaves the queue only after a pass with a call boundary
+    /// has built a view or found nothing to remove.
+    pub(super) fn take_landed_keep(
+        &mut self,
+    ) -> (Option<BTreeSet<lanes::PartKey>>, Option<KeepWait>) {
         let keep = self.next_keep.take();
         let after = if keep.is_some() && self.pending_keep == keep {
             self.pending_keep = None;
-            self.handled_keep_call = lanes::keep_call(&self.index).map(|(entry, _)| entry.ordinal);
+            self.handled_keep_call = lanes::keep_call(&self.index).map(|entry| entry.ordinal);
             self.pending_keep_after.take()
         } else {
             None
@@ -625,7 +631,7 @@ impl Session {
             && ops.is_empty()
             && !prefix_changes
             && over_limit.is_none()
-            && keep.is_none()
+            && self.next_keep.is_none()
             && !self.summary_unshown
             && !self.head_stale
             && self.only_m1_changes(history)

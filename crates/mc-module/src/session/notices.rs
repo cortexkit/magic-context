@@ -301,7 +301,11 @@ impl Session {
             self.fold_due = true;
         }
         let short_of_move_floor = self.short_of_move_floor() || self.short_of_numbers_floor();
-        if let Some(kept) = self.ready_keep().filter(|_| !short_of_move_floor).cloned() {
+        if let Some(kept) = self
+            .ready_keep(true)
+            .filter(|_| !short_of_move_floor)
+            .cloned()
+        {
             let (view, _) = self.build(settings, None, false, Some(&kept));
             if let Some(view) = view {
                 self.publish(client, view).await;

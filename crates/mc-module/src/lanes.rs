@@ -1625,13 +1625,11 @@ pub(crate) fn emergency_drop_excluding(
 }
 
 /// The last indexed `ctx_keep` call, which bounds the reach of its edit.
-pub(crate) fn keep_call(index: &Index) -> Option<(&Entry, &ToolPart)> {
-    index.entries().iter().rev().find_map(|entry| {
-        entry.parts.iter().rev().find_map(|part| match &part.body {
-            PartBody::Tool(tool) if normalize_tool_name(&tool.name) == "ctx_keep" => {
-                Some((entry, tool))
-            }
-            _ => None,
+pub(crate) fn keep_call(index: &Index) -> Option<&Entry> {
+    index.entries().iter().rev().find(|entry| {
+        entry.parts.iter().any(|part| {
+            matches!(&part.body,
+                PartBody::Tool(tool) if normalize_tool_name(&tool.name) == "ctx_keep")
         })
     })
 }
@@ -1656,7 +1654,7 @@ pub(crate) fn keep_drops_with_notice_marks(
     notice_keep: bool,
 ) -> Vec<(PartKey, Shape)> {
     let entries = context.index.entries();
-    let Some((call, _)) = keep_call(context.index) else {
+    let Some(call) = keep_call(context.index) else {
         return Vec::new();
     };
     let mut drops = Vec::new();

@@ -105,27 +105,12 @@ fn person(transcript: &mut Transcript, text: &str) -> Entry {
 
 fn tool(transcript: &mut Transcript, name: &str, output: &str) -> Entry {
     let id = transcript.entries().len();
-    tool_with_input(
-        transcript,
-        name,
-        output,
-        json!({"path": format!("file-{id}.rs")}),
-    )
-}
-
-fn tool_with_input(
-    transcript: &mut Transcript,
-    name: &str,
-    output: &str,
-    input: serde_json::Value,
-) -> Entry {
-    let id = transcript.entries().len();
     append(
         transcript,
         Role::Assistant,
         serde_json::from_value(json!({
             "kind": "tool", "call_id": format!("call-{id}"), "name": name,
-            "input": input, "status": "completed",
+            "input": {"path": format!("file-{id}.rs")}, "status": "completed",
             "output": output, "output_bytes": output.len()
         }))
         .unwrap(),
@@ -252,9 +237,9 @@ async fn audit_ctx_keep_must_win_over_automatic_age_reclaim() {
         "read",
         &"source still needed\n".repeat(200),
     );
-    for _ in 0..3 {
-        tool(&mut transcript, "read", "short result");
-    }
+    let expendable: Vec<_> = (0..3)
+        .map(|_| tool(&mut transcript, "read", "short result"))
+        .collect();
     for prompt in [
         "Explain it",
         "Check it",
@@ -265,12 +250,7 @@ async fn audit_ctx_keep_must_win_over_automatic_age_reclaim() {
     let tag = needed.parts[0].tag.unwrap();
     let input =
         json!({"tags": tag.to_string(), "note": "The next edit requires this exact source."});
-    tool_with_input(
-        &mut transcript,
-        "ctx_keep",
-        "keeping the selected source",
-        input.clone(),
-    );
+    tool(&mut transcript, "ctx_keep", "keeping the selected source");
     let runner = AuditRunner::new(transcript);
     let settings = Settings {
         protected_tokens: Some(0),
@@ -290,6 +270,7 @@ async fn audit_ctx_keep_must_win_over_automatic_age_reclaim() {
         !changes_part(&view, &needed),
         "ctx_keep promised {answer}, but emitted {view:?}"
     );
+    assert!(expendable.iter().any(|entry| changes_part(&view, entry)));
 }
 
 fn database() -> (tempfile::TempDir, Arc<ContextDb>) {
