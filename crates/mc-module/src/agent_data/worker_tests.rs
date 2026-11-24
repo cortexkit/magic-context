@@ -622,3 +622,51 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
         Ok(SetupAnswer::Ready)
     );
 }
+
+/// A session command for a session a move holds, when no worker holds the
+/// session here (after a restart), is refused without starting one: the
+/// worker could only refuse the command too, and would then keep the
+/// session counted as running here until the move ends.
+#[tokio::test]
+async fn a_session_command_starts_no_worker_for_a_session_a_move_holds() {
+    use crate::agent_data::Host;
+    use cortexkit_role_user_commands as wire;
+    let f = Fixture::new();
+    assert_eq!(f.setup(), Ok(SetupAnswer::Ready));
+    f.module.idle(&f.key).await.unwrap();
+    assert!(f.saved());
+    f.hold(MovingState::Frozen);
+    let restarted = Module::with_journal(
+        Client,
+        Settings::default(),
+        None,
+        Some(Store::open(&f._dir.path().join("mode3.db")).unwrap()),
+        f.journal.clone(),
+        false,
+    );
+    assert!(!restarted.active(&f.key));
+    let request = wire::ModuleRunRequest::new(
+        wire::ModulePreviewRequest::new(
+            "flush",
+            wire::Subject::session(wire::SessionRef::new(
+                &f.key.runner,
+                &f.key.harness,
+                &f.key.session,
+            )),
+            Default::default(),
+            wire::Caller::new("desktop", "operator_app"),
+        ),
+        String::from("version"),
+        "request-1",
+    );
+    let body = serde_json::to_vec(&json!({"method": "commands.run", "params": request})).unwrap();
+    let caller = subc_protocol::Principal::Reserved {
+        module_id: "occipital".into(),
+    };
+    let refused = restarted.command_request(&caller, &body).await.unwrap_err();
+    assert_eq!(refused.code, "unknown_subject");
+    assert!(
+        !restarted.active(&f.key),
+        "no worker holds the session here"
+    );
+}

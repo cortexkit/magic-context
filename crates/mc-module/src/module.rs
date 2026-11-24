@@ -1468,6 +1468,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         };
         // A Run restores, from its saved state, a session no worker holds;
         // other commands answer such a session as one ck-mc doesn't hold.
+        // A session a move holds is never restored: its worker would only
+        // refuse the command, and would then keep the session counted as
+        // running in this process until the move ends.
         let restores = matches!(&request, commands::Request::Run(_))
             && !self
                 .inner
@@ -1481,6 +1484,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .as_ref()
                 .and_then(|store| store.load(&key))
                 .is_some();
+        if restores && self.admit(&key).is_err() {
+            return Err(session_moving_command());
+        }
         let (reply, answer) = oneshot::channel();
         let unsent = {
             let mut workers = self.inner.workers.lock().expect("worker map");
@@ -2444,10 +2450,7 @@ fn hold(
             None
         }
         Job::Command { reply, .. } => {
-            let _ = reply.send(Err(subc_protocol::ErrorBody::new(
-                "unknown_subject",
-                "Session is moving or unavailable.",
-            )));
+            let _ = reply.send(Err(session_moving_command()));
             None
         }
         Job::Tool { reply, .. } => {
@@ -2469,6 +2472,11 @@ fn hold(
         | Job::Discard { .. }
         | Job::AppCheckpoint { .. } => Some(job),
     }
+}
+
+/// The answer to a session command while a move holds the session.
+fn session_moving_command() -> subc_protocol::ErrorBody {
+    subc_protocol::ErrorBody::new("unknown_subject", "Session is moving or unavailable.")
 }
 
 /// A job's kind, as a slow tool call's log line names the jobs it waited
