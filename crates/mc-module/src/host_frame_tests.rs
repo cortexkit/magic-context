@@ -320,3 +320,51 @@ async fn host_frame_expand_labels_only_the_words_without_losing_stored_text() {
         assert!(!out.contains("U (user)"), "{input}: {out}");
     }
 }
+
+#[tokio::test]
+async fn marked_range_continuation_recovers_full_tool_output() {
+    use cortexkit_role_compaction::part::{ToolPart, ToolStatus};
+    let (session, client, _, _, _) = fixture();
+    let mut long = text(2, "long page");
+    long.parts[0].body = PartBody::Text {
+        text: "0123456789".repeat(5_800).into(),
+    };
+    let raw = format!("{}UNABRIDGED END", "payload ".repeat(1_000));
+    let mut second = frame(3, Role::System);
+    second.mid = "second-frame".into();
+    second.parts.push(Part::new(
+        "p",
+        PartBody::Tool(
+            ToolPart::new("call", "read", json!({}), ToolStatus::Completed).with_output(raw),
+        ),
+    ));
+    *client.entries.lock().unwrap() = vec![frame(1, Role::System), long, second];
+    let expand = async |input| {
+        crate::expand::run(
+            &client,
+            &session.key,
+            session.limits,
+            &input,
+            Some(3),
+            counter(),
+            crate::expand::NumbersUnknown {
+                refused: &mut Default::default(),
+                summarized: false,
+            },
+        )
+        .await
+        .unwrap()
+    };
+    let first = expand(json!({"start":1,"end":3})).await;
+    let args = first
+        .rsplit_once("Call again with start=")
+        .expect("first page has a continuation")
+        .1;
+    let start: u64 = args.split_whitespace().next().unwrap().parse().unwrap();
+    assert_eq!(start, 3, "the second page starts at the next marked entry");
+    let next = expand(json!({"start":start,"end":3,"verbose":args.contains("verbose=true")})).await;
+    assert!(
+        next.contains("UNABRIDGED END"),
+        "following the continuation must not request previews"
+    );
+}
