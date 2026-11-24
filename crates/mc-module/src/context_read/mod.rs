@@ -152,7 +152,8 @@ impl ContextRead {
         }
     }
 
-    /// Saved state is only consulted after admission and a live worker miss.
+    /// The runners of sessions saved to disk. Only asked once the caller was
+    /// admitted and no live session worker could answer.
     pub(crate) async fn saved_runners(&self, recent: &Recent) -> Result<Vec<String>, Refusal> {
         let (reply, answer) = oneshot::channel();
         self.tx

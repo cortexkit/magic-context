@@ -1066,9 +1066,10 @@ async fn send_and_wait_inner<C: RunnerClient>(
             } else {
                 None
             };
-            // The runner freezes a child's storage policy on the send that creates
-            // it, so only that send carries one. Runners without the
-            // session_retention group refuse the member and are never sent it.
+            // The runner freezes a child's storage policy (how long it keeps the
+            // child's transcript) on the send that creates it, so only that send
+            // carries one. A runner that doesn't declare the retention capability
+            // would refuse the field, so it is never sent one.
             let retention_policy = if how.creates_child {
                 client.child_session_retention(child).await.map(|limits| {
                     if how.keep_child {

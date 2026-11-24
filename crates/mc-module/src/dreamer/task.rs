@@ -176,8 +176,9 @@ pub(crate) trait Batch: TaskInput + Send {
         let _ = db;
     }
     /// Whether to record unusable answers after model fallback fails. A
-    /// step-cap skip, like an accepted answer, can only commit while the
-    /// computer still holds the role with enough time left on its lease.
+    /// step-cap skip, like an accepted answer, commits only while this
+    /// computer still holds the project's maintenance lease from Entorhinal,
+    /// with enough time left on it to finish the write.
     fn records_unusable_reply(&self) -> bool {
         false
     }

@@ -212,9 +212,10 @@ fn truncate(value: &str, chars: usize) -> String {
 }
 
 /// The cue written in place of one refused for the third time: the model's
-/// last try made to fit, else the start of the memory's text. If a
-/// prohibition cannot be shown with its negative marker and mechanism, use
-/// a neutral label rather than drawing it as a positive instruction.
+/// last try made to fit, else the start of the memory's text. A prohibition
+/// needs its negative marker and, after it, the reason in parentheses; if the
+/// fallback can't hold both, use a neutral label rather than drawing the rule
+/// as a positive instruction.
 pub(crate) fn fallback_cue(memory: &Sent, last_try: &str, budget: Budget) -> String {
     let importance = memory.importance.unwrap_or(DEFAULT_IMPORTANCE);
     let chars = budget.chars(importance);

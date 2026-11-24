@@ -744,8 +744,11 @@ impl ContextDb {
         apply(&mut connection)
     }
 
-    /// Discover legacy keys in one read transaction, without leasing either
-    /// the shared writer connection or a search reader.
+    /// Find the 0.49 project keys (`git:<root commit>`, `dir:<path hash>`)
+    /// that still own rows waiting to move to Entorhinal's `pj-` ids
+    /// ([`crate::legacy_projects`]). One read transaction on a connection of
+    /// its own, so the scan neither holds the shared writer nor takes a
+    /// search reader.
     pub(crate) fn legacy_project_keys(
         &self,
     ) -> rusqlite::Result<std::collections::BTreeSet<String>> {

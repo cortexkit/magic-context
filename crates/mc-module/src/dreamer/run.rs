@@ -106,7 +106,8 @@ pub struct TaskRun<'a> {
     /// The tool provider whose `reader` preset a code-reading child reads
     /// with; `None` for a task that reads no code.
     pub reader: Option<&'a str>,
-    /// Tokens the occurrence can still spend before starting this batch.
+    /// Tokens this scheduled run of the task (one night's slot) can still
+    /// spend before starting this batch.
     pub remaining_tokens: u64,
     /// Where the run's children are attributed, each right before the send
     /// that creates it ([`crate::attribution`]); `None` attributes none.

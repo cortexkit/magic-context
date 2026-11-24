@@ -592,9 +592,10 @@ impl Loader {
         false
     }
 
-    /// Catalog composition can precede Setup, or happen without it. Use the
-    /// same first-answer budget for both tiers, and let SDK callbacks run
-    /// while waiting. A missing or refused view still falls back to the user.
+    /// A runner can ask for a project's tool catalog before it sets the
+    /// session up, or without ever setting one up. Wait for the project's
+    /// settings within the same first-answer budget a session setup uses, and
+    /// let SDK callbacks run while waiting. A missing or refused view still falls back to the user.
     pub(crate) async fn await_catalog_project_config(
         &self,
         handle: &subc_client_rs::ModuleHandle,

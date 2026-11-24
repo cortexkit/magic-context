@@ -47,8 +47,9 @@ pub struct Chunk {
     pub messages: usize,
     /// Each printed line, in order: what a fact's anchor may cite.
     pub printed_blocks: Vec<PrintedBlock>,
-    /// The historian input marks at least one line whose host metadata
-    /// verifies that it contains the person's words from an ongoing turn.
+    /// At least one line is a message the person sent while the agent was
+    /// still working, verified by the runner's frame around it (an entry's
+    /// `host_frame`), and is marked as such for the summarizer.
     pub(super) marks_mid_turn: bool,
 }
 
