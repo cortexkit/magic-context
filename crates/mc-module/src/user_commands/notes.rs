@@ -31,27 +31,45 @@ fn note_state(note: &Note) -> Value {
 }
 
 /// The project's notes `ids` names. A refusal names every id that isn't
-/// one of them.
+/// one of them. A session note of a session a move holds is refused as the
+/// gate refuses that session: its notes moved with it, and the copy kept
+/// here must stay as the move found it, or a move back finds the session
+/// changed here and refuses it.
 fn project_notes(
     db: &ContextDb,
+    gate: Option<&crate::agent_data::Gate>,
     project: &str,
     ids: &[i64],
     field: &str,
 ) -> Result<Vec<Note>, ErrorBody> {
-    let rows = read(db, |conn| {
+    type Row = (Note, Option<(String, String)>);
+    let rows: Vec<Option<Row>> = read(db, |conn| {
         ids.iter()
             .map(|id| {
                 conn.query_row(
-                    "SELECT id, status, content, updated_at FROM notes
+                    "SELECT id, status, content, updated_at,
+                            CASE WHEN type = 'session' THEN harness END,
+                            CASE WHEN type = 'session' THEN session_id END
+                       FROM notes
                       WHERE id = ?1 AND project_path = ?2",
                     params![id, project],
                     |row| {
-                        Ok(Note {
-                            id: row.get(0)?,
-                            status: row.get(1)?,
-                            content: row.get(2)?,
-                            updated_at: row.get(3)?,
-                        })
+                        let session = match (
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ) {
+                            (Some(harness), Some(session)) => Some((harness, session)),
+                            _ => None,
+                        };
+                        Ok((
+                            Note {
+                                id: row.get(0)?,
+                                status: row.get(1)?,
+                                content: row.get(2)?,
+                                updated_at: row.get(3)?,
+                            },
+                            session,
+                        ))
                     },
                 )
                 .optional()
@@ -76,7 +94,17 @@ fn project_notes(
             &missing,
         ));
     }
-    Ok(rows.into_iter().flatten().collect())
+    let rows: Vec<Row> = rows.into_iter().flatten().collect();
+    if let Some(gate) = gate {
+        for (harness, session) in rows.iter().filter_map(|(_, session)| session.as_ref()) {
+            if let Err(gated) = gate.check_any_runner(harness, session) {
+                let mut refused = ErrorBody::new(gated.code, gated.message);
+                refused.detail = gated.detail;
+                return Err(refused);
+            }
+        }
+    }
+    Ok(rows.into_iter().map(|(note, _)| note).collect())
 }
 
 /// Apply `write` to each note in one transaction. `write` changes a note only
@@ -124,6 +152,7 @@ fn applied(label: &str, notes: usize) -> RunReply {
 /// `note_edit {id, content}`, `note_dismiss {ids}` and `note_delete {ids}`.
 pub(super) fn plan<'a>(
     db: &'a ContextDb,
+    gate: Option<&crate::agent_data::Gate>,
     command: &str,
     project: String,
     args: &Map<String, Value>,
@@ -147,7 +176,7 @@ pub(super) fn plan<'a>(
             if content.is_empty() {
                 return Err(invalid("args.content"));
             }
-            let note = project_notes(db, &project, &[id], "id")?.remove(0);
+            let note = project_notes(db, gate, &project, &[id], "id")?.remove(0);
             let version = stamp(note_state(&note));
             if note.content == content {
                 return Ok(Plan::unavailable(version, "no_change"));
@@ -178,7 +207,7 @@ pub(super) fn plan<'a>(
         }
         "note_dismiss" => {
             let ids = ids(args, "ids")?;
-            let notes = project_notes(db, &project, &ids, "ids")?;
+            let notes = project_notes(db, gate, &project, &ids, "ids")?;
             let version = stamp(Value::Array(notes.iter().map(note_state).collect()));
             let open: Vec<Note> = notes
                 .iter()
@@ -220,7 +249,7 @@ pub(super) fn plan<'a>(
         }
         _ => {
             let ids = ids(args, "ids")?;
-            let notes = project_notes(db, &project, &ids, "ids")?;
+            let notes = project_notes(db, gate, &project, &ids, "ids")?;
             let version = stamp(Value::Array(notes.iter().map(note_state).collect()));
             let mut preview = Preview::new(version, true);
             preview.effect = Some(format!(

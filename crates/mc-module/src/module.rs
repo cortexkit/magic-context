@@ -344,6 +344,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         app_read.attach(crate::app_read::sessions::Attachment {
             config: config.clone(),
             dreamer: dreamer.clone(),
+            gate: journal.gate().clone(),
         });
         let dreamer_enabled = dreamer.is_some() && config.initial_dreamer_enabled();
         let module = Self {
@@ -1541,6 +1542,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             dreamer_settings: self.inner.config.dreamer(),
             client: &self.inner.client,
             project_known,
+            gate: Some(self.inner.journal.gate().as_ref()),
         };
         match request {
             Request::Preview(request) => {

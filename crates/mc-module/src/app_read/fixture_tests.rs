@@ -71,6 +71,7 @@ impl Fixture {
         replica.apps.attached = Some(sessions::Attachment {
             config: Arc::new(settings.into()),
             dreamer: None,
+            gate: Arc::default(),
         });
         // The folder a Setup in this process would have named.
         replica.session_seen(head(), PROJECT.into(), "/work/sample".into(), "head".into());

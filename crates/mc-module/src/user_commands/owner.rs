@@ -41,6 +41,9 @@ pub(crate) struct Context<'a, C> {
     pub client: &'a Arc<C>,
     /// For a project subject: whether the app reads know the project.
     pub project_known: bool,
+    /// The move journal's gate: a note command refuses a session note of a
+    /// session a move holds. `None` serves every note.
+    pub gate: Option<&'a crate::agent_data::Gate>,
 }
 
 /// Why a run did not act: an answer to give without storing it, or a
@@ -581,7 +584,7 @@ fn plan<'a, C: crate::client::RunnerClient + crate::routing::Router + Send + Syn
         ("dreamer_undo_run", Some(project)) => super::dreamer::undo_run(db, project, args, &stamp),
         ("docs_proposal_dismiss", Some(project)) => super::docs::dismiss(db, project, args, &stamp),
         ("note_edit" | "note_dismiss" | "note_delete", Some(project)) => {
-            super::notes::plan(db, id, project, args, &stamp)
+            super::notes::plan(db, context.gate, id, project, args, &stamp)
         }
         _ => {
             let verb = LEVELS
