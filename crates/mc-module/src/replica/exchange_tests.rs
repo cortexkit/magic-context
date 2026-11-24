@@ -1174,3 +1174,51 @@ async fn a_delete_sent_to_a_stream_made_anew_is_never_settled_by_an_older_own_ch
         "the delete reached the new stream"
     );
 }
+
+/// A store copied to another computer while one of its changes was being
+/// sent (the hub stored it, but its acknowledgement was lost) holds that
+/// change's outbox row under the store id it had before. The message comes
+/// back from the original computer, or from the copy sending it again after
+/// the hub's duplicate window: either way it settles the copy's row, so a
+/// later change of the row from a third computer applies on the copy as it
+/// does everywhere else.
+#[tokio::test]
+async fn a_copy_taken_while_a_change_was_being_sent_settles_it_and_takes_later_changes() {
+    for after_duplicate_window in [false, true] {
+        let hub = InMemoryHub::new();
+        let (a, c) = (Computer::new(&hub, 1), Computer::new(&hub, 3));
+        memory(&a, "pj-a", "Use the first API.");
+        a.sync().await;
+        c.sync().await;
+        a.execute("UPDATE memories SET content = 'Use the API from A.'");
+        hub.lose_next_acks(1);
+        assert!(
+            a.replica.publish().await.is_err(),
+            "the acknowledgement was lost"
+        );
+        let copy = a.copy();
+        // C changes the row at the same revision, later in the stream.
+        c.execute("UPDATE memories SET content = 'Use the API from C.'");
+        c.sync().await;
+        a.sync().await;
+        assert_eq!(contents(&a), ["Use the API from C."]);
+        assert_eq!(contents(&c), ["Use the API from C."]);
+        if after_duplicate_window {
+            hub.forget_ids();
+        }
+        let b = Computer::open(&hub, 2, copy);
+        b.sync().await;
+        b.follow_all().await;
+        assert_eq!(
+            contents(&b),
+            ["Use the API from C."],
+            "the copy took the later change (after the duplicate window: {after_duplicate_window})"
+        );
+        assert!(outbox(&b).is_empty(), "{:?}", outbox(&b));
+        assert_eq!(
+            b.value::<i64>("SELECT COUNT(*) FROM replica_passed"),
+            0,
+            "no arrival waits for a change of the copy's own"
+        );
+    }
+}

@@ -756,8 +756,18 @@ fn apply_body(
             body.global_id, body.revision, body.writer.store_id
         )));
     }
-    let own = body.writer.box_id == box_id && own_known(tx, body)?;
-    if !own && body.writer.store_id == super::store_id(tx)? {
+    // A message this store's outbox waits for is its own. A store copied
+    // here from another computer may hold rows that computer was still
+    // sending under its own store id, which this store no longer has
+    // ([`super::moved_here`]). Whichever of the two computers the stream
+    // got such a message from, it carries the snapshot the row froze when
+    // it was first claimed, so it settles the row here too. A message under
+    // this store's current id is its own only when this computer sent it:
+    // from anywhere else it is a copy's, and the store takes a new id.
+    let store = super::store_id(tx)?;
+    let own =
+        (body.writer.box_id == box_id || body.writer.store_id != store) && own_known(tx, body)?;
+    if !own && body.writer.store_id == store {
         super::new_store_id(
             tx,
             "the stream holds a message sent under this store's id that this store doesn't know; a copy of the store, or an earlier or later state of it, sent it",
