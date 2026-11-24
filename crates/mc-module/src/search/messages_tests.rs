@@ -574,7 +574,7 @@ fn an_unrelated_memory_retrieval_commit_does_not_rescan_message_coverage() {
 }
 
 #[test]
-fn an_index_commit_refreshes_a_read_only_coverage_proof() {
+fn paired_appends_keep_the_coverage_proof_and_match_a_fresh_search() {
     let store = Store::new();
     let db = &store._db;
     let ask = |session: &str| {
@@ -604,7 +604,14 @@ fn an_index_commit_refreshes_a_read_only_coverage_proof() {
         std::slice::from_ref(&entry),
     )
     .unwrap();
-    assert_eq!(ask("neighbour"), (true, 2));
+    assert_eq!(ask("neighbour"), (true, 1));
+    db.with_search_reader(|conn, coverage| {
+        let cached = screened_reach(conn, coverage, "neighbour");
+        let fresh = screened_reach(conn, &mut Coverage::default(), "neighbour");
+        let page = |reach| app_page_with_reach(conn, "neighbour", "alpha beta", 0, 51, reach);
+        assert_eq!(page(&cached), page(&fresh));
+        assert!(page(&cached).iter().any(|hit| hit.number == 51));
+    });
     index_with_generation(
         &mut writer,
         &db.message_index,
@@ -615,9 +622,20 @@ fn an_index_commit_refreshes_a_read_only_coverage_proof() {
     .unwrap();
     assert_eq!(
         ask("neighbour"),
-        (true, 2),
+        (true, 1),
         "a watermark-only write is not an index change"
     );
+}
+
+#[test]
+fn an_unmapped_index_commit_invalidates_the_next_readers_coverage_proof() {
+    let store = Store::new();
+    let db = &store._db;
+    let ask = |session: &str| {
+        db.with_search_reader(|conn, coverage| (coverage.complete(conn, session), coverage.scans()))
+    };
+    let mut writer = Connection::open(&store.path).unwrap();
+    assert_eq!(ask("neighbour"), (true, 1));
     // A write during this read leaves its old snapshot and proof intact.
     // The next call to with_search_reader must see the new unmapped row.
     db.with_search_reader(|conn, coverage| {
@@ -625,9 +643,9 @@ fn an_index_commit_refreshes_a_read_only_coverage_proof() {
         write(&tx, "neighbour", 52, "alpha beta", false);
         db.message_index.commit(tx, true).unwrap();
         assert!(coverage.complete(conn, "neighbour"));
-        assert_eq!(coverage.scans(), 2);
+        assert_eq!(coverage.scans(), 1);
     });
-    assert_eq!(ask("neighbour"), (false, 3));
+    assert_eq!(ask("neighbour"), (false, 2));
     // A connection that can write proves again on every read.
     let mut own = Coverage::default();
     writer.execute_batch("BEGIN").unwrap();
