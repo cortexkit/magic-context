@@ -207,6 +207,8 @@ pub struct Session {
     /// Last indexed keep call when the live tool request arrived. Wait for
     /// a different call before consuming its selection.
     pending_keep_after: Option<u64>,
+    /// The last indexed call whose `ctx_keep` selection we already handled.
+    handled_keep_call: Option<u64>,
     /// The highest notice number handled.
     seq: u64,
     /// The session's summaries, oldest first.

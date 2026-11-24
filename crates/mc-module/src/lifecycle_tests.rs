@@ -2749,9 +2749,15 @@ async fn keep_leaves_user_notices_when_the_runner_cannot_mark_them() {
     let (mut session, client, _, _, settings) = fixture();
     let notice = text(2, "person's words")
         .with_notice(cortexkit_role_compaction::read::NoticeOrigin::new("host"));
-    session
-        .index
-        .extend([text(1, "task"), notice, assistant_text(3, "discard")]);
+    let reminder = text(3, "reminder").with_notice(
+        cortexkit_role_compaction::read::NoticeOrigin::new(crate::MODULE_ID),
+    );
+    session.index.extend([
+        text(1, "task"),
+        notice,
+        reminder,
+        assistant_text(4, "discard"),
+    ]);
     session
         .tool(
             &client,
@@ -2761,7 +2767,7 @@ async fn keep_leaves_user_notices_when_the_runner_cannot_mark_them() {
         )
         .await
         .unwrap();
-    session.index.extend([keep_call(4, "ctx_keep")]);
+    session.index.extend([keep_call(5, "ctx_keep")]);
     let ride = RideRequest::new(
         vec![RideCause::EffortChange],
         1000,
@@ -2771,6 +2777,7 @@ async fn keep_leaves_user_notices_when_the_runner_cannot_mark_them() {
         .ride(&settings, &ride)
         .expect("the keep has work to do");
     assert!(view_edits_message(&view, "discard"));
+    assert!(view_edits_message(&view, "reminder"));
     assert!(!view_edits_message(&view, "person's words"));
 }
 

@@ -568,7 +568,13 @@ impl Session {
             answer.push_str(&format!(" Not found: {}.", list(&missing)));
         }
         self.pending_keep = Some(kept);
-        self.pending_keep_after = lanes::keep_call(&self.index).map(|entry| entry.ordinal);
+        // A runner may already have indexed this call by the time it invokes
+        // the tool. Otherwise a previous keep must not act as its boundary.
+        self.pending_keep_after = lanes::keep_call(&self.index)
+            .filter(|(entry, tool)| {
+                self.handled_keep_call == Some(entry.ordinal) || tool.input.parse() != *input
+            })
+            .map(|(entry, _)| entry.ordinal);
         Ok(answer)
     }
 

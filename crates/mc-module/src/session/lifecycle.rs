@@ -86,6 +86,7 @@ impl Session {
             keep_requested: false,
             pending_keep: None,
             pending_keep_after: None,
+            handled_keep_call: None,
             seq: 0,
             summaries: Summaries::default(),
             summaries_unread: false,
@@ -363,6 +364,7 @@ impl Session {
         }
         self.pending_keep = durable.pending_keep;
         self.pending_keep_after = None;
+        self.handled_keep_call = None;
         self.head_stale = durable.head_stale;
         self.marker_possible = durable.marker_possible;
         self.reminder_counter = durable.reminder_counter;

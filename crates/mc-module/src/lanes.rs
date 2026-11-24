@@ -888,9 +888,10 @@ pub fn reasoning_over_budget(
         exempt_from = exempt_from.min(latest);
     }
     if anthropic {
-        if let Some(turn) = crate::pass::current_turn_start(entries) {
-            let ordinal = entries[turn].ordinal;
-            let first = assistants.partition_point(|(entry, _)| entry.ordinal < ordinal);
+        if let Some(turn_start) =
+            crate::pass::current_turn_start(entries).and_then(|at| entries.get(at))
+        {
+            let first = assistants.partition_point(|(entry, _)| entry.ordinal < turn_start.ordinal);
             exempt_from = exempt_from.min(first);
         }
     }
@@ -1623,20 +1624,23 @@ pub(crate) fn emergency_drop_excluding(
     selected
 }
 
-/// The parts a `ctx_keep` view drops: everything before the message holding
-/// the `ctx_keep` call, except kept notices, non-notice user inputs (including
-/// instructions from another agent), the session's first
-/// message when it keeps it, the selected parts, and the protected tail. The call's
-/// message and everything after it stay, so the model sees its own note.
-pub(crate) fn keep_call(index: &Index) -> Option<&Entry> {
-    index.entries().iter().rev().find(|entry| {
-        entry.parts.iter().any(|part| {
-            matches!(&part.body,
-            PartBody::Tool(tool) if normalize_tool_name(&tool.name) == "ctx_keep")
+/// The last indexed `ctx_keep` call, which bounds the reach of its edit.
+pub(crate) fn keep_call(index: &Index) -> Option<(&Entry, &ToolPart)> {
+    index.entries().iter().rev().find_map(|entry| {
+        entry.parts.iter().rev().find_map(|part| match &part.body {
+            PartBody::Tool(tool) if normalize_tool_name(&tool.name) == "ctx_keep" => {
+                Some((entry, tool))
+            }
+            _ => None,
         })
     })
 }
 
+/// The parts a `ctx_keep` view drops: everything before the message holding
+/// the call, except kept notices, non-notice user inputs (including
+/// instructions from another agent), the protected first message when
+/// configured, selected parts, and the protected tail. The call's message
+/// and everything after it stay, so the model sees its own note.
 pub fn keep_drops(
     context: &Context,
     kept: &BTreeSet<PartKey>,
@@ -1652,7 +1656,7 @@ pub(crate) fn keep_drops_with_notice_marks(
     notice_keep: bool,
 ) -> Vec<(PartKey, Shape)> {
     let entries = context.index.entries();
-    let Some(call) = keep_call(context.index) else {
+    let Some((call, _)) = keep_call(context.index) else {
         return Vec::new();
     };
     let mut drops = Vec::new();
@@ -1661,9 +1665,16 @@ pub(crate) fn keep_drops_with_notice_marks(
         .take_while(|entry| entry.ordinal < call.ordinal)
         .enumerate()
     {
+        // Without keep marks, a runner notice can be the person's words.
+        // Our own notices contain reminders, not relayed user input.
+        let may_be_user_notice = !notice_keep
+            && entry
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.sender != crate::MODULE_ID);
         if (position == 0 && context.keep_first_message)
             || protects_from_automatic_reclaim(entry)
-            || (entry.role == Role::User && (entry.notice.is_none() || !notice_keep))
+            || (entry.role == Role::User && (entry.notice.is_none() || may_be_user_notice))
         {
             continue;
         }

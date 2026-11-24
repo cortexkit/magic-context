@@ -262,7 +262,7 @@ impl Session {
     pub(super) fn ready_keep(&self) -> Option<&BTreeSet<lanes::PartKey>> {
         let kept = self.pending_keep.as_ref()?;
         (!self.latest_unknown
-            && lanes::keep_call(&self.index).is_some_and(|entry| {
+            && lanes::keep_call(&self.index).is_some_and(|(entry, _)| {
                 self.pending_keep_after
                     .is_none_or(|previous| entry.ordinal > previous)
             }))
@@ -275,6 +275,7 @@ impl Session {
         let keep = self.next_keep.take();
         let after = if keep.is_some() && self.pending_keep == keep {
             self.pending_keep = None;
+            self.handled_keep_call = lanes::keep_call(&self.index).map(|(entry, _)| entry.ordinal);
             self.pending_keep_after.take()
         } else {
             None
@@ -385,7 +386,7 @@ impl Session {
         history: &[EditOp],
         cut: Option<u64>,
     ) -> (Sealed, u64) {
-        let keep = self.next_keep.as_ref();
+        let keep = self.next_keep.as_ref().or(self.pending_keep.as_ref());
         let flush = self.next_flush;
         let lanes_timing = crate::notice_cost_timing::span("build.lanes");
         let edited = self.edited(cut);
@@ -408,7 +409,7 @@ impl Session {
             .filter(|key| !lanes::in_protected_tail(&context, key, cutoff))
             .map(|key| (key.clone(), lanes::Shape::Requested))
             .collect();
-        if let Some(kept) = keep {
+        if let Some(kept) = self.next_keep.as_ref() {
             wanted.extend(lanes::keep_drops_with_notice_marks(
                 &context,
                 kept,
