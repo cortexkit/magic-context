@@ -73,13 +73,21 @@ impl Session {
         let decisions = std::mem::take(&mut self.app_decisions);
         let unsaved = std::mem::take(&mut self.app_decisions_unsaved);
         let revision = self.app_decisions_revision;
-        // The runner may report its move floor while refusing the view. That
-        // floor is not part of the attempted rebuild and survives its rollback.
+        // Facts learned from the runner's refusals are not part of the
+        // attempted rebuild. Keep them so the next pass doesn't repeat it.
         let move_floor = self.move_floor.take();
         let move_floor_unplaced_logged = std::mem::take(&mut self.move_floor_unplaced_logged);
+        let (numbers_refused, numbers_views_held) =
+            (self.numbers_refused.take(), self.numbers_views_held);
+        let numbers_unknown_tags = std::mem::take(&mut self.numbers_unknown_tags);
+        let disproved_floor = self.disproved_floor.take();
         *self = snapshot;
         self.move_floor = move_floor;
         self.move_floor_unplaced_logged = move_floor_unplaced_logged;
+        self.numbers_refused = numbers_refused;
+        self.numbers_views_held = numbers_views_held;
+        self.numbers_unknown_tags = numbers_unknown_tags;
+        self.disproved_floor = disproved_floor;
         self.view_validation = validation;
         self.app_decisions = decisions;
         self.app_decisions_unsaved = unsaved;
