@@ -179,9 +179,27 @@ impl Config {
         project_id: Option<&str>,
     ) -> crate::catalog::CatalogConfig {
         match self {
-            Self::Fixed(_) => catalog_config(None, &[], Path::new("")),
+            Self::Fixed(_) => catalog_metadata(None, &[]),
             Self::Files(loader) => {
                 loader.catalog_for_project(project_root.map(Path::new), project_id)
+            }
+        }
+    }
+
+    /// A tool call checks availability, not the wording of the catalog.
+    pub(crate) fn catalog_for_tool_call(
+        &self,
+        project_root: Option<&str>,
+        project_id: Option<&str>,
+    ) -> crate::catalog::CatalogConfig {
+        match self {
+            Self::Fixed(_) => catalog_metadata(None, &[]),
+            Self::Files(loader) => {
+                let tiers = loader.tiers(project_root.map(Path::new), project_id);
+                catalog_metadata(
+                    tiers.user.as_ref().map(UserTier::value),
+                    &tiers.overlays.iter().flatten().collect::<Vec<_>>(),
+                )
             }
         }
     }
@@ -828,6 +846,12 @@ fn catalog_config(
     overlays: &[&Value],
     user_path: &Path,
 ) -> crate::catalog::CatalogConfig {
+    let mut config = catalog_metadata(user, overlays);
+    config.guidance_override = user.and_then(|user| guidance_override(user, user_path));
+    config
+}
+
+fn catalog_metadata(user: Option<&Value>, overlays: &[&Value]) -> crate::catalog::CatalogConfig {
     use crate::catalog::{CatalogConfig, Surface};
 
     let tiers = || user.into_iter().chain(overlays.iter().copied());
@@ -893,7 +917,7 @@ fn catalog_config(
             .map(str::to_ascii_lowercase),
         surface_default,
         surface_models,
-        guidance_override: user.and_then(|user| guidance_override(user, user_path)),
+        guidance_override: None,
         tool_descriptions,
         disabled_tools: Vec::new(),
     }
@@ -948,11 +972,28 @@ fn guidance_override_path(configured: &str, user_path: &Path) -> PathBuf {
 /// exactly one `## Magic Context` heading.
 fn guidance_file(path: &Path) -> Result<String, String> {
     const MARKER: &str = "## Magic Context";
-    let content = match fs::read(path) {
-        Ok(bytes) if path.is_file() => String::from_utf8_lossy(&bytes).into_owned(),
-        Ok(_) => return Err("is not a file".to_owned()),
-        Err(error) => return Err(format!("could not be read ({error})")),
-    };
+    use std::io::Read;
+
+    let read_error = |error| format!("could not be read ({error})");
+    if !fs::metadata(path).map_err(read_error)?.is_file() {
+        return Err("is not a file".to_owned());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    // The path can be replaced between metadata and open. Do not wait for a
+    // writer if the replacement is a FIFO, and validate the opened file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path).map_err(read_error)?;
+    if !file.metadata().map_err(read_error)?.is_file() {
+        return Err("is not a file".to_owned());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(read_error)?;
+    let content = String::from_utf8_lossy(&bytes).into_owned();
     if content.trim().is_empty() {
         return Err("is empty".to_owned());
     }
@@ -1019,7 +1060,7 @@ fn execute_threshold(
             let mut chosen = user_value;
             for tier in overlays {
                 let higher = valid_map(tier.get("execute_threshold_tokens"), &valid_tokens);
-                let merged = raised_threshold_map(&user_tokens, &higher);
+                let merged = raised_threshold_map(&user_tokens, &higher, model_key, chosen);
                 let candidate = model_value(&merged, model_key)
                     .and_then(valid_tokens)
                     .unwrap_or(chosen);
@@ -1062,9 +1103,7 @@ fn execute_threshold(
             chosen = chosen.max(scalar);
         } else {
             let higher = valid_map(value, &valid_percentage);
-            let merged = raised_threshold_map(&user_percentages, &higher);
-            // A more-specific key must not bypass the applicable lower tier,
-            // even if it passed the literal-key comparison.
+            let merged = raised_threshold_map(&user_percentages, &higher, model_key, chosen);
             let candidate = model_value(&merged, model_key)
                 .and_then(valid_percentage)
                 .unwrap_or(chosen);
@@ -1091,6 +1130,8 @@ fn execute_threshold(
 fn raised_threshold_map(
     user: &serde_json::Map<String, Value>,
     project: &serde_json::Map<String, Value>,
+    model_key: &str,
+    lower_threshold: f64,
 ) -> serde_json::Map<String, Value> {
     let mut merged = user.clone();
     if let (Some(base), Some(value)) = (
@@ -1101,19 +1142,14 @@ fn raised_threshold_map(
             merged.insert("default".into(), Value::from(value));
         }
     }
-    for (key, value) in project {
-        if key == "default" {
-            continue;
-        }
-        let base = user
-            .get(key)
-            .or_else(|| user.get("default"))
-            .and_then(Value::as_f64);
-        if base.is_some_and(|base| value.as_f64().is_some_and(|value| value > base)) {
-            if value.as_f64() == merged.get("default").and_then(Value::as_f64) {
-                merged.remove(key);
-            } else {
-                merged.insert(key.clone(), value.clone());
+    // This map is resolved for one model. Compare each spelling of that
+    // model against the effective floor, not against the same literal key.
+    // Keep an explicit match even when it equals the default: a less
+    // specific lower-tier model entry may still win over that default.
+    for key in model_key_lookup_order(model_key) {
+        if let Some(value) = project.get(&key).and_then(Value::as_f64) {
+            if value > lower_threshold {
+                merged.insert(key, Value::from(value));
             }
         }
     }

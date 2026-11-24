@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -104,6 +104,7 @@ struct Inner<C> {
     /// the `statement_order` module). In memory only: after a restart every
     /// session is set up again.
     set_up: Mutex<HashMap<SessionRef, Option<String>>>,
+    setup_count: AtomicUsize,
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
     summaries_running: Mutex<usize>,
     /// The same work counted per session, for a move's `busy`.
@@ -357,6 +358,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 journal,
                 workers: Mutex::new(HashMap::new()),
                 set_up: Mutex::new(HashMap::new()),
+                setup_count: AtomicUsize::new(0),
                 summaries_running: Mutex::new(0),
                 runs: Arc::default(),
                 agent_data: crate::agent_data::Service::new(agent_data),
@@ -396,12 +398,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         crate::health::Health {
             context_open: self.inner.db.is_some(),
             mode3_open: self.inner.store.is_some(),
-            session_count: self
-                .inner
-                .set_up
-                .try_lock()
-                .ok()
-                .map(|sessions| sessions.len()),
+            session_count: self.inner.setup_count.load(Ordering::Relaxed),
             dreamer_enabled: self.inner.dreamer_enabled.load(Ordering::Relaxed),
             bus_connected,
             settings_source: self.inner.config.settings_source(),
@@ -573,11 +570,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 replaced,
             });
         }
-        self.inner
-            .set_up
-            .lock()
-            .expect("setup sessions")
-            .remove(session);
+        {
+            let mut set_up = self.inner.set_up.lock().expect("setup sessions");
+            set_up.remove(session);
+            self.inner
+                .setup_count
+                .store(set_up.len(), Ordering::Relaxed);
+        }
         self.inner
             .session_folders
             .lock()
@@ -625,8 +624,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             .cloned();
         let key = match live {
             Some(key) => key,
-            None => recent
-                .saved?
+            None => self
+                .inner
+                .context_read
+                .saved_runners(&recent)
+                .await?
                 .into_iter()
                 .map(|runner| SessionRef::new(runner, &recent.harness, &recent.session))
                 .find(|key| {
@@ -751,6 +753,9 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .map_err(|_| ModuleError::Stopped)?;
         }
         set_up.insert(key, epoch);
+        self.inner
+            .setup_count
+            .store(set_up.len(), Ordering::Relaxed);
         Ok(SetupAnswer::Ready)
     }
 
@@ -1580,6 +1585,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .as_ref()
                 .map(|search| search.session_guard(key));
             let mut session: Option<Session> = None;
+            let mut recent_restore_pending = false;
             let (mut carry, mut saved, mut subagent) = match quiet {
                 Some(quiet) => (Some(quiet.carry), quiet.saved, quiet.subagent),
                 None => (None, None, false),
@@ -1836,6 +1842,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                 }
                 if let Job::Setup(_, _, features) = &job {
+                    recent_restore_pending = false;
                     // Each Setup names the preset again.
                     subagent = !features.summarizer;
                     if !subagent {
@@ -2109,7 +2116,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         let settings = inner
                             .config
                             .resolve_for_project(root, project, &model, usable);
-                        let config = inner.config.catalog_for_project(root, project);
+                        let config = inner.config.catalog_for_tool_call(root, project);
                         timing.mark("config");
                         let answer = if !session.serves_tool(&name, &config) {
                             Err(ModuleError::UnknownTool(name.clone()))
@@ -2164,9 +2171,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 // Restored as for a tool call that arrives
                                 // before the runner's first notice: one read
                                 // of the transcript from the cut on (the first
-                                // message the runner still sends). A read
-                                // that fails leaves the index unready, and
-                                // the answer asks the caller to retry.
+                                // message the runner still sends).
                                 inner.app_read.activate(&held_key).await;
                                 let route = Route {
                                     session: held_key.clone(),
@@ -2178,12 +2183,18 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                                 restored.set_store(inner.store.clone());
                                 restored.load_summaries();
                                 restored.restore(durable);
-                                restored.restore_for_tools(inner.client.as_ref()).await;
                                 session = Some(restored);
+                                recent_restore_pending = true;
                             }
                         }
-                        let answer = match &session {
-                            Some(session) => session.recent(budget),
+                        let answer = match &mut session {
+                            Some(session) => {
+                                if recent_restore_pending {
+                                    recent_restore_pending =
+                                        !session.ensure_recent_index(inner.client.as_ref()).await;
+                                }
+                                session.recent(budget)
+                            }
                             None => Err(crate::context_read::unknown_session()),
                         };
                         let _ = reply.send(answer);

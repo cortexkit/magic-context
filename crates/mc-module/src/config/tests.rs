@@ -3,6 +3,26 @@ use serde_json::json;
 
 const OPUS: &str = "anthropic/claude-opus-5-5";
 
+#[cfg(unix)]
+#[test]
+fn guidance_review_refuses_a_fifo_without_waiting_for_a_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guidance.md");
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let user_file = dir.path().join("settings.jsonc");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let settings = json!({"prompt_surface":{"guidance_override_path":"guidance.md"}});
+        let _ = tx.send(review::checks(&settings, &user_file));
+    });
+    let errors = rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("review must not block opening a FIFO");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].0, "/prompt_surface/guidance_override_path");
+    assert!(errors[0].1.contains("not a file"), "{errors:?}");
+}
+
 struct TestEnv<const N: usize>([(&'static str, PathBuf); N]);
 
 impl<const N: usize> EnvSource for TestEnv<N> {
@@ -270,6 +290,29 @@ fn project_token_default_requires_user_default() {
         .execute_threshold_percentage,
         80.0
     );
+}
+
+#[test]
+fn exact_threshold_raises_an_applicable_model_alias() {
+    for (key, user, overlay) in [
+        (
+            "execute_threshold_tokens",
+            json!({"claude-opus-5-5": 50_000}),
+            json!({OPUS: 70_000}),
+        ),
+        (
+            "execute_threshold_percentage",
+            json!({"claude-opus-5-5": 40}),
+            json!({"default": 70, OPUS: 70}),
+        ),
+    ] {
+        assert_eq!(
+            resolve_for_test(json!({key: user}), json!({key: overlay}), OPUS, 100_000)
+                .execute_threshold_percentage,
+            70.0,
+            "{key}"
+        );
+    }
 }
 
 #[test]

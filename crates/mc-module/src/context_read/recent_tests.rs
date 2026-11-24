@@ -544,6 +544,27 @@ fn newest_lines_never_pass_the_budget_and_are_whole_lines_unless_cut() {
 }
 
 #[tokio::test]
+async fn live_recent_reads_do_not_resolve_saved_runners() {
+    let key = SessionRef::new("thalamus-harness", HARNESS, "ses_live");
+    let fixture = Fixture::new("ses_live", &[]);
+    fixture.set_up(&key).await;
+    for _ in 0..3 {
+        fixture
+            .read("context.recent", recent_params("ses_live", 1000))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        fixture
+            .module
+            .context_read()
+            .saved_lookups
+            .load(Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
 async fn recent_restores_a_session_with_saved_state_and_reads_its_transcript_once() {
     let key = SessionRef::new("thalamus-harness", HARNESS, "ses_saved");
     let fixture = Fixture::new("ses_saved", std::slice::from_ref(&key));
@@ -583,7 +604,10 @@ async fn recent_asks_to_retry_while_the_transcript_is_not_read() {
         .unwrap_err();
     assert_eq!(refused.code, "transient");
     assert_eq!(refused.detail, transient);
-    // A saved session whose restoring read fails.
+}
+
+#[tokio::test]
+async fn recent_retries_a_saved_sessions_failed_transcript_read() {
     let saved = SessionRef::new("thalamus-harness", HARNESS, "ses_saved");
     let fixture = Fixture::new("ses_saved", std::slice::from_ref(&saved));
     fixture.runner.0.fail.store(true, Ordering::SeqCst);
@@ -592,8 +616,19 @@ async fn recent_asks_to_retry_while_the_transcript_is_not_read() {
         .await
         .unwrap_err();
     assert_eq!(refused.code, "transient");
-    assert_eq!(refused.detail, transient);
+    assert_eq!(
+        refused.detail,
+        Some(json!({"class": "transient", "retry_after_ms": 2000}))
+    );
     assert!(fixture.module.active(&saved));
+    let reads = read_count(&fixture);
+    fixture.runner.0.fail.store(false, Ordering::SeqCst);
+    let answer = fixture
+        .read("context.recent", recent_params("ses_saved", 32_768))
+        .await
+        .expect("a recovered runner can answer without another Setup or notice");
+    assert_eq!(read_count(&fixture), reads + 1);
+    assert_eq!(answer["text"], joined(&lines(&transcript())));
 }
 
 #[tokio::test]
