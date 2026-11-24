@@ -434,7 +434,7 @@ fn converting_a_converted_file_changes_nothing() {
             "protected_tokens": 8000,
             "embedding": {"provider": "local", "query_instruction": "q: ", "document_prefix": "d: ", "api_key": "{vault:e}"},
             "rerank": {"provider": "off", "api_key": "{vault:r}"},
-            "dreamer": {"disable": true, "maxTokens": 9, "projects": ["p"], "tasks": {"verify": {"schedule": "0 1 * * *"}}},
+            "dreamer": {"disable": true, "maxTokens": 9, "projects": ["p"], "branches": {"pj-a": ["release/1.x"]}, "tasks": {"verify": {"schedule": "0 1 * * *"}}},
             "temporal_awareness": false
         }),
     ));
@@ -532,4 +532,50 @@ fn the_last_value_is_converted_and_the_bom_and_crlf_are_kept() {
         apply(text, &edits).unwrap(),
         "\u{feff}{\r\n  \"clock_note\": \"1h\",\r\n  \"clock_note\": \"off\" // quiet\r\n}\r\n"
     );
+}
+
+#[test]
+fn dreamer_branches_survives_conversion() {
+    let file = json!({"dreamer": {"branches": {"pj-a": ["master", "release/1.x"]}}});
+    let (edits, notes) = convert_0_49(&file);
+    assert!(edits.is_empty(), "{edits:?} {notes:?}");
+    let (edits, _) = convert_0_49(&json!({"dreamer": {"branches": ["master"]}}));
+    assert_eq!(edits, [Edit::remove("/dreamer/branches")]);
+}
+
+/// Every setting the schema declares, written at its default, comes through
+/// the conversion untouched. A setting added to the schema and the reader but
+/// not to the converter would otherwise be removed from the person's file at
+/// every start, as "not a ck-mc setting".
+#[test]
+fn every_schema_default_survives_conversion() {
+    let schema = super::review::schema_value();
+    let mut checked = 0;
+    for field in super::review::fields() {
+        let node = field
+            .pointer
+            .split('/')
+            .skip(1)
+            .try_fold(schema, |node, key| node.get("properties")?.get(key));
+        let Some(default) = node.and_then(|node| node.get("default")) else {
+            continue;
+        };
+        let mut file = json!({});
+        let mut slot = &mut file;
+        let keys: Vec<&str> = field.pointer.split('/').skip(1).collect();
+        for key in &keys[..keys.len() - 1] {
+            slot = slot
+                .as_object_mut()
+                .unwrap()
+                .entry(*key)
+                .or_insert_with(|| json!({}));
+        }
+        slot.as_object_mut()
+            .unwrap()
+            .insert(keys[keys.len() - 1].to_owned(), default.clone());
+        let (edits, notes) = convert_0_49(&file);
+        assert!(edits.is_empty(), "{}: {edits:?} {notes:?}", field.pointer);
+        checked += 1;
+    }
+    assert!(checked > 20, "only {checked} schema defaults were checked");
 }

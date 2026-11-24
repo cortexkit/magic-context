@@ -544,6 +544,7 @@ impl Converter {
                 "max_tokens" if budget.is_some() => {}
                 "max_tokens" => self.leaf(&member_at, value, |v| integer(v, 1, None)),
                 "projects" => self.leaf(&member_at, value, projects),
+                "branches" => self.leaf(&member_at, value, branches),
                 "tasks" => self.tasks(&member_at, value),
                 _ => self.unknown(&member_at),
             }
@@ -700,6 +701,17 @@ fn projects(value: &Value) -> Verdict {
                     .into(),
             ),
         ),
+    }
+}
+
+/// `dreamer.branches` has no 0.49 form: it is kept as written. The reader
+/// skips a project whose entry is not a list of branch names, with a warning,
+/// so only a value that is not a map at all is removed here.
+fn branches(value: &Value) -> Verdict {
+    if value.is_object() {
+        Keep
+    } else {
+        Drop("not a map of project ids to branch names".into())
     }
 }
 
