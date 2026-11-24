@@ -1,4 +1,4 @@
-//! Entorhinal's tagged `fleet.epoch_current` samples (`hub-samples-v1`,
+//! Entorhinal's tagged `fleet.epoch_current` samples (`hub-only-samples-v1`,
 //! folder `test-vectors/fleet-epoch-current-v1/`, copied with their
 //! `SHA256SUMS`): ck-mc's request has the samples' shape, every served reply
 //! reads as the epoch record it states (a missing member is unknown, never
@@ -26,7 +26,7 @@ const SUMS: &str = include_str!("../../testdata/entorhinal-fleet-epoch-current-v
 
 /// The SHA-256 of the tagged set's `SHA256SUMS`, as Entorhinal's team
 /// published it with the tag.
-const SUMS_SHA256: &str = "b8634fb2ceb9b8d96ef9c998aabe2dbf18481ba1a760237e362d8afc451b2c2f";
+const SUMS_SHA256: &str = "3c26338be826ffa497cf2561fdea6ec12a0ebcf8739a3df66e0fff674e21c0cf";
 
 const FILES: [(&str, &str); 8] = [
     sample!("README.md"),

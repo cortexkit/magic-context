@@ -20,6 +20,12 @@
 //!   locally, at `gen` 1, renewed every 20 seconds. Only the hub arbitrates.
 //!   So ck-mc always asks, and on a single computer the answer is always
 //!   yes.
+//! - **Taking a role on the hub.** There the first notice for a role this
+//!   computer doesn't hold yet says `holding: false`, and it is pending:
+//!   once it is acknowledged, Entorhinal asks the hub, and the next notice
+//!   holds with a new generation. A run keeps the watch open and waits up
+//!   to [`TAKE_DEADLINE`] for that notice; closing the watch on the first
+//!   notice would end the request before the hub saw it.
 //! - **The acting window.** A holder may act until `issued_at_ms +
 //!   valid_for_ms`, read on the operating system's monotonic clock in
 //!   milliseconds, the clock Entorhinal stamps notices with ([`monotonic_ms`]).
@@ -38,7 +44,7 @@
 //!
 //! The live client is the transport's ([`crate::transport`]); tests drive
 //! the same [`Lease`] with a double fed Entorhinal's published samples
-//! (`testdata/role-lease-v1.2`).
+//! (`testdata/role-lease-v1.5`).
 //!
 //! The lease matters only once memories replicate, so the dreamer uses it
 //! only in a build with the `memory-replica` feature ([`ENABLED`]). Without
@@ -76,6 +82,15 @@ pub const YIELD_OP: &str = "role.lease.yield";
 /// one-minute round, so an Entorhinal that never answers holds a run back
 /// for at most that long, once per due slot.
 pub const FIRST_NOTICE: Duration = Duration::from_secs(10);
+
+/// How long a run waits, after a first notice that doesn't hold the role,
+/// for one that does. On the hub that first notice is pending, not a
+/// refusal: Entorhinal writes the take to the hub only once the notice is
+/// acknowledged, and the next notice holds. That takes about a second for
+/// a vacant role, up to 60 seconds while another computer recorded as the
+/// role's preferred home is given its chance, and up to one 45-second lease
+/// if another computer held the role and its lease has to lapse first.
+pub const TAKE_DEADLINE: Duration = Duration::from_secs(90);
 
 /// Entorhinal's bound on acknowledging a notice.
 pub const ACK_DEADLINE: Duration = Duration::from_secs(5);
@@ -357,11 +372,12 @@ pub struct Lease {
 
 impl Lease {
     /// Open `role`'s watch and wait up to [`FIRST_NOTICE`] for its first
-    /// notice. `Err` says why the run may not act for the role: Entorhinal
-    /// refused or didn't answer, this computer doesn't hold the role, the
-    /// notice leaves less than the margin of its window, or it asked for
-    /// the role and the run, with nothing in flight yet, handed it over.
-    /// The watch is closed then.
+    /// notice, then, when it doesn't hold the role, up to [`TAKE_DEADLINE`]
+    /// for one that does. `Err` says why the run may not act for the role:
+    /// Entorhinal refused or didn't answer, this computer wasn't given the
+    /// role, the notice leaves less than the margin of its window, or it
+    /// asked for the role and the run, with nothing in flight yet, handed
+    /// it over. The watch is closed then.
     pub async fn open(leases: &dyn RoleLeases, role: &str, clock: &Clock) -> Result<Lease, String> {
         let Watch { notices, route } = leases
             .watch(role)
@@ -397,13 +413,18 @@ impl Lease {
             .await,
             Ok(Ok(_))
         );
-        let standing = if answered {
-            lease.standing(clock).await
-        } else {
+        let standing = if !answered {
             Standing::Lost(format!(
                 "Entorhinal did not answer for {role} within {} seconds",
                 FIRST_NOTICE.as_secs()
             ))
+        } else if !lease.taken().await {
+            Standing::Lost(format!(
+                "this computer was not given {role} within {} seconds of asking",
+                TAKE_DEADLINE.as_secs()
+            ))
+        } else {
+            lease.standing(clock).await
         };
         match standing {
             Standing::Acting { .. } => Ok(lease),
@@ -422,6 +443,26 @@ impl Lease {
 
     pub fn role(&self) -> &str {
         &self.role
+    }
+
+    /// After the first notice: wait up to [`TAKE_DEADLINE`] for a notice
+    /// that holds the role, or for the watch to end. `false` when neither
+    /// came in time. A notice that doesn't hold is acknowledged by the
+    /// reader as it arrives, which is what lets Entorhinal take the role.
+    async fn taken(&mut self) -> bool {
+        // The wait's answer borrows the state, which the reader can't
+        // change while it is held: it ends with this statement.
+        matches!(
+            tokio::time::timeout(
+                TAKE_DEADLINE,
+                self.state.wait_for(|state| {
+                    state.ended.is_some()
+                        || state.notice.as_ref().is_some_and(|notice| notice.holding)
+                }),
+            )
+            .await,
+            Ok(Ok(_))
+        )
     }
 
     /// Where the run stands with the role now, by `clock`, once every

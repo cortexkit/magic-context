@@ -1,6 +1,6 @@
 //! A stand-in for Entorhinal's role leases, for tests: each watch it opens
 //! delivers notices taken from Entorhinal's published samples
-//! (`testdata/role-lease-v1.2`, Entorhinal tag `role-lease-v1.2`), a test
+//! (`testdata/role-lease-v1.5`, Entorhinal tag `role-lease-v1.5`), a test
 //! can send more into a watch that is open, and each yield gets the next
 //! answer a test queued for its role. It records every watch opened and
 //! closed, every acknowledgement and every yield.
@@ -18,50 +18,54 @@ use super::lease::{
 };
 
 /// The published samples, by file name, as their `SHA256SUMS` lists them.
-pub(crate) const SAMPLES: [(&str, &str); 10] = [
+pub(crate) const SAMPLES: [(&str, &str); 11] = [
     (
         "ack.json",
-        include_str!("../../testdata/role-lease-v1.2/ack.json"),
-    ),
-    (
-        "engram-sharing.json",
-        include_str!("../../testdata/role-lease-v1.2/engram-sharing.json"),
+        include_str!("../../testdata/role-lease-v1.5/ack.json"),
     ),
     (
         "handback.json",
-        include_str!("../../testdata/role-lease-v1.2/handback.json"),
+        include_str!("../../testdata/role-lease-v1.5/handback.json"),
     ),
     (
         "holding.json",
-        include_str!("../../testdata/role-lease-v1.2/holding.json"),
+        include_str!("../../testdata/role-lease-v1.5/holding.json"),
+    ),
+    (
+        "hub-first-take.json",
+        include_str!("../../testdata/role-lease-v1.5/hub-first-take.json"),
     ),
     (
         "lapsed.json",
-        include_str!("../../testdata/role-lease-v1.2/lapsed.json"),
+        include_str!("../../testdata/role-lease-v1.5/lapsed.json"),
+    ),
+    (
+        "local-after-hub.json",
+        include_str!("../../testdata/role-lease-v1.5/local-after-hub.json"),
     ),
     (
         "not-holding.json",
-        include_str!("../../testdata/role-lease-v1.2/not-holding.json"),
+        include_str!("../../testdata/role-lease-v1.5/not-holding.json"),
     ),
     (
         "refusals.json",
-        include_str!("../../testdata/role-lease-v1.2/refusals.json"),
+        include_str!("../../testdata/role-lease-v1.5/refusals.json"),
     ),
     (
         "sharing-disabled.json",
-        include_str!("../../testdata/role-lease-v1.2/sharing-disabled.json"),
+        include_str!("../../testdata/role-lease-v1.5/sharing-disabled.json"),
     ),
     (
         "yield-transferred.json",
-        include_str!("../../testdata/role-lease-v1.2/yield-transferred.json"),
+        include_str!("../../testdata/role-lease-v1.5/yield-transferred.json"),
     ),
     (
         "yield-withdrawn.json",
-        include_str!("../../testdata/role-lease-v1.2/yield-withdrawn.json"),
+        include_str!("../../testdata/role-lease-v1.5/yield-withdrawn.json"),
     ),
 ];
 
-pub(crate) const SHA256SUMS: &str = include_str!("../../testdata/role-lease-v1.2/SHA256SUMS");
+pub(crate) const SHA256SUMS: &str = include_str!("../../testdata/role-lease-v1.5/SHA256SUMS");
 
 /// One request a sample records: the op, its params, the principal its
 /// route was bound to, and every frame the handler served.

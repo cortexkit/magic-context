@@ -307,11 +307,12 @@ async fn a_single_computer_runs_the_dreamer_as_before() {
     assert_eq!(log.closed, [ROLE]);
 }
 
-/// A role another computer holds (`not-holding.json`): the run is skipped
-/// with the reason, its notice acknowledged all the same, and its schedule
-/// moves to the next slot, so the next rounds don't ask again.
+/// A role another computer holds (`not-holding.json`, and no notice that
+/// holds within the take deadline): the run is skipped with the reason, its
+/// notice acknowledged all the same, and its schedule moves to the next
+/// slot, so the next rounds don't ask again.
 #[cfg(feature = "memory-replica")]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_role_another_computer_holds_skips_the_run_and_is_not_asked_again() {
     let (_dir, db) = store();
     let leases = SampleLeases::new();
@@ -321,13 +322,20 @@ async fn a_role_another_computer_holds_skips_the_run_and_is_not_asked_again() {
     let client = replies(1);
     let now = now_ms();
     engine.tick(&db, &client, &Settings::default(), now);
+    // The run waits out the take deadline on the paused clock.
+    for _ in 0..200 {
+        if engine.running.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
     settled(&engine).await;
 
     let (status, error, next) = schedule(&db);
     assert_eq!(status.as_deref(), Some("skipped"));
     assert_eq!(
         error.as_deref(),
-        Some("this computer does not hold dreamer.pj-lease")
+        Some("this computer was not given dreamer.pj-lease within 90 seconds of asking")
     );
     let next = next.unwrap();
     assert!(next > now, "the schedule moved to its next slot");

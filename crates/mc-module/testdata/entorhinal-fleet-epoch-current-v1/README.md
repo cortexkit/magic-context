@@ -15,7 +15,7 @@ only local cached values. Missing fields are unknown, not zero.
   re-read `fleet.epoch_current`. A different `incarnation` means the publisher
   restarted; `generation` is comparable only within an incarnation.
 
-The cases include a computer that hasn't switched to the hub yet, one unknown field at a time, a vault that is
+The cases include a computer without hub sharing, one unknown field at a time, a vault that is
 current or behind, and an unknown request parameter. Reproduce the records with
 `ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked -- fleet_epoch_current_served_records_and_marker`.
 Verify the files with `shasum -a 256 -c SHA256SUMS` from this directory.

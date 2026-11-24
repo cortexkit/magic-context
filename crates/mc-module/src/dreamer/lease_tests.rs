@@ -20,7 +20,7 @@ fn steps(file: &str, role: &str) -> Vec<Step> {
     notices(file, role).into_iter().map(Step::Notice).collect()
 }
 
-/// The copy in `testdata/role-lease-v1.2` is the published one: every file
+/// The copy in `testdata/role-lease-v1.5` is the published one: every file
 /// its `SHA256SUMS` lists is here with that digest, and nothing else is.
 #[test]
 fn the_copied_samples_match_their_published_digests() {
@@ -79,7 +79,7 @@ fn every_frame_of_every_sample_decodes_through_the_lease_types() {
             }
         }
     }
-    assert_eq!(frames, 21);
+    assert_eq!(frames, 24);
 }
 
 /// The requests are sent as `{"method": op, "params": request}`, with the
@@ -137,24 +137,64 @@ async fn a_single_computer_grants_the_role_at_gen_one() {
     assert_eq!(log.closed, ["dreamer.global"]);
 }
 
-/// `holding: false` is refused with its reason, and still acknowledged.
-#[tokio::test]
+/// `holding: false` is acknowledged at once, and while no notice that holds
+/// follows, the run is refused after [`TAKE_DEADLINE`] with the watch
+/// closed.
+#[tokio::test(start_paused = true)]
 async fn a_role_another_computer_holds_is_refused_and_its_notice_acknowledged() {
     let leases = SampleLeases::new();
     leases.default_script(steps("not-holding.json", "dreamer.pj-fern_01"));
     let (_, clock) = fake_clock(100_500);
+    let started = tokio::time::Instant::now();
     let refused = Lease::open(&*leases, "dreamer.pj-fern_01", &clock)
         .await
         .err()
         .unwrap();
-    assert_eq!(refused, "this computer does not hold dreamer.pj-fern_01");
+    assert_eq!(
+        refused,
+        "this computer was not given dreamer.pj-fern_01 within 90 seconds of asking"
+    );
+    assert!(started.elapsed() >= TAKE_DEADLINE);
     let log = leases.log();
     assert_eq!(log.acks, [("dreamer.pj-fern_01".to_owned(), 2)]);
     assert_eq!(log.closed, ["dreamer.pj-fern_01"]);
 }
 
-/// Nothing extends the window, so the run stops acting at its deadline
-/// (less the margin) while the watch is still open.
+/// A first take on the hub (`hub-first-take.json`): `holding: false` at
+/// gen 0, then, once that is acknowledged and Entorhinal wrote the take,
+/// `holding: false` at gen 1, and once that is acknowledged too, a notice
+/// that holds at gen 1. The run acknowledges both pending notices and acts
+/// on the one that holds; closing the watch on the first would have ended
+/// the request before the hub saw it.
+#[tokio::test(start_paused = true)]
+async fn a_first_take_on_the_hub_acknowledges_the_pending_notices_and_acts_on_the_take() {
+    let leases = SampleLeases::new();
+    let role = "dreamer.pj-16a17c32f5e0199b";
+    let mut take = notices("hub-first-take.json", role);
+    let held = take.pop().unwrap();
+    assert!(held.holding && take.iter().all(|notice| !notice.holding));
+    leases.script(role, take.into_iter().map(Step::Notice).collect());
+    let (_, clock) = fake_clock(101_200);
+    let opening = {
+        let leases = Arc::clone(&leases);
+        let clock = Arc::clone(&clock);
+        tokio::spawn(async move { Lease::open(&*leases, role, &clock).await })
+    };
+    // Both pending notices are acknowledged while the run waits.
+    while leases.log().acks.len() < 2 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        leases.log().acks,
+        [(role.to_owned(), 1), (role.to_owned(), 2)]
+    );
+    assert!(leases.send(role, Step::Notice(held)));
+    let lease = opening.await.unwrap().unwrap();
+    assert_eq!(lease.standing(&clock).await, Standing::Acting { gen: 1 });
+    assert!(leases.log().closed.is_empty(), "the watch is still open");
+    lease.close().await;
+}
+
 #[tokio::test]
 async fn a_lapsed_window_stops_the_run_with_the_watch_still_open() {
     let leases = SampleLeases::new();
@@ -320,18 +360,22 @@ async fn a_handback_in_the_first_notice_is_yielded_before_the_run_starts() {
 #[tokio::test]
 async fn a_withdrawn_role_stops_the_run() {
     let leases = SampleLeases::new();
-    let mut engram = notices("engram-sharing.json", "connector_home");
-    let withdrawn = engram.pop().unwrap();
-    leases.default_script(engram.into_iter().map(Step::Notice).collect());
-    let (_, clock) = fake_clock(140_500);
-    let lease = Lease::open(&*leases, "connector_home", &clock)
-        .await
-        .unwrap();
-    assert_eq!(lease.standing(&clock).await, Standing::Acting { gen: 12 });
-    assert!(leases.send("connector_home", Step::Notice(withdrawn)));
+    let role = "dreamer.workspace_02";
+    let held = notices("lapsed.json", role).remove(0);
+    let mut withdrawn = held.clone();
+    withdrawn.holding = false;
+    withdrawn.seq += 1;
+    leases.script(role, vec![Step::Notice(held.clone())]);
+    let (_, clock) = fake_clock(100_500);
+    let lease = Lease::open(&*leases, role, &clock).await.unwrap();
     assert_eq!(
         lease.standing(&clock).await,
-        Standing::Lost("this computer does not hold connector_home".into())
+        Standing::Acting { gen: held.gen }
+    );
+    assert!(leases.send(role, Step::Notice(withdrawn)));
+    assert_eq!(
+        lease.standing(&clock).await,
+        Standing::Lost(format!("this computer does not hold {role}"))
     );
     lease.close().await;
 }

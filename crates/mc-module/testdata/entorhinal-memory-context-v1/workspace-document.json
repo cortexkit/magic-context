@@ -1,0 +1,5 @@
+[
+  {"op":"workspace.document","request":{"revision":null,"workspace_id":"served-workspace"},"principal":{"kind":"reserved","moduleId":"phone"},"reply":{"result":{"accepted_at_ms":700,"accepted_via":"direct","charter":"Build carefully.\n","document":"Accepted policy\n","revision":2,"sha256":"f8efe6cf15274cf6d4255496b31043a4f14386b408d0f52787777ab9d57e2d9b","workspace_id":"served-workspace"}}},
+  {"op":"workspace.document","request":{"revision":1,"workspace_id":"served-workspace"},"principal":{"kind":"reserved","moduleId":"phone"},"reply":{"result":{"accepted_at_ms":700,"accepted_via":"direct","charter":"Build carefully.\n","document":"Initial policy\n","revision":1,"sha256":"98fa1e4f30b35465a40719902ccbe2c5c8d0879df84f09c901c63c9559f794ad","workspace_id":"served-workspace"}}},
+  {"op":"workspace.document","request":{"revision":99,"workspace_id":"served-workspace"},"principal":{"kind":"reserved","moduleId":"phone"},"reply":{"code":"revision_unknown","detail":null,"message":"workspace served-workspace has no accepted revision 99"}}
+]

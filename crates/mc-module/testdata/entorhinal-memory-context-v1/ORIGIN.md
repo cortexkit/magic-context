@@ -4,18 +4,16 @@ These files were copied byte-for-byte from the Entorhinal repository, which owns
 the `context.project` and `context.session` wire protocol.
 
 The artifact handoff identifies the repository as `entorhinal` but supplies no
-canonical remote URL. Source paths and commits below are upstream identifiers;
+canonical remote URL. The tag and path below are upstream identifiers;
 `SHA256SUMS` independently identifies the exact supplied bytes.
 
-| File | Commit | Source path |
-| --- | --- | --- |
-| `context-project.json` | `19770194` | `test-vectors/memory-context-v1/context-project.json` |
-| `context-session.json` | `2a296fd` | `test-vectors/memory-context-v1/context-session.json` |
-| `README.md` | `2a296fd` | `test-vectors/memory-context-v1/README.md` |
-| `context-session-populated.json` | `9e1eb8b` | `test-vectors/memory-context-v1/context-session-populated.json` |
-| `README-9e1eb8b.md` | `9e1eb8b` | `test-vectors/memory-context-v1/README.md` |
+Every file is copied from Entorhinal tag `hub-only-samples-v1` (main `291c1ed`),
+from `test-vectors/memory-context-v1/`. That tag changed only the legacy claim
+fields of `context-session-populated.json`'s held-elsewhere record; the fields
+Magic Context reads are unchanged. This copy also carries
+`workspace-document.json`, which the upstream `SHA256SUMS` lists.
 
-`SHA256SUMS` pins all five upstream files. Both upstream READMEs are unchanged.
+`SHA256SUMS` is the upstream one and pins every file listed in it.
 References in the upstream READMEs to other vectors describe the upstream
 directory, not files vendored here. Tests read only these tracked copies, not
 internal documents or files in another repository checkout.

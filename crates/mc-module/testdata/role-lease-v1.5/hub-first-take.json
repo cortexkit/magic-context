@@ -1,0 +1,7 @@
+[
+  {"op":"role.lease","request":{"role":"dreamer.pj-16a17c32f5e0199b"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"StreamData","body":{"holding":false,"gen":0,"valid_for_ms":0,"issued_at_ms":100000,"seq":1}}]},
+  {"op":"role.lease.ack","request":{"role":"dreamer.pj-16a17c32f5e0199b","seq":1},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"Response","body":{"result":{"acknowledged":true}}}]},
+  {"op":"role.lease","request":{"role":"dreamer.pj-16a17c32f5e0199b"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"StreamData","body":{"holding":false,"gen":1,"valid_for_ms":0,"issued_at_ms":101000,"seq":2}}]},
+  {"op":"role.lease.ack","request":{"role":"dreamer.pj-16a17c32f5e0199b","seq":2},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"Response","body":{"result":{"acknowledged":true}}}]},
+  {"op":"role.lease","request":{"role":"dreamer.pj-16a17c32f5e0199b"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"StreamData","body":{"holding":true,"gen":1,"valid_for_ms":44950,"issued_at_ms":101100,"seq":3}}]}
+]
