@@ -190,6 +190,8 @@ pub struct Engine {
     leases: Arc<dyn RoleLeases>,
     /// The monotonic clock acting windows are read on.
     clock: Clock,
+    /// The maintenance pool and the module runtime that owns lease I/O.
+    runtimes: std::sync::OnceLock<(tokio::runtime::Handle, super::runtime::OnRuntime)>,
 }
 
 /// Where a run finds the embedding provider for a project's folder.
@@ -212,6 +214,7 @@ impl Engine {
             mural_enabled: None,
             leases: Arc::new(lease::NoEntorhinal),
             clock: lease::system_clock(),
+            runtimes: std::sync::OnceLock::new(),
         }
     }
 
@@ -244,6 +247,27 @@ impl Engine {
     pub(crate) fn with_mural_enabled(mut self, enabled: MuralEnabled) -> Self {
         self.mural_enabled = Some(enabled);
         self
+    }
+
+    pub(crate) fn bind_runtime(&self, dreamer: &tokio::runtime::Handle) {
+        assert!(
+            self.runtimes
+                .set((dreamer.clone(), super::runtime::OnRuntime::current()))
+                .is_ok(),
+            "the dreamer runtime is bound once, at module start"
+        );
+    }
+
+    pub(crate) fn spawn<F>(&self, work: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        match self.runtimes.get() {
+            Some((dreamer, _)) => dreamer.spawn(work),
+            // Direct engine tests need no second runtime.
+            None => tokio::spawn(work),
+        }
     }
 
     /// Close the runs a stopped process left open. Called once at start.
@@ -351,7 +375,20 @@ impl Engine {
         }
         let mut held = Vec::new();
         for owner in store::lock_order(owners) {
-            match Lease::open(&*self.leases, &lease::role(&owner), &self.clock).await {
+            let role = lease::role(&owner);
+            let lease = match self.runtimes.get() {
+                Some((_, module)) => {
+                    Lease::open_on(
+                        module.clone(),
+                        self.leases.clone(),
+                        role,
+                        self.clock.clone(),
+                    )
+                    .await
+                }
+                None => Lease::open(&*self.leases, &role, &self.clock).await,
+            };
+            match lease {
                 Ok(lease) => held.push(lease),
                 Err(reason) => {
                     close(held).await;
@@ -628,7 +665,7 @@ impl Engine {
             }
             let engine = Arc::clone(self);
             let (db, client, settings) = (Arc::clone(db), Arc::clone(client), settings.clone());
-            tokio::spawn(async move {
+            self.spawn(async move {
                 let owner = due.owner.clone();
                 engine
                     .run_due(&db, &*client, &settings, due, &root, &profile)
@@ -686,7 +723,7 @@ impl Engine {
             }
             let engine = Arc::clone(self);
             let (db, client) = (Arc::clone(db), Arc::clone(client));
-            tokio::spawn(async move {
+            self.spawn(async move {
                 if let Lookup::Members(members) =
                     crate::workspace_members::workspace_members(&*client, &workspace).await
                 {
@@ -791,7 +828,7 @@ impl Engine {
                 let engine = Arc::clone(self);
                 let (db, client, settings) = (Arc::clone(db), Arc::clone(client), settings.clone());
                 let (project, seen, workspace) = (project.clone(), seen.clone(), workspace.clone());
-                tokio::spawn(async move {
+                self.spawn(async move {
                     engine
                         .run_once(
                             &db,
@@ -1371,7 +1408,7 @@ impl Engine {
             settings.clone(),
             kind.to_owned(),
         );
-        tokio::spawn(async move {
+        self.spawn(async move {
             // A project run of a task that also reads its workspace is given
             // the workspace as a scheduled run is; a project run never
             // refuses for want of one.

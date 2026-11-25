@@ -360,6 +360,7 @@ pub enum Standing {
 pub struct Lease {
     role: String,
     route: Arc<dyn LeaseRoute>,
+    runtime: super::runtime::OnRuntime,
     state: watch::Receiver<State>,
     /// Asks the reader to take every notice the watch already delivered
     /// before answering ([`Lease::settle`]).
@@ -381,6 +382,28 @@ impl Lease {
     /// asked for the role and the run, with nothing in flight yet, handed
     /// it over. The watch is closed then.
     pub async fn open(leases: &dyn RoleLeases, role: &str, clock: &Clock) -> Result<Lease, String> {
+        Self::open_watch(leases, role, clock, Default::default()).await
+    }
+
+    pub(crate) async fn open_on(
+        runtime: super::runtime::OnRuntime,
+        leases: Arc<dyn RoleLeases>,
+        role: String,
+        clock: Clock,
+    ) -> Result<Lease, String> {
+        let reader_runtime = runtime.clone();
+        runtime
+            .run(async move { Self::open_watch(&*leases, &role, &clock, reader_runtime).await })
+            .await
+            .map_err(|error| format!("opening the lease on the module runtime: {error}"))?
+    }
+
+    async fn open_watch(
+        leases: &dyn RoleLeases,
+        role: &str,
+        clock: &Clock,
+        runtime: super::runtime::OnRuntime,
+    ) -> Result<Lease, String> {
         let Watch { notices, route } = leases
             .watch(role)
             .await
@@ -397,6 +420,7 @@ impl Lease {
         let mut lease = Lease {
             role: role.to_owned(),
             route,
+            runtime,
             state,
             settle,
             reader: Some(reader),
@@ -486,15 +510,22 @@ impl Lease {
             return Standing::Acting { gen: notice.gen };
         }
         let role = &self.role;
-        match tokio::time::timeout(YIELD_DEADLINE, self.route.yield_role(notice.gen)).await {
-            Ok(Ok(true)) => {
+        let route = Arc::clone(&self.route);
+        let answered =
+            self.runtime
+                .run(async move {
+                    tokio::time::timeout(YIELD_DEADLINE, route.yield_role(notice.gen)).await
+                })
+                .await;
+        match answered {
+            Ok(Ok(Ok(true))) => {
                 self.handed_over
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 Standing::HandedBack
             }
             // The other computer withdrew its request: the run keeps the
             // role, within the same deadline, until a renewal extends it.
-            Ok(Ok(false)) => {
+            Ok(Ok(Ok(false))) => {
                 *self.declined.lock().expect("lease yields") = Some(notice.seq);
                 self.settle().await;
                 match self.window(clock) {
@@ -504,13 +535,14 @@ impl Lease {
             }
             // Whether the role was handed over is unknown, so the run acts
             // no more for it.
-            Ok(Err(error)) => {
+            Ok(Ok(Err(error))) => {
                 Standing::Lost(format!("the yield of {role} was not settled ({error})"))
             }
-            Err(_) => Standing::Lost(format!(
+            Ok(Err(_)) => Standing::Lost(format!(
                 "the yield of {role} got no answer within {} seconds",
                 YIELD_DEADLINE.as_secs()
             )),
+            Err(error) => Standing::Lost(format!("the yield of {role} was interrupted ({error})")),
         }
     }
 

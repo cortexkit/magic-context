@@ -264,6 +264,7 @@ pub struct SubcRunnerClient {
 pub struct SharedConsumer {
     connection_file: PathBuf,
     cell: Arc<OnceCell<Arc<SubcConsumer>>>,
+    runtime: crate::dreamer::runtime::OnRuntime,
 }
 
 impl SharedConsumer {
@@ -272,14 +273,64 @@ impl SharedConsumer {
     /// has registered (`serve_with_handle`): the connection is bound with a
     /// claim minted on that registration.
     pub async fn get(&self) -> Result<&Arc<SubcConsumer>, String> {
-        self.cell
-            .get_or_try_init(|| async {
-                SubcConsumer::connect(&self.connection_file, ConsumerOptions::default())
+        if let Some(consumer) = self.cell.get() {
+            return Ok(consumer);
+        }
+        let this = self.clone();
+        self.runtime
+            .run(async move {
+                this.cell
+                    .get_or_try_init(|| async {
+                        SubcConsumer::connect(&this.connection_file, ConsumerOptions::default())
+                            .await
+                            .map(Arc::new)
+                    })
                     .await
-                    .map(Arc::new)
+                    .map(|_| ())
             })
             .await
-            .map_err(|error| format!("connect: {error:?}"))
+            .map_err(|error| format!("connect interrupted: {error}"))?
+            .map_err(|error| format!("connect: {error:?}"))?;
+        Ok(self.cell.get().expect("connected consumer"))
+    }
+}
+
+/// The SDK can reconnect inline on any call, registering a new socket and
+/// spawning its reader and writer on the calling runtime. Keep those tasks
+/// on the module runtime: the same connection carries lease ACKs.
+struct RunnerConsumer<'a> {
+    consumer: &'a Arc<SubcConsumer>,
+    runtime: &'a crate::dreamer::runtime::OnRuntime,
+}
+
+impl RunnerConsumer<'_> {
+    fn current_epoch(&self) -> u64 {
+        self.consumer.current_epoch()
+    }
+
+    async fn on_wire<T, F>(
+        &self,
+        operation: impl FnOnce(Arc<SubcConsumer>) -> F,
+    ) -> Result<T, subc_client_rs::CallError>
+    where
+        F: std::future::Future<Output = Result<T, subc_client_rs::CallError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.runtime
+            .run(operation(Arc::clone(self.consumer)))
+            .await
+            .map_err(|error| subc_client_rs::CallError::OutcomeUnknown(Box::new(error)))?
+    }
+
+    async fn call(
+        &self,
+        target: RouteTarget,
+        identity: BindIdentity,
+        body: Vec<u8>,
+        options: CallOptions,
+    ) -> Result<Vec<u8>, subc_client_rs::CallError> {
+        self.on_wire(|consumer| async move { consumer.call(target, identity, body, options).await })
+            .await
     }
 }
 
@@ -289,12 +340,19 @@ impl SubcRunnerClient {
             consumer: SharedConsumer {
                 connection_file,
                 cell: Arc::new(OnceCell::new()),
+                runtime: Default::default(),
             },
             child_scopes,
             runner_capabilities: Default::default(),
             routing_capabilities: Default::default(),
             run_ends: Arc::default(),
         }
+    }
+
+    /// Bind the shared wire connection to the module's interactive runtime.
+    pub fn on_current_runtime(mut self) -> Self {
+        self.consumer.runtime = crate::dreamer::runtime::OnRuntime::current();
+        self
     }
 
     /// The waits on this client's child runs, for the reader that wakes
@@ -397,11 +455,14 @@ impl SubcRunnerClient {
         let reply = match scope {
             None => consumer.call(target, identity, body, options).await,
             Some(scope) => {
-                let route = consumer
-                    .open_route_scoped(target, identity, scope, options.clone())
+                consumer
+                    .on_wire(|consumer| async move {
+                        let route = consumer
+                            .open_route_scoped(target, identity, scope, options.clone())
+                            .await?;
+                        consumer.request(&route, body, options).await
+                    })
                     .await
-                    .map_err(|error| call_error(method, &error))?;
-                consumer.request(&route, body, options).await
             }
         }
         .map_err(|error| call_error(method, &error))?;
@@ -446,11 +507,14 @@ fn route_target(role: &str, module_id: &str) -> RouteTarget {
 
 impl SubcRunnerClient {
     /// The connection to the daemon, made on first use.
-    async fn consumer(&self) -> Result<&SubcConsumer, String> {
-        self.consumer.get().await.map(|consumer| &**consumer)
+    async fn consumer(&self) -> Result<RunnerConsumer<'_>, String> {
+        Ok(RunnerConsumer {
+            consumer: self.consumer.get().await?,
+            runtime: &self.consumer.runtime,
+        })
     }
 
-    async fn routing_provider(&self) -> Result<(&SubcConsumer, String), RouteError> {
+    async fn routing_provider(&self) -> Result<(RunnerConsumer<'_>, String), RouteError> {
         let unavailable = |message: String| RouteError {
             code: "routing_unavailable".into(),
             message,
@@ -458,7 +522,9 @@ impl SubcRunnerClient {
         };
         let consumer = self.consumer().await.map_err(unavailable)?;
         let providers = consumer
-            .resolve_providers(crate::routing::CAPABILITY)
+            .on_wire(|consumer| async move {
+                consumer.resolve_providers(crate::routing::CAPABILITY).await
+            })
             .await
             .map_err(|error| unavailable(format!("{error:?}")))?;
         let module_id = match providers.as_slice() {
@@ -487,11 +553,11 @@ impl SubcRunnerClient {
         params: &P,
     ) -> Result<Value, RouteError> {
         let (consumer, module_id) = self.routing_provider().await?;
-        Self::route_call_on(consumer, &module_id, method, params).await
+        Self::route_call_on(&consumer, &module_id, method, params).await
     }
 
     async fn route_call_on<P: Serialize>(
-        consumer: &SubcConsumer,
+        consumer: &RunnerConsumer<'_>,
         module_id: &str,
         method: &str,
         params: &P,
@@ -544,10 +610,10 @@ impl crate::routing::Router for SubcRunnerClient {
                 &module_id,
                 consumer.current_epoch(),
                 request,
-                Self::route_call_on(consumer, &module_id, "role.describe", &json!({})),
+                Self::route_call_on(&consumer, &module_id, "role.describe", &json!({})),
             )
             .await;
-        let result = Self::route_call_on(consumer, &module_id, "route.select", &request).await?;
+        let result = Self::route_call_on(&consumer, &module_id, "route.select", &request).await?;
         serde_json::from_value(result).map_err(|error| RouteError {
             code: "routing_unavailable".into(),
             message: format!("route.select answer: {error}"),
@@ -1012,7 +1078,7 @@ impl RunnerClient for SubcRunnerClient {
     async fn ready_participants(&self, capability: &str) -> Result<Vec<String>, String> {
         let consumer = self.consumer().await?;
         let catalog = consumer
-            .catalog_list()
+            .on_wire(|consumer| async move { consumer.catalog_list().await })
             .await
             .map_err(|error| format!("{error:?}"))?;
         Ok(crate::agent_data::service::ready_participants(
@@ -1080,6 +1146,7 @@ impl RunnerClient for SubcRunnerClient {
     ) -> Result<Value, crate::client::CoreRefusal> {
         use crate::client::CoreRefusal;
         let consumer = self.consumer().await.map_err(CoreRefusal::unavailable)?;
+        let consumer = &consumer;
         let params = &params;
         crate::prefrontal::call(|module_id| async move {
             let reply = consumer

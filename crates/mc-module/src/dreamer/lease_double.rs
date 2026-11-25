@@ -161,6 +161,8 @@ pub(crate) struct Log {
 #[derive(Default)]
 struct Shared {
     log: Log,
+    #[cfg(feature = "memory-replica")]
+    ack_observer: Option<std::sync::mpsc::Sender<(String, u64)>>,
     /// The open watches, by role, for [`SampleLeases::send`].
     live: HashMap<String, mpsc::UnboundedSender<Step>>,
     /// The answers the next yields of each role get, in order. A yield
@@ -244,6 +246,13 @@ impl SampleLeases {
 
     pub(crate) fn log(&self) -> Log {
         self.shared.lock().unwrap().log.clone()
+    }
+
+    #[cfg(feature = "memory-replica")]
+    pub(crate) fn observe_acks(&self) -> std::sync::mpsc::Receiver<(String, u64)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.shared.lock().unwrap().ack_observer = Some(tx);
+        rx
     }
 }
 
@@ -342,12 +351,12 @@ struct SampleRoute {
 #[async_trait]
 impl LeaseRoute for SampleRoute {
     async fn ack(&self, seq: u64) -> Result<(), LeaseError> {
-        self.shared
-            .lock()
-            .unwrap()
-            .log
-            .acks
-            .push((self.role.clone(), seq));
+        let mut shared = self.shared.lock().unwrap();
+        shared.log.acks.push((self.role.clone(), seq));
+        #[cfg(feature = "memory-replica")]
+        if let Some(observer) = &shared.ack_observer {
+            let _ = observer.send((self.role.clone(), seq));
+        }
         Ok(())
     }
 
