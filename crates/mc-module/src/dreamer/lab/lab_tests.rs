@@ -619,6 +619,131 @@ async fn frozen_search_dated_messages_use_inclusive_utc_bounds_and_total_tie_ord
 }
 
 #[tokio::test]
+async fn frozen_search_summary_dates_come_from_indexed_messages_inside_the_range() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    let ms = |time| {
+        chrono::DateTime::parse_from_rfc3339(time)
+            .unwrap()
+            .timestamp_millis()
+    };
+    db.execute(
+        "UPDATE compartments SET start_message = 2, end_message = 5, created_at = ?1
+         WHERE session_id = 'session-p'",
+        [ms("2026-10-30T00:00:00Z")],
+    )
+    .unwrap();
+    for (ordinal, role, time) in [
+        (1, "user", "2026-06-27T10:00:00Z"),
+        (3, "user", "2026-06-28T10:00:00Z"),
+        (4, "assistant", "2026-07-02T12:00:00Z"),
+        (6, "assistant", "2026-07-03T12:00:00Z"),
+    ] {
+        index_message(&db, "session-p", ordinal, role, "covered text", ms(time));
+    }
+    drop(db);
+    let lab = fixture.search_lab(Some(&["session-p"])).await;
+    for bounds in [
+        json!({}),
+        json!({"from":"2026-06-30", "to":"2026-07-01"}),
+        json!({"from":"2026-07-02T12:00:00Z"}),
+        json!({"to":"2026-06-28T10:00:00Z"}),
+    ] {
+        let mut input = bounds;
+        input["query"] = json!("sharedterm");
+        let answer = lab.clone().tool("history_search", input).await.unwrap();
+        assert!(
+            group(&answer, "Summaries")
+                .contains("date=2026-06-28..2026-07-02 session=session-p ref=session-p:2-5"),
+            "{answer}"
+        );
+    }
+    for bounds in [
+        json!({"from":"2026-08-01"}),
+        json!({"from":"2026-07-02T12:00:01Z"}),
+        json!({"to":"2026-06-28T09:59:59Z"}),
+    ] {
+        let mut input = bounds;
+        input["query"] = json!("sharedterm");
+        let answer = lab.clone().tool("history_search", input).await.unwrap();
+        assert_eq!(group(&answer, "Summaries"), "none", "{answer}");
+    }
+}
+
+#[tokio::test]
+async fn frozen_search_summary_dates_of_empty_ranges_use_neighbouring_messages() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    db.execute(
+        "INSERT INTO compartments (session_id, harness, sequence, start_message, end_message, title, content, created_at)
+         VALUES ('session-p', 'mock', 2, 8, 11, 'A frozen summary', 'sharedterm', 900000000)",
+        [],
+    ).unwrap();
+    for (ordinal, at) in [(5, 86_400_000), (7, 172_800_000)] {
+        index_message(&db, "session-p", ordinal, "user", "indexed text", at);
+    }
+    drop(db);
+    let lab = fixture.search_lab(Some(&["session-p"])).await;
+    let answer = lab
+        .clone()
+        .tool("history_search", json!({"query":"sharedterm"}))
+        .await
+        .unwrap();
+    let summaries = group(&answer, "Summaries");
+    assert!(
+        summaries.contains("date=1970-01-02 session=session-p ref=session-p:1-4"),
+        "{answer}"
+    );
+    assert!(
+        summaries.contains("date=1970-01-03 session=session-p ref=session-p:8-11"),
+        "{answer}"
+    );
+    let answer = lab
+        .tool(
+            "history_search",
+            json!({"query":"sharedterm", "from":"1970-01-03", "to":"1970-01-03"}),
+        )
+        .await
+        .unwrap();
+    let summaries = group(&answer, "Summaries");
+    assert!(
+        summaries.contains("date=1970-01-03 session=session-p ref=session-p:8-11"),
+        "{answer}"
+    );
+    assert!(!summaries.contains("ref=session-p:1-4"), "{answer}");
+}
+
+#[tokio::test]
+async fn frozen_search_summary_dates_are_unknown_without_a_usable_session_time() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    db.execute(
+        "UPDATE message_fts_rowid_map SET message_time_ms = 0 WHERE session_id = 'session-p'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let lab = fixture.search_lab(Some(&["session-p"])).await;
+    let answer = lab
+        .clone()
+        .tool("history_search", json!({"query":"sharedterm"}))
+        .await
+        .unwrap();
+    assert!(
+        group(&answer, "Summaries").contains("date=unknown session=session-p ref=session-p:1-4"),
+        "{answer}"
+    );
+    let answer = lab
+        .tool(
+            "history_search",
+            json!({"query":"sharedterm", "to":"1970-01-02"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(group(&answer, "Summaries"), "none", "{answer}");
+}
+
+#[tokio::test]
 async fn frozen_search_archived_memory_follows_active_and_is_citable_by_id() {
     let fixture = Fixture::new();
     let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
@@ -771,7 +896,10 @@ async fn lab_review_only_mapped_harness_contributes_history_for_shared_ids() {
         1,
         "{answer}"
     );
-    assert!(group(&answer, "Summaries").contains("ref=session-p:1-4"));
+    assert!(
+        group(&answer, "Summaries").contains("date=unknown session=session-p ref=session-p:1-4"),
+        "{answer}"
+    );
 }
 
 #[tokio::test]
