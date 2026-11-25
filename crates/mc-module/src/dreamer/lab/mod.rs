@@ -25,7 +25,7 @@ use cortexkit_role_tool_provider::catalog::{self, composition_digest};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::child_scopes::{WorkerScope, LAB_WORKER_PROJECT};
+use crate::child_scopes::{WorkerScope, WorkerScopeGuard, LAB_WORKER_SCOPE};
 use crate::client::{Child, RunnerClient};
 use crate::routing::{self, Router};
 use crate::summary::fit::Window;
@@ -209,10 +209,11 @@ impl Start {
         if let Some(lab) = &loaded {
             lab.stopped.store(true, Ordering::Release);
         }
-        let worker_scope = observed.worker_scope.take();
+        let worker_guard = observed.worker_scope.take();
+        let worker_scope = worker_guard.as_ref().map(|guard| &guard.0);
         let (stop, error) = match outcome {
             Err(_) => {
-                in_child_scope(worker_scope.as_ref(), observed.cancel(client.as_ref())).await;
+                in_child_scope(worker_scope, observed.cancel(client.as_ref())).await;
                 ("deadline", None)
             }
             Ok(answer) => match answer {
@@ -258,10 +259,11 @@ impl Start {
             tracing::info!(%error, "ck-mc: dreamer lab could not record the result");
         }
         if let Some(worker_scope) = worker_scope {
-            if let Err(error) = client.end_worker_scope(&worker_scope).await {
+            if let Err(error) = client.end_worker_scope(worker_scope).await {
                 tracing::warn!(%error, "ck-mc: dreamer lab could not end its Worker scope");
             }
         }
+        drop(worker_guard);
         drop(permit);
     }
 }
@@ -270,7 +272,7 @@ const VALIDATION_TIMEOUT: &str = "dreamer lab validation timed out";
 
 async fn in_child_scope<T>(scope: Option<&Arc<WorkerScope>>, run: impl Future<Output = T>) -> T {
     match scope {
-        Some(scope) => LAB_WORKER_PROJECT.scope(scope.clone(), run).await,
+        Some(scope) => LAB_WORKER_SCOPE.scope(scope.clone(), run).await,
         None => run.await,
     }
 }
@@ -369,7 +371,7 @@ impl Lab {
             remaining_tokens: u64::MAX,
             attribution: None,
         };
-        observed.worker_scope.clone_from(&worker_scope);
+        observed.worker_scope = worker_scope.clone().map(WorkerScopeGuard);
         let result = in_child_scope(
             worker_scope.as_ref(),
             run::run_lab(client, &job, self, registry, observed, deadline),
@@ -694,7 +696,7 @@ pub(super) struct Observed {
     pub send: ObservedSend,
     pub account_limit_detail: Option<&'static str>,
     sidekick_offered: bool,
-    worker_scope: Option<Arc<WorkerScope>>,
+    worker_scope: Option<WorkerScopeGuard>,
     request: Option<Value>,
     request_written_at: Option<i64>,
 }

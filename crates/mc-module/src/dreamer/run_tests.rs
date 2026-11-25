@@ -47,7 +47,7 @@ pub(crate) type LabCatalogs = BTreeMap<
 >;
 
 fn lab_worker_project() -> Option<String> {
-    crate::child_scopes::LAB_WORKER_PROJECT
+    crate::child_scopes::LAB_WORKER_SCOPE
         .try_with(|scope| scope.project().to_owned())
         .ok()
 }

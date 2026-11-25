@@ -478,6 +478,52 @@ async fn sidekick_lab_ends_each_worker_scope_without_touching_the_ordinary_scope
 }
 
 #[tokio::test]
+async fn panicking_sidekick_lab_is_omitted_from_the_next_scope_sync() {
+    use crate::child_scopes::{tests::Recorder, ChildScopes};
+    use subc_protocol::scope::ScopeKind;
+
+    let fixture = Fixture::new();
+    let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
+    let publisher = Arc::new(Recorder::default());
+    scopes.set_publisher(publisher.clone());
+    scopes.for_child("/work/old").await.unwrap();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    let start = fixture.start(&spec).await.unwrap();
+    let registry = Arc::new(Registry::default());
+    // The scripted runner panics when asked for a result it was not given.
+    let mut client = review_client(&registry, &[]);
+    available_sidekick(&mut client);
+    client.lab_scopes = Some(scopes.clone());
+    let error = tokio::spawn(start.execute(Arc::new(client), registry, None))
+        .await
+        .unwrap_err();
+    assert!(error.is_panic());
+    {
+        let syncs = publisher.syncs.lock().unwrap();
+        assert_eq!(syncs.len(), 2, "unwinding must not issue a sync");
+        assert!(syncs[1]
+            .1
+            .iter()
+            .any(|record| record.kind == ScopeKind::Worker));
+    }
+    scopes.for_child("/work/new").await.unwrap();
+    let syncs = publisher.syncs.lock().unwrap();
+    assert_eq!(syncs.len(), 3);
+    let remaining = &syncs[2].1;
+    assert!(remaining
+        .iter()
+        .all(|record| record.kind == ScopeKind::Ephemeral));
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|record| record.workdir.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["/work/new", "/work/old"]
+    );
+}
+
+#[tokio::test]
 async fn sidekick_lab_deadline_republishes_without_the_unacknowledged_worker() {
     use crate::child_scopes::{tests::Recorder, ChildScopes};
     use subc_protocol::scope::ScopeKind;

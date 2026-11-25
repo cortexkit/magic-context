@@ -24,10 +24,20 @@ use subc_protocol::scope::{
 use subc_protocol::Principal;
 
 tokio::task_local! {
-    /// A lab run that offers `sidekick` needs the same Worker scope for all
-    /// of its child calls, including catalog preflight and cancellation.
+    /// An opted-in lab uses a Worker scope for the runner session, including
+    /// its catalog preflight and cancellation. Reader discovery runs first
+    /// under the ordinary scope.
     /// A separately spawned task does not inherit this task-local value.
-    pub(crate) static LAB_WORKER_PROJECT: Arc<WorkerScope>;
+    pub(crate) static LAB_WORKER_SCOPE: Arc<WorkerScope>;
+}
+
+pub(crate) struct WorkerScopeGuard(pub(crate) Arc<WorkerScope>);
+
+impl Drop for WorkerScopeGuard {
+    fn drop(&mut self) {
+        // If the run unwinds before it can sync, leave removal to the next sync.
+        self.0.mark_ended();
+    }
 }
 
 /// Identity and lifetime of one Worker scope. An ended scope cannot be reopened.
@@ -71,6 +81,13 @@ impl WorkerScope {
             .lock()
             .expect("Worker scope lifetime")
             .get_or_insert(error);
+    }
+
+    fn mark_ended(&self) {
+        self.end(ScopeError {
+            code: "worker_scope_ended".into(),
+            message: "the lab Worker scope has ended".into(),
+        });
     }
 
     pub(crate) fn check_live(&self) -> Result<(), ScopeError> {
@@ -174,6 +191,12 @@ impl State {
         publisher: &dyn ScopePublisher,
         pending: Option<(&ScopeKey, &Record)>,
     ) -> Result<(), ScopeError> {
+        self.records.retain(|_, record| {
+            record
+                .worker
+                .as_ref()
+                .is_none_or(|worker| worker.check_live().is_ok())
+        });
         let mut records: Vec<_> = self.records.iter().chain(pending).collect();
         if pending.is_some() {
             records.sort_by_key(|(key, _)| *key);
@@ -285,7 +308,7 @@ impl ChildScopes {
     /// The scope for `project_root`, published first when it is new. Only
     /// a lab run that requests `sidekick` sets a Worker project stamp.
     pub async fn for_child(&self, project_root: &str) -> Result<ScopeSelector, ScopeError> {
-        let worker = LAB_WORKER_PROJECT.try_with(Arc::clone).ok();
+        let worker = LAB_WORKER_SCOPE.try_with(Arc::clone).ok();
         if !Path::new(project_root).is_absolute() {
             return Err(ScopeError {
                 code: "child_scope_invalid_workdir".into(),
@@ -383,10 +406,7 @@ impl ChildScopes {
 
     pub(crate) async fn end_worker_scope(&self, worker: &WorkerScope) -> Result<(), ScopeError> {
         let mut state = self.state.lock().await;
-        worker.end(ScopeError {
-            code: "worker_scope_ended".into(),
-            message: "the lab Worker scope has ended".into(),
-        });
+        worker.mark_ended();
         if state.records.remove(&worker.key).is_some() {
             state.synced = false;
         }
@@ -464,7 +484,7 @@ pub(crate) mod tests {
         scopes: &ChildScopes,
         worker: &Arc<WorkerScope>,
     ) -> Result<ScopeSelector, ScopeError> {
-        LAB_WORKER_PROJECT
+        LAB_WORKER_SCOPE
             .scope(worker.clone(), scopes.for_child(&worker.key.0))
             .await
     }
