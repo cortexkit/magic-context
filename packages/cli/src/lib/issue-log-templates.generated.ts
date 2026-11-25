@@ -2491,6 +2491,7 @@ const TEMPLATE_DATA = [
 "ck-mc: app reads: loading session projects: \x01",
 "ck-mc: legacy project rows moved from \x01 to \x01: \x01",
 "ck-mc: memory writes see no allowed levels: \x01",
+"ck-mc: session \x01: \x01 refused host-frame facts: \x01",
 "ck-mc: upkeep could not read memories for \x01: \x01",
 "Failed to ensure project artifact gitignore \x01",
 "lkg_fit_basis=provider_input measured_input=\x01",

@@ -19,6 +19,7 @@ struct Fact {
     opens: Option<usize>,
     visible: Option<usize>,
     role: Option<char>,
+    framed: bool,
     commits: Vec<String>,
 }
 
@@ -278,6 +279,7 @@ struct Block {
     low: usize,
     high: usize,
     role: char,
+    framed: bool,
     commits: Vec<(usize, String)>,
 }
 
@@ -330,9 +332,10 @@ impl Window {
             let meaningful = trigger::is_meaningful_user(entry);
             let opens = meaningful || trigger::opens_tool_work(entry);
             let rendered = chunk::render_entry(entry, false);
+            let framed = crate::neutral::has_verified_host_frames(entry);
             let body = rendered
                 .as_ref()
-                .filter(|_| counter.family().is_some())
+                .filter(|_| !framed && counter.family().is_some())
                 .map_or(0, |(_, parts, _, _)| {
                     #[cfg(test)]
                     {
@@ -369,6 +372,7 @@ impl Window {
                     before.and_then(|fact| fact.visible)
                 },
                 role: rendered.as_ref().map(|rendered| rendered.0),
+                framed,
                 commits: rendered.map_or_else(Vec::new, |rendered| rendered.2),
             });
         }
@@ -390,7 +394,11 @@ impl Window {
         };
         self.from = from;
         self.blocks.truncate(keep);
-        let prefix_keep = if self.blocks.last().is_some_and(|block| block.role != 'R') {
+        let prefix_keep = if self
+            .blocks
+            .last()
+            .is_some_and(|block| block.role != 'R' && !block.framed)
+        {
             keep.saturating_sub(1)
         } else {
             keep
@@ -399,16 +407,18 @@ impl Window {
             let Some(role) = self.facts[i].role else {
                 continue;
             };
+            let framed = self.facts[i].framed;
             if self
                 .blocks
                 .last()
-                .is_none_or(|block| block.role != role || role == 'R')
+                .is_none_or(|block| block.role != role || role == 'R' || block.framed || framed)
             {
                 let low = self.blocks.last().map_or(start, |block| block.high);
                 self.blocks.push(Block {
                     low,
                     high: i + 1,
                     role,
+                    framed,
                     commits: Vec::new(),
                 });
             }
@@ -513,9 +523,9 @@ impl Window {
         counter: Counter,
         counts: &mut chunk::CountCache,
     ) -> u64 {
-        if counter.family().is_none() {
-            // Estimated models historically tokenize the merged spelling. Keep
-            // that contract, but only re-render a block whose contents changed.
+        if counter.family().is_none() || block.framed {
+            // Estimated models count the merged spelling. Framed blocks
+            // also need a full count because they repeat the ordinal header.
             return counts
                 .build(&entries[block.low..high], u64::MAX, counter)
                 .map_or(0, |chunk| chunk.token_estimate);

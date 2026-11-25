@@ -1,0 +1,45 @@
+{
+  "mid": "759e4164494a3e5458a0a3e6631f255db54717d0a131cc14fb390fd7a911ffe3",
+  "ordinal": 7,
+  "part_keys": [
+    "0#host_frame:head",
+    "0",
+    "0#host_frame:tail"
+  ],
+  "row": {
+    "client_message_id": "client-steer-1",
+    "host_frames": [
+      {
+        "code": "claude_code_mid_turn",
+        "head_bytes": 52,
+        "part": 0,
+        "tail_bytes": 232
+      }
+    ],
+    "parts": [
+      {
+        "host": true,
+        "host_code": "claude_code_mid_turn",
+        "part": "0#host_frame:head",
+        "text": "The user sent a new message while you were working:\n",
+        "type": "text"
+      },
+      {
+        "part": "0",
+        "text": "please also check the logs",
+        "type": "text"
+      },
+      {
+        "host": true,
+        "host_code": "claude_code_mid_turn",
+        "part": "0#host_frame:tail",
+        "text": "\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+        "type": "text"
+      }
+    ],
+    "role": "user",
+    "sender": "occipital",
+    "text": "please also check the logs"
+  },
+  "written_at": 1795617030633
+}

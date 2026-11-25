@@ -1,0 +1,79 @@
+{
+  "mid": "1f0f890f334284114924d4f448f5c6dd67d06ce176df78bc91b44bf90c8826bf",
+  "ordinal": 6,
+  "part_keys": [
+    "0",
+    "1#host_frame:head",
+    "1",
+    "1#host_frame:tail",
+    "2#host_frame:head",
+    "2",
+    "2#host_frame:tail"
+  ],
+  "row": {
+    "host_frames": [
+      {
+        "code": "claude_code_mid_turn",
+        "head_bytes": 52,
+        "part": 1,
+        "tail_bytes": 233
+      },
+      {
+        "code": "claude_code_mid_turn",
+        "head_bytes": 52,
+        "part": 2,
+        "tail_bytes": 232
+      }
+    ],
+    "parts": [
+      {
+        "content": "echo: hi",
+        "part": "0",
+        "tool_call_id": "toolu_standin_0002_0",
+        "type": "tool_result"
+      },
+      {
+        "host": true,
+        "host_code": "claude_code_mid_turn",
+        "part": "1#host_frame:head",
+        "text": "The user sent a new message while you were working:\n",
+        "type": "text"
+      },
+      {
+        "part": "1",
+        "text": "MID_TURN_FIRST",
+        "type": "text"
+      },
+      {
+        "host": true,
+        "host_code": "claude_code_mid_turn",
+        "part": "1#host_frame:tail",
+        "text": "\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n",
+        "type": "text"
+      },
+      {
+        "host": true,
+        "host_code": "claude_code_mid_turn",
+        "part": "2#host_frame:head",
+        "text": "The user sent a new message while you were working:\n",
+        "type": "text"
+      },
+      {
+        "part": "2",
+        "text": "MID_TURN_SECOND",
+        "type": "text"
+      },
+      {
+        "host": true,
+        "host_code": "claude_code_mid_turn",
+        "part": "2#host_frame:tail",
+        "text": "\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+        "type": "text"
+      }
+    ],
+    "role": "user",
+    "sender": "occipital",
+    "text": "MID_TURN_FIRSTMID_TURN_SECOND"
+  },
+  "written_at": 1795617044026
+}

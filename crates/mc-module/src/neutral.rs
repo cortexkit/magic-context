@@ -14,9 +14,21 @@ pub(crate) fn host_part<'a>(entry: &'a Entry, part: &Part) -> Option<&'a HostPar
     entry.host_parts.iter().find(|fact| fact.part == part.id)
 }
 
-/// Person-authored words the runner recorded inside a verified host wrapper.
-pub(crate) fn host_frame_words(entry: &Entry) -> Option<&str> {
-    entry.host_frame.as_ref().and_then(|fact| fact.words(entry))
+/// The stored part id and the person's words for each verified wrapper.
+pub(crate) fn verified_host_frames(entry: &Entry) -> impl Iterator<Item = (&str, &str)> {
+    let frames = entry.host_frames();
+    let frames = if frames.is_empty() || entry.check_host_frames().is_ok() {
+        frames
+    } else {
+        &[]
+    };
+    frames
+        .iter()
+        .filter_map(|fact| fact.words(entry).map(|words| (fact.part.as_str(), words)))
+}
+
+pub(crate) fn has_verified_host_frames(entry: &Entry) -> bool {
+    verified_host_frames(entry).next().is_some()
 }
 
 /// Parts eligible for attribution to the entry's user or assistant speaker.
@@ -42,11 +54,11 @@ pub(crate) fn is_kept_notice(entry: &Entry) -> bool {
 }
 
 pub(crate) fn protects_from_automatic_reclaim(entry: &Entry) -> bool {
-    is_kept_notice(entry) || host_frame_words(entry).is_some()
+    is_kept_notice(entry) || has_verified_host_frames(entry)
 }
 
 pub(crate) fn protects_from_explicit_drop(entry: &Entry) -> bool {
-    is_kept_notice(entry) && host_frame_words(entry).is_none()
+    is_kept_notice(entry) && !has_verified_host_frames(entry)
 }
 
 pub(crate) fn is_unkept_notice(entry: &Entry) -> bool {

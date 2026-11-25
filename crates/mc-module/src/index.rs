@@ -326,17 +326,23 @@ impl Index {
                     held.host_parts = entry.host_parts.clone();
                     self.app_changed.insert(entry.ordinal);
                 }
-                // A host frame can arrive later without changing a checksum.
-                // Keep it when a later read omits the fact and refresh summaries
-                // only when it changes the verified words.
-                if held.host_frame.is_none() && entry.host_frame.is_some() {
-                    if crate::neutral::host_frame_words(&entry).is_some() {
+                // An unchanged entry can gain frames, including a list in
+                // place of the legacy fact. An omitted fact does not erase
+                // words already verified against these same bytes.
+                if (held.host_frame != entry.host_frame || held.host_frames != entry.host_frames)
+                    && crate::neutral::has_verified_host_frames(&entry)
+                {
+                    if !crate::neutral::verified_host_frames(held)
+                        .eq(crate::neutral::verified_host_frames(&entry))
+                    {
                         self.summary_changed = Some(
                             self.summary_changed
                                 .map_or(entry.ordinal, |old| old.min(entry.ordinal)),
                         );
+                        self.app_changed.insert(entry.ordinal);
                     }
                     held.host_frame = entry.host_frame.clone();
+                    held.host_frames = entry.host_frames.clone();
                 }
                 if refresh_counts(held, &entry) {
                     self.summary_changed = Some(

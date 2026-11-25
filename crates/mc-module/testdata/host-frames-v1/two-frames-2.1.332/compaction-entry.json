@@ -1,0 +1,43 @@
+{
+  "digest": "69627a3670b3f0c3427dfbba053a9ef8ffc7f29e648bbe699dd112c7cedd8de0",
+  "host_frames": [
+    {
+      "code": "claude_code_mid_turn",
+      "head_bytes": 52,
+      "part": "1",
+      "tail_bytes": 233
+    },
+    {
+      "code": "claude_code_mid_turn",
+      "head_bytes": 52,
+      "part": "2",
+      "tail_bytes": 232
+    }
+  ],
+  "mid": "1f0f890f334284114924d4f448f5c6dd67d06ce176df78bc91b44bf90c8826bf",
+  "ordinal": 6,
+  "parts": [
+    {
+      "digest": "a2aa33d192f71253fa6a7aaa200bb8b26d7f644d1f42257713e62800d0e17e73",
+      "id": "1",
+      "kind": "text",
+      "tag": 6,
+      "text": "The user sent a new message while you were working:\nMID_TURN_FIRST\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n",
+      "tokens": {
+        "count": 95
+      }
+    },
+    {
+      "digest": "cd1f8480dcd40a8015590d22c88eb5198cb6ddf70d7a244ca50c627bd79f9bb5",
+      "id": "2",
+      "kind": "text",
+      "tag": 7,
+      "text": "The user sent a new message while you were working:\nMID_TURN_SECOND\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+      "tokens": {
+        "count": 95
+      }
+    }
+  ],
+  "role": "user",
+  "written_at": 1795617043929
+}

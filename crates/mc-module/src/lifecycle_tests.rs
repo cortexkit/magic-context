@@ -48,6 +48,9 @@ mod host_parts_tests;
 #[path = "host_frame_tests.rs"]
 mod host_frame_tests;
 
+#[path = "host_frame_list_tests.rs"]
+mod host_frame_list_tests;
+
 #[path = "notes_tokens_tests.rs"]
 mod notes_tokens_tests;
 

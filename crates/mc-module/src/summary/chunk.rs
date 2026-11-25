@@ -49,11 +49,12 @@ pub struct Chunk {
     pub printed_blocks: Vec<PrintedBlock>,
     /// At least one line is a message the person sent while the agent was
     /// still working, verified by the runner's frame around it (an entry's
-    /// `host_frame`), and is marked as such for the summarizer.
+    /// host-frame facts), and is marked as such for the summarizer.
     pub(super) marks_mid_turn: bool,
 }
 
-/// One `[N]`/`[N-M]` line of the chunk as the summarizer reads it.
+/// A printed block of the chunk. A host-framed entry can print several lines
+/// under the same stored ordinal, but they are admitted as one block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrintedBlock {
     /// `U`, `A`, or `R` for source-labelled relays, never user evidence.
@@ -88,6 +89,12 @@ struct Block {
     lines: Vec<ChunkLine>,
     commit_hashes: Vec<String>,
     tool_only: bool,
+    frame_lines: Vec<FrameLine>,
+}
+
+struct FrameLine {
+    role: char,
+    text: String,
     mid_turn: bool,
 }
 
@@ -120,11 +127,21 @@ impl Block {
                 .collect::<Vec<_>>()
                 .join("\n");
         }
-        let mut header = self.header();
-        if historian && self.mid_turn {
-            header = header.replacen(" U:", " U (mid-turn):", 1);
+        if !self.frame_lines.is_empty() {
+            return self
+                .frame_lines
+                .iter()
+                .map(|line| match line.role {
+                    'R' => format!("[{}] {}", self.end, line.text),
+                    _ if historian && line.mid_turn => {
+                        format!("[{}] U (mid-turn): {}", self.end, line.text)
+                    }
+                    _ => format!("[{}] U: {}", self.end, line.text),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
         }
-        format!("{header}{}", self.parts.join(" / "))
+        format!("{}{}", self.header(), self.parts.join(" / "))
     }
 }
 
@@ -235,7 +252,12 @@ pub fn newest(
         let mut facts: Vec<LineFacts> = Vec::new();
         let chunk = build_counted(&entries[from..], u64::MAX, Lines::Merged, |block, text| {
             let tokens = counter.count(text);
-            let (header, short_header) = if block.role == 'R' {
+            let (header, short_header) = if block.role == 'R'
+                || block
+                    .frame_lines
+                    .first()
+                    .is_some_and(|line| line.role == 'R')
+            {
                 let header = format!("[{}] ", block.end);
                 (header.clone(), header)
             } else {
@@ -428,7 +450,7 @@ impl CountCache {
         let chunk = build_counted(entries, budget, Lines::Merged, |block, text| {
             let low = entries.partition_point(|entry| entry.ordinal < block.start);
             let high = entries.partition_point(|entry| entry.ordinal <= block.end);
-            if let Some(separator) = separator {
+            if let Some(separator) = separator.filter(|_| block.frame_lines.is_empty()) {
                 let mut members = 0u64;
                 let header = block.header();
                 let mut tokens = self.headers.remove(&header).unwrap_or_else(|| {
@@ -496,7 +518,7 @@ pub(super) fn count_header(
         lines: Vec::new(),
         commit_hashes: hashes.iter().map(|hash| (*hash).to_owned()).collect(),
         tool_only: false,
-        mid_turn: false,
+        frame_lines: Vec::new(),
     };
     let header = block.header();
     if let Some((_, count)) = counts
@@ -528,9 +550,9 @@ fn count_identity(entry: &Entry) -> String {
     if !entry.host_parts.is_empty() {
         identity.push_str(&serde_json::to_string(&entry.host_parts).expect("host facts serialize"));
     }
-    if crate::neutral::host_frame_words(entry).is_some() {
+    if crate::neutral::has_verified_host_frames(entry) {
         identity
-            .push_str(&serde_json::to_string(&entry.host_frame).expect("host frame serializes"));
+            .push_str(&serde_json::to_string(entry.host_frames()).expect("host frames serialize"));
     }
     identity
 }
@@ -576,7 +598,7 @@ fn build_counted(
             *clusters += 1;
         }
         *last_role = Some(block.role);
-        marks_mid_turn |= per_message && block.mid_turn;
+        marks_mid_turn |= per_message && block.frame_lines.iter().any(|line| line.mid_turn);
         lines.push(text);
         printed.push((block.role, block.start, block.end, block.parts.clone()));
         covered.extend(block.lines);
@@ -596,13 +618,26 @@ fn build_counted(
         // Ordinals count from 1, as standalone sessions number messages, so
         // a summary names messages by their ordinal.
         let number = entry.ordinal;
+        let framed = render_frames(entry);
         let line = ChunkLine {
             ordinal: number,
             message_id: entry.mid.clone(),
             anchorable: true,
-            mid_turn: crate::neutral::host_frame_words(entry).is_some(),
+            mid_turn: framed.is_some(),
         };
-        let Some((role, mut parts, commits, narrative)) = render_entry(entry, per_message) else {
+        let rendered = match &framed {
+            None => render_ordinary_entry(entry, per_message),
+            Some(lines) if lines.is_empty() => None,
+            Some(lines) => {
+                let parts = lines
+                    .iter()
+                    .filter(|line| line.role == 'U')
+                    .map(|line| line.text.clone())
+                    .collect();
+                Some(('U', parts, Vec::new(), true))
+            }
+        };
+        let Some((role, mut parts, commits, narrative)) = rendered else {
             present.push(number);
             match current.as_mut().filter(|_| per_message) {
                 // A line of its own keeps the hidden messages after it in
@@ -616,14 +651,14 @@ fn build_counted(
             continue;
         };
         present.push(number);
-        if per_message && role != 'R' {
+        if per_message && role != 'R' && framed.is_none() {
             // A message's text is one part, so evidence may quote across its
             // text parts as it reads on the line.
             parts = vec![parts.join(" / ")];
         }
         if let Some(block) = current
             .as_mut()
-            .filter(|block| !per_message && role != 'R' && block.role == role)
+            .filter(|block| !per_message && framed.is_none() && role != 'R' && block.role == role)
         {
             block.end = number;
             block.parts.extend(parts);
@@ -655,12 +690,11 @@ fn build_counted(
             }
         }
         let mut block_lines = std::mem::take(&mut pending_noise);
-        let start = if role == 'R' {
+        let start = if role == 'R' || framed.is_some() {
             number
         } else {
             block_lines.first().map_or(number, |first| first.ordinal)
         };
-        let mid_turn = line.mid_turn;
         block_lines.push(line);
         current = Some(Block {
             role,
@@ -670,12 +704,15 @@ fn build_counted(
             lines: block_lines,
             commit_hashes: commits,
             tool_only: !narrative,
-            mid_turn,
+            frame_lines: framed.unwrap_or_default(),
         });
-        // A relay's labels all name this message, not adjacent hidden ordinals.
-        if role == 'R'
+        // A relay or frame names its own message, not the next same-role entry.
+        if (role == 'R'
+            || current
+                .as_ref()
+                .is_some_and(|block| !block.frame_lines.is_empty()))
             && !flush(
-                current.take().expect("just opened relay block"),
+                current.take().expect("just opened standalone block"),
                 &mut lines,
                 &mut printed,
                 &mut covered,
@@ -885,56 +922,81 @@ pub(super) fn render_entry(
     entry: &Entry,
     verbatim: bool,
 ) -> Option<(char, Vec<String>, Vec<String>, bool)> {
-    let _timing = crate::notice_cost_timing::span("trigger.render_entry");
-    if let Some(words) = crate::neutral::host_frame_words(entry) {
-        let words = normalize(words);
-        return (!words.is_empty()).then(|| ('U', vec![words], Vec::new(), true));
+    match render_frames(entry) {
+        None => render_ordinary_entry(entry, verbatim),
+        Some(lines) => (!lines.is_empty()).then(|| {
+            (
+                'U',
+                lines.into_iter().map(|line| line.text).collect(),
+                Vec::new(),
+                true,
+            )
+        }),
     }
-    match entry.role {
-        Role::User => {
-            let raw_texts: Vec<&str> = crate::neutral::authored_parts(entry)
-                .filter_map(|part| match &part.body {
-                    PartBody::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            let whole_text = raw_texts.join("\n");
-            if is_relayed_wake(&whole_text) {
-                let parts = relayed_wake::lines(&whole_text);
-                return (!parts.is_empty()).then(|| ('R', parts, Vec::new(), true));
-            }
-            if let Some(agent) = &entry.speaks_for {
-                let text = normalize(&whole_text);
-                if text.is_empty() {
-                    return None;
-                }
-                // One bounded line preserves the carried words without treating
-                // them as the person's decision.
-                let line = format!(
-                    "Message from {}: {text}",
-                    agent.name.as_deref().unwrap_or("another agent")
-                );
-                return Some((
-                    'R',
-                    vec![line.chars().take(1_500).collect()],
-                    Vec::new(),
-                    true,
-                ));
-            }
-            // Unkept notices are not the person's words, but an answer
-            // notice can still carry the person's decision.
-            let mut parts: Vec<String> = if crate::neutral::is_unkept_notice(entry) {
-                Vec::new()
-            } else {
-                raw_texts
-                    .iter()
-                    .map(|text| normalize(&clean_user_text(text)))
-                    .filter(|text| !text.is_empty() && !text.starts_with(SYSTEM_DIRECTIVE_PREFIX))
-                    .collect()
-            };
-            parts.extend(raw_texts.iter().flat_map(|text| ask_answer_lines(text)));
-            (!parts.is_empty()).then(|| ('U', parts, Vec::new(), true))
+}
+
+/// Keep ordinary parts on their normal reading path in the gaps between
+/// verified frames. Tool results and ordinary system text have no line.
+fn render_frames(entry: &Entry) -> Option<Vec<FrameLine>> {
+    let mut frames = crate::neutral::verified_host_frames(entry).peekable();
+    frames.peek()?;
+    let mut lines = Vec::new();
+    let mut first = 0;
+    for (i, part) in entry.parts.iter().enumerate() {
+        if !frames.peek().is_some_and(|(id, _)| *id == part.id) {
+            continue;
         }
+        render_ordinary_siblings(entry, first..i, &mut lines);
+        first = i + 1;
+        let (_, words) = frames.next().expect("peeked frame");
+        let text = normalize(words);
+        if !text.is_empty() {
+            lines.push(FrameLine {
+                role: 'U',
+                text,
+                mid_turn: true,
+            });
+        }
+    }
+    render_ordinary_siblings(entry, first..entry.parts.len(), &mut lines);
+    Some(lines)
+}
+
+fn render_ordinary_siblings(
+    entry: &Entry,
+    range: std::ops::Range<usize>,
+    lines: &mut Vec<FrameLine>,
+) {
+    if entry.role != Role::User || range.is_empty() {
+        return;
+    }
+    if let Some((role, parts)) = render_user(
+        entry,
+        entry.parts[range]
+            .iter()
+            .filter(|part| crate::neutral::host_part(entry, part).is_none()),
+    ) {
+        let parts = if role == 'R' {
+            parts
+        } else {
+            vec![parts.join(" / ")]
+        };
+        lines.extend(parts.into_iter().map(|text| FrameLine {
+            role,
+            text,
+            mid_turn: false,
+        }));
+    }
+}
+
+fn render_ordinary_entry(
+    entry: &Entry,
+    verbatim: bool,
+) -> Option<(char, Vec<String>, Vec<String>, bool)> {
+    let _timing = crate::notice_cost_timing::span("trigger.render_entry");
+    match entry.role {
+        Role::User => render_user(entry, crate::neutral::authored_parts(entry))
+            .map(|(role, parts)| (role, parts, Vec::new(), true)),
         Role::Assistant => {
             let mut has_spoken = false;
             let mut texts: Vec<_> = crate::neutral::authored_parts(entry)
@@ -980,6 +1042,48 @@ pub(super) fn render_entry(
         // entry whose role ck-mc doesn't know.
         _ => None,
     }
+}
+
+fn render_user<'a>(
+    entry: &Entry,
+    parts: impl Iterator<Item = &'a cortexkit_role_compaction::part::Part>,
+) -> Option<(char, Vec<String>)> {
+    let raw_texts: Vec<&str> = parts
+        .filter_map(|part| match &part.body {
+            PartBody::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let whole_text = raw_texts.join("\n");
+    if is_relayed_wake(&whole_text) {
+        let parts = relayed_wake::lines(&whole_text);
+        return (!parts.is_empty()).then_some(('R', parts));
+    }
+    if let Some(agent) = &entry.speaks_for {
+        let text = normalize(&whole_text);
+        if text.is_empty() {
+            return None;
+        }
+        // Keep carried words without treating them as the person's decision.
+        let line = format!(
+            "Message from {}: {text}",
+            agent.name.as_deref().unwrap_or("another agent")
+        );
+        return Some(('R', vec![line.chars().take(1_500).collect()]));
+    }
+    // Unkept notices are not the person's words, but an answer notice can
+    // still carry the person's decision.
+    let mut parts: Vec<String> = if crate::neutral::is_unkept_notice(entry) {
+        Vec::new()
+    } else {
+        raw_texts
+            .iter()
+            .map(|text| normalize(&clean_user_text(text)))
+            .filter(|text| !text.is_empty() && !text.starts_with(SYSTEM_DIRECTIVE_PREFIX))
+            .collect()
+    };
+    parts.extend(raw_texts.iter().flat_map(|text| ask_answer_lines(text)));
+    (!parts.is_empty()).then_some(('U', parts))
 }
 
 /// `TC: <description>` when the call states one, else `TC: name(key arg)`.

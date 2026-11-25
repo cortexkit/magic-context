@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
+use cortexkit_role_compaction::notice::NoticeRequest;
+use cortexkit_role_compaction::read::{Entry, ReadPage, ReadRequest, SessionRef};
 use cortexkit_role_compaction::view::{
     AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
 };
@@ -40,6 +41,55 @@ use subc_protocol::tool_call::ToolCallRequest;
 use subc_protocol::Principal;
 use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::sync::OnceCell;
+
+pub(crate) fn decode_session_entries(session: &str, reply: &[u8]) -> Result<ReadPage, ClientError> {
+    serde_json::from_slice(reply).map_err(|error| {
+        if let Some(detail) = serde_json::from_slice(reply)
+            .ok()
+            .as_ref()
+            .and_then(host_frame_refusal)
+        {
+            log_host_frame_refusal(session, ops::SESSION_ENTRIES, &detail);
+        }
+        ClientError::new(format!("session.entries answer: {error}"))
+    })
+}
+
+pub(crate) fn decode_entry_notice(
+    session: &str,
+    body: &[u8],
+    params: Value,
+) -> Result<NoticeRequest, Refusal> {
+    wire::params(params).inspect_err(|_| {
+        if let Some(detail) = wire::decode(body)
+            .ok()
+            .and_then(|(_, params)| host_frame_refusal(&params))
+        {
+            log_host_frame_refusal(session, ops::COMPACTION_NOTICE, &detail);
+        }
+    })
+}
+
+fn log_host_frame_refusal(session: &str, method: &str, detail: &str) {
+    tracing::warn!("ck-mc: session {session}: {method} refused host-frame facts: {detail}");
+}
+
+/// On a failed page or notice, locate the entry the contract rejected. The
+/// diagnostics never admit an entry the typed decoder refused.
+fn host_frame_refusal(params: &Value) -> Option<String> {
+    params.get("entries")?.as_array()?.iter().find_map(|entry| {
+        entry
+            .get("host_frame")
+            .or_else(|| entry.get("host_frames"))?;
+        let refusal = wire::params::<Entry>(entry.clone()).err()?;
+        let field = refusal.detail.as_ref()?.get("field")?.as_str()?;
+        if !field.starts_with("host_frame") && !refusal.message.starts_with("host_frame") {
+            return None;
+        }
+        let mid = entry.get("mid")?.as_str()?;
+        Some(format!("entry {mid:?}: {}", refusal.message))
+    })
+}
 
 use crate::child_scopes::ChildScopes;
 use crate::client::{Child, ClientError, RunnerClient};
@@ -149,6 +199,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_HOST_PARTS_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_HOST_FRAME_PROVIDES.to_owned(),
+        cortexkit_role_compaction::COMPACTION_HOST_FRAMES_PROVIDES.to_owned(),
         // The runner sends its signed floor (reasoning it strips after
         // a tool-set change) only to providers declaring this.
         cortexkit_role_compaction::COMPACTION_SIGNED_FLOOR_PROVIDES.to_owned(),
@@ -813,13 +864,16 @@ impl RunnerClient for SubcRunnerClient {
         session: &SessionRef,
         request: ReadRequest,
     ) -> Result<ReadPage, ClientError> {
-        self.call(
-            session,
-            COMPACTION_RUNNER_ROLE,
-            ops::SESSION_ENTRIES,
-            &request,
-        )
-        .await
+        let reply = self
+            .call_raw(
+                session,
+                COMPACTION_RUNNER_ROLE,
+                ops::SESSION_ENTRIES,
+                &request,
+                None,
+            )
+            .await?;
+        decode_session_entries(&session.session, &reply)
     }
 
     async fn apply_view(
@@ -1984,7 +2038,10 @@ impl Handler {
                 }
                 to_value(setup)
             }
-            ops::COMPACTION_NOTICE => to_value(self.module.notice(session, wire::params(params)?)),
+            ops::COMPACTION_NOTICE => to_value(self.module.notice(
+                session,
+                decode_entry_notice(&session.session, body, params)?,
+            )),
             ops::COMPACTION_RIDE => {
                 to_value(self.module.ride(session, wire::params(params)?).await)
             }
