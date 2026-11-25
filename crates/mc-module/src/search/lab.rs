@@ -4,11 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use super::{messages, sources, text, Hit};
-use crate::summary::dates::search_times;
 
 pub(crate) fn memory_search(
     conn: &Connection,
@@ -164,14 +164,33 @@ fn limit(input: &Value, default: usize, max: usize) -> usize {
 
 pub(crate) struct History {
     project: String,
-    sessions: Vec<String>,
+    sessions: Vec<HistorySession>,
     skipped_session_ids: usize,
-    scan: Mutex<Scan>,
+    coverage: Mutex<messages::Coverage>,
 }
 
-struct Scan {
-    coverage: messages::Coverage,
-    ambiguous: BTreeMap<String, bool>,
+struct HistorySession {
+    id: String,
+    ambiguous: bool,
+    times: IndexedTimes,
+}
+
+impl HistorySession {
+    fn load(conn: &Connection, project: &str, id: String) -> Result<Self, String> {
+        let ambiguous = raw_is_ambiguous(conn, project, &id)?;
+        // When another harness uses the same session ID, the message-time map
+        // cannot tell which harness wrote the timestamp for a given ordinal.
+        let times = if ambiguous {
+            IndexedTimes::default()
+        } else {
+            IndexedTimes::load(conn, &id)?
+        };
+        Ok(Self {
+            id,
+            ambiguous,
+            times,
+        })
+    }
 }
 
 impl History {
@@ -215,6 +234,11 @@ impl History {
         // left out of the search and counted.
         let selected_count = sessions.len();
         sessions.retain(|id| all[id] == 1);
+        let skipped_session_ids = selected_count - sessions.len();
+        let sessions = sessions
+            .into_iter()
+            .map(|id| HistorySession::load(conn, project, id))
+            .collect::<Result<_, _>>()?;
         let mut coverage = messages::Coverage::default();
         // Message search first screens the index for rows that have no entry
         // in the row-id map, which costs a pass over the whole index. The
@@ -223,12 +247,9 @@ impl History {
         coverage.for_snapshot(0);
         Ok(Self {
             project: project.to_owned(),
-            skipped_session_ids: selected_count - sessions.len(),
+            skipped_session_ids,
             sessions,
-            scan: Mutex::new(Scan {
-                coverage,
-                ambiguous: BTreeMap::new(),
-            }),
+            coverage: Mutex::new(coverage),
         })
     }
 
@@ -252,39 +273,25 @@ impl History {
         let mut agents = Vec::new();
         let mut summaries = Vec::new();
         let mut skipped = self.skipped_session_ids;
-        let mut scan = self.scan.lock().expect("lab history coverage");
+        let mut coverage = self.coverage.lock().expect("lab history coverage");
         for session in &self.sessions {
-            let ambiguous = match scan.ambiguous.get(session) {
-                Some(ambiguous) => *ambiguous,
-                None => {
-                    let ambiguous = raw_is_ambiguous(conn, project, session)?;
-                    scan.ambiguous.insert(session.clone(), ambiguous);
-                    ambiguous
-                }
-            };
-            if ambiguous {
+            if session.ambiguous {
                 skipped += 1;
             } else {
-                let reach = messages::reach(conn, &mut scan.coverage, session, dates);
+                let reach = messages::reach(conn, &mut coverage, &session.id, dates);
                 let raw = RawQuery {
                     query,
                     limit,
                     dates,
                     reach,
                 };
-                people.extend(raw.search(conn, session, "user")?);
+                people.extend(raw.search(conn, &session.id, "user")?);
                 if include_agent {
-                    agents.extend(raw.search(conn, session, "assistant")?);
+                    agents.extend(raw.search(conn, &session.id, "assistant")?);
                 }
             }
             summaries.extend(summary_hits(
-                conn,
-                project,
-                (session, ambiguous),
-                query,
-                limit,
-                dates,
-                semantic,
+                conn, project, session, query, limit, dates, semantic,
             )?);
         }
         summaries.sort_unstable_by(|a, b| {
@@ -448,8 +455,8 @@ impl RawQuery<'_> {
 
 #[derive(Clone, Copy)]
 struct SummaryRange {
-    start: chrono::DateTime<chrono::Utc>,
-    end: chrono::DateTime<chrono::Utc>,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
 }
 
 impl SummaryRange {
@@ -465,69 +472,51 @@ impl SummaryRange {
 }
 
 #[derive(Default)]
-struct SummaryDates {
-    ranges: BTreeMap<i64, SummaryRange>,
-    unknown: usize,
-}
+struct IndexedTimes(Vec<(i64, DateTime<Utc>)>);
 
-impl SummaryDates {
-    fn load(conn: &Connection, project: &str, session: &str) -> Result<Self, String> {
+impl IndexedTimes {
+    fn load(conn: &Connection, session: &str) -> Result<Self, String> {
+        // The frozen store never changes during the run. Read the usable times
+        // once, in ordinal order, for all later summary searches in this session.
         let mut statement = conn
             .prepare_cached(
-                "SELECT c.id, c.harness, c.start_message, c.end_message
-                   FROM compartments c
-                   JOIN session_projects p ON p.session_id = c.session_id AND p.harness = c.harness
-                  WHERE c.session_id = ?1 AND p.project_path = ?2",
+                "SELECT message_ordinal, message_time_ms FROM message_fts_rowid_map
+                  WHERE session_id = ?1 AND message_time_ms > 0 ORDER BY message_ordinal",
             )
             .map_err(show)?;
-        let summaries = statement
-            .query_map(params![session, project], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
-            .map_err(show)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(show)?;
-        let Some((_, harness, _, _)) = summaries.first() else {
-            return Ok(Self::default());
-        };
-        // Summaries record ordinals, not message IDs, so look up each boundary
-        // by its ordinal alone within the session.
-        let boundaries: Vec<_> = summaries
-            .iter()
-            .flat_map(|(_, _, start, end)| [(*start, ""), (*end, "")])
-            .collect();
-        let times = search_times(conn, harness, session, &boundaries);
-        let time = |ordinal| {
-            let ms = i64::try_from(*times.get(&(ordinal, String::new()))?).ok()?;
-            chrono::DateTime::from_timestamp_millis(ms)
-        };
-        let count = summaries.len();
-        let ranges: BTreeMap<_, _> = summaries
-            .into_iter()
-            .filter_map(|(id, _, start, end)| {
-                Some((
-                    id,
-                    SummaryRange {
-                        start: time(start)?,
-                        end: time(end)?,
-                    },
-                ))
-            })
-            .collect();
-        Ok(Self {
-            unknown: count - ranges.len(),
-            ranges,
+        let mut rows = statement.query([session]).map_err(show)?;
+        let mut times = Vec::new();
+        while let Some(row) = rows.next().map_err(show)? {
+            if let Some(time) = DateTime::from_timestamp_millis(row.get(1).map_err(show)?) {
+                times.push((row.get(0).map_err(show)?, time));
+            }
+        }
+        Ok(Self(times))
+    }
+
+    fn range(&self, start: i64, end: i64) -> Option<SummaryRange> {
+        let first = self.0.partition_point(|(ordinal, _)| *ordinal < start);
+        let rest = &self.0[first..];
+        let inside = rest.partition_point(|(ordinal, _)| *ordinal <= end);
+        if inside != 0 {
+            return Some(SummaryRange {
+                start: rest[0].1,
+                end: rest[inside - 1].1,
+            });
+        }
+        // A gap in the text index still belongs to the session's timeline.
+        // Prefer the last timed message before it; use the next one if the gap
+        // starts before any indexed time.
+        let (_, time) = *self.0.get(first.saturating_sub(1))?;
+        Some(SummaryRange {
+            start: time,
+            end: time,
         })
     }
 
-    fn matches(&self, id: i64, bounds: Option<messages::DateRange>) -> bool {
+    fn matches(&self, start: i64, end: i64, bounds: Option<messages::DateRange>) -> bool {
         bounds.is_none_or(|bounds| {
-            self.ranges.get(&id).is_some_and(|range| {
+            self.range(start, end).is_some_and(|range| {
                 range.start.timestamp_millis() <= bounds.to
                     && range.end.timestamp_millis() >= bounds.from
             })
@@ -538,41 +527,29 @@ impl SummaryDates {
 fn summary_hits<'a>(
     conn: &Connection,
     project: &str,
-    (session, ambiguous): (&'a str, bool),
+    session: &'a HistorySession,
     query: &str,
     limit: usize,
     dates: Option<messages::DateRange>,
     semantic: Option<sources::Semantic<'_>>,
 ) -> Result<Vec<Evidence<'a>>, String> {
-    // When another harness uses the same session ID, the message-time map
-    // cannot tell which harness wrote the timestamp for a given ordinal.
-    let times = if ambiguous {
-        SummaryDates::default()
-    } else {
-        SummaryDates::load(conn, project, session)?
-    };
-    if dates.is_some() && times.ranges.is_empty() {
+    if dates.is_some() && session.times.0.is_empty() {
         return Ok(Vec::new());
     }
-    let mut hits = lexical_summaries(conn, project, session, query, limit, dates, &times)?;
+    let (mut hits, excluded) = lexical_summaries(conn, project, session, query, limit, dates)?;
     if let Some(semantic) = semantic {
-        // The shared search already checks overlap, but can admit a zero
-        // timestamp. Leave room for dated hits if undated ones take slots.
-        let semantic_limit = if dates.is_some() {
-            limit + times.unknown
-        } else {
-            limit
-        };
+        // The shared search would require exact boundary times. Filter by the
+        // lab's ranges instead, allowing one extra slot per excluded summary.
         for hit in sources::search_chunks_in_project(
             conn,
-            session,
+            &session.id,
             project,
-            semantic_limit,
-            dates,
+            limit + excluded,
+            None,
             semantic,
         )
         .into_iter()
-        .filter(|hit| times.matches(hit.compartment_id, dates))
+        .filter(|hit| session.times.matches(hit.start, hit.end, dates))
         .take(limit)
         {
             if let Some(prior) = hits
@@ -589,11 +566,11 @@ fn summary_hits<'a>(
     Ok(hits
         .into_iter()
         .map(|hit| Evidence {
-            date: EvidenceDate::Range(times.ranges.get(&hit.compartment_id).copied()),
+            date: EvidenceDate::Range(session.times.range(hit.start, hit.end)),
             order: hit.start,
             rowid: hit.compartment_id,
             hit: Hit::Chunk(hit),
-            session: Some(session),
+            session: Some(&session.id),
         })
         .collect())
 }
@@ -601,12 +578,11 @@ fn summary_hits<'a>(
 fn lexical_summaries(
     conn: &Connection,
     project: &str,
-    session: &str,
+    session: &HistorySession,
     query: &str,
     limit: usize,
     dates: Option<messages::DateRange>,
-    times: &SummaryDates,
-) -> Result<Vec<sources::ChunkHit>, String> {
+) -> Result<(Vec<sources::ChunkHit>, usize), String> {
     // Compartments have an index by session and are much fewer than raw
     // messages. Stream only the selected session's summaries, keeping top hits.
     let mut statement = conn
@@ -617,11 +593,15 @@ fn lexical_summaries(
               WHERE c.session_id = ?1 AND p.project_path = ?2",
         )
         .map_err(show)?;
-    let mut rows = statement.query(params![session, project]).map_err(show)?;
+    let mut rows = statement
+        .query(params![session.id, project])
+        .map_err(show)?;
     let mut hits: Vec<sources::ChunkHit> = Vec::new();
+    let mut excluded = 0;
     while let Some(row) = rows.next().map_err(show)? {
-        let compartment_id = row.get(0).map_err(show)?;
-        if !times.matches(compartment_id, dates) {
+        let (start, end) = (row.get(2).map_err(show)?, row.get(3).map_err(show)?);
+        if !session.times.matches(start, end, dates) {
+            excluded += 1;
             continue;
         }
         let title: String = row.get(1).map_err(show)?;
@@ -640,9 +620,8 @@ fn lexical_summaries(
             continue;
         }
         let snippet = Some(text::matched_snippet(matched, query, 400));
-        let (start, end) = (row.get(2).map_err(show)?, row.get(3).map_err(show)?);
         hits.push(sources::ChunkHit {
-            compartment_id,
+            compartment_id: row.get(0).map_err(show)?,
             title,
             start,
             end,
@@ -659,7 +638,7 @@ fn lexical_summaries(
         });
         hits.truncate(limit);
     }
-    Ok(hits)
+    Ok((hits, excluded))
 }
 
 struct Evidence<'a> {
@@ -765,20 +744,18 @@ mod tests {
         .unwrap();
         let vector = [1.0, 0.0];
         for sequence in 1..=5 {
-            let start = sequence * 2;
-            let end = start + 1;
+            let start = sequence * 3;
+            let end = start + 2;
             conn.execute(
                 "INSERT INTO compartments (id, session_id, harness, sequence, start_message, end_message, title, content, created_at)
                  VALUES (?1, 's', 'mock', ?1, ?2, ?3, 'Routine debugging', 'Summary.', 2000000000000)",
                 params![sequence, start, end],
             ).unwrap();
-            for (ordinal, at) in [(start, if sequence <= 4 { 0 } else { 1000 }), (end, 2000)] {
-                conn.execute(
-                    "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
-                     VALUES ('s', ?1, ?1, ?2)",
-                    params![ordinal, at],
-                ).unwrap();
-            }
+            conn.execute(
+                "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
+                 VALUES ('s', ?1, ?1, ?2)",
+                params![start + 1, if sequence <= 4 { 1000 } else { 86_401_000 }],
+            ).unwrap();
             conn.execute(
                 "INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness,
                      window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
@@ -795,14 +772,14 @@ mod tests {
         let answer = history
             .search(
                 &conn,
-                &serde_json::json!({"query":"unrelatedterm", "from":"1970-01-01"}),
+                &serde_json::json!({"query":"unrelatedterm", "from":"1970-01-02"}),
                 semantic,
             )
             .unwrap();
         assert_eq!(answer.matches("compartment_id=").count(), 1, "{answer}");
         assert!(answer.contains("match=semantic"), "{answer}");
         assert!(
-            answer.contains("date=1970-01-01 session=s ref=s:10-11"),
+            answer.contains("date=1970-01-02 session=s ref=s:15-17"),
             "{answer}"
         );
     }
