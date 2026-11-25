@@ -208,8 +208,10 @@ impl History {
             }
             None => all.keys().cloned().collect(),
         };
-        // A bare session/range reference cannot tell the reader which harness
-        // it names if this project maps the same id to several harnesses.
+        // A history hit is cited by its session id and a position in that
+        // session, with no harness in it. When two harnesses in this project
+        // share one session id, such a citation is ambiguous, so the id is
+        // left out of the search and counted.
         let selected_count = sessions.len();
         sessions.retain(|id| all[id] == 1);
         let mut coverage = messages::Coverage::default();
