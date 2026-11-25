@@ -1,0 +1,38 @@
+{
+  "name": "fed-app-notes-page",
+  "request": {
+    "method": "notes.page",
+    "params": {
+      "limit": 1,
+      "project": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "next": "mcc1.WyJub3Rlcy5wYWdlIiwiMTk3NWIxNGRmYzAyZDU2MSIsWzE3MDAwMDA0MDAwMDAsNF1d",
+      "notes": [
+        {
+          "condition": "a new host release is out",
+          "content": "Bump the pinned host.",
+          "created_at": 1700000300000,
+          "id": 4,
+          "ready_reason": "host 1.4.2 was released",
+          "status": "ready",
+          "type": "smart",
+          "updated_at": 1700000400000
+        }
+      ],
+      "op": "notes.page",
+      "schema": 1
+    }
+  },
+  "route": {
+    "harness": "fed-app:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

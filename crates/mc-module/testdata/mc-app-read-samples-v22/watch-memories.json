@@ -1,0 +1,22 @@
+{
+  "name": "watch-memories",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "global": true,
+      "projects": [
+        "pj-sample"
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "cursor": "abc:1",
+      "kind": "memories",
+      "level": "project",
+      "op": "context.watch",
+      "owner": "pj-sample",
+      "schema": 1
+    }
+  }
+}

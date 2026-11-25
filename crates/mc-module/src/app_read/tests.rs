@@ -149,6 +149,89 @@ fn session_data_versions_both_sections_and_preserves_required_fields() {
 }
 
 #[test]
+fn historian_failure_fields_round_trip_and_legacy_saved_state_keeps_its_history() {
+    use crate::{
+        session::Session,
+        store::{Durable, Store},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mode3.db");
+    let store = Store::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let session = key();
+    let mut old = serde_json::to_value(Durable::default()).unwrap();
+    old["app"] = json!({
+        "last_model":"provider/model", "failures":3, "last_error":"summary timed out",
+        "stamps":[[["m2","p"],123]]
+    });
+    conn.execute(
+        "INSERT INTO sessions (runner, harness, session, state) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            session.runner,
+            session.harness,
+            session.session,
+            old.to_string()
+        ],
+    )
+    .unwrap();
+
+    let mut state = store
+        .load(&session)
+        .expect("the saved session predates failure times");
+    let mut restored = Session::app_sample_session();
+    restored.restore(state.clone());
+    let meta = restored.app_snapshot().meta;
+    assert_eq!(meta["historian_failure_count"], 3);
+    assert_eq!(meta["historian_last_error"], "summary timed out");
+    assert_eq!(meta.get("historian_last_error_at_ms"), Some(&Value::Null));
+    assert_eq!(meta["historian_failures_since_success"], 0);
+
+    state.app.last_error_at_ms = Some(1_699_999_950_000);
+    state.app.failures_since_success = 2;
+    store.save(&session, &state).unwrap();
+    let app = store.load(&session).unwrap().app;
+    assert_eq!(app, state.app);
+
+    // The pre-upgrade JSON reader uses this shape, including the stamp codec.
+    #[derive(Deserialize)]
+    struct LegacySessionState {
+        last_model: Option<String>,
+        failures: u64,
+        last_error: Option<String>,
+        #[serde(with = "stamp_map")]
+        stamps: BTreeMap<(String, String), u64>,
+    }
+    let legacy: LegacySessionState =
+        serde_json::from_value(serde_json::to_value(&app).unwrap()).unwrap();
+    assert_eq!(legacy.last_model, app.last_model);
+    assert_eq!(legacy.failures, app.failures);
+    assert_eq!(legacy.last_error, app.last_error);
+    assert_eq!(legacy.stamps, app.stamps);
+}
+
+#[tokio::test]
+async fn historian_failure_defaults_apply_to_a_legacy_meta_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let mut snapshot = fixture();
+    snapshot.meta["historian_failure_count"] = json!(3);
+    snapshot.meta["historian_last_error"] = json!("summary timed out");
+    save_fixture(&store, &snapshot, None);
+
+    let reader = AppRead::new(Some(store.path.clone()), None);
+    let reply = reader
+        .read("session_data.read", request(json!({"section":"meta"})))
+        .await
+        .unwrap();
+    let meta = &reply["row"];
+    assert_eq!(meta["historian_failure_count"], 3);
+    assert_eq!(meta["historian_last_error"], "summary timed out");
+    assert_eq!(meta.get("historian_last_error_at_ms"), Some(&Value::Null));
+    assert_eq!(meta["historian_failures_since_success"], 0);
+}
+
+#[test]
 fn states_distinguishes_raw_dropped_summarized_and_outside_and_is_conditional() {
     let mut replica = replica(None);
     let mut p = request(json!({"message_ids":["m1","m2","m3","absent"]}));
@@ -770,6 +853,13 @@ async fn samples_v10() {
     let mut samples = BTreeMap::new();
     for (name, method, params) in requests {
         let mut response = replica.read(method, &params).unwrap();
+        if name == "meta" {
+            // v10 pins the row before it carried failure times and streaks.
+            let row = response["row"].as_object_mut().unwrap();
+            row.remove("historian_last_error_at_ms");
+            row.remove("historian_failures_since_success");
+            response["version"] = json!(version(&response["row"]));
+        }
         response["as_of_ms"] = json!(1700000000000_u64);
         let response: Value = serde_json::from_slice(&result_bytes(response)).unwrap();
         samples.insert(
@@ -809,19 +899,62 @@ async fn samples_v10() {
 }
 
 fn check_samples_v21(testdata: &std::path::Path, search: Vec<u8>) {
-    let v20 = testdata.join("mc-app-read-samples-v20");
-    let mut samples = BTreeMap::new();
-    for line in std::fs::read_to_string(v20.join("SHA256SUMS"))
-        .unwrap()
-        .lines()
-    {
-        let (_, name) = line.split_once("  ").unwrap();
-        samples.insert(name.to_owned(), std::fs::read(v20.join(name)).unwrap());
-    }
+    let mut samples = tagged_json_samples(&testdata.join("mc-app-read-samples-v20"));
     // Search is the only v20 sample whose bytes may differ in v21.
     assert!(samples.insert("search.json".into(), search).is_some());
+    check_tagged_samples(testdata, "v21", samples);
+}
 
-    let mut root = testdata.join("mc-app-read-samples-v21");
+#[test]
+fn samples_v22() {
+    use crate::session::Session;
+
+    let testdata = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+    let mut samples = tagged_json_samples(&testdata.join("mc-app-read-samples-v21"));
+    let mut replica = replica(None);
+    for (name, snapshot) in [
+        ("meta", Session::app_sample_snapshot()),
+        (
+            "meta-historian-recovered",
+            Session::app_historian_sample_snapshot(0),
+        ),
+        (
+            "meta-historian-failing",
+            Session::app_historian_sample_snapshot(2),
+        ),
+    ] {
+        replica.publish(snapshot);
+        let method = "session_data.read";
+        let params = request(json!({"section":"meta"}));
+        let mut response = replica.read(method, &params).unwrap();
+        response["as_of_ms"] = json!(1_700_000_000_000_u64);
+        let response: Value = serde_json::from_slice(&result_bytes(response)).unwrap();
+        let sample =
+            json!({"name":name,"request":{"method":method,"params":params},"response":response});
+        let text = format!("{}\n", serde_json::to_string_pretty(&sample).unwrap());
+        let replaced = samples.insert(format!("{name}.json"), text.into_bytes());
+        assert_eq!(replaced.is_some(), name == "meta");
+    }
+    check_tagged_samples(&testdata, "v22", samples);
+}
+
+fn tagged_json_samples(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_to_string(root.join("SHA256SUMS"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let (_, name) = line.split_once("  ").unwrap();
+            (name.to_owned(), std::fs::read(root.join(name)).unwrap())
+        })
+        .collect()
+}
+
+fn check_tagged_samples(
+    testdata: &std::path::Path,
+    version: &str,
+    samples: BTreeMap<String, Vec<u8>>,
+) {
+    let mut root = testdata.join(format!("mc-app-read-samples-{version}"));
     let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
     let regenerate = output.is_some();
     if let Some(output) = output.filter(|value| value != "1") {
@@ -837,7 +970,7 @@ fn check_samples_v21(testdata: &std::path::Path, search: Vec<u8>) {
         if regenerate && current.as_ref().ok() != Some(&bytes) {
             std::fs::write(path, &bytes).unwrap();
         } else {
-            assert_eq!(current.unwrap(), bytes, "stale v21 sample {name}");
+            assert_eq!(current.unwrap(), bytes, "stale {version} sample {name}");
         }
         sums.push_str(&format!("{:x}  {name}\n", Sha256::digest(&bytes)));
     }
@@ -847,7 +980,7 @@ fn check_samples_v21(testdata: &std::path::Path, search: Vec<u8>) {
     assert_eq!(
         std::fs::read_to_string(root.join("SHA256SUMS")).unwrap(),
         sums,
-        "stale v21 sample checksums"
+        "stale {version} sample checksums"
     );
 }
 
