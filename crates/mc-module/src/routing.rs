@@ -193,8 +193,10 @@ pub const DREAM_DEMANDS: &[DreamDemand] = &[
     },
 ];
 
-// The lab reviews evidence like a verify task, but takes its step cap and
-// any routing overrides from the experiment, never the scheduled defaults.
+// A lab run reads code and history to judge memories, as the nightly memory
+// check does, so it asks routing for the same kind of model. Its step limit
+// and any model override come from the run's spec file; `max_steps` here is
+// only the declared default and is never used for a lab run.
 pub(crate) static LAB_DEMAND: DreamDemand = DreamDemand {
     kind: "lab",
     iq: 60,

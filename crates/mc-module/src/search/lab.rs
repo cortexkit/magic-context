@@ -54,8 +54,10 @@ impl History {
             None => all.into_iter().collect(),
         };
         let mut coverage = messages::Coverage::default();
-        // The backing connection is immutable. Reuse the check for rows that
-        // lack a map entry, rather than rescreening the frozen index every query.
+        // Message search first screens the index for rows that have no entry
+        // in the row-id map, which costs a pass over the whole index. The
+        // store copy never changes, so do that pass once and reuse its
+        // result for every later query of this run.
         coverage.for_snapshot(0);
         Ok(Self {
             sessions,

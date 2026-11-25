@@ -86,8 +86,10 @@ impl Persona {
             .render(&context, &FragmentSources::new())
             .map_err(show)?
             .text;
-        // The closed guidance checker can loop over scalars, not lists of
-        // named records. Supply one Markdown string for each ordered block list.
+        // The first message's template is checked against a fixed list of
+        // facts before it is rendered, and that check accepts lists of plain
+        // values but not lists of records. So the context files and the
+        // memories each arrive as one ready-made Markdown string.
         let properties: BTreeMap<&str, Value> = tools
             .keys()
             .map(|name| (name.as_str(), json!({"type":"boolean"})))
