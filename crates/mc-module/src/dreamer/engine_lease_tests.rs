@@ -161,6 +161,94 @@ fn steps(file: &str, role: &str) -> Vec<Step> {
     notices(file, role).into_iter().map(Step::Notice).collect()
 }
 
+#[cfg(feature = "memory-replica")]
+#[test]
+fn lease_ack_survives_two_blocked_classify_planners() {
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    struct BlockingClassify {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Task for BlockingClassify {
+        fn kind(&self) -> &'static str {
+            "classify-memories"
+        }
+
+        fn batches(&self, _: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String> {
+            self.entered.send(()).unwrap();
+            let _ = self.release.lock().unwrap().recv();
+            Ok(Vec::new())
+        }
+    }
+
+    let module = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dreamer = super::super::runtime::build().unwrap();
+    module.block_on(async {
+        let (_dir, db) = store();
+        let leases = SampleLeases::new();
+        let mut sample = notices("sharing-disabled.json", "dreamer.global").into_iter();
+        let first = sample.next().unwrap();
+        let renewal = sample.next().unwrap();
+        let (now, clock) = clock(first.issued_at_ms);
+        leases.default_script(vec![Step::Notice(first)]);
+
+        let (entered, planning) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let engine = Arc::new(
+            Engine::new(
+                "this",
+                vec![Box::new(BlockingClassify {
+                    entered,
+                    release: Mutex::new(gate),
+                })],
+            )
+            .with_leases(leases.clone())
+            .with_clock(clock),
+        );
+        engine.bind_runtime(dreamer.handle());
+        let settings = Settings::default();
+        let profile = Arc::new(crate::memory_profile::prompt_profile(None).unwrap());
+        for project in [PROJECT, "pj-other"] {
+            engine.see_project(&db, project, FOLDER, profile.clone(), &settings, 1);
+        }
+        db.with_connection(|conn| conn.execute("UPDATE dream_schedules SET next_due_at = 1", []))
+            .unwrap();
+        let tick = engine.clone();
+        engine
+            .spawn(async move { tick.tick(&db, &replies(0), &settings, 1) })
+            .await
+            .unwrap();
+
+        // Wait from the test's thread, not from either worker pool: both
+        // planners must stay blocked until after the ACK or the deadline.
+        let wait_for_planners = Duration::from_secs(10);
+        for _ in 0..2 {
+            planning
+                .recv_timeout(wait_for_planners)
+                .expect("both planners entered");
+        }
+        let acks = leases.observe_acks();
+        now.store(renewal.issued_at_ms, Ordering::SeqCst);
+        let seq = renewal.seq;
+        assert!(leases.send(ROLE, Step::Notice(renewal)));
+        let ack = acks.recv_timeout(lease::ACK_DEADLINE);
+        drop(release);
+        settled(&engine).await;
+        assert_eq!(
+            ack.ok(),
+            Some((ROLE.to_owned(), seq)),
+            "lease renewal was not acknowledged while both dreamer workers planned"
+        );
+    });
+}
+
 /// `handback.json`'s notice (gen 9, `handback: true`, seq 3), and the same
 /// notice before the request came: seq 2, without handback.
 fn handback_notices() -> (Notice, Notice) {

@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::client::RunnerClient;
 use crate::config::Config;
 use crate::context_db::ContextDb;
+pub use crate::dreamer::runtime::build as build_dreamer_runtime;
 use crate::entorhinal_changes;
 pub use crate::entorhinal_changes::MarkerTask;
 use crate::pass::Settings;
@@ -1269,13 +1270,23 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// bundled one, and the workspace its memory context names) and starts
     /// the tasks that are due. The person's `dreamer.disable` stops new runs
     /// from the next round.
-    pub fn spawn_dreamer(&self) {
+    pub async fn spawn_dreamer(
+        &self,
+        runtime: &tokio::runtime::Handle,
+    ) -> Result<(), tokio::task::JoinError> {
         let (Some(db), Some(engine)) = (self.inner.db.clone(), self.inner.dreamer.clone()) else {
-            return;
+            return Ok(());
         };
-        engine.start(&db, now_ms());
+        engine.bind_runtime(runtime);
+        let (start_engine, start_db) = (engine.clone(), db.clone());
+        // Recover interrupted runs before any request can start another one.
+        engine
+            .spawn(async move { start_engine.start(&start_db, now_ms()) })
+            .await?;
         let module = self.clone();
-        tokio::spawn(async move {
+        let round_engine = engine.clone();
+        engine.spawn(async move {
+            let engine = round_engine;
             tokio::time::sleep(crate::upkeep::BOOT_QUIET).await;
             loop {
                 let settings = module.inner.config.dreamer();
@@ -1330,6 +1341,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 tokio::time::sleep(crate::dreamer::engine::TICK).await;
             }
         });
+        Ok(())
     }
 
     /// Each project with a session set up in this process, with the folder

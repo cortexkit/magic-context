@@ -696,6 +696,7 @@ pub(crate) trait SessionFactory: Send + Sync {
 /// Sessions from ck-bus, through the daemon at `path`.
 struct ProductionSessions {
     path: PathBuf,
+    runtime: crate::dreamer::runtime::OnRuntime,
 }
 
 async fn build_session(
@@ -731,9 +732,15 @@ impl NonceSigner for ProviderSigner {
 #[async_trait]
 impl SessionFactory for ProductionSessions {
     async fn open(&self) -> Result<BusSession, String> {
-        let route = Arc::new(CredentialRoute::connect(&self.path).await?);
-        let credential = route.issue().await?;
-        build_session(route, credential).await
+        let path = self.path.clone();
+        self.runtime
+            .run(async move {
+                let route = Arc::new(CredentialRoute::connect(&path).await?);
+                let credential = route.issue().await?;
+                build_session(route, credential).await
+            })
+            .await
+            .map_err(|error| format!("bus session open interrupted: {error}"))?
     }
 
     async fn renew(&self, session: &mut BusSession) -> Result<(), String> {
@@ -742,10 +749,16 @@ impl SessionFactory for ProductionSessions {
             .credential
             .clone()
             .ok_or("ckbus_credential_absent")?;
-        renew_credential(route.as_ref(), &mut credential).await?;
         // The auth callback holds the credential it was built with, so a
         // renewal opens a new connection rather than updating the old one.
-        *session = build_session(route, credential).await?;
+        *session = self
+            .runtime
+            .run(async move {
+                renew_credential(route.as_ref(), &mut credential).await?;
+                build_session(route, credential).await
+            })
+            .await
+            .map_err(|error| format!("bus session renewal interrupted: {error}"))??;
         Ok(())
     }
 }
@@ -802,9 +815,13 @@ impl SessionGuard<'_> {
 
 impl Bus {
     /// The bus through ck-bus, reached over the daemon whose connection file
-    /// is `path`.
+    /// is `path`. If built on the module runtime, open and renew its shared
+    /// connection there so maintenance cannot stall its socket tasks.
     pub fn through_ckbus(path: PathBuf) -> Self {
-        Self::with_factory(Arc::new(ProductionSessions { path }))
+        Self::with_factory(Arc::new(ProductionSessions {
+            path,
+            runtime: crate::dreamer::runtime::OnRuntime::try_current(),
+        }))
     }
 
     pub(crate) fn with_factory(factory: Arc<dyn SessionFactory>) -> Self {

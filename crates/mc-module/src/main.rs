@@ -17,7 +17,7 @@ use mc_module::agent_data::Journal;
 use mc_module::child_scopes::ChildScopes;
 use mc_module::config::{Config, Loader};
 use mc_module::context_db::ContextDb;
-use mc_module::module::Module;
+use mc_module::module::{build_dreamer_runtime, Module};
 use mc_module::storage_paths::{context_db_path, store_path};
 use mc_module::store::Store;
 use mc_module::transport::{manifest_for, Handler, SubcRunnerClient};
@@ -76,13 +76,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if std::env::args().nth(1).as_deref() == Some("move-in") {
         return move_in();
     }
-    tokio::runtime::Builder::new_multi_thread()
+    let module = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
-        .block_on(serve())
+        .build()?;
+    let dreamer = build_dreamer_runtime()?;
+    let result = module.block_on(serve(dreamer.handle()));
+    // Stop maintenance while the runtime that owns its lease watches and
+    // transport is still alive. Unfinished runs are recovered on startup.
+    drop(dreamer);
+    result
 }
 
-async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn serve(dreamer: &tokio::runtime::Handle) -> Result<(), Box<dyn Error + Send + Sync>> {
     let connection_file = subc_arg().ok_or("missing --subc <connection-file>")?;
     let module_id = std::env::var(subc_protocol::SUBC_MODULE_ID_ENV)
         .ok()
@@ -113,7 +118,8 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
         let _ = mc_module::engram_catalog::write_catalog_at_startup(data_dir);
     }
     let child_scopes = Arc::new(ChildScopes::new(module_id.clone()));
-    let client = SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes));
+    let client = SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes))
+        .on_current_runtime();
     let run_end_waits = client.run_end_waits();
     // The replica task reaches ck-bus and the vault over the same
     // connection to the daemon.
@@ -164,7 +170,7 @@ async fn serve() -> Result<(), Box<dyn Error + Send + Sync>> {
     // build with the memory-replica feature; the box id comes from the bus.
     let replica = module.spawn_replica(replica_consumer, Arc::clone(&bus));
     mc_module::bus::spawn_run_end_reader(Arc::clone(&bus), run_end_waits);
-    module.spawn_dreamer();
+    module.spawn_dreamer(dreamer).await?;
     module.spawn_legacy_projects();
     let registry_watch = module.spawn_entorhinal_follow(bus);
     // An install a move started before a crash is finished in every build:
