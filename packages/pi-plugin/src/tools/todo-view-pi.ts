@@ -10,7 +10,7 @@ import {
 	TODO_PRIORITIES,
 	TODO_STATUSES,
 } from "@magic-context/core/hooks/magic-context/todo-view";
-import { legacyTui, truncateToWidth } from "../pi-tui-compat";
+import { canRenderPiRows, truncateToWidth } from "../pi-tui-compat";
 
 export const TODO_TOOL_NAME = "todowrite";
 export const TODOS_COMMAND_NAME = "todos";
@@ -404,7 +404,7 @@ export class TodoOverlay {
 	private uiCtx: ExtensionUIContext | undefined;
 	private sessionId: string | undefined;
 	private widgetRegistered = false;
-	private tui: TUI | undefined;
+	private tui: Pick<TUI, "requestRender"> | undefined;
 	private completedTaskIdsPendingHide = new Set<string>();
 	private hiddenCompletedTaskIds = new Set<string>();
 	private lastTodoKeys = new Set<string>();
@@ -424,7 +424,7 @@ export class TodoOverlay {
 
 	update(sessionId = this.sessionId): void {
 		if (
-			!legacyTui ||
+			!canRenderPiRows ||
 			!this.uiCtx ||
 			!this.sessionId ||
 			sessionId !== this.sessionId
@@ -452,12 +452,15 @@ export class TodoOverlay {
 				WIDGET_KEY,
 				(tui, theme) => {
 					this.tui = tui;
+					const clearRegistration = () => {
+						if (this.tui !== tui) return;
+						this.widgetRegistered = false;
+						this.tui = undefined;
+					};
 					return {
 						render: (width: number) => this.renderWidget(theme, width),
-						invalidate: () => {
-							this.widgetRegistered = false;
-							this.tui = undefined;
-						},
+						invalidate: clearRegistration,
+						dispose: clearRegistration,
 					};
 				},
 				{ placement: "aboveEditor" },

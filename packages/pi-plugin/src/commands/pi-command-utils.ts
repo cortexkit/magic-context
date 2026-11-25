@@ -6,7 +6,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { sessionLog } from "@magic-context/core/shared/logger";
-import { legacyTui, matchesKey } from "../pi-tui-compat";
+import {
+	canRenderPiRows,
+	legacyTui,
+	matchesKey,
+	piOverlayOptions,
+} from "../pi-tui-compat";
 
 export const CTX_STATUS_CUSTOM_TYPE = "ctx-status";
 
@@ -81,15 +86,12 @@ export async function showCtxStatusDialog(
 	ctx: Pick<ExtensionCommandContext, "ui">,
 	content: CtxStatusMessageContent,
 ): Promise<boolean> {
-	if (!legacyTui) return false;
+	if (!canRenderPiRows) return false;
 	let factoryInvoked = false;
-	await ctx.ui.custom<undefined>(
-		(_tui, theme, _keybindings, done) => {
-			factoryInvoked = true;
-			return new CtxStatusDialog(content, theme, done);
-		},
-		{ overlay: true, overlayOptions: { anchor: "center", width: 92 } },
-	);
+	await ctx.ui.custom<undefined>((_tui, theme, _keybindings, done) => {
+		factoryInvoked = true;
+		return new CtxStatusDialog(content, theme, done);
+	}, piOverlayOptions(92));
 	return factoryInvoked;
 }
 

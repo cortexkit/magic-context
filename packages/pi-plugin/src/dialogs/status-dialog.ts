@@ -4,7 +4,7 @@ import type {
 	Theme,
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
@@ -95,8 +95,11 @@ import {
 } from "../pi-proven-floor";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
 import {
-	legacyTui,
+	canRenderPiRows,
 	matchesKey,
+	type PiRowsHost,
+	piOverlayOptions,
+	piTerminalRows,
 	truncateToWidth,
 	visibleWidth,
 } from "../pi-tui-compat";
@@ -242,7 +245,7 @@ export async function showStatusDialog(
 ): Promise<void> {
 	const sessionId = resolveSessionId(ctx);
 	if (!sessionId) throw new Error("No active Pi session is available.");
-	if (!legacyTui) {
+	if (!canRenderPiRows) {
 		ctx.ui.notify(
 			formatPiStatusSummary(buildPiStatusDetail(pi, ctx, deps, sessionId)),
 			"info",
@@ -261,10 +264,7 @@ export async function showStatusDialog(
 				tui,
 				done,
 			}),
-		{
-			overlay: true,
-			overlayOptions: { anchor: "center", width: 78 },
-		},
+		piOverlayOptions(78),
 	);
 }
 
@@ -274,7 +274,7 @@ interface StatusDialogProps {
 	deps: StatusDialogDeps;
 	sessionId: string;
 	theme: Theme;
-	tui: TUI;
+	tui: PiRowsHost;
 	done: (value: undefined) => void;
 }
 
@@ -366,7 +366,7 @@ class StatusDialogComponent implements Component {
 		);
 		// Reserve the borders, title and close hint; only the body scrolls.
 		// The host clips overflowing overlays rather than scrolling them.
-		const rows = Math.max(0, this.props.tui.terminal.rows);
+		const rows = Math.max(0, piTerminalRows(this.props.tui));
 		const header = inner.slice(0, 1);
 		const footer = inner.slice(-1);
 		const body = inner.slice(header.length, inner.length - footer.length);
