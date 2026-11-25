@@ -34,7 +34,7 @@ import {
 	TODO_STATUSES,
 } from "@magic-context/core/hooks/magic-context/todo-view";
 import { type Static, Type } from "typebox";
-import { legacyTui } from "../pi-tui-compat";
+import { canRenderPiRows, hasOmpRowsTui } from "../pi-tui-compat";
 import {
 	renderTodowriteCall,
 	renderTodowriteResult,
@@ -108,10 +108,17 @@ export function createTodowriteTool(): ToolDefinition<typeof TodowriteParams> {
 				},
 			};
 		},
-		...(legacyTui && {
-			renderCall: renderTodowriteCall,
+		...(canRenderPiRows && {
+			// OMP passes theme methods on its render options, but does not pass
+			// Pi's tool-call context. The args and result details hold the list.
+			renderCall: (args, theme, context) =>
+				renderTodowriteCall(args, theme, hasOmpRowsTui ? undefined : context),
 			renderResult: (result, _opts, theme, context) =>
-				renderTodowriteResult(result, theme, context),
+				renderTodowriteResult(
+					result,
+					theme,
+					hasOmpRowsTui ? undefined : context,
+				),
 		}),
 	};
 }

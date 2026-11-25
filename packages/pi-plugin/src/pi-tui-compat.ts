@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import type { TUI } from "@earendil-works/pi-tui";
 import { resolvePiHarnessDetection } from "./pi-harness-kind";
 
 type LegacyTui = Pick<
@@ -9,6 +10,16 @@ type LegacyTui = Pick<
 >;
 
 type TuiExports = Partial<LegacyTui> & { createSurface?: unknown };
+type RowsTui = {
+	visibleWidth: LegacyTui["visibleWidth"];
+	truncate: LegacyTui["truncateToWidth"];
+	decodeKey: (
+		data: string,
+		options: { kitty: boolean; backspaceIsCtrl: boolean },
+	) => { id: string; kind: string } | null;
+};
+
+type DisplayTui = { legacy?: LegacyTui; rows?: RowsTui };
 
 function legacyExports(tui: TuiExports | undefined): LegacyTui | undefined {
 	if (
@@ -22,7 +33,27 @@ function legacyExports(tui: TuiExports | undefined): LegacyTui | undefined {
 	}
 }
 
-async function loadLegacyTui(): Promise<LegacyTui | undefined> {
+async function loadOmpRowsTui(): Promise<RowsTui | undefined> {
+	try {
+		const width: Partial<RowsTui> = await import(
+			"@oh-my-pi/pi-tui/text/width" as string
+		);
+		const keys: Partial<RowsTui> = await import(
+			"@oh-my-pi/pi-tui/driver/input/keys" as string
+		);
+		if (width.visibleWidth && width.truncate && keys.decodeKey) {
+			return {
+				visibleWidth: width.visibleWidth,
+				truncate: width.truncate,
+				decodeKey: keys.decodeKey,
+			};
+		}
+	} catch {
+		// Without the host's width and key helpers, use text notifications only.
+	}
+}
+
+async function loadDisplayTui(): Promise<DisplayTui> {
 	// OMP scans literal imports across the extension graph before evaluation.
 	const piPeer = "@earendil-works/pi-tui";
 	if ((await resolvePiHarnessDetection()).kind === "omp") {
@@ -31,10 +62,12 @@ async function loadLegacyTui(): Promise<LegacyTui | undefined> {
 			"@oh-my-pi/pi-tui" as string
 		).catch(() => undefined);
 		const legacy = legacyExports(tui);
-		if (legacy) return legacy;
+		if (legacy) return { legacy };
 		// A recognized rows-based host cannot use old components, even when a
 		// copy of the Pi peer happens to be installed next to the extension.
-		if (typeof tui?.createSurface === "function") return undefined;
+		if (typeof tui?.createSurface === "function") {
+			return { rows: await loadOmpRowsTui() };
+		}
 	} else if (process.argv[1]) {
 		try {
 			// A globally installed Pi owns the peer. The extension package's
@@ -42,28 +75,54 @@ async function loadLegacyTui(): Promise<LegacyTui | undefined> {
 			const hostRequire = createRequire(realpathSync(process.argv[1]));
 			const peerUrl = pathToFileURL(hostRequire.resolve(piPeer));
 			const tui = legacyExports(await import(peerUrl.href));
-			if (tui) return tui;
+			if (tui) return { legacy: tui };
 		} catch {
 			// An embedded host or test entry may have no on-disk host package.
 		}
 	}
 	// Also accept a local Pi peer on older OMP installs without the canonical
 	// package. An unavailable display dependency must not stop the extension.
-	return legacyExports(await import(piPeer).catch(() => undefined));
+	return { legacy: legacyExports(await import(piPeer).catch(() => undefined)) };
 }
 
-export const legacyTui = await loadLegacyTui();
+const { legacy, rows } = await loadDisplayTui();
+export const legacyTui = legacy;
+export const hasOmpRowsTui = rows !== undefined;
+export const canRenderPiRows = legacyTui !== undefined || hasOmpRowsTui;
+
+export type PiRowsHost =
+	| Pick<TUI, "terminal" | "requestRender">
+	| { size(): { rows: number }; requestRender(): void };
+
+export function piTerminalRows(host: PiRowsHost): number {
+	return "size" in host ? host.size().rows : host.terminal.rows;
+}
+
+export function piOverlayOptions(width: number) {
+	return {
+		overlay: true,
+		...(legacyTui && { overlayOptions: { anchor: "center" as const, width } }),
+	};
+}
 
 export function matchesKey(...args: Parameters<LegacyTui["matchesKey"]>) {
-	return legacyTui?.matchesKey(...args) ?? false;
+	if (legacyTui) return legacyTui.matchesKey(...args);
+	const [data, key] = args;
+	// The rows canvas passes complete input sequences, and does not forward key releases.
+	const event = rows?.decodeKey(data, { kitty: false, backspaceIsCtrl: false });
+	return event?.id === (key === "return" ? "enter" : key);
 }
 
 export function truncateToWidth(
 	...args: Parameters<LegacyTui["truncateToWidth"]>
 ) {
-	return legacyTui?.truncateToWidth(...args) ?? args[0];
+	return (
+		legacyTui?.truncateToWidth(...args) ?? rows?.truncate(...args) ?? args[0]
+	);
 }
 
 export function visibleWidth(text: string): number {
-	return legacyTui?.visibleWidth(text) ?? text.length;
+	return (
+		legacyTui?.visibleWidth(text) ?? rows?.visibleWidth(text) ?? text.length
+	);
 }

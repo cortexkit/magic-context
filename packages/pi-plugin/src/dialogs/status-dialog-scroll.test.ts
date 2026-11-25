@@ -41,6 +41,7 @@ async function withDialog(
 		},
 	) => void,
 	shortSessionTtl = false,
+	useRowsHost = false,
 ) {
 	const db = createTestDb();
 	const sessionId = "ses-status-scroll";
@@ -80,7 +81,9 @@ async function withDialog(
 				ui: {
 					async custom(factory: (...args: unknown[]) => Dialog) {
 						const dialog = factory(
-							{ terminal, requestRender },
+							useRowsHost
+								? { size: () => terminal, requestRender }
+								: { terminal, requestRender },
 							{
 								fg: (_color: string, text: string) => text,
 								bold: (text: string) => text,
@@ -140,6 +143,21 @@ function assertBottom(dialog: Dialog, width: number, rows: number) {
 }
 
 describe("Pi status dialog scrolling", () => {
+	it("fits the rows host viewport without a legacy terminal object", async () => {
+		await withDialog(
+			(dialog, { terminal, requestRender }) => {
+				terminal.rows = 9;
+				const initial = dialog.render(78);
+				assertFits(initial, 78, terminal.rows);
+				dialog.handleInput(keys.down);
+				expect(requestRender).toHaveBeenCalledTimes(1);
+				expect(visibleRange(dialog.render(78)).first).toBe(2);
+			},
+			false,
+			true,
+		);
+	});
+
 	it("keeps the title, close hint and bottom border visible in a short terminal", async () => {
 		await withDialog((dialog, { terminal }) => {
 			const lines = dialog.render(78);
