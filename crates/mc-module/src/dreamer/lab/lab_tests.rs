@@ -116,6 +116,46 @@ impl Fixture {
     fn output(&self, name: &str) -> Value {
         serde_json::from_slice(&fs::read(self.out.join(name)).unwrap()).unwrap()
     }
+
+    async fn search_lab(&self, sessions: Option<&[&str]>) -> Arc<Lab> {
+        let mut spec = self.spec_value();
+        spec["tools"] = json!(["memory_search", "history_search"]);
+        spec["history_sessions"] = json!(sessions);
+        Arc::new(Lab::load(self.start(&spec).await.unwrap(), None).unwrap())
+    }
+}
+
+fn index_message(
+    conn: &rusqlite::Connection,
+    session: &str,
+    n: i64,
+    role: &str,
+    text: &str,
+    at: i64,
+) {
+    conn.execute(
+        "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![session, n, format!("{session}-{n}"), role, text],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![session, n, conn.last_insert_rowid(), at],
+    ).unwrap();
+}
+
+fn group<'a>(answer: &'a str, title: &str) -> &'a str {
+    let heading = format!("## {title}\n");
+    answer
+        .split_once(&heading)
+        .unwrap_or_else(|| panic!("missing group {title:?}: {answer}"))
+        .1
+        .split("\n\n## ")
+        .next()
+        .unwrap()
+        .trim()
 }
 
 fn submit(entries: &[Value]) -> Value {
@@ -132,7 +172,10 @@ async fn scripted_lab_records_incremental_verdicts_and_request_without_store_wri
     let live_before = fs::read(&fixture.live).unwrap();
     let frozen_before = fs::read(&fixture.frozen).unwrap();
     let mut spec = fixture.spec_value();
-    spec["tools"].as_array_mut().unwrap().push(json!("reader"));
+    spec["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("reader"), json!("history_search")]);
     let client = fixture
         .run(
             spec,
@@ -196,7 +239,14 @@ async fn scripted_lab_records_incremental_verdicts_and_request_without_store_wri
             .chain(request["lab_tools"].as_array().unwrap())
             .map(|tool| tool["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["read", "aft_search", "git_read", "memory_search", "submit"]
+        [
+            "read",
+            "aft_search",
+            "git_read",
+            "memory_search",
+            "history_search",
+            "submit"
+        ]
     );
     let first = request["first_message"].as_str().unwrap();
     assert!(first.contains("## Context note\n\nA fixed context note."));
@@ -210,6 +260,31 @@ async fn scripted_lab_records_incremental_verdicts_and_request_without_store_wri
         .as_str()
         .unwrap()
         .contains("Reader is available."));
+    assert!(request["system_text"]
+        .as_str()
+        .unwrap()
+        .contains("History search is available."));
+    assert!(request["system_text"]
+        .as_str()
+        .unwrap()
+        .contains("Memory search is available."));
+    let lab_tools = request["lab_tools"].as_array().unwrap();
+    let properties = |name: &str| {
+        let mut keys = lab_tools.iter().find(|tool| tool["name"] == name).unwrap()["input_schema"]
+            ["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
+    };
+    assert_eq!(properties("memory_search"), ["limit", "query"]);
+    assert_eq!(
+        properties("history_search"),
+        ["from", "include_agent", "limit", "query", "to"]
+    );
     assert_eq!(client.selects.lock().unwrap()[0].requirements.eq, Some(29));
     assert_eq!(live_before, fs::read(&fixture.live).unwrap());
     assert_eq!(frozen_before, fs::read(&fixture.frozen).unwrap());
@@ -274,14 +349,22 @@ async fn undefined_persona_name_refuses_before_sending_to_model() {
 #[tokio::test]
 async fn frozen_search_uses_only_project_sessions_and_indexed_messages() {
     let fixture = Fixture::new();
-    let start = fixture.start(&fixture.spec_value()).await.unwrap();
-    let lab = Arc::new(Lab::load(start, None).unwrap());
-    let answer = lab
+    let lab = fixture.search_lab(None).await;
+    let memory = lab
         .clone()
         .tool("memory_search", json!({"query":"sharedterm"}))
         .await
         .unwrap();
-    assert!(answer.contains("id=7"), "{answer}");
+    let answer = lab
+        .clone()
+        .tool("history_search", json!({"query":"sharedterm"}))
+        .await
+        .unwrap();
+    assert!(memory.contains("id=7"), "{memory}");
+    assert!(
+        !memory.contains("id=9") && !memory.contains("different project"),
+        "{memory}"
+    );
     assert!(
         answer.contains("session=session-p ref=session-p:12"),
         "{answer}"
@@ -298,33 +381,285 @@ async fn frozen_search_uses_only_project_sessions_and_indexed_messages() {
         !answer.contains("unrelated") && !answer.contains("different project"),
         "{answer}"
     );
-    let db = lab.store.lock().unwrap();
-    assert!(db
-        .execute("UPDATE memories SET retrieval_count=1", [])
-        .unwrap_err()
-        .to_string()
-        .contains("readonly"));
-    assert_eq!(
-        db.query_row(
-            "SELECT retrieval_count FROM memories WHERE id=7",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
-    let history = crate::search::lab::History::load(&db, "p", Some(&["session-p".into()])).unwrap();
-    let narrow = history
-        .search(
-            &db,
-            "p",
-            &json!({"query":"sharedterm","sources":["message"]}),
-            None,
-        )
+    assert!(!answer.contains("id=7"), "{answer}");
+    {
+        let db = lab.store.lock().unwrap();
+        assert!(db
+            .execute("UPDATE memories SET retrieval_count=1", [])
+            .unwrap_err()
+            .to_string()
+            .contains("readonly"));
+        assert_eq!(
+            db.query_row(
+                "SELECT retrieval_count FROM memories WHERE id=7",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert!(crate::search::lab::History::load(&db, "p", Some(&["unrelated".into()])).is_err());
+    }
+    let fixture = Fixture::new();
+    let narrow = fixture
+        .search_lab(Some(&["session-p"]))
+        .await
+        .tool("history_search", json!({"query":"sharedterm"}))
+        .await
         .unwrap();
     assert!(narrow.contains("session=session-p ref=session-p:12"));
     assert!(!narrow.contains("session-p2"));
-    assert!(crate::search::lab::History::load(&db, "p", Some(&["unrelated".into()])).is_err());
+}
+
+#[tokio::test]
+async fn memory_search_does_not_use_history_session_selection() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["history_sessions"] = json!(["unrelated"]);
+    let lab = Arc::new(Lab::load(fixture.start(&spec).await.unwrap(), None).unwrap());
+    let answer = lab
+        .clone()
+        .tool("memory_search", json!({"query":"#7"}))
+        .await
+        .unwrap();
+    assert!(answer.contains("id=7"), "{answer}");
+    let error = lab
+        .tool("memory_search", json!({"query":"#7", "sources":["memory"]}))
+        .await
+        .unwrap_err();
+    assert!(error.contains("does not accept \"sources\""), "{error}");
+}
+
+#[tokio::test]
+async fn frozen_search_memory_only_even_when_messages_outranked_it() {
+    let fixture = Fixture::new();
+    let lab = fixture.search_lab(None).await;
+    let answer = lab
+        .clone()
+        .tool("memory_search", json!({"query":"sharedterm", "limit":1}))
+        .await
+        .unwrap();
+    assert!(answer.contains("id=7"), "{answer}");
+    let answer = lab
+        .tool("memory_search", json!({"query":"sharedterm"}))
+        .await
+        .unwrap();
+    assert_eq!(answer.matches("[memory]").count(), 1, "{answer}");
+    assert!(
+        !answer.contains("[message]") && !answer.contains("[git_commit]"),
+        "{answer}"
+    );
+}
+
+#[tokio::test]
+async fn frozen_search_agent_messages_require_opt_in_and_get_their_own_group() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    index_message(
+        &db,
+        "session-p",
+        13,
+        "assistant",
+        "sharedterm from the agent.",
+        1000,
+    );
+    drop(db);
+    let lab = fixture.search_lab(None).await;
+    let omitted = lab
+        .clone()
+        .tool("history_search", json!({"query":"sharedterm"}))
+        .await
+        .unwrap();
+    assert!(
+        !omitted.contains("from the agent") && !omitted.contains("## Agent messages"),
+        "{omitted}"
+    );
+    let included = lab
+        .tool(
+            "history_search",
+            json!({"query":"sharedterm", "include_agent":true}),
+        )
+        .await
+        .unwrap();
+    assert!(group(&included, "The person's messages").contains("ref=session-p:12"));
+    assert!(!group(&included, "The person's messages").contains("from the agent"));
+    assert!(group(&included, "Agent messages").contains("ref=session-p:13"));
+}
+
+#[tokio::test]
+async fn frozen_search_sizes_multiply_independently_per_group() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    for n in 20..34 {
+        index_message(&db, "session-p", n, "user", "groupterm human", 1000);
+        index_message(
+            &db,
+            "session-p",
+            n + 20,
+            "assistant",
+            "groupterm agent",
+            1000,
+        );
+        db.execute("INSERT INTO compartments (session_id, harness, sequence, start_message, end_message, title, content, created_at)
+                    VALUES ('session-p', 'mock', ?1, ?1, ?1, 'groupterm summary', 'groupterm summary', 2000)", [n]).unwrap();
+        db.execute("INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+                    VALUES (?1, 'p', ?1, 'groupterm commit', 'author', ?2, 1000)", params![format!("commit-{n}"), n]).unwrap();
+    }
+    drop(db);
+    let lab = fixture.search_lab(None).await;
+    for (limit, multiplier) in [(Value::Null, 1), (json!(2), 2), (json!(99), 3)] {
+        let mut input = json!({"query":"groupterm", "include_agent":true});
+        if !limit.is_null() {
+            input["limit"] = limit;
+        }
+        let answer = lab.clone().tool("history_search", input).await.unwrap();
+        for (title, count, marker) in [
+            ("Summaries", 4, "compartment_id="),
+            ("The person's messages", 4, "ordinal="),
+            ("Commits", 3, "sha="),
+            ("Agent messages", 4, "ordinal="),
+        ] {
+            assert_eq!(
+                group(&answer, title).matches(marker).count(),
+                count * multiplier,
+                "{answer}"
+            );
+        }
+    }
+    let empty = lab
+        .tool(
+            "history_search",
+            json!({"query":"zznomatchzz", "include_agent":true}),
+        )
+        .await
+        .unwrap();
+    for title in [
+        "Summaries",
+        "The person's messages",
+        "Commits",
+        "Agent messages",
+    ] {
+        assert_eq!(group(&empty, title), "none", "{empty}");
+    }
+}
+
+#[tokio::test]
+async fn frozen_search_user_role_system_reminders_do_not_take_slots() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    for n in 20..35 {
+        index_message(
+            &db,
+            "session-p",
+            n,
+            "user",
+            "<system-reminder>noticeterm noticeterm noticeterm host notice</system-reminder>",
+            1000,
+        );
+    }
+    index_message(
+        &db,
+        "session-p",
+        40,
+        "user",
+        "My actual noticeterm request.",
+        1000,
+    );
+    drop(db);
+    let lab = fixture.search_lab(None).await;
+    let answer = lab
+        .tool("history_search", json!({"query":"noticeterm"}))
+        .await
+        .unwrap();
+    assert!(!answer.contains("host notice"), "{answer}");
+    let user = group(&answer, "The person's messages");
+    assert!(user.contains("My actual noticeterm request."), "{answer}");
+    assert_eq!(user.matches("ordinal=").count(), 1, "{answer}");
+}
+
+#[tokio::test]
+async fn frozen_search_dated_messages_use_inclusive_utc_bounds_and_total_tie_order() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    for (session, n, at) in [
+        ("session-p", 16, 86_399_999),
+        ("session-p2", 15, 86_399_999),
+        ("session-p", 15, 86_399_999),
+        ("session-p", 14, 0),
+        ("session-p", 13, -1),
+        ("session-p", 17, 86_400_000),
+        ("unrelated", 15, 86_399_999),
+    ] {
+        index_message(&db, session, n, "user", "same tiebreakterm text", at);
+    }
+    drop(db);
+    let lab = fixture.search_lab(None).await;
+    let answer = lab
+        .tool(
+            "history_search",
+            json!({"query":"tiebreakterm", "from":"1970-01-01", "to":"1970-01-01"}),
+        )
+        .await
+        .unwrap();
+    let user = group(&answer, "The person's messages");
+    let references: Vec<_> = user
+        .lines()
+        .filter_map(|line| line.split_once(" ref=").map(|(_, r)| r))
+        .collect();
+    assert_eq!(
+        references,
+        [
+            "session-p:15",
+            "session-p:16",
+            "session-p2:15",
+            "session-p:14"
+        ],
+        "{answer}"
+    );
+}
+
+#[tokio::test]
+async fn frozen_search_archived_memory_follows_active_and_is_citable_by_id() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    let words = format!("{} an ending beyond the character cap", "é".repeat(600));
+    db.execute(
+        "UPDATE memories SET content=?1, status='archived' WHERE id=2",
+        [format!("sharedterm sharedterm {words}")],
+    )
+    .unwrap();
+    drop(db);
+    let lab = fixture.search_lab(None).await;
+    let answer = lab
+        .clone()
+        .tool("memory_search", json!({"query":"sharedterm"}))
+        .await
+        .unwrap();
+    let active = answer.find("id=7").expect("active memory");
+    let archived = answer
+        .find("id=2")
+        .unwrap_or_else(|| panic!("missing archived memory: {answer}"));
+    assert!(active < archived, "{answer}");
+    assert!(
+        answer[active..archived].contains("status=active"),
+        "{answer}"
+    );
+    assert!(
+        answer[archived..].contains("status=archived")
+            && answer[archived..].contains("importance=72"),
+        "{answer}"
+    );
+    let text = answer[archived..].split_once('\n').unwrap().1;
+    assert_eq!(text.strip_suffix('…').unwrap().chars().count(), 600);
+    let ids = lab
+        .tool("memory_search", json!({"query":"#2, #7, #9"}))
+        .await
+        .unwrap();
+    assert!(
+        ids.find("id=7").unwrap() < ids.find("id=2").unwrap(),
+        "{ids}"
+    );
+    assert!(!ids.contains("id=9"), "{ids}");
 }
 
 #[tokio::test]
@@ -413,13 +748,18 @@ async fn lab_review_only_mapped_harness_contributes_history_for_shared_ids() {
         VALUES ('session-p', 'unknown', 2, 3, 5, 'private sharedterm', 'not mapped in this project', 2000)", []).unwrap();
     conn.execute("UPDATE compartments SET harness='mock' WHERE session_id IN ('session-p','session-p2') AND sequence=1", []).unwrap();
     drop(conn);
-    let start = fixture.start(&fixture.spec_value()).await.unwrap();
-    let lab = Arc::new(Lab::load(start, None).unwrap());
+    let lab = fixture.search_lab(None).await;
+    let memory = lab
+        .clone()
+        .tool("memory_search", json!({"query":"sharedterm"}))
+        .await
+        .unwrap();
+    assert!(
+        memory.contains("id=7") && !memory.contains("session-p"),
+        "{memory}"
+    );
     let answer = lab
-        .tool(
-            "memory_search",
-            json!({"query":"sharedterm", "sources":["message"]}),
-        )
+        .tool("history_search", json!({"query":"sharedterm"}))
         .await
         .unwrap();
     assert!(answer.contains("ref=session-p:1-4"), "{answer}");
@@ -431,6 +771,41 @@ async fn lab_review_only_mapped_harness_contributes_history_for_shared_ids() {
         1,
         "{answer}"
     );
+    assert!(group(&answer, "Summaries").contains("ref=session-p:1-4"));
+}
+
+#[tokio::test]
+async fn history_omits_sessions_mapped_to_multiple_harnesses_in_the_same_project() {
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    db.execute_batch(
+        "INSERT INTO session_projects (session_id, harness, project_path, updated_at)
+             VALUES ('session-p', 'other', 'p', 1);
+         INSERT INTO compartments (session_id, harness, sequence, start_message, end_message, title, content, created_at)
+             VALUES ('session-p', 'other', 2, 1, 4, 'other sharedterm summary', 'same bare session id', 2000);",
+    ).unwrap();
+    drop(db);
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["history_search"]);
+    let client = fixture
+        .run(
+            spec,
+            Ends::LabTools(vec![
+                json!({"name":"history_search", "arguments":{"query":"sharedterm"}}),
+            ]),
+        )
+        .await;
+    let calls = client.lab_tool_results.lock().unwrap();
+    let answer = calls[0]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        answer.contains("ref=session-p2:12") && answer.contains("ref=session-p2:1-4"),
+        "{answer}"
+    );
+    assert!(
+        !answer.contains("ref=session-p:") && !answer.contains("same bare session id"),
+        "{answer}"
+    );
+    assert_eq!(fixture.output("run.json")["history_session_ids_skipped"], 1);
 }
 
 #[tokio::test]
