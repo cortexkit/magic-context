@@ -94,6 +94,8 @@ pub const TAKE_DEADLINE: Duration = Duration::from_secs(90);
 
 /// Entorhinal's bound on acknowledging a notice.
 pub const ACK_DEADLINE: Duration = Duration::from_secs(5);
+/// Warn before acknowledgement latency reaches the deadline.
+const SLOW_ACK_MS: u64 = 2_000;
 
 /// How long a run waits for the answer to its yield. Settling the
 /// hand-over takes Entorhinal one write on the hub, so this is the same
@@ -651,14 +653,37 @@ async fn take(
     match next {
         Some(Ok(notice)) => {
             let seq = notice.seq;
+            let issued_at_ms = notice.issued_at_ms;
             state.send_modify(|state| state.notice = Some(notice));
             // Every notice is acknowledged, `holding: false` included.
-            match tokio::time::timeout(ACK_DEADLINE, route.ack(seq)).await {
+            let ack_send_age_ms = monotonic_ms().saturating_sub(issued_at_ms);
+            let ack = tokio::time::timeout(ACK_DEADLINE, route.ack(seq)).await;
+            // Measure from issue, not receipt: the provider's deadline also
+            // counts time spent waiting for this reader to run.
+            let ack_latency_ms = monotonic_ms().saturating_sub(issued_at_ms);
+            tracing::info!(
+                role,
+                seq,
+                issued_at_ms,
+                ack_send_age_ms,
+                ack_latency_ms,
+                acknowledged = matches!(&ack, Ok(Ok(()))),
+                "ck-mc: dreamer: role lease notice acknowledgement"
+            );
+            match ack {
+                Ok(Ok(())) if ack_latency_ms > SLOW_ACK_MS => tracing::warn!(
+                    role,
+                    seq,
+                    ack_latency_ms,
+                    "ck-mc: dreamer: slow role lease notice acknowledgement"
+                ),
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::warn!(
+                    ack_latency_ms,
                     "ck-mc: dreamer: acknowledging {role} notice {seq} failed: {error}"
                 ),
                 Err(_) => tracing::warn!(
+                    ack_latency_ms,
                     "ck-mc: dreamer: acknowledging {role} notice {seq} took longer than {} seconds",
                     ACK_DEADLINE.as_secs()
                 ),

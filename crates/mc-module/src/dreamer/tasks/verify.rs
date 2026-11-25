@@ -1194,24 +1194,31 @@ impl Task for Verify {
         _: Option<&'a crate::embedding::Provider>,
     ) -> crate::dreamer::task::RunPlanning<'a> {
         use crate::dreamer::task::{PlanningWrite, RunPlan};
-        let plan = self
-            .plan_batches(context)
-            .map(|VerifyPlan { batches, rechecked }| {
-                // The unchanged lines still support the memory at the new commit.
-                // Record it under the run's role without asking a model again.
-                let write = (!rechecked.is_empty()).then(|| {
-                    Box::new(move |tx: &Transaction<'_>| {
-                        record_rechecked(tx, &rechecked).map_err(|error| error.to_string())
-                    }) as PlanningWrite
-                });
-                RunPlan {
-                    batches: batches
-                        .into_iter()
-                        .map(|batch| Box::new(batch) as Box<dyn Batch>)
-                        .collect(),
-                    write,
-                }
+        // Checkout scans and git commands block. Give Tokio another worker
+        // for lease acknowledgements while this run plans its batches.
+        let plan_batches = || self.plan_batches(context);
+        let planned = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(plan_batches)
+            }
+            _ => plan_batches(),
+        };
+        let plan = planned.map(|VerifyPlan { batches, rechecked }| {
+            // The unchanged lines still support the memory at the new commit.
+            // Record it under the run's role without asking a model again.
+            let write = (!rechecked.is_empty()).then(|| {
+                Box::new(move |tx: &Transaction<'_>| {
+                    record_rechecked(tx, &rechecked).map_err(|error| error.to_string())
+                }) as PlanningWrite
             });
+            RunPlan {
+                batches: batches
+                    .into_iter()
+                    .map(|batch| Box::new(batch) as Box<dyn Batch>)
+                    .collect(),
+                write,
+            }
+        });
         Box::pin(std::future::ready(plan))
     }
 }
