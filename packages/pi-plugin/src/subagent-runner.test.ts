@@ -1027,13 +1027,20 @@ describe("subagent-runner pure helpers", () => {
 			expect(historianArgs).toContain("--no-rules");
 			expect(historianArgs).not.toContain("--no-prompt-templates");
 			expect(historianArgs).not.toContain("--no-context-files");
-			expect(historianArgs).toEqual(expect.arrayContaining(["--no-tools"]));
+			expect(historianArgs).toContain("--tools=");
+			expect(historianArgs).not.toContain("--no-tools");
+			const allowlistFlag = historianArgs.indexOf(
+				"--magic-context-tool-allowlist",
+			);
+			expect(allowlistFlag).toBeGreaterThan(-1);
+			expect(historianArgs[allowlistFlag + 1]).toBe("[]");
 
 			const dreamerArgs = buildArgsForTest({
 				...baseOptions,
 				agent: "dreamer",
 			});
-			expect(dreamerArgs).toContain("--no-tools");
+			expect(dreamerArgs).toContain("--tools=");
+			expect(dreamerArgs).not.toContain("--no-tools");
 			expect(dreamerArgs).not.toContain("--tools");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
@@ -1184,7 +1191,8 @@ describe("subagent-runner pure helpers", () => {
 			{ ...baseOptions, agent: "dreamer-memory-mapper" },
 			{ targetHarness: "omp", hostToolNames: [] },
 		);
-		expect(args).toContain("--no-tools");
+		expect(args).toContain("--tools=");
+		expect(args).not.toContain("--no-tools");
 		expect(args).not.toContain("--tools");
 	});
 
@@ -5066,7 +5074,8 @@ for (const targetHarness of ["pi", "omp"] as const) {
 					onProgress: (event) => progress.push(event),
 				});
 				const args = (spawnImpl.mock.calls as unknown[][])[0]?.[1] as string[];
-				expect(args.includes("--no-tools")).toBe(
+				const emptyTools = targetHarness === "omp" ? "--tools=" : "--no-tools";
+				expect(args.includes(emptyTools)).toBe(
 					agent !== "dreamer-memory-mapper",
 				);
 				expect(

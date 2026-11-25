@@ -3313,8 +3313,6 @@ export function buildArgs(
 		...(ompTarget
 			? (["--no-rules"] as const)
 			: (["--no-prompt-templates", "--no-context-files"] as const)),
-		// --no-tools is applied below for unknown, explicitly zero-tool, or fully
-		// filtered allow-lists.
 		// Every known Magic Context child gets an explicit --tools allow-list so Pi's
 		// discovered extension registry cannot leak unrelated tools into subagents.
 	];
@@ -3396,13 +3394,17 @@ export function buildArgs(
 	// Pi's CLI filters the complete registry. OMP needs both a built-in CLI budget
 	// and a startup selection through its extension API to exclude discovered tools.
 	const strictTools = STRICT_TOOL_ALLOWLIST.get(options.agent);
+	// OMP 19.2 made --no-tools incompatible with the required startup extension.
+	// --tools= requests no built-ins without disabling extension loading; the
+	// startup guard still checks the full active tool set on every OMP version.
+	const emptyToolFlag = ompTarget ? "--tools=" : "--no-tools";
 	let activeToolNames: readonly string[] = [];
 	if (strictTools === undefined) {
 		sessionLog(
 			options.accountingSessionId ?? "pi-subagent",
-			`Pi subagent agent "${options.agent}" has no strict tool allow-list; forcing --no-tools`,
+			`Pi subagent agent "${options.agent}" has no strict tool allow-list; forcing an empty tool list`,
 		);
-		args.push("--no-tools");
+		args.push(emptyToolFlag);
 	} else {
 		// Only OMP refuses a child whose --tools names a built-in it has disabled.
 		// Pi accepts the list, and its registry also reflects the parent session's
@@ -3438,7 +3440,7 @@ export function buildArgs(
 		if (hostTools.length > 0) {
 			args.push("--tools", hostTools.join(","));
 		} else {
-			args.push("--no-tools");
+			args.push(emptyToolFlag);
 		}
 	}
 	if (ompTarget) {

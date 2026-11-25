@@ -3,7 +3,6 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { findPiTagIdentityConflict } from "@magic-context/core/features/magic-context/storage-tags";
 import {
 	exactReusablePrefix,
@@ -72,6 +71,7 @@ import {
 } from "./pi-dispatch-structure";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { PiDegradedPassError } from "./pi-raw-fallback";
+import { legacyTui } from "./pi-tui-compat";
 
 const ENTRY_TYPE = "magic-context-turn-refused";
 const RETRY_MESSAGE =
@@ -996,10 +996,13 @@ export function registerPiGuardedContext(
 				: undefined;
 		});
 	}
-	pi.registerEntryRenderer?.<{ message: string }>(
-		ENTRY_TYPE,
-		(entry) => new Text(entry.data?.message ?? RETRY_MESSAGE, 0, 0),
-	);
+	if (legacyTui) {
+		const { Text } = legacyTui;
+		pi.registerEntryRenderer?.<{ message: string }>(
+			ENTRY_TYPE,
+			(entry) => new Text(entry.data?.message ?? RETRY_MESSAGE, 0, 0),
+		);
+	}
 	pi.on("context", async (event, ctx) => {
 		// A dump is a read-only snapshot, not a provider preparation. In particular,
 		// do not allocate an operation, claim a generation, or enter SQLite here.
