@@ -427,6 +427,138 @@ async fn sidekick_lab_uses_a_worker_scope_and_asks_aft_for_reader() {
 }
 
 #[tokio::test]
+async fn sidekick_lab_ends_each_worker_scope_without_touching_the_ordinary_scope() {
+    use crate::child_scopes::{tests::Recorder, ChildScopes};
+    use subc_protocol::scope::ScopeKind;
+
+    let mut fixture = Fixture::new();
+    let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
+    let recorder = Arc::new(Recorder::default());
+    scopes.set_publisher(recorder.clone());
+    let plain = scopes
+        .for_child(fixture.root.to_str().unwrap())
+        .await
+        .unwrap();
+    for (out, tool_names, stop) in [
+        ("success", &["sidekick"][..], "model_finished"),
+        ("refused", &[][..], "refusal"),
+    ] {
+        fixture.out = fixture.root.join(out);
+        let mut spec = fixture.spec_value();
+        spec["tools"] = json!(["sidekick"]);
+        fixture
+            .run_with(spec, Ends::LabTools(vec![]), |client| {
+                sidekick_provider(client, &["sidekick"], tool_names);
+                client.lab_scopes = Some(scopes.clone());
+            })
+            .await;
+        assert_eq!(fixture.output("run.json")["stop"], stop);
+        assert_eq!(
+            scopes
+                .for_child(fixture.root.to_str().unwrap())
+                .await
+                .unwrap(),
+            plain
+        );
+    }
+
+    let syncs = recorder.syncs.lock().unwrap();
+    assert_eq!(syncs.len(), 5);
+    for added in [1, 3] {
+        let records = &syncs[added].1;
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0], syncs[0].1[0]);
+        assert_eq!(records[1].kind, ScopeKind::Worker);
+        assert_eq!(records[1].project_id.as_deref(), Some("p"));
+        assert_eq!(records[1].scope_epoch, 1);
+        assert_ne!(records[1].scope_ref, records[0].scope_ref);
+        assert_eq!(syncs[added + 1].1, syncs[0].1);
+    }
+    assert_ne!(syncs[1].1[1].scope_ref, syncs[3].1[1].scope_ref);
+}
+
+#[tokio::test]
+async fn sidekick_lab_deadline_republishes_without_the_unacknowledged_worker() {
+    use crate::child_scopes::{tests::Recorder, ChildScopes};
+    use subc_protocol::scope::ScopeKind;
+
+    let fixture = Fixture::new();
+    let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
+    let recorder = Arc::new(Recorder::default());
+    scopes.set_publisher(recorder.clone());
+    scopes.for_child("/work/ordinary").await.unwrap();
+    recorder.stall_workers.store(true, Ordering::Relaxed);
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    spec["deadline_minutes"] = json!(1);
+    let start = fixture.start(&spec).await.unwrap();
+    let registry = Arc::new(Registry::default());
+    let mut client = review_client(&registry, &[Ends::Reply("must not be sent")]);
+    available_sidekick(&mut client);
+    client.lab_scopes = Some(scopes);
+    let client = Arc::new(client);
+    tokio::time::pause();
+    start.execute(client.clone(), registry, None).await;
+    assert!(client.sends.lock().unwrap().is_empty());
+    assert_eq!(fixture.output("run.json")["stop"], "deadline");
+    let syncs = recorder.syncs.lock().unwrap();
+    assert_eq!(syncs.len(), 3);
+    assert!(syncs[1]
+        .1
+        .iter()
+        .any(|record| record.kind == ScopeKind::Worker));
+    assert_eq!(syncs[2].1, syncs[0].1);
+}
+
+#[tokio::test]
+async fn sidekick_lab_reports_the_original_worker_scope_refusal() {
+    use crate::child_scopes::{tests::Recorder, ChildScopes};
+
+    let fixture = Fixture::new();
+    let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
+    let recorder = Arc::new(Recorder::default());
+    recorder.reject_workers.store(true, Ordering::Relaxed);
+    scopes.set_publisher(recorder.clone());
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), |client| {
+            available_sidekick(client);
+            client.lab_scopes = Some(scopes);
+        })
+        .await;
+    let run = fixture.output("run.json");
+    assert_eq!(run["stop"], "refusal");
+    assert_eq!(
+        run["error"],
+        "worker_refused: the scope fixture refused this sync"
+    );
+    assert!(client.sends.lock().unwrap().is_empty());
+    let syncs = recorder.syncs.lock().unwrap();
+    assert_eq!(syncs.len(), 2);
+    assert!(syncs[1].1.is_empty());
+}
+
+#[tokio::test]
+async fn sidekick_lab_refuses_an_invalid_project_id_before_catalog_preflight() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["project"] = json!("contains a space");
+    spec["tools"] = json!(["sidekick"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    let run = fixture.output("run.json");
+    assert_eq!(run["stop"], "refusal");
+    assert!(run["error"]
+        .as_str()
+        .unwrap()
+        .contains("1 to 128 printable non-space ASCII"));
+    assert!(client.asked.lock().unwrap().is_empty());
+    assert!(client.sends.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn opted_in_lab_plan_offers_only_sidekick_from_prefrontal() {
     let fixture = Fixture::new();
     let mut spec = fixture.spec_value();

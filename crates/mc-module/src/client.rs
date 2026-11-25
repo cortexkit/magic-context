@@ -148,6 +148,13 @@ pub trait RunnerClient: Send + Sync + 'static {
     fn child_plans(&self, _child: &Child) -> impl Future<Output = bool> + Send {
         async { false }
     }
+    /// End a Worker scope once its owner has no more calls to make under it.
+    fn end_worker_scope(
+        &self,
+        _scope: &crate::child_scopes::WorkerScope,
+    ) -> impl Future<Output = Result<(), ClientError>> + Send {
+        async { Ok(()) }
+    }
     /// The modules the daemon lists as ready tool providers (they claim
     /// `tool-provider/v1` in their manifest), by module id. A client that
     /// can't ask the daemon lists none, so no code-reading task runs.

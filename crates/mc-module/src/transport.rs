@@ -303,7 +303,7 @@ pub struct SubcRunnerClient {
     consumer: SharedConsumer,
     /// The scopes ck-mc's summarizer children run under.
     child_scopes: Arc<ChildScopes>,
-    runner_capabilities: crate::runner_capabilities::RunnerCapabilities,
+    runner_capabilities: Arc<crate::runner_capabilities::RunnerCapabilities>,
     routing_capabilities: crate::routing::Capabilities,
     /// The waits on summary and dreamer child runs, which the bus's run-end
     /// reader wakes ([`crate::bus::spawn_run_end_reader`]).
@@ -418,6 +418,14 @@ impl SubcRunnerClient {
     /// by whichever side needs it first.
     pub fn shared_consumer(&self) -> SharedConsumer {
         self.consumer.clone()
+    }
+
+    fn child_capabilities(&self) -> Arc<crate::runner_capabilities::RunnerCapabilities> {
+        // A Worker route can fail discovery without saying anything about the
+        // runner's capabilities on an ordinary route.
+        crate::child_scopes::LAB_WORKER_PROJECT
+            .try_with(|scope| scope.capabilities.clone())
+            .unwrap_or_else(|_| self.runner_capabilities.clone())
     }
 
     /// An llm-runner call on a child's route, opened under ck-mc's child
@@ -739,7 +747,7 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .cache_policy(
                 &child.session.runner,
                 epoch,
@@ -753,7 +761,7 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .session_class(
                 &child.session.runner,
                 epoch,
@@ -767,7 +775,7 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .temperature(
                 &child.session.runner,
                 epoch,
@@ -781,13 +789,23 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .plans(
                 &child.session.runner,
                 epoch,
                 self.child_call(child, "role.describe", &json!({})),
             )
             .await
+    }
+
+    async fn end_worker_scope(
+        &self,
+        scope: &crate::child_scopes::WorkerScope,
+    ) -> Result<(), ClientError> {
+        self.child_scopes
+            .end_worker_scope(scope)
+            .await
+            .map_err(|error| ClientError::refused(error.code, error.message))
     }
 
     async fn child_session_retention(
@@ -798,7 +816,7 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .session_retention(
                 &child.session.runner,
                 epoch,
@@ -942,7 +960,7 @@ impl RunnerClient for SubcRunnerClient {
             Err(_) => 0,
         };
         let declared = self
-            .runner_capabilities
+            .child_capabilities()
             .run_cancel(
                 &child.session.runner,
                 epoch,
@@ -970,7 +988,7 @@ impl RunnerClient for SubcRunnerClient {
             Err(_) => 0,
         };
         if !self
-            .runner_capabilities
+            .child_capabilities()
             .retract(
                 &child.session.runner,
                 epoch,
@@ -3048,6 +3066,64 @@ mod agent_data_transport_tests;
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_worker_discovery_does_not_poison_an_ordinary_child_probe() {
+        use crate::child_scopes::{WorkerScope, LAB_WORKER_PROJECT};
+
+        let client = SubcRunnerClient::new(
+            PathBuf::from("unused-connection"),
+            Arc::new(ChildScopes::new("test")),
+        );
+        let worker = WorkerScope::new("/work/lab", "project", "run-1").unwrap();
+        let described_plans = LAB_WORKER_PROJECT
+            .scope(worker.clone(), async {
+                client
+                    .child_capabilities()
+                    .plans("broca", 1, async {
+                        Err(ClientError::new("the Worker scope was refused"))
+                    })
+                    .await
+            })
+            .await;
+        assert!(!described_plans);
+        assert!(
+            client
+                .child_capabilities()
+                .plans("broca", 1, async { Ok(json!({"capabilities": ["plans"]})) })
+                .await,
+            "the ordinary probe still discovers the runner's plans capability"
+        );
+        assert!(Arc::ptr_eq(
+            &client.child_capabilities(),
+            &client.runner_capabilities
+        ));
+        assert!(
+            !LAB_WORKER_PROJECT
+                .scope(worker, async {
+                    client
+                        .child_capabilities()
+                        .plans("broca", 1, async {
+                            panic!("this Worker's failure should be cached separately")
+                        })
+                        .await
+                })
+                .await
+        );
+        let next_worker = WorkerScope::new("/work/lab", "project", "run-2").unwrap();
+        assert!(
+            LAB_WORKER_PROJECT
+                .scope(next_worker, async {
+                    client
+                        .child_capabilities()
+                        .plans("broca", 1, async { Ok(json!({"capabilities": ["plans"]})) })
+                        .await
+                })
+                .await,
+            "the next Worker can discover capabilities again"
+        );
+    }
+
     /// A tool catalog is read on the provider's tool-provider route, which
     /// any principal may open; runner calls stay on the management surface.
     #[test]

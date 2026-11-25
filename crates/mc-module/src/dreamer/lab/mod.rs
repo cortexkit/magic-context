@@ -25,6 +25,7 @@ use cortexkit_role_tool_provider::catalog::{self, composition_digest};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::child_scopes::{WorkerScope, LAB_WORKER_PROJECT};
 use crate::client::{Child, RunnerClient};
 use crate::routing::{self, Router};
 use crate::summary::fit::Window;
@@ -186,7 +187,8 @@ impl Start {
         let start = Instant::now();
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(self.spec.deadline_minutes * 60);
-        let permit = self.permit.take();
+        // Keep the reservation until both the artifact writer and scope teardown finish.
+        let permit = Arc::new(self.permit.take());
         let out = self.spec.out_dir.clone();
         let ids = self.spec.memory_ids.clone();
         let mut observed = Observed::default();
@@ -207,11 +209,10 @@ impl Start {
         if let Some(lab) = &loaded {
             lab.stopped.store(true, Ordering::Release);
         }
+        let worker_scope = observed.worker_scope.take();
         let (stop, error) = match outcome {
             Err(_) => {
-                if let Some(lab) = &loaded {
-                    lab.in_child_scope(observed.cancel(client.as_ref())).await;
-                }
+                in_child_scope(worker_scope.as_ref(), observed.cancel(client.as_ref())).await;
                 ("deadline", None)
             }
             Ok(answer) => match answer {
@@ -222,8 +223,9 @@ impl Start {
                 Err(run::LabEnd::Error(e)) => ("error", Some(e)),
             },
         };
+        let write_permit = permit.clone();
         let finished = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+            let _permit = write_permit;
             let history_session_ids_skipped = loaded.as_ref().and_then(|lab| {
                 lab.history
                     .as_ref()
@@ -255,10 +257,23 @@ impl Start {
         if let Err(error) = finished {
             tracing::info!(%error, "ck-mc: dreamer lab could not record the result");
         }
+        if let Some(worker_scope) = worker_scope {
+            if let Err(error) = client.end_worker_scope(&worker_scope).await {
+                tracing::warn!(%error, "ck-mc: dreamer lab could not end its Worker scope");
+            }
+        }
+        drop(permit);
     }
 }
 
 const VALIDATION_TIMEOUT: &str = "dreamer lab validation timed out";
+
+async fn in_child_scope<T>(scope: Option<&Arc<WorkerScope>>, run: impl Future<Output = T>) -> T {
+    match scope {
+        Some(scope) => LAB_WORKER_PROJECT.scope(scope.clone(), run).await,
+        None => run.await,
+    }
+}
 
 async fn validate_with_limit<T: Send + 'static>(
     limit: Duration,
@@ -277,6 +292,9 @@ async fn validate_with_limit<T: Send + 'static>(
 impl Lab {
     fn load(start: Start, embedding: Option<crate::embedding::Provider>) -> Result<Self, String> {
         let Start { spec, live, .. } = start;
+        if spec.tools.contains(&Tool::Sidekick) {
+            WorkerScope::check_project_id(&spec.project).map_err(|error| error.to_string())?;
+        }
         spec::reject_live(&spec.store, &live)?;
         let store = frozen::open(&spec.store)?;
         let memories = frozen::memories(&store, &spec.project, &spec.memory_ids)?;
@@ -336,6 +354,13 @@ impl Lab {
             crate::memory_writes::now_ms(),
             RUNS.fetch_add(1, Ordering::Relaxed)
         );
+        let worker_scope = self
+            .spec
+            .tools
+            .contains(&Tool::Sidekick)
+            .then(|| WorkerScope::new(root, &self.spec.project, &id))
+            .transpose()
+            .map_err(|error| run::LabEnd::Refused(error.to_string()))?;
         let job = run::TaskRun {
             demand: &routing::LAB_DEMAND,
             run_id: &id,
@@ -344,20 +369,20 @@ impl Lab {
             remaining_tokens: u64::MAX,
             attribution: None,
         };
-        self.in_child_scope(run::run_lab(
-            client, &job, self, registry, observed, deadline,
-        ))
-        .await
-    }
-
-    async fn in_child_scope<T>(&self, run: impl Future<Output = T>) -> T {
-        if self.spec.tools.contains(&Tool::Sidekick) {
-            crate::child_scopes::LAB_WORKER_PROJECT
-                .scope(self.spec.project.clone(), run)
-                .await
-        } else {
-            run.await
+        observed.worker_scope.clone_from(&worker_scope);
+        let result = in_child_scope(
+            worker_scope.as_ref(),
+            run::run_lab(client, &job, self, registry, observed, deadline),
+        )
+        .await;
+        // Capability discovery reports an inaccessible runner as not supporting
+        // plans. Keep the scope refusal rather than that proxy error.
+        if result.is_err() {
+            if let Some(Err(error)) = worker_scope.as_ref().map(|scope| scope.check_live()) {
+                return Err(run::LabEnd::Refused(error.to_string()));
+            }
         }
+        result
     }
 
     pub(super) fn route_select(&self, select: &mut SelectRequest) {
@@ -669,6 +694,7 @@ pub(super) struct Observed {
     pub send: ObservedSend,
     pub account_limit_detail: Option<&'static str>,
     sidekick_offered: bool,
+    worker_scope: Option<Arc<WorkerScope>>,
     request: Option<Value>,
     request_written_at: Option<i64>,
 }

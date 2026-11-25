@@ -12,6 +12,7 @@ use cortexkit_role_routing::select::{RouteRef, RunnerRef, SelectAnswer, SelectRe
 use serde_json::json;
 
 use super::*;
+use crate::child_scopes::{ChildScopes, WorkerScope};
 use crate::client::ClientError;
 use crate::routing::DREAM_DEMANDS;
 use crate::runner_capabilities::SessionRetention;
@@ -47,7 +48,7 @@ pub(crate) type LabCatalogs = BTreeMap<
 
 fn lab_worker_project() -> Option<String> {
     crate::child_scopes::LAB_WORKER_PROJECT
-        .try_with(Clone::clone)
+        .try_with(|scope| scope.project().to_owned())
         .ok()
 }
 
@@ -87,6 +88,7 @@ pub(crate) struct Client {
     pub(crate) lab_catalogs: Option<LabCatalogs>,
     pub(crate) lab_catalog_projects: Mutex<Vec<Option<String>>>,
     pub(crate) lab_send_projects: Mutex<Vec<Option<String>>>,
+    pub(crate) lab_scopes: Option<std::sync::Arc<ChildScopes>>,
     /// What Entorhinal answers every call with; `None` for no answer.
     pub(crate) entorhinal: Option<serde_json::Value>,
     /// What core answers every call with; `None` for a core that is not
@@ -126,6 +128,7 @@ impl Client {
             lab_catalogs: None,
             lab_catalog_projects: Mutex::default(),
             lab_send_projects: Mutex::default(),
+            lab_scopes: None,
             entorhinal: None,
             core: None,
             core_calls: Mutex::default(),
@@ -171,17 +174,41 @@ impl RunnerClient for Client {
             .unwrap_or_else(|| Err(crate::client::CoreRefusal::not_installed()))
     }
     async fn child_plans(&self, child: &Child) -> bool {
+        if let Some(scopes) = &self.lab_scopes {
+            if scopes
+                .for_child(child.project_root.as_deref().unwrap())
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
         self.plans.contains(&child.session.runner.as_str())
+    }
+    async fn end_worker_scope(&self, scope: &WorkerScope) -> Result<(), ClientError> {
+        if let Some(scopes) = &self.lab_scopes {
+            scopes
+                .end_worker_scope(scope)
+                .await
+                .map_err(|error| ClientError::new(error.to_string()))?;
+        }
+        Ok(())
     }
     async fn tool_providers(&self) -> Result<Vec<String>, ClientError> {
         Ok(self.providers.iter().map(|id| (*id).to_owned()).collect())
     }
     async fn tool_catalog(
         &self,
-        _: &Child,
+        child: &Child,
         provider: &str,
         preset: Option<&str>,
     ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
+        if let Some(scopes) = &self.lab_scopes {
+            scopes
+                .for_child(child.project_root.as_deref().unwrap())
+                .await
+                .map_err(|error| ClientError::new(error.to_string()))?;
+        }
         self.asked
             .lock()
             .unwrap()
