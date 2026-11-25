@@ -143,7 +143,13 @@ it("warmed appends and updates do not write the database-wide allocation clock",
 		h.db.exec(`CREATE TEMP TABLE seed_writes (value TEXT);
 		CREATE TEMP TRIGGER observe_seed_writes AFTER UPDATE ON main.schema_migrations_meta
 		WHEN NEW.key='${TAG_REVISION_INCARNATION_KEY}' BEGIN INSERT INTO seed_writes VALUES (NEW.value); END;`);
+		// One transaction for the 1,001 appends: each insert committed by itself
+		// is a separate disk sync, and on a slow CI disk that alone took the
+		// test past its 30 s limit. The triggers under test fire per row either
+		// way.
+		h.db.exec("BEGIN");
 		for (let i = 2; i <= 1002; i++) insert(h.db, "warm", i, `part-${i}:p0`);
+		h.db.exec("COMMIT");
 		h.db
 			.prepare("UPDATE tags SET status='dropped' WHERE session_id='warm'")
 			.run();
