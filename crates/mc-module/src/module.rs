@@ -1249,8 +1249,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         {
             let workers = self.inner.workers.lock().expect("worker map");
             for (session, folder) in folders {
-                // A quiet session gets the answer too: it starts its worker
-                // again, which takes the answer without reading the session.
+                // Only sessions with a live worker are read again here. A
+                // quiet session reads its folder's workspace when its worker
+                // starts again, so it gets the new registry without being
+                // woken now.
                 if !workers.contains_key(&session) {
                     continue;
                 }
