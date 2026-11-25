@@ -469,7 +469,7 @@ async fn lab_review_account_limit_after_submit_never_starts_a_second_child() {
         "quota exhausted",
         cortexkit_role_llm_runner::errors::ACCOUNT_LIMIT_EXHAUSTED,
     )
-    .with_resets_at_ms((crate::memory_writes::now_ms() + 3600_000) as u64);
+    .with_resets_at_ms((crate::memory_writes::now_ms() + 3_600_000) as u64);
     run.awaits = Some(cortexkit_role_llm_runner::errors::ending_awaits(
         &error,
         crate::memory_writes::now_ms() as u64,
