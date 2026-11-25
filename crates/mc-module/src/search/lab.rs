@@ -8,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use super::{messages, sources, text, Hit};
+use crate::summary::dates::search_times;
 
 pub(crate) fn memory_search(
     conn: &Connection,
@@ -277,7 +278,13 @@ impl History {
                 }
             }
             summaries.extend(summary_hits(
-                conn, project, session, query, limit, dates, semantic,
+                conn,
+                project,
+                (session, ambiguous),
+                query,
+                limit,
+                dates,
+                semantic,
             )?);
         }
         summaries.sort_unstable_by(|a, b| {
@@ -423,7 +430,7 @@ impl RawQuery<'_> {
                         score: -row.get::<_, f64>(3)?,
                     }),
                     session: Some(session),
-                    at: row.get(4)?,
+                    date: EvidenceDate::Instant(row.get(4)?),
                     order: number,
                     rowid: row.get(5)?,
                 })
@@ -439,18 +446,134 @@ impl RawQuery<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SummaryRange {
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+}
+
+impl SummaryRange {
+    fn render(self) -> String {
+        let start = self.start.date_naive();
+        let end = self.end.date_naive();
+        if start == end {
+            start.to_string()
+        } else {
+            format!("{start}..{end}")
+        }
+    }
+}
+
+#[derive(Default)]
+struct SummaryDates {
+    ranges: BTreeMap<i64, SummaryRange>,
+    unknown: usize,
+}
+
+impl SummaryDates {
+    fn load(conn: &Connection, project: &str, session: &str) -> Result<Self, String> {
+        let mut statement = conn
+            .prepare_cached(
+                "SELECT c.id, c.harness, c.start_message, c.end_message
+                   FROM compartments c
+                   JOIN session_projects p ON p.session_id = c.session_id AND p.harness = c.harness
+                  WHERE c.session_id = ?1 AND p.project_path = ?2",
+            )
+            .map_err(show)?;
+        let summaries = statement
+            .query_map(params![session, project], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(show)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(show)?;
+        let Some((_, harness, _, _)) = summaries.first() else {
+            return Ok(Self::default());
+        };
+        // Summaries record ordinals, not message IDs, so look up each boundary
+        // by its ordinal alone within the session.
+        let boundaries: Vec<_> = summaries
+            .iter()
+            .flat_map(|(_, _, start, end)| [(*start, ""), (*end, "")])
+            .collect();
+        let times = search_times(conn, harness, session, &boundaries);
+        let time = |ordinal| {
+            let ms = i64::try_from(*times.get(&(ordinal, String::new()))?).ok()?;
+            chrono::DateTime::from_timestamp_millis(ms)
+        };
+        let count = summaries.len();
+        let ranges: BTreeMap<_, _> = summaries
+            .into_iter()
+            .filter_map(|(id, _, start, end)| {
+                Some((
+                    id,
+                    SummaryRange {
+                        start: time(start)?,
+                        end: time(end)?,
+                    },
+                ))
+            })
+            .collect();
+        Ok(Self {
+            unknown: count - ranges.len(),
+            ranges,
+        })
+    }
+
+    fn matches(&self, id: i64, bounds: Option<messages::DateRange>) -> bool {
+        bounds.is_none_or(|bounds| {
+            self.ranges.get(&id).is_some_and(|range| {
+                range.start.timestamp_millis() <= bounds.to
+                    && range.end.timestamp_millis() >= bounds.from
+            })
+        })
+    }
+}
+
 fn summary_hits<'a>(
     conn: &Connection,
     project: &str,
-    session: &'a str,
+    (session, ambiguous): (&'a str, bool),
     query: &str,
     limit: usize,
     dates: Option<messages::DateRange>,
     semantic: Option<sources::Semantic<'_>>,
 ) -> Result<Vec<Evidence<'a>>, String> {
-    let mut hits = lexical_summaries(conn, project, session, query, limit, dates)?;
+    // When another harness uses the same session ID, the message-time map
+    // cannot tell which harness wrote the timestamp for a given ordinal.
+    let times = if ambiguous {
+        SummaryDates::default()
+    } else {
+        SummaryDates::load(conn, project, session)?
+    };
+    if dates.is_some() && times.ranges.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut hits = lexical_summaries(conn, project, session, query, limit, dates, &times)?;
     if let Some(semantic) = semantic {
-        for hit in sources::search_chunks_in_project(conn, session, project, limit, dates, semantic)
+        // The shared search already checks overlap, but can admit a zero
+        // timestamp. Leave room for dated hits if undated ones take slots.
+        let semantic_limit = if dates.is_some() {
+            limit + times.unknown
+        } else {
+            limit
+        };
+        for hit in sources::search_chunks_in_project(
+            conn,
+            session,
+            project,
+            semantic_limit,
+            dates,
+            semantic,
+        )
+        .into_iter()
+        .filter(|hit| times.matches(hit.compartment_id, dates))
+        .take(limit)
         {
             if let Some(prior) = hits
                 .iter_mut()
@@ -463,24 +586,16 @@ fn summary_hits<'a>(
             }
         }
     }
-    let mut created = conn
-        .prepare_cached("SELECT created_at FROM compartments WHERE id = ?1")
-        .map_err(show)?;
-    hits.into_iter()
-        .map(|hit| {
-            let at = created
-                .query_row([hit.compartment_id], |row| row.get(0))
-                .optional()
-                .map_err(show)?;
-            Ok(Evidence {
-                at,
-                order: hit.start,
-                rowid: hit.compartment_id,
-                hit: Hit::Chunk(hit),
-                session: Some(session),
-            })
+    Ok(hits
+        .into_iter()
+        .map(|hit| Evidence {
+            date: EvidenceDate::Range(times.ranges.get(&hit.compartment_id).copied()),
+            order: hit.start,
+            rowid: hit.compartment_id,
+            hit: Hit::Chunk(hit),
+            session: Some(session),
         })
-        .collect()
+        .collect())
 }
 
 fn lexical_summaries(
@@ -490,6 +605,7 @@ fn lexical_summaries(
     query: &str,
     limit: usize,
     dates: Option<messages::DateRange>,
+    times: &SummaryDates,
 ) -> Result<Vec<sources::ChunkHit>, String> {
     // Compartments have an index by session and are much fewer than raw
     // messages. Stream only the selected session's summaries, keeping top hits.
@@ -498,15 +614,16 @@ fn lexical_summaries(
             "SELECT c.id, c.title, c.start_message, c.end_message, c.content, c.p1
                FROM compartments c
                JOIN session_projects p ON p.session_id = c.session_id AND p.harness = c.harness
-              WHERE c.session_id = ?1 AND p.project_path = ?2 AND c.created_at BETWEEN ?3 AND ?4",
+              WHERE c.session_id = ?1 AND p.project_path = ?2",
         )
         .map_err(show)?;
-    let (from, to) = dates.map_or((i64::MIN, i64::MAX), |dates| (dates.from, dates.to));
-    let mut rows = statement
-        .query(params![session, project, from, to])
-        .map_err(show)?;
+    let mut rows = statement.query(params![session, project]).map_err(show)?;
     let mut hits: Vec<sources::ChunkHit> = Vec::new();
     while let Some(row) = rows.next().map_err(show)? {
+        let compartment_id = row.get(0).map_err(show)?;
+        if !times.matches(compartment_id, dates) {
+            continue;
+        }
         let title: String = row.get(1).map_err(show)?;
         let content: String = row.get(4).map_err(show)?;
         let detail: Option<String> = row.get(5).map_err(show)?;
@@ -525,7 +642,7 @@ fn lexical_summaries(
         let snippet = Some(text::matched_snippet(matched, query, 400));
         let (start, end) = (row.get(2).map_err(show)?, row.get(3).map_err(show)?);
         hits.push(sources::ChunkHit {
-            compartment_id: row.get(0).map_err(show)?,
+            compartment_id,
             title,
             start,
             end,
@@ -548,15 +665,29 @@ fn lexical_summaries(
 struct Evidence<'a> {
     hit: Hit,
     session: Option<&'a str>,
-    at: Option<i64>,
+    date: EvidenceDate,
     order: i64,
     rowid: i64,
+}
+
+enum EvidenceDate {
+    Instant(Option<i64>),
+    Range(Option<SummaryRange>),
+}
+
+impl EvidenceDate {
+    fn end(&self) -> Option<i64> {
+        match self {
+            Self::Instant(at) => *at,
+            Self::Range(range) => range.map(|range| range.end.timestamp_millis()),
+        }
+    }
 }
 
 impl Evidence<'_> {
     fn commit(hit: sources::CommitHit) -> Self {
         Self {
-            at: Some(hit.committed_at),
+            date: EvidenceDate::Instant(Some(hit.committed_at)),
             hit: Hit::Commit(hit),
             session: None,
             order: 0,
@@ -576,7 +707,12 @@ impl Evidence<'_> {
             }
             _ => unreachable!("only history sources were collected"),
         };
-        let date = format_date(self.at);
+        let date = match self.date {
+            EvidenceDate::Instant(at) => format_date(at),
+            EvidenceDate::Range(range) => {
+                range.map_or_else(|| "unknown".to_owned(), SummaryRange::render)
+            }
+        };
         let block = super::format_hit(&self.hit, index, session, now);
         let (head, text) = block.split_once('\n').unwrap_or((&block, ""));
         format!("{head} date={date}{reference}\n{text}")
@@ -587,7 +723,7 @@ fn compare_evidence(a: &Evidence<'_>, b: &Evidence<'_>) -> std::cmp::Ordering {
     b.hit
         .score()
         .total_cmp(&a.hit.score())
-        .then_with(|| b.at.cmp(&a.at))
+        .then_with(|| b.date.end().cmp(&a.date.end()))
         .then_with(|| a.session.cmp(&b.session))
         .then_with(|| a.order.cmp(&b.order))
         .then_with(|| a.rowid.cmp(&b.rowid))
@@ -617,6 +753,59 @@ fn show(error: rusqlite::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_dates_filter_semantic_hits_before_the_result_limit() {
+        let conn = crate::context_db::ContextDb::fresh_in_memory();
+        conn.execute(
+            "INSERT INTO session_projects (session_id, harness, project_path, updated_at)
+             VALUES ('s', 'mock', 'p', 1)",
+            [],
+        )
+        .unwrap();
+        let vector = [1.0, 0.0];
+        for sequence in 1..=5 {
+            let start = sequence * 2;
+            let end = start + 1;
+            conn.execute(
+                "INSERT INTO compartments (id, session_id, harness, sequence, start_message, end_message, title, content, created_at)
+                 VALUES (?1, 's', 'mock', ?1, ?2, ?3, 'Routine debugging', 'Summary.', 2000000000000)",
+                params![sequence, start, end],
+            ).unwrap();
+            for (ordinal, at) in [(start, if sequence <= 4 { 0 } else { 1000 }), (end, 2000)] {
+                conn.execute(
+                    "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
+                     VALUES ('s', ?1, ?1, ?2)",
+                    params![ordinal, at],
+                ).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness,
+                     window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+                 VALUES (?1, 's', 'p', 'mock', 0, ?2, ?3, 'hash', 'model', 2, ?4, 1)",
+                params![sequence, start, end, crate::embedding::encode(&vector)],
+            ).unwrap();
+        }
+        let history = History::load(&conn, "p", None).unwrap();
+        let semantic = Some(sources::Semantic {
+            vector: &vector,
+            model_id: "model",
+            chunk_model_id: "model",
+        });
+        let answer = history
+            .search(
+                &conn,
+                &serde_json::json!({"query":"unrelatedterm", "from":"1970-01-01"}),
+                semantic,
+            )
+            .unwrap();
+        assert_eq!(answer.matches("compartment_id=").count(), 1, "{answer}");
+        assert!(answer.contains("match=semantic"), "{answer}");
+        assert!(
+            answer.contains("date=1970-01-01 session=s ref=s:10-11"),
+            "{answer}"
+        );
+    }
 
     #[test]
     fn raw_history_can_find_an_unmapped_legacy_index_row_without_a_date_bound() {
