@@ -41,8 +41,8 @@ use crate::routing::{self, DreamDemand, Router, DREAM_OUTPUT_TOKENS};
 use crate::summary::account_wait::{AccountWait, Reselect, SendKind};
 use crate::summary::fit::Window;
 use crate::summary::run::{
-    backoff, now_ms, retryable, send_and_wait_stepped, Ended, Model, PlanRun, Reply, SummaryError,
-    MAX_RETRIES,
+    backoff, now_ms, retryable, send_and_wait_recorded, send_and_wait_stepped, Ended, Model,
+    PlanRun, Reply, SummaryError, MAX_RETRIES,
 };
 
 /// How long one task run may take, retries and fallbacks included.
@@ -198,6 +198,62 @@ pub async fn run<C: RunnerClient + Router>(
     job: &TaskRun<'_>,
     task: &dyn TaskInput,
 ) -> Result<TaskReply, TaskError> {
+    run_inner(client, job, Some(task), None).await
+}
+
+pub(super) enum LabEnd {
+    StepCap,
+    Refused(String),
+    Error(String),
+}
+
+struct LabRun<'a> {
+    lab: &'a std::sync::Arc<super::lab::Lab>,
+    registry: &'a super::lab::Registry,
+    observed: &'a mut super::lab::Observed,
+    capped: bool,
+}
+
+pub(super) async fn run_lab<C: RunnerClient + Router>(
+    client: &C,
+    job: &TaskRun<'_>,
+    lab: &std::sync::Arc<super::lab::Lab>,
+    registry: &super::lab::Registry,
+    observed: &mut super::lab::Observed,
+) -> Result<(), LabEnd> {
+    let mut lab = LabRun {
+        lab,
+        registry,
+        observed,
+        capped: false,
+    };
+    let result = run_inner(client, job, None, Some(&mut lab)).await;
+    if lab.capped {
+        return Err(LabEnd::StepCap);
+    }
+    result.map(|_| ()).map_err(|error| {
+        if matches!(
+            error,
+            TaskError::AccountWait(..)
+                | TaskError::Failed {
+                    request_specific: true,
+                    ..
+                }
+        ) || lab.observed.child.is_none()
+        {
+            LabEnd::Refused(error.to_string())
+        } else {
+            LabEnd::Error(error.to_string())
+        }
+    })
+}
+
+async fn run_inner<C: RunnerClient + Router>(
+    client: &C,
+    job: &TaskRun<'_>,
+    task: Option<&dyn TaskInput>,
+    mut lab: Option<&mut LabRun<'_>>,
+) -> Result<TaskReply, TaskError> {
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
@@ -213,7 +269,10 @@ pub async fn run<C: RunnerClient + Router>(
         if budget_spent(job.remaining_tokens, total) {
             return Err(TaskError::BudgetStopped(total));
         }
-        let select = reselect.exclusions(routing::dream_select(job.demand, &tried));
+        let mut select = reselect.exclusions(routing::dream_select(job.demand, &tried));
+        if let Some(lab) = lab.as_deref() {
+            lab.lab.route_select(&mut select);
+        }
         let answer = if let Some(answer) = next.take() {
             answer
         } else {
@@ -268,7 +327,60 @@ pub async fn run<C: RunnerClient + Router>(
         let output_tokens = window
             .output_tokens(DREAM_OUTPUT_TOKENS)
             .min(answer.max_output_tokens);
-        let Some(prompt) = task.prompt(window, output_tokens) else {
+        let model = routing::model_of(&answer);
+        let first_child = Child {
+            session: SessionRef::new(
+                answer.runner.module.clone(),
+                harness.clone(),
+                child_session(job.run_id, attempt, 0),
+            ),
+            project_root: Some(job.project_root.to_owned()),
+        };
+        let prepared = if let Some(lab) = lab.as_deref() {
+            if !client.child_plans(&first_child).await {
+                only_request_failures = false;
+                report(Outcome::Cancelled, &[]).await;
+                failure = Some(format!(
+                    "{} takes no fetch plan, so it can't run the lab",
+                    answer.runner.module
+                ));
+                tried.push(answer.route.route_key());
+                continue;
+            }
+            match lab
+                .lab
+                .prepare(
+                    client,
+                    &first_child,
+                    job.reader,
+                    &model,
+                    window,
+                    output_tokens,
+                )
+                .await
+            {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    report(Outcome::Cancelled, &[]).await;
+                    return Err(TaskError::Failed {
+                        error,
+                        usage: total,
+                        request_specific: true,
+                        unusable_reply,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        let prompt = if let Some(prepared) = &prepared {
+            std::borrow::Cow::Borrowed(prepared.prompt.as_str())
+        } else if let Some(prompt) = task
+            .expect("a scheduled task")
+            .prompt(window, output_tokens)
+        {
+            std::borrow::Cow::Owned(prompt)
+        } else {
             only_request_failures = false;
             report(Outcome::Cancelled, &[]).await;
             failure = Some(format!(
@@ -278,8 +390,12 @@ pub async fn run<C: RunnerClient + Router>(
             tried.push(answer.route.route_key());
             continue;
         };
-        let model = routing::model_of(&answer);
-        let plan = if job.demand.reads_code {
+        let system = prepared.as_ref().map_or_else(
+            || task.expect("a scheduled task").system(),
+            |p| p.system.as_str(),
+        );
+        let cap = task.and_then(TaskInput::step_cap);
+        let scheduled_plan = if prepared.is_none() && job.demand.reads_code {
             let Some(reader) = job.reader else {
                 report(Outcome::Cancelled, &[]).await;
                 return Err(TaskError::Failed {
@@ -290,18 +406,10 @@ pub async fn run<C: RunnerClient + Router>(
                     request_specific: false,
                 });
             };
-            let child = Child {
-                session: SessionRef::new(
-                    answer.runner.module.clone(),
-                    harness.clone(),
-                    child_session(job.run_id, attempt, 0),
-                ),
-                project_root: Some(job.project_root.to_owned()),
-            };
-            match reader_plan(client, &child, reader, task.system()).await {
+            match reader_plan(client, &first_child, reader, system).await {
                 Ok(plan) => Some(PlanRun {
                     plan,
-                    max_steps: task.step_cap().map_or(job.demand.max_steps, |cap| {
+                    max_steps: cap.map_or(job.demand.max_steps, |cap| {
                         cap.steps.min(job.demand.max_steps)
                     }),
                 }),
@@ -331,7 +439,7 @@ pub async fn run<C: RunnerClient + Router>(
             model: &model,
             decision_id: &answer.decision_id,
             output_tokens,
-            system: task.system(),
+            system,
             deadline,
             continuation: false,
             creates_child: true,
@@ -340,7 +448,10 @@ pub async fn run<C: RunnerClient + Router>(
             keep_child: true,
             send: SendKind::Dream,
             cache_ttl: cortexkit_role_llm_runner::cache::Ttl::Short,
-            plan: plan.as_ref(),
+            plan: prepared
+                .as_ref()
+                .map(|p| &p.plan)
+                .or(scheduled_plan.as_ref()),
             attribution: job.attribution,
         };
         let mut usage = None;
@@ -352,6 +463,99 @@ pub async fn run<C: RunnerClient + Router>(
                 Some(crate::summary::run::add_usage(total, &more))
             })
         };
+        if let (Some(lab), Some(prepared)) = (lab.as_deref_mut(), &prepared) {
+            let _registered = match lab.lab.register(lab.registry, &first_child, prepared) {
+                Ok(registered) => registered,
+                Err(error) => {
+                    report(Outcome::Cancelled, &[]).await;
+                    return Err(TaskError::Failed {
+                        error,
+                        usage: total,
+                        request_specific: false,
+                        unusable_reply,
+                    });
+                }
+            };
+            let child_id = first_child.session.session.clone();
+            lab.observed.child = Some(child_id.clone());
+            lab.observed.runner = Some(answer.runner.module.clone());
+            lab.observed.model = Some(model.clone());
+            lab.observed.route = Some(answer.route.route_key());
+            lab.observed.usage = None;
+            let mut spent = None;
+            let sent = send_and_wait_recorded(
+                client,
+                &first_child,
+                &child_id,
+                &prompt,
+                &how,
+                &mut spent,
+                &mut lab.observed.usage,
+            )
+            .await;
+            retain_usage(&mut usage, &mut reports, child_id.clone(), spent);
+            let used = batch_usage(usage);
+            // A lab records one child that ran, not several paid transcripts.
+            // Only a pre-step account refusal can go back through routing.
+            match sent {
+                Ok(ended) => {
+                    lab.capped = ended.step_capped;
+                    let failed = ended.reply.length_capped;
+                    report(
+                        if lab.capped || failed {
+                            Outcome::Failed
+                        } else {
+                            Outcome::Completed
+                        },
+                        &reports,
+                    )
+                    .await;
+                    if failed {
+                        return Err(TaskError::Failed {
+                            error: "the reply hit its output limit".into(),
+                            usage: used,
+                            unusable_reply: true,
+                            request_specific: false,
+                        });
+                    }
+                    return Ok(TaskReply {
+                        text: ended.reply.text,
+                        model,
+                        runner: answer.runner.module.clone(),
+                        child: child_id,
+                        usage: used,
+                        steps: ended.reply.steps,
+                    });
+                }
+                Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
+                    report(Outcome::Cancelled, &reports).await;
+                    if usage.is_some() || wait.refusal.is_none() {
+                        return Err(TaskError::AccountWait(wait, used.map(Box::new)));
+                    }
+                    match reselect
+                        .after_refusal(client, select, &answer, wait, deadline)
+                        .await
+                    {
+                        Ok(answer) => {
+                            next = Some(answer);
+                            continue;
+                        }
+                        Err(wait) => return Err(TaskError::AccountWait(wait, used.map(Box::new))),
+                    }
+                }
+                Err(error) => {
+                    report(Outcome::Failed, &reports).await;
+                    let error = error.to_string();
+                    return Err(TaskError::Failed {
+                        request_specific: request_refusal(&error),
+                        error,
+                        usage: used,
+                        unusable_reply,
+                    });
+                }
+            }
+        }
+        let task = task.expect("a scheduled task");
         let mut retry = 0;
         let outcome = loop {
             let child = Child {
@@ -369,7 +573,7 @@ pub async fn run<C: RunnerClient + Router>(
             let sent =
                 send_and_wait_stepped(client, &child, &send_id, &prompt, &how, &mut spent).await;
             retain_usage(&mut usage, &mut reports, send_id.clone(), spent);
-            let sent = match (sent, task.step_cap()) {
+            let sent = match (sent, cap) {
                 // A run that reached the task's step cap answers once more in
                 // the same child, and no other model is tried after it.
                 (Ok(ended), Some(cap)) if ended.step_capped => {

@@ -435,6 +435,25 @@ pub(crate) fn catalog_answer(
     arguments: &Value,
     config: &CatalogConfig,
 ) -> Result<Value, CatalogError> {
+    catalog_answer_with_tools(arguments, config, None)
+}
+
+/// The dreamer preset stays text-only for ordinary children. A lab child's
+/// admitted route instead supplies the definitions frozen for that run.
+pub(crate) fn lab_answer_bytes(
+    arguments: &Value,
+    tools: &[Value],
+) -> Result<Vec<u8>, CatalogError> {
+    let config = crate::config::Config::from(crate::pass::Settings::default()).catalog_config(None);
+    let answer = catalog_answer_with_tools(arguments, &config, Some(tools))?;
+    jcs_bytes(&answer)
+}
+
+fn catalog_answer_with_tools(
+    arguments: &Value,
+    config: &CatalogConfig,
+    lab: Option<&[Value]>,
+) -> Result<Value, CatalogError> {
     if !arguments.is_object() {
         return Err(CatalogError::invalid(
             "arguments",
@@ -456,18 +475,27 @@ pub(crate) fn catalog_answer(
     }
     let compacting = compacts_session(arguments)?;
     let served = served_tools(preset, compacting, &request.params, config);
-    let own = own_tool_names(&request, &served);
-    if request.composition.is_some() {
-        let listed: BTreeSet<&str> = own.iter().map(String::as_str).collect();
-        let serving: BTreeSet<&str> = served.iter().map(|tool| tool.name.as_str()).collect();
-        if listed != serving {
-            return Err(CatalogError::invalid(
-                "composition",
-                format!(
-                    "the composition lists {listed:?} under {MODULE_ID}, but this request serves {serving:?}"
-                ),
-            ));
-        }
+    if lab.is_some() && preset != Preset::Dreamer {
+        return Err(CatalogError::invalid(
+            "preset",
+            "a lab child uses only the dreamer preset",
+        ));
+    }
+    let served_names: BTreeSet<String> = match lab {
+        Some(tools) => tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("lab tool name").to_owned())
+            .collect(),
+        None => served.iter().map(|tool| tool.name.clone()).collect(),
+    };
+    let own = own_tool_names(&request, &served_names);
+    if request.composition.is_some() && own != served_names {
+        return Err(CatalogError::invalid(
+            "composition",
+            format!(
+                "the composition lists {own:?} under {MODULE_ID}, but this request serves {served_names:?}"
+            ),
+        ));
     }
     let composition_digest = request
         .composition
@@ -492,10 +520,13 @@ pub(crate) fn catalog_answer(
         content.insert("composition_digest".to_string(), json!(digest));
     }
     let surface = tool_surface(&request.params, config);
-    let tools = served
-        .iter()
-        .map(|tool| catalog_tool(tool, surface, compacting, config))
-        .collect::<Result<Vec<_>, _>>()?;
+    let tools = match lab {
+        Some(tools) => tools.to_vec(),
+        None => served
+            .iter()
+            .map(|tool| catalog_tool(tool, surface, compacting, config))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     content.insert("tools".to_string(), Value::Array(tools));
     if config.user_commands && compacting && preset == Preset::Head {
         let declared = catalog::CatalogAnswer::new("", "").with_user_commands(vec![
@@ -682,9 +713,9 @@ pub(crate) fn served_tools(
 
 /// Magic Context's own tool names as the request's composition lists them. A
 /// preflight request carries no composition, so the served names stand in.
-fn own_tool_names(request: &CatalogRequest, served: &[&ToolDefinition]) -> BTreeSet<String> {
+fn own_tool_names(request: &CatalogRequest, served: &BTreeSet<String>) -> BTreeSet<String> {
     let Some(composition) = &request.composition else {
-        return served.iter().map(|tool| tool.name.clone()).collect();
+        return served.clone();
     };
     composition
         .get("providers")

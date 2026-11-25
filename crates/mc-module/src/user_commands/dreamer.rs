@@ -16,6 +16,48 @@ use crate::memory_writes::person::{self, LeftAlone, OwnerRef};
 
 type Stamp<'s> = &'s dyn Fn(Value) -> String;
 
+const LAB_RUN: &str = "dreamer_lab_run";
+
+/// Recognize only the envelope; admission must precede decoding any path.
+pub(crate) fn lab_requested(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Method {
+        method: String,
+        params: Id,
+    }
+    #[derive(serde::Deserialize)]
+    struct Id {
+        id: String,
+    }
+    serde_json::from_slice::<Method>(body)
+        .is_ok_and(|request| request.method == "commands.run" && request.params.id == LAB_RUN)
+}
+
+pub(crate) fn lab_path(body: &[u8]) -> Result<std::path::PathBuf, ErrorBody> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        params: Params,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        #[serde(rename = "id")]
+        _id: String,
+        args: Args,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Args {
+        spec: std::path::PathBuf,
+    }
+    if body.len() > 64 * 1024 {
+        return Err(invalid("request"));
+    }
+    serde_json::from_slice::<Envelope>(body)
+        .map(|request| request.params.args.spec)
+        .map_err(|error| ErrorBody::new("invalid_params", format!("dreamer_lab_run: {error}")))
+}
+
 /// A task kind as a person reads it: `classify-memories` is "Classify
 /// memories".
 fn task_label(kind: &str) -> String {

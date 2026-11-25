@@ -32,6 +32,7 @@ pub(crate) enum Ends {
     /// reset, the way an llm-runner 0.8.51 runner ends a queued run.
     Full(u64),
     SpentFull(u64, u64),
+    LabTools(Vec<serde_json::Value>),
     /// The runner could not hand the prompt to its host, so no model ran.
     NeverRan,
 }
@@ -79,6 +80,8 @@ pub(crate) struct Client {
     pub(crate) core: Option<Result<serde_json::Value, crate::client::CoreRefusal>>,
     /// Each call to core: its method and params.
     pub(crate) core_calls: Mutex<Vec<(String, serde_json::Value)>>,
+    pub(crate) lab: Option<std::sync::Arc<super::super::lab::Registry>>,
+    pub(crate) lab_tool_results: Mutex<Vec<serde_json::Value>>,
 }
 
 impl Client {
@@ -105,6 +108,8 @@ impl Client {
             entorhinal: None,
             core: None,
             core_calls: Mutex::default(),
+            lab: None,
+            lab_tool_results: Mutex::default(),
         }
     }
 
@@ -217,7 +222,11 @@ impl RunnerClient for Client {
         reply.run_id = Some("run".into());
         Ok(reply)
     }
-    async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
+    async fn child_result(
+        &self,
+        child: &Child,
+        _: RunResultRequest,
+    ) -> Result<RunResult, ClientError> {
         let ends = self
             .ends
             .lock()
@@ -241,6 +250,39 @@ impl RunnerClient for Client {
                 usage.steps = steps;
                 usage.input_tokens = Some(1_000);
                 result.usage = Some(usage);
+                result
+            }
+            Ends::LabTools(calls) => {
+                let route = crate::route::Route {
+                    session: child.session.clone(),
+                    workdir: child.project_root.clone(),
+                    project: None,
+                    agent_id: None,
+                };
+                let lab = self
+                    .lab
+                    .as_ref()
+                    .unwrap()
+                    .get(&route)
+                    .expect("active lab child");
+                let mut result = completed("", Some(Finish::Stop));
+                let mut usage = cortexkit_role_llm_runner::usage::RunUsage::default();
+                usage.steps = calls.len() as u64 + 1;
+                usage.input_tokens = Some(123);
+                usage.cache_write_tokens = Some(17);
+                usage.cached_input_tokens = Some(321);
+                usage.output_tokens = Some(42);
+                result.usage = Some(usage);
+                for call in calls {
+                    let bytes = serde_json::to_vec(&call).unwrap();
+                    let reply = crate::transport::lab_tool(&bytes, lab.clone(), false)
+                        .await
+                        .unwrap();
+                    self.lab_tool_results
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&reply).unwrap());
+                }
                 result
             }
             Ends::NeverRan => crate::summary::run::never_ran_tests::handover("nothing_written"),

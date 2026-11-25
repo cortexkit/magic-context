@@ -919,7 +919,7 @@ async fn call<C: RunnerClient>(
         plan: None,
         attribution: call_on.attribution,
     };
-    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage)
+    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage, None)
         .await?
         .completed()?;
     if reply.length_capped {
@@ -1061,7 +1061,32 @@ pub(crate) async fn send_and_wait_stepped<C: RunnerClient>(
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<Ended, SummaryError> {
-    match send_and_wait_inner(client, child, send_id, prompt, how, usage).await {
+    send_and_wait_with_usage(client, child, send_id, prompt, how, usage, None).await
+}
+
+/// The same send, retaining the runner's exact aggregate usage for an experiment.
+pub(crate) async fn send_and_wait_recorded<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    send_id: &str,
+    prompt: &str,
+    how: &Model<'_>,
+    usage: &mut Option<StepUsage>,
+    reported: &mut Option<cortexkit_role_llm_runner::usage::RunUsage>,
+) -> Result<Ended, SummaryError> {
+    send_and_wait_with_usage(client, child, send_id, prompt, how, usage, Some(reported)).await
+}
+
+async fn send_and_wait_with_usage<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    send_id: &str,
+    prompt: &str,
+    how: &Model<'_>,
+    usage: &mut Option<StepUsage>,
+    reported: Option<&mut Option<cortexkit_role_llm_runner::usage::RunUsage>>,
+) -> Result<Ended, SummaryError> {
+    match send_and_wait_inner(client, child, send_id, prompt, how, usage, reported).await {
         Ok(reply) => Ok(reply),
         Err(CallError::Summary(error)) => Err(error),
         Err(CallError::HostRefused(error)) => Err(SummaryError::Failed(error)),
@@ -1078,6 +1103,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
     prompt: &str,
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
+    reported: Option<&mut Option<cortexkit_role_llm_runner::usage::RunUsage>>,
 ) -> Result<Ended, CallError> {
     if tokio::time::Instant::now() >= how.deadline {
         return Err(TIMED_OUT.to_owned().into());
@@ -1255,7 +1281,16 @@ async fn send_and_wait_inner<C: RunnerClient>(
     }) else {
         return Err(format!("the runner did not start a run: {}", reply.state).into());
     };
-    let result = wait_for(client, child, &run_id, how.deadline, how.send, usage).await?;
+    let result = wait_for(
+        client,
+        child,
+        &run_id,
+        how.deadline,
+        how.send,
+        usage,
+        reported,
+    )
+    .await?;
     if result.state != states::COMPLETED {
         if result.state == states::ERROR
             && result.error.as_ref().is_some_and(|error| {
@@ -1638,6 +1673,7 @@ async fn wait_for<C: RunnerClient>(
     deadline: tokio::time::Instant,
     send: SendKind,
     usage: &mut Option<StepUsage>,
+    mut raw_usage: Option<&mut Option<cortexkit_role_llm_runner::usage::RunUsage>>,
 ) -> Result<RunResult, SummaryError> {
     // Registered before the first read: an event that comes after that read
     // wakes the next pause, and one that came before it means the read
@@ -1661,6 +1697,9 @@ async fn wait_for<C: RunnerClient>(
             }
             Ok(Err(_)) | Err(_) => break,
         };
+        if let (Some(raw_usage), Some(current)) = (raw_usage.as_deref_mut(), &result.usage) {
+            *raw_usage = Some(current.clone());
+        }
         if let Some(current) = result.usage.as_ref().filter(|usage| {
             usage.steps > 0
                 || [
