@@ -171,13 +171,29 @@ impl Hit {
     }
 }
 
-/// Best boosted score first; ties within one source in that source's order.
+/// Best boosted score first. Hits with the same score are ordered by source
+/// (memories, messages, summaries, commits, primers, notes) and then by that
+/// source's own order.
+///
+/// This must be a total order: every pair of different hits compares the same
+/// way from both sides, and "equal" only ever means the same position. The
+/// standard sort panics when it notices a comparison that is not one, and an
+/// earlier version, which called hits of different sources equal while
+/// ordering each source inside itself, could contradict itself on three hits
+/// with one score.
 fn compare(left: &Hit, right: &Hit) -> std::cmp::Ordering {
     use std::cmp::Ordering::Equal;
-    let by_score = right
-        .boosted()
-        .partial_cmp(&left.boosted())
-        .unwrap_or(Equal);
+    fn source(hit: &Hit) -> u8 {
+        match hit {
+            Hit::Memory(_) => 0,
+            Hit::Message(_) => 1,
+            Hit::Chunk(_) => 2,
+            Hit::Commit(_) => 3,
+            Hit::Primer(_) => 4,
+            Hit::Note(_) => 5,
+        }
+    }
+    let by_score = right.boosted().total_cmp(&left.boosted());
     if by_score != Equal {
         return by_score;
     }
@@ -194,7 +210,7 @@ fn compare(left: &Hit, right: &Hit) -> std::cmp::Ordering {
             .created_at
             .cmp(&left.created_at)
             .then(left.id.cmp(&right.id)),
-        _ => Equal,
+        _ => source(left).cmp(&source(right)),
     }
 }
 
@@ -1292,6 +1308,62 @@ fn truncate(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message(number: i64, score: f64) -> Hit {
+        Hit::Message(MessageHit {
+            number,
+            message_id: format!("m{number}"),
+            role: "user".into(),
+            content: String::new(),
+            score,
+        })
+    }
+
+    fn summary(start: i64, score: f64) -> Hit {
+        Hit::Chunk(ChunkHit {
+            compartment_id: start,
+            title: String::new(),
+            start,
+            end: start,
+            window: (start, start),
+            score,
+            match_type: "lexical",
+            snippet: None,
+        })
+    }
+
+    /// Two summaries and a message share one score. The order must not
+    /// contradict itself: whatever is first of each pair, the three pairs
+    /// must agree on one line-up. The old comparison called a summary and a
+    /// message equal while ordering the two summaries, which the standard
+    /// sort may refuse with a panic.
+    #[test]
+    fn compare_orders_hits_of_one_score_without_contradiction() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let hits = [summary(1, 0.5), message(9, 0.5), summary(5, 0.5)];
+        for a in &hits {
+            for b in &hits {
+                let forward = compare(a, b);
+                assert_eq!(forward, compare(b, a).reverse());
+                if std::ptr::eq(a, b) {
+                    assert_eq!(forward, Equal);
+                } else {
+                    assert_ne!(forward, Equal);
+                }
+                for c in &hits {
+                    if forward == Less && compare(b, c) == Less {
+                        assert_eq!(compare(a, c), Less);
+                    }
+                    if forward == Greater && compare(b, c) == Greater {
+                        assert_eq!(compare(a, c), Greater);
+                    }
+                }
+            }
+        }
+        let mut sorted = hits.to_vec();
+        sorted.sort_by(compare);
+        assert!(matches!(sorted[0], Hit::Message(_)));
+    }
 
     #[test]
     fn dates_take_whole_days_or_full_datetimes() {
