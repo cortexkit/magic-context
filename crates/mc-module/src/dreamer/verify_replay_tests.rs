@@ -289,7 +289,8 @@ fn write_requests(args: &Args) -> Value {
                 guidance: None,
                 branches: &args.branches,
             })
-            .unwrap_or_else(|error| panic!("planning {task}: {error}"));
+            .unwrap_or_else(|error| panic!("planning {task}: {error}"))
+            .batches;
         let planned = batches.len();
         let mut written = Vec::new();
         for (index, batch) in batches

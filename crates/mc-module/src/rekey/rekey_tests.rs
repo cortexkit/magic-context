@@ -566,6 +566,55 @@ fn rekey_injected_open_file_check_refuses_without_changing_the_dump() {
 }
 
 #[test]
+fn rekey_refuses_agent_data_journal_entries_before_rewriting_any_session() {
+    for target_entry in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mode3.db");
+        basic_fixture(&path);
+        let request = request();
+        let runner = if target_entry {
+            &request.to
+        } else {
+            &request.from
+        };
+        let journal_path = journal::path(&path.with_file_name("context.db"));
+        let journal = journal::Journal::load(journal_path.clone());
+        journal
+            .change(|contents| {
+                contents.session_mut(runner, "pi", "head-two").baseline =
+                    Some("old-baseline".into());
+            })
+            .unwrap();
+        let before = dump(&path);
+        let journal_before = std::fs::read(&journal_path).unwrap();
+        let error = rekey_runner(&path, &request).unwrap_err();
+        assert!(error.contains(&format!("{runner}/pi/head-two")), "{error}");
+        assert!(error.contains("agent-data/journal.json"), "{error}");
+        assert_eq!(dump(&path), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+    }
+}
+
+#[test]
+fn rekey_refuses_mode3_move_records_before_rewriting_any_session() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("mode3.db");
+    basic_fixture(&path);
+    let context_path = path.with_file_name("context.db");
+    Connection::open(&context_path).unwrap().execute_batch(
+        "CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO schema_migrations_meta VALUES ('mode3_move:pi:head-two', '{\"runner\":\"thalamus-pi\"}');",
+    ).unwrap();
+    let before = dump(&path);
+    let context_before = dump(&context_path);
+    let error = rekey_runner(&path, &request()).unwrap_err();
+    assert!(error.contains("mode3_move:pi:head-two"), "{error}");
+    assert!(error.contains("context.db"), "{error}");
+    assert_eq!(dump(&path), before);
+    assert_eq!(dump(&context_path), context_before);
+}
+
+#[test]
 fn rekey_parse_requires_complete_unambiguous_arguments() {
     let parse = |args: &[&str]| Request::parse(args.iter().map(|arg| (*arg).to_owned()));
     for args in [

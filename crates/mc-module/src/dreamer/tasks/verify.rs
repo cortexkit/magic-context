@@ -703,12 +703,15 @@ struct Plans<'a> {
     lookup: Lookup,
 }
 
+#[derive(Default)]
+pub(crate) struct VerifyPlan {
+    pub batches: Vec<VerifyBatch>,
+    rechecked: Vec<Rechecked>,
+}
+
 impl Verify {
     /// The run's batches for the context's owner, in order.
-    pub(crate) fn plan_batches(
-        &self,
-        context: &TaskContext<'_>,
-    ) -> Result<Vec<VerifyBatch>, String> {
+    pub(crate) fn plan_batches(&self, context: &TaskContext<'_>) -> Result<VerifyPlan, String> {
         self.plan_batches_of(context, READ_BATCH_SIZE)
     }
 
@@ -719,7 +722,7 @@ impl Verify {
         &self,
         context: &TaskContext<'_>,
         read_batch: usize,
-    ) -> Result<Vec<VerifyBatch>, String> {
+    ) -> Result<VerifyPlan, String> {
         let Owner::Project { id: project, root } = context.owner else {
             return Err(format!(
                 "{} works on a project's memories only",
@@ -747,7 +750,7 @@ impl Verify {
             .filter(|memory| !memory.not_code && (self.broad || !memory.files.is_empty()))
             .collect();
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok(VerifyPlan::default());
         }
         // The main checkout, whatever worktree the run's session was in.
         let main = main_checkout(Path::new(root))?;
@@ -830,24 +833,6 @@ impl Verify {
                 plans,
                 lookup,
             });
-        }
-        // No model is asked about a memory whose cited lines are unchanged;
-        // it is recorded as confirmed at the new commit now, so the next
-        // run looks only at what changes after it.
-        if !rechecked.is_empty() {
-            match context
-                .db
-                .with_connection(|conn| record_rechecked(conn, &rechecked))
-            {
-                Ok(recorded) => tracing::info!(
-                    "ck-mc: dreamer: {} for {project}: {recorded} memories stay confirmed, the lines they cite unchanged",
-                    declared.task
-                ),
-                Err(error) => tracing::warn!(
-                    "ck-mc: dreamer: {} for {project}: recording the memories whose cited lines are unchanged failed: {error}",
-                    declared.task
-                ),
-            }
         }
         // `verify` checks memories without a diff under its other message.
         let read_document = if self.broad {
@@ -934,7 +919,7 @@ impl Verify {
                 });
             }
         }
-        Ok(batches)
+        Ok(VerifyPlan { batches, rechecked })
     }
 
     /// The messages for `memories`, all checked in `checkout`, the plain
@@ -1123,8 +1108,7 @@ fn recheck(
 /// commit and the spans' new places replace the old ones, the time of the
 /// confirmation stays. A memory whose text or confirmation changed since
 /// the re-check read it is left alone. Returns how many were recorded.
-fn record_rechecked(conn: &mut Connection, rechecked: &[Rechecked]) -> rusqlite::Result<usize> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+fn record_rechecked(tx: &Transaction<'_>, rechecked: &[Rechecked]) -> rusqlite::Result<usize> {
     let mut recorded = 0;
     for memory in rechecked {
         recorded += tx.execute(
@@ -1145,7 +1129,6 @@ fn record_rechecked(conn: &mut Connection, rechecked: &[Rechecked]) -> rusqlite:
             ],
         )?;
     }
-    tx.commit()?;
     Ok(recorded)
 }
 
@@ -1199,9 +1182,37 @@ impl Task for Verify {
     fn batches(&self, context: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String> {
         Ok(self
             .plan_batches(context)?
+            .batches
             .into_iter()
             .map(|batch| Box::new(batch) as Box<dyn Batch>)
             .collect())
+    }
+
+    fn plan_run<'a>(
+        &'a self,
+        context: &'a TaskContext<'a>,
+        _: Option<&'a crate::embedding::Provider>,
+    ) -> crate::dreamer::task::RunPlanning<'a> {
+        use crate::dreamer::task::{PlanningWrite, RunPlan};
+        let plan = self
+            .plan_batches(context)
+            .map(|VerifyPlan { batches, rechecked }| {
+                // The unchanged lines still support the memory at the new commit.
+                // Record it under the run's role without asking a model again.
+                let write = (!rechecked.is_empty()).then(|| {
+                    Box::new(move |tx: &Transaction<'_>| {
+                        record_rechecked(tx, &rechecked).map_err(|error| error.to_string())
+                    }) as PlanningWrite
+                });
+                RunPlan {
+                    batches: batches
+                        .into_iter()
+                        .map(|batch| Box::new(batch) as Box<dyn Batch>)
+                        .collect(),
+                    write,
+                }
+            });
+        Box::pin(std::future::ready(plan))
     }
 }
 

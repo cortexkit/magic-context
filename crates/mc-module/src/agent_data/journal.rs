@@ -385,7 +385,7 @@ impl Journal {
     }
 }
 
-fn read(path: &Path) -> Result<Contents, String> {
+pub(crate) fn read(path: &Path) -> Result<Contents, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Contents::default()),

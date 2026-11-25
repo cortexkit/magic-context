@@ -160,6 +160,57 @@ fn a_project_gets_a_schedule_for_each_task_its_profile_declares_and_the_module_r
 }
 
 #[tokio::test]
+async fn compress_cues_sends_work_only_when_the_projects_mural_is_enabled() {
+    use crate::dreamer::tasks::compress_cues::CompressCues;
+
+    for enabled in [false, true] {
+        let (_dir, db) = store();
+        db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO memories(id, level, owner_id, category, origin_category, content,
+                                      normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
+                 VALUES (1, 'project', ?1, 'ARCHITECTURE', 'ARCHITECTURE', 'Gate deploys on a review.', 'test', 0, 0, 0, 0)",
+                [PROJECT],
+            )
+        }).unwrap();
+        let engine = Arc::new(
+            Engine::new("this", vec![Box::new(CompressCues)])
+                .with_leases(crate::dreamer::lease_double::SampleLeases::granting())
+                .with_mural_enabled(Arc::new(move |root, project| {
+                    assert_eq!((root, project), (FOLDER, PROJECT));
+                    enabled
+                })),
+        );
+        let client = Arc::new(Client::new(
+            &["p/a"],
+            &[Ends::Reply(
+                "<cues><cue id=\"1\">Review before deploy</cue></cues>",
+            )],
+        ));
+        let settings = Settings::default();
+        engine.see_project(&db, PROJECT, FOLDER, profile(), &settings, 1);
+        make_due(&db);
+        engine.tick(&db, &client, &settings, now_ms());
+        settled(&engine).await;
+
+        assert_eq!(client.children().len(), usize::from(enabled));
+        if !enabled {
+            let (outcome, error): (String, String) = db
+                .with_connection(|conn| {
+                    conn.query_row("SELECT outcome, error FROM dream_task_runs", [], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                })
+                .unwrap();
+            assert_eq!(
+                (outcome.as_str(), error.as_str()),
+                ("nothing_to_do", "mural is not enabled")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_due_task_sends_each_batch_and_applies_each_accepted_reply() {
     let (_dir, db) = store();
     let engine = engine(2);

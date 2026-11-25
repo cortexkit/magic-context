@@ -324,6 +324,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             // starts, and acts only under its owner's role lease, which it
             // asks Entorhinal for through the module's client.
             let settings = config.clone();
+            let mural_settings = config.clone();
             Arc::new(
                 crate::dreamer::engine::Engine::new(
                     format!("ck-mc:{}", std::process::id()),
@@ -331,6 +332,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 )
                 .with_embedding(Arc::new(move |root: &str| {
                     settings.resolve(Some(root), "", 0).embedding
+                }))
+                .with_mural_enabled(Arc::new(move |root, project| {
+                    mural_settings
+                        .resolve_for_project(Some(root), Some(project), "", 0)
+                        .mural_enabled
                 }))
                 .with_leases(client.role_leases()),
             )

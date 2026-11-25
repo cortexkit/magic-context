@@ -52,7 +52,7 @@ use serde_json::{json, Value};
 use super::lease::{self, Clock, Lease, RoleLeases, Standing};
 use super::run::{self, TaskError, TaskReply, TaskRun};
 use super::store::{self, OwnerKey, RunEnd, Settled};
-use super::task::{Batch, Owner, Task, TaskContext};
+use super::task::{Batch, Owner, PlanningWrite, RunPlan, Task, TaskContext};
 use super::tasks;
 use crate::client::RunnerClient;
 use crate::context_db::ContextDb;
@@ -181,6 +181,8 @@ pub struct Engine {
     /// project's folder, when they configure one. A project's run plans
     /// with it ([`Task::plan`]); without a source no run has one.
     embedding: Option<EmbeddingSource>,
+    /// Whether a project's settings turn on the mural that uses prepared cues.
+    mural_enabled: Option<MuralEnabled>,
     /// Where runs open their roles' lease watches.
     leases: Arc<dyn RoleLeases>,
     /// The monotonic clock acting windows are read on.
@@ -189,6 +191,7 @@ pub struct Engine {
 
 /// Where a run finds the embedding provider for a project's folder.
 pub type EmbeddingSource = Arc<dyn Fn(&str) -> Option<crate::embedding::Provider> + Send + Sync>;
+type MuralEnabled = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 impl Engine {
     /// An engine whose runs open no lease until [`Self::with_leases`] gives
@@ -203,6 +206,7 @@ impl Engine {
             running: Mutex::default(),
             checking: Mutex::default(),
             embedding: None,
+            mural_enabled: None,
             leases: Arc::new(lease::NoEntorhinal),
             clock: lease::system_clock(),
         }
@@ -231,6 +235,11 @@ impl Engine {
     /// embedding provider.
     pub fn with_embedding(mut self, source: EmbeddingSource) -> Self {
         self.embedding = Some(source);
+        self
+    }
+
+    pub(crate) fn with_mural_enabled(mut self, enabled: MuralEnabled) -> Self {
+        self.mural_enabled = Some(enabled);
         self
     }
 
@@ -350,7 +359,7 @@ impl Engine {
         Ok(held)
     }
 
-    /// Before a paid batch of run `run_id`: whether the run may still act
+    /// Before a write or paid batch of run `run_id`: whether the run may still act
     /// for every role of `leases`, and if so the generation of each, now
     /// recorded in its journal ([`store::journal_leases`]). `Err` is the
     /// outcome the run ends with, and why. A run without leases (a build
@@ -391,6 +400,27 @@ impl Engine {
                 "failed",
                 format!("recording the run's leases failed: {error}"),
             )),
+        }
+    }
+
+    async fn write_planned(
+        &self,
+        db: &ContextDb,
+        locks: &[OwnerKey],
+        run_id: i64,
+        leases: &[Lease],
+        write: PlanningWrite,
+    ) -> Result<usize, (&'static str, String)> {
+        if lease::ENABLED && leases.is_empty() {
+            return Err(("lease_lost", "the run holds no maintenance role".into()));
+        }
+        let gens = self.fence(db, run_id, leases).await?;
+        let window = || still_acting(leases, &gens, &self.clock);
+        match write_fenced(db, locks, &self.holder, run_id, &gens, &window, write) {
+            Ok(Ok(Some(recorded))) => Ok(recorded),
+            Ok(Ok(None)) => Err(("lock_lost", "the run lost its maintenance lock".into())),
+            Ok(Err(error)) => Err(("failed", error)),
+            Err(reason) => Err(("lease_lost", reason)),
         }
     }
 
@@ -1457,7 +1487,15 @@ impl Engine {
         } else {
             None
         };
-        let batches = {
+        let planned = if kind == tasks::compress_cues::KIND
+            && !self
+                .mural_enabled
+                .as_ref()
+                .is_some_and(|enabled| enabled(root, &due.owner.owner_id))
+        {
+            end.error = Some("mural is not enabled".into());
+            Ok(RunPlan::default())
+        } else {
             let branches = settings
                 .branches
                 .get(&due.owner.owner_id)
@@ -1472,13 +1510,29 @@ impl Engine {
                 guidance: guidance.as_deref(),
                 branches,
             };
-            task.plan(&context, embedding.as_ref()).await
+            task.plan_run(&context, embedding.as_ref()).await
+        };
+        let batches = match planned {
+            Ok(RunPlan {
+                batches,
+                write: Some(write),
+            }) => match self.write_planned(db, locks, run_id, leases, write).await {
+                Ok(recorded) => {
+                    tracing::info!(
+                            "ck-mc: dreamer: run {run_id}: recorded {recorded} changes that needed no model"
+                        );
+                    Ok(batches)
+                }
+                Err((outcome, reason)) => Err((outcome, None, reason)),
+            },
+            Ok(plan) => Ok(plan.batches),
+            Err(reason) => Err(("failed", Some("input"), reason)),
         };
         match batches {
             Ok(batches) if batches.is_empty() => {
                 end.outcome = "nothing_to_do".into();
                 // A gate that held the model back says why on the run.
-                end.error = task.skip_reason(&owner);
+                end.error = end.error.or_else(|| task.skip_reason(&owner));
             }
             Ok(batches) => {
                 self.send_batches(
@@ -1487,10 +1541,10 @@ impl Engine {
                 )
                 .await
             }
-            Err(error) => {
-                end.outcome = "failed".into();
-                end.failure_class = Some("input".into());
-                end.error = Some(error);
+            Err((outcome, failure_class, reason)) => {
+                end.outcome = outcome.into();
+                end.failure_class = failure_class.map(str::to_owned);
+                end.error = Some(reason);
             }
         }
         tracing::info!(
@@ -1805,14 +1859,6 @@ impl Engine {
     }
 }
 
-/// Apply an accepted reply or record an unusable one in a transaction that
-/// checks this process still holds every lock of `locks`. `None`
-/// when it doesn't: nothing is written. The changes are captured for the
-/// user's other computers as the dreamer's, with the run's id and `gens`,
-/// the generation of each role lease the batch was sent under. `window` is
-/// checked once the changes are written and before they commit: when it
-/// says a role's acting window closed, the transaction is rolled back and
-/// its reason is the outer `Err`.
 #[allow(clippy::too_many_arguments)]
 fn apply(
     db: &ContextDb,
@@ -1824,14 +1870,30 @@ fn apply(
     gens: &[(String, i64)],
     window: &dyn Fn() -> Result<(), String>,
 ) -> Result<Result<Option<super::task::Applied>, String>, String> {
+    write_fenced(db, locks, holder, run_id, gens, window, |tx| match reply {
+        Some(reply) => batch.apply(tx, reply, run_id),
+        None => batch.skip(tx, run_id),
+    })
+}
+
+/// Commit a dreamer write only while the run holds its local locks and role
+/// generations. The outbox captures `gens` so the other computers can tell
+/// who had the role. If the acting window closes before commit, all changes
+/// roll back and its reason is the outer `Err`.
+fn write_fenced<T>(
+    db: &ContextDb,
+    locks: &[OwnerKey],
+    holder: &str,
+    run_id: i64,
+    gens: &[(String, i64)],
+    window: &dyn Fn() -> Result<(), String>,
+    write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, String>,
+) -> Result<Result<Option<T>, String>, String> {
     let closed = std::cell::RefCell::new(None);
     let written = write_locked(db, locks, holder, |tx| {
         crate::replica::name_writer(tx, "dreamer", Some(run_id), gens)
             .map_err(|error| error.to_string())?;
-        let applied = match reply {
-            Some(reply) => batch.apply(tx, reply, run_id),
-            None => batch.skip(tx, run_id),
-        }?;
+        let applied = write(tx)?;
         crate::replica::unname_writer(tx).map_err(|error| error.to_string())?;
         if let Err(reason) = window() {
             *closed.borrow_mut() = Some(reason.clone());
@@ -1868,12 +1930,12 @@ fn still_acting(
 /// Run `write` in its own transaction, after checking in that transaction
 /// that this process still holds every lock of `locks`. `None` when it
 /// doesn't: nothing is written.
-fn write_locked(
+fn write_locked<T>(
     db: &ContextDb,
     locks: &[OwnerKey],
     holder: &str,
-    write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<super::task::Applied, String>,
-) -> Result<Option<super::task::Applied>, String> {
+    write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, String>,
+) -> Result<Option<T>, String> {
     db.with_connection(|conn| {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)

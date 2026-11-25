@@ -24,6 +24,9 @@ pub(crate) struct Sample {
 #[derive(Clone, Copy)]
 pub(crate) struct Store {
     pub(crate) unsent_count: u64,
+    pub(crate) local_only_count: u64,
+    pub(crate) reject_count: u64,
+    pub(crate) routine_skip_count: u64,
     /// The stream stops at the first message whose fleet key generation
     /// (epoch) is missing locally, so only one epoch can hold it at a time.
     pub(crate) hold: Option<(u64, i64)>,
@@ -53,23 +56,7 @@ impl Health {
         }
 
         let store = db
-            .with_connection(|conn| {
-                conn.query_row(
-                    "SELECT (SELECT COUNT(*) FROM replica_outbox
-                              WHERE state IN ('pending', 'sending', 'too_large', 'unaddressable')),
-                            held_epoch, held_since FROM replica_state WHERE id = 1",
-                    [],
-                    |row| {
-                        Ok(Store {
-                            unsent_count: row.get(0)?,
-                            hold: match row.get(1)? {
-                                Some(epoch) => Some((epoch, row.get(2)?)),
-                                None => None,
-                            },
-                        })
-                    },
-                )
-            })
+            .with_connection(read_store)
             .map_err(|error| error.to_string());
 
         *self.sample.lock().unwrap_or_else(PoisonError::into_inner) = Some(Sample {
@@ -84,4 +71,45 @@ impl Health {
             .map(|sample| sample.clone())
             .map_err(|_| "replica health snapshot unavailable")
     }
+}
+
+fn read_store(conn: &mut rusqlite::Connection) -> rusqlite::Result<Store> {
+    const BACKLOG: &str = "('pending', 'sending', 'too_large', 'unaddressable')";
+    // Older versions recorded these two kinds of harmless skips as refusals.
+    // Do not count them as refusals while they age out of the table.
+    let mut store = conn.query_row(
+        &format!("SELECT (SELECT COUNT(*) FROM replica_outbox WHERE state IN {BACKLOG}),
+                (SELECT COUNT(*) FROM replica_rejects
+                  WHERE reason NOT GLOB 'a copy of *, applied here before: a send tried again after the hub''s duplicate window'
+                    AND reason NOT GLOB 'a dreamer change written under generation *, older than generation * the stream holds a change of this row under'),
+                COALESCE((SELECT CAST(value AS INTEGER) FROM schema_migrations_meta WHERE key = ?1), 0),
+                held_epoch, held_since FROM replica_state WHERE id = 1"),
+        [super::ROUTINE_SKIPS_KEY],
+        |row| Ok(Store {
+            unsent_count: row.get(0)?,
+            local_only_count: 0,
+            reject_count: row.get(1)?,
+            routine_skip_count: row.get(2)?,
+            hold: match row.get(3)? {
+                Some(epoch) => Some((epoch, row.get(4)?)),
+                None => None,
+            },
+        }),
+    )?;
+    // Unplaced legacy rows kept a project path instead of a project id.
+    // Use the publisher's address check, and leave already-frozen changes
+    // alone: they have an address fixed independently of the current row.
+    let mut stmt = conn.prepare(&format!(
+        "SELECT m.owner_id FROM replica_outbox o JOIN memories m ON m.id = o.local_id
+          WHERE o.state IN {BACKLOG} AND o.kind = 'memory' AND o.frozen IS NULL AND m.level = 'project'"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let owner: String = row.get(0)?;
+        if super::wire::subject("memory", Some("project"), &owner).is_err() {
+            store.local_only_count += 1;
+        }
+    }
+    store.unsent_count -= store.local_only_count;
+    Ok(store)
 }

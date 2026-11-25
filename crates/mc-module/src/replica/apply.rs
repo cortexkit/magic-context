@@ -515,11 +515,11 @@ fn validate(kind: &str, snapshot: &Map<String, Value>) -> Result<(), String> {
 enum Applied {
     /// Changes to report once the transaction commits.
     Changed(Vec<Change>),
-    /// Recorded and skipped, with the reason.
-    Skipped(String),
+    /// A valid message skipped by deduplication or a dreamer fence.
+    Skipped,
 }
 
-/// Apply one message in its own transaction, or record why it was skipped;
+/// Apply one message, count a routine skip, or record a bad message;
 /// either way the stream position moves past it. A store error leaves the
 /// position where it was: the transaction rolls back, nothing of the
 /// message stays, and it is read again on the next round.
@@ -529,17 +529,22 @@ fn apply_message(
     message: &HubMessage,
     body: Result<Body, String>,
 ) -> rusqlite::Result<Vec<Change>> {
-    let global = body.as_ref().ok().map(|body| body.global_id.clone());
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute("INSERT INTO replica_applying (applying) VALUES (1)", [])?;
-    let applied = match &body {
-        Ok(body) => apply_body(&tx, box_id, message.seq, &message.subject, body)?,
-        Err(reason) => Applied::Skipped(reason.clone()),
-    };
-    let changes = match applied {
-        Applied::Changed(changes) => changes,
-        Applied::Skipped(reason) => {
-            reject(&tx, message, global.as_deref(), &reason)?;
+    let changes = match body {
+        Ok(body) => match apply_body(&tx, box_id, message.seq, &message.subject, &body)? {
+            Applied::Changed(changes) => changes,
+            Applied::Skipped => {
+                tx.execute(
+                    "INSERT INTO schema_migrations_meta (key, value) VALUES (?1, '1')
+                     ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+                    [super::ROUTINE_SKIPS_KEY],
+                )?;
+                Vec::new()
+            }
+        },
+        Err(reason) => {
+            reject(&tx, message, &reason)?;
             Vec::new()
         }
     };
@@ -586,26 +591,15 @@ fn restore_message(
     Ok(changes)
 }
 
-fn reject(
-    tx: &Connection,
-    message: &HubMessage,
-    global: Option<&str>,
-    reason: &str,
-) -> rusqlite::Result<()> {
+fn reject(tx: &Connection, message: &HubMessage, reason: &str) -> rusqlite::Result<()> {
     tracing::info!(
         "ck-mc: replica: stream message {} skipped: {reason}",
         message.seq
     );
     tx.execute(
         "INSERT INTO replica_rejects (stream_seq, subject, global_id, reason, recorded_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            message.seq as i64,
-            message.subject,
-            global,
-            reason,
-            now_ms()
-        ],
+         VALUES (?1, ?2, NULL, ?3, ?4)",
+        params![message.seq as i64, message.subject, reason, now_ms()],
     )?;
     Ok(())
 }
@@ -751,10 +745,7 @@ fn apply_body(
 ) -> rusqlite::Result<Applied> {
     let table = table(&body.kind);
     if body.change != "delete" && applied_before(tx, body)? {
-        return Ok(Applied::Skipped(format!(
-            "a copy of {}@{} from {}, applied here before: a send tried again after the hub's duplicate window",
-            body.global_id, body.revision, body.writer.store_id
-        )));
+        return Ok(Applied::Skipped);
     }
     // A message this store's outbox waits for is its own. A store copied
     // here from another computer may hold rows that computer was still
@@ -804,8 +795,8 @@ fn apply_body(
     if body.change == "delete" {
         return tombstone(tx, table, body, subject, local).map(Applied::Changed);
     }
-    let fence = fenced(tx, subject, body)?;
-    let winner = fence.is_none()
+    let fenced = fenced(tx, subject, body)?;
+    let winner = !fenced
         && found
             .as_ref()
             .and_then(|found| found.revision)
@@ -854,8 +845,8 @@ fn apply_body(
         changes.dedup();
         return Ok(Applied::Changed(changes));
     }
-    if let Some(reason) = fence {
-        return Ok(Applied::Skipped(reason));
+    if fenced {
+        return Ok(Applied::Skipped);
     }
     let Some(local) = local else {
         if !winner {
@@ -1026,9 +1017,8 @@ fn fence_of(tx: &Connection, global: &str, role: &str) -> rusqlite::Result<Optio
     .optional()
 }
 
-/// Why `body` is skipped as a dreamer change older than its row's fence,
-/// if it is. Otherwise its epoch raises the row's fence for the changes
-/// after it.
+/// Whether `body` is skipped as a dreamer change older than its row's
+/// fence. Otherwise its epoch raises the row's fence for later changes.
 ///
 /// A dreamer change carries the generation of the lease its run held for
 /// the row's role, and Entorhinal raises a role's generation each time the
@@ -1038,27 +1028,25 @@ fn fence_of(tx: &Connection, global: &str, role: &str) -> rusqlite::Result<Optio
 /// alone (`replica_fences`), never from this computer's own leases, so
 /// every computer at the same position decides the same. A change without
 /// an epoch is never fenced: no dreamer wrote it under a lease of its role.
-fn fenced(tx: &Connection, subject: &str, body: &Body) -> rusqlite::Result<Option<String>> {
+fn fenced(tx: &Connection, subject: &str, body: &Body) -> rusqlite::Result<bool> {
     let Some(epoch) = body.writer.dreamer_epoch else {
-        return Ok(None);
+        return Ok(false);
     };
     if body.writer.actor != "dreamer" {
-        return Ok(None);
+        return Ok(false);
     }
     let Some(role) = subject_role(subject) else {
-        return Ok(None);
+        return Ok(false);
     };
-    if let Some(fence) = fence_of(tx, &body.global_id, &role)?.filter(|fence| epoch < *fence) {
-        return Ok(Some(format!(
-            "a dreamer change written under generation {epoch} of {role}, older than generation {fence} the stream holds a change of this row under"
-        )));
+    if fence_of(tx, &body.global_id, &role)?.is_some_and(|fence| epoch < fence) {
+        return Ok(true);
     }
     tx.execute(
         "INSERT INTO replica_fences (global_id, role, epoch) VALUES (?1, ?2, ?3)
          ON CONFLICT (global_id, role) DO UPDATE SET epoch = MAX(epoch, excluded.epoch)",
         params![body.global_id, role, epoch],
     )?;
-    Ok(None)
+    Ok(false)
 }
 
 /// This computer's own message `body` came back. A memory that has its

@@ -26,6 +26,21 @@ use crate::workspace_members::WorkspaceMembers;
 /// A run's batches, once planning them (which may wait on the network) ends.
 pub(crate) type Planning<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<Box<dyn Batch>>, String>> + Send + 'a>>;
+
+/// Deterministic changes found while planning, to be written by the engine
+/// under the run's locks and role generations, even if there are no batches.
+pub(crate) type PlanningWrite =
+    Box<dyn FnOnce(&rusqlite::Transaction<'_>) -> Result<usize, String> + Send>;
+
+#[derive(Default)]
+pub(crate) struct RunPlan {
+    pub batches: Vec<Box<dyn Batch>>,
+    pub write: Option<PlanningWrite>,
+}
+
+pub(crate) type RunPlanning<'a> =
+    Pin<Box<dyn Future<Output = Result<RunPlan, String>> + Send + 'a>>;
+
 /// Whose memories a run reads and may change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Owner {
@@ -125,8 +140,8 @@ pub(crate) trait Task: Send + Sync {
     fn batches(&self, context: &TaskContext<'_>) -> Result<Vec<Box<dyn Batch>>, String>;
     /// The run's batches, for a task whose planning embeds text with the
     /// project's embedding provider (`embedding`, when one is configured)
-    /// and so waits on the network. The engine plans every run through
-    /// here; the default is [`Task::batches`], which needs neither.
+    /// and so waits on the network. The default is [`Task::batches`], which
+    /// needs neither.
     fn plan<'a>(
         &'a self,
         context: &'a TaskContext<'a>,
@@ -134,6 +149,20 @@ pub(crate) trait Task: Send + Sync {
     ) -> Planning<'a> {
         let _ = embedding;
         Box::pin(std::future::ready(self.batches(context)))
+    }
+    /// The engine plans every run here. Verify returns its no-model rechecks
+    /// with the batches, so the engine can write them under the run's role.
+    fn plan_run<'a>(
+        &'a self,
+        context: &'a TaskContext<'a>,
+        embedding: Option<&'a Provider>,
+    ) -> RunPlanning<'a> {
+        Box::pin(async move {
+            Ok(RunPlan {
+                batches: self.plan(context, embedding).await?,
+                write: None,
+            })
+        })
     }
     /// Why the run that just planned for `owner` sends nothing, when its
     /// planning ended on a reason worth recording with the run (a gate that

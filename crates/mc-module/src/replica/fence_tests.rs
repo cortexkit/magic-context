@@ -48,7 +48,7 @@ fn rejects(computer: &Computer) -> Vec<String> {
 
 /// The holder changes a memory under generation 5 of the role; a change of
 /// the same memory written afterwards under generation 4, by a computer
-/// that had lost the role, is skipped with the reason. The former holder's
+/// that had lost the role, is counted as a skip, not a refusal. The former holder's
 /// change of another memory, which the stream holds no newer change of,
 /// applies, and so does a person's change of the fenced memory.
 #[tokio::test]
@@ -86,9 +86,10 @@ async fn a_receiver_skips_a_dreamer_change_of_a_row_the_stream_holds_a_newer_gen
         41,
         "no newer generation of this row is in the stream"
     );
+    assert!(rejects(&receiver).is_empty());
     assert_eq!(
-        rejects(&receiver),
-        ["a dreamer change written under generation 4 of dreamer.pj-a, older than generation 5 the stream holds a change of this row under"]
+        receiver.value::<i64>("SELECT CAST(value AS INTEGER) FROM schema_migrations_meta WHERE key = 'replica_routine_skips'"),
+        1
     );
     assert_eq!(
         receiver.texts(

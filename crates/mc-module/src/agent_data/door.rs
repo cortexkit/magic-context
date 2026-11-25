@@ -169,9 +169,7 @@ const CUT_ANSWERS: &[(&str, CutAnswer)] = &[
     ),
     (
         "stream_label_too_long",
-        CutAnswer::Fault(
-            "ck-mc's module id is too long for a door stream; run it under a shorter id",
-        ),
+        CutAnswer::Fault(STREAM_LABEL_TOO_LONG),
     ),
     (
         "record_too_large",
@@ -196,6 +194,9 @@ const CUT_ANSWERS: &[(&str, CutAnswer)] = &[
         CutAnswer::Fault("the door's running hash cannot be read; update ck-mc or Engram"),
     ),
 ];
+
+const STREAM_LABEL_TOO_LONG: &str =
+    "ck-mc's module id is too long for a door stream; custom module ids are not supported";
 
 /// What the receiver answers for a cut-bound read that failed with `code`.
 pub fn cut_answer(code: &str) -> CutAnswer {
@@ -230,8 +231,8 @@ const ANSWERS: &[(&str, Answer, Answer)] = &[
     ),
     (
         "stream_label_too_long",
-        Fault("ck-mc's module id is too long for a door stream; run it under a shorter id"),
-        Fault("ck-mc's module id is too long for a door stream; run it under a shorter id"),
+        Fault(STREAM_LABEL_TOO_LONG),
+        Fault(STREAM_LABEL_TOO_LONG),
     ),
     (
         "record_too_large",

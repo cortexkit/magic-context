@@ -6,6 +6,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::Serialize;
 
+use crate::agent_data::journal;
 use crate::store::{lock_store, session_tables, SCHEMA_VERSION};
 
 mod process_check;
@@ -18,6 +19,7 @@ store held open by another process.
 Linux checks /proc for open files; macOS requires lsof. MAGIC_CONTEXT_MODE3_STORE
 overrides the store path, as for move-in. context.db (MAGIC_CONTEXT_DB) is checked read-only:
 summary_in_flight means historian stage attempts must finish before re-keying.
+Move records in context.db or agent-data/journal.json also prevent re-keying.
 On Linux, store_check_incomplete lists same-user processes whose files cannot be
 inspected, with their pid, comm and cmdline. Check each process before repeating
 --ignore-pid <pid> for unrelated processes only. This waives an unreadable-process
@@ -127,17 +129,62 @@ fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-fn refuse_in_flight(context_path: &Path, request: &Request) -> Result<(), String> {
+fn refuse_journal_entries(context_path: &Path, request: &Request) -> Result<(), String> {
+    let path = journal::path(context_path);
+    let journal = journal::read(&path)
+        .map_err(|error| format!("move_check_failed: {}: {error}", path.display()))?;
+    for session in &request.sessions {
+        for runner in [&request.from, &request.to] {
+            if journal.session(runner, &request.harness, session).is_some() {
+                return Err(format!(
+                    "move_record_exists: {runner}/{}/{session} has a session entry in {}",
+                    request.harness,
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn refuse_context_dependencies(context_path: &Path, request: &Request) -> Result<(), String> {
     if !context_path
         .try_exists()
         .map_err(|error| format!("context_check_failed: {error}"))?
     {
         return Ok(());
     }
-    // Open no ContextDb: its startup path performs writes. A read-only raw
-    // connection is enough to reject child routes that still name the old runner.
+    // ContextDb startup performs writes; the move and historian checks only
+    // need a read-only connection.
     let connection = Connection::open_with_flags(context_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| format!("context_check_failed: {error}"))?;
+    let has_meta: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_migrations_meta')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("context_check_failed: {error}"))?;
+    if has_meta {
+        for session in &request.sessions {
+            // The move record's key has no runner. Rekeying either side of
+            // a runner change would leave that record attached to the old id.
+            let key = crate::move_in::fence_key(&request.harness, session);
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM schema_migrations_meta WHERE key = ?1)",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("context_check_failed: {error}"))?;
+            if exists {
+                return Err(format!(
+                    "move_record_exists: {key} in {}",
+                    context_path.display()
+                ));
+            }
+        }
+    }
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='memory_stage_attempts')",
         [], |row| row.get(0),
@@ -188,7 +235,8 @@ fn rekey_with_check(
         .map_err(|error| format!("store_open: {}: {error}", path.display()))?;
     let _lease = lock_store(&path, true)?;
     check(&path)?;
-    refuse_in_flight(context_path, request)?;
+    refuse_journal_entries(context_path, request)?;
+    refuse_context_dependencies(context_path, request)?;
     // Store::open migrates and creates tables. Offline rekeys must instead
     // reject every other schema version without modifying the store.
     let mut connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)

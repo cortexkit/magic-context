@@ -52,6 +52,8 @@ pub mod apply;
 pub mod epochs;
 #[cfg(feature = "memory-replica")]
 pub(crate) mod health;
+
+const ROUTINE_SKIPS_KEY: &str = "replica_routine_skips";
 pub mod hub;
 pub mod live;
 pub mod nats;
