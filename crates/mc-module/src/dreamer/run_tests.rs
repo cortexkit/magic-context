@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest};
@@ -40,6 +40,16 @@ pub(crate) enum Ends {
 /// A reader catalog as the tests give it: each tool with its capabilities,
 /// or why the provider did not answer.
 pub(crate) type Catalog = Result<Vec<(&'static str, &'static [&'static str])>, &'static str>;
+pub(crate) type LabCatalogs = BTreeMap<
+    (&'static str, Option<&'static str>),
+    Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, &'static str>,
+>;
+
+fn lab_worker_project() -> Option<String> {
+    crate::child_scopes::LAB_WORKER_PROJECT
+        .try_with(Clone::clone)
+        .ok()
+}
 
 /// Routing offers `routes` in order, each on runner `rx` with harness `hx`
 /// unless `no_harness` names it; an excluded route is skipped. `refuse`
@@ -73,6 +83,10 @@ pub(crate) struct Client {
     pub(crate) no_reader_preset: Vec<&'static str>,
     /// Each catalog request: the provider and the preset it asked for.
     pub(crate) asked: Mutex<Vec<(String, Option<String>)>>,
+    /// Overrides for a lab's exact provider/preset requests, including errors.
+    pub(crate) lab_catalogs: Option<LabCatalogs>,
+    pub(crate) lab_catalog_projects: Mutex<Vec<Option<String>>>,
+    pub(crate) lab_send_projects: Mutex<Vec<Option<String>>>,
     /// What Entorhinal answers every call with; `None` for no answer.
     pub(crate) entorhinal: Option<serde_json::Value>,
     /// What core answers every call with; `None` for a core that is not
@@ -109,6 +123,9 @@ impl Client {
             catalogs: Vec::new(),
             no_reader_preset: Vec::new(),
             asked: Mutex::default(),
+            lab_catalogs: None,
+            lab_catalog_projects: Mutex::default(),
+            lab_send_projects: Mutex::default(),
             entorhinal: None,
             core: None,
             core_calls: Mutex::default(),
@@ -169,6 +186,15 @@ impl RunnerClient for Client {
             .lock()
             .unwrap()
             .push((provider.to_owned(), preset.map(str::to_owned)));
+        if let Some(catalogs) = &self.lab_catalogs {
+            self.lab_catalog_projects
+                .lock()
+                .unwrap()
+                .push(lab_worker_project());
+            if let Some(answer) = catalogs.get(&(provider, preset)) {
+                return answer.clone().map_err(ClientError::new);
+            }
+        }
         let tools = self
             .catalogs
             .iter()
@@ -219,6 +245,12 @@ impl RunnerClient for Client {
         child: &Child,
         request: SendRequest,
     ) -> Result<SendReply, ClientError> {
+        if self.lab_catalogs.is_some() {
+            self.lab_send_projects
+                .lock()
+                .unwrap()
+                .push(lab_worker_project());
+        }
         self.sends.lock().unwrap().push((child.clone(), request));
         if let Some(error) = self.send_errors.lock().unwrap().pop_front() {
             return Err(error);

@@ -439,7 +439,7 @@ impl SubcRunnerClient {
         loop {
             let scope = self
                 .child_scopes
-                .for_project(root)
+                .for_child(root)
                 .await
                 .map_err(|error| ClientError::new(format!("{method}: child scope: {error}")))?;
             match self
@@ -824,7 +824,7 @@ impl RunnerClient for SubcRunnerClient {
         })?;
         let scope = self
             .child_scopes
-            .for_project(root)
+            .for_child(root)
             .await
             .map_err(|error| ClientError::new(format!("tool.catalog: child scope: {error}")))?;
         // The same provider, preset, params and scope the runner fetches the

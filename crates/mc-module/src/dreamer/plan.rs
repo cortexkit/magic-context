@@ -28,7 +28,10 @@
 //! Without one, a task that reads code does not run.
 
 use cortexkit_role_compaction::read::SessionRef;
-use cortexkit_role_tool_provider::catalog::{check_presets, composition_digest, CatalogAnswer};
+use cortexkit_role_tool_provider::catalog::{
+    check_presets, composition_digest, serves_call_mode, CatalogAnswer,
+};
+use cortexkit_role_tool_provider::CallMode;
 use serde_json::{json, Value};
 
 use crate::client::{Child, RunnerClient};
@@ -38,6 +41,80 @@ use crate::client::{Child, RunnerClient};
 /// Context's own.
 pub fn reader_preset() -> &'static str {
     crate::catalog::Preset::Reader.as_str()
+}
+
+pub(super) const SIDEKICK_PROVIDER: &str = "prefrontal";
+pub(super) const SIDEKICK_NAME: &str = "sidekick";
+const SIDEKICK_PRESET: &str = "sidekick";
+
+pub(super) fn sidekick_item() -> Value {
+    json!({"provider": SIDEKICK_PROVIDER, "preset": SIDEKICK_PRESET, "params": {}})
+}
+
+/// The lab may fetch only a preset that offers exactly the read-only research
+/// tool. The plan's `composition` records the fetched tool names; it does not filter them.
+pub(super) async fn sidekick_tool<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+) -> Result<ReaderTool, String> {
+    let error = |reason: &str| format!("sidekick unavailable from {SIDEKICK_PROVIDER}: {reason}");
+    let providers = client
+        .tool_providers()
+        .await
+        .map_err(|e| error(&format!("listing tool providers failed: {e}")))?;
+    if !providers
+        .iter()
+        .any(|provider| provider == SIDEKICK_PROVIDER)
+    {
+        return Err(error("not installed or not ready as a tool provider"));
+    }
+    let listing = client
+        .tool_catalog(child, SIDEKICK_PROVIDER, None)
+        .await
+        .map_err(|e| error(&format!("listing presets failed: {e}")))?;
+    if !listing.lists_preset(SIDEKICK_PRESET) {
+        return Err(error(&format!(
+            "did not list the {SIDEKICK_PRESET:?} preset (listed {:?})",
+            listing.presets
+        )));
+    }
+    let catalog = client
+        .tool_catalog(child, SIDEKICK_PROVIDER, Some(SIDEKICK_PRESET))
+        .await
+        .map_err(|e| {
+            error(&format!(
+                "fetching the {SIDEKICK_PRESET:?} preset failed: {e}"
+            ))
+        })?;
+    if check_presets(&catalog, Some(SIDEKICK_PRESET)).is_err() {
+        return Err(error(&format!(
+            "did not answer with its {SIDEKICK_PRESET:?} preset (listed presets {:?})",
+            catalog.presets
+        )));
+    }
+    let [tool] = catalog.tools.as_slice() else {
+        return Err(error(&format!(
+            "expected only {SIDEKICK_NAME}, found {:?}",
+            catalog
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        )));
+    };
+    if tool.name != SIDEKICK_NAME {
+        return Err(error(&format!(
+            "expected only {SIDEKICK_NAME}, found {:?}",
+            tool.name
+        )));
+    }
+    if !serves_call_mode(tool, &CallMode::Classic) {
+        return Err(error("sidekick does not admit direct tool calls"));
+    }
+    Ok(ReaderTool {
+        name: tool.name.clone(),
+        capabilities: tool.capabilities.clone(),
+    })
 }
 
 /// The capability tag of a tool that returns file contents

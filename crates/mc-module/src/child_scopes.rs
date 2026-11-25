@@ -1,11 +1,12 @@
-//! ck-mc's own project scopes, under which its summarizer runs.
+//! ck-mc's own project scopes, under which its child sessions run.
 //!
 //! A summarizer run happens in a child session of ck-mc's own on the
 //! session's runner. The runner creates that child on its first send, in the
 //! folder of the scope the route was opened under, and refuses a scope with
 //! no folder (THALAMUS's runner: `invalid_params {field: scope, problem:
-//! workdir_required}`). So ck-mc owns one scope per project folder, with that
-//! folder as its `workdir`, and lists the runners that may carry it.
+//! workdir_required}`). ck-mc scopes carry the project folder as `workdir`
+//! and list the runners allowed to use them. Lab sessions offering
+//! `sidekick` use a separate Worker scope for the same folder.
 //!
 //! The daemon's `scope.sync` replaces an owner's whole set of scopes, so
 //! every sync carries every project seen so far in this process.
@@ -20,6 +21,12 @@ use subc_protocol::scope::{
     ScopeCarrier, ScopeKind, ScopeRecord, ScopeRecordOutcome, ScopeSelector,
 };
 use subc_protocol::Principal;
+
+tokio::task_local! {
+    /// A lab run that offers `sidekick` needs the same Worker scope for all
+    /// of its child calls, including catalog preflight and cancellation.
+    pub(crate) static LAB_WORKER_PROJECT: String;
+}
 
 /// The runners a child scope lists as carriers: they may open routes under
 /// it and run sessions in its folder.
@@ -96,8 +103,8 @@ struct State {
     generation: u64,
     /// The last sync was acknowledged, and covers `records`.
     synced: bool,
-    /// Every project's scope, by folder.
-    records: BTreeMap<String, ScopeRecord>,
+    /// By folder, with a separate Worker scope for each stamped lab project.
+    records: BTreeMap<(String, Option<String>), ScopeRecord>,
 }
 
 /// ck-mc's child scopes for this process.
@@ -145,19 +152,25 @@ impl ChildScopes {
         self.state.lock().await.synced = false;
     }
 
-    /// The scope for `project_root`, published first when it is new.
-    pub async fn for_project(&self, project_root: &str) -> Result<ScopeSelector, ScopeError> {
+    /// The scope for `project_root`, published first when it is new. Only
+    /// a lab run that requests `sidekick` sets a Worker project stamp.
+    pub async fn for_child(&self, project_root: &str) -> Result<ScopeSelector, ScopeError> {
+        let project = LAB_WORKER_PROJECT.try_with(Clone::clone).ok();
         if !Path::new(project_root).is_absolute() {
             return Err(ScopeError {
                 code: "child_scope_invalid_workdir".into(),
                 message: format!("{project_root} is not an absolute folder"),
             });
         }
-        let scope_ref = format!(
-            "mc-child-project-{}-{}",
-            self.incarnation,
-            hex(&Sha256::digest(project_root.as_bytes()))
-        );
+        let folder_digest = hex(&Sha256::digest(project_root.as_bytes()));
+        let scope_ref = match &project {
+            Some(project) => format!(
+                "mc-child-lab-worker-{}-{}",
+                self.incarnation,
+                hex(&Sha256::digest(format!("{folder_digest}{project}")))
+            ),
+            None => format!("mc-child-project-{}-{folder_digest}", self.incarnation),
+        };
         let selector = ScopeSelector::new(
             Principal::Reserved {
                 module_id: self.module_id.clone(),
@@ -166,7 +179,8 @@ impl ChildScopes {
             Some(1),
         );
         let mut state = self.state.lock().await;
-        if state.synced && state.records.contains_key(project_root) {
+        let key = (project_root.to_owned(), project.clone());
+        if state.synced && state.records.contains_key(&key) {
             return Ok(selector);
         }
         let publisher = self
@@ -178,24 +192,27 @@ impl ChildScopes {
                 code: "child_scope_owner_unavailable".into(),
                 message: "ck-mc is not serving yet".into(),
             })?;
-        state
-            .records
-            .entry(project_root.to_owned())
-            .or_insert_with(|| {
-                // The folder is kept exactly as the session's scope spelled
-                // it, never normalized.
-                ScopeRecord::new(scope_ref, 1, ScopeKind::Ephemeral)
-                    .with_workdir(Some(project_root.to_owned()))
-                    .with_carriers(
-                        CARRIERS
-                            .map(|module_id| {
-                                ScopeCarrier::new(Principal::Reserved {
-                                    module_id: module_id.into(),
-                                })
+        state.records.entry(key).or_insert_with(|| {
+            let kind = if project.is_some() {
+                ScopeKind::Worker
+            } else {
+                ScopeKind::Ephemeral
+            };
+            // The folder is kept exactly as the session's scope spelled
+            // it, never normalized.
+            ScopeRecord::new(scope_ref, 1, kind)
+                .with_project_id(project)
+                .with_workdir(Some(project_root.to_owned()))
+                .with_carriers(
+                    CARRIERS
+                        .map(|module_id| {
+                            ScopeCarrier::new(Principal::Reserved {
+                                module_id: module_id.into(),
                             })
-                            .into(),
-                    )
-            });
+                        })
+                        .into(),
+                )
+        });
         state.generation += 1;
         state.synced = false;
         // The records stay even when the sync fails, so a later sync for
@@ -232,9 +249,9 @@ mod tests {
         let scopes = ChildScopes::new("magic-context");
         let recorder = Arc::new(Recorder::default());
         scopes.set_publisher(recorder.clone());
-        let first = scopes.for_project("/work/a").await.unwrap();
-        assert_eq!(scopes.for_project("/work/a").await.unwrap(), first);
-        scopes.for_project("/work/b").await.unwrap();
+        let first = scopes.for_child("/work/a").await.unwrap();
+        assert_eq!(scopes.for_child("/work/a").await.unwrap(), first);
+        scopes.for_child("/work/b").await.unwrap();
         let syncs = recorder.0.lock().unwrap().clone();
         assert_eq!(syncs.len(), 2, "a known project does not sync again");
         let (generation, records) = &syncs[1];
@@ -245,8 +262,11 @@ mod tests {
             .collect();
         assert_eq!(folders, ["/work/a", "/work/b"]);
         assert_eq!(records[0].carriers.len(), 2);
+        assert!(records
+            .iter()
+            .all(|record| record.kind == ScopeKind::Ephemeral && record.project_id.is_none()));
         scopes.forget_sync().await;
-        scopes.for_project("/work/a").await.unwrap();
+        scopes.for_child("/work/a").await.unwrap();
         assert_eq!(
             recorder.0.lock().unwrap().len(),
             3,
@@ -255,11 +275,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_projects_have_separate_scopes_in_the_same_folder() {
+        let scopes = ChildScopes::new("magic-context");
+        let recorder = Arc::new(Recorder::default());
+        scopes.set_publisher(recorder.clone());
+        let root = "/work/lab";
+        let plain = scopes.for_child(root).await.unwrap();
+        let first = LAB_WORKER_PROJECT
+            .scope("project-a".into(), scopes.for_child(root))
+            .await
+            .unwrap();
+        let second = LAB_WORKER_PROJECT
+            .scope("project-b".into(), scopes.for_child(root))
+            .await
+            .unwrap();
+        assert_ne!(first, plain);
+        assert_ne!(first, second);
+        assert_eq!(scopes.for_child(root).await.unwrap(), plain);
+        let syncs = recorder.0.lock().unwrap();
+        assert_eq!(syncs.len(), 3);
+        assert_eq!(syncs[0].1[0], syncs[2].1[0]);
+        assert_eq!(syncs[2].1.len(), 3);
+        for (record, project) in syncs[2]
+            .1
+            .iter()
+            .zip([None, Some("project-a"), Some("project-b")])
+        {
+            assert_eq!(record.workdir.as_deref(), Some(root));
+            assert_eq!(record.project_id.as_deref(), project);
+            assert_eq!(record.carriers, syncs[0].1[0].carriers);
+            assert_eq!(
+                record.kind,
+                if project.is_some() {
+                    ScopeKind::Worker
+                } else {
+                    ScopeKind::Ephemeral
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_relative_folder_or_no_daemon_is_refused_by_name() {
         let scopes = ChildScopes::new("magic-context");
-        let error = scopes.for_project("work/a").await.unwrap_err();
+        let error = scopes.for_child("work/a").await.unwrap_err();
         assert_eq!(error.code, "child_scope_invalid_workdir");
-        let error = scopes.for_project("/work/a").await.unwrap_err();
+        let error = scopes.for_child("/work/a").await.unwrap_err();
         assert_eq!(error.code, "child_scope_owner_unavailable");
     }
 }

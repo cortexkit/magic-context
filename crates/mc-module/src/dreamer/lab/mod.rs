@@ -10,6 +10,7 @@ mod tests;
 mod verdicts;
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -208,7 +209,9 @@ impl Start {
         }
         let (stop, error) = match outcome {
             Err(_) => {
-                observed.cancel(client.as_ref()).await;
+                if let Some(lab) = &loaded {
+                    lab.in_child_scope(observed.cancel(client.as_ref())).await;
+                }
                 ("deadline", None)
             }
             Ok(answer) => match answer {
@@ -341,7 +344,20 @@ impl Lab {
             remaining_tokens: u64::MAX,
             attribution: None,
         };
-        run::run_lab(client, &job, self, registry, observed, deadline).await
+        self.in_child_scope(run::run_lab(
+            client, &job, self, registry, observed, deadline,
+        ))
+        .await
+    }
+
+    async fn in_child_scope<T>(&self, run: impl Future<Output = T>) -> T {
+        if self.spec.tools.contains(&Tool::Sidekick) {
+            crate::child_scopes::LAB_WORKER_PROJECT
+                .scope(self.spec.project.clone(), run)
+                .await
+        } else {
+            run.await
+        }
     }
 
     pub(super) fn route_select(&self, select: &mut SelectRequest) {
@@ -367,6 +383,7 @@ impl Lab {
         let mut tools: BTreeMap<String, bool> = OWN_NAMES
             .into_iter()
             .chain(READER_NAMES)
+            .chain([plan::SIDEKICK_NAME])
             .map(|name| (name.into(), false))
             .collect();
         let mut reader_tools = Vec::new();
@@ -388,6 +405,28 @@ impl Lab {
             providers.insert(reader, composition_tools(definitions));
             tool_items.push(json!({"provider": reader, "preset": preset, "params":{}}));
         }
+        let sidekick_offered = self.spec.tools.contains(&Tool::Sidekick);
+        let checkout_paths = if sidekick_offered {
+            let sidekick = plan::sidekick_tool(client, child).await?;
+            if tools.insert(sidekick.name.clone(), true) == Some(true)
+                || providers.contains_key(plan::SIDEKICK_PROVIDER)
+            {
+                return Err("the reader and the sidekick preset overlap".into());
+            }
+            providers.insert(plan::SIDEKICK_PROVIDER, composition_tools(vec![sidekick]));
+            tool_items.push(plan::sidekick_item());
+            self.spec
+                .checkouts
+                .values()
+                .map(|path| {
+                    path.to_str().map(str::to_owned).ok_or_else(|| {
+                        format!("sidekick checkout path must be UTF-8: {}", path.display())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
         let mut own = Vec::new();
         for tool in &self.tools {
             let name = tool["name"].as_str().expect("lab tool name");
@@ -436,10 +475,13 @@ impl Lab {
         };
         let owned = self.clone();
         let (system, prompt) = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let (system, prompt) =
-                owned
-                    .persona
-                    .render(context, tools, &owned.context, &owned.memories)?;
+            let (system, prompt) = owned.persona.render(
+                context,
+                tools,
+                &checkout_paths,
+                &owned.context,
+                &owned.memories,
+            )?;
             if system.trim().is_empty() || prompt.trim().is_empty() {
                 return Err("the lab system text and first message must not be empty".into());
             }
@@ -461,6 +503,7 @@ impl Lab {
             system,
             prompt,
             reader_tools,
+            sidekick_offered,
             plan: PlanRun {
                 plan: plan.as_object().expect("lab plan object").clone(),
                 max_steps: self.spec.step_cap,
@@ -614,6 +657,7 @@ pub(super) struct Prepared {
     pub system: String,
     pub prompt: String,
     reader_tools: Vec<Value>,
+    sidekick_offered: bool,
     pub plan: PlanRun,
 }
 
@@ -624,6 +668,7 @@ pub(super) struct Observed {
     pub child: Option<Child>,
     pub send: ObservedSend,
     pub account_limit_detail: Option<&'static str>,
+    sidekick_offered: bool,
     request: Option<Value>,
     request_written_at: Option<i64>,
 }
@@ -644,6 +689,7 @@ impl Observed {
     ) {
         self.child = Some(child.clone());
         self.send = ObservedSend::default();
+        self.sidekick_offered = prepared.sidekick_offered;
         self.request = Some(
             json!({"system_text":prepared.system, "first_message":prepared.prompt,
             "lab_tools":lab_tools, "reader_tools_at_preflight":prepared.reader_tools}),
@@ -701,6 +747,7 @@ impl Observed {
         let session = self.child.as_ref().map(|child| &child.session);
         json!({"model":self.model,"route":self.route,"child_session_id":session.map(|s| &s.session),"runner":session.map(|s| &s.runner),
             "sent":self.send.accepted,"request_written_at":self.request_written_at,"account_limit_detail":self.account_limit_detail,
+            "sidekick_offered":self.sidekick_offered,
             "steps":self.send.usage.as_ref().map(|usage| usage.steps),"usage":{"total":total,"per_step":null,
                  "unreported_steps":unreported,"usage_complete":self.send.terminal_usage && unreported == Some(0),
                 "per_step_unavailable":"the runner's run result reports aggregate usage only"},

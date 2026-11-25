@@ -2,6 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use cortexkit_role_llm_runner::usage::RunUsage;
+use cortexkit_role_tool_provider::catalog::{CatalogAnswer, CatalogTool};
 use rusqlite::params;
 
 use super::*;
@@ -98,12 +99,22 @@ impl Fixture {
     }
 
     async fn run(&self, value: Value, ends: Ends) -> Arc<Client> {
+        self.run_with(value, ends, |_| {}).await
+    }
+
+    async fn run_with(
+        &self,
+        value: Value,
+        ends: Ends,
+        configure: impl FnOnce(&mut Client),
+    ) -> Arc<Client> {
         let registry = Arc::new(Registry::default());
         let mut client = Client::new(&["p/a"], &[ends]);
         client.plans = vec!["ra"];
         client.catalog = Ok(vec![("read", &["code.read/v1"]), ("aft_search", &[])]);
         client.lab = Some(registry.clone());
         client.lab_verdicts_path = Some(self.out.join("verdicts.json"));
+        configure(&mut client);
         let client = Arc::new(client);
         self.start(&value)
             .await
@@ -288,6 +299,258 @@ async fn scripted_lab_records_incremental_verdicts_and_request_without_store_wri
     assert_eq!(client.selects.lock().unwrap()[0].requirements.eq, Some(29));
     assert_eq!(live_before, fs::read(&fixture.live).unwrap());
     assert_eq!(frozen_before, fs::read(&fixture.frozen).unwrap());
+}
+
+#[tokio::test]
+async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
+    use sha2::{Digest, Sha256};
+
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"].as_array_mut().unwrap().push(json!("reader"));
+    let client = fixture.run(spec, Ends::LabTools(vec![])).await;
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    let mut sent = sends[0].1.clone();
+    // The child ID includes a PID and wall clock; every other send byte is stable.
+    assert_eq!(sent.send_id, sends[0].0.session.session);
+    sent.send_id = "mc-dream:fixed:0.0".into();
+    let send = serde_json::to_vec(&sent).unwrap();
+    let request = fs::read(fixture.out.join("request.json")).unwrap();
+    let pins = [
+        format!("{:x}", Sha256::digest(&send)),
+        format!("{:x}", Sha256::digest(&request)),
+    ];
+    assert_eq!(
+        pins,
+        [
+            "b7094a89a773d890f4ef21f2a5175ccb2642986aa577b15c95555e0f3769fbe2",
+            "a32d53392fd942f9ef6407e3a952f50a2c99a043dd8b92098b0640d805063c37",
+        ]
+    );
+}
+
+fn sidekick_catalog(presets: &[&str], tools: &[&str]) -> CatalogAnswer {
+    let mut answer = CatalogAnswer::default();
+    answer.presets = presets.iter().map(|name| (*name).into()).collect();
+    answer.tools = tools
+        .iter()
+        .map(|name| {
+            let mut tool = CatalogTool::default();
+            tool.name = (*name).into();
+            tool
+        })
+        .collect();
+    answer
+}
+
+fn sidekick_provider(client: &mut Client, presets: &[&str], tools: &[&str]) {
+    client.providers.push("prefrontal");
+    client.lab_catalogs = Some(BTreeMap::from([
+        (
+            ("prefrontal", None),
+            Ok(sidekick_catalog(presets, &["sidekick"])),
+        ),
+        (
+            ("prefrontal", Some("sidekick")),
+            Ok(sidekick_catalog(&[], tools)),
+        ),
+    ]));
+}
+
+fn available_sidekick(client: &mut Client) {
+    sidekick_provider(client, &["worker", "sidekick"], &["sidekick"]);
+}
+
+#[tokio::test]
+async fn sidekick_lab_uses_a_worker_scope_and_asks_aft_for_reader() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["reader", "sidekick"]);
+    let worker = fixture
+        .run_with(spec.clone(), Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    assert_eq!(
+        *worker.lab_send_projects.lock().unwrap(),
+        [Some("p".to_owned())]
+    );
+    {
+        let asked = worker.asked.lock().unwrap();
+        let projects = worker.lab_catalog_projects.lock().unwrap();
+        let scoped_catalogs: Vec<_> = asked
+            .iter()
+            .zip(projects.iter())
+            .filter_map(|(request, project)| {
+                project.as_ref().map(|project| {
+                    assert_eq!(project, "p");
+                    (request.0.as_str(), request.1.as_deref())
+                })
+            })
+            .collect();
+        assert_eq!(
+            scoped_catalogs,
+            [
+                ("aft", Some("reader")),
+                ("prefrontal", None),
+                ("prefrontal", Some("sidekick"))
+            ]
+        );
+    }
+    assert_eq!(
+        worker.sends.lock().unwrap()[0].0.project_root.as_deref(),
+        fixture.root.to_str()
+    );
+
+    let plain_out = fixture.root.join("plain");
+    spec["out_dir"] = json!(plain_out);
+    spec["tools"] = json!(["reader"]);
+    let plain = fixture
+        .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    assert_eq!(*plain.lab_send_projects.lock().unwrap(), [None]);
+    assert!(plain
+        .lab_catalog_projects
+        .lock()
+        .unwrap()
+        .iter()
+        .all(Option::is_none));
+    assert!(plain
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(provider, _)| provider == "aft"));
+    assert_eq!(
+        plain.sends.lock().unwrap()[0].0.project_root.as_deref(),
+        fixture.root.to_str()
+    );
+}
+
+#[tokio::test]
+async fn opted_in_lab_plan_offers_only_sidekick_from_prefrontal() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["reader", "sidekick", "submit"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    let plan = &sends[0].1.plan.as_ref().unwrap();
+    assert_eq!(
+        plan["tool_items"],
+        json!([
+            {"provider":"aft","preset":"reader","params":{}},
+            {"provider":"prefrontal","preset":"sidekick","params":{}},
+            {"provider":crate::MODULE_ID,"preset":"dreamer","params":{}}
+        ])
+    );
+    assert_eq!(
+        plan["composition"]["providers"],
+        json!([
+            {"provider":"aft","tools":[{"name":"aft_search","capabilities":[]},
+                {"name":"read","capabilities":["code.read/v1"]}]},
+            {"provider":crate::MODULE_ID,"tools":[{"name":"submit","capabilities":[]}]},
+            {"provider":"prefrontal","tools":[{"name":"sidekick","capabilities":[]}]}
+        ])
+    );
+    assert_eq!(fixture.output("run.json")["sidekick_offered"], true);
+}
+
+#[tokio::test]
+async fn persona_facts_report_sidekick_and_checkout_paths_only_when_offered() {
+    for enabled in [false, true] {
+        let fixture = Fixture::new();
+        let fact = "{% if tools.sidekick %}{% for path in checkout_paths %} {{ path }}{% endfor %}{% else %} unavailable{% endif %}";
+        fs::write(
+            fixture.persona.join("PERSONA.md"),
+            format!("{SYSTEM}{fact}"),
+        )
+        .unwrap();
+        fs::write(
+            fixture.persona.join("first-message.md"),
+            format!("{MESSAGE}{fact}"),
+        )
+        .unwrap();
+        let mut spec = fixture.spec_value();
+        if enabled {
+            spec["tools"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("sidekick"));
+        }
+        fixture
+            .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+            .await;
+        let request = fixture.output("request.json");
+        let expected = if enabled {
+            fixture.checkout.to_str().unwrap()
+        } else {
+            "unavailable"
+        };
+        for field in ["system_text", "first_message"] {
+            assert!(
+                request[field].as_str().unwrap().ends_with(expected),
+                "{field}: {}",
+                request[field]
+            );
+        }
+        assert_eq!(fixture.output("run.json")["sidekick_offered"], enabled);
+    }
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_not_installed() {
+    assert_sidekick_refusal(None, &[], "not installed or not ready").await;
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_the_preset_is_not_listed() {
+    assert_sidekick_refusal(Some(&["worker"]), &["sidekick"], "listed [\"worker\"]").await;
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_the_catalog_is_empty() {
+    assert_sidekick_refusal(Some(&["sidekick"]), &[], "found []").await;
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_the_catalog_offers_other_tools() {
+    assert_sidekick_refusal(
+        Some(&["sidekick"]),
+        &["sidekick", "notify"],
+        "found [\"sidekick\", \"notify\"]",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_the_tool_is_not_sidekick() {
+    assert_sidekick_refusal(Some(&["sidekick"]), &["review"], "found \"review\"").await;
+}
+
+async fn assert_sidekick_refusal(presets: Option<&[&str]>, tools: &[&str], reason: &str) {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), |client| {
+            if let Some(presets) = presets {
+                sidekick_provider(client, presets, tools);
+            }
+        })
+        .await;
+    assert!(client.sends.lock().unwrap().is_empty());
+    assert!(!fixture.out.join("request.json").exists());
+    let run = fixture.output("run.json");
+    assert_eq!(run["stop"], "refusal");
+    assert_eq!(run["sidekick_offered"], false);
+    let error = run["error"].as_str().unwrap();
+    assert!(
+        error.contains("sidekick unavailable from prefrontal"),
+        "{error}"
+    );
+    assert!(error.contains(reason), "{error}");
 }
 
 #[tokio::test]
