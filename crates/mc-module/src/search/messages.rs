@@ -54,7 +54,8 @@ fn content_of(entry: &Entry) -> String {
     if frames.peek().is_some() {
         let ordinary_user =
             entry.role == Role::User && entry.notice.is_none() && entry.speaks_for.is_none();
-        // The FTS row belongs to the stored ordinal, not to an individual part.
+        // The search index holds one row per stored message, not per part, so
+        // every frame's words go into that one row.
         return entry
             .parts
             .iter()
