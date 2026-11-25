@@ -1,0 +1,1 @@
+{"code":"account_selection_refused","message":"the routing module refused to choose a provider account for this send (no_route); retry after 28 s","detail":{"routing_code":"no_route","class":"transient","retry_after_s":28,"retry_after_secs":28.0,"resets_at_ms":1795635684115,"routing_detail":{"reason":"concurrency_full","reset_at_ms":1795635684115}}}
