@@ -3,9 +3,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use serde_json::{json, Value};
-
-use crate::search;
 
 pub(super) fn open(path: &Path) -> Result<Connection, String> {
     let path = path.to_str().ok_or("store path must be UTF-8")?;
@@ -84,46 +81,16 @@ fn date(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map_or_else(|| ms.to_string(), |dt| dt.to_rfc3339())
 }
 
-pub(super) fn search(
-    conn: &Connection,
-    project: &str,
-    history: &search::lab::History,
-    input: Value,
-    semantic: Option<search::sources::Semantic<'_>>,
-) -> Result<String, String> {
-    const SOURCES: [&str; 3] = ["memory", "message", "git_commit"];
-    let mut input = input;
-    let object = input
-        .as_object_mut()
-        .ok_or("memory_search expects an object")?;
-    match object.get("sources") {
-        None => {
-            object.insert("sources".into(), json!(SOURCES));
-        }
-        Some(Value::Array(sources))
-            if sources
-                .iter()
-                .all(|source| source.as_str().is_some_and(|s| SOURCES.contains(&s))) => {}
-        _ => {
-            return Err(
-                "memory_search sources are memory, message (including summaries), and git_commit"
-                    .into(),
-            )
-        }
-    }
-    history.search(conn, project, &input, semantic)
-}
-
 pub(super) const SEARCH_LIMIT: Duration = Duration::from_secs(20);
-pub(super) const SEARCH_TIMED_OUT: &str = "memory_search timed out; narrow the query";
 
 pub(super) fn search_with_limit<T>(
     conn: &Connection,
     limit: Duration,
+    timed_out: &str,
     work: impl FnOnce(&Connection) -> Result<T, String>,
 ) -> Result<T, String> {
     if limit.is_zero() {
-        return Err(SEARCH_TIMED_OUT.into());
+        return Err(timed_out.into());
     }
     let deadline = Instant::now() + limit;
     conn.progress_handler(1000, Some(move || Instant::now() >= deadline));
@@ -132,7 +99,7 @@ pub(super) fn search_with_limit<T>(
     // Some of the memory and history searches skip a failing database read.
     // A deadline is a tool error even if the interrupted search returned no hits.
     if Instant::now() >= deadline {
-        Err(SEARCH_TIMED_OUT.into())
+        Err(timed_out.into())
     } else {
         answer
     }
@@ -142,9 +109,14 @@ pub(super) fn search_with_limit<T>(
 #[test]
 fn lab_search_interrupts_sql_and_keeps_the_connection_usable() {
     let conn = Connection::open_in_memory().unwrap();
-    let result = search_with_limit(&conn, std::time::Duration::from_millis(5), |conn| {
-        conn.query_row("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<4000000) SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0)).map_err(|e| e.to_string())
-    });
+    let result = search_with_limit(
+        &conn,
+        std::time::Duration::from_millis(5),
+        "memory_search timed out; narrow the query",
+        |conn| {
+            conn.query_row("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<4000000) SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0)).map_err(|e| e.to_string())
+        },
+    );
     assert_eq!(
         result,
         Err("memory_search timed out; narrow the query".into())

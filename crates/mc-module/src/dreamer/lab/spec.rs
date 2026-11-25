@@ -37,6 +37,7 @@ pub(super) enum Tool {
     Reader,
     GitRead,
     MemorySearch,
+    HistorySearch,
     Submit,
 }
 

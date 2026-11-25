@@ -33,7 +33,7 @@ use super::{plan, run};
 use spec::{Route, Spec, Tool};
 
 static RUNS: AtomicU64 = AtomicU64::new(0);
-const OWN_NAMES: [&str; 3] = ["git_read", "memory_search", "submit"];
+const OWN_NAMES: [&str; 4] = ["git_read", "memory_search", "history_search", "submit"];
 const READER_NAMES: [&str; 9] = [
     "read",
     "grep",
@@ -118,7 +118,7 @@ pub(crate) struct Lab {
     memories: String,
     persona: persona::Persona,
     store: Mutex<rusqlite::Connection>,
-    history: crate::search::lab::History,
+    history: Option<crate::search::lab::History>,
     embedding: Option<crate::embedding::Provider>,
     tools: Vec<Value>,
     verdicts: Mutex<verdicts::Verdicts>,
@@ -221,6 +221,11 @@ impl Start {
         };
         let finished = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let history_session_ids_skipped = loaded.as_ref().and_then(|lab| {
+                lab.history
+                    .as_ref()
+                    .map(crate::search::lab::History::skipped_session_ids)
+            });
             let missing = loaded.map_or(ids, |lab| {
                 verdicts::missing(
                     &lab.spec.memory_ids,
@@ -235,7 +240,10 @@ impl Start {
             } else {
                 (stop, error)
             };
-            let result = observed.result(stop, missing, error, start.elapsed().as_millis());
+            let mut result = observed.result(stop, missing, error, start.elapsed().as_millis());
+            if let Some(skipped) = history_session_ids_skipped {
+                result["history_session_ids_skipped"] = json!(skipped);
+            }
             verdicts::write_json(&out, "run.json", &result)
         })
         .await
@@ -269,11 +277,17 @@ impl Lab {
         spec::reject_live(&spec.store, &live)?;
         let store = frozen::open(&spec.store)?;
         let memories = frozen::memories(&store, &spec.project, &spec.memory_ids)?;
-        let history = crate::search::lab::History::load(
-            &store,
-            &spec.project,
-            spec.history_sessions.as_deref(),
-        )?;
+        let history = spec
+            .tools
+            .contains(&Tool::HistorySearch)
+            .then(|| {
+                crate::search::lab::History::load(
+                    &store,
+                    &spec.project,
+                    spec.history_sessions.as_deref(),
+                )
+            })
+            .transpose()?;
         let context = spec.context()?;
         let persona = persona::Persona::load(&spec, &live)?;
         let tools = tool_definitions(&spec)?;
@@ -520,16 +534,32 @@ impl Lab {
             })
             .await
             .map_err(|e| e.to_string())?,
-            "memory_search" => {
-                tokio::time::timeout(frozen::SEARCH_LIMIT, self.memory_search(input))
-                    .await
-                    .map_err(|_| frozen::SEARCH_TIMED_OUT.to_owned())?
-            }
+            "memory_search" => self.search(Tool::MemorySearch, input).await,
+            "history_search" => self.search(Tool::HistorySearch, input).await,
             _ => Err(format!("unknown lab tool {name}")),
         }
     }
 
-    async fn memory_search(self: Arc<Self>, input: Value) -> Result<String, String> {
+    async fn search(self: Arc<Self>, tool: Tool, input: Value) -> Result<String, String> {
+        let timed_out = match tool {
+            Tool::MemorySearch => "memory_search timed out; narrow the query",
+            Tool::HistorySearch => "history_search timed out; narrow the query",
+            _ => unreachable!("only search tools use a frozen-store deadline"),
+        };
+        tokio::time::timeout(
+            frozen::SEARCH_LIMIT,
+            self.search_frozen(tool, input, timed_out),
+        )
+        .await
+        .map_err(|_| timed_out.to_owned())?
+    }
+
+    async fn search_frozen(
+        self: Arc<Self>,
+        tool: Tool,
+        input: Value,
+        timed_out: &'static str,
+    ) -> Result<String, String> {
         let deadline = Instant::now() + frozen::SEARCH_LIMIT;
         let query = input
             .get("query")
@@ -549,20 +579,29 @@ impl Lab {
             frozen::search_with_limit(
                 &conn,
                 deadline.saturating_duration_since(Instant::now()),
+                timed_out,
                 |conn| {
-                    frozen::search(
-                        conn,
-                        &self.spec.project,
-                        &self.history,
-                        input,
-                        semantic.as_ref().map(|(vector, model, chunk)| {
-                            crate::search::sources::Semantic {
-                                vector,
-                                model_id: model,
-                                chunk_model_id: chunk,
-                            }
-                        }),
-                    )
+                    let semantic = semantic.as_ref().map(|(vector, model, chunk)| {
+                        crate::search::sources::Semantic {
+                            vector,
+                            model_id: model,
+                            chunk_model_id: chunk,
+                        }
+                    });
+                    match tool {
+                        Tool::MemorySearch => crate::search::lab::memory_search(
+                            conn,
+                            &self.spec.project,
+                            &input,
+                            semantic,
+                        ),
+                        Tool::HistorySearch => self
+                            .history
+                            .as_ref()
+                            .expect("history tool has a session scope")
+                            .search(conn, &input, semantic),
+                        _ => unreachable!("only search tools use the frozen index"),
+                    }
                 },
             )
         })
@@ -713,17 +752,27 @@ fn tool_definitions(spec: &Spec) -> Result<Vec<Value>, String> {
             }}), true)?;
     }
     if spec.tools.contains(&Tool::MemorySearch) {
-        let search = crate::catalog::definition()
-            .tool("ctx_search")
-            .expect("ctx_search definition");
-        let mut schema = crate::catalog::input_schema(search, crate::catalog::Surface::Full)
-            .map_err(|e| e.into_refusal().message)?;
-        schema["properties"]["sources"]["items"]["enum"] =
-            json!(["memory", "message", "git_commit"]);
         add(
             "memory_search",
-            "Search this project's frozen memories, messages, summaries and commits.",
-            schema,
+            "Find other project memories about the same subject, or look them up by memory id. Returns active matches first, then archived matches marked as archived, with each memory's category, creation date, importance and text. Does not return messages, summaries or commits.",
+            json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{
+                "query":{"type":"string"},
+                "limit":{"type":"integer","minimum":1,"maximum":20,"default":10}
+            }}),
+            true,
+        )?;
+    }
+    if spec.tools.contains(&Tool::HistorySearch) {
+        add(
+            "history_search",
+            "Find what was said or decided in this project, and when. Returns separate groups of summaries, the person's indexed messages and commits, with dates and references you can cite. Agent messages are omitted unless requested, in which case they have their own group. Use the optional UTC dates to narrow the search.",
+            json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{
+                "query":{"type":"string"},
+                "from":{"type":"string","description":"Inclusive start date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
+                "to":{"type":"string","description":"Inclusive end date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
+                "limit":{"type":"integer","minimum":1,"maximum":3,"default":1,"description":"Multiply group sizes: 4 summaries, 4 person messages, 3 commits, and 4 agent messages if included."},
+                "include_agent":{"type":"boolean","default":false}
+            }}),
             true,
         )?;
     }
