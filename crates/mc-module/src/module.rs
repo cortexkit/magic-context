@@ -579,8 +579,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         }
     }
 
-    /// Forget the Setup metadata while holding the Setup and worker locks,
-    /// so retirement cannot clear anything a newer Setup just registered.
+    /// Forget a session's Setup data when it is dropped or moved away, or
+    /// when the transcript and view kept while idle (its quiet carry) expire.
+    /// Hold the Setup and worker locks so this cannot clear anything a newer
+    /// Setup just registered.
     fn forget_setup(
         inner: &Inner<C>,
         set_up: &mut HashMap<SessionRef, Option<String>>,
@@ -725,9 +727,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let features = preset::features(&request.preset)
             .ok_or_else(|| ModuleError::UnknownPreset(request.preset.clone()))?;
         self.inner.client.runner_setup(&route.session.runner);
-        // The epoch is recorded and the Setup queued under the lock that
-        // checks and queues notices and rides. Retirement uses it too, so
-        // keep the new project and folder registration under the same lock.
+        // Record the epoch and queue Setup under the lock that checks and
+        // queues runner notices and `compaction.ride` requests for a view.
+        // The same lock protects forgetting Setup data when a session is
+        // dropped or moved away, or its idle transcript and view expire.
+        // Register the new project and folder under that lock too.
         let mut set_up = self.inner.set_up.lock().expect("setup sessions");
         if let Some(project) = &route.project {
             self.inner

@@ -1,0 +1,53 @@
+{
+  "name": "memories-get-merged",
+  "request": {
+    "method": "memories.get",
+    "params": {
+      "id": 6
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "memory": {
+        "category": "swe:config-values",
+        "content": "The execute threshold defaults to 65% of the usable window.",
+        "created_at": 1700000006000,
+        "embedded": false,
+        "first_seen_at": 1700000006000,
+        "history": [
+          {
+            "after": "The execute threshold defaults to 65% of the usable window.",
+            "at": 1700000400000,
+            "before": "The execute threshold defaults to 65% of the usable window.",
+            "reason": "duplicate threshold",
+            "revision": 2,
+            "writer": "agent"
+          }
+        ],
+        "id": 6,
+        "importance": 50,
+        "last_seen_at": 1700000006000,
+        "level": "project",
+        "merged_from": [
+          5,
+          6
+        ],
+        "owner": "pj-sample",
+        "retrieval_count": 0,
+        "revision": 2,
+        "seen_count": 1,
+        "sensitive": false,
+        "shareable": false,
+        "source": {
+          "session": "s",
+          "type": "historian"
+        },
+        "status": "active",
+        "updated_at": 1700000400000
+      },
+      "op": "memories.get",
+      "schema": 1
+    }
+  }
+}

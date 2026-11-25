@@ -92,13 +92,12 @@ impl Replica {
             Some(value) => {
                 let value = value.as_str().ok_or_else(|| invalid("cursor"))?;
                 let (stamp, payload) = value.rsplit_once(':').ok_or_else(|| invalid("cursor"))?;
+                let restart = || error("cursor_invalid", "Search changed; restart the search.");
                 if stamp != identity {
-                    return Err(error(
-                        "cursor_invalid",
-                        "Search changed; restart the search.",
-                    ));
+                    return Err(restart());
                 }
-                let (position, seen) = decode_position(payload).ok_or_else(|| invalid("cursor"))?;
+                // A cursor from an older build can match the identity but use an offset.
+                let (position, seen) = decode_position(payload).ok_or_else(restart)?;
                 (Some(position), seen)
             }
         };

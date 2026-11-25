@@ -1,0 +1,53 @@
+{
+  "name": "dreamer-status-forms",
+  "request": {
+    "method": "dreamer.status",
+    "params": {
+      "project": "pj-forms"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "config_source": "user",
+      "enabled": true,
+      "health": "ok",
+      "op": "dreamer.status",
+      "project": "pj-forms",
+      "schema": 1,
+      "tasks": [
+        {
+          "enabled": true,
+          "failures_in_a_row": 0,
+          "next_due_at": 4102444800000,
+          "overdue": false,
+          "schedule": {
+            "every": "hour",
+            "minute": 0,
+            "time_zone": "Europe/Istanbul"
+          },
+          "task": "swe:classify-memories"
+        },
+        {
+          "enabled": true,
+          "failures_in_a_row": 0,
+          "next_due_at": 4102444800000,
+          "overdue": false,
+          "schedule": {
+            "at": "04:30",
+            "days": [
+              "mon",
+              "tue",
+              "wed",
+              "thu",
+              "fri"
+            ],
+            "every": "week",
+            "time_zone": "Europe/Istanbul"
+          },
+          "task": "swe:compress-cues"
+        }
+      ]
+    }
+  }
+}

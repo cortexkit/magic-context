@@ -154,8 +154,8 @@ fn refuse_context_dependencies(context_path: &Path, request: &Request) -> Result
     {
         return Ok(());
     }
-    // ContextDb startup performs writes; the move and historian checks only
-    // need a read-only connection.
+    // ContextDb startup performs writes. Checking for move records and
+    // unfinished rows in `memory_stage_attempts` only needs a read-only connection.
     let connection = Connection::open_with_flags(context_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| format!("context_check_failed: {error}"))?;
     let has_meta: bool = connection
