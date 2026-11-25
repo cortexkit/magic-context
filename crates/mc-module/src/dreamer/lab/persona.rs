@@ -77,10 +77,19 @@ impl Persona {
         &self,
         mut context: RenderContext<()>,
         tools: BTreeMap<String, bool>,
+        checkout_paths: &[String],
         context_text: &str,
         memories_text: &str,
     ) -> Result<(String, String), String> {
         context.tools = GrantMap(tools.clone());
+        if !checkout_paths.is_empty() {
+            context = context.with_root(
+                "checkout_paths",
+                cortexkit_persona::Value::list(
+                    checkout_paths.iter().map(cortexkit_persona::Value::string),
+                ),
+            );
+        }
         let system = self
             .role
             .render(&context, &FragmentSources::new())
@@ -96,6 +105,7 @@ impl Persona {
             .collect();
         let shape = FactsShape::from_json_schema(&json!({"type":"object","properties":{
             "tools":{"type":"object","properties":properties},
+            "checkout_paths":{"type":"array","items":{"type":"string"}},
             "context_text":{"type":"string"}, "memories_text":{"type":"string"}
         }}))
         .map_err(show)?;
@@ -105,7 +115,8 @@ impl Persona {
             .render(
                 "first-message",
                 &json!({
-                    "tools":tools, "context_text":context_text, "memories_text":memories_text,
+                    "tools":tools, "checkout_paths":checkout_paths, "context_text":context_text,
+                    "memories_text":memories_text,
                 }),
                 RenderLimits::default(),
             )

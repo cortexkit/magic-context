@@ -2,6 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use cortexkit_role_llm_runner::usage::RunUsage;
+use cortexkit_role_tool_provider::catalog::{CatalogAnswer, CatalogTool};
 use rusqlite::params;
 
 use super::*;
@@ -98,12 +99,22 @@ impl Fixture {
     }
 
     async fn run(&self, value: Value, ends: Ends) -> Arc<Client> {
+        self.run_with(value, ends, |_| {}).await
+    }
+
+    async fn run_with(
+        &self,
+        value: Value,
+        ends: Ends,
+        configure: impl FnOnce(&mut Client),
+    ) -> Arc<Client> {
         let registry = Arc::new(Registry::default());
         let mut client = Client::new(&["p/a"], &[ends]);
         client.plans = vec!["ra"];
         client.catalog = Ok(vec![("read", &["code.read/v1"]), ("aft_search", &[])]);
         client.lab = Some(registry.clone());
         client.lab_verdicts_path = Some(self.out.join("verdicts.json"));
+        configure(&mut client);
         let client = Arc::new(client);
         self.start(&value)
             .await
@@ -288,6 +299,436 @@ async fn scripted_lab_records_incremental_verdicts_and_request_without_store_wri
     assert_eq!(client.selects.lock().unwrap()[0].requirements.eq, Some(29));
     assert_eq!(live_before, fs::read(&fixture.live).unwrap());
     assert_eq!(frozen_before, fs::read(&fixture.frozen).unwrap());
+}
+
+#[tokio::test]
+async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
+    use sha2::{Digest, Sha256};
+
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"].as_array_mut().unwrap().push(json!("reader"));
+    let client = fixture.run(spec, Ends::LabTools(vec![])).await;
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    let mut sent = sends[0].1.clone();
+    // The child ID includes a PID and wall clock; every other send byte is stable.
+    assert_eq!(sent.send_id, sends[0].0.session.session);
+    sent.send_id = "mc-dream:fixed:0.0".into();
+    let send = serde_json::to_vec(&sent).unwrap();
+    let request = fs::read(fixture.out.join("request.json")).unwrap();
+    let pins = [
+        format!("{:x}", Sha256::digest(&send)),
+        format!("{:x}", Sha256::digest(&request)),
+    ];
+    assert_eq!(
+        pins,
+        [
+            "b7094a89a773d890f4ef21f2a5175ccb2642986aa577b15c95555e0f3769fbe2",
+            "a32d53392fd942f9ef6407e3a952f50a2c99a043dd8b92098b0640d805063c37",
+        ]
+    );
+}
+
+fn sidekick_catalog(presets: &[&str], tools: &[&str]) -> CatalogAnswer {
+    let mut answer = CatalogAnswer::default();
+    answer.presets = presets.iter().map(|name| (*name).into()).collect();
+    answer.tools = tools
+        .iter()
+        .map(|name| {
+            let mut tool = CatalogTool::default();
+            tool.name = (*name).into();
+            tool
+        })
+        .collect();
+    answer
+}
+
+fn sidekick_provider(client: &mut Client, presets: &[&str], tools: &[&str]) {
+    client.providers.push("prefrontal");
+    client.lab_catalogs = Some(BTreeMap::from([
+        (
+            ("prefrontal", None),
+            Ok(sidekick_catalog(presets, &["sidekick"])),
+        ),
+        (
+            ("prefrontal", Some("sidekick")),
+            Ok(sidekick_catalog(&[], tools)),
+        ),
+    ]));
+}
+
+fn available_sidekick(client: &mut Client) {
+    sidekick_provider(client, &["worker", "sidekick"], &["sidekick"]);
+}
+
+#[tokio::test]
+async fn sidekick_lab_uses_a_worker_scope_and_asks_aft_for_reader() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["reader", "sidekick"]);
+    let worker = fixture
+        .run_with(spec.clone(), Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    assert_eq!(
+        *worker.lab_send_projects.lock().unwrap(),
+        [Some("p".to_owned())]
+    );
+    {
+        let asked = worker.asked.lock().unwrap();
+        let projects = worker.lab_catalog_projects.lock().unwrap();
+        let scoped_catalogs: Vec<_> = asked
+            .iter()
+            .zip(projects.iter())
+            .filter_map(|(request, project)| {
+                project.as_ref().map(|project| {
+                    assert_eq!(project, "p");
+                    (request.0.as_str(), request.1.as_deref())
+                })
+            })
+            .collect();
+        assert_eq!(
+            scoped_catalogs,
+            [
+                ("aft", Some("reader")),
+                ("prefrontal", None),
+                ("prefrontal", Some("sidekick"))
+            ]
+        );
+    }
+    assert_eq!(
+        worker.sends.lock().unwrap()[0].0.project_root.as_deref(),
+        fixture.root.to_str()
+    );
+
+    let plain_out = fixture.root.join("plain");
+    spec["out_dir"] = json!(plain_out);
+    spec["tools"] = json!(["reader"]);
+    let plain = fixture
+        .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    assert_eq!(*plain.lab_send_projects.lock().unwrap(), [None]);
+    assert!(plain
+        .lab_catalog_projects
+        .lock()
+        .unwrap()
+        .iter()
+        .all(Option::is_none));
+    assert!(plain
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(provider, _)| provider == "aft"));
+    assert_eq!(
+        plain.sends.lock().unwrap()[0].0.project_root.as_deref(),
+        fixture.root.to_str()
+    );
+}
+
+#[tokio::test]
+async fn sidekick_lab_ends_each_worker_scope_without_touching_the_ordinary_scope() {
+    use crate::child_scopes::{tests::Recorder, ChildScopes};
+    use subc_protocol::scope::ScopeKind;
+
+    let mut fixture = Fixture::new();
+    let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
+    let recorder = Arc::new(Recorder::default());
+    scopes.set_publisher(recorder.clone());
+    let plain = scopes
+        .for_child(fixture.root.to_str().unwrap())
+        .await
+        .unwrap();
+    for (out, tool_names, stop) in [
+        ("success", &["sidekick"][..], "model_finished"),
+        ("refused", &[][..], "refusal"),
+    ] {
+        fixture.out = fixture.root.join(out);
+        let mut spec = fixture.spec_value();
+        spec["tools"] = json!(["sidekick"]);
+        fixture
+            .run_with(spec, Ends::LabTools(vec![]), |client| {
+                sidekick_provider(client, &["sidekick"], tool_names);
+                client.lab_scopes = Some(scopes.clone());
+            })
+            .await;
+        assert_eq!(fixture.output("run.json")["stop"], stop);
+        assert_eq!(
+            scopes
+                .for_child(fixture.root.to_str().unwrap())
+                .await
+                .unwrap(),
+            plain
+        );
+    }
+
+    let syncs = recorder.syncs.lock().unwrap();
+    assert_eq!(syncs.len(), 5);
+    for added in [1, 3] {
+        let records = &syncs[added].1;
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0], syncs[0].1[0]);
+        assert_eq!(records[1].kind, ScopeKind::Worker);
+        assert_eq!(records[1].project_id.as_deref(), Some("p"));
+        assert_eq!(records[1].scope_epoch, 1);
+        assert_ne!(records[1].scope_ref, records[0].scope_ref);
+        assert_eq!(syncs[added + 1].1, syncs[0].1);
+    }
+    assert_ne!(syncs[1].1[1].scope_ref, syncs[3].1[1].scope_ref);
+}
+
+#[tokio::test]
+async fn panicking_sidekick_lab_is_omitted_from_the_next_scope_sync() {
+    use crate::child_scopes::{tests::Recorder, ChildScopes};
+    use subc_protocol::scope::ScopeKind;
+
+    let fixture = Fixture::new();
+    let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
+    let publisher = Arc::new(Recorder::default());
+    scopes.set_publisher(publisher.clone());
+    scopes.for_child("/work/old").await.unwrap();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    let start = fixture.start(&spec).await.unwrap();
+    let registry = Arc::new(Registry::default());
+    // The scripted runner panics when asked for a result it was not given.
+    let mut client = review_client(&registry, &[]);
+    available_sidekick(&mut client);
+    client.lab_scopes = Some(scopes.clone());
+    let error = tokio::spawn(start.execute(Arc::new(client), registry, None))
+        .await
+        .unwrap_err();
+    assert!(error.is_panic());
+    {
+        let syncs = publisher.syncs.lock().unwrap();
+        assert_eq!(syncs.len(), 2, "unwinding must not issue a sync");
+        assert!(syncs[1]
+            .1
+            .iter()
+            .any(|record| record.kind == ScopeKind::Worker));
+    }
+    scopes.for_child("/work/new").await.unwrap();
+    let syncs = publisher.syncs.lock().unwrap();
+    assert_eq!(syncs.len(), 3);
+    let remaining = &syncs[2].1;
+    assert!(remaining
+        .iter()
+        .all(|record| record.kind == ScopeKind::Ephemeral));
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|record| record.workdir.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["/work/new", "/work/old"]
+    );
+}
+
+#[tokio::test]
+async fn sidekick_lab_deadline_republishes_without_the_unacknowledged_worker() {
+    use crate::child_scopes::{tests::Recorder, ChildScopes};
+    use subc_protocol::scope::ScopeKind;
+
+    let fixture = Fixture::new();
+    let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
+    let recorder = Arc::new(Recorder::default());
+    scopes.set_publisher(recorder.clone());
+    scopes.for_child("/work/ordinary").await.unwrap();
+    recorder.stall_workers.store(true, Ordering::Relaxed);
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    spec["deadline_minutes"] = json!(1);
+    let start = fixture.start(&spec).await.unwrap();
+    let registry = Arc::new(Registry::default());
+    let mut client = review_client(&registry, &[Ends::Reply("must not be sent")]);
+    available_sidekick(&mut client);
+    client.lab_scopes = Some(scopes);
+    let client = Arc::new(client);
+    tokio::time::pause();
+    start.execute(client.clone(), registry, None).await;
+    assert!(client.sends.lock().unwrap().is_empty());
+    assert_eq!(fixture.output("run.json")["stop"], "deadline");
+    let syncs = recorder.syncs.lock().unwrap();
+    assert_eq!(syncs.len(), 3);
+    assert!(syncs[1]
+        .1
+        .iter()
+        .any(|record| record.kind == ScopeKind::Worker));
+    assert_eq!(syncs[2].1, syncs[0].1);
+}
+
+#[tokio::test]
+async fn sidekick_lab_reports_the_original_worker_scope_refusal() {
+    use crate::child_scopes::{tests::Recorder, ChildScopes};
+
+    let fixture = Fixture::new();
+    let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
+    let recorder = Arc::new(Recorder::default());
+    recorder.reject_workers.store(true, Ordering::Relaxed);
+    scopes.set_publisher(recorder.clone());
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), |client| {
+            available_sidekick(client);
+            client.lab_scopes = Some(scopes);
+        })
+        .await;
+    let run = fixture.output("run.json");
+    assert_eq!(run["stop"], "refusal");
+    assert_eq!(
+        run["error"],
+        "worker_refused: the scope fixture refused this sync"
+    );
+    assert!(client.sends.lock().unwrap().is_empty());
+    let syncs = recorder.syncs.lock().unwrap();
+    assert_eq!(syncs.len(), 2);
+    assert!(syncs[1].1.is_empty());
+}
+
+#[tokio::test]
+async fn sidekick_lab_refuses_an_invalid_project_id_before_catalog_preflight() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["project"] = json!("contains a space");
+    spec["tools"] = json!(["sidekick"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    let run = fixture.output("run.json");
+    assert_eq!(run["stop"], "refusal");
+    assert!(run["error"]
+        .as_str()
+        .unwrap()
+        .contains("1 to 128 printable non-space ASCII"));
+    assert!(client.asked.lock().unwrap().is_empty());
+    assert!(client.sends.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn opted_in_lab_plan_offers_only_sidekick_from_prefrontal() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["reader", "sidekick", "submit"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    let plan = &sends[0].1.plan.as_ref().unwrap();
+    assert_eq!(
+        plan["tool_items"],
+        json!([
+            {"provider":"aft","preset":"reader","params":{}},
+            {"provider":"prefrontal","preset":"sidekick","params":{}},
+            {"provider":crate::MODULE_ID,"preset":"dreamer","params":{}}
+        ])
+    );
+    assert_eq!(
+        plan["composition"]["providers"],
+        json!([
+            {"provider":"aft","tools":[{"name":"aft_search","capabilities":[]},
+                {"name":"read","capabilities":["code.read/v1"]}]},
+            {"provider":crate::MODULE_ID,"tools":[{"name":"submit","capabilities":[]}]},
+            {"provider":"prefrontal","tools":[{"name":"sidekick","capabilities":[]}]}
+        ])
+    );
+    assert_eq!(fixture.output("run.json")["sidekick_offered"], true);
+}
+
+#[tokio::test]
+async fn persona_facts_report_sidekick_and_checkout_paths_only_when_offered() {
+    for enabled in [false, true] {
+        let fixture = Fixture::new();
+        let fact = "{% if tools.sidekick %}{% for path in checkout_paths %} {{ path }}{% endfor %}{% else %} unavailable{% endif %}";
+        fs::write(
+            fixture.persona.join("PERSONA.md"),
+            format!("{SYSTEM}{fact}"),
+        )
+        .unwrap();
+        fs::write(
+            fixture.persona.join("first-message.md"),
+            format!("{MESSAGE}{fact}"),
+        )
+        .unwrap();
+        let mut spec = fixture.spec_value();
+        if enabled {
+            spec["tools"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("sidekick"));
+        }
+        fixture
+            .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+            .await;
+        let request = fixture.output("request.json");
+        let expected = if enabled {
+            fixture.checkout.to_str().unwrap()
+        } else {
+            "unavailable"
+        };
+        for field in ["system_text", "first_message"] {
+            assert!(
+                request[field].as_str().unwrap().ends_with(expected),
+                "{field}: {}",
+                request[field]
+            );
+        }
+        assert_eq!(fixture.output("run.json")["sidekick_offered"], enabled);
+    }
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_not_installed() {
+    assert_sidekick_refusal(None, &[], "not installed or not ready").await;
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_the_preset_is_not_listed() {
+    assert_sidekick_refusal(Some(&["worker"]), &["sidekick"], "listed [\"worker\"]").await;
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_the_catalog_is_empty() {
+    assert_sidekick_refusal(Some(&["sidekick"]), &[], "found []").await;
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_the_catalog_offers_other_tools() {
+    assert_sidekick_refusal(
+        Some(&["sidekick"]),
+        &["sidekick", "notify"],
+        "found [\"sidekick\", \"notify\"]",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sidekick_preflight_refuses_before_send_when_the_tool_is_not_sidekick() {
+    assert_sidekick_refusal(Some(&["sidekick"]), &["review"], "found \"review\"").await;
+}
+
+async fn assert_sidekick_refusal(presets: Option<&[&str]>, tools: &[&str], reason: &str) {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), |client| {
+            if let Some(presets) = presets {
+                sidekick_provider(client, presets, tools);
+            }
+        })
+        .await;
+    assert!(client.sends.lock().unwrap().is_empty());
+    assert!(!fixture.out.join("request.json").exists());
+    let run = fixture.output("run.json");
+    assert_eq!(run["stop"], "refusal");
+    assert_eq!(run["sidekick_offered"], false);
+    let error = run["error"].as_str().unwrap();
+    assert!(
+        error.contains("sidekick unavailable from prefrontal"),
+        "{error}"
+    );
+    assert!(error.contains(reason), "{error}");
 }
 
 #[tokio::test]

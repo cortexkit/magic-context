@@ -303,11 +303,13 @@ pub struct SubcRunnerClient {
     consumer: SharedConsumer,
     /// The scopes ck-mc's summarizer children run under.
     child_scopes: Arc<ChildScopes>,
-    runner_capabilities: crate::runner_capabilities::RunnerCapabilities,
+    runner_capabilities: Arc<crate::runner_capabilities::RunnerCapabilities>,
     routing_capabilities: crate::routing::Capabilities,
     /// The waits on summary and dreamer child runs, which the bus's run-end
     /// reader wakes ([`crate::bus::spawn_run_end_reader`]).
     run_ends: Arc<crate::run_ends::RunEnds>,
+    #[cfg(test)]
+    child_call_replies: std::collections::BTreeMap<&'static str, Value>,
 }
 
 /// ck-mc's connection to the daemon as a consumer, made on first use and
@@ -398,6 +400,8 @@ impl SubcRunnerClient {
             runner_capabilities: Default::default(),
             routing_capabilities: Default::default(),
             run_ends: Arc::default(),
+            #[cfg(test)]
+            child_call_replies: Default::default(),
         }
     }
 
@@ -420,6 +424,14 @@ impl SubcRunnerClient {
         self.consumer.clone()
     }
 
+    fn child_capabilities(&self) -> Arc<crate::runner_capabilities::RunnerCapabilities> {
+        // A Worker route can fail discovery without saying anything about the
+        // runner's capabilities on an ordinary route.
+        crate::child_scopes::LAB_WORKER_SCOPE
+            .try_with(|scope| scope.capabilities.clone())
+            .unwrap_or_else(|_| self.runner_capabilities.clone())
+    }
+
     /// An llm-runner call on a child's route, opened under ck-mc's child
     /// scope for the parent's project folder. A daemon that restarted since
     /// the last sync answers `scope_not_synced`; the scope is synced again
@@ -439,9 +451,14 @@ impl SubcRunnerClient {
         loop {
             let scope = self
                 .child_scopes
-                .for_project(root)
+                .for_child(root)
                 .await
                 .map_err(|error| ClientError::new(format!("{method}: child scope: {error}")))?;
+            #[cfg(test)]
+            if let Some(reply) = self.child_call_replies.get(method) {
+                return serde_json::from_value(reply.clone())
+                    .map_err(|error| ClientError::new(format!("{method} test answer: {error}")));
+            }
             match self
                 .call_raw(&child.session, LLM_RUNNER_ROLE, method, params, Some(scope))
                 .await
@@ -739,7 +756,7 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .cache_policy(
                 &child.session.runner,
                 epoch,
@@ -753,7 +770,7 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .session_class(
                 &child.session.runner,
                 epoch,
@@ -767,7 +784,7 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .temperature(
                 &child.session.runner,
                 epoch,
@@ -781,13 +798,23 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .plans(
                 &child.session.runner,
                 epoch,
                 self.child_call(child, "role.describe", &json!({})),
             )
             .await
+    }
+
+    async fn end_worker_scope(
+        &self,
+        scope: &crate::child_scopes::WorkerScope,
+    ) -> Result<(), ClientError> {
+        self.child_scopes
+            .end_worker_scope(scope)
+            .await
+            .map_err(|error| ClientError::refused(error.code, error.message))
     }
 
     async fn child_session_retention(
@@ -798,7 +825,7 @@ impl RunnerClient for SubcRunnerClient {
             Ok(consumer) => consumer.current_epoch(),
             Err(_) => 0,
         };
-        self.runner_capabilities
+        self.child_capabilities()
             .session_retention(
                 &child.session.runner,
                 epoch,
@@ -824,7 +851,7 @@ impl RunnerClient for SubcRunnerClient {
         })?;
         let scope = self
             .child_scopes
-            .for_project(root)
+            .for_child(root)
             .await
             .map_err(|error| ClientError::new(format!("tool.catalog: child scope: {error}")))?;
         // The same provider, preset, params and scope the runner fetches the
@@ -942,7 +969,7 @@ impl RunnerClient for SubcRunnerClient {
             Err(_) => 0,
         };
         let declared = self
-            .runner_capabilities
+            .child_capabilities()
             .run_cancel(
                 &child.session.runner,
                 epoch,
@@ -970,7 +997,7 @@ impl RunnerClient for SubcRunnerClient {
             Err(_) => 0,
         };
         if !self
-            .runner_capabilities
+            .child_capabilities()
             .retract(
                 &child.session.runner,
                 epoch,
@@ -3048,6 +3075,77 @@ mod agent_data_transport_tests;
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_worker_discovery_does_not_poison_an_ordinary_child_probe() {
+        use crate::child_scopes::{tests::Recorder, WorkerScope, LAB_WORKER_SCOPE};
+        use cortexkit_role_llm_runner::{capabilities as caps, ops};
+        use subc_protocol::scope::ScopeKind;
+
+        async fn probe(client: &SubcRunnerClient, child: &Child, name: &str) -> bool {
+            match name {
+                "cache_policy" => client.child_cache_policy(child).await,
+                caps::SESSION_CLASS => client.child_session_class(child).await,
+                caps::TEMPERATURE => client.child_temperature(child).await,
+                caps::PLANS => client.child_plans(child).await,
+                caps::SESSION_RETENTION => client.child_session_retention(child).await.is_some(),
+                caps::RUN_CANCEL => client.cancel_child_run(child, "run").await.unwrap(),
+                caps::RETRACT => client.retract_child_send(child, "send").await.unwrap(),
+                _ => unreachable!(),
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let child = Child {
+            session: SessionRef::new("broca", "broca", "child"),
+            project_root: Some("/work/lab".into()),
+        };
+        for name in [
+            "cache_policy",
+            caps::SESSION_CLASS,
+            caps::TEMPERATURE,
+            caps::PLANS,
+            caps::SESSION_RETENTION,
+            caps::RUN_CANCEL,
+            caps::RETRACT,
+        ] {
+            // Start with an empty cache for each probe: another successful probe
+            // on the same runner could otherwise hide a shared-cache read.
+            let scopes = Arc::new(ChildScopes::new("test"));
+            let publisher = Arc::new(Recorder::default());
+            publisher
+                .reject_workers
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            scopes.set_publisher(publisher.clone());
+            let mut client = SubcRunnerClient::new(temp.path().join("no-connection"), scopes);
+            client.child_call_replies.extend([
+                ("role.describe", json!({"capabilities": [name]})),
+                (ops::RUN_CANCEL, json!("ack")),
+                (ops::SESSION_RETRACT, json!("retracted")),
+            ]);
+            let worker = WorkerScope::new("/work/lab", "project", "run").unwrap();
+            assert!(
+                !LAB_WORKER_SCOPE
+                    .scope(worker, probe(&client, &child, name))
+                    .await,
+                "{name}: the Worker probe should fail"
+            );
+            assert!(
+                probe(&client, &child, name).await,
+                "{name}: the ordinary probe should still discover the capability"
+            );
+            assert!(Arc::ptr_eq(
+                &client.child_capabilities(),
+                &client.runner_capabilities
+            ));
+            let syncs = publisher.syncs.lock().unwrap();
+            assert_eq!(syncs.len(), 3);
+            assert_eq!(syncs[0].1[0].kind, ScopeKind::Worker);
+            assert!(syncs[1].1.is_empty());
+            assert_eq!(syncs[2].1[0].kind, ScopeKind::Ephemeral);
+        }
+    }
+
     /// A tool catalog is read on the provider's tool-provider route, which
     /// any principal may open; runner calls stay on the management surface.
     #[test]

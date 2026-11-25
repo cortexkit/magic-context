@@ -35,6 +35,7 @@ fn default_deadline_minutes() -> u64 {
 #[serde(rename_all = "snake_case")]
 pub(super) enum Tool {
     Reader,
+    Sidekick,
     GitRead,
     MemorySearch,
     HistorySearch,
