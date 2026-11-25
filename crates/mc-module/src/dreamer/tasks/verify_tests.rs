@@ -857,6 +857,83 @@ fn live_and_gone(rows: &[Row]) -> Fixture {
 
 const ARCHIVE_2: &str = "<verify>\n<archive id=\"2\" reason=\"its subject was removed\" missing=\"gone_function\"/>\n</verify>";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn verify_planning_keeps_the_lease_reader_running() {
+    use crate::dreamer::lease::{self, Lease};
+    use crate::dreamer::lease_double::{notices, SampleLeases, Step};
+    use std::sync::mpsc;
+
+    let fixture = Arc::new(Fixture::new(&[("src/lib.rs", "fn run() {}\n")]));
+    fixture.insert(&[row(1, "`run` does the work.")]);
+    let role = "dreamer.pj-verify";
+    let leases = SampleLeases::new();
+    let mut sample = notices("sharing-disabled.json", "dreamer.global").into_iter();
+    let first = sample.next().unwrap();
+    let renewal = sample.next().unwrap();
+    let now = Arc::new(std::sync::atomic::AtomicU64::new(first.issued_at_ms));
+    let current = Arc::clone(&now);
+    let clock: lease::Clock = Arc::new(move || current.load(std::sync::atomic::Ordering::SeqCst));
+    leases.script(role, vec![Step::Notice(first)]);
+    let watch = Lease::open(&*leases, role, &clock).await.unwrap();
+    let seq = renewal.seq;
+
+    let (plan, reader, acknowledged) = std::thread::scope(|threads| {
+        // Hold the planner's first database read until the renewal is serviced.
+        // An OS thread owns the lock so the test does not need a Tokio worker
+        // to release it when the planner starves the runtime.
+        let (locked, lock_held) = mpsc::channel();
+        let (release, release_lock) = mpsc::channel();
+        let lock_fixture = Arc::clone(&fixture);
+        threads.spawn(move || {
+            lock_fixture.db.with_connection(|_| {
+                locked.send(()).unwrap();
+                let _ = release_lock.recv();
+            });
+        });
+        lock_held.recv().unwrap();
+        let (starting, started) = mpsc::channel();
+        let fixture = Arc::clone(&fixture);
+        let plan = tokio::spawn(async move {
+            let owner = Owner::Project {
+                id: PROJECT.into(),
+                root: fixture.repo.path().to_str().unwrap().into(),
+            };
+            let declaration = fixture.declaration(VERIFY_BROAD);
+            let context = TaskContext {
+                db: &fixture.db,
+                owner: &owner,
+                profile: &fixture.profile,
+                declaration: &declaration,
+                workspace: None,
+                guidance: None,
+                branches: &fixture.branches,
+            };
+            starting.send(()).unwrap();
+            Verify { broad: true }.plan_run(&context, None).await
+        });
+        started.recv().unwrap();
+        now.store(renewal.issued_at_ms, std::sync::atomic::Ordering::SeqCst);
+        assert!(leases.send(role, Step::Notice(renewal)));
+        let (settled, settle) = mpsc::channel();
+        let reader = tokio::spawn(async move {
+            watch.refresh().await;
+            let _ = settled.send(());
+            watch
+        });
+        let acknowledged = settle.recv_timeout(lease::ACK_DEADLINE).is_ok()
+            && leases.log().acks.contains(&(role.to_owned(), seq));
+        release.send(()).unwrap();
+        (plan, reader, acknowledged)
+    });
+
+    reader.await.unwrap().close().await;
+    assert_eq!(plan.await.unwrap().unwrap().batches.len(), 1);
+    assert!(
+        acknowledged,
+        "lease renewal was not acknowledged while verify planned"
+    );
+}
+
 #[tokio::test]
 async fn a_request_refusal_defers_one_memory_without_stopping_verification() {
     let fixture = live_and_gone(&[
