@@ -1,0 +1,36 @@
+{
+  "ordinal": 4,
+  "mid": "fixture-one-frame",
+  "written_at": 1800000000000,
+  "role": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_use_id": "call_dial",
+        "content": [
+          {
+            "type": "text",
+            "text": "The dial is unlocked."
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": "The user sent a new message while you were working:\nLeave the brass latch open.\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  },
+  "host_frames": [
+    {
+      "part": 1,
+      "code": "claude_code_mid_turn",
+      "head_bytes": 52,
+      "tail_bytes": 232
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "role": "user",
+  "text": "Leave the brass latch open.",
+  "parts": [
+    {
+      "type": "tool_result",
+      "part": "0",
+      "tool_call_id": "call_dial",
+      "content": "The dial is unlocked."
+    },
+    {
+      "type": "text",
+      "part": "1#host_frame:head",
+      "text": "The user sent a new message while you were working:\n",
+      "host": true,
+      "host_code": "claude_code_mid_turn"
+    },
+    {
+      "type": "text",
+      "part": "1",
+      "text": "Leave the brass latch open."
+    },
+    {
+      "type": "text",
+      "part": "1#host_frame:tail",
+      "text": "\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+      "host": true,
+      "host_code": "claude_code_mid_turn"
+    }
+  ],
+  "host_frames": [
+    {
+      "part": 1,
+      "code": "claude_code_mid_turn",
+      "head_bytes": 52,
+      "tail_bytes": 232
+    }
+  ]
+}

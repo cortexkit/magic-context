@@ -1,0 +1,30 @@
+[
+  {
+    "provides": [
+      "compaction-provider/v2"
+    ],
+    "host_frames": false
+  },
+  {
+    "provides": [
+      "compaction-provider/v2",
+      "compaction-host-frame/v1"
+    ],
+    "host_frames": false
+  },
+  {
+    "provides": [
+      "compaction-provider/v2",
+      "compaction-host-frame/v2"
+    ],
+    "host_frames": true
+  },
+  {
+    "provides": [
+      "compaction-provider/v2",
+      "compaction-host-frame/v1",
+      "compaction-host-frame/v2"
+    ],
+    "host_frames": true
+  }
+]

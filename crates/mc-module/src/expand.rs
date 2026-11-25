@@ -114,7 +114,7 @@ pub fn mode(input: &Value) -> Result<Mode, String> {
 }
 
 fn role_label(entry: &Entry) -> String {
-    if crate::neutral::host_frame_words(entry).is_some() {
+    if crate::neutral::has_verified_host_frames(entry) {
         return "host-framed message".to_owned();
     }
     if !entry.host_parts.is_empty() && crate::neutral::authored_parts(entry).next().is_none() {
@@ -144,12 +144,9 @@ fn recovered_part(
         Some(counter) => render_part_preview(&part.body, counter),
         None => render_part_full(&part.body),
     }?;
-    if let Some(words) = crate::neutral::host_frame_words(entry).filter(|_| {
-        entry
-            .host_frame
-            .as_ref()
-            .is_some_and(|fact| fact.part == part.id)
-    }) {
+    if let Some((_, words)) =
+        crate::neutral::verified_host_frames(entry).find(|(id, _)| *id == part.id)
+    {
         let words = match preview {
             Some(_) => truncate(words, 200),
             None => words.to_owned(),
@@ -418,7 +415,7 @@ async fn range<C: RunnerClient>(
     // Historian lines intentionally omit host text. Raw recovery must keep it,
     // so a marked range uses per-part labels instead of the historian renderer.
     if entries.iter().any(|entry| {
-        !entry.host_parts.is_empty() || crate::neutral::host_frame_words(entry).is_some()
+        !entry.host_parts.is_empty() || crate::neutral::has_verified_host_frames(entry)
     }) {
         return Ok(recovery_blocks(&entries, start, end, counter, false));
     }

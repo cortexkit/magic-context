@@ -41,7 +41,7 @@ fn now_ms() -> i64 {
 }
 
 fn role_name(entry: &Entry) -> &str {
-    if crate::neutral::host_frame_words(entry).is_some() {
+    if crate::neutral::has_verified_host_frames(entry) {
         "user"
     } else {
         entry.role.as_str()
@@ -50,8 +50,30 @@ fn role_name(entry: &Entry) -> &str {
 
 /// What `entry` adds to the index, or empty.
 fn content_of(entry: &Entry) -> String {
-    if let Some(words) = crate::neutral::host_frame_words(entry) {
-        return super::text::collapse_whitespace(words);
+    let mut frames = crate::neutral::verified_host_frames(entry).peekable();
+    if frames.peek().is_some() {
+        let ordinary_user =
+            entry.role == Role::User && entry.notice.is_none() && entry.speaks_for.is_none();
+        // The FTS row belongs to the stored ordinal, not to an individual part.
+        return entry
+            .parts
+            .iter()
+            .filter_map(|part| {
+                if frames.peek().is_some_and(|(id, _)| *id == part.id) {
+                    let (_, words) = frames.next().expect("peeked frame");
+                    Some(super::text::collapse_whitespace(words))
+                } else if ordinary_user && crate::neutral::host_part(entry, part).is_none() {
+                    let PartBody::Text { text } = &part.body else {
+                        return None;
+                    };
+                    Some(indexable_content(true, &[text.as_str()]))
+                } else {
+                    None
+                }
+            })
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
     }
     if entry.notice.is_some() || entry.speaks_for.is_some() {
         return String::new();

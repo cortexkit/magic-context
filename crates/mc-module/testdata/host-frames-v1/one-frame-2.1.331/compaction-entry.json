@@ -1,0 +1,26 @@
+{
+  "digest": "aeeea62581b8cd36c3d6b7e85e48946c0eca507e741fa0af2dffaa822a24c000",
+  "host_frames": [
+    {
+      "code": "claude_code_mid_turn",
+      "head_bytes": 52,
+      "part": "0",
+      "tail_bytes": 232
+    }
+  ],
+  "mid": "759e4164494a3e5458a0a3e6631f255db54717d0a131cc14fb390fd7a911ffe3",
+  "ordinal": 7,
+  "parts": [
+    {
+      "digest": "6b1bd685e2296319cfb362227a8d06dbc5f4cb573e86297c9d33f3414d1a50af",
+      "id": "0",
+      "kind": "text",
+      "text": "The user sent a new message while you were working:\nplease also check the logs\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+      "tokens": {
+        "count": 86
+      }
+    }
+  ],
+  "role": "system",
+  "written_at": 1795617030580
+}

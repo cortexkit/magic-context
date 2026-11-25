@@ -1,0 +1,37 @@
+{
+  "ordinal": 4,
+  "mid": "fixture-two-frames",
+  "role": "user",
+  "host_frames": [
+    {
+      "part": "z-first",
+      "code": "claude_code_mid_turn",
+      "head_bytes": 52,
+      "tail_bytes": 233
+    },
+    {
+      "part": "a-second",
+      "code": "claude_code_mid_turn",
+      "head_bytes": 52,
+      "tail_bytes": 232
+    }
+  ],
+  "written_at": 1800000000000,
+  "digest": "6a04407fbf39a3769ce8c6d00ebb976432bcf048a76c90cac24844f50ec6deb8",
+  "parts": [
+    {
+      "id": "z-first",
+      "tag": 8,
+      "digest": "0fb5d8ab8a329227f92ba541cfaeb636b42b5b87c9d2f6a48b00ec04e963ec4c",
+      "kind": "text",
+      "text": "The user sent a new message while you were working:\nTry the blue dial. \n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n"
+    },
+    {
+      "id": "a-second",
+      "tag": 9,
+      "digest": "60a3fed2a0325d6039cb33a2c1abd192bfb67ac8770398fc52f204a1dc871291",
+      "kind": "text",
+      "text": "The user sent a new message while you were working:\nLeave the brass latch open.\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn."
+    }
+  ]
+}
