@@ -34,6 +34,7 @@ import {
 	TODO_STATUSES,
 } from "@magic-context/core/hooks/magic-context/todo-view";
 import { type Static, Type } from "typebox";
+import { legacyTui } from "../pi-tui-compat";
 import {
 	renderTodowriteCall,
 	renderTodowriteResult,
@@ -107,11 +108,10 @@ export function createTodowriteTool(): ToolDefinition<typeof TodowriteParams> {
 				},
 			};
 		},
-		renderCall(args, theme, context) {
-			return renderTodowriteCall(args, theme, context);
-		},
-		renderResult(result, _opts, theme, context) {
-			return renderTodowriteResult(result, theme, context);
-		},
+		...(legacyTui && {
+			renderCall: renderTodowriteCall,
+			renderResult: (result, _opts, theme, context) =>
+				renderTodowriteResult(result, theme, context),
+		}),
 	};
 }

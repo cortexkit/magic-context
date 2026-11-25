@@ -4,13 +4,7 @@ import type {
 	Theme,
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import {
-	type Component,
-	matchesKey,
-	type TUI,
-	truncateToWidth,
-	visibleWidth,
-} from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
@@ -100,6 +94,12 @@ import {
 	resolvePiProvenInputFloor,
 } from "../pi-proven-floor";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
+import {
+	legacyTui,
+	matchesKey,
+	truncateToWidth,
+	visibleWidth,
+} from "../pi-tui-compat";
 
 /** Countdown/usage cadence while dialog is open. */
 const REFRESH_INTERVAL_MS = 1000;
@@ -242,6 +242,13 @@ export async function showStatusDialog(
 ): Promise<void> {
 	const sessionId = resolveSessionId(ctx);
 	if (!sessionId) throw new Error("No active Pi session is available.");
+	if (!legacyTui) {
+		ctx.ui.notify(
+			formatPiStatusSummary(buildPiStatusDetail(pi, ctx, deps, sessionId)),
+			"info",
+		);
+		return;
+	}
 
 	await ctx.ui.custom<undefined>(
 		(tui, theme, _keybindings, done) =>

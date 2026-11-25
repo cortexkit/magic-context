@@ -4,16 +4,13 @@ import type {
 	ExtensionUIContext,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
-import {
-	type Component,
-	type TUI,
-	truncateToWidth,
-} from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import {
 	TITLE_DONE_STATUSES,
 	TODO_PRIORITIES,
 	TODO_STATUSES,
 } from "@magic-context/core/hooks/magic-context/todo-view";
+import { legacyTui, truncateToWidth } from "../pi-tui-compat";
 
 export const TODO_TOOL_NAME = "todowrite";
 export const TODOS_COMMAND_NAME = "todos";
@@ -426,7 +423,13 @@ export class TodoOverlay {
 	}
 
 	update(sessionId = this.sessionId): void {
-		if (!this.uiCtx || !this.sessionId || sessionId !== this.sessionId) return;
+		if (
+			!legacyTui ||
+			!this.uiCtx ||
+			!this.sessionId ||
+			sessionId !== this.sessionId
+		)
+			return;
 		const todos = getTodoSnapshot(this.sessionId).todos;
 		this.pruneCompletedDisplayState(todos);
 		const visible = this.selectOverlayTodos(todos);
