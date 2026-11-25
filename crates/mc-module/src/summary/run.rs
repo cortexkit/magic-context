@@ -18,7 +18,7 @@ use cortexkit_role_llm_runner::send::states as send_states;
 use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::{json, Map, Value};
 
-use super::account_wait::{caller_next_ms, AccountWait, SendKind};
+use super::account_wait::{caller_next_ms, AccountWait, Reselect, SendKind};
 use super::two_pass::turn_one;
 use super::{chunk, fit};
 use std::sync::OnceLock;
@@ -282,36 +282,41 @@ pub async fn run<C: RunnerClient + Router>(
         db,
         purpose: &purpose,
     });
-    for _ in 0..=MAX_FALLBACKS {
+    let mut reselect = Reselect::default();
+    let mut next = None;
+    let mut selections_left = 1 + MAX_FALLBACKS;
+    while next.is_some() || selections_left > 0 {
         if tokio::time::Instant::now() >= deadline {
             break;
         }
-        let answer = match tokio::time::timeout_at(
-            deadline,
-            client.select(routing::summary_select(
-                &job.session.runner,
-                child_harness,
-                &tried,
-            )),
-        )
-        .await
-        {
-            Ok(Ok(answer)) if tokio::time::Instant::now() < deadline => answer,
-            Ok(Ok(_)) | Err(_) => break,
-            Ok(Err(error)) => {
-                // Waiting charges no failure, so a fallback refusal must not
-                // erase the route failure that made the fallback necessary.
-                if paid_failure.is_none() && failure.is_none() {
-                    if let Some(wait) = AccountWait::of_routing(&error, SendKind::TurnOne, now_ms())
-                    {
-                        return Err(SummaryError::AccountWait(wait));
+        let select = reselect.exclusions(routing::summary_select(
+            &job.session.runner,
+            child_harness,
+            &tried,
+        ));
+        let answer = if let Some(answer) = next.take() {
+            answer
+        } else {
+            selections_left -= 1;
+            match tokio::time::timeout_at(deadline, client.select(select.clone())).await {
+                Ok(Ok(answer)) if tokio::time::Instant::now() < deadline => answer,
+                Ok(Ok(_)) | Err(_) => break,
+                Ok(Err(error)) => {
+                    // Waiting charges no failure, so a fallback refusal must not
+                    // erase the route failure that made the fallback necessary.
+                    if paid_failure.is_none() && failure.is_none() {
+                        if let Some(wait) =
+                            AccountWait::of_routing(&error, SendKind::TurnOne, now_ms())
+                        {
+                            return Err(SummaryError::AccountWait(wait));
+                        }
                     }
+                    // No route left after a failure: the failure is what to report.
+                    return Err(paid_failure
+                        .or(failure)
+                        .unwrap_or_else(|| error.to_string())
+                        .into());
                 }
-                // No route left after a failure: the failure is what to report.
-                return Err(paid_failure
-                    .or(failure)
-                    .unwrap_or_else(|| error.to_string())
-                    .into());
             }
         };
         // Routing picks the model per attempt and ck-mc keeps no other record
@@ -325,7 +330,6 @@ pub async fn run<C: RunnerClient + Router>(
             child_harness,
             answer.decision_id,
         );
-        tried.push(answer.route.route_key());
         let window = fit::Window {
             counter: crate::count::Counter::for_model(Some(&answer.route.route_key())),
             context_window: answer.context_window,
@@ -381,26 +385,46 @@ pub async fn run<C: RunnerClient + Router>(
             routing::report_runs(client, &answer.decision_id, reported, &usage),
         )
         .await;
-        match outcome {
+        let (wait, failed_on_route) = match outcome {
             Ok(result) => return Ok(result),
-            // Another model would draw on the same accounts, and the
-            // runner named when to ask again: the run ends waiting.
-            Err(Failure::AccountWait(wait)) => {
-                return Err(
-                    paid_failure.map_or(SummaryError::AccountWait(wait), SummaryError::Failed)
-                );
-            }
+            Err(Failure::AccountWait(wait)) => (wait, None),
             Err(Failure::NeverRan(wait)) => {
                 return Err(paid_failure.map_or(SummaryError::NeverRan(wait), SummaryError::Failed));
             }
-            Err(Failure::PaidThenWait { error, wait }) => {
-                return Err(SummaryError::PaidThenWait { error, wait })
-            }
+            Err(Failure::PaidThenWait { error, wait }) => (wait, Some(error)),
             Err(Failure::HostRefused(error) | Failure::Uncertain(error)) => {
                 return Err(SummaryError::Failed(error))
             }
-            Err(Failure::NotSent(error)) => failure = Some(error),
-            Err(Failure::Failed(error)) => paid_failure = Some(error),
+            Err(Failure::NotSent(error)) => {
+                tried.push(answer.route.route_key());
+                failure = Some(error);
+                continue;
+            }
+            Err(Failure::Failed(error)) => {
+                tried.push(answer.route.route_key());
+                paid_failure = Some(error);
+                continue;
+            }
+        };
+        let rerouting = wait.refusal.is_some();
+        match reselect
+            .after_refusal(client, select, &answer, wait, deadline)
+            .await
+        {
+            Ok(answer) => {
+                next = Some(answer);
+                paid_failure = failed_on_route.or(paid_failure);
+            }
+            Err(wait) => {
+                return Err(match failed_on_route {
+                    Some(error) => SummaryError::PaidThenWait { error, wait },
+                    None => match paid_failure {
+                        Some(error) if rerouting => SummaryError::PaidThenWait { error, wait },
+                        Some(error) => SummaryError::Failed(error),
+                        None => SummaryError::AccountWait(wait),
+                    },
+                });
+            }
         }
     }
     Err(paid_failure
@@ -852,8 +876,8 @@ async fn attempt<C: RunnerClient>(
                     child.session.session
                 )))
             }
-            // An account wait is never retried here: the runner named when
-            // to send again, and that is minutes or hours away.
+            // The outer loop may re-select, but this decision never retries a
+            // runner account refusal.
             Err(CallError::Summary(SummaryError::AccountWait(wait))) => {
                 return Err(wait_after_retry(paid_failure, wait, false))
             }
@@ -1337,6 +1361,7 @@ fn never_ran(code: &str, send: SendKind) -> SummaryError {
         at_ms,
         until_ms: at_ms.saturating_add(backoff(MAX_RETRIES - 1).as_millis() as i64),
         send,
+        refusal: None,
     })
 }
 
@@ -1602,12 +1627,10 @@ fn still_running(state: &str) -> bool {
 /// Wait for a run's result until `deadline`, the run's overall limit. The
 /// wait for each answer is bounded by it too. Between reads it sleeps the
 /// poll interval, or less when the runner's run-end event wakes it
-/// ([`crate::run_ends`]). A `paused` run has not ended (llm-runner §6): a
-/// runner may pause it, for example until an account has room, and continue
-/// it by itself, so it is waited for like an active one. At the deadline,
-/// status supplies waits that nonterminal results omit. A person-owned wait
-/// is never a failed attempt; runner-owned waits keep the existing deadline
-/// and classification.
+/// ([`crate::run_ends`]). A runner may resume a paused run by itself, so we
+/// keep polling it unless the pause names an account limit. In that case
+/// cancel now so the work can try another route. Status supplies the retry
+/// floor and wait owner when the result omits them.
 async fn wait_for<C: RunnerClient>(
     client: &C,
     child: &Child,
@@ -1664,8 +1687,11 @@ async fn wait_for<C: RunnerClient>(
             }
             return Ok(result);
         }
+        let account_paused = result.state == states::PAUSED
+            && AccountWait::of_paused_run(&result, None, send, now_ms())
+                .is_some_and(|wait| wait.refusal.is_some());
         last = Some(result);
-        if tokio::time::Instant::now() >= deadline {
+        if account_paused || tokio::time::Instant::now() >= deadline {
             break;
         }
         crate::run_ends::pause(watch.as_ref(), deadline).await;
@@ -1673,12 +1699,12 @@ async fn wait_for<C: RunnerClient>(
     if let Some(reported) = reported {
         *usage = Some(add_usage(usage.take(), &reported));
     }
-    timed_out(client, child, run_id, last, send).await
+    stop_waiting(client, child, run_id, last, send).await
 }
 
 /// Read status before cancelling: cancellation may clear the wait. Older
 /// runners may not serve status, so the last result remains the fallback.
-async fn timed_out<C: RunnerClient>(
+async fn stop_waiting<C: RunnerClient>(
     client: &C,
     child: &Child,
     run_id: &str,

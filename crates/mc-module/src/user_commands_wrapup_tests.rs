@@ -527,6 +527,7 @@ async fn wrapup_waits_for_account_and_failures_pause_without_losing_target() {
                 until_ms: now + 60_000,
                 code: "account_limit_exhausted".into(),
                 send: SendKind::TurnOne,
+                refusal: None,
             })),
             now,
         )
@@ -564,6 +565,7 @@ fn wait_until(until_ms: i64) -> crate::summary::account_wait::AccountWait {
         until_ms,
         code: "account_limit_exhausted".into(),
         send: crate::summary::account_wait::SendKind::TurnOne,
+        refusal: None,
     }
 }
 

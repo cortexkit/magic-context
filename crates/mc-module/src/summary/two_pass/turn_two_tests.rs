@@ -500,7 +500,7 @@ async fn confirmed_turn_two_timeout_cancel_releases_the_reservations() {
 
 /// The second turn's send meets the account wait, at the send or as the
 /// error its run ends with: its stage is revoked, so both facts are
-/// retryable again with no attempt spent, and the turn reports the wait.
+/// retryable again with no attempt spent, without parking the next summary.
 #[tokio::test]
 async fn account_wait_turn_two_revokes_its_stage_without_spending_attempts() {
     use crate::summary::run::account_wait_send_tests::{Answer, Client};
@@ -508,14 +508,46 @@ async fn account_wait_turn_two_revokes_its_stage_without_spending_attempts() {
         let (_dir, db, job) = store_with_candidates();
         let client = Client::new(answer);
         let outcome = run(&client, &db, &job).await;
-        let Outcome::AccountWait(wait) = outcome else {
-            panic!("not an account wait: {outcome:?}");
-        };
-        assert_eq!(wait.send, SendKind::TurnTwo);
-        assert_eq!(wait.code, "account_limit_exhausted");
+        assert_eq!(outcome, Outcome::Requeued);
         assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
         assert_eq!(*client.sends.lock().unwrap(), 1);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_reroute_a_refused_turn_two_requeues_for_the_next_summary_child() {
+    use crate::summary::run::account_wait_send_tests::{self, Answer, Client};
+    let (_dir, db, mut job) = store_with_candidates();
+    let mut client = Client::new(Answer::RunEndsFinal);
+    client.scripted_answers = vec![Answer::LongAccountLimit, Answer::Completed];
+    let start = tokio::time::Instant::now();
+    let outcome = run(&client, &db, &job).await;
+    assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
+    assert!(!matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
+    assert!(
+        client.requests.lock().unwrap().is_empty(),
+        "no second-turn probe"
+    );
+
+    let mut first = account_wait_send_tests::job();
+    first.project = Some(job.project.clone());
+    first.memory_enabled = true;
+    first.emergency = true;
+    let summary = run::run(&client, Some(&db), &first).await.unwrap().unwrap();
+    job.continuation = summary.continuation.unwrap();
+    run(&client, &db, &job).await;
+    let sent = client.sent.lock().unwrap();
+    assert_eq!(sent.len(), 3);
+    assert_ne!(sent[0].0, sent[1].0, "the next summary has its own child");
+    assert_eq!(sent[1].0, sent[2].0, "turn two runs in that child");
+    assert!(sent[2]
+        .1
+        .prompt
+        .as_deref()
+        .unwrap()
+        .contains("Releases need two reviewers."));
+    assert_eq!(client.requests.lock().unwrap().len(), 1);
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
 }
 
 #[tokio::test(start_paused = true)]
@@ -635,7 +667,7 @@ async fn account_wait_recovered_turn_two_is_revoked_without_a_visit() {
     .unwrap();
     let client = Client::new(Answer::RunEndsRefused);
     let outcome = run(&client, &db, &job).await;
-    assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
+    assert_eq!(outcome, Outcome::Requeued);
     assert_eq!(*client.sends.lock().unwrap(), 1);
     assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
     let request: String = db.with_connection(|conn| {
@@ -764,7 +796,7 @@ async fn account_wait_revoked_stage_counts_no_item_send_on_either_side() {
     })
     .unwrap();
     let outcome = run(&Client::new(Answer::RefuseSend), &db, &job).await;
-    assert!(matches!(outcome, Outcome::AccountWait(_)), "{outcome:?}");
+    assert_eq!(outcome, Outcome::Requeued);
     db.with_connection(|conn| {
         let held: String = conn
             .query_row(
@@ -787,20 +819,15 @@ async fn account_wait_revoked_stage_counts_no_item_send_on_either_side() {
     });
 }
 
-/// A runner may pause the second turn's run for an account limit. Still
-/// paused when the turn's time runs out, with the limit's run error beside
-/// the pause, it is an account wait like any other: the stage is revoked
-/// and no attempt is spent. The paused clock lets the turn's twenty-minute
-/// deadline pass at once.
+/// An account limit pause revokes the stage without waiting for the deadline.
 #[tokio::test(start_paused = true)]
 async fn account_wait_turn_two_paused_for_an_account_revokes_its_stage() {
     use crate::summary::run::account_wait_send_tests::{Answer, Client};
     let (_dir, db, job) = store_with_candidates();
+    let start = tokio::time::Instant::now();
     let outcome = run(&Client::new(Answer::PausedForAccount), &db, &job).await;
-    let Outcome::AccountWait(wait) = outcome else {
-        panic!("not an account wait: {outcome:?}");
-    };
-    assert_eq!(wait.send, SendKind::TurnTwo);
+    assert_eq!(outcome, Outcome::Requeued);
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
     assert_eq!(ledger(&db), (untouched(), vec!["revoked".to_owned()]));
 }
 

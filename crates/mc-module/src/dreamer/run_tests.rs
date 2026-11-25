@@ -56,6 +56,8 @@ pub(crate) struct Client {
     report_ids: Mutex<Vec<Option<String>>>,
     pub(crate) sends: Mutex<Vec<(Child, SendRequest)>>,
     pub(crate) send_replies: Mutex<VecDeque<SendReply>>,
+    pub(crate) send_errors: Mutex<VecDeque<ClientError>>,
+    pub(crate) route_script: Mutex<VecDeque<Result<&'static str, routing::RouteError>>>,
     /// The runners that take fetch plans.
     pub(crate) plans: Vec<&'static str>,
     /// The modules the daemon lists as tool providers, in the order it
@@ -92,6 +94,8 @@ impl Client {
             report_ids: Mutex::default(),
             sends: Mutex::default(),
             send_replies: Mutex::default(),
+            send_errors: Mutex::default(),
+            route_script: Mutex::default(),
             plans: Vec::new(),
             providers: vec!["aft"],
             catalog: Err("no reader in this test"),
@@ -203,6 +207,9 @@ impl RunnerClient for Client {
         request: SendRequest,
     ) -> Result<SendReply, ClientError> {
         self.sends.lock().unwrap().push((child.clone(), request));
+        if let Some(error) = self.send_errors.lock().unwrap().pop_front() {
+            return Err(error);
+        }
         if let Some(reply) = self.send_replies.lock().unwrap().pop_front() {
             return Ok(reply);
         }
@@ -285,11 +292,12 @@ impl Router for Client {
             return Err(refusal.clone());
         }
         let excluded = request.exclude.unwrap_or_default();
-        let Some(route) = self
-            .routes
-            .iter()
-            .find(|route| !excluded.iter().any(|x| x == *route))
-        else {
+        let scripted = self.route_script.lock().unwrap().pop_front().transpose()?;
+        let Some(route) = scripted.as_ref().or_else(|| {
+            self.routes
+                .iter()
+                .find(|route| !excluded.iter().any(|x| x == *route))
+        }) else {
             return Err(routing::RouteError {
                 code: "no_route".into(),
                 message: "every route excluded".into(),
@@ -324,6 +332,40 @@ impl Router for Client {
             outcome.as_str().unwrap()
         ));
     }
+}
+
+pub(crate) fn long_account_limit() -> ClientError {
+    let mut error = ClientError::refused("account_limit_exhausted", "account exhausted");
+    error.detail = Some(json!({"retry_after_s": 3 * 3600}));
+    error
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_reroute_dreamer_selects_again_immediately() {
+    let client = Client::new(&[], &[Ends::Reply("ok")]);
+    client
+        .route_script
+        .lock()
+        .unwrap()
+        .extend([Ok("p/a"), Ok("p/b")]);
+    client
+        .send_errors
+        .lock()
+        .unwrap()
+        .push_back(long_account_limit());
+    let start = tokio::time::Instant::now();
+    let reply = run(&client, &job(), &Task { fits: true }).await.unwrap();
+    assert_eq!(reply.model.model, "b");
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    let requests = client.selects.lock().unwrap();
+    assert_eq!(
+        requests.as_slice(),
+        [requests[0].clone(), requests[0].clone()]
+    );
+    assert_eq!(
+        *client.reports.lock().unwrap(),
+        ["decision-a cancelled", "decision-b completed"]
+    );
 }
 
 /// A task whose input always fits, unless `fits` is false, and which

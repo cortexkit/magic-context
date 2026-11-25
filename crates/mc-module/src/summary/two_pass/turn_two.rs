@@ -101,11 +101,23 @@ pub enum Outcome {
     /// A send or check outcome is unknown: its facts stay reserved for
     /// recovery.
     InFlight,
-    /// A send met the runner's account wait: the stage it belonged to is
-    /// revoked, its unresolved facts are retryable with no attempt spent, and
-    /// its classification items spend no send.
+    /// An account refused this decision. The revoked stage's facts wait for
+    /// the next summary's child, but the next summary can select at once.
+    Requeued,
+    /// The stage is revoked without spending an attempt, and the owning
+    /// session needs to honor a wait before resuming work.
     AccountWait(AccountWait),
     Failed(String),
+}
+
+impl Outcome {
+    fn after_wait(wait: AccountWait) -> Self {
+        if wait.refusal.is_some() {
+            Self::Requeued
+        } else {
+            Self::AccountWait(wait)
+        }
+    }
 }
 
 /// Stage keys this process is working on, so recovery leaves them alone.
@@ -2080,7 +2092,7 @@ pub async fn run<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Outc
     match recover(client, db, job).await {
         Ok(None) => {}
         // This publication's own send would ask for the same accounts.
-        Ok(Some(wait)) => return Outcome::AccountWait(wait),
+        Ok(Some(wait)) => return Outcome::after_wait(wait),
         Err(error) => tracing::warn!("ck-mc: turn two: recovery failed: {error}"),
     }
     match send(client, db, job).await {
@@ -2234,7 +2246,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
         Err(SummaryError::Uncertain(_)) => return Ok(Outcome::InFlight),
         Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
             revoke_for_account(db, &reserved.stage)?;
-            return Ok(Outcome::AccountWait(wait));
+            return Ok(Outcome::after_wait(wait));
         }
         Err(error) => {
             let error = error.to_string();
@@ -2269,7 +2281,7 @@ async fn send<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Result<
         // A fact check met the wait. Facts the reply already resolved stay
         // resolved; the rest go back to retryable with no attempt spent.
         revoke_for_account(db, &reserved.stage)?;
-        return Ok(Outcome::AccountWait(wait));
+        return Ok(Outcome::after_wait(wait));
     }
     let reserved_left = db
         .with_connection(|conn| still_reserved(conn, &reserved.stage))

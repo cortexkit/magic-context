@@ -96,6 +96,9 @@ fn account_wait_vectors_a_queued_send_refused_at_admission_waits_from_its_run_er
             until_ms: NOW + 120_000,
             at_ms: NOW,
             send: SendKind::TurnTwo,
+            refusal: Some(RunnerAccountRefusal {
+                credential_id: None
+            }),
         }
     );
     let wait = AccountWait::of_run_error(

@@ -24,9 +24,10 @@
 //! model in a new child; a model that still fails, or whose reply the task
 //! can't use, is replaced by the next one routing picks without it, at most
 //! twice. Every routing decision's outcome is reported back to routing. An
-//! account wait or routing's full capacity (`concurrency_full`), from
-//! routing or the runner, ends the run as a wait: nothing is counted against
-//! the task, and the engine's schedule tries again when the wait ends.
+//! account refusal from the runner re-selects on the same ladder, because the
+//! wait names one account, not the work. If the ladder is blocked, the engine
+//! schedules another try at routing's reset. Capacity and person-owned waits
+//! still park the run without counting a failure.
 
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ use cortexkit_role_routing::report::Outcome;
 use crate::client::{Child, RunnerClient};
 use crate::count::Counter;
 use crate::routing::{self, DreamDemand, Router, DREAM_OUTPUT_TOKENS};
-use crate::summary::account_wait::{AccountWait, SendKind};
+use crate::summary::account_wait::{AccountWait, Reselect, SendKind};
 use crate::summary::fit::Window;
 use crate::summary::run::{
     backoff, now_ms, retryable, send_and_wait_stepped, Ended, Model, PlanRun, Reply, SummaryError,
@@ -186,6 +187,11 @@ pub(super) fn usage_tokens(usage: Option<&StepUsage>) -> (u64, u64) {
     })
 }
 
+enum AttemptError {
+    Failed(String),
+    Wait(AccountWait),
+}
+
 /// Run `task` once.
 pub async fn run<C: RunnerClient + Router>(
     client: &C,
@@ -199,36 +205,46 @@ pub async fn run<C: RunnerClient + Router>(
     let mut unusable_reply = false;
     let mut total = None;
     let mut only_request_failures = true;
-    for attempt in 0..=MAX_FALLBACKS {
+    let mut reselect = Reselect::default();
+    let mut next = None;
+    let mut selections_left = 1 + MAX_FALLBACKS;
+    let mut decisions = 0;
+    while next.is_some() || selections_left > 0 {
         if budget_spent(job.remaining_tokens, total) {
             return Err(TaskError::BudgetStopped(total));
         }
-        let answer = match client
-            .select(routing::dream_select(job.demand, &tried))
-            .await
-        {
-            Ok(answer) => answer,
-            Err(error) => {
-                // A wait after a failed model would hide the failure that
-                // made the fallback necessary.
-                if paid_failure.is_none() && failure.is_none() {
-                    if let Some(wait) = AccountWait::of_routing(&error, SendKind::Dream, now_ms()) {
-                        return Err(TaskError::AccountWait(wait, total.map(Box::new)));
+        let select = reselect.exclusions(routing::dream_select(job.demand, &tried));
+        let answer = if let Some(answer) = next.take() {
+            answer
+        } else {
+            selections_left -= 1;
+            match client.select(select.clone()).await {
+                Ok(answer) => answer,
+                Err(error) => {
+                    // A wait after a failed model would hide the failure that
+                    // made the fallback necessary.
+                    if paid_failure.is_none() && failure.is_none() {
+                        if let Some(wait) =
+                            AccountWait::of_routing(&error, SendKind::Dream, now_ms())
+                        {
+                            return Err(TaskError::AccountWait(wait, total.map(Box::new)));
+                        }
                     }
+                    return Err(TaskError::Failed {
+                        request_specific: paid_failure.is_some()
+                            && only_request_failures
+                            && error.code == "no_route",
+                        error: paid_failure
+                            .or(failure)
+                            .unwrap_or_else(|| error.to_string()),
+                        usage: total,
+                        unusable_reply,
+                    });
                 }
-                return Err(TaskError::Failed {
-                    request_specific: paid_failure.is_some()
-                        && only_request_failures
-                        && error.code == "no_route",
-                    error: paid_failure
-                        .or(failure)
-                        .unwrap_or_else(|| error.to_string()),
-                    usage: total,
-                    unusable_reply,
-                });
             }
         };
-        tried.push(answer.route.route_key());
+        let attempt = decisions;
+        decisions += 1;
         let report = async |outcome, runs: &[(String, StepUsage)]| {
             routing::report_runs(client, &answer.decision_id, outcome, runs).await;
         };
@@ -242,6 +258,7 @@ pub async fn run<C: RunnerClient + Router>(
                 answer.runner.module,
                 answer.route.route_key()
             ));
+            tried.push(answer.route.route_key());
             continue;
         };
         let window = Window {
@@ -258,6 +275,7 @@ pub async fn run<C: RunnerClient + Router>(
                 "the task's input doesn't fit {}",
                 answer.route.route_key()
             ));
+            tried.push(answer.route.route_key());
             continue;
         };
         let model = routing::model_of(&answer);
@@ -291,6 +309,7 @@ pub async fn run<C: RunnerClient + Router>(
                     only_request_failures = false;
                     report(Outcome::Cancelled, &[]).await;
                     failure = Some(problem);
+                    tried.push(answer.route.route_key());
                     continue;
                 }
                 // The tools are missing whichever model runs: no other
@@ -379,15 +398,7 @@ pub async fn run<C: RunnerClient + Router>(
                     );
                     let (last, usable) = match finalized {
                         Ok(answered) => answered,
-                        Err(wait) => {
-                            report(Outcome::Cancelled, &reports).await;
-                            return Err(waiting(
-                                wait,
-                                paid_failure,
-                                batch_usage(usage),
-                                unusable_reply,
-                            ));
-                        }
+                        Err(wait) => break Err(AttemptError::Wait(wait)),
                     };
                     let reply = TaskReply {
                         text: last.text,
@@ -424,10 +435,10 @@ pub async fn run<C: RunnerClient + Router>(
             match sent {
                 Ok(reply) if reply.length_capped => {
                     unusable_reply = true;
-                    break Err(format!(
+                    break Err(AttemptError::Failed(format!(
                         "the reply hit its output limit (child {})",
                         child.session.session
-                    ));
+                    )));
                 }
                 Ok(reply) => match task.accepts(&reply.text) {
                     Ok(()) => {
@@ -442,20 +453,14 @@ pub async fn run<C: RunnerClient + Router>(
                     }
                     Err(problem) => {
                         unusable_reply = true;
-                        break Err(format!(
+                        break Err(AttemptError::Failed(format!(
                             "the reply can't be used: {problem} (child {})",
                             child.session.session
-                        ));
+                        )));
                     }
                 },
                 Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
-                    report(Outcome::Cancelled, &reports).await;
-                    return Err(waiting(
-                        wait,
-                        paid_failure,
-                        batch_usage(usage),
-                        unusable_reply,
-                    ));
+                    break Err(AttemptError::Wait(wait));
                 }
                 Err(SummaryError::Failed(error)) if retry < MAX_RETRIES && retryable(&error) => {
                     let used = batch_usage(usage);
@@ -477,7 +482,10 @@ pub async fn run<C: RunnerClient + Router>(
                     });
                 }
                 Err(SummaryError::Failed(error) | SummaryError::PaidThenWait { error, .. }) => {
-                    break Err(format!("{error} (child {})", child.session.session))
+                    break Err(AttemptError::Failed(format!(
+                        "{error} (child {})",
+                        child.session.session
+                    )))
                 }
             }
         };
@@ -487,11 +495,34 @@ pub async fn run<C: RunnerClient + Router>(
                 reply.usage = batch_usage(reply.usage);
                 return Ok(reply);
             }
-            Err(error) => {
+            Err(AttemptError::Failed(error)) => {
                 only_request_failures &= request_refusal(&error);
                 report(Outcome::Failed, &reports).await;
                 total = batch_usage(usage);
                 paid_failure = Some(error);
+                tried.push(answer.route.route_key());
+            }
+            Err(AttemptError::Wait(wait)) => {
+                report(Outcome::Cancelled, &reports).await;
+                total = batch_usage(usage);
+                let rerouting = wait.refusal.is_some();
+                if rerouting && budget_spent(job.remaining_tokens, total) {
+                    return Err(TaskError::BudgetStopped(total));
+                }
+                match reselect
+                    .after_refusal(client, select, &answer, wait, deadline)
+                    .await
+                {
+                    Ok(answer) => next = Some(answer),
+                    Err(wait) => {
+                        return Err(waiting(
+                            wait,
+                            if rerouting { None } else { paid_failure },
+                            total,
+                            unusable_reply,
+                        ))
+                    }
+                }
             }
         }
     }

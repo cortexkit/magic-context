@@ -1,6 +1,4 @@
-//! A summarizer send the runner holds back until an account has room, at
-//! the send and as the error a run ends with: the run ends waiting, without
-//! retries, other models or a failure.
+//! Runner refusals at send or run admission, and the summarizer's re-select.
 
 use super::*;
 use crate::client::ClientError;
@@ -11,7 +9,9 @@ use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyV
 use cortexkit_role_llm_runner::run::{RunStatus, RunStatusRequest};
 use cortexkit_role_llm_runner::send::SendReply;
 use cortexkit_role_routing::report::ReportRequest;
-use cortexkit_role_routing::select::{RouteRef, RunnerRef, SelectAnswer, SelectRequest};
+use cortexkit_role_routing::select::{
+    RouteRef, RunnerAuth, RunnerRef, SelectAnswer, SelectRequest,
+};
 use std::sync::Mutex;
 
 fn sample(name: &str) -> Value {
@@ -50,8 +50,11 @@ pub(crate) enum Answer {
     /// Refuses the send itself: an account wait of 120 s (sample 1 of
     /// `testdata/account-wait-0.8.41/`).
     RefuseSend,
+    LongAccountLimit,
+    Completed,
     /// Starts a run that ends with an account wait of 120 s (sample 5, the limit).
     RunEndsRefused,
+    RunEndsSelectionRefused,
     /// Refuses the send for good: `account_selection_final` (sample 4).
     RefuseSendFinal,
     /// Starts a run that ends refused for good (sample 5, final).
@@ -73,6 +76,11 @@ impl Answer {
             Self::RefuseSend => Some(refused_send(
                 "1_account_limit_exhausted_retry_and_reset.new.plan.json",
             )),
+            Self::LongAccountLimit => {
+                let mut error = Self::RefuseSend.send_refusal().unwrap();
+                error.detail = Some(serde_json::json!({ "retry_after_s": 3 * 3600 }));
+                Some(error)
+            }
             Self::RefuseSendFinal => Some(refused_send(
                 "4_account_selection_final_no_hint.new.plan.json",
             )),
@@ -85,7 +93,9 @@ impl Answer {
                 Some(error)
             }
             Self::RunEndsRefused
+            | Self::RunEndsSelectionRefused
             | Self::RunEndsFinal
+            | Self::Completed
             | Self::PausedForAccount
             | Self::RunEndsCapacity(_) => None,
         }
@@ -113,10 +123,12 @@ impl Answer {
             ended.error = Some(error);
             return ended;
         }
-        refused_run(if self == Self::RunEndsFinal {
-            "5_queued_account_selection_final.new.run_status.json"
-        } else {
-            "5_queued_account_limit_exhausted.new.run_status.json"
+        refused_run(match self {
+            Self::RunEndsFinal => "5_queued_account_selection_final.new.run_status.json",
+            Self::RunEndsSelectionRefused => {
+                "5_queued_account_selection_refused.new.run_status.json"
+            }
+            _ => "5_queued_account_limit_exhausted.new.run_status.json",
         })
     }
 }
@@ -128,6 +140,11 @@ pub(crate) struct Client {
     pub(crate) sends: Mutex<usize>,
     selects: Mutex<usize>,
     reports: Mutex<Vec<Outcome>>,
+    pub(crate) scripted_answers: Vec<Answer>,
+    scripted_models: Vec<(&'static str, Option<&'static str>)>,
+    pub(crate) requests: Mutex<Vec<SelectRequest>>,
+    pub(crate) sent: Mutex<Vec<(String, SendRequest)>>,
+    cancelled: Mutex<Vec<String>>,
 }
 
 impl Client {
@@ -139,6 +156,11 @@ impl Client {
             sends: Mutex::new(0),
             selects: Mutex::new(0),
             reports: Mutex::new(Vec::new()),
+            scripted_answers: Vec::new(),
+            scripted_models: Vec::new(),
+            requests: Mutex::default(),
+            sent: Mutex::default(),
+            cancelled: Mutex::default(),
         }
     }
 
@@ -146,6 +168,13 @@ impl Client {
         self.route_refusal = Some(error);
         self.route_refusal_after = selects;
         self
+    }
+
+    fn answer_at(&self, index: usize) -> Answer {
+        self.scripted_answers
+            .get(index)
+            .copied()
+            .unwrap_or(self.answer)
     }
 }
 
@@ -188,9 +217,19 @@ impl RunnerClient for Client {
     async fn send(&self, _: &SessionRef, _: SendRequest) -> Result<SendReply, ClientError> {
         unreachable!()
     }
-    async fn send_child(&self, _: &Child, _: SendRequest) -> Result<SendReply, ClientError> {
-        *self.sends.lock().unwrap() += 1;
-        if let Some(refusal) = self.answer.send_refusal() {
+    async fn send_child(
+        &self,
+        child: &Child,
+        request: SendRequest,
+    ) -> Result<SendReply, ClientError> {
+        let mut sends = self.sends.lock().unwrap();
+        let answer = self.answer_at(*sends);
+        *sends += 1;
+        self.sent
+            .lock()
+            .unwrap()
+            .push((child.session.session.clone(), request));
+        if let Some(refusal) = answer.send_refusal() {
             return Err(refusal);
         }
         let mut reply = SendReply::new(states::ACTIVE);
@@ -198,12 +237,35 @@ impl RunnerClient for Client {
         Ok(reply)
     }
     async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
-        Ok(self.answer.run_end())
+        let sent = self.sent.lock().unwrap();
+        let answer = self.answer_at(sent.len().saturating_sub(1));
+        if answer == Answer::Completed {
+            let prompt = sent.last().unwrap().1.prompt.as_deref().unwrap();
+            let mut result = RunResult::new("run", states::COMPLETED);
+            result.final_message = Some(cortexkit_role_llm_runner::run::FinalMessage {
+                mid: "reply".into(),
+                ordinal: 1,
+                text: mc_mock_runner::child::turn_one_reply(&mc_mock_runner::child::summarize(
+                    prompt,
+                )),
+            });
+            return Ok(result);
+        }
+        Ok(answer.run_end())
+    }
+
+    async fn cancel_child_run(&self, child: &Child, _: &str) -> Result<bool, ClientError> {
+        self.cancelled
+            .lock()
+            .unwrap()
+            .push(child.session.session.clone());
+        Ok(true)
     }
 }
 
 impl Router for Client {
     async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, RouteError> {
+        self.requests.lock().unwrap().push(request.clone());
         let mut selects = self.selects.lock().unwrap();
         *selects += 1;
         if *selects > self.route_refusal_after {
@@ -211,11 +273,24 @@ impl Router for Client {
                 return Err(error.clone());
             }
         }
-        let route = RouteRef::new("test", format!("model-{selects}"));
-        let runner = RunnerRef::new(
+        let scripted = self.scripted_models.get(*selects - 1);
+        let route = RouteRef::new(
+            "test",
+            scripted.map_or_else(
+                || format!("model-{selects}"),
+                |(model, _)| (*model).to_owned(),
+            ),
+        );
+        let mut runner = RunnerRef::new(
             request.runners.unwrap_or_default()[0].clone(),
             route.clone(),
         );
+        if let Some((_, Some(credential))) = scripted {
+            runner = runner.with_auth(RunnerAuth {
+                pool: None,
+                credential_id: Some((*credential).to_owned()),
+            });
+        }
         Ok(SelectAnswer::new(
             format!("decision-{selects}"),
             route,
@@ -313,19 +388,150 @@ async fn account_wait_a_run_ended_by_the_refusal_is_a_wait_not_a_failure() {
     assert_waits_120_s(error, before, SendKind::TurnTwo);
 }
 
-/// A whole run that meets the wait ends at once: no retry, no other model,
-/// and routing hears no failure of the route.
+/// When routing has no usable answer or reset, keep the runner's named wait
+/// without charging a failure against its route.
 #[tokio::test]
-async fn account_wait_a_summary_run_ends_waiting_on_its_first_send() {
+async fn account_wait_uses_the_runner_wait_when_routing_cannot_reselect() {
     for answer in [Answer::RefuseSend, Answer::RunEndsRefused] {
-        let client = Client::new(answer);
+        let client = Client::new(answer).with_route_refusal_after(
+            1,
+            RouteError {
+                code: "no_route".into(),
+                message: "no route and no reset".into(),
+                detail: None,
+            },
+        );
         let before = crate::summary::account_wait::now_ms();
         let error = run(&client, None, &job()).await.expect_err("no summary");
         assert_waits_120_s(error, before, SendKind::TurnOne);
         assert_eq!(*client.sends.lock().unwrap(), 1);
-        assert_eq!(*client.selects.lock().unwrap(), 1);
+        assert_eq!(*client.selects.lock().unwrap(), 2);
         assert_eq!(*client.reports.lock().unwrap(), vec![Outcome::Cancelled]);
     }
+}
+
+fn reroute_client(models: &[(&'static str, Option<&'static str>)], answers: &[Answer]) -> Client {
+    Client {
+        scripted_models: models.to_vec(),
+        scripted_answers: answers.to_vec(),
+        ..Client::new(Answer::LongAccountLimit)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_reroute_summary_selects_again_immediately() {
+    for refusal in [Answer::LongAccountLimit, Answer::RunEndsRefused] {
+        for next_model in ["next", "first"] {
+            let client = reroute_client(
+                &[("first", Some("acct-a")), (next_model, Some("acct-b"))],
+                &[refusal, Answer::Completed],
+            );
+            let start = tokio::time::Instant::now();
+            assert!(run(&client, None, &job()).await.unwrap().is_some());
+            assert_eq!(start.elapsed(), Duration::ZERO);
+            let requests = client.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0], requests[1], "the re-select is plain");
+            let sent = client.sent.lock().unwrap();
+            assert_eq!(sent[1].1.route_decision_id.as_deref(), Some("decision-2"));
+            assert_eq!(
+                client.reports.lock().unwrap().as_slice(),
+                [Outcome::Cancelled, Outcome::Completed]
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_reroute_repeated_account_gets_one_exclusion_and_no_loop() {
+    for (credential, sends) in [(Some("acct-a"), 2), (None, 3)] {
+        let client = reroute_client(
+            &[
+                ("first", credential),
+                ("first", credential),
+                ("alternate", None),
+            ],
+            &[],
+        );
+        let start = tokio::time::Instant::now();
+        let error = run(&client, None, &job()).await.unwrap_err();
+        let SummaryError::AccountWait(wait) = error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(wait.until_ms - wait.at_ms, 3 * 3_600_000);
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(
+            requests[2].exclude.as_deref(),
+            Some(["test/first".to_owned()].as_slice())
+        );
+        assert_eq!(client.sent.lock().unwrap().len(), sends);
+        assert_eq!(*client.reports.lock().unwrap(), vec![Outcome::Cancelled; 3]);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_reroute_cancels_a_paused_run_without_reusing_its_child() {
+    let client = reroute_client(
+        &[("first", Some("acct-a")), ("alternate", Some("acct-b"))],
+        &[Answer::PausedForAccount, Answer::Completed],
+    );
+    let start = tokio::time::Instant::now();
+    assert!(run(&client, None, &job()).await.unwrap().is_some());
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    let sent = client.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].1.prompt, sent[1].1.prompt);
+    assert_ne!(sent[0].0, sent[1].0);
+    assert_ne!(sent[0].1.send_id, sent[1].1.send_id);
+    assert_eq!(*client.cancelled.lock().unwrap(), [sent[0].0.clone()]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_reroute_walks_three_rungs_without_parking() {
+    let client = reroute_client(
+        &[
+            ("first", Some("one")),
+            ("second", Some("one")),
+            ("third", Some("two")),
+        ],
+        &[
+            Answer::LongAccountLimit,
+            Answer::RunEndsSelectionRefused,
+            Answer::Completed,
+        ],
+    );
+    let start = tokio::time::Instant::now();
+    assert!(run(&client, None, &job()).await.unwrap().is_some());
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|request| request == &requests[0]));
+    assert_eq!(client.sent.lock().unwrap().len(), 3);
+    assert_eq!(start.elapsed(), Duration::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_reroute_parks_after_four_distinct_refused_routes() {
+    let client = reroute_client(
+        &[
+            ("first", Some("one")),
+            ("first", Some("two")),
+            ("second", Some("one")),
+            ("third", Some("one")),
+            ("third", Some("two")),
+        ],
+        &[],
+    );
+    let SummaryError::AccountWait(wait) = run(&client, None, &job()).await.unwrap_err() else {
+        panic!("the cap should park the work")
+    };
+    assert_eq!(wait.until_ms - wait.at_ms, 3 * 3_600_000);
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests.iter().all(|request| request.exclude.is_none()));
+    assert_eq!(client.sent.lock().unwrap().len(), 4);
 }
 
 /// `account_selection_final` is no wait: waiting cannot change it. It keeps
@@ -473,10 +679,10 @@ async fn account_wait_a_run_still_paused_at_its_deadline_times_out_and_is_cancel
 }
 
 /// A run a runner paused for an account limit reports the limit's run error
-/// beside the pause. Still paused at its deadline, the call ends as that
-/// account wait, not as a timeout, and the run is cancelled first.
-#[tokio::test]
-async fn account_wait_a_run_paused_for_an_account_at_its_deadline_is_a_wait() {
+/// beside the pause. The call cancels immediately and returns that account
+/// refusal for its caller to re-select.
+#[tokio::test(start_paused = true)]
+async fn account_wait_a_run_paused_for_an_account_is_cancelled_at_once() {
     let client = PausedRunner {
         error: Answer::RunEndsRefused.run_end().error,
         ..PausedRunner::new(Some("account_limit"))
@@ -486,9 +692,11 @@ async fn account_wait_a_run_paused_for_an_account_at_its_deadline_is_a_wait() {
     how.send = SendKind::TurnOne;
     how.deadline = tokio::time::Instant::now() + Duration::from_millis(700);
     let before = crate::summary::account_wait::now_ms();
+    let start = tokio::time::Instant::now();
     let error =
         refusal_of(send_and_wait(&client, &child(), "send", "prompt", &how, &mut None).await);
     assert_waits_120_s(error, before, SendKind::TurnOne);
+    assert_eq!(start.elapsed(), Duration::ZERO);
     assert_eq!(*client.cancelled.lock().unwrap(), vec!["run".to_owned()]);
 }
 

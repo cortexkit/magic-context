@@ -86,7 +86,18 @@ impl crate::routing::Router for SummaryClient {
     ) -> Result<SelectAnswer, crate::routing::RouteError> {
         let route = RouteRef::new("test", "summary-model");
         let runner = RunnerRef::new(request.runners.as_ref().unwrap()[0].clone(), route.clone());
-        self.0.selects.lock().unwrap().push(request);
+        let mut selects = self.0.selects.lock().unwrap();
+        selects.push(request);
+        if !self.0.complete && selects.len() > 1 {
+            return Err(crate::routing::RouteError {
+                code: "no_route".into(),
+                message: "every rung is walled".into(),
+                detail: Some(json!({
+                    "reason": "quota_or_cooldown",
+                    "reset_at_ms": crate::summary::account_wait::now_ms() + 10 * 60_000,
+                })),
+            });
+        }
         Ok(SelectAnswer::new(
             "summary-decision",
             route,
@@ -100,8 +111,8 @@ impl crate::routing::Router for SummaryClient {
     async fn report(&self, _: cortexkit_role_routing::report::ReportRequest) {}
 }
 
-#[tokio::test]
-async fn wrapup_worker_starts_exactly_one_routed_child_and_status_reports_wait() {
+#[tokio::test(start_paused = true)]
+async fn wrapup_worker_starts_one_child_and_status_reports_routings_wait() {
     let (session, _, settings) = wrapup::ready();
     let (_, _, route, mut setup, _) = fixture();
     setup.preset = "head".into();
@@ -147,7 +158,9 @@ async fn wrapup_worker_starts_exactly_one_routed_child_and_status_reports_wait()
             !children[0].1.contains("[23]"),
             "newest prompt stays raw for keep=2"
         );
-        assert_eq!(trace.selects.lock().unwrap().len(), 1);
+        let selects = trace.selects.lock().unwrap();
+        assert_eq!(selects.len(), 2);
+        assert_eq!(selects[0], selects[1]);
         assert_eq!(
             *trace.session_sends.lock().unwrap(),
             0,
@@ -163,6 +176,7 @@ async fn wrapup_worker_starts_exactly_one_routed_child_and_status_reports_wait()
     assert!(status.contains("Wrapup target"));
     assert!(status.contains("Wrapup through"));
     assert!(status.contains("paused"));
+    assert!(status.contains("Summaries wait for a model route"));
 }
 
 #[tokio::test]

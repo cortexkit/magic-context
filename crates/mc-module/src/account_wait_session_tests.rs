@@ -66,6 +66,7 @@ fn refusal(send: SendKind) -> AccountWait {
         until_ms: now_ms() + 120_000,
         at_ms: now_ms(),
         send,
+        refusal: None,
     }
 }
 
@@ -196,6 +197,41 @@ async fn routing_account_wait_releases_quota_preserves_views_and_stops_repeat_no
     assert!(session.decide_notice(&settings).summary.is_none());
 }
 
+#[tokio::test(start_paused = true)]
+async fn account_reroute_routing_reset_allows_one_emergency_probe_per_history() {
+    use crate::summary::run::account_wait_send_tests::{Answer, Client as SendClient};
+
+    let (mut session, client, settings) = ready();
+    let reset = now_ms() + 10 * 60_000;
+    let sender = SendClient::new(Answer::LongAccountLimit).with_route_refusal_after(
+        1,
+        crate::routing::RouteError {
+            code: "no_route".into(),
+            message: "blocked routes".into(),
+            detail: Some(json!({"reason": "quota_or_cooldown", "reset_at_ms": reset})),
+        },
+    );
+    assert_eq!(
+        waits_charging_nothing(&mut session, &client, &settings, &sender).await,
+        reset
+    );
+    assert!(session.decide_notice(&settings).summary.is_none());
+    at_usage(&mut session, 96.0);
+    assert!(session.decide_notice(&settings).summary.is_some());
+    let result = run::run(
+        &sender,
+        None,
+        &crate::summary::run::account_wait_send_tests::job(),
+    )
+    .await;
+    session
+        .summary_finished(&client, &settings, result, now_ms())
+        .await;
+    assert!(session.decide_notice(&settings).summary.is_none());
+    push(&mut session, 19, Role::Assistant, "next step".into());
+    assert!(session.decide_notice(&settings).summary.is_some());
+}
+
 #[tokio::test]
 async fn routing_account_wait_fallback_refusal_preserves_and_counts_the_first_failure() {
     use crate::summary::run::account_wait_send_tests::{job, Answer, Client as SendClient};
@@ -269,12 +305,14 @@ async fn account_wait_the_first_trigger_after_the_wait_starts_a_run() {
     assert_eq!(session.account_wait, None);
 }
 
-/// A second turn or a fact check that meets the wait holds the session's
-/// summaries just as a first turn does.
+/// A second turn that needs a person or meets a capacity hold still parks
+/// the session's summaries.
 #[tokio::test]
 async fn account_wait_from_turn_two_holds_the_next_run() {
     let (mut session, _, settings) = ready();
-    session.account_refused(refusal(SendKind::TurnTwo));
+    let wait =
+        AccountWait::of_refusal("concurrency_full", None, SendKind::TurnTwo, now_ms()).unwrap();
+    session.account_refused(wait);
     assert!(session.decide_notice(&settings).summary.is_none());
 }
 

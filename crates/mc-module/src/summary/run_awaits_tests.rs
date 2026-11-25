@@ -463,7 +463,7 @@ async fn run_awaits_caller_result_next_precedes_error_hints_and_keeps_caps() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn run_awaits_runner_status_waits_to_the_existing_deadline() {
+async fn run_awaits_runner_status_cancels_an_account_pause_but_waits_for_a_held_tool() {
     for (name, account) in [
         ("held.after.run.status.json", false),
         ("account-limit.after.run.status.json", true),
@@ -479,7 +479,11 @@ async fn run_awaits_runner_status_waits_to_the_existing_deadline() {
         let error = send_error(&client, SendKind::TurnOne).await;
         assert_eq!(
             tokio::time::Instant::now() - started,
-            Duration::from_secs(2)
+            if account {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(2)
+            }
         );
         if account {
             assert_eq!(wait(error).until_ms, resume as i64);

@@ -96,6 +96,7 @@ fn refusal() -> AccountWait {
         until_ms: now_ms() + 120_000,
         at_ms: now_ms(),
         send: SendKind::TurnOne,
+        refusal: None,
     }
 }
 
@@ -299,12 +300,8 @@ fn turn_two_job() -> turn_two::Job {
     }
 }
 
-/// A second turn that meets the account wait revokes its stage, which
-/// `Outcome::AccountWait` documents as "no attempt spent"; only its facts
-/// get that. An agent memory waiting to be classified counts one send for
-/// every `turn_two` row in `memory_stage_attempts` whose `request_json` lists
-/// it under `items`, revoked or not (`ITEM_SENDS` in `turn_two.rs`). Three
-/// waits use up the item's three sends, and it is never classified.
+/// A second turn's account refusal must not use up any of a classification
+/// item's send allowance, even after several revoked stages.
 #[tokio::test]
 async fn account_wait_review_a_turn_two_wait_spends_no_classification_attempt() {
     let (_dir, db) = store_with_a_due_item();
@@ -312,7 +309,7 @@ async fn account_wait_review_a_turn_two_wait_spends_no_classification_attempt() 
         let client = SendClient::new(Answer::RefuseSend);
         let outcome = turn_two::run(&client, &db, &turn_two_job()).await;
         assert!(
-            matches!(outcome, turn_two::Outcome::AccountWait(_)),
+            matches!(outcome, turn_two::Outcome::Requeued),
             "wait {wait}: the item was not sent again: {outcome:?}"
         );
         assert_eq!(*client.sends.lock().unwrap(), 1, "wait {wait}");
@@ -371,7 +368,7 @@ impl RunnerClient for PausingRunner {
         *polls += 1;
         if *polls == 1 {
             let mut paused = RunResult::new("run", "paused");
-            paused.reason = Some("account_limit".into());
+            paused.reason = Some("concurrency_full".into());
             return Ok(paused);
         }
         let mut done = RunResult::new("run", "completed");
@@ -383,13 +380,10 @@ impl RunnerClient for PausingRunner {
     }
 }
 
-/// llm-runner §12.1: "A runner that pauses the run itself (`paused` with an
-/// account-limit reason) and continues it at the named time satisfies the
-/// wait. The caller does nothing while it is paused." `paused` is not a
-/// terminal state: the summarizer waits through it and reads the run's
-/// later completion as its reply.
-#[tokio::test]
-async fn account_wait_review_a_run_the_runner_pauses_for_an_account_is_waited_for() {
+/// A capacity pause is not a terminal state: the summarizer waits through
+/// it and reads the run's later completion as its reply.
+#[tokio::test(start_paused = true)]
+async fn account_wait_review_a_run_paused_for_capacity_is_waited_for() {
     let client = PausingRunner {
         polls: Mutex::new(0),
     };

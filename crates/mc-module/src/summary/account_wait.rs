@@ -1,41 +1,31 @@
-//! A runner's account or person-owned wait during a summarizer send.
+//! Account refusals and waits shared by the summarizer and dreamer.
 //!
-//! A runner that picks the provider account when a send arrives refuses the
-//! send with `account_limit_exhausted` or `account_selection_refused` when no
-//! account has room (llm-runner contract §12.1). A run can also end `error`
-//! with one of those codes as its `provider_code`: a send queued behind
-//! another run and refused at its own admission, or a runner that picks an
-//! account per model request. A runner may also pause a run for an account
-//! limit and resume it by itself: ck-mc waits through the pause, and a run
-//! still paused at its deadline whose reason or run error names an account wait is
-//! cancelled and ends as that wait. In every case the contract forbids failing the
-//! work for it and forbids asking the same account again before the time
-//! the runner names, so a summary that meets it waits instead of counting as
-//! failed. `account_selection_final` is no wait: waiting cannot change it,
-//! and it fails as any other refusal does.
+//! A runner's `account_limit_exhausted` or `account_selection_refused` is
+//! about an account on one route. Whether it refuses the send, ends the run,
+//! or pauses a started run (which we cancel), select again on the same ladder.
+//! Routing can pick another account for the same model or fall through to
+//! another model. Exclude a model only when the fresh decision repeats the
+//! refused account, or one unidentifiable same-model send is refused again.
+//! At most four distinct routes can refuse before the work parks.
+//! Routing's own refusal parks the work until its reset; the runner's time
+//! is only a last resort when the bounded re-select cannot find a usable
+//! route or a routing reset. `account_selection_final` remains a failure.
 //!
-//! Routing's capacity hold, `concurrency_full`, takes the same paths: routing
-//! refuses a select with it when every eligible account is running as many
-//! runs as its cap allows, a runner refuses a send or ends a queued run with
-//! it, and a runner pauses a started run for it (`errors::is_wait` and
-//! `RunReason::ConcurrencyFull`, llm-runner 0.8.51). The contract makes it a
-//! wait, never a failure, so it charges nothing either.
-//!
-//! The wait lasts the runner's named time, at least a minute and at most six
-//! hours after the refusal, so a hint of zero or a stale reset cannot start
-//! a new run on every notice.
-//! A typed person-owned wait also uses this machinery, but always with the
-//! default duration: a sign-in or approval has no known completion time.
-//!
-//! A wait never sends the same prompt into a child whose run began, which
-//! would put it in that child's transcript twice: the summary's first turn
-//! starts again later in a new child, and a second turn or fact check gives
-//! its facts back to a later second turn in that run's own child.
+//! Capacity holds (`concurrency_full`) still wait, including through a
+//! runner's pause, and person-owned waits still use the default duration.
+//! Never repeat a prompt in a child whose run began. A first turn or dreamer
+//! task starts in a fresh child; a second turn or fact check requeues its
+//! unresolved facts for a later summary's second turn without parking the lane.
 
 use cortexkit_role_llm_runner::awaits::AwaitParty;
 use cortexkit_role_llm_runner::errors;
 use cortexkit_role_llm_runner::run::{RunError, RunReason, RunResult};
+use cortexkit_role_routing::report::Outcome;
+use cortexkit_role_routing::select::{SelectAnswer, SelectRequest};
 use serde_json::Value;
+use tokio::time::{timeout_at, Instant};
+
+use crate::routing::{self, Router};
 
 /// How long summaries wait when the runner names no time. The contract
 /// leaves that wait to the caller and only forbids sending again at once.
@@ -49,6 +39,8 @@ pub const MAX_WAIT_MS: i64 = 6 * 60 * 60 * 1000;
 /// sooner than runner sends, since a manual reset or sign-in can restore a
 /// route before its stated reset time.
 pub const MAX_ROUTING_WAIT_MS: i64 = 60 * 60 * 1000;
+const MAX_RESELECT_WAIT_MS: i64 = 15 * 60 * 1000;
+const MAX_REFUSED_ROUTES: usize = 4;
 /// The shortest wait. A hint of zero, or a reset time already past (a
 /// runner with a stale clock or quota record), would otherwise let every
 /// notice start a new summarizer run against the same accounts, with no
@@ -104,6 +96,19 @@ pub struct AccountWait {
     /// run: the accounts had room again by then.
     pub at_ms: i64,
     pub send: SendKind,
+    /// Present only when a runner refused an account, not when routing or a person is waiting.
+    pub(crate) refusal: Option<RunnerAccountRefusal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunnerAccountRefusal {
+    credential_id: Option<String>,
+}
+
+fn runner_refusal(code: &str, credential_id: Option<&str>) -> Option<RunnerAccountRefusal> {
+    errors::is_account_wait(code).then(|| RunnerAccountRefusal {
+        credential_id: credential_id.map(str::to_owned),
+    })
 }
 
 impl AccountWait {
@@ -148,6 +153,7 @@ impl AccountWait {
             until_ms: until(now_ms, None, reset).min(now_ms.saturating_add(MAX_ROUTING_WAIT_MS)),
             at_ms: now_ms,
             send,
+            refusal: None,
         })
     }
 
@@ -177,6 +183,7 @@ impl AccountWait {
             until_ms: until(now_ms, seconds, reset),
             at_ms: now_ms,
             send,
+            refusal: runner_refusal(code, detail.get("credential_id").and_then(Value::as_str)),
         })
     }
 
@@ -193,6 +200,9 @@ impl AccountWait {
             until_ms: until(now_ms, error.retry_after_secs, error.resets_at_ms),
             at_ms: now_ms,
             send,
+            // A run error may name an account_ref, but routing's answer
+            // names a credential_id. They are not comparable identifiers.
+            refusal: runner_refusal(&error.provider_code, None),
         })
     }
 
@@ -207,6 +217,7 @@ impl AccountWait {
             until_ms: until(now_ms, None, None),
             at_ms: now_ms,
             send,
+            refusal: None,
         })
     }
 
@@ -218,6 +229,7 @@ impl AccountWait {
             until_ms: until(now_ms, None, Some(next_ms)),
             at_ms: now_ms,
             send,
+            refusal: None,
         }
     }
 
@@ -231,11 +243,10 @@ impl AccountWait {
         })
     }
 
-    /// A pause still present at the caller's deadline. The runner's exact
+    /// A pause the caller will not wait through. The runner's exact
     /// resume floor takes priority over the error's retry hint or reset.
-    /// Older runners name only the provider code, so keep accepting it. A run
-    /// paused for an account limit or for routing's full capacity, with no
-    /// run error beside the pause, waits under that reason's code.
+    /// The typed pause reason distinguishes account limits from capacity.
+    /// Older runners that omit it can still name the wait in a provider code.
     pub fn of_paused_run(
         paused: &RunResult,
         resume_not_before_ms: Option<u64>,
@@ -245,36 +256,165 @@ impl AccountWait {
         if let Some(wait) = Self::of_person(paused, send, now_ms) {
             return Some(wait);
         }
-        let fallback = paused
-            .error
-            .as_ref()
-            .and_then(|error| Self::of_run_error(error, send, now_ms));
-        let wait = fallback.or_else(|| {
-            let code = match RunReason::from(paused.reason.clone()?) {
-                RunReason::AccountLimit => errors::ACCOUNT_LIMIT_EXHAUSTED,
-                RunReason::ConcurrencyFull => errors::CONCURRENCY_FULL,
-                _ => return None,
-            };
-            Some(Self {
-                code: code.to_owned(),
-                until_ms: until(
-                    now_ms,
-                    paused
-                        .error
-                        .as_ref()
-                        .and_then(|error| error.retry_after_secs),
-                    paused.error.as_ref().and_then(|error| error.resets_at_ms),
-                ),
-                at_ms: now_ms,
-                send,
-            })
-        });
-        wait.map(|mut wait| {
-            if let Some(resume) = caller_next_ms(paused).or(resume_not_before_ms) {
-                wait.until_ms = until(now_ms, None, Some(resume));
-            }
-            wait
+        let error = paused.error.as_ref();
+        let code = error.map(|error| error.provider_code.as_str());
+        let code = match paused.reason.clone().map(RunReason::from) {
+            Some(RunReason::AccountLimit) => code
+                .filter(|code| errors::is_account_wait(code))
+                .unwrap_or(errors::ACCOUNT_LIMIT_EXHAUSTED),
+            Some(RunReason::ConcurrencyFull) => errors::CONCURRENCY_FULL,
+            _ => code.filter(|code| errors::is_wait(code))?,
+        };
+        let until_ms = if let Some(resume) = caller_next_ms(paused).or(resume_not_before_ms) {
+            until(now_ms, None, Some(resume))
+        } else {
+            until(
+                now_ms,
+                error.and_then(|error| error.retry_after_secs),
+                error.and_then(|error| error.resets_at_ms),
+            )
+        };
+        Some(Self {
+            code: code.to_owned(),
+            at_ms: now_ms,
+            until_ms,
+            send,
+            refusal: runner_refusal(code, None),
         })
+    }
+}
+
+/// Account recovery for one summary or task batch, independent of ordinary
+/// model fallbacks. A new invocation after a wait starts with no refusals.
+#[derive(Default)]
+pub(crate) struct Reselect {
+    refused: Vec<RefusedRoute>,
+    excluded: Option<String>,
+}
+
+struct RefusedRoute {
+    model: String,
+    credential_id: Option<String>,
+}
+
+impl Reselect {
+    fn known_repeat(&self, model: &str, answer: &SelectAnswer) -> bool {
+        credential(answer).is_some_and(|credential| {
+            self.refused.iter().any(|prior| {
+                prior.model == model && prior.credential_id.as_deref() == Some(credential)
+            })
+        })
+    }
+
+    pub(crate) fn exclusions(&self, mut request: SelectRequest) -> SelectRequest {
+        if let Some(model) = &self.excluded {
+            let exclude = request.exclude.get_or_insert_with(Vec::new);
+            if !exclude.contains(model) {
+                exclude.push(model.clone());
+            }
+        }
+        request
+    }
+
+    /// The caller has settled `refused`. An answer discarded without a send
+    /// also needs settling; otherwise its decision can hold routing capacity.
+    pub(crate) async fn after_refusal<C: Router>(
+        &mut self,
+        client: &C,
+        request: SelectRequest,
+        refused: &SelectAnswer,
+        wait: AccountWait,
+        deadline: Instant,
+    ) -> Result<SelectAnswer, AccountWait> {
+        let Some(refusal) = &wait.refusal else {
+            return Err(wait);
+        };
+        if self.excluded.is_some() {
+            // The exclusion already gave the ladder one last chance.
+            return Err(wait);
+        }
+        let model = refused.route.route_key();
+        let refused_credential = refusal
+            .credential_id
+            .as_deref()
+            .or_else(|| credential(refused));
+        let repeats = self.refused.iter().any(|prior| {
+            prior.model == model
+                && match (prior.credential_id.as_deref(), refused_credential) {
+                    (Some(before), Some(after)) => before == after,
+                    // The first unknown answer gets one send. A second refusal
+                    // of the same model is enough to try the exclusion.
+                    _ => true,
+                }
+        });
+        let model = if repeats {
+            model
+        } else {
+            self.refused.push(RefusedRoute {
+                model,
+                credential_id: refused_credential.map(str::to_owned),
+            });
+            if self.refused.len() >= MAX_REFUSED_ROUTES {
+                return Err(wait);
+            }
+            let fresh = select_again(client, request.clone(), &wait, deadline).await?;
+            let model = fresh.route.route_key();
+            if !self.known_repeat(&model, &fresh) {
+                return Ok(fresh);
+            }
+            cancel_decision(client, &fresh, deadline).await;
+            model
+        };
+        self.excluded = Some(model.clone());
+        let fresh = select_again(client, self.exclusions(request), &wait, deadline).await?;
+        let selected = fresh.route.route_key();
+        if selected == model || self.known_repeat(&selected, &fresh) {
+            cancel_decision(client, &fresh, deadline).await;
+            return Err(wait);
+        }
+        Ok(fresh)
+    }
+}
+
+fn credential(answer: &SelectAnswer) -> Option<&str> {
+    answer.runner.auth.as_ref()?.credential_id.as_deref()
+}
+
+async fn cancel_decision<C: Router>(client: &C, answer: &SelectAnswer, deadline: Instant) {
+    let report = routing::report(&answer.decision_id, Outcome::Cancelled, None);
+    let _ = timeout_at(deadline, client.report(report)).await;
+}
+
+async fn select_again<C: Router>(
+    client: &C,
+    request: SelectRequest,
+    fallback: &AccountWait,
+    deadline: Instant,
+) -> Result<SelectAnswer, AccountWait> {
+    if Instant::now() >= deadline {
+        return Err(fallback.clone());
+    }
+    match timeout_at(deadline, client.select(request)).await {
+        Ok(Ok(answer)) => Ok(answer),
+        Ok(Err(error)) => {
+            let now = now_ms();
+            let reset = error
+                .detail
+                .as_ref()
+                .and_then(|detail| detail.get("reset_at_ms"))
+                .and_then(Value::as_u64);
+            if let (Some(reset), Some(mut wait)) =
+                (reset, AccountWait::of_routing(&error, fallback.send, now))
+            {
+                let reset = i64::try_from(reset).unwrap_or(i64::MAX);
+                if reset > now {
+                    wait.until_ms = reset.min(now.saturating_add(MAX_RESELECT_WAIT_MS));
+                }
+                return Err(wait);
+            }
+            Err(fallback.clone())
+        }
+        Err(_) => Err(fallback.clone()),
     }
 }
 

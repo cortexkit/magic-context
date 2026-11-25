@@ -524,6 +524,46 @@ async fn account_waits_share_the_scheduled_occurrences_token_budget() {
     assert_eq!(client.children().len(), 1);
 }
 
+#[tokio::test(start_paused = true)]
+async fn account_reroute_waits_until_routing_reset_then_selects_again() {
+    let (_dir, db) = store();
+    let engine = engine(1);
+    let settings = Settings::default();
+    let now = now_ms();
+    let reset = now + 10 * 60_000;
+    engine.see_project(&db, PROJECT, FOLDER, profile(), &settings, now);
+    make_due(&db);
+    let client = Arc::new(Client::new(&[], &[Ends::Reply("ok")]));
+    client
+        .send_errors
+        .lock()
+        .unwrap()
+        .push_back(run::tests::long_account_limit());
+    client.route_script.lock().unwrap().extend([
+        Ok("p/a"),
+        Err(crate::routing::RouteError {
+            code: "no_route".into(),
+            message: "every rung is walled".into(),
+            detail: Some(json!({"reason": "quota_or_cooldown", "reset_at_ms": reset})),
+        }),
+        Ok("p/b"),
+    ]);
+    engine.tick(&db, &client, &settings, now);
+    settled(&engine).await;
+    assert_eq!(schedule(&db).3, Some(reset));
+    assert_eq!(client.selects.lock().unwrap().len(), 2);
+    engine.tick(&db, &client, &settings, reset - 1);
+    settled(&engine).await;
+    assert_eq!(client.selects.lock().unwrap().len(), 2);
+    engine.tick(&db, &client, &settings, reset);
+    settled(&engine).await;
+    assert_eq!(client.selects.lock().unwrap().len(), 3);
+    assert_eq!(
+        *client.reports.lock().unwrap(),
+        ["decision-a cancelled", "decision-b completed"]
+    );
+}
+
 #[tokio::test]
 async fn a_curate_run_stopped_by_its_budget_resumes_at_its_next_part() {
     let (_dir, db) = store();

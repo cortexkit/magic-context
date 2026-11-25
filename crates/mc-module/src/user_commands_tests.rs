@@ -660,6 +660,7 @@ async fn user_commands_status_waits_and_project_memory_count_use_contract_units(
                 at_ms: now,
                 until_ms: now + 60_000,
                 send: crate::summary::account_wait::SendKind::TurnOne,
+                refusal: None,
             },
             None,
         ));
