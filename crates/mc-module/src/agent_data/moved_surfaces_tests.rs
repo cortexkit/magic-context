@@ -12,8 +12,9 @@ fn occipital() -> subc_protocol::Principal {
 }
 
 impl Machine {
-    /// What `mode3.db` keeps of a head session of [`PROJECT`] this machine
-    /// served: its project and its preset. A restart reads the project's
+    /// What `mode3.db` keeps of a primary session (preset `head`, one a
+    /// person works in) of [`PROJECT`] that this machine served: its
+    /// project and its preset. A restart reads the project's
     /// sessions from it.
     fn served_before(&self, session: &str) {
         let conn = Connection::open(self.dir.path().join("mode3.db")).unwrap();
