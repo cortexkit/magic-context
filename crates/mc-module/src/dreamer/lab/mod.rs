@@ -377,8 +377,9 @@ impl Lab {
             run::run_lab(client, &job, self, registry, observed, deadline),
         )
         .await;
-        // Capability discovery reports an inaccessible runner as not supporting
-        // plans. Keep the scope refusal rather than that proxy error.
+        // When the Worker scope was refused, the runner cannot be reached
+        // under it, and capability discovery then reports that the runner
+        // does not support plans. Report the scope refusal, which is the cause.
         if result.is_err() {
             if let Some(Err(error)) = worker_scope.as_ref().map(|scope| scope.check_live()) {
                 return Err(run::LabEnd::Refused(error.to_string()));

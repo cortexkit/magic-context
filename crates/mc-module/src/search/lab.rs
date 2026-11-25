@@ -178,8 +178,9 @@ struct HistorySession {
 impl HistorySession {
     fn load(conn: &Connection, project: &str, id: String) -> Result<Self, String> {
         let ambiguous = raw_is_ambiguous(conn, project, &id)?;
-        // When another harness uses the same session ID, the message-time map
-        // cannot tell which harness wrote the timestamp for a given ordinal.
+        // Two hosts (OpenCode and Pi, say) can each have a session with this
+        // ID. The message-time map is keyed by session ID alone, so it cannot
+        // say which host's message a timestamp belongs to.
         let times = if ambiguous {
             IndexedTimes::default()
         } else {

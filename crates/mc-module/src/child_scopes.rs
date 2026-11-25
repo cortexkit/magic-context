@@ -305,8 +305,9 @@ impl ChildScopes {
         self.state.lock().await.synced = false;
     }
 
-    /// The scope for `project_root`, published first when it is new. Only
-    /// a lab run that requests `sidekick` sets a Worker project stamp.
+    /// The scope for `project_root`, published first when it is new. A lab
+    /// run that requests `sidekick` gets its own Worker scope, which also
+    /// names the project; every other caller gets the folder's ordinary one.
     pub async fn for_child(&self, project_root: &str) -> Result<ScopeSelector, ScopeError> {
         let worker = LAB_WORKER_SCOPE.try_with(Arc::clone).ok();
         if !Path::new(project_root).is_absolute() {
@@ -384,8 +385,9 @@ impl ChildScopes {
                     .await?;
             } else {
                 // A timed-out caller can drop this future while the daemon
-                // is publishing. Do not keep an unacknowledged Worker in the
-                // ordinary list, but let teardown remove it at the daemon.
+                // is publishing. Do not keep a Worker the daemon has not
+                // acknowledged in `state.records`, where every later sync
+                // would resend it; the run's teardown removes it at the daemon.
                 let pending = new_record();
                 worker.attempted.store(true, Ordering::Release);
                 state
