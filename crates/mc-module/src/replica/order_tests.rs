@@ -385,10 +385,18 @@ async fn a_persons_edit_after_a_waiting_dreamer_change_carries_what_the_person_s
     assert_eq!(row(&other), expected);
     assert_eq!(row(&holder), expected);
     assert_eq!(row(&x), expected);
+    // The fenced message is a routine skip, counted apart from refusals.
     assert_eq!(
-        other.value::<i64>("SELECT COUNT(*) FROM replica_rejects"),
+        other.value::<i64>(&format!(
+            "SELECT CAST(value AS INTEGER) FROM schema_migrations_meta WHERE key = '{}'",
+            super::ROUTINE_SKIPS_KEY
+        )),
         1,
         "the dreamer's own message is fenced"
+    );
+    assert_eq!(
+        other.value::<i64>("SELECT COUNT(*) FROM replica_rejects"),
+        0
     );
 }
 
