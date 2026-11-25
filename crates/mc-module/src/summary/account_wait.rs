@@ -15,7 +15,8 @@
 //! runner's pause, and person-owned waits still use the default duration.
 //! Never repeat a prompt in a child whose run began. A first turn or dreamer
 //! task starts in a fresh child; a second turn or fact check requeues its
-//! unresolved facts for a later summary's second turn without parking the lane.
+//! unresolved facts for a later summary's second turn, and the session's next
+//! summary does not wait for them.
 
 use cortexkit_role_llm_runner::awaits::AwaitParty;
 use cortexkit_role_llm_runner::errors;

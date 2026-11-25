@@ -1629,8 +1629,8 @@ fn still_running(state: &str) -> bool {
 /// poll interval, or less when the runner's run-end event wakes it
 /// ([`crate::run_ends`]). A runner may resume a paused run by itself, so we
 /// keep polling it unless the pause names an account limit. In that case
-/// cancel now so the work can try another route. Status supplies the retry
-/// floor and wait owner when the result omits them.
+/// cancel now so the work can try another route. Status supplies the earliest
+/// retry time and who the wait is on when the result omits them.
 async fn wait_for<C: RunnerClient>(
     client: &C,
     child: &Child,
