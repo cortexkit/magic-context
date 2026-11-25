@@ -13,6 +13,7 @@ pub(super) fn submit(
     ids: &[i64],
     current: &mut Verdicts,
     input: Value,
+    active: impl Fn(i64) -> Result<bool, String>,
 ) -> Result<String, String> {
     let list = input
         .as_object()
@@ -26,7 +27,18 @@ pub(super) fn submit(
     for (index, item) in list.iter().enumerate() {
         let checked = serde_json::from_value::<Entry>(item.clone())
             .map_err(|e| e.to_string())
-            .and_then(|entry| entry.check(ids));
+            .and_then(|entry| {
+                let target = entry.into;
+                let id = entry.check(ids)?;
+                if let Some(target) = target {
+                    if !active(target)? {
+                        return Err(format!(
+                            "into id {target} is not an active memory of this project"
+                        ));
+                    }
+                }
+                Ok(id)
+            });
         match checked {
             Ok(id) => {
                 next.insert(id, item.clone());

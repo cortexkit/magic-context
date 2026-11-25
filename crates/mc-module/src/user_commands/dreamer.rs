@@ -35,7 +35,10 @@ pub(crate) fn lab_requested(body: &[u8]) -> bool {
 
 pub(crate) fn lab_path(body: &[u8]) -> Result<std::path::PathBuf, ErrorBody> {
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Envelope {
+        #[serde(rename = "method")]
+        _method: String,
         params: Params,
     }
     #[derive(serde::Deserialize)]

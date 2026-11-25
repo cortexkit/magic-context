@@ -1,5 +1,6 @@
 use std::fmt::Write;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
@@ -111,4 +112,45 @@ pub(super) fn search(
         }
     }
     history.search(conn, project, &input, semantic)
+}
+
+pub(super) const SEARCH_LIMIT: Duration = Duration::from_secs(20);
+pub(super) const SEARCH_TIMED_OUT: &str = "memory_search timed out; narrow the query";
+
+pub(super) fn search_with_limit<T>(
+    conn: &Connection,
+    limit: Duration,
+    work: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    if limit.is_zero() {
+        return Err(SEARCH_TIMED_OUT.into());
+    }
+    let deadline = Instant::now() + limit;
+    conn.progress_handler(1000, Some(move || Instant::now() >= deadline));
+    let answer = work(conn);
+    conn.progress_handler(0, None::<fn() -> bool>);
+    // Some of the memory and history searches skip a failing database read.
+    // A deadline is a tool error even if the interrupted search returned no hits.
+    if Instant::now() >= deadline {
+        Err(SEARCH_TIMED_OUT.into())
+    } else {
+        answer
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn lab_search_interrupts_sql_and_keeps_the_connection_usable() {
+    let conn = Connection::open_in_memory().unwrap();
+    let result = search_with_limit(&conn, std::time::Duration::from_millis(5), |conn| {
+        conn.query_row("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<4000000) SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0)).map_err(|e| e.to_string())
+    });
+    assert_eq!(
+        result,
+        Err("memory_search timed out; narrow the query".into())
+    );
+    let value = conn
+        .query_row("SELECT 7", [], |row| row.get::<_, i64>(0))
+        .unwrap();
+    assert_eq!(value, 7);
 }

@@ -29,33 +29,15 @@ impl Request {
     }
 
     async fn arguments(&self, root: &Path) -> Result<Vec<String>, String> {
-        // Only output shaping is allowed: short log summaries and diff file
-        // summaries. No model-supplied numeric limits, formats or git config.
-        let (refs, options, fixed): (_, &[_], &[_]) = match self.command.as_str() {
-            "log" => (
-                0..=1,
-                &["--oneline", "--stat"],
-                &[
-                    "--max-count=40",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-show-signature",
-                ],
-            ),
-            "show" => (
-                0..=1,
-                &["--stat", "--name-only"],
-                &["--no-ext-diff", "--no-textconv", "--no-show-signature"],
-            ),
-            "diff" => (
-                2..=2,
-                &["--stat", "--name-only", "--name-status"],
-                &["--no-ext-diff", "--no-textconv", "--ignore-submodules=all"],
-            ),
-            "blame" => (0..=1, &[], &[]),
-            "ls-files" => (0..=0, &[], &["--cached"]),
-            other => return Err(format!("git_read does not allow the {other:?} subcommand")),
-        };
+        let CommandSpec {
+            name,
+            refs,
+            options,
+            fixed,
+        } = COMMANDS
+            .iter()
+            .find(|spec| spec.name == self.command)
+            .ok_or_else(|| format!("git_read does not allow the {:?} subcommand", self.command))?;
         if !refs.contains(&self.refs.len()) {
             return Err(format!("git {} expects {refs:?} refs", self.command));
         }
@@ -75,7 +57,7 @@ impl Request {
         for path in &self.paths {
             validate_path(root, path)?;
         }
-        let mut args = vec![self.command.clone()];
+        let mut args = vec![(*name).to_owned()];
         args.extend(fixed.iter().map(|value| (*value).to_owned()));
         args.extend(self.options.iter().cloned());
         let refs: Vec<&str> = if self.refs.is_empty() && self.command != "ls-files" {
@@ -90,6 +72,65 @@ impl Request {
         args.extend(self.paths.iter().cloned());
         Ok(args)
     }
+}
+
+struct CommandSpec {
+    name: &'static str,
+    refs: std::ops::RangeInclusive<usize>,
+    options: &'static [&'static str],
+    fixed: &'static [&'static str],
+}
+
+// Admission and execution use the same table. Git's defaults are not safe:
+// `blame` otherwise honors checkout-configured text conversion, for example.
+// Optional flags shape output only; none can undo a fixed safety flag.
+const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "log",
+        refs: 0..=1,
+        options: &["--oneline", "--stat", "-p"],
+        fixed: &[
+            "--max-count=40",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-show-signature",
+        ],
+    },
+    CommandSpec {
+        name: "show",
+        refs: 0..=1,
+        options: &["--stat", "--name-only"],
+        fixed: &["--no-ext-diff", "--no-textconv", "--no-show-signature"],
+    },
+    CommandSpec {
+        name: "diff",
+        refs: 2..=2,
+        options: &["--stat", "--name-only", "--name-status"],
+        fixed: &["--no-ext-diff", "--no-textconv", "--ignore-submodules=all"],
+    },
+    CommandSpec {
+        name: "blame",
+        refs: 0..=1,
+        options: &[],
+        fixed: &["--no-textconv"],
+    },
+    CommandSpec {
+        name: "ls-files",
+        refs: 0..=0,
+        options: &[],
+        fixed: &["--cached"],
+    },
+];
+
+pub(super) fn commands() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().map(|spec| spec.name)
+}
+
+pub(super) fn options() -> std::collections::BTreeSet<&'static str> {
+    COMMANDS
+        .iter()
+        .flat_map(|spec| spec.options.iter().copied())
+        .collect()
 }
 
 fn validate_path(root: &Path, path: &str) -> Result<(), String> {
@@ -171,21 +212,9 @@ pub(super) async fn check_worktree(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn git(root: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String, String> {
-    let mut command = Command::new("git");
-    // Git environment overrides can redirect a command to another repository.
-    // Read history without lazy network fetches, pagers, external diff drivers,
-    // fsmonitor hooks, or an index lock. Use only objects already present in
-    // the checkout's repository.
-    for (key, _) in std::env::vars_os() {
-        if key
-            .to_string_lossy()
-            .to_ascii_uppercase()
-            .starts_with("GIT_")
-        {
-            command.env_remove(key);
-        }
-    }
+fn command_for(program: &str, root: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Command {
+    let mut command = Command::new(program);
+    git_environment(&mut command);
     command
         .args([
             "--no-pager",
@@ -198,6 +227,29 @@ async fn git(root: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String
             "color.ui=false",
         ])
         .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn git_environment(command: &mut Command) {
+    // Git environment overrides can redirect a command to another repository.
+    // Read history without lazy network fetches, pagers, external diff drivers,
+    // fsmonitor hooks, or an index lock. Use only objects already present in
+    // the checkout's repository.
+    command
+        .env_clear()
+        .env(
+            "PATH",
+            if cfg!(windows) {
+                r"C:\Program Files\Git\cmd;C:\Windows\System32"
+            } else {
+                "/usr/bin:/bin"
+            },
+        )
+        .env("LC_ALL", "C")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env(
             "GIT_CONFIG_GLOBAL",
@@ -206,12 +258,11 @@ async fn git(root: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_ALLOW_PROTOCOL", "")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = tokio::process::Command::from(command)
+        .env("GIT_TERMINAL_PROMPT", "0");
+}
+
+async fn git(root: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String, String> {
+    let mut child = tokio::process::Command::from(command_for("git", root, args))
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| format!("starting git: {error}"))?;
@@ -248,4 +299,94 @@ async fn git(root: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String
         text.push_str("\n[git output truncated]");
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn lab_git_does_not_inherit_a_module_environment_marker() {
+        const MARKER: &str = "MC_LAB_TEST_ENV_MARKER";
+        if std::env::var_os(MARKER).is_none() {
+            let result = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "dreamer::lab::git::review_tests::lab_git_does_not_inherit_a_module_environment_marker", "--nocapture"])
+                .env(MARKER, "fixture")
+                .output().unwrap();
+            let output = String::from_utf8_lossy(&result.stdout);
+            assert!(output.contains("running 1 test"), "{output}");
+            assert!(
+                result.status.success(),
+                "{output}\n{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let mut probe = Command::new("/usr/bin/env");
+        git_environment(&mut probe);
+        let result = probe.output().unwrap();
+        assert!(result.status.success());
+        let env = String::from_utf8(result.stdout).unwrap();
+        assert!(!env.contains(MARKER), "git inherited the test marker");
+        assert!(env.lines().any(|line| line == "LC_ALL=C"));
+    }
+
+    #[tokio::test]
+    async fn lab_git_allows_five_commands_without_running_textconv() {
+        let repo = tempfile::tempdir().unwrap();
+        let raw = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        raw(&["init", "-q"]);
+        raw(&["config", "user.email", "lab@example.invalid"]);
+        raw(&["config", "user.name", "Lab test"]);
+        raw(&["config", "diff.sample.textconv", "wc -l"]);
+        std::fs::write(
+            repo.path().join(".gitattributes"),
+            "fixture.log diff=sample\n",
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("fixture.log"), "original raw line\n").unwrap();
+        raw(&["add", "."]);
+        raw(&["commit", "-qm", "before"]);
+        std::fs::write(
+            repo.path().join("fixture.log"),
+            "original raw line\nnew raw line\n",
+        )
+        .unwrap();
+        raw(&["commit", "-qam", "after"]);
+        for (command, refs, options) in [
+            ("blame", vec![], vec![]),
+            ("show", vec![], vec![]),
+            ("diff", vec!["HEAD~1", "HEAD"], vec![]),
+            ("log", vec![], vec!["-p"]),
+            ("ls-files", vec![], vec![]),
+        ] {
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "checkout":"fixture", "command":command, "refs":refs,
+                "options":options, "paths":["fixture.log"]
+            }))
+            .unwrap();
+            let output = request.read(repo.path()).await.unwrap();
+            let expected = if command == "ls-files" {
+                "fixture.log"
+            } else {
+                "new raw line"
+            };
+            assert!(
+                output.contains(expected),
+                "{command} did not return {expected:?}: {output}"
+            );
+        }
+    }
 }

@@ -1493,19 +1493,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 "the dreamer runtime is unavailable",
             ));
         };
-        let start = crate::dreamer::lab::Start::load(&path, &live.path)
+        let start = crate::dreamer::lab::Start::load(&path, &live.path, self.inner.labs.clone())
             .await
             .map_err(|error| subc_protocol::ErrorBody::new("invalid_params", error))?;
-        let embedding = self
-            .inner
-            .config
-            .resolve_for_project(start.root().to_str(), Some(start.project()), "", 0)
-            .embedding;
+        let config = self.inner.config.clone();
         let reply = serde_json::json!({"outcome": "started", "out_dir": start.out_dir()});
-        engine.spawn(start.execute(
+        engine.spawn(start.execute_with(
             self.inner.client.clone(),
             self.inner.labs.clone(),
-            embedding,
+            move |root, project| {
+                config
+                    .resolve_for_project(root.to_str(), Some(project), "", 0)
+                    .embedding
+            },
         ));
         Ok(reply)
     }

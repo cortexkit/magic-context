@@ -2305,6 +2305,7 @@ pub(crate) async fn lab_tool(
         }
         _ => {}
     }
+    lab.note_tool_call();
     if fork_call(body, &request.name)? {
         return Err(Refusal::new(
             "not_permitted",
@@ -3547,6 +3548,107 @@ mod user_commands_tests {
             .commands
             .iter()
             .any(|command| command.id == "dreamer_lab_run"));
+    }
+
+    #[cfg(unix)]
+    fn lab_owner_bind() -> RouteBindRequest {
+        let peer =
+            serde_json::from_value(json!({"status":"observed","uid":local_lab_user().unwrap()}))
+                .unwrap();
+        route(Principal::Direct)
+            .with_call_mode(subc_client_rs::CallMode::Classic)
+            .with_peer(subc_protocol::peer::RouteBindPeer::new().with_observed_peer(Some(peer)))
+    }
+
+    #[cfg(unix)]
+    const LAB_MALFORMED: &[u8] =
+        br#"{"method":"commands.run","params":{"id":"dreamer_lab_run","args":{"spec":42}}}"#;
+
+    #[cfg(unix)]
+    macro_rules! lab_refuses_only {
+        ($test:ident, $change:expr) => {
+            #[tokio::test]
+            async fn $test() {
+                let handler = handler();
+                let mut request = lab_owner_bind();
+                ($change)(&mut request);
+                handler.on_bind(&request).await;
+                assert_eq!(
+                    handler
+                        .command(10, LAB_MALFORMED)
+                        .await
+                        .unwrap()
+                        .unwrap_err()
+                        .code,
+                    "caller_not_admitted"
+                );
+            }
+        };
+    }
+
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_wrong_principal,
+        |r: &mut RouteBindRequest| r.principal = Some(Principal::Reserved {
+            module_id: "occipital".into()
+        })
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_scope,
+        |r: &mut RouteBindRequest| r.scope = Some(subc_protocol::scope::ScopeStamp::new(
+            Principal::Direct,
+            "head",
+            1,
+            subc_protocol::scope::ScopeKind::Head
+        ))
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_non_classic,
+        |r: &mut RouteBindRequest| r.call_mode = subc_client_rs::CallMode::Codemode
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_unobserved_status,
+        |r: &mut RouteBindRequest| r.peer.observed_peer.as_mut().unwrap().status =
+            subc_protocol::peer::ObservedPeerStatus::Unobserved
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_wrong_uid,
+        |r: &mut RouteBindRequest| r.peer.observed_peer.as_mut().unwrap().uid =
+            Some(local_lab_user().unwrap() ^ 1)
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_absent_peer,
+        |r: &mut RouteBindRequest| r.peer.observed_peer = None
+    );
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dreamer_lab_valid_bind_reaches_spec_decode() {
+        let handler = handler();
+        handler.on_bind(&lab_owner_bind()).await;
+        assert_eq!(
+            handler
+                .command(10, LAB_MALFORMED)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "invalid_params"
+        );
+    }
+
+    #[test]
+    fn dreamer_lab_rejects_an_unknown_outer_envelope_field() {
+        let body = br#"{"method":"commands.run","fork_id":"stray","params":{"id":"dreamer_lab_run","args":{"spec":"/example/spec.json"}}}"#;
+        assert!(crate::user_commands::dreamer::lab_requested(body));
+        let error = crate::user_commands::dreamer::lab_path(body).unwrap_err();
+        assert_eq!(error.code, "invalid_params");
+        assert!(error.message.contains("fork_id"));
     }
 
     #[cfg(unix)]

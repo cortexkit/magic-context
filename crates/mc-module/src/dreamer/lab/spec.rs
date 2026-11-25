@@ -22,7 +22,13 @@ pub(super) struct Spec {
     pub tools: BTreeSet<Tool>,
     pub route: Option<Route>,
     pub step_cap: u64,
+    #[serde(default = "default_deadline_minutes")]
+    pub deadline_minutes: u64,
     pub out_dir: PathBuf,
+}
+
+fn default_deadline_minutes() -> u64 {
+    60
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,6 +55,8 @@ pub(super) enum Route {
 }
 
 impl Spec {
+    // These checks are snapshots, not handles: only a process of the same
+    // user may start the lab, and that user can already change these files.
     pub(super) async fn load(path: &Path, live: &Path) -> Result<Self, String> {
         let path = existing(path, "spec", false)?;
         reject_live(&path, live)?;
@@ -70,6 +78,9 @@ impl Spec {
         }
         if spec.step_cap == 0 {
             return Err("step_cap must be positive".into());
+        }
+        if !(1..=240).contains(&spec.deadline_minutes) {
+            return Err("deadline_minutes must be between 1 and 240".into());
         }
         match &spec.route {
             Some(Route::Demand { iq, eq }) if *iq > 100 || *eq > 100 => {
@@ -162,7 +173,10 @@ impl Spec {
         // same empty directory. No run may replace a previous run's files.
         use std::io::Write;
         File::create_new(self.out_dir.join("verdicts.json"))
-            .and_then(|mut file| file.write_all(b"[]\n"))
+            .and_then(|mut file| {
+                file.write_all(b"[]\n")?;
+                file.sync_all()
+            })
             .map_err(|e| format!("reserving out_dir: {e}"))?;
         Ok(())
     }

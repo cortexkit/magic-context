@@ -82,6 +82,10 @@ pub(crate) struct Client {
     pub(crate) core_calls: Mutex<Vec<(String, serde_json::Value)>>,
     pub(crate) lab: Option<std::sync::Arc<super::super::lab::Registry>>,
     pub(crate) lab_tool_results: Mutex<Vec<serde_json::Value>>,
+    pub(crate) lab_result: Option<RunResult>,
+    pub(crate) lab_verdicts_path: Option<std::path::PathBuf>,
+    pub(crate) lab_verdicts_after: Mutex<Vec<serde_json::Value>>,
+    pub(crate) lab_select_delay: Option<Duration>,
 }
 
 impl Client {
@@ -110,6 +114,10 @@ impl Client {
             core_calls: Mutex::default(),
             lab: None,
             lab_tool_results: Mutex::default(),
+            lab_result: None,
+            lab_verdicts_path: None,
+            lab_verdicts_after: Mutex::default(),
+            lab_select_delay: None,
         }
     }
 
@@ -282,8 +290,15 @@ impl RunnerClient for Client {
                         .lock()
                         .unwrap()
                         .push(serde_json::from_slice(&reply).unwrap());
+                    if let Some(path) = &self.lab_verdicts_path {
+                        let bytes = std::fs::read(path).unwrap();
+                        self.lab_verdicts_after
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&bytes).unwrap());
+                    }
                 }
-                result
+                self.lab_result.clone().unwrap_or(result)
             }
             Ends::NeverRan => crate::summary::run::never_ran_tests::handover("nothing_written"),
             Ends::Error(message) => {
@@ -330,6 +345,9 @@ fn completed(text: &str, finish: Option<Finish>) -> RunResult {
 impl Router for Client {
     async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, routing::RouteError> {
         self.selects.lock().unwrap().push(request.clone());
+        if let Some(delay) = self.lab_select_delay {
+            tokio::time::sleep(delay).await;
+        }
         if let Some(refusal) = &self.refuse {
             return Err(refusal.clone());
         }

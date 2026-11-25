@@ -11,7 +11,12 @@ use super::{messages, sources, text, Hit, Request, Scope, DEFAULT_LIMIT, MAX_LIM
 
 pub(crate) struct History {
     sessions: Vec<String>,
-    coverage: Mutex<messages::Coverage>,
+    scan: Mutex<Scan>,
+}
+
+struct Scan {
+    coverage: messages::Coverage,
+    ambiguous: BTreeMap<String, bool>,
 }
 
 impl History {
@@ -20,14 +25,10 @@ impl History {
         project: &str,
         selected: Option<&[String]>,
     ) -> Result<Self, String> {
-        // The full-text message index keys by session id alone. Do not search
-        // an id shared by different projects, even if one matching row exists.
         let mut query = conn
             .prepare(
                 "SELECT DISTINCT p.session_id FROM session_projects p
-              WHERE p.project_path = ?1 AND NOT EXISTS (
-                SELECT 1 FROM session_projects other
-                 WHERE other.session_id = p.session_id AND other.project_path <> p.project_path)
+              WHERE p.project_path = ?1
               ORDER BY p.session_id",
             )
             .map_err(show)?;
@@ -39,7 +40,9 @@ impl History {
         let sessions = match selected {
             Some(selected) => {
                 if let Some(unknown) = selected.iter().find(|id| !all.contains(*id)) {
-                    return Err(format!("history session {unknown:?} does not belong unambiguously to project {project:?}"));
+                    return Err(format!(
+                        "history session {unknown:?} does not belong to project {project:?}"
+                    ));
                 }
                 selected
                     .iter()
@@ -56,7 +59,10 @@ impl History {
         coverage.for_snapshot(0);
         Ok(Self {
             sessions,
-            coverage: Mutex::new(coverage),
+            scan: Mutex::new(Scan {
+                coverage,
+                ambiguous: BTreeMap::new(),
+            }),
         })
     }
 
@@ -104,7 +110,7 @@ impl History {
                 }
             }
         }
-        let mut coverage = self.coverage.lock().expect("lab history coverage");
+        let mut scan = self.scan.lock().expect("lab history coverage");
         let owner_request = Request {
             requested: Some(
                 ["memory", "git_commit"]
@@ -117,7 +123,7 @@ impl History {
         };
         let hits = super::collect(
             conn,
-            &mut coverage,
+            &mut scan.coverage,
             &scope,
             &owner_request,
             true,
@@ -127,6 +133,7 @@ impl History {
         )?;
         let mut ranked: Vec<(Hit, Option<&str>)> =
             hits.into_iter().map(|hit| (hit, None)).collect();
+        let mut skipped = 0;
         if request.active("message") {
             let probes = text::literal_probes(request.query);
             let query = messages::Query {
@@ -137,19 +144,30 @@ impl History {
                 visible: None,
             };
             for session in &self.sessions {
-                let reach = messages::reach(conn, &mut coverage, session, request.dates);
-                let raw =
+                let ambiguous = match scan.ambiguous.get(session) {
+                    Some(ambiguous) => *ambiguous,
+                    None => {
+                        let ambiguous = raw_is_ambiguous(conn, project, session)?;
+                        scan.ambiguous.insert(session.clone(), ambiguous);
+                        ambiguous
+                    }
+                };
+                let raw = if ambiguous {
+                    skipped += 1;
+                    Vec::new()
+                } else {
+                    let reach = messages::reach(conn, &mut scan.coverage, session, request.dates);
                     messages::search_at(conn, session, &query, &[depth], i64::MAX, true, &reach)
                         .pop()
-                        .unwrap_or_default();
-                let mut summaries = lexical_summaries(conn, session, &query)?;
+                        .unwrap_or_default()
+                };
+                let mut summaries = lexical_summaries(conn, project, session, &query)?;
                 if let Some(semantic) = semantic {
-                    let semantic = sources::search_chunks(
+                    let semantic = sources::search_chunks_in_project(
                         conn,
                         session,
                         project,
                         depth,
-                        i64::MAX,
                         request.dates,
                         semantic,
                     );
@@ -177,12 +195,34 @@ impl History {
         }
         ranked.sort_by(|a, b| super::compare(&a.0, &b.0).then(a.1.cmp(&b.1)));
         ranked.truncate(ceiling);
-        render(conn, request.query, ranked, project)
+        let reply = render(conn, request.query, ranked, project)?;
+        if skipped == 0 {
+            Ok(reply)
+        } else {
+            Ok(format!(
+                "{skipped} sessions skipped: ambiguous id\n\n{reply}"
+            ))
+        }
     }
+}
+
+fn raw_is_ambiguous(conn: &Connection, project: &str, session: &str) -> Result<bool, String> {
+    // Raw message indexes cannot separate harnesses. Inspect the indexed
+    // records for this id once per frozen copy, even when a second harness has
+    // its own evidence but has not been entered in the project map.
+    conn.query_row(
+        "WITH mapped AS (SELECT harness FROM session_projects WHERE session_id=?1 AND project_path=?2)
+         SELECT EXISTS(SELECT 1 FROM session_projects WHERE session_id=?1 AND project_path<>?2)
+             OR EXISTS(SELECT 1 FROM compartments WHERE session_id=?1 AND harness NOT IN mapped)
+             OR EXISTS(SELECT 1 FROM message_history_index WHERE session_id=?1 AND harness NOT IN mapped)
+             OR EXISTS(SELECT 1 FROM message_history_source WHERE session_id=?1 AND harness NOT IN mapped)",
+        params![session, project], |row| row.get(0),
+    ).map_err(show)
 }
 
 fn lexical_summaries(
     conn: &Connection,
+    project: &str,
     session: &str,
     query: &messages::Query<'_>,
 ) -> Result<Vec<sources::ChunkHit>, String> {
@@ -190,14 +230,18 @@ fn lexical_summaries(
     // messages. Stream only the selected session's summaries, keeping top hits.
     let mut statement = conn
         .prepare_cached(
-            "SELECT id, title, start_message, end_message, content, p1 FROM compartments
-          WHERE session_id = ?1 AND created_at BETWEEN ?2 AND ?3",
+            "SELECT c.id, c.title, c.start_message, c.end_message, c.content, c.p1
+               FROM compartments c
+               JOIN session_projects p ON p.session_id = c.session_id AND p.harness = c.harness
+              WHERE c.session_id = ?1 AND p.project_path = ?2 AND c.created_at BETWEEN ?3 AND ?4",
         )
         .map_err(show)?;
     let (from, to) = query
         .dates
         .map_or((i64::MIN, i64::MAX), |dates| (dates.from, dates.to));
-    let mut rows = statement.query(params![session, from, to]).map_err(show)?;
+    let mut rows = statement
+        .query(params![session, project, from, to])
+        .map_err(show)?;
     let mut hits: Vec<sources::ChunkHit> = Vec::new();
     while let Some(row) = rows.next().map_err(show)? {
         let title: String = row.get(1).map_err(show)?;

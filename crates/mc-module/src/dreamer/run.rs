@@ -203,6 +203,7 @@ pub async fn run<C: RunnerClient + Router>(
 
 pub(super) enum LabEnd {
     StepCap,
+    AccountLimit(String),
     Refused(String),
     Error(String),
 }
@@ -212,6 +213,7 @@ struct LabRun<'a> {
     registry: &'a super::lab::Registry,
     observed: &'a mut super::lab::Observed,
     capped: bool,
+    deadline: tokio::time::Instant,
 }
 
 pub(super) async fn run_lab<C: RunnerClient + Router>(
@@ -220,25 +222,32 @@ pub(super) async fn run_lab<C: RunnerClient + Router>(
     lab: &std::sync::Arc<super::lab::Lab>,
     registry: &super::lab::Registry,
     observed: &mut super::lab::Observed,
+    deadline: tokio::time::Instant,
 ) -> Result<(), LabEnd> {
     let mut lab = LabRun {
         lab,
         registry,
         observed,
         capped: false,
+        deadline,
     };
     let result = run_inner(client, job, None, Some(&mut lab)).await;
     if lab.capped {
         return Err(LabEnd::StepCap);
     }
     result.map(|_| ()).map_err(|error| {
+        if matches!(error, TaskError::AccountWait(..)) {
+            lab.observed
+                .account_limit_detail
+                .get_or_insert("refused_before_accept");
+            return LabEnd::AccountLimit(error.to_string());
+        }
         if matches!(
             error,
-            TaskError::AccountWait(..)
-                | TaskError::Failed {
-                    request_specific: true,
-                    ..
-                }
+            TaskError::Failed {
+                request_specific: true,
+                ..
+            }
         ) || lab.observed.child.is_none()
         {
             LabEnd::Refused(error.to_string())
@@ -254,7 +263,10 @@ async fn run_inner<C: RunnerClient + Router>(
     task: Option<&dyn TaskInput>,
     mut lab: Option<&mut LabRun<'_>>,
 ) -> Result<TaskReply, TaskError> {
-    let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
+    let deadline = lab.as_ref().map_or_else(
+        || tokio::time::Instant::now() + RUN_TIMEOUT,
+        |lab| lab.deadline,
+    );
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
     let mut paid_failure: Option<String> = None;
@@ -464,24 +476,12 @@ async fn run_inner<C: RunnerClient + Router>(
             })
         };
         if let (Some(lab), Some(prepared)) = (lab.as_deref_mut(), &prepared) {
-            let _registered = match lab.lab.register(lab.registry, &first_child, prepared) {
-                Ok(registered) => registered,
-                Err(error) => {
-                    report(Outcome::Cancelled, &[]).await;
-                    return Err(TaskError::Failed {
-                        error,
-                        usage: total,
-                        request_specific: false,
-                        unusable_reply,
-                    });
-                }
-            };
+            let _registered = lab.lab.register(lab.registry, &first_child);
             let child_id = first_child.session.session.clone();
-            lab.observed.child = Some(child_id.clone());
-            lab.observed.runner = Some(answer.runner.module.clone());
+            lab.observed
+                .record_attempt(&first_child, prepared, lab.lab.tools());
             lab.observed.model = Some(model.clone());
             lab.observed.route = Some(answer.route.route_key());
-            lab.observed.usage = None;
             let mut spent = None;
             let sent = send_and_wait_recorded(
                 client,
@@ -490,7 +490,7 @@ async fn run_inner<C: RunnerClient + Router>(
                 &prompt,
                 &how,
                 &mut spent,
-                &mut lab.observed.usage,
+                &mut lab.observed.send,
             )
             .await;
             retain_usage(&mut usage, &mut reports, child_id.clone(), spent);
@@ -529,7 +529,27 @@ async fn run_inner<C: RunnerClient + Router>(
                 }
                 Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
                     report(Outcome::Cancelled, &reports).await;
-                    if usage.is_some() || wait.refusal.is_none() {
+                    let send = &lab.observed.send;
+                    let (known_idle, detail) = if lab.lab.called_tool() {
+                        (false, "child_had_tool_calls")
+                    } else if !send.accepted {
+                        (true, "refused_before_accept")
+                    } else if send.terminal_usage
+                        && usage.is_none()
+                        && send
+                            .usage
+                            .as_ref()
+                            .is_some_and(|usage| usage.steps == 0 && usage.unreported_steps == 0)
+                    {
+                        (true, "zero_steps_reselected")
+                    } else {
+                        // The runner sends Reader calls straight to the code
+                        // provider. Missing usage or recorded steps cannot
+                        // establish that no tool ran.
+                        (false, "accepted_usage_unknown")
+                    };
+                    lab.observed.account_limit_detail = Some(detail);
+                    if !known_idle || wait.refusal.is_none() {
                         return Err(TaskError::AccountWait(wait, used.map(Box::new)));
                     }
                     match reselect
