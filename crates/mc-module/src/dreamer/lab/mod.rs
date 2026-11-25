@@ -5,6 +5,7 @@ mod git;
 mod persona;
 mod spec;
 #[cfg(test)]
+#[path = "lab_tests.rs"]
 mod tests;
 mod verdicts;
 

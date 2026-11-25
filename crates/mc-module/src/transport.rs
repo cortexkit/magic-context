@@ -3911,8 +3911,12 @@ mod manifest_tests {
             .iter()
             .map(|consumer| consumer["name"].as_str().unwrap())
             .collect();
+        // The lab's consumer comes last. It is declared like a task so that
+        // routing can choose a model for a lab run and report its usage apart
+        // from the scheduled tasks.
         let kinds: Vec<String> = crate::routing::DREAM_DEMANDS
             .iter()
+            .chain(std::iter::once(&crate::routing::LAB_DEMAND))
             .map(|demand| crate::routing::dream_consumer(demand.kind))
             .collect();
         assert_eq!(dream, kinds);
