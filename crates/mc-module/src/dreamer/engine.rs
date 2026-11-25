@@ -181,7 +181,10 @@ pub struct Engine {
     /// project's folder, when they configure one. A project's run plans
     /// with it ([`Task::plan`]); without a source no run has one.
     embedding: Option<EmbeddingSource>,
-    /// Whether a project's settings turn on the mural that uses prepared cues.
+    /// Whether a project enables the memory mural, an image of the memories
+    /// that do not fit in the text memory block. When it is off, skip
+    /// `compress-cues`, the paid maintenance task that shortens those
+    /// memories into cues for the image.
     mural_enabled: Option<MuralEnabled>,
     /// Where runs open their roles' lease watches.
     leases: Arc<dyn RoleLeases>,

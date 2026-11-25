@@ -378,6 +378,32 @@ fn search_reuses_message_index_paginates_and_returns_utf8_byte_ranges() {
 }
 
 #[test]
+fn search_cursor_refuses_old_offset_with_restart_error() {
+    let (_dir, conn) = search_db();
+    let mut replica = replica(Some(conn));
+    let mut p = json!({"query":"needle","scope":{"session":key()}});
+    let first = replica.read("context.search", &p).unwrap();
+    let (identity, _) = first["next_cursor"]
+        .as_str()
+        .unwrap()
+        .rsplit_once(':')
+        .unwrap();
+
+    p["cursor"] = json!(format!("{identity}:50"));
+    let refusal = replica.read("context.search", &p).unwrap_err();
+    assert_eq!(refusal.code, "cursor_invalid");
+    assert_eq!(refusal.message, "Search changed; restart the search.");
+
+    for invalid in [json!(50), json!("50")] {
+        p["cursor"] = invalid;
+        assert_eq!(
+            replica.read("context.search", &p).unwrap_err().code,
+            "invalid_params"
+        );
+    }
+}
+
+#[test]
 fn search_cursor_resumes_after_tied_hits_when_a_match_is_added_ahead() {
     let (dir, conn) = search_db();
     let mut replica = replica(Some(conn));
@@ -739,13 +765,8 @@ async fn samples_v10() {
             json!({"query":"needle", "scope":{"session":key()}, "sources":["message"]}),
         ),
     ];
-    let mut root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/mc-app-read-samples-v10");
-    let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
-    let regenerate = output.is_some();
-    if let Some(output) = output.filter(|value| value != "1") {
-        root = output.into();
-    }
+    let testdata = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+    let v10 = testdata.join("mc-app-read-samples-v10");
     let mut samples = BTreeMap::new();
     for (name, method, params) in requests {
         let mut response = replica.read(method, &params).unwrap();
@@ -763,23 +784,62 @@ async fn samples_v10() {
     notice["cursor"] = json!("abc:0");
     let response: Value = serde_json::from_slice(&result_bytes(notice)).unwrap();
     samples.insert("watch.json".into(),json!({"name":"watch","request":{"method":"context.watch","params":{"sessions":[key()]}},"response":response}));
+    let mut search = None;
+    let mut sums = String::new();
+    for (name, value) in samples {
+        let text = format!("{}\n", serde_json::to_string_pretty(&value).unwrap());
+        let frozen = std::fs::read_to_string(v10.join(&name)).unwrap();
+        if name == "search.json" {
+            // v10 documents offset cursors; only v21 tracks the live search reply.
+            search = Some(text.into_bytes());
+        } else {
+            assert_eq!(frozen, text, "stale v10 sample {name}");
+        }
+        sums.push_str(&format!(
+            "{:x}  {name}\n",
+            Sha256::digest(frozen.as_bytes())
+        ));
+    }
+    assert_eq!(
+        std::fs::read_to_string(v10.join("SHA256SUMS")).unwrap(),
+        sums,
+        "stale v10 sample checksums"
+    );
+    check_samples_v21(&testdata, search.unwrap());
+}
+
+fn check_samples_v21(testdata: &std::path::Path, search: Vec<u8>) {
+    let v20 = testdata.join("mc-app-read-samples-v20");
+    let mut samples = BTreeMap::new();
+    for line in std::fs::read_to_string(v20.join("SHA256SUMS"))
+        .unwrap()
+        .lines()
+    {
+        let (_, name) = line.split_once("  ").unwrap();
+        samples.insert(name.to_owned(), std::fs::read(v20.join(name)).unwrap());
+    }
+    // Search is the only v20 sample whose bytes may differ in v21.
+    assert!(samples.insert("search.json".into(), search).is_some());
+
+    let mut root = testdata.join("mc-app-read-samples-v21");
+    let output = std::env::var_os("MC_REGENERATE_APP_READ_SAMPLES");
+    let regenerate = output.is_some();
+    if let Some(output) = output.filter(|value| value != "1") {
+        root = output.into();
+    }
     let mut sums = String::new();
     if regenerate {
         std::fs::create_dir_all(&root).unwrap();
     }
-    for (name, value) in samples {
-        let text = format!("{}\n", serde_json::to_string_pretty(&value).unwrap());
-        sums.push_str(&format!("{:x}  {name}\n", Sha256::digest(text.as_bytes())));
+    for (name, bytes) in samples {
         let path = root.join(&name);
-        if regenerate {
-            std::fs::write(&path, &text).unwrap();
+        let current = std::fs::read(&path);
+        if regenerate && current.as_ref().ok() != Some(&bytes) {
+            std::fs::write(path, &bytes).unwrap();
+        } else {
+            assert_eq!(current.unwrap(), bytes, "stale v21 sample {name}");
         }
-        assert_eq!(
-            std::fs::read_to_string(&path)
-                .unwrap_or_else(|_| panic!("missing {name}; regenerate samples")),
-            text,
-            "stale {name}"
-        );
+        sums.push_str(&format!("{:x}  {name}\n", Sha256::digest(&bytes)));
     }
     if regenerate {
         std::fs::write(root.join("SHA256SUMS"), &sums).unwrap();
@@ -787,7 +847,7 @@ async fn samples_v10() {
     assert_eq!(
         std::fs::read_to_string(root.join("SHA256SUMS")).unwrap(),
         sums,
-        "stale sample checksums"
+        "stale v21 sample checksums"
     );
 }
 

@@ -1,0 +1,42 @@
+{
+  "name": "memories-get-no-history",
+  "request": {
+    "method": "memories.get",
+    "params": {
+      "id": 7
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "memory": {
+        "category": "swe:project-rules",
+        "content": "Never push to main without a review.",
+        "created_at": 1700000007000,
+        "embedded": false,
+        "first_seen_at": 1700000007000,
+        "history": [],
+        "id": 7,
+        "importance": 95,
+        "last_seen_at": 1700000007000,
+        "level": "project",
+        "merged_from": [],
+        "owner": "pj-sample",
+        "retrieval_count": 0,
+        "revision": 1,
+        "safety_critical": true,
+        "seen_count": 1,
+        "sensitive": true,
+        "shareable": false,
+        "source": {
+          "session": "s",
+          "type": "historian"
+        },
+        "status": "permanent",
+        "updated_at": 1700000007000
+      },
+      "op": "memories.get",
+      "schema": 1
+    }
+  }
+}

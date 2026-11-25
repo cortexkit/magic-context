@@ -1,0 +1,262 @@
+{
+  "name": "states",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "m1",
+        "m2",
+        "m3",
+        "m4",
+        "m5",
+        "absent"
+      ],
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "compartments": [
+        {
+          "compartment_id": "1",
+          "first_message_id": "m1",
+          "last_message_id": "m1",
+          "ordinal": 1
+        }
+      ],
+      "messages": [
+        {
+          "compartment_id": "1",
+          "dropped_parts": [],
+          "items": [
+            {
+              "kind": "text",
+              "origin": {
+                "kind": "person"
+              },
+              "part_ref": {
+                "part_key": "p"
+              },
+              "source": "counted",
+              "state": "live",
+              "tokens": 2
+            }
+          ],
+          "message_id": "m1",
+          "outside_reason": null,
+          "parts": {
+            "dropped": 0,
+            "stamped": 0,
+            "tagged": 1
+          },
+          "split": null,
+          "stamped_parts": [],
+          "state": "summarized"
+        },
+        {
+          "compartment_id": null,
+          "dropped_parts": [],
+          "items": [
+            {
+              "kind": "text",
+              "part_ref": {
+                "part_key": "p"
+              },
+              "source": "counted",
+              "state": "stamped",
+              "tokens": 3
+            },
+            {
+              "kind": "tool",
+              "part_ref": {
+                "part_key": "tool"
+              },
+              "source": "runner",
+              "state": "live",
+              "tokens": 700,
+              "tool": "read"
+            },
+            {
+              "kind": "reasoning",
+              "part_ref": {
+                "part_key": "reasoning-a"
+              },
+              "source": "runner",
+              "state": "live",
+              "tokens": 333
+            },
+            {
+              "kind": "reasoning",
+              "part_ref": {
+                "part_key": "reasoning-b"
+              },
+              "source": "runner",
+              "state": "live",
+              "tokens": 668
+            }
+          ],
+          "message_id": "m2",
+          "outside_reason": null,
+          "parts": {
+            "dropped": 0,
+            "stamped": 1,
+            "tagged": 1
+          },
+          "split": null,
+          "stamped_parts": [
+            {
+              "kind": "text",
+              "part_ref": {
+                "part_key": "p"
+              },
+              "size": {
+                "bytes": 11,
+                "input_bytes": null,
+                "input_tokens": null,
+                "tokens": 3
+              },
+              "stage": "queued",
+              "stamped_at_ms": 123,
+              "stamped_at_source": "recorded"
+            }
+          ],
+          "state": "raw"
+        },
+        {
+          "compartment_id": null,
+          "dropped_parts": [
+            {
+              "drop_mode": null,
+              "dropped_at_ms": null,
+              "dropped_at_source": "not_recorded",
+              "kind": "text",
+              "part_ref": {
+                "part_key": "p"
+              },
+              "size": {
+                "bytes": 12,
+                "input_bytes": null,
+                "input_tokens": null,
+                "tokens": 3
+              }
+            }
+          ],
+          "items": [
+            {
+              "kind": "text",
+              "origin": {
+                "kind": "notice",
+                "sender": "prefrontal"
+              },
+              "part_ref": {
+                "part_key": "p"
+              },
+              "source": "counted",
+              "state": "dropped",
+              "tokens": 0
+            }
+          ],
+          "message_id": "m3",
+          "outside_reason": null,
+          "parts": {
+            "dropped": 1,
+            "stamped": 0,
+            "tagged": 1
+          },
+          "split": null,
+          "stamped_parts": [],
+          "state": "dropped"
+        },
+        {
+          "compartment_id": null,
+          "dropped_parts": [],
+          "items": [
+            {
+              "kind": "text",
+              "origin": {
+                "agent_id": "agent_brief",
+                "kind": "agent",
+                "name": "BROCA"
+              },
+              "part_ref": {
+                "part_key": "p"
+              },
+              "source": "counted",
+              "state": "live",
+              "tokens": 5
+            }
+          ],
+          "message_id": "m4",
+          "outside_reason": null,
+          "parts": {
+            "dropped": 0,
+            "stamped": 0,
+            "tagged": 1
+          },
+          "split": null,
+          "stamped_parts": [],
+          "state": "raw"
+        },
+        {
+          "compartment_id": null,
+          "dropped_parts": [],
+          "items": [
+            {
+              "kind": "text",
+              "origin": {
+                "kind": "notice",
+                "sender": "prefrontal",
+                "speaks_for": {
+                  "agent_id": "agent_post",
+                  "name": "SUBC"
+                }
+              },
+              "part_ref": {
+                "part_key": "p"
+              },
+              "source": "counted",
+              "state": "live",
+              "tokens": 2
+            }
+          ],
+          "message_id": "m5",
+          "outside_reason": null,
+          "parts": {
+            "dropped": 0,
+            "stamped": 0,
+            "tagged": 1
+          },
+          "split": null,
+          "stamped_parts": [],
+          "state": "raw"
+        },
+        {
+          "compartment_id": null,
+          "dropped_parts": [],
+          "items": [],
+          "message_id": "absent",
+          "outside_reason": "not_indexed",
+          "parts": {
+            "dropped": 0,
+            "stamped": 0,
+            "tagged": 0
+          },
+          "split": null,
+          "stamped_parts": [],
+          "state": "outside"
+        }
+      ],
+      "moved_from_standalone": false,
+      "op": "context.states",
+      "schema": 1,
+      "session_kind": "mode3",
+      "state": "ready",
+      "version": "mca1:6f7392f1952314e7a9515cfa096bace3b8d60a85232452466eec001c56c9437a"
+    }
+  }
+}

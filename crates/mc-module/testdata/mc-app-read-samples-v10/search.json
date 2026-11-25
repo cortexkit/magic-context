@@ -1329,7 +1329,7 @@
           "source": "message"
         }
       ],
-      "next_cursor": "mca2:a46037918e4c9799806368b4c314d1bb00881a020bbe2f5032f4c842e03c2c76:beb0c6f7a0b5ed8d,50,50,50",
+      "next_cursor": "mca1:a46037918e4c9799806368b4c314d1bb00881a020bbe2f5032f4c842e03c2c76:50",
       "op": "context.search",
       "schema": 1,
       "source_status": {
