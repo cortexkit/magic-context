@@ -2997,6 +2997,15 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn send_refusal_from_wire_for_test(body: &[u8]) -> ClientError {
+    let refusal = serde_json::from_slice(body).expect("a typed module error body");
+    call_error(
+        ops::SESSION_SEND,
+        &subc_client_rs::CallError::Module(refusal),
+    )
+}
+
 /// Whether a failed call may have reached the runner, from what the client
 /// reports about it: no answer to a written request (`outcome_unknown`), or
 /// [`subc_client_rs::CallError::never_forwarded`] (see [`call_error`]).

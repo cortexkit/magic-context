@@ -32,6 +32,9 @@ struct Runner {
     reports: Mutex<Vec<Outcome>>,
     selects: Mutex<usize>,
     queued: bool,
+    send_answers: Mutex<VecDeque<Result<SendReply, ClientError>>>,
+    sent_ids: Mutex<Vec<String>>,
+    polled_ids: Mutex<Vec<String>>,
     withdrawn: Mutex<Vec<String>>,
     select_delay: Duration,
     report_delay: Duration,
@@ -53,6 +56,9 @@ impl Runner {
             reports: Mutex::new(Vec::new()),
             selects: Mutex::new(0),
             queued: false,
+            send_answers: Mutex::default(),
+            sent_ids: Mutex::default(),
+            polled_ids: Mutex::default(),
             withdrawn: Mutex::new(Vec::new()),
             select_delay: Duration::ZERO,
             report_delay: Duration::ZERO,
@@ -93,8 +99,12 @@ impl RunnerClient for Runner {
     async fn send(&self, _: &SessionRef, _: SendRequest) -> Result<SendReply, ClientError> {
         unreachable!()
     }
-    async fn send_child(&self, _: &Child, _: SendRequest) -> Result<SendReply, ClientError> {
+    async fn send_child(&self, _: &Child, request: SendRequest) -> Result<SendReply, ClientError> {
         *self.sends.lock().unwrap() += 1;
+        self.sent_ids.lock().unwrap().push(request.send_id);
+        if let Some(answer) = self.send_answers.lock().unwrap().pop_front() {
+            return answer;
+        }
         if self.queued {
             let mut reply = SendReply::new(send_states::PENDING);
             reply.submission_id = Some("queued-1".into());
@@ -104,7 +114,12 @@ impl RunnerClient for Runner {
         reply.run_id = Some("r1".into());
         Ok(reply)
     }
-    async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
+    async fn child_result(
+        &self,
+        _: &Child,
+        request: RunResultRequest,
+    ) -> Result<RunResult, ClientError> {
+        self.polled_ids.lock().unwrap().push(request.run_id);
         let mut reads = self.reads.lock().unwrap();
         *reads += 1;
         if *reads <= self.failed_reads {
@@ -137,6 +152,9 @@ impl RunnerClient for Runner {
         Ok(true)
     }
 }
+
+#[path = "capacity_refusal_tests.rs"]
+mod capacity_refusal_tests;
 
 impl Router for Runner {
     async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, routing::RouteError> {
