@@ -1002,6 +1002,45 @@ pub fn search_chunks(
     dates: Option<DateRange>,
     semantic: Semantic<'_>,
 ) -> Vec<ChunkHit> {
+    search_chunks_scoped(
+        conn,
+        (session, false),
+        project,
+        limit,
+        cutoff,
+        dates,
+        semantic,
+    )
+}
+
+pub(super) fn search_chunks_in_project(
+    conn: &Connection,
+    session: &str,
+    project: &str,
+    limit: usize,
+    dates: Option<DateRange>,
+    semantic: Semantic<'_>,
+) -> Vec<ChunkHit> {
+    search_chunks_scoped(
+        conn,
+        (session, true),
+        project,
+        limit,
+        i64::MAX,
+        dates,
+        semantic,
+    )
+}
+
+fn search_chunks_scoped(
+    conn: &Connection,
+    (session, check_harness): (&str, bool),
+    project: &str,
+    limit: usize,
+    cutoff: i64,
+    dates: Option<DateRange>,
+    semantic: Semantic<'_>,
+) -> Vec<ChunkHit> {
     if limit == 0 {
         return Vec::new();
     }
@@ -1025,11 +1064,15 @@ pub fn search_chunks(
                  ON start_map.session_id = c.session_id AND start_map.message_ordinal = c.start_message
                LEFT JOIN message_fts_rowid_map end_map
                  ON end_map.session_id = c.session_id AND end_map.message_ordinal = c.end_message
-              WHERE e.session_id = ?1 AND e.project_path = ?2 AND e.model_id = ?3
+               WHERE e.session_id = ?1 AND e.project_path = ?2 AND e.model_id = ?3
+                 AND (?4 = 0 OR (e.session_id = c.session_id AND e.harness = c.harness AND EXISTS (
+                       SELECT 1 FROM session_projects p WHERE p.session_id = c.session_id
+                         AND p.harness = c.harness AND p.project_path = ?2)))
               ORDER BY e.id ASC",
         )?;
-        let rows =
-            statement.query_map(params![session, project, semantic.chunk_model_id], |row| {
+        let rows = statement.query_map(
+            params![session, project, semantic.chunk_model_id, check_harness],
+            |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
@@ -1040,7 +1083,8 @@ pub fn search_chunks(
                     row.get(6)?,
                     (row.get(7)?, row.get(8)?),
                 ))
-            })?;
+            },
+        )?;
         rows.collect()
     };
     let mut best: BTreeMap<i64, ChunkHit> = BTreeMap::new();

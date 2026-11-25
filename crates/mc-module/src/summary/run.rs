@@ -919,7 +919,7 @@ async fn call<C: RunnerClient>(
         plan: None,
         attribution: call_on.attribution,
     };
-    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage)
+    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage, None)
         .await?
         .completed()?;
     if reply.length_capped {
@@ -1061,7 +1061,44 @@ pub(crate) async fn send_and_wait_stepped<C: RunnerClient>(
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<Ended, SummaryError> {
-    match send_and_wait_inner(client, child, send_id, prompt, how, usage).await {
+    send_and_wait_with_usage(client, child, send_id, prompt, how, usage, None).await
+}
+
+/// What an experiment can prove about its send, independently of whether it
+/// received a terminal result. Aggregate usage may have come from an earlier poll.
+#[derive(Default)]
+pub(crate) struct ObservedSend {
+    pub accepted: bool,
+    pub run_id: Option<String>,
+    pub submission_id: Option<String>,
+    pub finished: bool,
+    pub terminal_usage: bool,
+    pub usage: Option<cortexkit_role_llm_runner::usage::RunUsage>,
+}
+
+/// The same send, retaining the runner's receipt and exact aggregate usage.
+pub(crate) async fn send_and_wait_recorded<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    send_id: &str,
+    prompt: &str,
+    how: &Model<'_>,
+    usage: &mut Option<StepUsage>,
+    reported: &mut ObservedSend,
+) -> Result<Ended, SummaryError> {
+    send_and_wait_with_usage(client, child, send_id, prompt, how, usage, Some(reported)).await
+}
+
+async fn send_and_wait_with_usage<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    send_id: &str,
+    prompt: &str,
+    how: &Model<'_>,
+    usage: &mut Option<StepUsage>,
+    reported: Option<&mut ObservedSend>,
+) -> Result<Ended, SummaryError> {
+    match send_and_wait_inner(client, child, send_id, prompt, how, usage, reported).await {
         Ok(reply) => Ok(reply),
         Err(CallError::Summary(error)) => Err(error),
         Err(CallError::HostRefused(error)) => Err(SummaryError::Failed(error)),
@@ -1078,6 +1115,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
     prompt: &str,
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
+    mut reported: Option<&mut ObservedSend>,
 ) -> Result<Ended, CallError> {
     if tokio::time::Instant::now() >= how.deadline {
         return Err(TIMED_OUT.to_owned().into());
@@ -1196,6 +1234,17 @@ async fn send_and_wait_inner<C: RunnerClient>(
                     )
                 }
             };
+        if let Some(observed) = reported.as_deref_mut() {
+            if matches!(
+                reply.state.as_str(),
+                states::ACTIVE | send_states::PENDING | send_states::FINISHED
+            ) && (reply.run_id.is_some() || reply.submission_id.is_some())
+            {
+                observed.accepted = true;
+                observed.run_id.clone_from(&reply.run_id);
+                observed.submission_id.clone_from(&reply.submission_id);
+            }
+        }
         if reply.state == send_states::NOT_DELIVERED {
             // A host that refused the words themselves (an unreadable
             // attachment, invalid host configuration, an unsupported host
@@ -1255,7 +1304,16 @@ async fn send_and_wait_inner<C: RunnerClient>(
     }) else {
         return Err(format!("the runner did not start a run: {}", reply.state).into());
     };
-    let result = wait_for(client, child, &run_id, how.deadline, how.send, usage).await?;
+    let result = wait_for(
+        client,
+        child,
+        &run_id,
+        how.deadline,
+        how.send,
+        usage,
+        reported,
+    )
+    .await?;
     if result.state != states::COMPLETED {
         if result.state == states::ERROR
             && result.error.as_ref().is_some_and(|error| {
@@ -1638,6 +1696,7 @@ async fn wait_for<C: RunnerClient>(
     deadline: tokio::time::Instant,
     send: SendKind,
     usage: &mut Option<StepUsage>,
+    mut observed: Option<&mut ObservedSend>,
 ) -> Result<RunResult, SummaryError> {
     // Registered before the first read: an event that comes after that read
     // wakes the next pause, and one that came before it means the read
@@ -1661,6 +1720,9 @@ async fn wait_for<C: RunnerClient>(
             }
             Ok(Err(_)) | Err(_) => break,
         };
+        if let (Some(observed), Some(current)) = (observed.as_deref_mut(), &result.usage) {
+            observed.usage = Some(current.clone());
+        }
         if let Some(current) = result.usage.as_ref().filter(|usage| {
             usage.steps > 0
                 || [
@@ -1682,6 +1744,10 @@ async fn wait_for<C: RunnerClient>(
             .as_ref()
             .is_some_and(|wait| wait.party == AwaitParty::Runner);
         if !still_running(&result.state) && !runner_wait {
+            if let Some(observed) = observed.as_deref_mut() {
+                observed.finished = true;
+                observed.terminal_usage = result.usage.is_some();
+            }
             if let Some(reported) = reported {
                 *usage = Some(add_usage(usage.take(), &reported));
             }
@@ -1699,7 +1765,12 @@ async fn wait_for<C: RunnerClient>(
     if let Some(reported) = reported {
         *usage = Some(add_usage(usage.take(), &reported));
     }
-    stop_waiting(client, child, run_id, last, send).await
+    let result = stop_waiting(client, child, run_id, last, send).await;
+    if let (Some(observed), Ok(result)) = (observed, &result) {
+        observed.finished = !still_running(&result.state);
+        observed.terminal_usage = observed.finished && result.usage.is_some();
+    }
+    result
 }
 
 /// Read status before cancelling: cancellation may clear the wait. Older

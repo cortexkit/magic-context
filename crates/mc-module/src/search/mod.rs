@@ -12,6 +12,7 @@
 //! [`prepare`] and [`finish`], without holding the store.
 
 pub(crate) mod background;
+pub(crate) mod lab;
 pub mod messages;
 pub mod rerank;
 pub mod sources;

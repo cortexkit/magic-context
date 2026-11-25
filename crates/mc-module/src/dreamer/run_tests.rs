@@ -32,6 +32,7 @@ pub(crate) enum Ends {
     /// reset, the way an llm-runner 0.8.51 runner ends a queued run.
     Full(u64),
     SpentFull(u64, u64),
+    LabTools(Vec<serde_json::Value>),
     /// The runner could not hand the prompt to its host, so no model ran.
     NeverRan,
 }
@@ -79,6 +80,12 @@ pub(crate) struct Client {
     pub(crate) core: Option<Result<serde_json::Value, crate::client::CoreRefusal>>,
     /// Each call to core: its method and params.
     pub(crate) core_calls: Mutex<Vec<(String, serde_json::Value)>>,
+    pub(crate) lab: Option<std::sync::Arc<super::super::lab::Registry>>,
+    pub(crate) lab_tool_results: Mutex<Vec<serde_json::Value>>,
+    pub(crate) lab_result: Option<RunResult>,
+    pub(crate) lab_verdicts_path: Option<std::path::PathBuf>,
+    pub(crate) lab_verdicts_after: Mutex<Vec<serde_json::Value>>,
+    pub(crate) lab_select_delay: Option<Duration>,
 }
 
 impl Client {
@@ -105,6 +112,12 @@ impl Client {
             entorhinal: None,
             core: None,
             core_calls: Mutex::default(),
+            lab: None,
+            lab_tool_results: Mutex::default(),
+            lab_result: None,
+            lab_verdicts_path: None,
+            lab_verdicts_after: Mutex::default(),
+            lab_select_delay: None,
         }
     }
 
@@ -217,7 +230,11 @@ impl RunnerClient for Client {
         reply.run_id = Some("run".into());
         Ok(reply)
     }
-    async fn child_result(&self, _: &Child, _: RunResultRequest) -> Result<RunResult, ClientError> {
+    async fn child_result(
+        &self,
+        child: &Child,
+        _: RunResultRequest,
+    ) -> Result<RunResult, ClientError> {
         let ends = self
             .ends
             .lock()
@@ -242,6 +259,46 @@ impl RunnerClient for Client {
                 usage.input_tokens = Some(1_000);
                 result.usage = Some(usage);
                 result
+            }
+            Ends::LabTools(calls) => {
+                let route = crate::route::Route {
+                    session: child.session.clone(),
+                    workdir: child.project_root.clone(),
+                    project: None,
+                    agent_id: None,
+                };
+                let lab = self
+                    .lab
+                    .as_ref()
+                    .unwrap()
+                    .get(&route)
+                    .expect("active lab child");
+                let mut result = completed("", Some(Finish::Stop));
+                let mut usage = cortexkit_role_llm_runner::usage::RunUsage::default();
+                usage.steps = calls.len() as u64 + 1;
+                usage.input_tokens = Some(123);
+                usage.cache_write_tokens = Some(17);
+                usage.cached_input_tokens = Some(321);
+                usage.output_tokens = Some(42);
+                result.usage = Some(usage);
+                for call in calls {
+                    let bytes = serde_json::to_vec(&call).unwrap();
+                    let reply = crate::transport::lab_tool(&bytes, lab.clone(), false)
+                        .await
+                        .unwrap();
+                    self.lab_tool_results
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&reply).unwrap());
+                    if let Some(path) = &self.lab_verdicts_path {
+                        let bytes = std::fs::read(path).unwrap();
+                        self.lab_verdicts_after
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&bytes).unwrap());
+                    }
+                }
+                self.lab_result.clone().unwrap_or(result)
             }
             Ends::NeverRan => crate::summary::run::never_ran_tests::handover("nothing_written"),
             Ends::Error(message) => {
@@ -288,6 +345,9 @@ fn completed(text: &str, finish: Option<Finish>) -> RunResult {
 impl Router for Client {
     async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, routing::RouteError> {
         self.selects.lock().unwrap().push(request.clone());
+        if let Some(delay) = self.lab_select_delay {
+            tokio::time::sleep(delay).await;
+        }
         if let Some(refusal) = &self.refuse {
             return Err(refusal.clone());
         }

@@ -145,6 +145,7 @@ async fn cold_scoped_catalog_waits_for_project_settings_without_setup() {
             Bound {
                 route: route.clone(),
                 role,
+                lab_scope: false,
             },
         );
     }

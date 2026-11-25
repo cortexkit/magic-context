@@ -62,7 +62,7 @@ pub fn consumer_declarations() -> cortexkit_role_routing::declarations::Consumer
     summary.tools = Some(ToolsRequirement::None);
     summary.context_window = Some(SUMMARY_CONTEXT_WINDOW);
     let mut consumers = vec![ConsumerDeclaration::new(SUMMARY_CONSUMER).with_defaults(summary)];
-    for demand in DREAM_DEMANDS {
+    for demand in DREAM_DEMANDS.iter().chain(std::iter::once(&LAB_DEMAND)) {
         let mut defaults = DemandDefaults::new()
             .with_iq(demand.iq)
             .with_priority(ConsumerPriority::Background);
@@ -192,6 +192,16 @@ pub const DREAM_DEMANDS: &[DreamDemand] = &[
         max_steps: 60,
     },
 ];
+
+// The lab reviews evidence like a verify task, but takes its step cap and
+// any routing overrides from the experiment, never the scheduled defaults.
+pub(crate) static LAB_DEMAND: DreamDemand = DreamDemand {
+    kind: "lab",
+    iq: 60,
+    context_window: 200_000,
+    reads_code: true,
+    max_steps: 1,
+};
 
 /// The largest reply a dreamer task asks its runner for, capped further by
 /// the chosen model's own output limit.

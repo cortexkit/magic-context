@@ -195,6 +195,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
         concurrency: Concurrency::ModuleManaged,
     });
     let mut claims = vec![
+        subc_protocol::peer::OBSERVED_PEER_CAPABILITY.to_owned(),
         COMPACTION_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_HOST_PARTS_PROVIDES.to_owned(),
@@ -1501,6 +1502,7 @@ pub struct Handler {
     bound: Mutex<HashMap<u16, Bound>>,
     app_bound: Mutex<HashMap<u16, AppCaller>>,
     command_bound: Mutex<HashMap<u16, Principal>>,
+    local_lab_routes: Mutex<std::collections::HashSet<u16>>,
     context_bound: Mutex<std::collections::HashSet<u16>>,
     /// Every bound `agent-data` route, by channel, with the caller the
     /// daemon stamped on it.
@@ -1794,6 +1796,7 @@ const HOOK_ROLE: (&str, &str) = (step::ROLE, step::VERSION);
 struct Bound {
     route: Route,
     role: RouteRole,
+    lab_scope: bool,
 }
 
 /// The roles ck-mc serves, one per route.
@@ -1837,6 +1840,7 @@ impl Handler {
             bound: Mutex::default(),
             app_bound: Mutex::default(),
             command_bound: Mutex::default(),
+            local_lab_routes: Mutex::default(),
             context_bound: Mutex::default(),
             agent_data_bound: Mutex::default(),
             flow_bound: Mutex::default(),
@@ -2000,6 +2004,11 @@ impl Handler {
             // Catalog answers are served as the exact canonical bytes the
             // catalog produced, never re-serialized.
             RouteRole::Tools => {
+                if bound.lab_scope {
+                    if let Some(lab) = self.module.lab_child(&bound.route) {
+                        return lab_tool(body, lab, false).await;
+                    }
+                }
                 return self
                     .tool_at(&bound.route, body, arrived, handle)
                     .await
@@ -2008,7 +2017,14 @@ impl Handler {
                         refusal
                     });
             }
-            RouteRole::Discovery => return self.discovery(&bound.route, body, handle).await,
+            RouteRole::Discovery => {
+                if bound.lab_scope {
+                    if let Some(lab) = self.module.lab_child(&bound.route) {
+                        return lab_tool(body, lab, true).await;
+                    }
+                }
+                return self.discovery(&bound.route, body, handle).await;
+            }
             RouteRole::Hooks => self.hook(&bound.route, body).await?,
         };
         Ok(serde_json::to_vec(&answer).expect("answers serialize"))
@@ -2321,6 +2337,98 @@ fn tool_call(body: &[u8]) -> Result<ToolCallRequest, Refusal> {
         .map_err(|error| Refusal::invalid_params("", format!("not a tool call: {error}")))
 }
 
+pub(crate) async fn lab_tool(
+    body: &[u8],
+    lab: Arc<crate::dreamer::lab::Lab>,
+    discovery: bool,
+) -> Result<Vec<u8>, Refusal> {
+    use cortexkit_role_tool_provider::{call, errors, ops};
+    let request = tool_call(body)?;
+    match request.name.as_str() {
+        ops::ROLE_DESCRIBE => {
+            return crate::catalog::role_describe_bytes()
+                .map_err(crate::catalog::CatalogError::into_refusal)
+        }
+        ops::TOOL_CATALOG => {
+            return crate::catalog::lab_answer_bytes(&request.arguments, lab.tools())
+                .map_err(crate::catalog::CatalogError::into_refusal)
+        }
+        name if discovery => {
+            return Err(Refusal::new(
+                codes::UNKNOWN_ROUTE_ROLE,
+                format!("{name} needs a tool-provider route"),
+                None,
+            ))
+        }
+        _ => {}
+    }
+    lab.note_tool_call();
+    if fork_call(body, &request.name)? {
+        return Err(Refusal::new(
+            "not_permitted",
+            "Lab tools are not available on forks.",
+            None,
+        ));
+    }
+    let definition = lab
+        .tools()
+        .iter()
+        .find(|definition| definition["name"].as_str() == Some(&request.name))
+        .ok_or_else(|| {
+            let error = errors::unknown_tool(&request.name);
+            Refusal::new(&error.code, error.message, None)
+        })?;
+    if let Some(pin) =
+        call::check_call(&request).map_err(|e| Refusal::new(&e.code, e.message, e.detail))?
+    {
+        if definition["schema_digest"].as_str() != Some(&pin.schema_digest) {
+            return Err(Refusal::new(
+                errors::TOOL_SCHEMA_CHANGED,
+                "the lab tool schema does not match its pin",
+                None,
+            ));
+        }
+        if definition["semantics"].as_u64() != Some(pin.semantics) {
+            return Err(Refusal::new(
+                errors::TOOL_SEMANTICS_CHANGED,
+                "the lab tool does not match its pinned semantics",
+                None,
+            ));
+        }
+    }
+    let (text, is_error) = match lab.tool(&request.name, request.arguments).await {
+        Ok(text) => (text, false),
+        Err(error) => (error, true),
+    };
+    let mut result = ToolResult::new(vec![ContentPart::text(crate::tool_output::bounded(text))]);
+    if is_error {
+        result.is_error = Some(true);
+    }
+    Ok(serde_json::to_vec(&result).expect("lab tool result serializes"))
+}
+
+fn local_lab_caller(request: &RouteBindRequest) -> bool {
+    use subc_protocol::peer::ObservedPeerStatus;
+    let observed = request.peer.observed_peer.as_ref();
+    matches!(request.principal, Some(Principal::Direct))
+        && matches!(request.call_mode, subc_client_rs::CallMode::Classic)
+        && request.scope.is_none()
+        && observed.is_some_and(|peer| {
+            matches!(peer.status, ObservedPeerStatus::Observed)
+                && local_lab_user().is_some_and(|uid| peer.uid == Some(uid))
+        })
+}
+
+#[cfg(unix)]
+fn local_lab_user() -> Option<u32> {
+    Some(nix::unistd::geteuid().as_raw())
+}
+
+#[cfg(not(unix))]
+fn local_lab_user() -> Option<u32> {
+    None
+}
+
 /// Whether a call to `tool` carries a well-formed `fork_id`, refusing a
 /// malformed one and a marked call to a tool the catalog does not mark
 /// read-only.
@@ -2455,6 +2563,10 @@ impl ModuleHandler for Handler {
             .lock()
             .expect("command routes")
             .remove(&request.handle.channel);
+        self.local_lab_routes
+            .lock()
+            .expect("lab command routes")
+            .remove(&request.handle.channel);
         self.flow_bound
             .lock()
             .expect("flow routes")
@@ -2479,6 +2591,15 @@ impl ModuleHandler for Handler {
                 .lock()
                 .expect("command routes")
                 .insert(request.handle.channel, principal.clone());
+            if local_lab_caller(request) {
+                self.local_lab_routes
+                    .lock()
+                    .expect("lab command routes")
+                    .insert(request.handle.channel);
+                // This bind admits only the hidden lab command. It does not
+                // create a session or bypass the other command admissions.
+                return BindDecision::accept();
+            }
             if cortexkit_role_user_commands::check_admission(&principal, false, false).is_ok() {
                 self.bound.lock().expect("bound routes").insert(
                     request.handle.channel,
@@ -2494,6 +2615,7 @@ impl ModuleHandler for Handler {
                             agent_id: None,
                         },
                         role: RouteRole::Hooks,
+                        lab_scope: false,
                     },
                 );
                 return BindDecision::accept();
@@ -2576,6 +2698,7 @@ impl ModuleHandler for Handler {
                                 agent_id: None,
                             },
                             role: RouteRole::Hooks,
+                            lab_scope: false,
                         },
                     );
                     BindDecision::accept()
@@ -2645,10 +2768,18 @@ impl ModuleHandler for Handler {
                 .as_ref()
                 .and_then(|scope| scope.attributes.agent_id.clone()),
         };
-        self.bound
-            .lock()
-            .expect("bound routes")
-            .insert(request.handle.channel, Bound { route, role });
+        let lab_scope = request.scope.as_ref().is_some_and(|scope| {
+            matches!(&scope.owner,
+            Principal::Reserved { module_id } if module_id == crate::MODULE_ID)
+        });
+        self.bound.lock().expect("bound routes").insert(
+            request.handle.channel,
+            Bound {
+                route,
+                role,
+                lab_scope,
+            },
+        );
         BindDecision::accept()
     }
 
@@ -2732,6 +2863,22 @@ impl Handler {
             .get(&channel)
             .cloned();
         if let Some(principal) = principal {
+            if crate::user_commands::dreamer::lab_requested(body) {
+                let local = self
+                    .local_lab_routes
+                    .lock()
+                    .expect("lab command routes")
+                    .contains(&channel);
+                let result = if local {
+                    self.module.lab_command(body).await
+                } else {
+                    Err(subc_protocol::ErrorBody::new(
+                        "caller_not_admitted",
+                        "dreamer_lab_run requires an unscoped local owner connection",
+                    ))
+                };
+                return Some(result);
+            }
             // Other management consumers retain their existing operations.
             // Command params are decoded only after admitting the daemon's
             // recorded caller for this route.
@@ -3419,6 +3566,189 @@ mod user_commands_tests {
             .command(10, br#"{"method":"session_data.read","params":{}}"#)
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn dreamer_lab_refuses_remote_and_relayed_callers_before_decoding_the_spec() {
+        let handler = handler();
+        let body =
+            br#"{"method":"commands.run","params":{"id":"dreamer_lab_run","args":{"spec":42}}}"#;
+        for (principal, harness) in [
+            (Principal::Direct, "ck"),
+            (
+                Principal::Reserved {
+                    module_id: "callosum".into(),
+                },
+                "fed-phone:paired",
+            ),
+            (
+                Principal::Reserved {
+                    module_id: "callosum".into(),
+                },
+                "fed-app:remote",
+            ),
+            (
+                Principal::Reserved {
+                    module_id: "occipital".into(),
+                },
+                "local-looking-label",
+            ),
+        ] {
+            let mut request = route(principal).with_call_mode(subc_client_rs::CallMode::Classic);
+            request.identity.harness = harness.into();
+            handler.on_bind(&request).await;
+            let error = handler.command(10, body).await.unwrap().unwrap_err();
+            assert_eq!(error.code, "caller_not_admitted", "{harness}");
+        }
+        let commands = crate::user_commands::describe();
+        assert!(!commands
+            .commands
+            .iter()
+            .any(|command| command.id == "dreamer_lab_run"));
+    }
+
+    #[cfg(unix)]
+    fn lab_owner_bind() -> RouteBindRequest {
+        let peer =
+            serde_json::from_value(json!({"status":"observed","uid":local_lab_user().unwrap()}))
+                .unwrap();
+        route(Principal::Direct)
+            .with_call_mode(subc_client_rs::CallMode::Classic)
+            .with_peer(subc_protocol::peer::RouteBindPeer::new().with_observed_peer(Some(peer)))
+    }
+
+    #[cfg(unix)]
+    const LAB_MALFORMED: &[u8] =
+        br#"{"method":"commands.run","params":{"id":"dreamer_lab_run","args":{"spec":42}}}"#;
+
+    #[cfg(unix)]
+    macro_rules! lab_refuses_only {
+        ($test:ident, $change:expr) => {
+            #[tokio::test]
+            async fn $test() {
+                let handler = handler();
+                let mut request = lab_owner_bind();
+                ($change)(&mut request);
+                handler.on_bind(&request).await;
+                assert_eq!(
+                    handler
+                        .command(10, LAB_MALFORMED)
+                        .await
+                        .unwrap()
+                        .unwrap_err()
+                        .code,
+                    "caller_not_admitted"
+                );
+            }
+        };
+    }
+
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_wrong_principal,
+        |r: &mut RouteBindRequest| r.principal = Some(Principal::Reserved {
+            module_id: "occipital".into()
+        })
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_scope,
+        |r: &mut RouteBindRequest| r.scope = Some(subc_protocol::scope::ScopeStamp::new(
+            Principal::Direct,
+            "head",
+            1,
+            subc_protocol::scope::ScopeKind::Head
+        ))
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_non_classic,
+        |r: &mut RouteBindRequest| r.call_mode = subc_client_rs::CallMode::Codemode
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_unobserved_status,
+        |r: &mut RouteBindRequest| r.peer.observed_peer.as_mut().unwrap().status =
+            subc_protocol::peer::ObservedPeerStatus::Unobserved
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_wrong_uid,
+        |r: &mut RouteBindRequest| r.peer.observed_peer.as_mut().unwrap().uid =
+            Some(local_lab_user().unwrap() ^ 1)
+    );
+    #[cfg(unix)]
+    lab_refuses_only!(
+        dreamer_lab_refuses_only_absent_peer,
+        |r: &mut RouteBindRequest| r.peer.observed_peer = None
+    );
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dreamer_lab_valid_bind_reaches_spec_decode() {
+        let handler = handler();
+        handler.on_bind(&lab_owner_bind()).await;
+        assert_eq!(
+            handler
+                .command(10, LAB_MALFORMED)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "invalid_params"
+        );
+    }
+
+    #[test]
+    fn dreamer_lab_rejects_an_unknown_outer_envelope_field() {
+        let body = br#"{"method":"commands.run","fork_id":"stray","params":{"id":"dreamer_lab_run","args":{"spec":"/example/spec.json"}}}"#;
+        assert!(crate::user_commands::dreamer::lab_requested(body));
+        let error = crate::user_commands::dreamer::lab_path(body).unwrap_err();
+        assert_eq!(error.code, "invalid_params");
+        assert!(error.message.contains("fork_id"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dreamer_lab_requires_the_daemon_observed_local_owner_and_classic_mode() {
+        let handler = handler();
+        let uid = local_lab_user().unwrap();
+        let with_peer = |principal, uid| {
+            let peer = serde_json::from_value(json!({"status":"observed","uid":uid})).unwrap();
+            route(principal)
+                .with_call_mode(subc_client_rs::CallMode::Classic)
+                .with_peer(subc_protocol::peer::RouteBindPeer::new().with_observed_peer(Some(peer)))
+        };
+        let body =
+            br#"{"method":"commands.run","params":{"id":"dreamer_lab_run","args":{"spec":42}}}"#;
+        let local = with_peer(Principal::Direct, uid);
+        handler.on_bind(&local).await;
+        assert_eq!(
+            handler.command(10, body).await.unwrap().unwrap_err().code,
+            "invalid_params"
+        );
+        for request in [
+            with_peer(Principal::Direct, uid ^ 1),
+            with_peer(Principal::Direct, uid).with_call_mode(subc_client_rs::CallMode::Codemode),
+            with_peer(Principal::Direct, uid).with_scope(subc_protocol::scope::ScopeStamp::new(
+                Principal::Direct,
+                "head",
+                1,
+                subc_protocol::scope::ScopeKind::Head,
+            )),
+            with_peer(
+                Principal::Reserved {
+                    module_id: "occipital".into(),
+                },
+                uid,
+            ),
+        ] {
+            handler.on_bind(&request).await;
+            assert_eq!(
+                handler.command(10, body).await.unwrap().unwrap_err().code,
+                "caller_not_admitted"
+            );
+        }
     }
 }
 

@@ -8,7 +8,7 @@ use serde_json::Value;
 use wire::{Command, ErrorBody, ModulePreviewRequest, ModuleRunRequest, RunReply, Subject};
 
 mod docs;
-mod dreamer;
+pub(crate) mod dreamer;
 mod memories;
 mod notes;
 pub(crate) mod owner;

@@ -25,6 +25,18 @@ use mc_module::transport::{manifest_for, Handler, SubcRunnerClient};
 const DEFAULT_MODULE_ID: &str = mc_module::MODULE_ID;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Development tool: run an experiment in the already running module,
+    // without starting a second module or opening a context store here.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("lab")) {
+        match lab_run() {
+            Ok(folder) => println!("{folder}"),
+            Err(error) => {
+                eprintln!("ck-mc lab run: {error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("tag-floor") {
         return tag_floor();
     }
@@ -85,6 +97,78 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // transport is still alive. Unfinished runs are recovered on startup.
     drop(dreamer);
     result
+}
+
+fn lab_run() -> Result<String, String> {
+    use serde_json::json;
+    use subc_client_rs::{CallError, CallOptions, ConsumerOptions, SubcConsumer};
+    use subc_protocol::{BindIdentity, RouteTarget};
+
+    let mut args = std::env::args_os().skip(2);
+    let verb = args.next();
+    let spec = args.next().map(PathBuf::from);
+    if verb.as_deref() != Some(std::ffi::OsStr::new("run"))
+        || spec.is_none()
+        || args.next().is_some()
+    {
+        return Err("expected run followed by an absolute spec path".into());
+    }
+    let spec = spec.expect("checked spec argument");
+    if !spec.is_absolute() {
+        return Err("spec path must be absolute".into());
+    }
+    let spec = spec.to_str().ok_or("spec path must be UTF-8")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "could not start the local daemon client")?;
+    runtime.block_on(async {
+        let consumer = SubcConsumer::connect_default_local(ConsumerOptions::default())
+            .await
+            .map_err(|_| "could not connect to the local daemon socket")?;
+        let request = serde_json::to_vec(&json!({"method":"commands.run","params":{
+            "id":"dreamer_lab_run","args":{"spec":spec}
+        }}))
+        .expect("lab command serializes");
+        let reply = consumer
+            .call(
+                RouteTarget::ManagementSurface {
+                    module_id: DEFAULT_MODULE_ID.to_owned(),
+                },
+                BindIdentity::new("ck-mc-lab", "operator"),
+                request,
+                CallOptions::default(),
+            )
+            .await;
+        consumer.close().await;
+        let bytes = match reply {
+            Ok(bytes) => bytes,
+            Err(CallError::Module(error)) => {
+                return Err(format!("{}: {}", error.code, error.message))
+            }
+            Err(error) if error.route_open_refusal().is_some() => {
+                let error = error.route_open_refusal().expect("checked route refusal");
+                return Err(format!("{}: {}", error.code, error.message));
+            }
+            // Do not dump the SDK's connection details or error payloads.
+            Err(_) => {
+                return Err(
+                    "local daemon request failed; check the output directory before retrying"
+                        .into(),
+                )
+            }
+        };
+        let reply: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "invalid lab reply from Magic Context")?;
+        if reply.get("outcome").and_then(serde_json::Value::as_str) != Some("started") {
+            return Err("Magic Context did not start the lab".into());
+        }
+        reply
+            .get("out_dir")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "Magic Context did not return the output folder".into())
+    })
 }
 
 async fn serve(dreamer: &tokio::runtime::Handle) -> Result<(), Box<dyn Error + Send + Sync>> {

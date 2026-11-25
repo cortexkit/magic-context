@@ -120,6 +120,7 @@ struct Inner<C> {
     /// The dreamer, which runs scheduled memory tasks for the projects this
     /// process has sessions of. `None` without `context.db`.
     dreamer: Option<Arc<crate::dreamer::engine::Engine>>,
+    labs: Arc<crate::dreamer::lab::Registry>,
     dreamer_enabled: AtomicBool,
     #[cfg(feature = "memory-replica")]
     replica_health: std::sync::OnceLock<Arc<crate::replica::health::Health>>,
@@ -373,6 +374,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 session_projects,
                 active_projects: Mutex::new(HashMap::new()),
                 dreamer,
+                labs: Arc::default(),
                 dreamer_enabled: AtomicBool::new(dreamer_enabled),
                 #[cfg(feature = "memory-replica")]
                 replica_health: std::sync::OnceLock::new(),
@@ -1477,6 +1479,35 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         };
         self.run_worker(key.clone(), &jobs, receiver, Some(*quiet));
         jobs
+    }
+
+    pub(crate) fn lab_child(&self, route: &Route) -> Option<Arc<crate::dreamer::lab::Lab>> {
+        self.inner.labs.get(route)
+    }
+
+    pub(crate) async fn lab_command(&self, body: &[u8]) -> Result<Value, subc_protocol::ErrorBody> {
+        let path = crate::user_commands::dreamer::lab_path(body)?;
+        let (Some(live), Some(engine)) = (&self.inner.db, &self.inner.dreamer) else {
+            return Err(subc_protocol::ErrorBody::new(
+                "unavailable",
+                "the dreamer runtime is unavailable",
+            ));
+        };
+        let start = crate::dreamer::lab::Start::load(&path, &live.path, self.inner.labs.clone())
+            .await
+            .map_err(|error| subc_protocol::ErrorBody::new("invalid_params", error))?;
+        let config = self.inner.config.clone();
+        let reply = serde_json::json!({"outcome": "started", "out_dir": start.out_dir()});
+        engine.spawn(start.execute_with(
+            self.inner.client.clone(),
+            self.inner.labs.clone(),
+            move |root, project| {
+                config
+                    .resolve_for_project(root.to_str(), Some(project), "", 0)
+                    .embedding
+            },
+        ));
+        Ok(reply)
     }
 
     pub(crate) async fn command_request(

@@ -12,6 +12,7 @@ pub mod checkout;
 pub mod cron;
 pub mod engine;
 pub mod guidance;
+pub(crate) mod lab;
 pub mod lease;
 #[cfg(test)]
 pub(crate) mod lease_double;

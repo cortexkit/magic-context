@@ -708,6 +708,7 @@ async fn pause_at_deadline(client: &PausedRunner) -> AccountWait {
         tokio::time::Instant::now() + Duration::from_millis(10),
         SendKind::TurnOne,
         &mut None,
+        None,
     )
     .await
     .expect_err("the run stays paused");
