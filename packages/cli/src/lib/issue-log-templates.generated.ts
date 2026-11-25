@@ -2558,6 +2558,7 @@ const TEMPLATE_DATA = [
 "[dreamer] \x01: skipped (anchor-tail-mismatch)",
 "[dreamer] \x01: skipped (mural is not enabled)",
 "v2 storage \x01 notice could not be delivered:",
+"ck-mc: upkeep embedded \x01 workspace memories",
 "note_nudge_anchors CAS: \x01 retries exhausted",
 "turn two: gave up stage \x01 (outcome_unknown)",
 "ck-mc: turn two: gave up \x01 (recovery_error)",

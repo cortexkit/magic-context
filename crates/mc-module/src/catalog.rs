@@ -996,7 +996,8 @@ fn catalog_tool(
              {FROZEN_CTX_REDUCE_SCHEMA_DIGEST}; change it only together with the gateway"
         )));
     }
-    let description = match config.tool_descriptions.get(&tool.name) {
+    let custom_description = config.tool_descriptions.get(&tool.name);
+    let description = match custom_description {
         Some(text) => text.as_str(),
         None => (!compacting)
             .then(|| {
@@ -1017,15 +1018,16 @@ fn catalog_tool(
                 ))
             })?,
     };
-    let description = if tool.name == "ctx_note" && !config.smart_notes_enabled {
-        without_smart_note_description(
-            definition()
-                .description(surface, &tool.name)
-                .unwrap_or(description),
-        )
-    } else {
-        description.to_string()
-    };
+    let description =
+        if tool.name == "ctx_note" && !config.smart_notes_enabled && custom_description.is_none() {
+            without_smart_note_description(
+                definition()
+                    .description(surface, &tool.name)
+                    .unwrap_or(description),
+            )
+        } else {
+            description.to_string()
+        };
     let mut entry = json!({
         "name": tool.name,
         "schema_digest": schema_digest,

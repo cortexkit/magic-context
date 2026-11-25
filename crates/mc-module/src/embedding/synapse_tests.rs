@@ -710,7 +710,7 @@ async fn upkeep_embeds_memories_on_its_first_round() {
 }
 
 #[tokio::test]
-async fn source_project_upkeep_refreshes_workspace_vectors_for_each_model_identity() {
+async fn user_provider_upkeep_refreshes_workspace_vectors_for_each_model_identity() {
     use crate::memory_levels::Authority;
     use crate::memory_writes::Writer;
     use crate::search::sources::{search_memories, MemoryOwners, Semantic};
@@ -718,10 +718,10 @@ async fn source_project_upkeep_refreshes_workspace_vectors_for_each_model_identi
     let dir = tempfile::tempdir().unwrap();
     let db =
         crate::context_db::ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
-    let save = |project: &str, content: &str| {
+    let save = |project: &str, workspace: &str, content: &str| {
         let authority = Authority {
             project_id: Some(project.into()),
-            workspace_id: Some("team".into()),
+            workspace_id: Some(workspace.into()),
             profile: None,
             state: "resolved".into(),
             snapshot_digest: None,
@@ -741,8 +741,8 @@ async fn source_project_upkeep_refreshes_workspace_vectors_for_each_model_identi
         });
     };
     let text = "Use the narrow bridge for deliveries.";
-    save("pj-source", text);
-    save("pj-other", "Keep emergency exits clear.");
+    save("pj-source", "team", text);
+    save("pj-other", "other-team", "Keep emergency exits clear.");
     let mut old_model = None;
     for serving in [[false, false, true, true], [true, true, true, true]] {
         let fake = Fake::serving(lanes(DEFAULT_MODEL, serving));
@@ -754,7 +754,13 @@ async fn source_project_upkeep_refreshes_workspace_vectors_for_each_model_identi
         };
         let report =
             crate::upkeep::run_project(&db, "pj-source", dir.path(), &plan, &|| 1_000).await;
-        assert_eq!(report.memories_embedded, 1);
+        assert_eq!(report.memories_embedded, 0);
+        assert!(fake.params("embed.batch").is_empty());
+        let user = crate::pass::Settings {
+            embedding: Some(provider.clone()),
+            ..Default::default()
+        };
+        assert_eq!(crate::upkeep::run_workspace(&db, &user).await, 2);
         let model = provider.model_id();
         assert_ne!(old_model.as_ref(), Some(&model));
         old_model = Some(model.clone());
@@ -786,7 +792,14 @@ async fn source_project_upkeep_refreshes_workspace_vectors_for_each_model_identi
         }));
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content, text);
-        assert_eq!(fake.params("embed.batch")[0]["items"][0]["text"], text);
+        let calls = fake.params("embed.batch");
+        let texts: std::collections::BTreeSet<_> = calls[0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, [text, "Keep emergency exits clear."].into());
     }
 }
 

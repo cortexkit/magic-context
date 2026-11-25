@@ -40,6 +40,32 @@ fn surface_workers_and_readers_offer_keep_with_string_tags_and_note() {
     }
 }
 
+#[test]
+fn the_catalog_keeps_a_custom_note_description_with_smart_notes_off() {
+    let mut config = example_catalog_config();
+    let custom = "Use this exact wording for session notes.";
+    config
+        .tool_descriptions
+        .insert("ctx_note".into(), custom.into());
+    for smart_notes_enabled in [false, true] {
+        config.smart_notes_enabled = smart_notes_enabled;
+        for compacting in [false, true] {
+            let answer = tool_catalog::catalog_answer(
+                &json!({"preset": "head", "params": {"compacting": compacting}}),
+                &config,
+            )
+            .unwrap();
+            let note = answer["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "ctx_note")
+                .unwrap();
+            assert_eq!(note["description"], custom);
+        }
+    }
+}
+
 /// A runner offers a forked quick question only the tools marked read-only,
 /// and ck-mc honours a fork call's no-observable-change rule only in
 /// `ctx_search` and `ctx_expand`. The writing tools must stay unmarked, and

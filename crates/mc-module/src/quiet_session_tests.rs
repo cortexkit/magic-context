@@ -382,6 +382,48 @@ async fn quiet_a_freed_session_answers_its_next_jobs_as_one_never_freed() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn quiet_expiry_forgets_only_the_retired_sessions_setup_and_checkout() {
+    let mut f = Fixture::new("worker", false).await;
+    let project = crate::route::Project {
+        id: "project".into(),
+        root: f._dir.path().display().to_string(),
+    };
+    f.route.project = Some(project.clone());
+    f.route.workdir = Some(project.root.clone());
+    let mut sibling = f.route.clone();
+    sibling.session = SessionRef::new("runner", "mock", "sibling");
+    let _hold = f.module.inner.runs.start(&sibling.session);
+    for route in [&f.route, &sibling] {
+        f.module.setup(route.clone(), f.setup.clone()).unwrap();
+        f.module.idle_foreground(&route.session).await.unwrap();
+    }
+    let count = || f.module.health(false).metrics.unwrap()["session_count"].clone();
+    assert_eq!(count(), 2);
+    f.wait_quiet_time().await;
+    assert!(f.quiet());
+    let inner = &f.module.inner;
+    Module::<Client>::expire_quiet(inner, tokio::time::Instant::now() + QUIET_CARRY_TTL);
+    assert_eq!(count(), 1);
+    assert_eq!(
+        *inner.set_up.lock().unwrap(),
+        [(sibling.session.clone(), Some("epoch".into()))].into()
+    );
+    assert_eq!(
+        *inner.session_projects.lock().unwrap(),
+        [(sibling.session.clone(), project.clone())].into()
+    );
+    assert_eq!(
+        *inner.session_folders.lock().unwrap(),
+        [(sibling.session.clone(), project.root)].into()
+    );
+
+    f.module.drop_session(&sibling.session, "test-cut", false);
+    assert_eq!(count(), 0);
+    assert!(inner.session_projects.lock().unwrap().is_empty());
+    assert!(inner.session_folders.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn quiet_an_expired_carry_restores_the_same_view_bytes_on_setup() {
     let kept = Fixture::new("worker", true).await;
     let expired = Fixture::new("worker", false).await;

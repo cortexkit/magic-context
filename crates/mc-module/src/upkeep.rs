@@ -5,6 +5,8 @@
 //! - one batch of the project's active memories that have no vector for the
 //!   configured embedding model, so `ctx_search` and the memory hint find
 //!   them by meaning;
+//! - once per round, a batch of workspace memories using the user's model,
+//!   even when none of their source projects are active;
 //! - when `memory.git_commit_indexing.enabled`, a sweep of new commits on the
 //!   project's HEAD into `git_commits` (the `ctx_search` commit source), then
 //!   their vectors.
@@ -172,7 +174,7 @@ pub(crate) async fn run_project_scoped(
         _ => None,
     };
     if let (true, Some(provider)) = (plan.memory, embedding) {
-        report.memories_embedded = embed_memories(db, project, provider).await;
+        report.memories_embedded = embed_memories(db, Some(project), provider).await;
     }
     if let Some(provider) = embedding {
         report.chunks_embedded = chunks::embed(db, project, provider, clock, owned).await;
@@ -211,17 +213,29 @@ fn missing_root(project: &str, root: &Path) -> bool {
     missing
 }
 
-/// Embed one batch of memories written by the project that have no vector for
-/// this model. Workspace memories use their source project's provider, not
-/// the provider of another member that can read the same workspace.
-async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> usize {
+/// Workspace upkeep takes settings without a project overlay, so the user's
+/// provider is the only one that receives workspace facts.
+pub(crate) async fn run_workspace(db: &ContextDb, user: &crate::pass::Settings) -> usize {
+    let Some(provider) = user.embedding.as_ref().filter(|_| user.memory_enabled) else {
+        return 0;
+    };
+    if !provider.prepare().await {
+        return 0;
+    }
+    embed_memories(db, None, provider).await
+}
+
+/// Embed one batch missing vectors for this model: either project-owned
+/// memories or workspace facts, never both in one request.
+async fn embed_memories(db: &ContextDb, project: Option<&str>, provider: &Provider) -> usize {
     let model_id = provider.model_id();
+    let scope = project.unwrap_or("workspace memories");
     let rows = db.with_connection(|conn| -> rusqlite::Result<Vec<(i64, String, String)>> {
         let mut statement = conn.prepare(
             "SELECT m.id, m.content, m.normalized_hash FROM memories m \
              LEFT JOIN memory_embeddings me ON m.id = me.memory_id AND me.model_id = ?1 \
              WHERE ((m.level = 'project' AND m.owner_id = ?2 AND m.status = 'active')
-                 OR (m.level = 'workspace' AND m.source_project_id = ?2 AND m.status IN ('active', 'permanent')))
+                  OR (?2 IS NULL AND m.level = 'workspace' AND m.status IN ('active', 'permanent')))
                AND me.memory_id IS NULL LIMIT ?3",
         )?;
         let rows = statement
@@ -235,7 +249,7 @@ async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> u
         Ok(rows) if !rows.is_empty() => rows,
         Ok(_) => return 0,
         Err(error) => {
-            tracing::warn!("ck-mc: upkeep could not read memories for {project}: {error}");
+            tracing::warn!("ck-mc: upkeep could not read memories for {scope}: {error}");
             return 0;
         }
     };
@@ -252,7 +266,8 @@ async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> u
             let mut statement = transaction.prepare(
                 "INSERT INTO memory_embeddings (memory_id, embedding, model_id) \
                  SELECT ?1, ?2, ?3 FROM memories WHERE id = ?1 AND normalized_hash = ?4
-                   AND ((level = 'project' AND owner_id = ?5) OR (level = 'workspace' AND source_project_id = ?5)) \
+                   AND ((level = 'project' AND owner_id = ?5)
+                     OR (?5 IS NULL AND level = 'workspace' AND status IN ('active', 'permanent'))) \
                  ON CONFLICT(memory_id, model_id) DO UPDATE SET embedding = excluded.embedding",
             )?;
             for ((id, _, hash), vector) in rows.iter().zip(vectors) {
@@ -265,7 +280,7 @@ async fn embed_memories(db: &ContextDb, project: &str, provider: &Provider) -> u
         Ok(saved)
     });
     saved.unwrap_or_else(|error| {
-        tracing::warn!("ck-mc: upkeep could not save memory vectors for {project}: {error}");
+        tracing::warn!("ck-mc: upkeep could not save memory vectors for {scope}: {error}");
         0
     })
 }
@@ -970,6 +985,65 @@ mod tests {
     }
 
     const PROJECT: &str = "pj-upkeep";
+
+    #[tokio::test]
+    async fn upkeep_embeds_workspace_facts_without_any_recent_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        let db = ContextDb::create_for_tests(&path).unwrap();
+        let (url, requests, inputs) = endpoint().await;
+        let fact = add_memory(
+            &db,
+            "pj-dormant",
+            "Use the shared check-in desk.",
+            "permanent",
+        );
+        let archived = add_memory(
+            &db,
+            "pj-dormant",
+            "The desk used to be downstairs.",
+            "archived",
+        );
+        add_memory(
+            &db,
+            "pj-dormant",
+            "The private project uses desk B.",
+            "active",
+        );
+        db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE memories SET level='workspace', owner_id='team', source_project_id='pj-dormant'
+                 WHERE id IN (?1, ?2)",
+                params![fact, archived],
+            ).unwrap();
+        });
+        let config_path = dir.path().join("magic-context.jsonc");
+        std::fs::write(&config_path, serde_json::json!({
+            "embedding": {"provider": "openai-compatible", "endpoint": url, "model": "mock-embed"},
+        }).to_string()).unwrap();
+        let config = crate::config::Config::Files(
+            crate::config::Loader::with_user_path(config_path)
+                .with_vault(crate::vault::Vault::none()),
+        );
+        let client = crate::transport::SubcRunnerClient::new(
+            "unused-connection-file".into(),
+            Arc::new(crate::child_scopes::ChildScopes::new(crate::MODULE_ID)),
+        );
+        let module = crate::module::Module::new(client, config, Some(db), None);
+        assert!(
+            module.run_upkeep().await.is_empty(),
+            "no project upkeep ran"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(inputs.load(Ordering::SeqCst), 1);
+        let conn = Connection::open(path).unwrap();
+        let embedded: i64 = conn
+            .query_row("SELECT memory_id FROM memory_embeddings", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(embedded, fact);
+    }
 
     #[tokio::test]
     async fn missing_root_is_quiet_until_the_folder_returns() {

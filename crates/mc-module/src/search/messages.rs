@@ -501,6 +501,8 @@ pub struct MessageHit {
 
 #[derive(Clone, Debug)]
 struct Row {
+    bm25: f64,
+    rowid: i64,
     number: i64,
     message_id: String,
     role: String,
@@ -780,6 +782,16 @@ impl Within<'_> {
 /// and message number fall to the rowid, so a shorter page is always the
 /// start of a longer one.
 fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize)) -> Vec<Row> {
+    query_raw_after(conn, within, fts, page, None)
+}
+
+fn query_raw_after(
+    conn: &Connection,
+    within: Within,
+    fts: &str,
+    page: (usize, usize),
+    after: Option<AppPosition>,
+) -> Vec<Row> {
     if fts.is_empty() || *within.reach == Reach::Nothing {
         return Vec::new();
     }
@@ -793,14 +805,22 @@ fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize))
         ),
         None => ("", ""),
     };
-    let screen = screen(within.reach, 9);
+    let (after_filter, screen_start) = if after.is_some() {
+        ("AND (bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER), \
+          message_history_fts.rowid) > (?9, ?10, ?11)", 12)
+    } else {
+        ("", 9)
+    };
+    let screen = screen(within.reach, screen_start);
     let sql = format!(
         "SELECT message_history_fts.message_ordinal, message_history_fts.message_id,
-                message_history_fts.role, message_history_fts.content
+                message_history_fts.role, message_history_fts.content,
+                bm25(message_history_fts), message_history_fts.rowid
            FROM message_history_fts {join}
           WHERE {screen} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
             AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?3 {date_filter}
             AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?7))
+            {after_filter}
           ORDER BY bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER) ASC,
                    message_history_fts.rowid ASC
            LIMIT ?4 OFFSET ?8"
@@ -819,6 +839,8 @@ fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize))
                 message_id: row.get(1)?,
                 role: row.get(2)?,
                 content: row.get(3)?,
+                bm25: row.get(4)?,
+                rowid: row.get(5)?,
             })
         };
         let visible = serde_json::to_string(&within.visible.cloned().unwrap_or_default())
@@ -833,6 +855,9 @@ fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize))
             visible.into(),
             (page.1 as i64).into(),
         ];
+        if let Some(after) = after {
+            values.extend([after.bm25.into(), after.ordinal.into(), after.rowid.into()]);
+        }
         values.extend(unmapped_rowids(within.reach));
         let rows = statement
             .query_map(rusqlite::params_from_iter(values), map)?
@@ -841,13 +866,6 @@ fn query_raw(conn: &Connection, within: Within, fts: &str, page: (usize, usize))
     };
     // Malformed FTS syntax that survived quoting finds nothing.
     read(conn).unwrap_or_default()
-}
-
-fn query_rows_page(conn: &Connection, within: Within, fts: &str, page: (usize, usize)) -> Vec<Row> {
-    query_raw(conn, within, fts, page)
-        .into_iter()
-        .filter(|row| within.admits(row))
-        .collect()
 }
 
 /// The rows a read of at most `fetch` rows keeps, taken from the start of a
@@ -860,8 +878,8 @@ fn window(raw: &[Row], fetch: usize, within: Within) -> Vec<Row> {
         .collect()
 }
 
-/// App search includes visible messages as well as hidden history. Offset is
-/// applied by SQLite, rather than fetching every preceding page into memory.
+/// Read a window of visible messages and hidden history by offset. The app
+/// read uses [`app_page_with_reach`] to continue from a ranked position.
 pub fn app_page(
     conn: &Connection,
     session: &str,
@@ -869,17 +887,53 @@ pub fn app_page(
     offset: usize,
     limit: usize,
 ) -> Vec<MessageHit> {
-    app_page_with_reach(conn, session, text, offset, limit, &Reach::Unmapped)
+    app_rows(conn, session, text, offset, None, limit, &Reach::Unmapped)
+        .iter()
+        .enumerate()
+        .map(|(index, row)| hit(row, text, 1.0 / (offset + index + 1) as f64))
+        .collect()
+}
+
+/// The app's internal sort key; the public hit score is still reciprocal rank.
+#[derive(Clone, Copy)]
+pub(crate) struct AppPosition {
+    pub bm25: f64,
+    pub ordinal: i64,
+    pub rowid: i64,
 }
 
 pub(crate) fn app_page_with_reach(
     conn: &Connection,
     session: &str,
     text: &str,
-    offset: usize,
+    after: Option<AppPosition>,
+    seen: usize,
     limit: usize,
     reach: &Reach,
-) -> Vec<MessageHit> {
+) -> Vec<(MessageHit, AppPosition)> {
+    app_rows(conn, session, text, 0, after, limit, reach)
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let position = AppPosition {
+                bm25: row.bm25,
+                ordinal: row.number,
+                rowid: row.rowid,
+            };
+            (hit(&row, text, 1.0 / (seen + index + 1) as f64), position)
+        })
+        .collect()
+}
+
+fn app_rows(
+    conn: &Connection,
+    session: &str,
+    text: &str,
+    offset: usize,
+    after: Option<AppPosition>,
+    limit: usize,
+    reach: &Reach,
+) -> Vec<Row> {
     let within = Within {
         session,
         cutoff: i64::MAX,
@@ -888,19 +942,23 @@ pub(crate) fn app_page_with_reach(
         reach,
     };
     let base = sanitize_fts_query(text.trim());
-    let mut rows = query_rows_page(conn, within, &base, (limit, offset));
-    let base_empty = if offset == 0 {
-        rows.is_empty()
-    } else {
-        query_rows_page(conn, within, &base, (1, 0)).is_empty()
+    let read = |fts: &str| {
+        query_raw_after(conn, within, fts, (limit, offset), after)
+            .into_iter()
+            .filter(|row| within.admits(row))
+            .collect::<Vec<_>>()
     };
-    if base_empty {
-        rows = query_rows_page(conn, within, &relaxed_fts_query(text), (limit, offset));
+    let rows = read(&base);
+    if rows.is_empty()
+        && (offset == 0 && after.is_none()
+            || query_raw(conn, within, &base, (1, 0))
+                .iter()
+                .all(|row| !within.admits(row)))
+    {
+        read(&relaxed_fts_query(text))
+    } else {
+        rows
     }
-    rows.iter()
-        .enumerate()
-        .map(|(index, row)| hit(row, text, 1.0 / (offset + index + 1) as f64))
-        .collect()
 }
 
 /// How many messages up to the cutoff match `fts`, for one probe's weight.
