@@ -63,8 +63,8 @@
 //! (`renumber_conflict`).
 //!
 //! Left as they are: records that are history rather than live coordinates
-//! (memory change history and journal, device-sync operations already
-//! queued, summarizer run logs and attempts), and the standalone plugin's own
+//! (memory change history and journal, summarizer run logs and attempts),
+//! and the standalone plugin's own
 //! runtime state (session metadata, replay and render caches, its runner
 //! admission log). The move's fence retires the plugin on the session, and
 //! nothing in mode 3 reads them.

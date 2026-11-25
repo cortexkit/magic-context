@@ -756,8 +756,18 @@ fn apply_body(
             body.global_id, body.revision, body.writer.store_id
         )));
     }
-    let own = body.writer.box_id == box_id && own_known(tx, body)?;
-    if !own && body.writer.store_id == super::store_id(tx)? {
+    // A message this store's outbox waits for is its own. A store copied
+    // here from another computer may hold rows that computer was still
+    // sending under its own store id, which this store no longer has
+    // ([`super::moved_here`]). Whichever of the two computers the stream
+    // got such a message from, it carries the snapshot the row froze when
+    // it was first claimed, so it settles the row here too. A message under
+    // this store's current id is its own only when this computer sent it:
+    // from anywhere else it is a copy's, and the store takes a new id.
+    let store = super::store_id(tx)?;
+    let own =
+        (body.writer.box_id == box_id || body.writer.store_id != store) && own_known(tx, body)?;
+    if !own && body.writer.store_id == store {
         super::new_store_id(
             tx,
             "the stream holds a message sent under this store's id that this store doesn't know; a copy of the store, or an earlier or later state of it, sent it",
@@ -824,6 +834,17 @@ fn apply_body(
                     [&body.global_id],
                 )?;
             }
+            // The row's own snapshot decides it now, and it carried the
+            // row's links as they stood here: a link an older arrival named
+            // to a memory not here yet went out as none. That link no
+            // longer belongs to the row, so its target arriving later must
+            // not set it ([`resolve_pending`]).
+            if let (Some(local), true) = (local, table.kind == MEMORIES.kind) {
+                tx.execute(
+                    "DELETE FROM replica_pending_links WHERE kind = 'memory' AND local_id = ?1",
+                    [local],
+                )?;
+            }
         }
         if let Some(local) = local {
             changes.extend(reconcile(tx, box_id, table, local)?);
@@ -841,7 +862,7 @@ fn apply_body(
             return Ok(Applied::Changed(Vec::new()));
         }
         let snapshot = body.snapshot.as_ref().expect("checked when decoded");
-        let local = insert(tx, table, body, snapshot)?;
+        let local = insert(tx, table, body, snapshot, seq)?;
         decides(tx, body, seq, subject)?;
         written(tx, &body.global_id, None)?;
         let mut changes = Vec::new();
@@ -1424,13 +1445,15 @@ fn keep_own_state(
     Ok(())
 }
 
-/// A new row for an arrival. Read counters start as for a fresh row, and
-/// an observation's session is empty: both are this computer's own.
+/// A new row for an arrival, the message at `seq`. Read counters start as
+/// for a fresh row, and an observation's session is empty: both are this
+/// computer's own.
 fn insert(
     tx: &Connection,
     table: &Table,
     body: &Body,
     snapshot: &Map<String, Value>,
+    seq: u64,
 ) -> rusqlite::Result<i64> {
     let now = now_ms();
     let mut columns: Vec<String> = Vec::new();
@@ -1484,9 +1507,11 @@ fn insert(
         params_from_iter(values),
     )?;
     let local = tx.last_insert_rowid();
+    // With the sequence of the message it arrived in, so the fact it holds
+    // is decided below as a memory read from the stream ([`settle_fact`]).
     tx.execute(
-        "INSERT OR REPLACE INTO replica_ids (kind, global_id, local_id) VALUES (?1, ?2, ?3)",
-        params![table.kind, body.global_id, local],
+        "INSERT OR REPLACE INTO replica_ids (kind, global_id, local_id, seq) VALUES (?1, ?2, ?3, ?4)",
+        params![table.kind, body.global_id, local, seq as i64],
     )?;
     if table.kind == MEMORIES.kind {
         set_links(tx, local, snapshot)?;
@@ -1831,6 +1856,12 @@ fn conflict(tx: &Connection, one: i64, other: i64, key: &str) -> rusqlite::Resul
 /// Make the links that waited for `global`, now that it names `target`. A
 /// memory archived because another holds its fact keeps the successor it
 /// waited for aside, as its own, until it is live again.
+///
+/// A link waits with the arrival that named it. While a change of this
+/// computer's own written over that arrival is still to come back from the
+/// stream, the row shows that change, which sends the link as none, so the
+/// link keeps waiting: it is dropped once the own change decides the row,
+/// and named again by the arrival that decides it otherwise.
 fn resolve_pending(tx: &Connection, global: &str, target: i64) -> rusqlite::Result<()> {
     let waiting: Vec<(i64, String, Option<String>)> = tx
         .prepare(
@@ -1840,6 +1871,14 @@ fn resolve_pending(tx: &Connection, global: &str, target: i64) -> rusqlite::Resu
         .query_map([global], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (local, field, detail) in waiting {
+        if exists(tx, &MEMORIES, local)? && !own_changes(tx, &MEMORIES, local)?.is_empty() {
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM replica_pending_links
+              WHERE target_global_id = ?1 AND kind = 'memory' AND local_id = ?2 AND field = ?3",
+            params![global, local, field],
+        )?;
         if !exists(tx, &MEMORIES, local)? || !exists(tx, &MEMORIES, target)? {
             continue;
         }
@@ -1889,10 +1928,6 @@ fn resolve_pending(tx: &Connection, global: &str, target: i64) -> rusqlite::Resu
             _ => {}
         }
     }
-    tx.execute(
-        "DELETE FROM replica_pending_links WHERE target_global_id = ?1 AND kind = 'memory'",
-        [global],
-    )?;
     Ok(())
 }
 
@@ -2006,6 +2041,10 @@ fn fact_of(tx: &Connection, local: i64) -> rusqlite::Result<Option<Fact>> {
 /// One memory holding a fact, live by its own state.
 struct Holder {
     id: i64,
+    /// Its global id, once a message of it was read from the stream here:
+    /// `None` for a memory that only has an id given to it here, which no
+    /// other computer may ever hold (one too large to send, or one never
+    /// sent yet).
     global: Option<String>,
     /// Live as the row stands, not archived here for another row.
     live_here: bool,
@@ -2014,21 +2053,25 @@ struct Holder {
 }
 
 /// Leave one live memory for `fact`: of the memories whose own state holds
-/// it live, the one with the lowest global id; a memory never sent loses to
-/// any sent one (once sent, its own message coming back decides again,
-/// [`settled`]). The others are archived, superseded by it, with their own
+/// it live, the one with the lowest global id; a memory never read from the
+/// stream here loses to any that was (once its own message comes back, it
+/// decides again, [`settled`]), as every other computer holds only those.
+/// The others are archived, superseded by it, with their own
 /// state kept aside to be sent and put back if the fact frees up. Every
 /// computer derives the same from the ids, so nothing of it is sent.
 /// Losers are archived before the survivor is made live, so the store's
 /// unique key never sees two. Returns whether anything changed.
 fn settle_fact(tx: &Connection, fact: &Fact) -> rusqlite::Result<bool> {
-    // Each memory holding the fact: its id, global id and status, whether
-    // its own state is kept aside, and that own status.
+    // Each memory holding the fact: its id, its global id when the stream
+    // decided its row here, its status, whether its own state is kept
+    // aside, and that own status.
     type Row = (i64, Option<String>, Option<String>, bool, Option<String>);
     let rows: Vec<Row> = tx
         .prepare(
-            "SELECT m.id, m.global_id, m.status, d.local_id IS NOT NULL, d.status
+            "SELECT m.id, CASE WHEN r.seq IS NOT NULL THEN m.global_id END, m.status,
+                    d.local_id IS NOT NULL, d.status
                FROM memories m LEFT JOIN replica_derived d ON d.local_id = m.id
+                    LEFT JOIN replica_ids r ON r.global_id = m.global_id
               WHERE m.level = ?1 AND m.owner_id = ?2 AND m.category = ?3 AND m.normalized_hash = ?4
               ORDER BY m.id",
         )?

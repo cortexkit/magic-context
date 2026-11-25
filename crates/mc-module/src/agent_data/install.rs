@@ -22,7 +22,7 @@ use rusqlite::{params, params_from_iter, Connection, ToSql};
 use serde_json::{json, Map, Value};
 
 use super::moved::{self, Install, Mark, Reassigned, Scope, Table, MOVED, NOT_MOVED};
-use super::snapshot::{quoted, scope_sql, stored, Snapshot};
+use super::snapshot::{quoted, scope_sql, stored, table_scope_sql, Snapshot};
 use crate::move_batches::{self, Plan};
 
 /// The key the install's plan and progress are saved under.
@@ -146,7 +146,7 @@ pub(crate) fn steps(
                 conn,
                 &mut steps,
                 table.name,
-                &scope_sql(table.scope),
+                &table_scope_sql(table),
                 &[session, harness],
             )?,
             Scope::Publication(filter) => {

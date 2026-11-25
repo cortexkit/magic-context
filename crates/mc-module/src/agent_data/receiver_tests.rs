@@ -1515,3 +1515,6 @@ mod crash_tests;
 #[cfg(feature = "context-db-timing")]
 #[path = "install_lock_tests.rs"]
 mod install_lock_tests;
+
+#[path = "moved_surfaces_tests.rs"]
+mod moved_surfaces_tests;

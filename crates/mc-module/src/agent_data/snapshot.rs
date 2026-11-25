@@ -331,6 +331,19 @@ pub(crate) fn scope_sql(scope: Scope) -> String {
     }
 }
 
+/// [`scope_sql`] for moved table `table`. A row of a summary that carries
+/// its session id too is found by it first: it is the same as its
+/// summary's, and those tables' indexes lead with it, so the session's rows
+/// are found without reading every session's.
+pub(crate) fn table_scope_sql(table: &moved::Table) -> String {
+    match table.scope {
+        Scope::Compartment if table.column("session_id").is_some() => {
+            format!("session_id = ?1 AND {}", scope_sql(table.scope))
+        }
+        scope => scope_sql(scope),
+    }
+}
+
 pub(crate) fn quoted(name: &str) -> String {
     crate::move_batches::quoted(name)
 }
@@ -419,7 +432,7 @@ pub fn read_rows(conn: &Connection, harness: &str, session: &str) -> Result<Rows
             "SELECT {} FROM {} WHERE {} ORDER BY {}",
             select.join(", "),
             quoted(table.name),
-            scope_sql(table.scope),
+            table_scope_sql(table),
             table.order_by
         );
         let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;

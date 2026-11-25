@@ -105,6 +105,32 @@ impl Gate {
         self.check_with(harness, session, None)
     }
 
+    /// The harness and session id of every session a move holds, for a
+    /// read that lists sessions, or rows of many sessions, instead of
+    /// naming one: it leaves out each session [`Self::check_any_runner`]
+    /// refuses. `None` while the journal can't be read, which holds every
+    /// session.
+    pub fn held_sessions(&self) -> Option<Vec<(String, String)>> {
+        if !self.any.load(Ordering::Acquire) {
+            return Some(Vec::new());
+        }
+        let index = self.index.read().expect("agent-data gate");
+        if index.unreadable.is_some() {
+            return None;
+        }
+        Some(
+            index
+                .holds
+                .iter()
+                .flat_map(|(session, holds)| {
+                    holds
+                        .iter()
+                        .map(move |hold| (hold.harness.clone(), session.clone()))
+                })
+                .collect(),
+        )
+    }
+
     fn check_with(&self, harness: &str, session: &str, runner: Option<&str>) -> Result<(), Gated> {
         if !self.any.load(Ordering::Acquire) {
             return Ok(());

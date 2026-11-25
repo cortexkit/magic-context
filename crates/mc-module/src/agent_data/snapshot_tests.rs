@@ -977,3 +977,36 @@ fn check_store_refuses_a_null_the_store_requires() {
         "{error}"
     );
 }
+
+/// A summary's score rows that carry their session's id are found through
+/// it, which those tables' indexes lead with, rather than by reading every
+/// session's rows: snapshots, fingerprints and installs read them on every
+/// move op.
+#[test]
+fn a_sessions_score_rows_are_found_through_its_session_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = store(dir.path(), "context.db");
+    for table in MOVED
+        .iter()
+        .filter(|table| table.scope == moved::Scope::Compartment)
+    {
+        let plan: Vec<String> = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT * FROM {} WHERE {}",
+                table.name,
+                snapshot::table_scope_sql(table)
+            ))
+            .unwrap()
+            .query_map(params![SESSION, HARNESS], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.starts_with(&format!("SCAN {}", table.name))),
+            "{}: {plan:?}",
+            table.name
+        );
+    }
+}

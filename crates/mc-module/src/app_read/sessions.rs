@@ -17,12 +17,15 @@ use super::pages::{self, Keyset, Page};
 use super::*;
 
 /// What the module hands the app reads besides its stores: the settings,
-/// for the dreamer's switch and each project's embedding model, and the
-/// dreamer, for the task declarations of the projects it has seen.
+/// for the dreamer's switch and each project's embedding model, the
+/// dreamer, for the task declarations of the projects it has seen, and the
+/// move journal's gate, so a list leaves out the sessions a move holds, as
+/// a read that names one of them is refused.
 #[derive(Clone)]
 pub(crate) struct Attachment {
     pub config: Arc<crate::config::Config>,
     pub dreamer: Option<Arc<crate::dreamer::engine::Engine>>,
+    pub gate: Arc<crate::agent_data::Gate>,
 }
 
 /// A project the module has seen.
@@ -74,6 +77,18 @@ impl Apps {
             .or_default()
             .sessions
             .insert(key);
+    }
+
+    /// Whether a list may show session `key`: no move holds it. Every
+    /// runner of a session shares its rows, so a hold under any runner of
+    /// its harness and id leaves it out.
+    fn served(&self, key: &SessionRef) -> bool {
+        self.attached.as_ref().is_none_or(|attached| {
+            attached
+                .gate
+                .check_any_runner(&key.harness, &key.session)
+                .is_ok()
+        })
     }
 
     /// The model id the project's memories are embedded under now, when
@@ -210,6 +225,7 @@ impl Replica {
             .sessions
             .iter()
             .filter(|key| harness.is_none_or(|harness| key.harness == harness))
+            .filter(|key| self.apps.served(key))
             .cloned()
             .collect();
         let mut rows = Vec::new();
@@ -316,6 +332,28 @@ impl Replica {
         if let Some(status) = status {
             sql.push_str(" AND status = ?");
             binds.push(Sql::Text(status.into()));
+        }
+        // A session note of a session a move holds is left out, as a read
+        // naming that session is refused: the session's notes moved with it,
+        // and the copy kept here only lets a move back find it unchanged.
+        let held = self
+            .apps
+            .attached
+            .as_ref()
+            .map(|attached| attached.gate.held_sessions());
+        match held {
+            None => {}
+            Some(None) => sql.push_str(" AND type IS NOT 'session'"),
+            Some(Some(held)) if held.is_empty() => {}
+            Some(Some(held)) => {
+                sql.push_str(
+                    " AND NOT (type = 'session' AND EXISTS (
+                         SELECT 1 FROM json_each(?) held
+                          WHERE json_extract(held.value, '$[0]') = notes.harness
+                            AND json_extract(held.value, '$[1]') = notes.session_id))",
+                );
+                binds.push(Sql::Text(json!(held).to_string()));
+            }
         }
         if let Some(after) = after {
             sql.push_str(" AND (updated_at < ? OR (updated_at = ? AND id < ?))");
