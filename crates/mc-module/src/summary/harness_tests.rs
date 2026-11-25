@@ -20,6 +20,14 @@ impl Client {
         Self {
             runner: account_wait_send_tests::Client::new(
                 account_wait_send_tests::Answer::RefuseSend,
+            )
+            .with_route_refusal_after(
+                1,
+                routing::RouteError {
+                    code: "no_route".into(),
+                    message: "no alternate route".into(),
+                    detail: None,
+                },
             ),
             routing: routing::Capabilities::default(),
             declares,
@@ -90,15 +98,15 @@ async fn selected(declares: bool, child_harness: Option<&str>) -> (Value, Sessio
     let mut job = account_wait_send_tests::job();
     job.session.harness = "opencode2".into();
     job.child_harness = child_harness.map(str::to_owned);
-    // An account wait ends the run after its first child send, so this checks
-    // the select and destination without needing a valid historian reply.
+    // With no alternate route, only the first decision sends to a child.
     assert!(matches!(
         run(&client, None, &job).await,
         Err(SummaryError::AccountWait(_))
     ));
     let mut selects = client.selects.lock().unwrap();
     let mut children = client.children.lock().unwrap();
-    assert_eq!(selects.len(), 1);
+    assert_eq!(selects.len(), 2);
+    assert_eq!(selects[0], selects[1], "re-select keeps the same harness");
     assert_eq!(children.len(), 1);
     (selects.remove(0), children.remove(0))
 }

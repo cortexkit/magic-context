@@ -486,13 +486,31 @@ async fn a_same_route_retry_wait_does_not_erase_a_paid_attempt() {
     let wait = account_wait_send_tests::refused_run(
         "5_queued_account_limit_exhausted.new.run_status.json",
     );
-    let client = Client::new(vec![active()], vec![failed, wait]);
+    let reset = now_ms() + 600_000;
+    let mut client = Client::new(vec![active()], vec![failed, wait]);
+    // Routing has no alternate. If it had one, that model could finish the
+    // summary; this test covers the wait after the paid retry failed.
+    client.base = client.base.with_route_refusal_after(
+        1,
+        routing::RouteError {
+            code: "no_route".into(),
+            message: "all routes are on cooldown".into(),
+            detail: Some(serde_json::json!({"reason": "quota_or_cooldown", "reset_at_ms": reset})),
+        },
+    );
     let error = run(&client, None, &account_wait_send_tests::job())
         .await
         .unwrap_err();
     assert_eq!(client.sends.lock().unwrap().len(), 2);
     assert!(error.to_string().contains("503 overloaded"), "{error:?}");
     assert_eq!(*client.reports.lock().unwrap(), [Outcome::Failed]);
+    assert!(matches!(&error, SummaryError::PaidThenWait { wait, .. } if wait.until_ms == reset));
+    let selects = client.base.requests.lock().unwrap();
+    assert_eq!(selects.len(), 2);
+    assert_eq!(selects[0], selects[1]);
+    let reports = client.report_bodies.lock().unwrap();
+    assert_eq!(reports[0]["decision_id"], "decision-1");
+    assert_eq!(reports[0]["usage"]["input_tokens"], 10_000);
 }
 
 #[tokio::test(start_paused = true)]
