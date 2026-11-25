@@ -56,6 +56,27 @@ fn stream_label_too_long_is_a_permanent_participant_fault() {
 }
 
 #[test]
+fn stream_label_refusals_say_custom_module_ids_are_not_supported() {
+    let code = "stream_label_too_long";
+    for (op, step) in [(Op::Prepare, Step::None), (Op::Export, Step::Prepared)] {
+        let message = refused(op, step, code).message;
+        assert!(
+            message.contains("custom module ids are not supported"),
+            "{message}"
+        );
+        assert!(!message.contains("shorter id"), "{message}");
+    }
+    let door::CutAnswer::Fault(message) = door::cut_answer(code) else {
+        panic!("the receiver must treat an invalid stream label as a fault");
+    };
+    assert!(
+        message.contains("custom module ids are not supported"),
+        "{message}"
+    );
+    assert!(!message.contains("shorter id"), "{message}");
+}
+
+#[test]
 fn record_too_large_is_a_permanent_participant_fault() {
     permanent_fault("record_too_large");
 }

@@ -72,6 +72,34 @@ pub const ROUND_RETRY_MAX: Duration = Duration::from_secs(60);
 /// How long stopping may wait for the task to end.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
+const REJECT_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const REJECT_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Default)]
+struct Upkeep {
+    next_prune: Option<tokio::time::Instant>,
+}
+
+impl Upkeep {
+    fn run(&mut self, db: &ContextDb) {
+        let now = tokio::time::Instant::now();
+        if self.next_prune.is_some_and(|next| now < next) {
+            return;
+        }
+        let cutoff = crate::memory_writes::now_ms() - REJECT_RETENTION_MS;
+        let pruned = db.with_connection(|conn| {
+            conn.execute(
+                "DELETE FROM replica_rejects WHERE recorded_at < ?1",
+                [cutoff],
+            )
+        });
+        self.next_prune = Some(now + REJECT_PRUNE_INTERVAL);
+        if let Err(error) = pruned {
+            tracing::warn!("ck-mc: replica: pruning old refusals failed: {error}");
+        }
+    }
+}
+
 /// Why the task has no hub to work with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
@@ -373,9 +401,11 @@ enum Ended {
 impl Live {
     pub(crate) async fn run(self, mut stop: watch::Receiver<bool>) {
         let mut report = Reporter::new();
+        let mut upkeep = Upkeep::default();
         let mut box_id: Option<String> = None;
         let mut attempt = 0;
         loop {
+            upkeep.run(&self.db);
             #[cfg(feature = "memory-replica")]
             self.health.refresh(&self.db);
             let refusal = match unless_stopped(&mut stop, self.connect(&mut box_id)).await {
@@ -384,7 +414,7 @@ impl Live {
                 Some(Ok((box_id, link))) => {
                     attempt = 0;
                     match self
-                        .serve(&box_id, link.as_ref(), &mut report, &mut stop)
+                        .serve(&box_id, link.as_ref(), &mut report, &mut upkeep, &mut stop)
                         .await
                     {
                         None => return,
@@ -426,6 +456,7 @@ impl Live {
         box_id: &str,
         link: &dyn Link,
         report: &mut Reporter,
+        upkeep: &mut Upkeep,
         stop: &mut watch::Receiver<bool>,
     ) -> Option<Refusal> {
         let mut changes = link.changes();
@@ -445,7 +476,7 @@ impl Live {
             )
             .with_epochs(Arc::clone(&self.epochs));
             let ended = self
-                .rounds(&replica, &hub, report, &mut changes, stop)
+                .rounds(&replica, &hub, report, upkeep, &mut changes, stop)
                 .await;
             hub.close().await;
             match ended {
@@ -471,6 +502,7 @@ impl Live {
         replica: &Replica,
         hub: &NatsHub,
         report: &mut Reporter,
+        upkeep: &mut Upkeep,
         changes: &mut watch::Receiver<u64>,
         stop: &mut watch::Receiver<bool>,
     ) -> Ended {
@@ -480,6 +512,7 @@ impl Live {
         };
         let mut failures = 0;
         loop {
+            upkeep.run(&self.db);
             #[cfg(feature = "memory-replica")]
             self.health.refresh(&self.db);
             let outcome = tokio::select! {

@@ -210,6 +210,7 @@ impl Fixture {
                 read_batch,
             )
             .unwrap()
+            .batches
     }
 
     pub(crate) fn batches(&self, broad: bool) -> Vec<VerifyBatch> {
@@ -725,7 +726,8 @@ impl Ran {
         self.db
             .with_connection(|conn| {
                 conn.query_row(
-                    "SELECT task, outcome, proposed, applied, error, batches_json FROM dream_task_runs ORDER BY id DESC LIMIT 1",
+                    "SELECT task, outcome, proposed, applied, error, COALESCE(batches_json, '[]')
+                       FROM dream_task_runs ORDER BY id DESC LIMIT 1",
                     [],
                     |row| {
                         Ok((
@@ -782,6 +784,17 @@ impl Ran {
 /// that take plans with AFT's reader tools, each child run ending as `ends`
 /// says, and wait for the run to end.
 async fn broad_through_engine(fixture: Fixture, ends: &[Ends], settings: &Settings) -> Ran {
+    let engine = Engine::new("this", vec![Box::new(Verify { broad: true })])
+        .with_leases(crate::dreamer::lease_double::SampleLeases::granting());
+    verify_through_engine(fixture, ends, settings, engine).await
+}
+
+async fn verify_through_engine(
+    fixture: Fixture,
+    ends: &[Ends],
+    settings: &Settings,
+    engine: Engine,
+) -> Ran {
     let Fixture {
         repo,
         _dir,
@@ -790,10 +803,7 @@ async fn broad_through_engine(fixture: Fixture, ends: &[Ends], settings: &Settin
         ..
     } = fixture;
     let db = Arc::new(db);
-    let engine = Arc::new(
-        Engine::new("this", vec![Box::new(Verify { broad: true })])
-            .with_leases(crate::dreamer::lease_double::SampleLeases::granting()),
-    );
+    let engine = Arc::new(engine);
     let mut client = Client::new(&["p/a", "p/b"], ends);
     client.plans = vec!["ra", "rb"];
     client.catalog = Ok(vec![
@@ -1088,11 +1098,7 @@ async fn the_token_budget_stops_a_run_of_one_memory_messages_before_the_next() {
     assert_eq!(ran.checked(3).1, None);
 }
 
-/// A confirmed memory whose file changed, but not the lines it cites, stays
-/// confirmed without a model: the module finds the lines again, where they
-/// moved, and records the new commit and their new place.
-#[test]
-fn a_confirmation_whose_cited_lines_are_unchanged_stays_without_a_model() {
+fn unchanged_confirmation() -> (Fixture, String) {
     let fixture = Fixture::new(&[("src/a.rs", "fn keep() {}\nconst CAP: u64 = 64_000;\n")]);
     let first = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     fixture.repo.write(&[(
@@ -1106,8 +1112,32 @@ fn a_confirmation_whose_cited_lines_are_unchanged_stays_without_a_model() {
         spans: vec![("src/a.rs", 2, 2, "const CAP: u64 = 64_000;")],
         ..row(1, "`CAP` in src/a.rs is 64k.")
     }]);
-    assert!(fixture.batches(false).is_empty(), "no model is asked");
-    let (_, _, revision, verified_at, metadata, updated_at) = fixture.memory(1);
+    (fixture, second)
+}
+
+/// A confirmed memory whose file changed, but not the lines it cites, stays
+/// confirmed without a model and records the commit under the run's role.
+#[tokio::test]
+async fn a_confirmation_whose_cited_lines_are_unchanged_stays_without_a_model() {
+    let (fixture, second) = unchanged_confirmation();
+    assert!(fixture.batches(false).is_empty(), "no model is needed");
+    assert_ne!(
+        fixture.memory(1).4["dreamerVerifiedCommit"],
+        json!(second),
+        "planning alone must not write"
+    );
+    let engine = Engine::new("this", vec![Box::new(Verify { broad: false })])
+        .with_leases(crate::dreamer::lease_double::SampleLeases::granting());
+    let ran = verify_through_engine(fixture, &[], &Settings::default(), engine).await;
+    assert!(ran.sent().is_empty(), "no model is asked");
+    assert_eq!(ran.run().1, "nothing_to_do");
+    let (revision, verified_at, metadata, updated_at): (i64, Option<i64>, String, i64) = ran.db.with_connection(|conn| {
+        conn.query_row(
+            "SELECT revision, verified_at, metadata_json, updated_at FROM memories WHERE id = 1", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+    }).unwrap();
+    let metadata: Value = serde_json::from_str(&metadata).unwrap();
     assert_eq!((revision, verified_at, updated_at), (1, Some(1_000), 5));
     assert_eq!(metadata["dreamerVerifiedAt"], json!(1_000));
     assert_eq!(metadata["dreamerVerifiedCommit"], json!(second));
@@ -1119,20 +1149,87 @@ fn a_confirmation_whose_cited_lines_are_unchanged_stays_without_a_model() {
             "spans": [{"path": "src/a.rs", "start": 4, "end": 4, "text": "const CAP: u64 = 64_000;"}],
         })
     );
-    let verify_commit: String = fixture
+    let (verify_commit, actor, run_id, epoch): (String, String, i64, Option<i64>) = ran
         .db
         .with_connection(|conn| {
             conn.query_row(
-                "SELECT verify_commit FROM memories WHERE id = 1",
+                "SELECT m.verify_commit, o.actor, o.run_id, o.epoch
+                   FROM memories m JOIN replica_outbox o ON o.kind = 'memory' AND o.local_id = m.id
+                  WHERE m.id = 1",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
         })
         .unwrap();
     assert_eq!(verify_commit, second);
-    // Nothing changed since the commit recorded, so the next run has
-    // nothing to check either.
-    assert!(fixture.batches(false).is_empty());
+    assert_eq!(
+        (actor.as_str(), run_id, epoch),
+        ("dreamer", 1, cfg!(feature = "memory-replica").then_some(1))
+    );
+
+    let profile = prompt_profile(None).unwrap();
+    let declaration = profile.body["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["kind"] == VERIFY)
+        .unwrap();
+    let plan = Verify { broad: false }
+        .plan_batches(&TaskContext {
+            db: &ran.db,
+            owner: &Owner::Project {
+                id: PROJECT.into(),
+                root: ran.root.clone(),
+            },
+            profile: &profile,
+            declaration,
+            workspace: None,
+            guidance: None,
+            branches: &[],
+        })
+        .unwrap();
+    assert!(plan.batches.is_empty());
+    assert!(
+        plan.rechecked.is_empty(),
+        "the next run already knows this commit"
+    );
+}
+
+#[cfg(feature = "memory-replica")]
+#[tokio::test]
+async fn a_verify_recheck_rolls_back_if_its_role_window_closes_before_commit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (fixture, _) = unchanged_confirmation();
+    let before = fixture.memory(1).4;
+    let checks = AtomicUsize::new(0);
+    let clock = crate::dreamer::lease::system_clock();
+    let engine = Engine::new("this", vec![Box::new(Verify { broad: false })])
+        .with_leases(crate::dreamer::lease_double::SampleLeases::granting())
+        .with_clock(Arc::new(move || {
+            // The watch opens and the engine journals its generation while
+            // the role is held. The transaction reaches commit too late.
+            let advance = if checks.fetch_add(1, Ordering::SeqCst) < 2 {
+                0
+            } else {
+                120_000
+            };
+            clock() + advance
+        }));
+    let ran = verify_through_engine(fixture, &[], &Settings::default(), engine).await;
+    assert_eq!(ran.run().1, "lease_lost");
+    assert!(ran.sent().is_empty());
+    let (metadata, dreamer_outbox): (String, i64) = ran
+        .db
+        .with_connection(|conn| {
+            conn.query_row(
+            "SELECT metadata_json, (SELECT COUNT(*) FROM replica_outbox WHERE actor = 'dreamer')
+               FROM memories WHERE id = 1", [], |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        })
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&metadata).unwrap(), before);
+    assert_eq!(dreamer_outbox, 0);
 }
 
 /// A confirmed memory whose cited lines changed goes to the model with the

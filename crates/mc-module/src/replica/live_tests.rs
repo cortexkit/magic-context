@@ -678,10 +678,70 @@ async fn replica_health_reports_an_old_hold_and_unsent_count_before_the_hub_conn
             "enabled": true,
             "sample_age_seconds": 0,
             "unsent_count": 1,
+            "local_only_count": 0,
+            "reject_count": 0,
+            "routine_skip_count": 0,
             "epoch_holds": {"count": 1, "oldest_held_at_ms": since, "epochs": [7]},
         })
     );
     task.stop().await;
+}
+
+#[cfg(feature = "memory-replica")]
+#[tokio::test(start_paused = true)]
+async fn replica_upkeep_prunes_old_refusals_and_health_shows_recent_real_ones() {
+    let server = Server::new();
+    let fake = Fake::new(&server, vec![Refusal::NotGranted]);
+    let (db, _dir) = store();
+    let now = crate::memory_writes::now_ms();
+    let old = now - 30 * 24 * 60 * 60 * 1000 - 1;
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO replica_rejects (stream_seq, subject, reason, recorded_at) VALUES
+                (1, 'old', 'invalid envelope', ?1), (2, 'recent', 'invalid body', ?2),
+                (3, 'recent', 'a dreamer change written under generation 4 of dreamer.pj-a, older than generation 5 the stream holds a change of this row under', ?2)",
+            rusqlite::params![old, now],
+        ).unwrap();
+    });
+    let task = start(&fake, &db, &Arc::new(Notify::new()));
+    until(|| fake.asks() == 1).await;
+    db.with_connection(|conn| {
+        let sequences = conn
+            .prepare("SELECT stream_seq FROM replica_rejects ORDER BY stream_seq")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(sequences, [2, 3]);
+    });
+    let metrics = health_report(Arc::clone(&task.health)).metrics.unwrap();
+    assert_eq!(metrics["replica"]["reject_count"], 1);
+    task.stop().await;
+}
+
+#[cfg(feature = "memory-replica")]
+#[test]
+fn replica_health_excludes_project_memories_without_a_hub_address_from_unsent() {
+    use super::hub::InMemoryHub;
+    use super::test_support::{memory, Computer};
+
+    let hub = InMemoryHub::new();
+    let a = Computer::new(&hub, 1);
+    memory(&a, "pj-a", "Send this memory.");
+    memory(
+        &a,
+        "/legacy/folder",
+        "This memory has a path but no project id.",
+    );
+    memory(&a, "", "This memory has no project id or path.");
+    a.execute("UPDATE replica_outbox SET state = 'unaddressable' WHERE local_id = 2");
+
+    let health = Arc::new(super::health::Health::default());
+    health.refresh(&a.db);
+    let metrics = health_report(health).metrics.unwrap();
+    assert_eq!(metrics["replica_unsent_count"], 1);
+    assert_eq!(metrics["replica"]["local_only_count"], 2);
 }
 
 #[cfg(feature = "memory-replica")]

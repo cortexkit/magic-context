@@ -1126,6 +1126,11 @@ async fn a_send_stored_again_after_the_duplicate_window_is_applied_once() {
     b.follow_all().await;
     for computer in [&a, &b] {
         assert_eq!(contents(computer), ["Releases need three reviewers."]);
+        assert_eq!(
+            computer.value::<i64>("SELECT COUNT(*) FROM replica_rejects"),
+            0
+        );
+        assert_eq!(computer.value::<i64>("SELECT CAST(value AS INTEGER) FROM schema_migrations_meta WHERE key = 'replica_routine_skips'"), 1);
     }
     assert_eq!(a.store_id(), store, "A knows its own message");
 }

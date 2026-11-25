@@ -117,6 +117,9 @@ fn replica(
         "enabled": health.is_some(),
         "sample_age_seconds": age,
         "unsent_count": store.map(|store| store.unsent_count),
+        "local_only_count": store.map(|store| store.local_only_count),
+        "reject_count": store.map(|store| store.reject_count),
+        "routine_skip_count": store.map(|store| store.routine_skip_count),
         "epoch_holds": {
             "count": store.map(|_| usize::from(hold.is_some())),
             "oldest_held_at_ms": hold.map(|(_, since)| since),
