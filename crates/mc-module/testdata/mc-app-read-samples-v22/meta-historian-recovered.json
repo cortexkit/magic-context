@@ -1,0 +1,45 @@
+{
+  "name": "meta-historian-recovered",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "meta",
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "session_data.read",
+      "row": {
+        "cache_ttl": null,
+        "compartment_count": 1,
+        "compartment_in_progress": false,
+        "execute_threshold": {
+          "percentage": 65.0,
+          "source": "default",
+          "tokens": 64350
+        },
+        "historian_failure_count": 3,
+        "historian_failures_since_success": 0,
+        "historian_last_error": "summary timed out",
+        "historian_last_error_at_ms": 1699999800000,
+        "is_subagent": false,
+        "last_input_tokens": 80,
+        "last_response_time_ms": 30,
+        "memory_block_count": 0,
+        "newest_compartment_at_ms": 1699999900000,
+        "queued_stamp_count": 1,
+        "session_id": "s"
+      },
+      "schema": 1,
+      "section": "meta",
+      "state": "ready",
+      "version": "mca1:14abb230df5e15de76eac9106c76c315ead732692bb5e879cf21c7633b6fcbfa"
+    }
+  }
+}

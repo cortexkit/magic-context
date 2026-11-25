@@ -247,6 +247,87 @@ fn publication(session: &Session, from: u64, until: u64) -> run::Summarized {
 }
 
 #[tokio::test]
+async fn historian_failure_records_the_session_time_and_advances_both_counts() {
+    let (mut session, client, settings) = ready();
+    session.app.failures = 3;
+    for (ordinal, failure_at_ms, error, streak) in [
+        (25, 1_700_000_000_000, "summary timed out", 1),
+        (26, 1_700_000_001_000, "summary connection lost", 2),
+    ] {
+        session.index.extend([Entry::new(
+            ordinal,
+            format!("m{ordinal}"),
+            Role::User,
+            failure_at_ms,
+            vec![],
+        )]);
+        session
+            .summary_finished(&client, &settings, Err(error.to_owned().into()), -1)
+            .await;
+        let meta = session.app_snapshot().meta;
+        assert_eq!(meta["historian_failure_count"], 3 + streak);
+        assert_eq!(meta["historian_failures_since_success"], streak);
+        assert_eq!(meta["historian_last_error"], error);
+        assert_eq!(meta["historian_last_error_at_ms"], failure_at_ms);
+    }
+}
+
+fn seed_historian_failure(session: &mut Session) {
+    session.app.failures = 3;
+    session.app.failures_since_success = 2;
+    session.app.last_error = Some("summary timed out".into());
+    session.app.last_error_at_ms = Some(80);
+}
+
+fn assert_historian_failure_history(session: &mut Session, streak: u64, count: usize) {
+    let meta = session.app_snapshot().meta;
+    assert_eq!(meta["compartment_count"], count);
+    assert_eq!(meta["historian_failure_count"], 3);
+    assert_eq!(meta["historian_failures_since_success"], streak);
+    assert_eq!(meta["historian_last_error"], "summary timed out");
+    assert_eq!(meta["historian_last_error_at_ms"], 80);
+}
+
+#[tokio::test]
+async fn historian_failure_streak_resets_only_after_a_summary_is_stored() {
+    let (mut session, client, settings) = ready();
+    let (_dir, db) = block_summary_store();
+    unblock_summary_store(&db);
+    session.db = Some(db.clone());
+    seed_historian_failure(&mut session);
+
+    publish(&mut session, &client, &settings, 1, 5).await;
+
+    let stored: u64 = db
+        .with_connection(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM compartments", [], |row| row.get(0))
+        })
+        .unwrap();
+    assert_eq!(stored, 1);
+    assert!(session.summary_unshown);
+    assert_historian_failure_history(&mut session, 0, 1);
+}
+
+#[tokio::test]
+async fn historian_failure_streak_survives_runs_that_publish_nothing() {
+    let (mut session, client, settings) = ready();
+    seed_historian_failure(&mut session);
+    let mut empty = publication(&session, 1, 5);
+    empty.validated.compartments.clear();
+    let now = crate::summary::account_wait::now_ms();
+    for result in [
+        Ok(None),
+        Ok(Some(empty)),
+        Err(run::SummaryError::AccountWait(wait_until(now + 60_000))),
+    ] {
+        session
+            .summary_finished(&client, &settings, result, now)
+            .await;
+        assert_historian_failure_history(&mut session, 2, 0);
+    }
+}
+
+#[tokio::test]
 async fn fresh_publication_checks_the_runner_before_storing_coverage() {
     use crate::summary::chunk::PrintedBlock;
     use crate::summary::two_pass::turn_one::{self, Publication, SendInput};
@@ -350,6 +431,7 @@ async fn fresh_publication_holds_when_it_cannot_read_the_runner() {
     let (_dir, db) = block_summary_store();
     unblock_summary_store(&db);
     session.db = Some(db.clone());
+    seed_historian_failure(&mut session);
     let result = publication(&session, 1, 5);
     client
         .pages
@@ -361,11 +443,11 @@ async fn fresh_publication_holds_when_it_cannot_read_the_runner() {
         .await;
     assert!(session.has_pending_publication());
     assert!(session.summaries.is_empty());
-    assert_eq!(session.app.failures, 0);
+    assert_historian_failure_history(&mut session, 2, 0);
     *client.entries.lock().unwrap() = session.index.entries().to_vec();
     session.retry_summary_publication(&client, 200).await;
     assert!(!session.has_pending_publication());
-    assert_eq!(session.summaries.len(), 1);
+    assert_historian_failure_history(&mut session, 0, 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -404,6 +486,8 @@ async fn failed_summary_publication_is_not_counted_until_the_result_is_given_up(
         session.retry_summary_publication(&client, 201).await;
         assert!(!session.has_pending_publication());
         assert_eq!(session.app.failures, u64::from(changed));
+        assert_eq!(session.app.failures_since_success, u64::from(changed));
+        assert_eq!(session.app.last_error_at_ms, changed.then_some(24));
         assert_eq!(session.no_progress, None);
         assert_eq!(session.summaries.len(), usize::from(!changed));
         let rows: i64 = db

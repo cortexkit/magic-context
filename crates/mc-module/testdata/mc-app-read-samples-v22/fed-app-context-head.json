@@ -1,0 +1,68 @@
+{
+  "name": "fed-app-context-head",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of": {
+        "applied": true,
+        "at_ms": 30,
+        "step_ref": "m3",
+        "view": 2
+      },
+      "managed": true,
+      "messages": [
+        {
+          "bytes": 111,
+          "sections": [
+            {
+              "bytes": 43,
+              "index": 0,
+              "kind": "project_docs",
+              "tokens": 12
+            },
+            {
+              "bytes": 66,
+              "index": 1,
+              "items": [
+                {
+                  "compartment_id": "1",
+                  "tier": 1,
+                  "tokens": 9
+                }
+              ],
+              "kind": "history",
+              "tokens": 21
+            }
+          ],
+          "slot": "baseline",
+          "tokens": 35
+        },
+        {
+          "bytes": 90,
+          "empty": true,
+          "placeholder": "<session-history-since>(no new content since last materialization)</session-history-since>",
+          "sections": [],
+          "slot": "delta",
+          "tokens": 21
+        }
+      ]
+    }
+  },
+  "route": {
+    "harness": "fed-app:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

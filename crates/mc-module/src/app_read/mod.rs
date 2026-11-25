@@ -61,6 +61,10 @@ pub struct SessionState {
     pub last_model: Option<String>,
     pub failures: u64,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_at_ms: Option<i64>,
+    #[serde(default)]
+    pub failures_since_success: u64,
     #[serde(with = "stamp_map")]
     pub stamps: BTreeMap<(String, String), u64>,
 }
@@ -1148,9 +1152,28 @@ impl Replica {
         let mut fields = match method {
             "session_data.read" => {
                 let section = string(p, "section")?;
+                let row_with_defaults;
                 let breakdown;
                 let row = match section {
-                    "meta" => &snapshot.meta,
+                    "meta" => {
+                        // An inactive session may still serve a checkpoint made
+                        // before it recorded when its last failure happened.
+                        match snapshot.meta.as_object() {
+                            Some(row)
+                                if !row.contains_key("historian_last_error_at_ms")
+                                    || !row.contains_key("historian_failures_since_success") =>
+                            {
+                                let mut row = row.clone();
+                                row.entry("historian_last_error_at_ms")
+                                    .or_insert(Value::Null);
+                                row.entry("historian_failures_since_success")
+                                    .or_insert(json!(0));
+                                row_with_defaults = Value::Object(row);
+                                &row_with_defaults
+                            }
+                            _ => &snapshot.meta,
+                        }
+                    }
                     "token_breakdown" if snapshot.ready => {
                         breakdown = snapshot.breakdown.to_value();
                         &breakdown

@@ -387,6 +387,21 @@ mod tests {
             session.app_materialize()
         }
 
+        pub(crate) fn app_historian_sample_snapshot(failures_since_success: u64) -> Snapshot {
+            let mut session = Self::app_sample_session();
+            session.summaries.edit()[0].created_at = 1_699_999_900_000;
+            session.app.failures = 3;
+            session.app.failures_since_success = failures_since_success;
+            session.app.last_error = Some("summary timed out".into());
+            session.app.last_error_at_ms = Some(if failures_since_success == 0 {
+                1_699_999_800_000
+            } else {
+                1_699_999_950_000
+            });
+            let _ = session.app_update();
+            session.app_materialize()
+        }
+
         /// The session the app-read samples show, before its first update.
         pub(crate) fn app_sample_session() -> Session {
             use cortexkit_role_compaction::{

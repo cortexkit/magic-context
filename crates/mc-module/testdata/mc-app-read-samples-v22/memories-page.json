@@ -1,0 +1,94 @@
+{
+  "name": "memories-page",
+  "request": {
+    "method": "memories.page",
+    "params": {
+      "level": "project",
+      "limit": 3,
+      "owner": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "level": "project",
+      "memories": [
+        {
+          "category": "swe:architecture",
+          "content": "The head is rebuilt only when the provider cache is already lost.",
+          "created_at": 1700000002000,
+          "embedded": false,
+          "expires_at": 4102444800000,
+          "first_seen_at": 1700000002000,
+          "id": 2,
+          "importance": 50,
+          "last_seen_at": 1700000002000,
+          "level": "project",
+          "owner": "pj-sample",
+          "retrieval_count": 0,
+          "revision": 2,
+          "seen_count": 1,
+          "sensitive": false,
+          "shareable": true,
+          "source": {
+            "session": "s",
+            "type": "historian"
+          },
+          "status": "active",
+          "updated_at": 1700000200000
+        },
+        {
+          "category": "swe:config-values",
+          "content": "The execute threshold defaults to 65% of the usable window.",
+          "created_at": 1700000006000,
+          "embedded": false,
+          "first_seen_at": 1700000006000,
+          "id": 6,
+          "importance": 50,
+          "last_seen_at": 1700000006000,
+          "level": "project",
+          "owner": "pj-sample",
+          "retrieval_count": 0,
+          "revision": 2,
+          "seen_count": 1,
+          "sensitive": false,
+          "shareable": false,
+          "source": {
+            "session": "s",
+            "type": "historian"
+          },
+          "status": "active",
+          "updated_at": 1700000400000
+        },
+        {
+          "category": "swe:constraints",
+          "content": "The provider caps a request at 200 000 tokens.",
+          "created_at": 1700000003000,
+          "embedded": false,
+          "first_seen_at": 1700000003000,
+          "id": 3,
+          "importance": 80,
+          "last_seen_at": 1700000003000,
+          "level": "project",
+          "owner": "pj-sample",
+          "retrieval_count": 0,
+          "revision": 2,
+          "safety_critical": false,
+          "seen_count": 1,
+          "sensitive": false,
+          "shareable": false,
+          "source": {
+            "session": "s",
+            "type": "historian"
+          },
+          "status": "active",
+          "updated_at": 1700003690000
+        }
+      ],
+      "next": "mcc1.WyJtZW1vcmllcy5wYWdlIiwiZjVlOGI1NjUxZTQyMTU5NSIsWyJzd2U6Y29uc3RyYWludHMiLDgwLDE3MDAwMDM2OTAwMDAsM11d",
+      "op": "memories.page",
+      "owner": "pj-sample",
+      "schema": 1
+    }
+  }
+}

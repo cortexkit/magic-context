@@ -1,0 +1,45 @@
+{
+  "name": "meta",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "meta",
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "op": "session_data.read",
+      "row": {
+        "cache_ttl": null,
+        "compartment_count": 1,
+        "compartment_in_progress": false,
+        "execute_threshold": {
+          "percentage": 65.0,
+          "source": "default",
+          "tokens": 64350
+        },
+        "historian_failure_count": 0,
+        "historian_failures_since_success": 0,
+        "historian_last_error": null,
+        "historian_last_error_at_ms": null,
+        "is_subagent": false,
+        "last_input_tokens": 80,
+        "last_response_time_ms": 30,
+        "memory_block_count": 0,
+        "newest_compartment_at_ms": 40,
+        "queued_stamp_count": 1,
+        "session_id": "s"
+      },
+      "schema": 1,
+      "section": "meta",
+      "state": "ready",
+      "version": "mca1:290aa1d5ac6798782be80f0c27914c5cdb7b14a1e1bce3dd2e525d56f5627bbb"
+    }
+  }
+}

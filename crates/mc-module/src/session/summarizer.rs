@@ -639,14 +639,11 @@ impl Session {
                     self.account_refused_at(wait.clone(), emergency_at);
                 }
                 let error = error.to_string();
-                self.app.failures += 1;
-                self.app.last_error = Some(error.clone());
                 tracing::warn!(
                     "ck-mc: session {}: summary failed: {error}",
                     self.key.session
                 );
-                let now = self.clock();
-                self.drain.record_failure(now);
+                self.record_summary_failure(error);
                 return None;
             }
         };
@@ -798,9 +795,16 @@ impl Session {
             "discarding a held summary after its transcript changed: {}",
             publication.error
         );
+        self.record_summary_failure(error);
+    }
+
+    fn record_summary_failure(&mut self, error: String) {
+        let now = self.clock();
         self.app.failures += 1;
+        self.app.failures_since_success += 1;
         self.app.last_error = Some(error);
-        self.drain.record_failure(self.clock());
+        self.app.last_error_at_ms = Some(now);
+        self.drain.record_failure(now);
     }
 
     fn publication_recall(
@@ -916,6 +920,8 @@ impl Session {
                 stored
             }));
         if !validated.compartments.is_empty() {
+            // Storage succeeded even if the runner cannot show the summaries yet.
+            self.app.failures_since_success = 0;
             self.summary_unshown = true;
             tracing::info!(
                 "ck-mc: session {}: {} summaries published, through message {}",

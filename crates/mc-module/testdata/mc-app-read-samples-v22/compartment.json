@@ -1,0 +1,65 @@
+{
+  "name": "compartment",
+  "request": {
+    "method": "context.compartment",
+    "params": {
+      "compartment_id": "1",
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "compartment": {
+        "compartment_id": "1",
+        "created_at_ms": 40,
+        "episode_type": null,
+        "facts": {
+          "attribution": "historian_run",
+          "by_category": {},
+          "session_facts_cursor": null
+        },
+        "first_at_ms": 10,
+        "first_message_id": "m1",
+        "first_message_ordinal": 1,
+        "importance": 70,
+        "last_at_ms": 10,
+        "last_message_id": "m1",
+        "last_message_ordinal": 1,
+        "legacy": false,
+        "message_count": 1,
+        "ordinal": 1,
+        "summary_markdown": "A summary",
+        "summary_markdown_bytes": 9,
+        "summary_markdown_truncated": false,
+        "tiers": {
+          "p1": "detail",
+          "p2": "short",
+          "p3": "tiny",
+          "p4": "cue"
+        },
+        "tiers_bytes": {
+          "p1": 6,
+          "p2": 5,
+          "p3": 4,
+          "p4": 3
+        },
+        "tiers_truncated": {
+          "p1": false,
+          "p2": false,
+          "p3": false,
+          "p4": false
+        },
+        "title": "Earlier work"
+      },
+      "op": "context.compartment",
+      "schema": 1,
+      "state": "ready",
+      "version": "mca1:f7134b8d044b15b3faba57143b25b9d55b22de2ca799e38dc44e327c682813bf"
+    }
+  }
+}

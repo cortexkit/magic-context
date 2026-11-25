@@ -1,0 +1,171 @@
+{
+  "name": "cache-why-views",
+  "request": {
+    "method": "context.cache_why",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      },
+      "views": [
+        7,
+        6,
+        5,
+        4,
+        3,
+        2,
+        1,
+        8
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "decisions": [
+        {
+          "at_ms": 1699999580000,
+          "cause": "over_limit",
+          "changes": {
+            "model": {
+              "new": "provider/model",
+              "prev": null
+            },
+            "system_prompt": null,
+            "tool_set": null
+          },
+          "dropped_count": 0,
+          "dropped_tokens": 0,
+          "emergency": false,
+          "identity_delta": [
+            "model"
+          ],
+          "input_tokens": null,
+          "materialized": false,
+          "status": "applied",
+          "view_checksum": "e615510e918d655c957a3c7f89dc77177d10aba205cfa7cec43e22555c1eb27e",
+          "view_version": 1
+        },
+        {
+          "at_ms": 1699999640000,
+          "cause": "explicit_flush",
+          "changes": {
+            "model": null,
+            "system_prompt": null,
+            "tool_set": null
+          },
+          "dropped_count": 0,
+          "dropped_tokens": 0,
+          "emergency": false,
+          "identity_delta": [],
+          "input_tokens": null,
+          "materialized": false,
+          "status": "applied",
+          "view_checksum": "35b92c207e12ab57c62069ccc1679c876f63936ef1e7465f3c9e8982a16d7bce",
+          "view_version": 2
+        },
+        {
+          "at_ms": 1699999700000,
+          "cause": "cache_lost",
+          "changes": {
+            "model": null,
+            "system_prompt": null,
+            "tool_set": null
+          },
+          "dropped_count": 0,
+          "dropped_tokens": 0,
+          "emergency": false,
+          "identity_delta": [],
+          "input_tokens": null,
+          "materialized": false,
+          "status": "accepted",
+          "view_checksum": "b08bc94556b57b9c81bb36a632ad5b1127a55bcc7be35ad624b5257eb0a646e2",
+          "view_version": 3
+        },
+        {
+          "at_ms": 1699999760000,
+          "cause": "history_changed",
+          "changes": {
+            "model": null,
+            "system_prompt": null,
+            "tool_set": null
+          },
+          "dropped_count": 0,
+          "dropped_tokens": 0,
+          "emergency": false,
+          "identity_delta": [],
+          "input_tokens": null,
+          "materialized": false,
+          "status": "refused",
+          "view_checksum": "d910e6e8b3dbf2371829494b75cfad581d56b079d8d92055846553d4d7cf2784",
+          "view_version": 4
+        },
+        {
+          "at_ms": 1699999820000,
+          "cause": "history_refresh",
+          "changes": {
+            "model": null,
+            "system_prompt": null,
+            "tool_set": null
+          },
+          "dropped_count": 0,
+          "dropped_tokens": 0,
+          "emergency": false,
+          "identity_delta": [],
+          "input_tokens": null,
+          "materialized": false,
+          "status": "undelivered",
+          "view_checksum": "e7366b06a7e3e69be2e2802a2f7ada2790d35afc4fedd36dc770977ebece50a8",
+          "view_version": 5
+        },
+        {
+          "at_ms": 1699999880000,
+          "cause": "execute",
+          "changes": {
+            "model": null,
+            "system_prompt": null,
+            "tool_set": null
+          },
+          "dropped_count": 0,
+          "dropped_tokens": 0,
+          "emergency": false,
+          "identity_delta": [],
+          "input_tokens": null,
+          "materialized": false,
+          "status": "offered",
+          "view_checksum": "a7829cbe04d795fdb59fc2f06d5fc1eff6e52ef1e21bce97895b2e1aaf24c995",
+          "view_version": 6
+        },
+        {
+          "at_ms": 1699999940000,
+          "cause": "some_future_cause",
+          "changes": {
+            "model": null,
+            "system_prompt": null,
+            "tool_set": null
+          },
+          "dropped_count": 0,
+          "dropped_tokens": 0,
+          "emergency": false,
+          "identity_delta": [],
+          "input_tokens": null,
+          "materialized": false,
+          "status": "accepted",
+          "view_checksum": "d546c3d4b6fe812b5cb472082aa4260d388a85011ec6f80f102609bdb5548e51",
+          "view_version": 7
+        }
+      ],
+      "missing": [
+        8
+      ],
+      "op": "context.cache_why",
+      "retention": {
+        "days": 30,
+        "oldest_at_ms": 1699999580000
+      },
+      "schema": 1,
+      "state": "ready"
+    }
+  }
+}
