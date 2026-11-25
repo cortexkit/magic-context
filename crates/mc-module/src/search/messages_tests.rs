@@ -608,7 +608,12 @@ fn paired_appends_keep_the_coverage_proof_and_match_a_fresh_search() {
     db.with_search_reader(|conn, coverage| {
         let cached = screened_reach(conn, coverage, "neighbour");
         let fresh = screened_reach(conn, &mut Coverage::default(), "neighbour");
-        let page = |reach| app_page_with_reach(conn, "neighbour", "alpha beta", 0, 51, reach);
+        let page = |reach| {
+            app_page_with_reach(conn, "neighbour", "alpha beta", None, 0, 51, reach)
+                .into_iter()
+                .map(|(hit, _)| hit)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(page(&cached), page(&fresh));
         assert!(page(&cached).iter().any(|hit| hit.number == 51));
     });

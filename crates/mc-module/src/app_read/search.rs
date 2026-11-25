@@ -1,6 +1,25 @@
 use super::*;
-use crate::search::messages;
+use crate::search::messages::{self, AppPosition};
 use rusqlite::OptionalExtension;
+
+const PAGE_SIZE: usize = 50;
+
+fn decode_position(payload: &str) -> Option<(AppPosition, usize)> {
+    let mut fields = payload.split(',');
+    let bm25 = f64::from_bits(u64::from_str_radix(fields.next()?, 16).ok()?);
+    let ordinal = fields.next()?.parse().ok()?;
+    let rowid = fields.next()?.parse().ok()?;
+    let seen = fields.next()?.parse::<usize>().ok()?;
+    (fields.next().is_none() && bm25.is_finite() && ordinal >= 0 && seen < usize::MAX - PAGE_SIZE)
+        .then_some((
+            AppPosition {
+                bm25,
+                ordinal,
+                rowid,
+            },
+            seen,
+        ))
+}
 
 impl Replica {
     pub(super) fn search(&mut self, p: &Map<String, Value>) -> Result<Value, Refusal> {
@@ -68,22 +87,19 @@ impl Replica {
         let identity =
             summaries::search_identity(conn, &key, query, snapshot.newest, &snapshot.compartments)
                 .map_err(|_| unavailable())?;
-        let offset = match p.get("cursor").filter(|v| !v.is_null()) {
-            None => 0,
+        let (after, seen) = match p.get("cursor").filter(|v| !v.is_null()) {
+            None => (None, 0),
             Some(value) => {
                 let value = value.as_str().ok_or_else(|| invalid("cursor"))?;
-                let (stamp, offset) = value.rsplit_once(':').ok_or_else(|| invalid("cursor"))?;
+                let (stamp, payload) = value.rsplit_once(':').ok_or_else(|| invalid("cursor"))?;
                 if stamp != identity {
                     return Err(error(
                         "cursor_invalid",
                         "Search changed; restart the search.",
                     ));
                 }
-                offset
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|n| *n <= i64::MAX as usize - 51)
-                    .ok_or_else(|| invalid("cursor"))?
+                let (position, seen) = decode_position(payload).ok_or_else(|| invalid("cursor"))?;
+                (Some(position), seen)
             }
         };
         // The app can show legacy rows even if the index has no record of
@@ -91,14 +107,34 @@ impl Replica {
         // through the rowid map only when the map is known to hold every row
         // of the session; otherwise search unscreened.
         let reach = messages::screened_reach(conn, &mut coverage, &key.session);
-        let hits = messages::app_page_with_reach(conn, &key.session, query, offset, 51, &reach);
-        let more = hits.len() > 50;
-        let hits: Vec<Value> = hits.into_iter().take(50).map(|hit| {
+        let hits = messages::app_page_with_reach(
+            conn,
+            &key.session,
+            query,
+            after,
+            seen,
+            PAGE_SIZE + 1,
+            &reach,
+        );
+        // A new match ahead of the cursor no longer shifts the next page.
+        // The ranking score depends on the shared corpus, though: rescoring
+        // may still move a hit across the boundary, making it repeat or disappear.
+        let next_cursor = (hits.len() > PAGE_SIZE).then(|| {
+            let (_, position) = hits[PAGE_SIZE - 1];
+            format!(
+                "{identity}:{:016x},{},{},{}",
+                position.bm25.to_bits(),
+                position.ordinal,
+                position.rowid,
+                seen + PAGE_SIZE
+            )
+        });
+        let hits: Vec<Value> = hits.into_iter().take(PAGE_SIZE).map(|(hit, _)| {
             let at_ms: Option<i64> = conn.query_row("SELECT message_time_ms FROM message_fts_rowid_map WHERE session_id=?1 AND message_ordinal=?2", params![key.session, hit.number], |row| row.get(0)).ok().flatten();
             let compartment = snapshot.compartments.iter().find(|c| c.first_message_ordinal <= hit.number && c.last_message_ordinal >= hit.number);
             json!({"session":key, "message_id":hit.message_id, "role":hit.role, "at_ms":at_ms, "snippet":hit.content, "match_ranges":match_ranges(&hit.content, query), "source":"message", "ordinal":hit.number, "score":hit.score, "compartment_id":compartment.map(|c| c.id()), "agent_id":null, "agent_resolution":"client", "project":null, "project_source":null, "ref":null})
         }).collect();
-        let mut fields = json!({"next_cursor":if more {Some(format!("{identity}:{}", offset+50))} else {None}, "hits":hits, "complete":true, "agent_resolution":"client", "diagnostics":{"omitted_sessions":0, "project_resolution":{"status":"ok"}}, "source_status":{"message":"ok"}});
+        let mut fields = json!({"next_cursor":next_cursor, "hits":hits, "complete":true, "agent_resolution":"client", "diagnostics":{"omitted_sessions":0, "project_resolution":{"status":"ok"}}, "source_status":{"message":"ok"}});
         envelope("context.search", &mut fields);
         Ok(fields)
     }

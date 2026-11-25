@@ -344,7 +344,7 @@ fn search_screened_and_fallback_pages_have_identical_bytes() {
         .execute(
             "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10001)
          INSERT INTO message_history_fts(session_id, message_ordinal, message_id, role, content)
-         SELECT 'other', i, i, 'user', 'été 🦀 haystack' FROM n",
+         SELECT 'other', i, i, 'user', 'été 🦀 needle ' || i FROM n",
             [],
         )
         .unwrap();
@@ -375,6 +375,77 @@ fn search_reuses_message_index_paginates_and_returns_utf8_byte_ranges() {
     assert_eq!(second["hits"].as_array().unwrap().len(), 5);
     assert!(second["next_cursor"].is_null());
     assert_eq!(search::match_ranges("İ and É", "é"), vec![[7, 9]]);
+}
+
+#[test]
+fn search_cursor_resumes_after_tied_hits_when_a_match_is_added_ahead() {
+    let (dir, conn) = search_db();
+    let mut replica = replica(Some(conn));
+    let mut p = json!({"query":"needle","scope":{"session":key()}});
+    let first = replica.read("context.search", &p).unwrap();
+    for (index, hit) in first["hits"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(hit["message_id"], format!("m{}", index + 1));
+        assert_eq!(hit["score"], 1.0 / (index + 1) as f64);
+    }
+    assert_eq!(first["hits"].as_array().unwrap().len(), 50);
+    p["cursor"] = first["next_cursor"].clone();
+
+    // The new index row is in history that was already part of this session.
+    // Equal document lengths and term frequencies keep the existing scores tied.
+    Connection::open(dir.path().join("context.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO message_history_fts(session_id,message_ordinal,message_id,role,content)
+         VALUES ('s',0,'backfilled','assistant','été 🦀 needle 0')",
+            [],
+        )
+        .unwrap();
+    let second = replica.read("context.search", &p).unwrap();
+    let ids: Vec<_> = second["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["message_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["m51", "m52", "m53", "m54", "m55"]);
+    assert!(second["next_cursor"].is_null());
+}
+
+#[test]
+fn search_cursor_keeps_the_saved_boundary_when_the_shared_corpus_rescores_hits() {
+    let (_dir, path, conn) = summary_db(1);
+    let writer = Connection::open(path).unwrap();
+    let insert = |session: &str, ordinal: i64, content: &str| {
+        writer.execute(
+            "INSERT INTO message_history_fts(session_id,message_ordinal,message_id,role,content)
+             VALUES (?1,?2,?3,'user',?4)",
+            params![session, ordinal, format!("m{ordinal}"), content],
+        ).unwrap();
+    };
+    for i in 1..50 {
+        insert("s", i, "alpha alpha alpha alpha beta beta beta beta");
+    }
+    insert("s", 50, "alpha alpha alpha beta x x x x");
+    insert("s", 51, "alpha beta beta beta x x x x");
+    for i in 1..=70 {
+        insert("other", i, "beta beta beta beta x x x x");
+    }
+    let mut replica = replica(Some(conn));
+    let mut p = json!({"query":"alpha beta","scope":{"session":key()}});
+    let first = replica.read("context.search", &p).unwrap();
+    assert_eq!(first["hits"][49]["message_id"], "m50");
+
+    // Only another session changed. Its new rows make beta the rare term,
+    // so m51 moves ahead of m50 and before the saved cursor boundary.
+    for i in 71..=270 {
+        insert("other", i, "alpha alpha alpha alpha x x x x");
+    }
+    let restarted = replica.read("context.search", &p).unwrap();
+    assert_eq!(restarted["hits"][49]["message_id"], "m51");
+    p["cursor"] = first["next_cursor"].clone();
+    let second = replica.read("context.search", &p).unwrap();
+    assert_eq!(second["hits"], json!([]));
+    assert!(second["next_cursor"].is_null());
 }
 
 #[tokio::test]

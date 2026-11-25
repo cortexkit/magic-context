@@ -176,5 +176,5 @@ pub(crate) fn search_identity(
         hash.update(json(&render(&body, at_ms)));
     }
     hash.update(b"]]");
-    Ok(format!("mca1:{:x}", hash.finalize()))
+    Ok(format!("mca2:{:x}", hash.finalize()))
 }

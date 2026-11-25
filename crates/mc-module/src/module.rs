@@ -560,16 +560,16 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// reads match a session by harness and id, and both would otherwise
     /// answer from the rows the install replaced.
     fn drop_session(&self, session: &SessionRef, cut: &str, replaced: bool) {
+        let mut set_up = self.inner.set_up.lock().expect("setup sessions");
+        let mut workers = self.inner.workers.lock().expect("worker map");
         // Everything the app reads show was built from the rows and views the
         // move took away or replaced. Until the session's next Setup, a read
         // of it is answered as for a session this process never saw.
         self.inner.app_read.forget_session(session, replaced);
-        let slot = self
-            .inner
-            .workers
-            .lock()
-            .expect("worker map")
-            .remove(session);
+        let slot = workers.remove(session);
+        Self::forget_setup(&self.inner, &mut set_up, session, replaced);
+        drop(workers);
+        drop(set_up);
         // A quiet session has no worker: what it kept goes with its slot.
         if let Some(Slot::Running(worker)) = slot {
             let _ = worker.send(Job::Discard {
@@ -577,29 +577,31 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 replaced,
             });
         }
-        {
-            let mut set_up = self.inner.set_up.lock().expect("setup sessions");
-            set_up.remove(session);
-            self.inner
-                .setup_count
-                .store(set_up.len(), Ordering::Relaxed);
-        }
-        self.inner
+    }
+
+    /// Forget the Setup metadata while holding the Setup and worker locks,
+    /// so retirement cannot clear anything a newer Setup just registered.
+    fn forget_setup(
+        inner: &Inner<C>,
+        set_up: &mut HashMap<SessionRef, Option<String>>,
+        session: &SessionRef,
+        replaced: bool,
+    ) {
+        set_up.remove(session);
+        inner.setup_count.store(set_up.len(), Ordering::Relaxed);
+        inner
             .session_folders
             .lock()
             .expect("session folders")
             .remove(session);
-        self.inner
-            .session_projects
-            .lock()
-            .expect("session projects")
-            .retain(|key, _| {
-                if replaced {
-                    !(key.harness == session.harness && key.session == session.session)
-                } else {
-                    key != session
-                }
+        let mut projects = inner.session_projects.lock().expect("session projects");
+        if replaced {
+            projects.retain(|key, _| {
+                !(key.harness == session.harness && key.session == session.session)
             });
+        } else {
+            projects.remove(session);
+        }
     }
 
     /// Context reads use a separate read-only worker so they cannot delay session work.
@@ -723,6 +725,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let features = preset::features(&request.preset)
             .ok_or_else(|| ModuleError::UnknownPreset(request.preset.clone()))?;
         self.inner.client.runner_setup(&route.session.runner);
+        // The epoch is recorded and the Setup queued under the lock that
+        // checks and queues notices and rides. Retirement uses it too, so
+        // keep the new project and folder registration under the same lock.
+        let mut set_up = self.inner.set_up.lock().expect("setup sessions");
         if let Some(project) = &route.project {
             self.inner
                 .session_projects
@@ -742,12 +748,6 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 .expect("session folders")
                 .insert(route.session.clone(), folder.clone());
         }
-        // The epoch is recorded and the Setup queued under one lock, the one
-        // a notice or ride is checked and queued under. So no statement
-        // checked against the epoch this Setup replaces is queued behind it,
-        // and of two Setups racing, the one queued last is the one recorded.
-        // The queue is unbounded, so sending never waits.
-        let mut set_up = self.inner.set_up.lock().expect("setup sessions");
         let key = route.session.clone();
         let epoch = request.statement_epoch.clone();
         {
@@ -1005,12 +1005,20 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         }
     }
 
-    /// One upkeep round: every project with a Setup or notice in the last
-    /// hour, one after another. Returns each project's report.
+    /// One upkeep round: workspace embedding, then each project with a Setup
+    /// or notice in the last hour. Returns only the project reports.
     pub async fn run_upkeep(&self) -> Vec<(String, crate::upkeep::Report)> {
         let Some(db) = self.inner.db.clone() else {
             return Vec::new();
         };
+        // Workspace facts can outlive every session in their source project.
+        // Use only the user's settings; a project overlay can tune its own
+        // embedding requests, but must not apply to other projects' facts.
+        let user = self.inner.config.resolve(None, "", 0);
+        let workspace_embedded = crate::upkeep::run_workspace(&db, &user).await;
+        if workspace_embedded > 0 {
+            tracing::info!("ck-mc: upkeep embedded {workspace_embedded} workspace memories");
+        }
         let now = now_ms();
         let projects: Vec<(String, String)> = {
             let mut active = self.inner.active_projects.lock().expect("active projects");
@@ -1101,6 +1109,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
 
     fn expire_quiet(inner: &Inner<C>, now: tokio::time::Instant) {
         let expired = {
+            let mut set_up = inner.set_up.lock().expect("setup sessions");
             let mut workers = inner.workers.lock().expect("worker map");
             let keys: Vec<_> = workers
                 .iter()
@@ -1114,7 +1123,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 })
                 .collect();
             keys.into_iter()
-                .filter_map(|key| workers.remove(&key).map(|slot| (key, slot)))
+                .map(|key| {
+                    let slot = workers.remove(&key).expect("expired worker");
+                    Self::forget_setup(inner, &mut set_up, &key, false);
+                    (key, slot)
+                })
                 .collect::<Vec<_>>()
         };
         // Drop the transcript and view outside the worker lock.
@@ -2642,6 +2655,9 @@ fn give_up_place<'a, C: RunnerClient + Router + Send + Sync + 'static>(
     ready: &mut VecDeque<Job>,
     quiet: Option<Box<Quiet>>,
 ) -> Result<(), Option<Box<Quiet>>> {
+    let mut set_up = quiet
+        .is_none()
+        .then(|| inner.set_up.lock().expect("setup sessions"));
     let mut workers = inner.workers.lock().expect("worker map");
     if let Ok(job) = receiver.try_recv() {
         ready.push_back(job);
@@ -2666,6 +2682,12 @@ fn give_up_place<'a, C: RunnerClient + Router + Send + Sync + 'static>(
         }
         None => {
             workers.remove(key);
+            Module::<C>::forget_setup(
+                inner,
+                set_up.as_deref_mut().expect("setup sessions"),
+                key,
+                false,
+            );
         }
     }
     inner.app_read.release(key);
