@@ -1,0 +1,54 @@
+{
+  "name": "fed-app-memories-page",
+  "request": {
+    "method": "memories.page",
+    "params": {
+      "level": "project",
+      "limit": 1,
+      "owner": "pj-sample"
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "level": "project",
+      "memories": [
+        {
+          "category": "swe:architecture",
+          "content": "The head is rebuilt only when the provider cache is already lost.",
+          "created_at": 1700000002000,
+          "expires_at": 4102444800000,
+          "first_seen_at": 1700000002000,
+          "id": 2,
+          "importance": 50,
+          "last_seen_at": 1700000002000,
+          "level": "project",
+          "owner": "pj-sample",
+          "retrieval_count": 0,
+          "revision": 2,
+          "seen_count": 1,
+          "sensitive": false,
+          "shareable": true,
+          "source": {
+            "session": "s",
+            "type": "historian"
+          },
+          "status": "active",
+          "updated_at": 1700000200000
+        }
+      ],
+      "next": "mcc1.WyJtZW1vcmllcy5wYWdlIiwiZjVlOGI1NjUxZTQyMTU5NSIsWyJzd2U6YXJjaGl0ZWN0dXJlIiw1MCwxNzAwMDAwMjAwMDAwLDJdXQ",
+      "op": "memories.page",
+      "owner": "pj-sample",
+      "schema": 1
+    }
+  },
+  "route": {
+    "harness": "fed-app:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

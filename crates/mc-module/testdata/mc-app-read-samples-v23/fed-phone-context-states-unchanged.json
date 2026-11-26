@@ -1,0 +1,35 @@
+{
+  "name": "fed-phone-context-states-unchanged",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "if_version": "mca1:2f175fc79aa5782b6fe60df2a0b7c04434a0745ea1bfcf5628bbcbb82461786b",
+      "message_ids": [
+        "m1"
+      ],
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s-tools"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "moved_from_standalone": false,
+      "op": "context.states",
+      "schema": 1,
+      "state": "unchanged",
+      "version": "mca1:2f175fc79aa5782b6fe60df2a0b7c04434a0745ea1bfcf5628bbcbb82461786b"
+    }
+  },
+  "route": {
+    "harness": "fed-phone:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

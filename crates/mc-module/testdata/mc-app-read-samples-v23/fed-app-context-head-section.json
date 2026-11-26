@@ -1,0 +1,34 @@
+{
+  "name": "fed-app-context-head-section",
+  "request": {
+    "method": "context.head_section",
+    "params": {
+      "section": 0,
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      },
+      "slot": "baseline",
+      "view": 2
+    }
+  },
+  "response": {
+    "result": {
+      "offset": 0,
+      "part": "text",
+      "section": 0,
+      "slot": "baseline",
+      "text": "<project-docs>Project layout</project-docs>",
+      "view": 2
+    }
+  },
+  "route": {
+    "harness": "fed-app:sample-device",
+    "principal": "reserved:callosum",
+    "target": {
+      "kind": "management_surface",
+      "module_id": "magic-context"
+    }
+  }
+}

@@ -307,6 +307,7 @@ fn cache_why_refuses_to_invent_a_producer_join_and_bounds_producers() {
     assert_eq!(value["join"], "unavailable");
     assert_eq!(value["join_reason"], "runner_step_identity_not_recorded");
     assert_eq!(value["decisions"], json!([]));
+    assert!(value.get("session_kind").is_none());
     assert!(value.get("cause_detail").is_none());
     let too_many: Vec<_> = (0..101)
         .map(|n| json!({"producer_ref":n.to_string()}))
@@ -860,6 +861,9 @@ async fn samples_v10() {
             row.remove("historian_failures_since_success");
             response["version"] = json!(version(&response["row"]));
         }
+        if matches!(name, "states" | "cache-why") {
+            pin_retired_session_kind(&mut response, &v10.join(format!("{name}.json")));
+        }
         response["as_of_ms"] = json!(1700000000000_u64);
         let response: Value = serde_json::from_slice(&result_bytes(response)).unwrap();
         samples.insert(
@@ -936,6 +940,34 @@ fn samples_v22() {
         assert_eq!(replaced.is_some(), name == "meta");
     }
     check_tagged_samples(&testdata, "v22", samples);
+}
+
+#[test]
+fn samples_v23() {
+    let testdata = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+    let mut samples = tagged_json_samples(&testdata.join("mc-app-read-samples-v22"));
+    let mut changed = Vec::new();
+    for (name, bytes) in &mut samples {
+        let mut sample: Value = serde_json::from_slice(bytes).unwrap();
+        if sample["response"]["result"]
+            .as_object_mut()
+            .is_some_and(|result| result.remove("session_kind").is_some())
+        {
+            changed.push(name.as_str());
+            *bytes = format!("{}\n", serde_json::to_string_pretty(&sample).unwrap()).into_bytes();
+        }
+    }
+    assert_eq!(
+        changed,
+        [
+            "cache-why.json",
+            "fed-app-context-states.json",
+            "fed-phone-context-states-unchanged.json",
+            "fed-phone-context-states.json",
+            "states.json",
+        ]
+    );
+    check_tagged_samples(&testdata, "v23", samples);
 }
 
 fn tagged_json_samples(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {

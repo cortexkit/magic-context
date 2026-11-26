@@ -1,0 +1,33 @@
+{
+  "name": "observations-page",
+  "request": {
+    "method": "observations.page",
+    "params": {
+      "limit": 2
+    }
+  },
+  "response": {
+    "result": {
+      "as_of_ms": 1700000000000,
+      "next": "mcc1.WyJvYnNlcnZhdGlvbnMucGFnZSIsIjRmNTNjZGExOGMyYmFhMGMiLFsxNzAwMDAwNzAwMDAwLDJdXQ",
+      "observations": [
+        {
+          "content": "Uses a Mac.",
+          "created_at": 1700000800000,
+          "id": 3,
+          "session": "s"
+        },
+        {
+          "content": "Reviews diffs before merging.",
+          "created_at": 1700000700000,
+          "id": 2,
+          "project": "pj-sample",
+          "proposed_category": "swe:engineering-practice",
+          "session": "s"
+        }
+      ],
+      "op": "observations.page",
+      "schema": 1
+    }
+  }
+}

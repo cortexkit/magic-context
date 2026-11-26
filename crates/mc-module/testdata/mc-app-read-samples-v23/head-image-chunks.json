@@ -1,0 +1,53 @@
+{
+  "name": "head-image-chunks",
+  "request": {
+    "method": "context.head",
+    "params": {
+      "session": {
+        "harness": "opencode2",
+        "runner": "thalamus-harness",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "as_of": {
+        "applied": true,
+        "at_ms": 30,
+        "step_ref": "m3",
+        "view": 7
+      },
+      "managed": true,
+      "messages": [
+        {
+          "bytes": 62,
+          "sections": [
+            {
+              "bytes": 62,
+              "image": {
+                "bytes": 1174,
+                "media_type": "image/svg+xml",
+                "sha256": "87da243ed0620d861ee9f13b4f32f2d12ae009bbb9f63c198819faf7c36cc109",
+                "tokens": null
+              },
+              "index": 0,
+              "kind": "memory_mural",
+              "tokens": 21
+            }
+          ],
+          "slot": "baseline",
+          "tokens": 21
+        },
+        {
+          "bytes": 90,
+          "empty": true,
+          "placeholder": "<session-history-since>(no new content since last materialization)</session-history-since>",
+          "sections": [],
+          "slot": "delta",
+          "tokens": 21
+        }
+      ]
+    }
+  }
+}
