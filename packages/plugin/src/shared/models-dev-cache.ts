@@ -518,7 +518,7 @@ export function useV2DraftModelLimits(
             inputLimit: merged.input,
             outputLimit: merged.output,
         });
-    }
+    } else v2DraftModelLimits.delete(key);
     if (!v2DraftModelLimitLogged.has(key)) {
         v2DraftModelLimitLogged.add(key);
         sessionLog(

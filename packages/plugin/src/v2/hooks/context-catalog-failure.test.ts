@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
+import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 import { V2ContextRefusal } from "./refusal";
 
@@ -69,6 +70,58 @@ test("the selected model window still refuses a clearly oversized first turn dur
         expect(turn.logs).toContainEqual(expect.stringContaining("over the 20000-token window"));
         expect(turn.logs).toContainEqual(expect.stringContaining("arm=blocking-transform-error"));
         expect(interrupt).toHaveBeenCalledTimes(1);
+    } finally {
+        interrupt.mockRestore();
+        await f.cleanup();
+    }
+});
+
+test.each([
+    { seed: 9803, draftInput: 30_000, cacheInput: 40_000, refused: true },
+    { seed: 9804, draftInput: 40_000, cacheInput: 30_000, refused: false },
+])("a catalog outage honors a cached cap of $cacheInput against the draft's $draftInput", async ({
+    seed,
+    draftInput,
+    cacheInput,
+    refused,
+}) => {
+    const model = `cached-catalog-down-${seed}`;
+    const f = await oc2ContextFixture(seed, {
+        area: "catalog-failure",
+        provider: "custom",
+        model,
+        limit: { context: 80_000, input: draftInput, output: 8000 },
+        listModels,
+    });
+    const interrupt = spyOn(f.hostSession, "interrupt");
+    try {
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "custom",
+                                models: {
+                                    [model]: {
+                                        limit: { context: 80_000, input: cacheInput, output: 8000 },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+        const turn = await f.pass();
+        if (refused) {
+            expect(interrupt).toHaveBeenCalledTimes(1);
+            expect(turn.logs).toContainEqual(expect.stringContaining("arm=usage-unavailable"));
+        } else {
+            expect(interrupt).not.toHaveBeenCalled();
+            expect(turn.draft.messages).not.toEqual(turn.input);
+            expect(readSessionMeta(f.db, f.session).lastUsageContextLimit).toBe(cacheInput);
+        }
     } finally {
         interrupt.mockRestore();
         await f.cleanup();

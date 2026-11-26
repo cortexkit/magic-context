@@ -215,6 +215,26 @@ describe("models-dev-cache (SDK-only)", () => {
         }
     });
 
+    test("a later failed lookup removes an overlay when the draft no longer fills any cached field", async () => {
+        const host = spyOn(harnessState, "getHarness").mockReturnValue("opencode2");
+        try {
+            await refreshModelLimitsFromApi(
+                makeClient([
+                    { id: "custom", models: { selected: { limit: { context: 80_000 } } } },
+                ]),
+            );
+            expect(
+                useV2DraftModelLimits("custom", "selected", { context: 80_000, input: 30_000 }),
+            ).toBe(true);
+            expect(getSdkContextLimit("custom", "selected")).toBe(30_000);
+
+            expect(useV2DraftModelLimits("custom", "selected", { context: 80_000 })).toBe(true);
+            expect(getSdkContextLimit("custom", "selected")).toBe(80_000);
+        } finally {
+            host.mockRestore();
+        }
+    });
+
     test("honors the reporter's default output_reserve on the SDK geometry path", async () => {
         await refreshModelLimitsFromApi(
             makeClient([
