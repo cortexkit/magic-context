@@ -13,8 +13,11 @@ is copied byte for byte.
   published summary; the streak is above `0`.
 
 The last error time is in epoch milliseconds. An error recorded by an older
-build has an unknown time (`null`) and does not start a streak. When reading a
-reply from an older build that omits these fields, treat them as `null` and `0`.
+build has an unknown time (`null`) and does not start a streak. A reply from an
+older build omits `historian_last_error_at_ms` and
+`historian_failures_since_success`: read that as "not reported", not as `0`, and
+fall back to `historian_failure_count`. Reading it as `0` would make a failing
+summarizer on an older build look idle.
 
 Regenerate from the workspace root:
 

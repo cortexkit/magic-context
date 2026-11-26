@@ -170,6 +170,44 @@ async fn reconnect_discards_the_cached_declaration() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_failed_discovery_is_asked_again_after_a_minute_without_a_setup() {
+    let cache = RunnerCapabilities::default();
+    assert!(
+        !cache
+            .plans("runner", 1, async {
+                Err(ClientError::new("describe timed out"))
+            })
+            .await
+    );
+    tokio::time::advance(FAILED_DISCOVERY_RETRY - Duration::from_secs(1)).await;
+    assert!(
+        !cache
+            .plans("runner", 1, async {
+                panic!("a failed discovery is kept for the retry time")
+            })
+            .await
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(
+        cache
+            .plans("runner", 1, async {
+                Ok(json!({"capabilities": ["plans"]}))
+            })
+            .await,
+        "the runner is asked again, with no Setup in between"
+    );
+    // A discovery that succeeded is never asked again by time alone.
+    tokio::time::advance(FAILED_DISCOVERY_RETRY * 10).await;
+    assert!(
+        cache
+            .plans("runner", 1, async {
+                panic!("a successful discovery does not expire")
+            })
+            .await
+    );
+}
+
 #[tokio::test]
 async fn discovery_failures_are_cached_until_setup() {
     let cache = RunnerCapabilities::default();

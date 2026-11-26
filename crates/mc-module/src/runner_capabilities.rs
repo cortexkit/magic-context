@@ -7,11 +7,23 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::sync::OnceCell;
+use tokio::time::{Duration, Instant};
 
 use crate::client::ClientError;
 use cortexkit_role_llm_runner::session_retention::{Keep, RetentionPolicy};
 
-type Declaration = (u64, Arc<OnceCell<Features>>);
+/// A runner's discovered features, with the time of the failure when
+/// discovery failed and the features are only a stand-in.
+type Discovered = (Features, Option<Instant>);
+type Declaration = (u64, Arc<OnceCell<Discovered>>);
+
+/// How long a failed discovery stands in for "declares nothing" before the
+/// runner is asked again. An older runner refuses every describe, so the
+/// failure is kept rather than repeated on each call. But a new Setup is the
+/// only other thing that clears it, and none arrives during a night of
+/// maintenance: without this limit one transient error would switch plans and
+/// caching off for every child session until morning.
+const FAILED_DISCOVERY_RETRY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Default)]
 struct Features {
@@ -54,7 +66,8 @@ impl SessionRetention {
 
 /// In-memory declarations, shared by summaries using the same runner and
 /// consumer connection. Negative answers are cached too, to avoid repeated
-/// discovery calls and warnings on older runners.
+/// discovery calls and warnings on older runners; a failed discovery is
+/// cached only for [`FAILED_DISCOVERY_RETRY`].
 #[derive(Default)]
 pub struct RunnerCapabilities {
     runners: Mutex<HashMap<String, Declaration>>,
@@ -232,6 +245,14 @@ impl RunnerCapabilities {
             if declaration.0 != connection_epoch {
                 *declaration = (connection_epoch, Arc::new(OnceCell::new()));
             }
+            let failure_expired = declaration
+                .1
+                .get()
+                .and_then(|(_, failed_at)| *failed_at)
+                .is_some_and(|failed_at| failed_at.elapsed() >= FAILED_DISCOVERY_RETRY);
+            if failure_expired {
+                declaration.1 = Arc::new(OnceCell::new());
+            }
             Arc::clone(&declaration.1)
         };
         cell
@@ -261,15 +282,16 @@ impl RunnerCapabilities {
                         if !declared.capabilities.contains("cache_policy") {
                             tracing::info!(runner, "summarizer cache omitted: runner does not declare cache_policy");
                         }
-                        declared
+                        (declared, None)
                     }
                     Err(error) => {
                         tracing::warn!(runner, reason = %error.message, "summarizer cache omitted: runner discovery failed");
-                        Features::default()
+                        (Features::default(), Some(Instant::now()))
                     }
                 }
             })
             .await
+            .0
             .clone()
     }
 }
