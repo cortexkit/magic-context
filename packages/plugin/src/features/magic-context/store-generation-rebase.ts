@@ -86,7 +86,7 @@ export interface CoordinateRebaseNotice {
      * of sessions stamped by an older build from running again.
      */
     neighbourRecoveryAt: number | null;
-    /** Conversion-only gaps copied into a fork; absent on a session the host converted. */
+    /** Gaps copied under the OpenCode 1→2 conversion rule. An empty list permits none. */
     inheritedGaps?: InheritedCoordinateGap[];
 }
 
@@ -1272,7 +1272,7 @@ export function recoverUnresolvedCompartments(
                     ? { inheritedGaps: previous.inheritedGaps }
                     : {}),
                 previousGeneration: previous?.previousGeneration ?? null,
-                at: previous?.at ?? now,
+                at: previous?.at || now,
                 unresolvedCompartments: result.unresolved.length,
                 discardedReductions: previous?.discardedReductions ?? 0,
                 droppedDepthRows: previous?.droppedDepthRows ?? 0,

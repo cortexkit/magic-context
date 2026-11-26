@@ -29,7 +29,7 @@ import {
     sessionHasMagicContextState,
 } from "./fork-inheritance";
 import { readForkHistoryGap } from "./hooks/fork-history-status";
-import { readV2MessageRange } from "./hooks/store";
+import { iterateV2MessageRange, readV2MessageRange } from "./hooks/store";
 import { type V2RowStamp, V2StoreReader } from "./store-reader";
 
 // Issue 608: an OpenCode 2 fork copies its parent's rows into a new session
@@ -284,7 +284,7 @@ function seedV2ForkFromParent(args: Parameters<typeof seed>[0]): ReturnType<type
 }
 
 function convertedFork(edited = false, descendant = false) {
-    const { reader } = createStore({
+    const { reader, path } = createStore({
         copyAll: true,
         copyThrough: 9,
         syntheticAt: 4,
@@ -299,7 +299,7 @@ function convertedFork(edited = false, descendant = false) {
     db.prepare(
         "INSERT INTO session_meta (session_id, harness, coordinate_rebase_notice) VALUES (?, 'opencode2', ?)",
     ).run(PARENT, JSON.stringify({ generation: "v2", healedGaps: 12, neighbourRecoveryAt: 100 }));
-    return { db, reader };
+    return { db, reader, path };
 }
 
 function inheritedMark(db: Database, sessionID = FORK): unknown {
@@ -405,6 +405,58 @@ describe("seedV2ForkFromParent", () => {
         }
     });
 
+    it("records only the crossed gap that needed the conversion record", () => {
+        const { reader, path } = createStore({ copyAll: true, syntheticAt: 6 });
+        const host = new Database(path);
+        try {
+            host.prepare("UPDATE session_message SET data = ? WHERE id IN (?, ?)").run(
+                JSON.stringify({ content: [{ type: "text", text: "synthetic", synthetic: true }] }),
+                parentId(2),
+                forkId(2),
+            );
+        } finally {
+            host.close();
+        }
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [1, parentId(1)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [4, parentId(5)]);
+        insertCompartment(db, PARENT, 2, [6, parentId(7)], [7, parentId(8)]);
+        db.prepare(
+            "INSERT INTO session_meta (session_id, coordinate_rebase_notice) VALUES (?, ?)",
+        ).run(PARENT, JSON.stringify({ generation: "v2" }));
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inheritedMark(db)).toEqual({
+            generation: "v2",
+            inheritedGaps: [{ start: 5, end: 5 }],
+        });
+    });
+
+    it.each([
+        ["empty", []],
+        ["null", null],
+        ["malformed", "3-3"],
+    ] as const)("rejects a healing gap with a present %s inherited list", (_name, inheritedGaps) => {
+        const { db, reader } = convertedFork();
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        db.prepare("UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?").run(
+            JSON.stringify({ generation: "v2", inheritedGaps }),
+            FORK,
+        );
+        const rows = [
+            { startMessage: 1, endMessage: 2 },
+            { startMessage: 4, endMessage: 6 },
+            { startMessage: 7, endMessage: 8 },
+        ];
+        expect(
+            validateStoredCompartments(
+                rows,
+                nonNarrativeStoredGapRanges(db, FORK, rows, (from, to) =>
+                    readV2MessageRange(reader, FORK, from, to),
+                ),
+            ),
+        ).toBe("gap before message 4 (expected 3)");
+    });
+
     it("lets a conversion heal both gaps but limits a fork to its inherited interval", () => {
         const { reader } = createStore({ copyAll: true, syntheticAt: [4, 6] });
         const db = createContextDb();
@@ -467,6 +519,7 @@ describe("seedV2ForkFromParent", () => {
         expect(mark?.inheritedGaps).toEqual([{ start: 3, end: 3 }]);
         expect(mark?.healedGaps).toBe(0);
         expect(mark?.neighbourRecoveryAt === null).toBe(!repair);
+        expect(mark?.at).toBe(repair ? mark?.neighbourRecoveryAt : 0);
         const after = executeStatus(db, FORK);
         expect(after).not.toContain("Store Conversion");
         expect(after.includes("Saved History Recovery")).toBe(repair);
@@ -520,11 +573,113 @@ describe("seedV2ForkFromParent", () => {
         expect(readForkHistoryGap(db, opened, FORK)).toBe(true);
         expect(rows).toBe(1);
         expect(readForkHistoryGap(db, opened, FORK)).toBe(true);
-        expect(opens).toBe(1);
+        expect(opens).toBe(2);
+        expect(rows).toBe(1);
         db.prepare("DELETE FROM compartments WHERE session_id = ?").run(FORK);
         insertCompartment(db, FORK, 0, [1, forkId(1)], [7, forkId(8)]);
         expect(readForkHistoryGap(db, opened, FORK)).toBe(false);
-        expect(opens).toBe(1);
+        expect(opens).toBe(2);
+    });
+
+    it.each([
+        ["distinct timestamps", false],
+        ["one timestamp", true],
+    ] as const)("seek equals the old paged read at every window (%s)", (_name, sameTime) => {
+        const { path, reader } = createStore();
+        const host = new Database(path);
+        try {
+            host.exec("BEGIN; DELETE FROM session_message;");
+            const insert = host.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)");
+            for (const id of [PARENT, FORK]) {
+                let seq = 0;
+                const add = (type: string, data: object) => {
+                    seq += 1;
+                    const time = sameTime ? 1 : seq;
+                    insert.run(`${id}_${seq}`, id, type, seq, time, time, JSON.stringify(data));
+                };
+                for (let i = 1; i <= 1210; i += 1) {
+                    add(i % 2 ? "user" : "assistant", { text: `row ${i}` });
+                    if (i % 7 === 0) add("idle", {});
+                    if (i % 13 === 0) seq += 3;
+                }
+            }
+            host.exec("COMMIT");
+        } finally {
+            host.close();
+        }
+        const windows: [number, number][] = [
+            [1, 501],
+            [499, 1002],
+            [1000, 1215],
+        ];
+        for (const edge of [1, 7, 13, 499, 500, 501, 999, 1000, 1001, 1210, 1211]) {
+            for (const from of [Math.max(1, edge - 1), edge]) {
+                for (const to of [from - 1, edge, edge + 2]) windows.push([from, to]);
+            }
+        }
+        for (const id of [PARENT, FORK]) {
+            for (const [from, to] of windows) {
+                expect([...iterateV2MessageRange(reader, id, from, to)]).toEqual(
+                    readV2MessageRange(reader, id, from, to),
+                );
+            }
+        }
+    });
+
+    it("invalidates a diagnosis when only the conversion record changes", () => {
+        const { db, reader, path } = convertedFork();
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        const check = () => readForkHistoryGap(db, () => new V2StoreReader(path), FORK);
+        expect(check()).toBe(false);
+        db.prepare("UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?").run(
+            JSON.stringify({ generation: "v2", inheritedGaps: [] }),
+            FORK,
+        );
+        expect(check()).toBe(true);
+    });
+
+    it("invalidates a diagnosis when a revert replaces the suffix with new IDs at the same count", () => {
+        const { db, reader, path } = convertedFork();
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        const check = () => readForkHistoryGap(db, () => new V2StoreReader(path), FORK);
+        expect(check()).toBe(false);
+        const count = reader.messageCount(FORK);
+        const host = new Database(path);
+        try {
+            // Host edits replace the suffix with new IDs, not an in-place SQL edit.
+            const suffix = host
+                .prepare(`DELETE FROM session_message WHERE session_id = ? AND seq >= 4
+                RETURNING seq, type, time_created`)
+                .all(FORK) as { seq: number; type: string; time_created: number }[];
+            const insert =
+                host.prepare(`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+                VALUES (?,?,?,?,?,?,?)`);
+            for (const row of suffix)
+                insert.run(
+                    `replacement_${row.seq}`,
+                    FORK,
+                    row.seq === 4 ? "user" : row.type,
+                    row.seq,
+                    row.time_created,
+                    row.time_created,
+                    JSON.stringify({ text: "New conversation after revert" }),
+                );
+        } finally {
+            host.close();
+        }
+        expect(reader.messageCount(FORK)).toBe(count);
+        expect(check()).toBe(true);
+    });
+
+    it("invalidates a diagnosis when the ranges change but still contain a gap", () => {
+        const { db, reader, path } = convertedFork();
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        const check = () => readForkHistoryGap(db, () => new V2StoreReader(path), FORK);
+        expect(check()).toBe(false);
+        db.prepare(
+            "UPDATE compartments SET start_message = 5 WHERE session_id = ? AND sequence = 1",
+        ).run(FORK);
+        expect(check()).toBe(true);
     });
 
     it("restores removals covered by live IDs beyond a rejected stored range", () => {
@@ -972,7 +1127,7 @@ describe("seedV2ForkFromParent", () => {
             sequenceForId: (session: string, id: string) => reader.sequenceForId(session, id),
             matchingForkBodies: (parent: string, fork: string, through: number) =>
                 reader.matchingForkBodies(parent, fork, through),
-            iterateRawMessageRange: reader.iterateRawMessageRange.bind(reader),
+            messagePage: reader.messagePage.bind(reader),
             rowStampsThrough: (session: string, through: number) => {
                 const rows = reader.rowStampsThrough(session, through);
                 if (session === FORK && !sessionHasMagicContextState(db, FORK)) {

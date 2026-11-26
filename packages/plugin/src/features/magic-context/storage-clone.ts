@@ -52,7 +52,7 @@ export interface CloneSessionStateFilter {
     selectCompartments?: (
         source: readonly CloneCompartmentBoundary[],
     ) => ReadonlyMap<number, CloneCompartmentRow>;
-    /** Conversion-only gaps crossed by this OpenCode 2 fork's copied prefix. */
+    /** Copied gaps accepted only because of the parent's OpenCode 1→2 conversion record. */
     inheritedCoordinateGaps?: () => readonly { start: number; end: number }[];
     includeTag(tag: CloneTagRow): boolean;
     includeMessageId(messageId: string): boolean;

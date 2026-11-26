@@ -1335,7 +1335,7 @@ export class V2StoreReader {
     *iterateRawMessageRange(sessionID: string, from: number, to: number): Iterable<StoreRow> {
         if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from)
             return;
-        // Read one row at a time. Older hosts report SQLite API misuse when
+        // OpenCode 2.0.22 and 2.1.0 report SQLite API misuse when
         // a consumer stops early and closes a native statement iterator.
         let anchor: RawMessageOrdinalAnchor | undefined;
         for (let after = from - 1; after < to; after += 1) {
@@ -1344,6 +1344,17 @@ export class V2StoreReader {
             anchor = { id: row.id, timeCreated: row.time_created ?? 0 };
             yield row;
         }
+    }
+
+    /** Identify suffix replacement without reading any message bodies. */
+    messageCountAndNewestId(sessionID: string): [number, string | null] {
+        const row = this.prepare(`SELECT COUNT(*) AS count, (
+                SELECT id FROM session_message WHERE session_id = ? ORDER BY seq DESC LIMIT 1
+            ) AS newestId FROM session_message WHERE session_id = ?`).get(sessionID, sessionID) as {
+            count: number;
+            newestId: string | null;
+        };
+        return [row.count, row.newestId];
     }
 
     latestSequenceForIds(sessionID: string, ids: readonly string[]): number {

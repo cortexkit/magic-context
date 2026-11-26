@@ -479,7 +479,7 @@ test.each([
 			const parentGap = required(parentRows[4]).id;
 			const forkGap = required(rawRows(sessionID)[4]).id;
 			// The parent accepts this counted synthetic message only because
-			// of its v2 conversion record.
+			// of its v2 coordinate_rebase_notice record.
 			usingDb(
 				source,
 				(db) => {

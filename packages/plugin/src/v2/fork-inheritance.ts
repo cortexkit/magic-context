@@ -204,9 +204,8 @@ function selectForkCompartments(
             ) {
                 reason = "live endpoint conflicts with the stored position";
             } else if (
-                // A stale ID needs an anchor among the host's current rows.
-                // The preceding check repeats the prior range proof, but
-                // makes the witness for a stale start explicit here.
+                // A stale start needs the live end ID of the previous range,
+                // which was already accepted with its end at lastEnd.
                 (start === undefined && previous && ordinal(previous.endMessageId) !== lastEnd) ||
                 (end === undefined &&
                     (!next ||
@@ -232,7 +231,7 @@ function selectForkCompartments(
                 const conversionGap = conversionGaps.find(
                     ({ start, end }) => start === lastEnd + 1 && end === startMessage - 1,
                 );
-                // Every position in this gap was proved equal in the fork,
+                // provePrefix checked every position in this gap in both copies,
                 // so the accepted interval already uses the fork's ordinals.
                 if (conversionGap) inheritedGaps.push(conversionGap);
                 lastEnd = endMessage;
@@ -382,7 +381,7 @@ export type V2ForkSeedOutcome =
     | { kind: "destination-not-empty"; parentSessionID: string };
 
 /** What the seed reads from the OpenCode 2 store. */
-export interface V2ForkStore extends Pick<V2StoreReader, "iterateRawMessageRange"> {
+export interface V2ForkStore extends Pick<V2StoreReader, "messagePage"> {
     forkOrigin(sessionID: string): V2ForkOrigin | null;
     sessionExists(sessionID: string): boolean;
     sequenceForId(sessionID: string, id: string): number | undefined;

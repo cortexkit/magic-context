@@ -6,14 +6,14 @@ import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications
 import type { Database } from "../../shared/sqlite";
 import { renderUserFacingFailure } from "../../shared/user-facing-codes";
 import type { V2StoreReader } from "../store-reader";
-import { readV2MessageRange } from "./store";
+import { iterateV2MessageRange } from "./store";
 
 const logged = new Set<string>();
 const toasted = new Set<string>();
 const isGap = (error: string | null) => error?.startsWith("gap before message ") === true;
 const diagnoses = new WeakMap<Database, BoundedSessionMap<{ key: string; gap: boolean }>>();
 
-/** Display only. Reuse the diagnosis until the saved summary ranges change. */
+/** Display only. Cache by saved ranges, conversion record and host suffix identity. */
 export function readForkHistoryGap(
     db: Database,
     openReader: () => V2StoreReader,
@@ -42,26 +42,35 @@ export function readForkHistoryGap(
         cache = new BoundedSessionMap(1000);
         diagnoses.set(db, cache);
     }
-    const key = JSON.stringify(rows);
-    const cached = cache.get(sessionID);
-    let gap = cached?.key === key ? cached.gap : undefined;
-    if (gap === undefined) {
-        const reader = openReader();
-        try {
+    const notice = db
+        .prepare("SELECT coordinate_rebase_notice AS text FROM session_meta WHERE session_id = ?")
+        .get(sessionID) as { text: string | null } | undefined;
+    const reader = openReader();
+    let gap: boolean;
+    try {
+        const key = JSON.stringify([
+            rows,
+            notice?.text ?? null,
+            reader.messageCountAndNewestId(sessionID),
+        ]);
+        const cached = cache.get(sessionID);
+        if (cached?.key === key) {
+            gap = cached.gap;
+        } else {
             gap =
                 Boolean(reader.forkOrigin(sessionID)) &&
                 isGap(
                     validateStoredCompartments(
                         rows,
                         nonNarrativeStoredGapRanges(db, sessionID, rows, (from, to) =>
-                            readV2MessageRange(reader, sessionID, from, to),
+                            iterateV2MessageRange(reader, sessionID, from, to),
                         ),
                     ),
                 );
-        } finally {
-            reader.close();
+            cache.set(sessionID, { key, gap });
         }
-        cache.set(sessionID, { key, gap });
+    } finally {
+        reader.close();
     }
     if (!gap) return false;
     if (!logged.has(sessionID)) {
