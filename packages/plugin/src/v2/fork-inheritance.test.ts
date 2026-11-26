@@ -8,18 +8,28 @@ import { runMigrations } from "../features/magic-context/migrations";
 import { copySessionStateForClone } from "../features/magic-context/storage-clone";
 import { initializeDatabase } from "../features/magic-context/storage-db";
 import {
+    readCoordinateRebaseNotice,
+    rebaseSessionCoordinates,
+} from "../features/magic-context/store-generation-rebase";
+import {
     freezeTemporalDecisions,
     getTemporalDecisions,
 } from "../features/magic-context/temporal-decisions";
+import { validateStoredCompartments } from "../hooks/magic-context/compartment-runner-validation";
+import { executeStatus } from "../hooks/magic-context/execute-status";
+import { nonNarrativeStoredGapRanges } from "../hooks/magic-context/stored-compartment-gaps";
+import { _resetHarnessForTesting, setHarness } from "../shared/harness";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
     buildForkIdMap,
     forkBoundarySeq,
-    seedV2ForkFromParent,
+    seedV2ForkFromParent as seed,
     sessionHasMagicContextState,
 } from "./fork-inheritance";
+import { readForkHistoryGap } from "./hooks/fork-history-status";
+import { iterateV2MessageRange, readV2MessageRange } from "./hooks/store";
 import { type V2RowStamp, V2StoreReader } from "./store-reader";
 
 // Issue 608: an OpenCode 2 fork copies its parent's rows into a new session
@@ -29,6 +39,7 @@ import { type V2RowStamp, V2StoreReader } from "./store-reader";
 
 const PARENT = "ses_parent";
 const FORK = "ses_fork";
+const DESCENDANT = "ses_descendant";
 /** OpenCode derives the copied ids from the fork event's id. */
 const FORK_PREFIX = "msg_0ffb3ee0f002forkEvent00";
 
@@ -65,7 +76,20 @@ const BOUNDARY_SEQ = 8;
 const parentId = (seq: number) => `msg_parent_${String(seq).padStart(2, "0")}`;
 const forkId = (seq: number) => `${FORK_PREFIX}_${seq}`;
 
-function createStore(options: { boundary?: string | null; withParentRow?: boolean } = {}) {
+function createStore(
+    options: {
+        boundary?: string | null;
+        withParentRow?: boolean;
+        copyAll?: boolean;
+        changedBodyAt?: number;
+        replacedCopyAt?: number;
+        omitIdle?: boolean;
+        partBody?: "same" | "changed";
+        copyThrough?: number;
+        syntheticAt?: number | number[];
+        descendant?: boolean;
+    } = {},
+) {
     const dir = createTestTempDirFromPath(join(tmpdir(), "mc-fork-inheritance-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const path = join(dir, "opencode.db");
@@ -85,15 +109,67 @@ function createStore(options: { boundary?: string | null; withParentRow?: boolea
         boundary,
     );
     db.prepare("INSERT INTO session_v2 (id) VALUES ('ses_plain')").run();
+    if (options.descendant)
+        db.prepare(
+            "INSERT INTO session_v2 (id, fork_session_id, fork_boundary) VALUES (?,?,?)",
+        ).run(
+            DESCENDANT,
+            FORK,
+            JSON.stringify({
+                type: "through",
+                messageID: forkId(options.copyThrough ?? BOUNDARY_SEQ),
+            }),
+        );
     const insert = db.prepare(
         "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, '{}')",
     );
     for (const row of PARENT_ROWS) {
-        insert.run(parentId(row.seq), PARENT, row.type, row.seq, row.seq * 100, row.seq * 100);
+        const type = [options.syntheticAt ?? []].flat().includes(row.seq) ? "synthetic" : row.type;
+        insert.run(parentId(row.seq), PARENT, type, row.seq, row.seq * 100, row.seq * 100);
         // The host copies settled rows through the boundary with the same seq,
         // type and timestamps.
-        if (row.seq <= BOUNDARY_SEQ && row.copied !== false)
-            insert.run(forkId(row.seq), FORK, row.type, row.seq, row.seq * 100, row.seq * 100);
+        if (
+            row.seq <= (options.copyThrough ?? BOUNDARY_SEQ) &&
+            (options.copyAll || row.copied !== false) &&
+            !(options.omitIdle && row.type === "idle")
+        ) {
+            insert.run(
+                options.replacedCopyAt === row.seq
+                    ? "msg_fork_native_replacement"
+                    : forkId(row.seq),
+                FORK,
+                type,
+                row.seq,
+                row.seq * 100,
+                row.seq * 100,
+            );
+            if (options.descendant)
+                insert.run(
+                    `msg_descendant_${row.seq}`,
+                    DESCENDANT,
+                    type,
+                    row.seq,
+                    row.seq * 100,
+                    row.seq * 100,
+                );
+        }
+    }
+    if (options.changedBodyAt !== undefined)
+        db.prepare("UPDATE session_message SET data = ? WHERE id = ?").run(
+            '{"text":"different content under the same copy stamps"}',
+            forkId(options.changedBodyAt),
+        );
+    if (options.partBody) {
+        db.exec(`CREATE TABLE session_part (message_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+            type TEXT NOT NULL, call_id TEXT, data TEXT NOT NULL, PRIMARY KEY (message_id, ordinal))`);
+        const part = db.prepare("INSERT INTO session_part VALUES (?, 0, 'text', NULL, ?)");
+        part.run(parentId(5), '{"type":"text","text":"parent part"}');
+        part.run(
+            forkId(5),
+            options.partBody === "same"
+                ? '{"type":"text","text":"parent part"}'
+                : '{"type":"text","text":"changed part"}',
+        );
     }
     // The fork's own first turn, after the boundary.
     insert.run("msg_fork_native_user", FORK, "user", 11, 5_000, 5_000);
@@ -187,6 +263,52 @@ function forkRows<T>(db: Database, sql: string): T[] {
     return db.prepare(sql).all(FORK) as T[];
 }
 
+function seedV2ForkFromParent(args: Parameters<typeof seed>[0]): ReturnType<typeof seed> {
+    const result = seed(args);
+    if (result.kind === "seeded") {
+        const { db, store, sessionId } = args;
+        const rows = db
+            .prepare(`SELECT start_message AS startMessage, end_message AS endMessage
+            FROM compartments WHERE session_id = ? ORDER BY sequence`)
+            .all(sessionId) as { startMessage: number; endMessage: number }[];
+        expect(
+            validateStoredCompartments(
+                rows,
+                nonNarrativeStoredGapRanges(db, sessionId, rows, (from, to) =>
+                    readV2MessageRange(store, sessionId, from, to),
+                ),
+            ),
+        ).toBeNull();
+    }
+    return result;
+}
+
+function convertedFork(edited = false, descendant = false) {
+    const { reader, path } = createStore({
+        copyAll: true,
+        copyThrough: 9,
+        syntheticAt: 4,
+        descendant,
+        changedBodyAt: edited ? 4 : undefined,
+        boundary: JSON.stringify({ type: "through", messageID: parentId(9) }),
+    });
+    const db = createContextDb();
+    insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+    insertCompartment(db, PARENT, 1, [4, parentId(5)], [6, parentId(7)]);
+    insertCompartment(db, PARENT, 2, [7, parentId(8)], [8, parentId(9)]);
+    db.prepare(
+        "INSERT INTO session_meta (session_id, harness, coordinate_rebase_notice) VALUES (?, 'opencode2', ?)",
+    ).run(PARENT, JSON.stringify({ generation: "v2", healedGaps: 12, neighbourRecoveryAt: 100 }));
+    return { db, reader, path };
+}
+
+function inheritedMark(db: Database, sessionID = FORK): unknown {
+    const row = db
+        .prepare("SELECT coordinate_rebase_notice AS mark FROM session_meta WHERE session_id = ?")
+        .get(sessionID) as { mark: string | null } | undefined;
+    return row?.mark ? JSON.parse(row.mark) : null;
+}
+
 describe("buildForkIdMap", () => {
     const stamps = (session: "parent" | "fork"): V2RowStamp[] =>
         PARENT_ROWS.filter(
@@ -261,6 +383,554 @@ describe("forkBoundarySeq", () => {
 });
 
 describe("seedV2ForkFromParent", () => {
+    it.each([
+        false,
+        true,
+    ])("crosses a parent-accepted gap only if the gap bytes match (edited=%s)", (edited) => {
+        const { reader, db } = convertedFork(edited, !edited);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual((edited ? [0] : [0, 1, 2]).map((sequence) => ({ sequence })));
+        const marker = { generation: "v2", inheritedGaps: [{ start: 3, end: 3 }] };
+        expect(inheritedMark(db)).toEqual(edited ? null : marker);
+        if (!edited) {
+            expect(seedV2ForkFromParent({ db, store: reader, sessionId: DESCENDANT }).kind).toBe(
+                "seeded",
+            );
+            expect(inheritedMark(db, DESCENDANT)).toEqual(marker);
+        }
+    });
+
+    it("records only the crossed gap that needed the conversion record", () => {
+        const { reader, path } = createStore({ copyAll: true, syntheticAt: 6 });
+        const host = new Database(path);
+        try {
+            host.prepare("UPDATE session_message SET data = ? WHERE id IN (?, ?)").run(
+                JSON.stringify({ content: [{ type: "text", text: "synthetic", synthetic: true }] }),
+                parentId(2),
+                forkId(2),
+            );
+        } finally {
+            host.close();
+        }
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [1, parentId(1)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [4, parentId(5)]);
+        insertCompartment(db, PARENT, 2, [6, parentId(7)], [7, parentId(8)]);
+        db.prepare(
+            "INSERT INTO session_meta (session_id, coordinate_rebase_notice) VALUES (?, ?)",
+        ).run(PARENT, JSON.stringify({ generation: "v2" }));
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inheritedMark(db)).toEqual({
+            generation: "v2",
+            inheritedGaps: [{ start: 5, end: 5 }],
+        });
+    });
+
+    it.each([
+        ["empty", []],
+        ["null", null],
+        ["malformed", "3-3"],
+    ] as const)("rejects a healing gap with a present %s inherited list", (_name, inheritedGaps) => {
+        const { db, reader } = convertedFork();
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        db.prepare("UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?").run(
+            JSON.stringify({ generation: "v2", inheritedGaps }),
+            FORK,
+        );
+        const rows = [
+            { startMessage: 1, endMessage: 2 },
+            { startMessage: 4, endMessage: 6 },
+            { startMessage: 7, endMessage: 8 },
+        ];
+        expect(
+            validateStoredCompartments(
+                rows,
+                nonNarrativeStoredGapRanges(db, FORK, rows, (from, to) =>
+                    readV2MessageRange(reader, FORK, from, to),
+                ),
+            ),
+        ).toBe("gap before message 4 (expected 3)");
+    });
+
+    it("lets a conversion heal both gaps but limits a fork to its inherited interval", () => {
+        const { reader } = createStore({ copyAll: true, syntheticAt: [4, 6] });
+        const db = createContextDb();
+        const rows = [
+            { startMessage: 1, endMessage: 2 },
+            { startMessage: 4, endMessage: 4 },
+            { startMessage: 6, endMessage: 7 },
+        ];
+        const mark = db.prepare(
+            "INSERT INTO session_meta (session_id, coordinate_rebase_notice) VALUES (?, ?)",
+        );
+        mark.run(PARENT, JSON.stringify({ generation: "v2" }));
+        mark.run(FORK, JSON.stringify({ generation: "v2", inheritedGaps: [{ start: 3, end: 3 }] }));
+        const check = (id: string) =>
+            validateStoredCompartments(
+                rows,
+                nonNarrativeStoredGapRanges(db, id, rows, (from, to) =>
+                    readV2MessageRange(reader, id, from, to),
+                ),
+            );
+        expect(check(PARENT)).toBeNull();
+        expect(check(FORK)).toBe("gap before message 6 (expected 5)");
+    });
+
+    it.each([
+        false,
+        true,
+    ])("the inherited mark neither converts the fork nor interferes with neighbour recovery (repair=%s)", (repair) => {
+        const { reader, db } = convertedFork();
+        setHarness("opencode2");
+        try {
+            expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe(
+                "seeded",
+            );
+        } finally {
+            _resetHarnessForTesting();
+        }
+        const before = executeStatus(db, FORK);
+        expect(before).not.toContain("Store Conversion");
+        expect(before).not.toContain("Saved History Recovery");
+        let projectionReads = 0;
+        const rebase = () =>
+            rebaseSessionCoordinates({
+                db,
+                sessionId: FORK,
+                generation: "v2",
+                readMessages: () => {
+                    projectionReads++;
+                    return [...readV2MessageRange(reader, FORK, 1, 8)];
+                },
+            });
+        expect(rebase().status).toBe("stamped");
+        expect(projectionReads).toBe(0);
+        if (repair)
+            db.prepare(`UPDATE compartments SET end_message = 7, end_message_id = 'missing-end',
+                rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 1`).run(FORK);
+        expect(rebase().status).toBe(repair ? "repaired" : "unchanged");
+        expect(projectionReads).toBe(repair ? 1 : 0);
+        const mark = readCoordinateRebaseNotice(db, FORK);
+        expect(mark?.inheritedGaps).toEqual([{ start: 3, end: 3 }]);
+        expect(mark?.healedGaps).toBe(0);
+        expect(mark?.neighbourRecoveryAt === null).toBe(!repair);
+        expect(mark?.at).toBe(repair ? mark?.neighbourRecoveryAt : 0);
+        const after = executeStatus(db, FORK);
+        expect(after).not.toContain("Store Conversion");
+        expect(after.includes("Saved History Recovery")).toBe(repair);
+    });
+
+    it("keeps one-sided live coverage and uses a live neighbour when available", () => {
+        for (const neighbour of [false, true]) {
+            const { reader } = createStore({ copyAll: true });
+            const db = createContextDb();
+            insertCompartment(
+                db,
+                PARENT,
+                0,
+                [1, parentId(1)],
+                [2, neighbour ? parentId(2) : "gone-end"],
+            );
+            insertCompartment(db, PARENT, 1, [neighbour ? 4 : 3, "gone-start"], [4, parentId(7)]);
+            for (const [i, seq] of [4, 6, 7, 8].entries())
+                insertTag(db, PARENT, `${parentId(seq)}:p0`, i + 1, "dropped");
+            expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe(
+                "seeded",
+            );
+            expect(
+                forkRows(
+                    db,
+                    "SELECT message_id FROM tags WHERE session_id = ? AND status = 'dropped'",
+                ),
+            ).toEqual([{ message_id: `${forkId(8)}:p0` }]);
+        }
+    });
+
+    it("stops the diagnosis at the first narrative row and caches until the summaries change", () => {
+        const { path } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, FORK, 0, [1, forkId(1)], [2, forkId(2)]);
+        insertCompartment(db, FORK, 1, [7, forkId(8)], [7, forkId(8)]);
+        let opens = 0;
+        let rows = 0;
+        const opened = () => {
+            opens++;
+            const reader = new V2StoreReader(path);
+            const iterate = reader.iterateRawMessageRange.bind(reader);
+            reader.iterateRawMessageRange = function* (...args) {
+                for (const row of iterate(...args)) {
+                    rows++;
+                    yield row;
+                }
+            };
+            return reader;
+        };
+        expect(readForkHistoryGap(db, opened, FORK)).toBe(true);
+        expect(rows).toBe(1);
+        expect(readForkHistoryGap(db, opened, FORK)).toBe(true);
+        expect(opens).toBe(2);
+        expect(rows).toBe(1);
+        db.prepare("DELETE FROM compartments WHERE session_id = ?").run(FORK);
+        insertCompartment(db, FORK, 0, [1, forkId(1)], [7, forkId(8)]);
+        expect(readForkHistoryGap(db, opened, FORK)).toBe(false);
+        expect(opens).toBe(2);
+    });
+
+    it.each([
+        ["distinct timestamps", false],
+        ["one timestamp", true],
+    ] as const)("seek equals the old paged read at every window (%s)", (_name, sameTime) => {
+        const { path, reader } = createStore();
+        const host = new Database(path);
+        try {
+            host.exec("BEGIN; DELETE FROM session_message;");
+            const insert = host.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)");
+            for (const id of [PARENT, FORK]) {
+                let seq = 0;
+                const add = (type: string, data: object) => {
+                    seq += 1;
+                    const time = sameTime ? 1 : seq;
+                    insert.run(`${id}_${seq}`, id, type, seq, time, time, JSON.stringify(data));
+                };
+                for (let i = 1; i <= 1210; i += 1) {
+                    add(i % 2 ? "user" : "assistant", { text: `row ${i}` });
+                    if (i % 7 === 0) add("idle", {});
+                    if (i % 13 === 0) seq += 3;
+                }
+            }
+            host.exec("COMMIT");
+        } finally {
+            host.close();
+        }
+        const windows: [number, number][] = [
+            [1, 501],
+            [499, 1002],
+            [1000, 1215],
+        ];
+        for (const edge of [1, 7, 13, 499, 500, 501, 999, 1000, 1001, 1210, 1211]) {
+            for (const from of [Math.max(1, edge - 1), edge]) {
+                for (const to of [from - 1, edge, edge + 2]) windows.push([from, to]);
+            }
+        }
+        for (const id of [PARENT, FORK]) {
+            for (const [from, to] of windows) {
+                expect([...iterateV2MessageRange(reader, id, from, to)]).toEqual(
+                    readV2MessageRange(reader, id, from, to),
+                );
+            }
+        }
+    });
+
+    it("invalidates a diagnosis when only the conversion record changes", () => {
+        const { db, reader, path } = convertedFork();
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        const check = () => readForkHistoryGap(db, () => new V2StoreReader(path), FORK);
+        expect(check()).toBe(false);
+        db.prepare("UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?").run(
+            JSON.stringify({ generation: "v2", inheritedGaps: [] }),
+            FORK,
+        );
+        expect(check()).toBe(true);
+    });
+
+    it("invalidates a diagnosis when a revert replaces the suffix with new IDs at the same count", () => {
+        const { db, reader, path } = convertedFork();
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        const check = () => readForkHistoryGap(db, () => new V2StoreReader(path), FORK);
+        expect(check()).toBe(false);
+        const count = reader.messageCount(FORK);
+        const host = new Database(path);
+        try {
+            // Host edits replace the suffix with new IDs, not an in-place SQL edit.
+            const suffix = host
+                .prepare(`DELETE FROM session_message WHERE session_id = ? AND seq >= 4
+                RETURNING seq, type, time_created`)
+                .all(FORK) as { seq: number; type: string; time_created: number }[];
+            const insert =
+                host.prepare(`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+                VALUES (?,?,?,?,?,?,?)`);
+            for (const row of suffix)
+                insert.run(
+                    `replacement_${row.seq}`,
+                    FORK,
+                    row.seq === 4 ? "user" : row.type,
+                    row.seq,
+                    row.time_created,
+                    row.time_created,
+                    JSON.stringify({ text: "New conversation after revert" }),
+                );
+        } finally {
+            host.close();
+        }
+        expect(reader.messageCount(FORK)).toBe(count);
+        expect(check()).toBe(true);
+    });
+
+    it("invalidates a diagnosis when the ranges change but still contain a gap", () => {
+        const { db, reader, path } = convertedFork();
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        const check = () => readForkHistoryGap(db, () => new V2StoreReader(path), FORK);
+        expect(check()).toBe(false);
+        db.prepare(
+            "UPDATE compartments SET start_message = 5 WHERE session_id = ? AND sequence = 1",
+        ).run(FORK);
+        expect(check()).toBe(true);
+    });
+
+    it("restores removals covered by live IDs beyond a rejected stored range", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [4, parentId(6)]);
+        insertTag(db, PARENT, `${parentId(6)}:p0`, 1, "dropped");
+        insertTag(db, PARENT, `${parentId(7)}:p0`, 2, "dropped");
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(db, "SELECT message_id FROM tags WHERE session_id = ? AND status = 'dropped'"),
+        ).toEqual([{ message_id: `${forkId(7)}:p0` }]);
+    });
+
+    it("does not restart inheritance after an inverted range even if the next range fits", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 2, [3, parentId(4)], [5, parentId(6)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual([{ sequence: 0 }]);
+    });
+
+    it("excludes call-keyed replay when its owner was covered by a rejected summary", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [8, parentId(9)]);
+        insertTag(db, PARENT, "call_covered", 1, "active", "tool", parentId(5));
+        insertTag(db, PARENT, "call_safe", 2, "active", "tool", parentId(2));
+        db.prepare(
+            "UPDATE session_meta SET processed_image_stripped_ids = ? WHERE session_id = ?",
+        ).run(JSON.stringify(["call_covered", "call_safe"]), PARENT);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT processed_image_stripped_ids FROM session_meta WHERE session_id = ?",
+            ),
+        ).toEqual([{ processed_image_stripped_ids: JSON.stringify(["call_safe"]) }]);
+    });
+
+    it.each([
+        ["missing next anchor", {}, "old-next-start"],
+        ["next anchor body differs", { changedBodyAt: 7 }, parentId(7)],
+    ] as const)("does not prove a stale end when the %s", (_name, options, nextStart) => {
+        const { reader } = createStore({ copyAll: true, ...options });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [5, "old-end"]);
+        insertCompartment(db, PARENT, 2, [6, nextStart], [7, parentId(8)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual([{ sequence: 0 }]);
+    });
+
+    it("rejects an unresolved rebase even though its current rows and anchors match", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [5, parentId(6)]);
+        db.prepare(
+            "UPDATE compartments SET rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 1",
+        ).run(PARENT);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual([{ sequence: 0 }]);
+    });
+
+    const inherited = (db: Database) =>
+        forkRows(
+            db,
+            "SELECT sequence, start_message_id AS start, end_message_id AS end FROM compartments WHERE session_id = ? ORDER BY sequence",
+        );
+
+    it("inherits a stale start and a stale end when the raw order and the live neighbors prove both ranges", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, "old-start"], [4, parentId(5)]);
+        insertCompartment(db, PARENT, 2, [5, parentId(6)], [5, "old-end"]);
+        insertCompartment(db, PARENT, 3, [6, parentId(7)], [7, parentId(8)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([
+            { sequence: 0, start: forkId(1), end: forkId(2) },
+            { sequence: 1, start: forkId(4), end: forkId(5) },
+            { sequence: 2, start: forkId(6), end: forkId(6) },
+            { sequence: 3, start: forkId(7), end: forkId(8) },
+        ]);
+    });
+
+    it.each([
+        ["a changed interior body", { copyAll: true, changedBodyAt: 5 }],
+        [
+            "an uncopied interior row with unchanged endpoint ordinals",
+            { copyAll: true, replacedCopyAt: 5 },
+        ],
+    ] as const)("rejects a range with two live endpoints and %s", (_name, options) => {
+        const { reader } = createStore(options);
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [5, parentId(6)]);
+        insertCompartment(db, PARENT, 2, [6, parentId(7)], [7, parentId(8)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(2) }]);
+    });
+
+    it.each([
+        "same",
+        "changed",
+    ] as const)("copies a block boundary only when its stored part body is %s", (partBody) => {
+        const { reader } = createStore({ copyAll: true, partBody });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [4, parentId(5)]);
+        db.prepare(
+            "UPDATE compartments SET end_block_index = 0 WHERE session_id = ? AND sequence = 1",
+        ).run(PARENT);
+        insertTag(db, PARENT, `${parentId(5)}:p0`, 1, "dropped");
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence, end_block_index FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual([
+            { sequence: 0, end_block_index: null },
+            ...(partBody === "same" ? [{ sequence: 1, end_block_index: 0 }] : []),
+        ]);
+        const dropped = forkRows(
+            db,
+            "SELECT message_id FROM tags WHERE session_id = ? AND status = 'dropped'",
+        );
+        expect(dropped).toEqual(partBody === "same" ? [{ message_id: `${forkId(5)}:p0` }] : []);
+    });
+
+    it.each([
+        ["gap", [4, parentId(5)], [5, parentId(6)]],
+        ["overlap", [2, parentId(2)], [5, parentId(6)]],
+    ] as const)("stops at a %s even though every summary anchor maps", (_name, start, end) => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 2, [...start], [...end]);
+        insertCompartment(db, PARENT, 4, [6, parentId(7)], [7, parentId(8)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(2) }]);
+    });
+
+    it("does not carry committed, pending, or placeholder removals inside a straddling range", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [8, parentId(9)]);
+        insertTag(db, PARENT, `${parentId(1)}:p0`, 1, "dropped");
+        insertTag(db, PARENT, `${parentId(5)}:p0`, 2, "dropped");
+        insertTag(db, PARENT, `${parentId(6)}:p0`, 3, "active");
+        db.prepare(
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, 3, 'drop', 1, 'opencode2')",
+        ).run(PARENT);
+        db.prepare("UPDATE session_meta SET stripped_placeholder_ids = ? WHERE session_id = ?").run(
+            JSON.stringify([parentId(1), parentId(6)]),
+            PARENT,
+        );
+
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(2) }]);
+        expect(
+            forkRows(
+                db,
+                "SELECT message_id, status FROM tags WHERE session_id = ? AND status = 'dropped'",
+            ),
+        ).toEqual([{ message_id: `${forkId(1)}:p0`, status: "dropped" }]);
+        expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
+        const [meta] = forkRows<{ stripped_placeholder_ids: string }>(
+            db,
+            "SELECT stripped_placeholder_ids FROM session_meta WHERE session_id = ?",
+        );
+        expect(JSON.parse(meta?.stripped_placeholder_ids ?? "[]")).toEqual([forkId(1)]);
+    });
+
+    it.each([
+        [
+            "a counted row was replaced",
+            { copyAll: true, replacedCopyAt: 5 },
+            "old-start",
+            parentId(6),
+        ],
+        ["a copied body differs", { copyAll: true, changedBodyAt: 5 }, "old-start", parentId(6)],
+        ["a live endpoint conflicts", { copyAll: true }, "old-start", parentId(5)],
+        [
+            "a live non-counted endpoint was not copied",
+            { copyAll: true, omitIdle: true },
+            parentId(3),
+            parentId(6),
+        ],
+    ] as const)("keeps the raw tail when %s", (_case, options, start, end) => {
+        const { reader } = createStore(options);
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, start], [5, end]);
+        insertCompartment(db, PARENT, 2, [6, parentId(7)], [7, parentId(8)]);
+        insertTag(db, PARENT, `${parentId(4)}:p0`, 1, "dropped");
+        insertTag(db, PARENT, `${parentId(7)}:p0`, 2, "active");
+        db.prepare(
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, 2, 'drop', 1, 'opencode2')",
+        ).run(PARENT);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(2) }]);
+        expect(forkRows(db, "SELECT message_id FROM tags WHERE session_id = ?")).toEqual([]);
+        expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
+    });
+
+    it("proves a stale start through the named boundary, not before that same row", () => {
+        const byBoundary = (type: "before" | "through") => {
+            // The same row really exists in both stores; only the fork's boundary changes.
+            const { reader } = createStore({
+                copyAll: true,
+                boundary: JSON.stringify({ type, messageID: parentId(8) }),
+            });
+            const db = createContextDb();
+            insertCompartment(db, PARENT, 0, [1, parentId(1)], [5, parentId(6)]);
+            insertCompartment(db, PARENT, 1, [6, "old-start"], [7, parentId(8)]);
+            expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe(
+                "seeded",
+            );
+            return inherited(db);
+        };
+        const first = { sequence: 0, start: forkId(1), end: forkId(6) };
+        expect(byBoundary("through")).toEqual([
+            first,
+            { sequence: 1, start: forkId(7), end: forkId(8) },
+        ]);
+        expect(byBoundary("before")).toEqual([first]);
+    });
+
     it("forks indexed temporal choices by mapped identity, retaining pending and empty rows", () => {
         const { reader } = createStore();
         const db = createContextDb();
@@ -293,16 +963,15 @@ describe("seedV2ForkFromParent", () => {
         ).toEqual({ marker: null });
         expect(getTemporalDecisions(db, PARENT).has(parentId(10))).toBe(true);
     });
-    it("copies history blocks, tags, drops and queued operations up to the fork boundary", () => {
-        const { reader } = createStore();
+    it("copies a complete history prefix and only the safe replay at the fork boundary", () => {
+        const { reader } = createStore({ copyAll: true });
         const db = createContextDb();
         seedParentState(db);
 
         const outcome = seedV2ForkFromParent({ db, store: reader, sessionId: FORK });
 
         expect(outcome.kind).toBe("seeded");
-        // Blocks 1 and 2 lie within the boundary, with positions renumbered in
-        // the fork; block 3 ends past it.
+        // Blocks 1 and 2 lie wholly within the boundary; block 3 ends past it.
         expect(
             forkRows(
                 db,
@@ -319,7 +988,7 @@ describe("seedV2ForkFromParent", () => {
             {
                 sequence: 2,
                 start_message: 3,
-                end_message: 5,
+                end_message: 6,
                 start_message_id: forkId(4),
                 end_message_id: forkId(7),
             },
@@ -357,16 +1026,14 @@ describe("seedV2ForkFromParent", () => {
                 tool_owner_message_id: forkId(7),
             },
             {
-                tag_number: 6,
-                message_id: `${forkId(8)}:p0`,
+                tag_number: 5,
+                message_id: `${forkId(5)}:p0`,
                 status: "active",
                 tool_owner_message_id: null,
             },
         ]);
-        // The queued drop on the boundary message comes along; the one past it does not.
-        expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([
-            { tag_id: 6 },
-        ]);
+        // The copied half of the rejected block stays raw, including its pending drop.
+        expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
         expect(forkRows(db, "SELECT content FROM session_facts WHERE session_id = ?")).toEqual([
             { content: "keep the module boundary" },
         ]);
@@ -380,7 +1047,7 @@ describe("seedV2ForkFromParent", () => {
             db,
             "SELECT counter, last_input_tokens, last_context_percentage, stripped_placeholder_ids FROM session_meta WHERE session_id = ?",
         )[0];
-        expect(meta?.counter).toBe(6);
+        expect(meta?.counter).toBe(5);
         expect(meta?.last_input_tokens).toBe(0);
         expect(meta?.last_context_percentage).toBe(0);
         expect(JSON.parse(meta?.stripped_placeholder_ids ?? "[]")).toEqual([forkId(4)]);
@@ -405,7 +1072,7 @@ describe("seedV2ForkFromParent", () => {
             db,
             "SELECT tag_number FROM tags WHERE session_id = ? ORDER BY tag_number",
         ).map((row) => row.tag_number);
-        expect(numbers).toEqual([1, 2, 3, 4]);
+        expect(numbers).toEqual([1, 2]);
         expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
     });
 
@@ -458,6 +1125,9 @@ describe("seedV2ForkFromParent", () => {
             forkOrigin: (id: string) => reader.forkOrigin(id),
             sessionExists: (id: string) => reader.sessionExists(id),
             sequenceForId: (session: string, id: string) => reader.sequenceForId(session, id),
+            matchingForkBodies: (parent: string, fork: string, through: number) =>
+                reader.matchingForkBodies(parent, fork, through),
+            messagePage: reader.messagePage.bind(reader),
             rowStampsThrough: (session: string, through: number) => {
                 const rows = reader.rowStampsThrough(session, through);
                 if (session === FORK && !sessionHasMagicContextState(db, FORK)) {

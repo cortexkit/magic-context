@@ -1310,6 +1310,54 @@ export class V2StoreReader {
         ).all(sessionID, throughSeq) as V2RowStamp[];
     }
 
+    /** Exact body equality for candidate fork pairs, without decoding or returning the bodies. */
+    matchingForkBodies(parentID: string, forkID: string, throughSeq: number): Map<string, string> {
+        // Assistant content may be in a separate host table. Compare both ways:
+        // a missing, changed or extra part makes this pair unfit for inheritance.
+        const matchParts = this.hasPartTable()
+            ? `
+               AND NOT EXISTS (
+                   SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = p.id
+                   EXCEPT SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = f.id
+               ) AND NOT EXISTS (
+                   SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = f.id
+                   EXCEPT SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = p.id
+               )`
+            : "";
+        const rows = this.prepare(
+            `SELECT p.id AS parentId, f.id AS forkId FROM session_message p JOIN session_message f ON f.seq = p.seq
+             WHERE p.session_id = ? AND f.session_id = ? AND p.seq <= ?
+               AND p.type = f.type AND p.time_created = f.time_created AND p.data = f.data${matchParts}`,
+        ).all(parentID, forkID, throughSeq) as { parentId: string; forkId: string }[];
+        return new Map(rows.map(({ parentId, forkId }) => [parentId, forkId]));
+    }
+
+    /** Step through counted rows without reading past the consumer's decision. */
+    *iterateRawMessageRange(sessionID: string, from: number, to: number): Iterable<StoreRow> {
+        if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from)
+            return;
+        // OpenCode 2.0.22 and 2.1.0 report SQLite API misuse when
+        // a consumer stops early and closes a native statement iterator.
+        let anchor: RawMessageOrdinalAnchor | undefined;
+        for (let after = from - 1; after < to; after += 1) {
+            const [row] = this.messagePage(sessionID, after, 1, to, anchor);
+            if (!row) return;
+            anchor = { id: row.id, timeCreated: row.time_created ?? 0 };
+            yield row;
+        }
+    }
+
+    /** Identify suffix replacement without reading any message bodies. */
+    messageCountAndNewestId(sessionID: string): [number, string | null] {
+        const row = this.prepare(`SELECT COUNT(*) AS count, (
+                SELECT id FROM session_message WHERE session_id = ? ORDER BY seq DESC LIMIT 1
+            ) AS newestId FROM session_message WHERE session_id = ?`).get(sessionID, sessionID) as {
+            count: number;
+            newestId: string | null;
+        };
+        return [row.count, row.newestId];
+    }
+
     latestSequenceForIds(sessionID: string, ids: readonly string[]): number {
         let latest = -1;
         for (let offset = 0; offset < ids.length; offset += 500) {

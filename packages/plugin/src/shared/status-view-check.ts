@@ -395,6 +395,7 @@ function warningInputFrom(raw: Fields, optional: OptionalFields): StatusWarningI
     return {
         lastTransformError: optional.read("lastTransformError", isNullableString) ?? null,
         historianFailureCount: optional.read("historianFailureCount", isNumber),
+        forkHistoryGap: raw.forkHistoryGap === true,
         configParseFailures: optional.readArray("configParseFailures", isConfigParseFailure),
         embedding:
             isRecord(raw.embedding) && isString(raw.embedding.state)

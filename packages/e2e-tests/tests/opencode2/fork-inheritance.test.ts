@@ -138,17 +138,26 @@ function capture(name: string, value: unknown): void {
 	writeFileSync(join(dir, name), typeof value === "string" ? value : JSON.stringify(value, null, 2));
 }
 
-/** The text of the first input item, which carries the rendered history head. */
+function renderedHistory(body: Record<string, unknown>): string {
+	const input = (body.input ?? body.messages) as Array<{
+		role?: string;
+		content?: string | Array<{ text?: string }>;
+	}> | undefined;
+	return (input ?? [])
+		.filter(({ role }) => role === "user")
+		.flatMap(({ content }) => typeof content === "string" ? [content] : (content ?? []).map(({ text }) => text ?? ""))
+		.flatMap((text) => [...text.matchAll(/<(session-history(?:-since)?)>[\s\S]*?<\/\1>/g)].map(([history]) => history))
+		.join("\n");
+}
+
+/** The first rendered history slot, not a reference to it in the system instructions. */
 function historyHead(body: Record<string, unknown>): string {
-	const input = (body.input ?? body.messages) as unknown[] | undefined;
-	const text = JSON.stringify(input?.slice(0, 2) ?? []);
-	const start = text.indexOf("<session-history>");
-	return start < 0 ? "" : text.slice(start, start + 600);
+	return renderedHistory(body).match(/<session-history>[\s\S]*?<\/session-history>/)?.[0].slice(0, 600) ?? "";
 }
 
 /** The rendered history block titles (`## 1-4 · History 1-4`), in order. */
 function compartmentTitles(body: Record<string, unknown>): string[] {
-	return [...JSON.stringify(body.input ?? body.messages).matchAll(/## \d+-\d+ · History \d+-\d+/g)].map(
+	return [...renderedHistory(body).matchAll(/## \d+-\d+ · (?:\d{4}-\d{2}-\d{2} · )?History \d+-\d+/g)].map(
 		(match) => match[0],
 	);
 }

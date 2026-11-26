@@ -51,6 +51,7 @@ export interface UserStatusSummary {
 export interface StatusWarningInput {
     readonly lastTransformError?: string | null;
     readonly historianFailureCount?: number;
+    readonly forkHistoryGap?: boolean;
     readonly configParseFailures?: readonly unknown[];
     readonly embedding?: { readonly state: string };
     readonly loggerDiagnostics?: { readonly swallowedWriteCount?: number };
@@ -66,7 +67,8 @@ export interface StatusWarningInput {
 export function statusWarningsFromDetail(detail: StatusWarningInput): UserFacingFailureKey[] {
     const warnings: UserFacingFailureKey[] = [];
     if (detail.lastTransformError) warnings.push("transform_update_failed");
-    if ((detail.historianFailureCount ?? 0) > 0) warnings.push("historian_unavailable");
+    if (detail.forkHistoryGap) warnings.push("fork_history_gap");
+    else if ((detail.historianFailureCount ?? 0) > 0) warnings.push("historian_unavailable");
     if ((detail.configParseFailures?.length ?? 0) > 0) warnings.push("configuration_warning");
     if (detail.embedding?.state === "stopped") warnings.push("embedding_unavailable");
     if ((detail.loggerDiagnostics?.swallowedWriteCount ?? 0) > 0) {

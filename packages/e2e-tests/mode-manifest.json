@@ -1117,6 +1117,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/fork-stale-summary.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "Real OpenCode 2 sibling requests pin healthy fork bytes. Straddling and damaged-parent forks keep unproven history raw. A status line and terminal toast name the rebuild without changing a damaged fork's request or transcript, and disappear from status after /ctx-recomp. PID lsof proves throwaway-store containment.",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/missing-history-boundary.test.ts",
             "tier": "excluded",
             "invocation": {

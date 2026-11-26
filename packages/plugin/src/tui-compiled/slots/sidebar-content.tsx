@@ -798,7 +798,7 @@ const SidebarContent = props => {
     })(), null);
     _$insert(_el$25, _$createComponent(For, {
       get each() {
-        return s()?.hostLimitations ?? [];
+        return _$memo(() => s()?.forkHistoryGap === true)() ? [...(s()?.hostLimitations ?? []), "fork_history_gap"] : s()?.hostLimitations ?? [];
       },
       children: limitation => (() => {
         var _el$38 = _$createElement("box"),

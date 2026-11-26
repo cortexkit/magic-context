@@ -244,6 +244,7 @@ import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { registerV2DreamScheduleTimer } from "./dream-timer";
 import { startDreamTrigger } from "./dream-trigger";
 import { createV2EmbeddingScope } from "./embedding-lifecycle";
+import { readForkHistoryGap } from "./fork-history-status";
 import { generateReplayAnchor, V2GenerateReplay } from "./generate";
 import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
@@ -3808,6 +3809,8 @@ export async function registerContext(context: V2Context) {
             : lateHiddenExecutor,
         compactionMarkerStrategy: v2CompactionMarkerStrategy,
         prepareHistorySession,
+        readForkHistoryGap: (database, sessionID) =>
+            readForkHistoryGap(database, openStoreReader, sessionID),
         readSessionDirectory: async (sessionID) => {
             try {
                 return (await context.session.get({ sessionID })).location?.directory ?? null;
