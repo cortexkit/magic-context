@@ -26,7 +26,7 @@ const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     ),
     (
         "ctx_memory",
-        r#"Durable facts about this project, shared with every agent on it and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact when it must not have to be found again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content; category required); archive one or more ids (reason optional); merge two or more ids (content); get 1–20 ids in any status."#,
+        r#"Durable facts about this project, shared with every agent and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact you must not have to find again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content + category); archive one or more ids (reason optional); merge 2+ distinct same-category ids (content); get 1–20 ids in any status."#,
     ),
     (
         "ctx_search",
@@ -77,9 +77,9 @@ fn schema_with_preset_descriptions(
         ],
         "ctx_memory" => &[
             ("action", "write | update | archive | merge | get"),
-            ("content", "One standalone fact (write, update, merge)."),
-            ("category", "Kind of fact (required for write; optional on update/merge)."),
-            ("ids", "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get."),
+            ("content", "Send on every call: the fact (write, update, merge); empty string for archive/get."),
+            ("category", "Send on every call: kind for write; current category for update/merge; any category for archive/get (ignored)."),
+            ("ids", "Send on every call: one id for update, 1+ for archive, 2+ distinct same-category ids for merge, 1–20 for get; write: empty list."),
             ("reason", "Why it is archived (optional)."),
         ],
         "ctx_search" => &[

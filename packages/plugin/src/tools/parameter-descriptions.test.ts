@@ -4,8 +4,9 @@ import { runMigrations } from "../features/magic-context/migrations";
 import { initializeDatabase } from "../features/magic-context/storage-db";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
-import { createCtxNoteTools } from "./ctx-note/tools";
 import { CTX_MEMORY_DESCRIPTION } from "./ctx-memory/constants";
+import { createCtxMemoryListTools } from "./ctx-memory/tools";
+import { createCtxNoteTools } from "./ctx-note/tools";
 import { CTX_SEARCH_DESCRIPTION } from "./ctx-search/constants";
 import { createCtxSearchTools } from "./ctx-search/tools";
 import { CTX_MEMORY_LIGHT_DESCRIPTION, CTX_SEARCH_LIGHT_DESCRIPTION } from "./light-descriptions";
@@ -134,27 +135,76 @@ describe("parameter descriptions match runtime behavior", () => {
         expect(hostArgs.note_ids?.description).toBe(FULL_PARAMETER_DESCRIPTIONS.ctx_note.note_ids);
     });
 
-    it("ctx_memory: required action-irrelevant arguments have explicit filler values", () => {
+    it("ctx_memory: action-irrelevant arguments have explicit filler values", () => {
         expect(FULL_PARAMETER_DESCRIPTIONS.ctx_memory).toMatchObject({
             content:
-                "Required on every call — the memory text for write, update and merge; pass an empty string for archive and get.",
+                "Send on every call — the memory text for write, update and merge; pass an empty string for archive and get.",
             category:
-                "Required on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it.",
-            ids: "Required on every call — one id for update, one or more for archive, two or more for merge, 1–20 for get; write takes an empty list.",
+                "Send on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it, so pass any valid category.",
+            ids: "Send on every call — one id for update, one or more for archive, two or more distinct ids of memories in the same category for merge, 1–20 for get; write takes an empty list.",
         });
         expect(LIGHT_PARAMETER_DESCRIPTIONS.ctx_memory).toMatchObject({
-            content: "Required on every call: the fact (write, update, merge); empty string for archive/get.",
+            content:
+                "Send on every call: the fact (write, update, merge); empty string for archive/get.",
             category:
-                "Required on every call: kind for write; current category for update/merge; ignored by archive/get.",
-            ids: "Required on every call: one id for update, 1+ for archive, 2+ for merge, 1–20 for get; write: empty list.",
+                "Send on every call: kind for write; current category for update/merge; any category for archive/get (ignored).",
+            ids: "Send on every call: one id for update, 1+ for archive, 2+ distinct same-category ids for merge, 1–20 for get; write: empty list.",
         });
     });
 
-    it("ctx_memory: descriptions do not call category optional now that every call sends it", () => {
-        for (const description of [CTX_MEMORY_DESCRIPTION, CTX_MEMORY_LIGHT_DESCRIPTION]) {
-            expect(description).not.toContain("category optional");
-            expect(description).toContain("category required");
+    it("ctx_memory: fillers are described as the portable call form, not a schema requirement", () => {
+        // On the Rust module neither ctx_memory schema has a `required` list,
+        // so "required on every call" would be false there. Sending the fields
+        // always works on every host, which is what the text must say.
+        for (const descriptions of Object.values(PRESETS)) {
+            for (const text of Object.values(descriptions.ctx_memory)) {
+                expect(text).not.toContain("Required on every call");
+            }
+            expect(descriptions.ctx_memory.content).toContain("Send on every call");
         }
+        // Enum-bearing schemas refuse category="", so the portable filler has to
+        // be a valid category. The full text covered this; the light one must
+        // say it as well.
+        expect(FULL_PARAMETER_DESCRIPTIONS.ctx_memory.category).toContain("any valid category");
+        expect(LIGHT_PARAMETER_DESCRIPTIONS.ctx_memory.category).toContain("any category");
+        // The original regression was "category optional" in the update bullet;
+        // guard that wording directly so it cannot come back.
+        for (const descriptions of Object.values(PRESETS)) {
+            expect(descriptions.ctx_memory.category).not.toContain("optional");
+        }
+        // "must not be found again" means keep the fact undiscoverable; the
+        // light text must say the agent should not have to find it again.
+        expect(CTX_MEMORY_LIGHT_DESCRIPTION).toContain("you must not have to find again");
+        expect(CTX_MEMORY_LIGHT_DESCRIPTION).not.toContain("must not be found again");
+        // merge refuses duplicate ids and cross-category sources, so "two or
+        // more ids" alone is not the contract.
+        for (const descriptions of Object.values(PRESETS)) {
+            expect(descriptions.ctx_memory.ids).toContain("distinct");
+            expect(descriptions.ctx_memory.ids).toMatch(/same.category/);
+        }
+        for (const description of [CTX_MEMORY_DESCRIPTION, CTX_MEMORY_LIGHT_DESCRIPTION]) {
+            expect(description).toContain("distinct");
+            expect(description).toMatch(/same.category/);
+            expect(description).not.toContain("category optional");
+            expect(description).not.toContain("category required");
+        }
+        expect(CTX_MEMORY_DESCRIPTION).toContain(
+            "category: the current one to keep, a new one to recategorize",
+        );
+        expect(CTX_MEMORY_LIGHT_DESCRIPTION).toContain("update one id (content + category)");
+        expect(CTX_MEMORY_DESCRIPTION).toContain("call form that works on every host");
+    });
+
+    it("ctx_memory_list category is an optional list filter, not a write action", () => {
+        const listTools = createCtxMemoryListTools({
+            db,
+            resolveProjectPath: () => "/repo/project",
+            memoryEnabled: true,
+            embeddingEnabled: false,
+        });
+        expect(listTools.ctx_memory_list.args.category?.description).toBe(
+            "Filter listed memories to this category (optional).",
+        );
     });
 
     it("ctx_memory: the primary tool no longer describes the dreamer-only list limit", () => {

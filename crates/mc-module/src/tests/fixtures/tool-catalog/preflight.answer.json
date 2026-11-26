@@ -1,6 +1,6 @@
 {
-  "generation": "6d584cffcac1037a500ec05273c768d18a84df04783a8ce15edd92d2f65c2736",
-  "catalog_digest": "6d584cffcac1037a500ec05273c768d18a84df04783a8ce15edd92d2f65c2736",
+  "generation": "15d6d330242f5e5c173f4fc68220769178c3f1cd56c3653888b4195f7fdc2a1f",
+  "catalog_digest": "15d6d330242f5e5c173f4fc68220769178c3f1cd56c3653888b4195f7fdc2a1f",
   "tools": [
     {
       "name": "ctx_note",
@@ -87,7 +87,7 @@
       "capabilities": [
         "magic-context:memory.write/v1"
       ],
-      "description": "Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.\n\nYour active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence (\"do X later, here is what we know\") is ctx_note, not memory.\n\nActions:\n- write: new memory (content + category).\n- update: rewrite one memory whose fact changed (ids: [one], content; category required — the current one to keep, a new one to recategorize).\n- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).\n- merge: collapse duplicates into one (ids: [two or more], content).\n- get: fetch by id (ids: 1–20), readable in every status.\nEvery call must carry action, content, category and ids: argument-dropping providers only emit required fields. For get and archive pass content=\"\" and any valid category; for write pass ids=[].\nExamples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\"",
+      "description": "Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.\n\nYour active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence (\"do X later, here is what we know\") is ctx_note, not memory.\n\nActions:\n- write: new memory (content + category).\n- update: rewrite one memory whose fact changed (ids: [one], content; category: the current one to keep, a new one to recategorize).\n- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).\n- merge: collapse duplicates into one (ids: [two or more distinct ids of memories in the same category], content).\n- get: fetch by id (ids: 1–20), readable in every status.\nThe call form that works on every host sends action, content, category and ids every time: argument-dropping providers only emit required fields. For get and archive pass content=\"\" and any valid category; for write pass ids=[].\nExamples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\"",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -105,7 +105,7 @@
           "content": {
             "type": "string",
             "maxLength": 65536,
-            "description": "Required on every call — the memory text for write, update and merge; pass an empty string for archive and get."
+            "description": "Send on every call — the memory text for write, update and merge; pass an empty string for archive and get."
           },
           "category": {
             "type": "string",
@@ -116,7 +116,7 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Required on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it."
+            "description": "Send on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it, so pass any valid category."
           },
           "ids": {
             "type": "array",
@@ -125,7 +125,7 @@
               "type": "integer",
               "minimum": 1
             },
-            "description": "Required on every call — one id for update, one or more for archive, two or more for merge, 1–20 for get; write takes an empty list."
+            "description": "Send on every call — one id for update, one or more for archive, two or more distinct ids of memories in the same category for merge, 1–20 for get; write takes an empty list."
           },
           "reason": {
             "type": "string",

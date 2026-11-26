@@ -7,10 +7,10 @@ Your active memories are already in <project-memory> as \`#id: fact\` lines. Wri
 
 Actions:
 - write: new memory (content + category).
-- update: rewrite one memory whose fact changed (ids: [one], content; category required — the current one to keep, a new one to recategorize).
+- update: rewrite one memory whose fact changed (ids: [one], content; category: the current one to keep, a new one to recategorize).
 - archive: retire wrong or obsolete memories (ids: [one or more], optional reason).
-- merge: collapse duplicates into one (ids: [two or more], content).
+- merge: collapse duplicates into one (ids: [two or more distinct ids of memories in the same category], content).
 - get: fetch by id (ids: 1–20), readable in every status.
-Every call must carry action, content, category and ids: argument-dropping providers only emit required fields. For get and archive pass content="" and any valid category; for write pass ids=[].
+The call form that works on every host sends action, content, category and ids every time: argument-dropping providers only emit required fields. For get and archive pass content="" and any valid category; for write pass ids=[].
 Examples: category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode" · category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale"`;
 export const DEFAULT_SEARCH_LIMIT = 10;

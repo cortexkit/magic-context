@@ -18,7 +18,7 @@
     }
   },
   {
-    "description": "Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.\n\nYour active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence (\"do X later, here is what we know\") is ctx_note, not memory.\n\nActions:\n- write: new memory (content + category).\n- update: rewrite one memory whose fact changed (ids: [one], content; category optional to recategorize).\n- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).\n- merge: collapse duplicates into one (ids: [two or more], content).\n- get: fetch by id (ids: 1–20), readable in every status.\nExamples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\"",
+    "description": "Durable facts about this project, shared with every agent working on it and kept for the months this work lasts.\n\nYour active memories are already in <project-memory> as `#id: fact` lines. Write one when you learn something that must not have to be found again — a project rule, an architectural fact, a hard-won constraint, a config value, a naming convention — and especially when it cost you turns to find. One standalone fact per memory, phrased to make sense on its own. A pending intention with its evidence (\"do X later, here is what we know\") is ctx_note, not memory.\n\nActions:\n- write: new memory (content + category).\n- update: rewrite one memory whose fact changed (ids: [one], content; category: the current one to keep, a new one to recategorize).\n- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).\n- merge: collapse duplicates into one (ids: [two or more distinct ids of memories in the same category], content).\n- get: fetch by id (ids: 1–20), readable in every status.\nThe call form that works on every host sends action, content, category and ids every time: argument-dropping providers only emit required fields. For get and archive pass content=\"\" and any valid category; for write pass ids=[].\nExamples: category=\"CONFIG_VALUES\", content=\"OpenCode source is at ~/Work/OSS/opencode\" · category=\"CONSTRAINTS\", content=\"Dashboard Tauri build needs RGBA PNGs, not grayscale\"",
     "execution_mode": "mutating",
     "name": "ctx_memory",
     "schema": {
@@ -36,11 +36,11 @@
           "type": "string"
         },
         "category": {
-          "description": "Kind of fact (required for write; on update/merge optional, omitted keeps the current category).",
+          "description": "Send on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it, so pass any valid category.",
           "type": "string"
         },
         "content": {
-          "description": "The memory text — one standalone fact (write, update, merge).",
+          "description": "Send on every call — the memory text for write, update and merge; pass an empty string for archive and get.",
           "maxLength": 65536,
           "type": "string"
         },
@@ -50,7 +50,7 @@
           "type": "integer"
         },
         "ids": {
-          "description": "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
+          "description": "Send on every call — one id for update, one or more for archive, two or more distinct ids of memories in the same category for merge, 1–20 for get; write takes an empty list.",
           "items": {
             "minimum": 1,
             "type": "integer"
