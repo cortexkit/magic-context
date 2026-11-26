@@ -121,6 +121,9 @@ nix = { version = "0.31.3", features = ["dir", "fs", "time", "user"] }
 windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
+# The log manifest test names the doctor crate's types on every platform; the
+# module itself links the crate on Unix only, where `ck-mc doctor` exists.
+cortexkit-doctor = "=0.2.0"
 cortexkit-log-manifest = "=0.2.0"
 cortexkit-role-tool-provider-conformance = "=0.15.18"
 rusqlite = { workspace = true, features = ["trace"] }
