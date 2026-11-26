@@ -91,9 +91,9 @@ fn live_wal_and_shm_are_unchanged_and_an_exclusive_session_lock_does_not_block_c
     let h = Homes::new();
     fs::write(h.xdg_config.join("untouched"), b"config bytes").unwrap();
     drop(ContextDb::create_for_tests(&h.context()).unwrap());
-    drop(Store::open(&h.data.join("mode3.db")).unwrap());
+    drop(Store::open(&h.data.join("sessions.db")).unwrap());
     let lock = Flock::lock(
-        File::open(h.data.join("mode3.db.lock")).unwrap(),
+        File::open(h.data.join("sessions.db.lock")).unwrap(),
         FlockArg::LockExclusiveNonblock,
     )
     .unwrap();
@@ -191,7 +191,7 @@ fn startup_schema_refusals_leave_no_sidecars_for_the_next_doctor_check() {
         );
         assert!(!h.data.join("context.db-wal").exists());
         assert!(!h.data.join("context.db-shm").exists());
-        assert!(!h.data.join("mode3.db").exists());
+        assert!(!h.data.join("sessions.db").exists());
         let findings = h.check();
         assert!(findings
             .findings()
