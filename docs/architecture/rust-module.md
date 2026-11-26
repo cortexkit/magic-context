@@ -49,8 +49,10 @@ A pass runs on a Setup, a notice or a ride, never on every step. A step that get
 
 1. The notice or ride brings the newest usage reading and names the entries that changed. ck-mc reads only what it has not seen and updates its index.
 2. `pass.rs` decides whether this pass may rebuild: usage at the execute threshold with no summary on its way, a ride that says the request's bytes change anyway or the request would not fit, or usage in the force band (at or above `max(85%, execute threshold + 2)`), where a pass stops waiting for a summary. A ride that only says the provider lost its cache permits nothing. A reading taken under an older view than the one the runner now applies is treated as stale.
-3. On a permitted pass every lane with work contributes its edits, and `view_builder.rs` publishes them as one view. A summary that finished earlier lands in the same view: the history head is re-rendered and the cut moves.
+3. On a permitted pass every lane with work contributes its edits, and `view_builder.rs` publishes them as one view. A summary that finished earlier lands in the same view: the history head is re-rendered, and the runner leaves out the messages covered by the summary. The two cleanup rules below contribute only when other edits change the view or the runner says the request prefix is changing anyway.
 4. The runner accepts or refuses the view. A refusal names its reason; ck-mc sets aside only what the refusal names and keeps everything else queued.
+
+Outside the protected tail, a file read can go whole when a later successful read of the same path covers all the lines it requested. Neither result may have file attachments. A failed `read`, `edit`, or `write` can also go whole after a successful retry of the same tool on the same path. For lookup tools the retry must have identical arguments; command failures such as `bash` are kept. The later result must still be visible in the view. As with other drops, `ctx_expand` recovers the original.
 
 The summarizer runs beside the session's worker, since a run can take minutes. Its result comes back as a job of its own.
 

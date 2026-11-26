@@ -622,6 +622,36 @@ impl Session {
         self.next_notice_reclaim_bookmark = self
             .notice_keep
             .then_some(self.notice_reclaim_bookmark.max(notice_bookmark));
+        // The existing lanes have first pick, and a result they remove on
+        // this pass cannot stand in for an older call.
+        let ride_edited = edited.including(&renderable_covered);
+        let ride_context = lanes::Context {
+            edited: &ride_edited,
+            ..context
+        };
+        let mut ride_wanted = lanes::superseded_reads(&ride_context, cutoff);
+        ride_wanted.extend(lanes::retried_failures(&ride_context, cutoff));
+        ride_wanted.retain(|(key, _)| !kept(key) && !self.failed_parts.contains(key));
+        let ride_parts: Vec<_> = if ride_wanted.is_empty() {
+            Vec::new()
+        } else {
+            lanes::drop_ops(&ride_context, &ride_wanted)
+                .0
+                .into_iter()
+                .filter_map(|op| {
+                    if self.render_failed.excludes(&op) {
+                        return None;
+                    }
+                    match op {
+                        EditOp::Drop {
+                            mid,
+                            part: Some(part),
+                        } => Some((mid, part)),
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
         // A pass whose lanes have no new edit publishes nothing. A memory
         // another writer saved changes only the history head's second
         // message: it waits for a pass that rewrites anyway, as the plugin's
@@ -645,7 +675,22 @@ impl Session {
         };
         ops.extend(history.iter().cloned());
         drop(lanes_timing);
-        (self.seal_candidate(ops, &covered, true, false), freed)
+        let riders = view_builder::RideDrops {
+            parts: &ride_parts,
+            prefix_changes,
+        };
+        let sealed = self.seal_candidate(ops, &covered, true, false, riders);
+        let ride_freed = if matches!(sealed, Sealed::Done(Some(_))) {
+            ride_parts
+                .iter()
+                .filter(|key| self.next_covered.contains(key) && !renderable_lined_up.contains(key))
+                .filter_map(|(mid, part)| self.index.find(mid, part))
+                .map(|(_, part)| crate::tokens::part(part))
+                .sum()
+        } else {
+            0
+        };
+        (sealed, freed + ride_freed)
     }
 
     /// Commands and rebuilds use the same tail boundary, so queued work is
@@ -682,10 +727,12 @@ impl Session {
             .filter(|op| !matches!(op, EditOp::Cut { .. }))
             .cloned()
             .collect();
-        match self.seal_candidate(ops, covered, true, false) {
+        let riders = view_builder::RideDrops::default();
+        match self.seal_candidate(ops, covered, true, false, riders) {
             Sealed::Done(view) => view,
             Sealed::RetryWithoutCut => {
-                let Sealed::Done(view) = self.seal_candidate(remaining, covered, false, true)
+                let Sealed::Done(view) =
+                    self.seal_candidate(remaining, covered, false, true, riders)
                 else {
                     unreachable!("the retry proposes no new cut")
                 };
@@ -700,6 +747,7 @@ impl Session {
         covered: &[lanes::PartKey],
         retry_cut: bool,
         keep_old_cut: bool,
+        riders: view_builder::RideDrops<'_>,
     ) -> Sealed {
         if self.recovery_in_flight() {
             return Sealed::Done(None);
@@ -707,7 +755,7 @@ impl Session {
         let _timing = crate::notice_cost_timing::span("build.seal");
         let version = self.version + 1;
         ops.retain(|op| !self.render_failed.excludes(op));
-        let covered = self.renderable_covered(&ops, covered);
+        let mut covered = self.renderable_covered(&ops, covered);
         let is_cut = |op: &EditOp| matches!(op, EditOp::Cut { .. });
         let has_new_cut = retry_cut
             && ops.iter().any(|op| {
@@ -721,7 +769,7 @@ impl Session {
         let built = {
             let retire = retired_history(self.summaries.is_empty(), &ops);
             let full = self.with_replaced_outputs(&ops);
-            view_builder::next_view_cached(
+            view_builder::next_view_with_riders(
                 self.latest.as_ref(),
                 full.as_deref().unwrap_or(self.index.entries()),
                 ops,
@@ -745,6 +793,7 @@ impl Session {
                     (!(keep_old_cut && is_cut(op)) && retire(op)) || self.render_failed.excludes(op)
                 },
                 &mut self.view_validation,
+                riders,
             )
         };
         Sealed::Done(match built {
@@ -779,6 +828,11 @@ impl Session {
                 }
                 self.release_numbers_floor_hold();
                 self.version = version;
+                covered.extend(riders.parts.iter().filter(|(mid, part)| {
+                    view.edits.iter().any(|edit| {
+                        edit.since == version && matches!(&edit.op, EditOp::Drop { mid: m, part: Some(p) } if m == mid && p == part)
+                    })
+                }).cloned());
                 self.next_covered = covered;
                 Some(view)
             }
@@ -811,6 +865,7 @@ impl Session {
                 self.commit_bookmark();
                 self.forget_queued(&covered);
                 self.failed_parts.extend(covered.iter().cloned());
+                self.failed_parts.extend(riders.parts.iter().cloned());
                 self.next_latch = false;
                 self.next_rearm = false;
                 tracing::warn!(

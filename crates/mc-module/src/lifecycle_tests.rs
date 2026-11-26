@@ -15,6 +15,9 @@ mod pass_decision_tests;
 #[path = "pass_safety_tests.rs"]
 mod pass_safety_tests;
 
+#[path = "cleanup_ride_tests.rs"]
+mod cleanup_ride_tests;
+
 #[path = "emergency_credit_review_tests.rs"]
 mod emergency_credit_review_tests;
 
