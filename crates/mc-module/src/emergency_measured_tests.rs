@@ -1224,3 +1224,27 @@ fn emergency_measured_a_plan_walks_the_index_for_protected_results_once() {
     assert_eq!(selected.len(), 36, "every result is a candidate");
     assert_eq!(walks, 1);
 }
+
+/// A stated count of zero is planned as no count, on the measured and the
+/// inferred path, even when there is no reading to fall back on: the
+/// refusal still puts the request at the 45,000-token window, so 29,225
+/// must go, 30 results.
+#[test]
+fn emergency_measured_a_count_of_zero_plans_as_no_count_without_a_reading() {
+    for exact_counts in [true, false] {
+        let plans: Vec<_> = [None, Some(0)]
+            .into_iter()
+            .map(|count| {
+                let (mut session, settings) = partial();
+                session.conditions.last_prompt_tokens = None;
+                if !exact_counts {
+                    session.surface_tokens = (None, None);
+                }
+                let view = session.ride(&settings, &over_limit(&session, count));
+                taken(view.as_ref())
+            })
+            .collect();
+        assert_eq!(plans[0], whole(2..=31), "exact counts {exact_counts}");
+        assert_eq!(plans[1], plans[0], "exact counts {exact_counts}");
+    }
+}

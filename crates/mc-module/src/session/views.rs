@@ -83,7 +83,9 @@ impl Session {
             Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
         }
         let over_limit = ride.has(RideCause::OverLimit).then(|| {
-            let count = match ride.request_tokens {
+            // A stated count of zero says nothing about the request, so it
+            // is planned as no count on both paths.
+            let count = match ride.request_tokens.filter(|&count| count > 0) {
                 Some(count) => lanes::RideCount::Stated(count),
                 None => {
                     // The provider refused the request, so it exceeded the
@@ -309,11 +311,10 @@ impl Session {
         let request = match over_limit {
             None => lanes::MeasuredRequest::Served,
             Some(over) if !over.newest_view => lanes::MeasuredRequest::OlderView,
-            // A stated count of zero says nothing about the request.
             Some(lanes::OverLimit {
                 count: lanes::RideCount::Stated(count),
                 ..
-            }) if count > 0 => lanes::MeasuredRequest::Counted { count, change },
+            }) => lanes::MeasuredRequest::Counted { count, change },
             Some(_) => lanes::MeasuredRequest::Refused { change },
         };
         Some(lanes::Measured {
