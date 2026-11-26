@@ -1080,7 +1080,6 @@ pub struct SessionMessageRow {
     pub timestamp_ms: i64,
     pub role: String,
     pub text_preview: String,
-    pub raw_json: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -7832,7 +7831,6 @@ pub fn get_session_messages(
                     timestamp_ms: message.timestamp_ms,
                     role: message.role.clone(),
                     text_preview: message.text_preview.clone(),
-                    raw_json: message.raw_json.clone(),
                 })
                 .collect())
         }
@@ -8010,13 +8008,13 @@ fn load_opencode_messages(
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([session_id], |row| {
-        let raw_string: String = row.get(3)?;
-        let raw_json: serde_json::Value = serde_json::from_str(&raw_string).unwrap_or_default();
         let aggregated_text: String = row.get(4)?;
         // Use aggregated parts text when present; fall back to legacy in-message content
         // (covers any future schema variants where text might live on the message row).
         let text_preview = if aggregated_text.is_empty() {
-            preview_from_json(&raw_json)
+            let raw_string: String = row.get(3)?;
+            let data = serde_json::from_str(&raw_string).unwrap_or_default();
+            preview_from_json(&data)
         } else {
             normalize_preview(&aggregated_text)
         };
@@ -8025,7 +8023,6 @@ fn load_opencode_messages(
             timestamp_ms: row.get(1)?,
             role: row.get(2)?,
             text_preview,
-            raw_json,
         })
     })?;
     rows.collect()
@@ -10905,6 +10902,37 @@ mod load_messages_tests {
             (id, message_id, time, data),
         )
         .expect("insert part");
+    }
+
+    #[test]
+    fn session_message_payload_contains_only_view_fields() {
+        let conn = make_test_db();
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_test', 100, ?1)",
+            [serde_json::json!({
+                "role": "user",
+                "content": "legacy preview",
+                "metadata": "unused".repeat(1024),
+            })
+            .to_string()],
+        )
+        .unwrap();
+        let messages = load_opencode_messages(&conn, OpenCodeStoreGeneration::V1, "ses_test")
+            .expect("load messages");
+        let payload = serde_json::to_value(messages).unwrap();
+        assert!(
+            payload[0].get("raw_json").is_none(),
+            "raw_json crossed the dashboard IPC boundary"
+        );
+        assert_eq!(
+            payload,
+            serde_json::json!([{
+                "message_id": "m1",
+                "timestamp_ms": 100,
+                "role": "user",
+                "text_preview": "legacy preview",
+            }])
+        );
     }
 
     #[test]

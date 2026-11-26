@@ -154,7 +154,6 @@ export interface SessionMessageRow {
   timestamp_ms: number;
   role: string;
   text_preview: string;
-  raw_json: unknown;
 }
 
 export interface PiCompactionEntry {
