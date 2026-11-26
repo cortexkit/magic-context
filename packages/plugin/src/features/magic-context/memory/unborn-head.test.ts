@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import parity from "../../../../../../testdata/unborn-head-parity.json";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     __resetProjectIdentityForTests,
@@ -62,16 +63,13 @@ function isolatedGitEnv(): NodeJS.ProcessEnv {
     if (gitEnv) return gitEnv;
     const config = join(makeTempDir("unborn-gitconfig-"), "config");
     writeFileSync(config, "");
-    gitEnv = {
-        ...process.env,
+    gitEnv = isolatedTestGitEnv({
         GIT_CONFIG_GLOBAL: config,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_COUNT: "0",
         GIT_AUTHOR_NAME: "Test",
         GIT_AUTHOR_EMAIL: "test@example.invalid",
         GIT_COMMITTER_NAME: "Test",
         GIT_COMMITTER_EMAIL: "test@example.invalid",
-    };
+    });
     return gitEnv;
 }
 

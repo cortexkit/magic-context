@@ -25,6 +25,7 @@ import {
 import { countIdentityRows } from "@magic-context/core/features/magic-context/storage-identity-merge";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { isolatedTestGitEnv } from "@magic-context/core/shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { diagnoseIdentitySplits, formatIdentitySplits } from "./doctor-identity-splits";
 import { runMergeIdentityCli } from "./doctor-merge-identity";
@@ -179,11 +180,7 @@ function git(directory: string, ...args: string[]): string {
         encoding: "utf8",
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: {
-            ...process.env,
-            GIT_CONFIG_GLOBAL: join(root, "empty-git-config"),
-            GIT_CONFIG_NOSYSTEM: "1",
-        },
+        env: isolatedTestGitEnv({ GIT_CONFIG_GLOBAL: join(root, "empty-git-config") }),
     }).trim();
 }
 
@@ -881,7 +878,11 @@ describe("doctor merge-identities safety rules", () => {
 it("still merges two real directory splits into the persisted git identity that owns rows", () => {
     const store = newStore();
     const directory = liveDirectory("legit");
-    execFileSync("git", ["init", "-q", directory], { stdio: "ignore", windowsHide: true });
+    execFileSync("git", ["init", "-q", directory], {
+        env: isolatedTestGitEnv(),
+        stdio: "ignore",
+        windowsHide: true,
+    });
     execFileSync(
         "git",
         [
@@ -896,9 +897,9 @@ it("still merges two real directory splits into the persisted git identity that 
             "-qm",
             "fixture",
         ],
-        { stdio: "ignore", windowsHide: true },
+        { env: isolatedTestGitEnv(), stdio: "ignore", windowsHide: true },
     );
-    const repository = `git:${execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8", windowsHide: true }).trim()}`;
+    const repository = `git:${execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8", env: isolatedTestGitEnv(), windowsHide: true }).trim()}`;
     persistIdentity(store, directory, repository);
     seedRows(store, repository, { memories: 3 });
     bindSession(store, "g", directory, repository);

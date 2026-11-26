@@ -161,7 +161,9 @@ for (const [runtime, directory, harness, packed] of [
                           "rpc",
                           "--no-session",
                           "--no-skills",
-                          "--no-tools",
+                          // Disable discovery without blocking the explicit test extension.
+                          "--no-extensions",
+                          "--tools=",
                           "--no-lsp",
                           "--no-pty",
                           "--no-rules",

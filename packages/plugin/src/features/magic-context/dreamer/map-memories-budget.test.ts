@@ -6,6 +6,7 @@ import path from "node:path";
 import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { insertMemory } from "../memory";
 import { getMemoryVerifications } from "../memory/storage-memory-verifications";
@@ -40,8 +41,8 @@ function fixture(count: number) {
             sourceSessionId: "fixture",
         });
     });
-    execFileSync("git", ["init", "-q"], { cwd: dir, windowsHide: true });
-    execFileSync("git", ["add", "src"], { cwd: dir, windowsHide: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir, env: isolatedTestGitEnv(), windowsHide: true });
+    execFileSync("git", ["add", "src"], { cwd: dir, env: isolatedTestGitEnv(), windowsHide: true });
     expect(acquireLease(db, "holder", "lease")).toBe(true);
     const args: MapMemoriesArgs = {
         db,

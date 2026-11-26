@@ -19,6 +19,7 @@ import {
 } from "@magic-context/core/plugin/dream-timer";
 import { _resetHarnessForTesting } from "@magic-context/core/shared/harness";
 import * as logger from "@magic-context/core/shared/logger";
+import { isolatedTestGitEnv } from "@magic-context/core/shared/test-git-env";
 import {
 	cleanupTestTempDir,
 	createTestTempDirFromPath,
@@ -69,6 +70,7 @@ for (const lane of ["OC1", "OC2", "Pi"] as const) {
 				],
 			]) {
 				const result = Bun.spawnSync(["git", "-C", root, ...args], {
+					env: isolatedTestGitEnv(),
 					windowsHide: true,
 				});
 				if (result.exitCode) throw new Error(result.stderr.toString());

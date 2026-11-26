@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
+import { isolatedTestGitEnv } from "../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { readRememberedGitIdentity } from "./memory/project-identity-cache";
 import {
@@ -104,7 +105,10 @@ function makeGitFailure(fields: {
 describe("project identity", () => {
     it("unborn repo resolves to its existing dir identity and switches at the first commit", () => {
         const directory = makeTempDir("identity-unborn-");
-        execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        execFileSync("git", ["init", "-q", directory], {
+            env: isolatedTestGitEnv(),
+            windowsHide: true,
+        });
         expect(
             expectProjectIdentityError(() => resolveProjectIdentityStrict(directory)).errorClass,
         ).toBe("no_commits");
@@ -124,10 +128,11 @@ describe("project identity", () => {
                 "-qm",
                 "first",
             ],
-            { cwd: directory, windowsHide: true },
+            { cwd: directory, env: isolatedTestGitEnv(), windowsHide: true },
         );
         const root = execFileSync("git", ["rev-parse", "HEAD"], {
             cwd: directory,
+            env: isolatedTestGitEnv(),
             encoding: "utf8",
             windowsHide: true,
         }).trim();
@@ -136,7 +141,10 @@ describe("project identity", () => {
 
     it("transient failure with commits and no recorded identity still pauses", () => {
         const directory = makeTempDir("identity-committed-cold-");
-        execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        execFileSync("git", ["init", "-q", directory], {
+            env: isolatedTestGitEnv(),
+            windowsHide: true,
+        });
         execFileSync(
             "git",
             [
@@ -149,7 +157,7 @@ describe("project identity", () => {
                 "-qm",
                 "first",
             ],
-            { cwd: directory, windowsHide: true },
+            { cwd: directory, env: isolatedTestGitEnv(), windowsHide: true },
         );
         __setProjectIdentityTestHooks({
             execFileSync: (() => {

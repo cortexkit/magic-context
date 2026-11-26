@@ -1,4 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as messageTime from "../features/magic-context/message-time-backfill";
@@ -9,7 +10,7 @@ import {
     openDatabase,
 } from "../features/magic-context/storage-db";
 import * as warmup from "../hooks/magic-context/raw-ordinal-warmup";
-import { setHarness } from "./harness";
+import { _resetHarnessForTesting, setHarness } from "./harness";
 import { openTestDatabase, openTestDb } from "./test-db";
 import { createTestTempDirFromPath } from "./test-temp-dir";
 
@@ -18,11 +19,12 @@ afterEach(async () => {
     await closeDatabase();
     if (originalHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalHome;
-    setHarness("opencode");
+    _resetHarnessForTesting();
 });
 
 test("transform fixture opener opts into and joins both startup writers before returning the serving handle", async () => {
     process.env.XDG_DATA_HOME = createTestTempDirFromPath(join(tmpdir(), "mc-startup-barrier-"));
+    _resetHarnessForTesting();
     setHarness("opencode");
     const ftsStarted = Promise.withResolvers<void>();
     const releaseFts = Promise.withResolvers<void>();
@@ -66,7 +68,7 @@ test("transform fixture opener opts into and joins both startup writers before r
         releaseTime.resolve();
         const db = await opening;
         expect(__getDatabaseStartupStateForTests(db).running).toBeInstanceOf(Promise);
-        expect(getDatabasePath(db)).toBe(dbPath[0]!.file);
+        expect(realpathSync(getDatabasePath(db))).toBe(realpathSync(dbPath[0]!.file));
         db.exec("BEGIN IMMEDIATE; ROLLBACK");
         await closeDatabase();
         const next = openDatabase()!;

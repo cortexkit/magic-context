@@ -8,6 +8,7 @@ import { isCommitRetentionPaused } from "../../../config/commit-retention-recove
 import { sweepGitCommits } from "../../../plugin/dream-timer";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
@@ -21,15 +22,7 @@ describe("indexCommitsForProject against a real repository", () => {
     let dir: string;
 
     const git = (args: string[], dateMs?: number) => {
-        // Run git hermetically: a caller's GIT_CONFIG_* overrides (an editor or agent
-        // can inject core.hooksPath this way) and the user's global or system config
-        // could add hooks that rewrite the commit messages these tests compare.
-        const env: NodeJS.ProcessEnv = {};
-        for (const [key, value] of Object.entries(process.env)) {
-            if (!key.startsWith("GIT_")) env[key] = value;
-        }
-        env.GIT_CONFIG_GLOBAL = "/dev/null";
-        env.GIT_CONFIG_NOSYSTEM = "1";
+        const env = isolatedTestGitEnv();
         if (dateMs !== undefined) {
             const stamp = `@${Math.floor(dateMs / 1000)} +0000`;
             env.GIT_AUTHOR_DATE = stamp;

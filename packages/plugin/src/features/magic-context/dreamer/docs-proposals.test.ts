@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     docsBaseHashes,
@@ -300,7 +301,12 @@ describe("docs proposals", () => {
     test("a docs proposal before any historian run stays invisible to git while config stays trackable", () => {
         const dir = fixture();
         const git = (...args: string[]) =>
-            execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true });
+            execFileSync("git", args, {
+                cwd: dir,
+                encoding: "utf8",
+                env: isolatedTestGitEnv(),
+                windowsHide: true,
+            });
         git("init", "-q");
         git("add", "ARCHITECTURE.md", "STRUCTURE.md");
         mkdirSync(join(dir, ".cortexkit"));
@@ -324,7 +330,12 @@ describe("docs proposals", () => {
     test("host changeset omits docs, tests and lockfiles and prompt never requests bash", () => {
         const dir = fixture();
         const git = (...args: string[]) =>
-            execFileSync("git", args, { windowsHide: true, cwd: dir, encoding: "utf8" }).trim();
+            execFileSync("git", args, {
+                windowsHide: true,
+                cwd: dir,
+                encoding: "utf8",
+                env: isolatedTestGitEnv(),
+            }).trim();
         git("init", "-q");
         git("config", "user.email", "test@example.com");
         git("config", "user.name", "Test");
@@ -372,7 +383,12 @@ describe("docs proposals", () => {
     test("rename diff names both paths and captures hunks", () => {
         const dir = fixture();
         const git = (...args: string[]) =>
-            execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true }).trim();
+            execFileSync("git", args, {
+                cwd: dir,
+                encoding: "utf8",
+                env: isolatedTestGitEnv(),
+                windowsHide: true,
+            }).trim();
         git("init", "-q");
         git("config", "user.email", "test@example.com");
         git("config", "user.name", "Test");
@@ -403,7 +419,12 @@ describe("docs proposals", () => {
     function anchoredRepo(architecture: string) {
         const dir = fixture();
         const git = (...args: string[]) =>
-            execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true }).trim();
+            execFileSync("git", args, {
+                cwd: dir,
+                encoding: "utf8",
+                env: isolatedTestGitEnv(),
+                windowsHide: true,
+            }).trim();
         git("init", "-q");
         git("config", "user.email", "test@example.com");
         git("config", "user.name", "Test");

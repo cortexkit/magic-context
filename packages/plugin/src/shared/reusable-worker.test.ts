@@ -156,35 +156,33 @@ describe("reusable job workers", () => {
     test("a file ending with queued jobs cannot interrupt the next parallel file", () => {
         withTestTempDir("reusable-worker-files-", (dir) => {
             const outcomes = join(dir, "outcomes.jsonl");
+            const owner = join(dir, "owner-started");
             writeFileSync(outcomes, "");
-            writeFileSync(
-                join(dir, "01-owner.test.ts"),
-                `import { test } from "bun:test";
-import { appendFileSync } from "node:fs";
+            // The single Bun worker visits both files, but it need not visit them
+            // in filename order. The first file to run takes the owner role.
+            const fixture = `import { expect, test } from "bun:test";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { reuseWorker } from ${JSON.stringify(new URL("./reusable-worker.ts", import.meta.url).href)};
-test("owner finishes with queued work", async () => {
-    const entry = new URL(${JSON.stringify(entry.href)});
-    const active = reuseWorker(entry, { workerData: { path: "file-exit", hang: true } });
-    active.on("error", () => {});
-    for (let id = 0; id < 3; id++) {
-        const queued = reuseWorker(entry, { workerData: { path: "file-exit", value: "queued" } });
-        let replied = false;
-        let failed = false;
-        queued.on("message", () => { replied = true; });
-        queued.on("error", () => { failed = true; });
-        queued.on("exit", code => appendFileSync(${JSON.stringify(outcomes)}, JSON.stringify({
-            id, outcome: code === 0 && replied && !failed ? "completed" : "failed",
-        }) + "\\n"));
-    }
-    await Promise.resolve();
-});`,
-            );
-            writeFileSync(
-                join(dir, "02-next.test.ts"),
-                `import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-await new Promise(resolve => setTimeout(resolve, 50));
-describe("next file", () => {
+const owner = ${JSON.stringify(owner)};
+if (!existsSync(owner)) {
+    test("owner finishes with queued work", async () => {
+        writeFileSync(owner, "");
+        const entry = new URL(${JSON.stringify(entry.href)});
+        const active = reuseWorker(entry, { workerData: { path: "file-exit", hang: true } });
+        active.on("error", () => {});
+        for (let id = 0; id < 3; id++) {
+            const queued = reuseWorker(entry, { workerData: { path: "file-exit", value: "queued" } });
+            let replied = false;
+            let failed = false;
+            queued.on("message", () => { replied = true; });
+            queued.on("error", () => { failed = true; });
+            queued.on("exit", code => appendFileSync(${JSON.stringify(outcomes)}, JSON.stringify({
+                id, outcome: code === 0 && replied && !failed ? "completed" : "failed",
+            }) + "\\n"));
+        }
+        await Promise.resolve();
+    });
+} else {
     test("still registers after every queued client settles once", () => {
         const outcomes = readFileSync(${JSON.stringify(outcomes)}, "utf8").trim().split("\\n").filter(Boolean).map(line => JSON.parse(line));
         expect(outcomes).toHaveLength(3);
@@ -194,8 +192,8 @@ describe("next file", () => {
             expect(["completed", "failed"]).toContain(client[0].outcome);
         }
     });
-});`,
-            );
+}`;
+            for (const name of ["a.test.ts", "b.test.ts"]) writeFileSync(join(dir, name), fixture);
             // The real preload owns file teardown. Bun may discard a bare file's
             // callbacks without notifying its workers' clients during VM teardown.
             const child = spawnSync(
@@ -212,6 +210,10 @@ describe("next file", () => {
             const output = child.stdout + child.stderr;
             expect(output).toContain("2 pass");
             expect(output).toContain("0 fail");
+            expect(output).toContain("(pass) owner finishes with queued work");
+            expect(output).toContain(
+                "(pass) still registers after every queued client settles once",
+            );
             expect(output).not.toContain("Unhandled error");
             expect(child.status).toBe(0);
             const settled = readFileSync(outcomes, "utf8").trim().split("\n").filter(Boolean);

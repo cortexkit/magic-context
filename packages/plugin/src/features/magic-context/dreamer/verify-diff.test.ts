@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 
 import { buildVerifyDiffEvidence, VERIFY_DIFF_BUDGET_TOKENS } from "./verify-diff";
@@ -13,7 +14,12 @@ afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 const git = (dir: string, ...args: string[]) =>
-    execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true }).trim();
+    execFileSync("git", args, {
+        cwd: dir,
+        encoding: "utf8",
+        env: isolatedTestGitEnv(),
+        windowsHide: true,
+    }).trim();
 function repo() {
     const dir = createTestTempDirFromPath(path.join(tmpdir(), "verify-diff-"));
     dirs.push(dir);
@@ -94,11 +100,10 @@ describe("incremental verify evidence", () => {
         execFileSync("git", ["commit", "-qam", "change"], {
             cwd: dir,
             windowsHide: true,
-            env: {
-                ...process.env,
+            env: isolatedTestGitEnv({
                 GIT_COMMITTER_DATE: new Date(timestamp + 60_000).toISOString(),
                 GIT_AUTHOR_DATE: new Date(timestamp + 60_000).toISOString(),
-            },
+            }),
         });
         const evidence = await buildVerifyDiffEvidence(dir, [memory(1, "a.ts", timestamp)]);
         expect(evidence?.files[0].text).toContain("+new");

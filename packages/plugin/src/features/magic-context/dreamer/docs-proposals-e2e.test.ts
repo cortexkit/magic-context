@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { DREAMER_DOCS_ALLOWED_TOOLS } from "../../../agents/dreamer";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
@@ -27,7 +28,12 @@ afterEach(() => {
 function fixture(architecture = "# Architecture\n\n## Core\nOld sentence.\n") {
     dir = createTestTempDirFromPath(join(tmpdir(), "mc-docs-e2e-"));
     const git = (...args: string[]) =>
-        execFileSync("git", args, { windowsHide: true, cwd: dir, encoding: "utf8" }).trim();
+        execFileSync("git", args, {
+            windowsHide: true,
+            cwd: dir,
+            encoding: "utf8",
+            env: isolatedTestGitEnv(),
+        }).trim();
     const file = join(dir, "ARCHITECTURE.md");
     writeFileSync(file, architecture);
     writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\n## Layout\nLayout.\n");

@@ -4,6 +4,7 @@ import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolatedTestGitEnv } from "@magic-context/core/shared/test-git-env";
 import { listOpenFiles } from "@magic-context/core/shared/test-open-files";
 import {
 	cleanupTestTempDir,
@@ -620,7 +621,7 @@ for (const harness of ["omp", "pi"] as const) {
 					"show",
 					"79ce01a522ae5a9d65d6bb2ac81aadf16fa8285a:packages/pi-plugin/src/pi-dispatch-responses-history.ts",
 				],
-				{ encoding: "utf8", windowsHide: true },
+				{ encoding: "utf8", env: isolatedTestGitEnv(), windowsHide: true },
 			);
 			const baselinePath = join(root, `master-${harness}.ts`);
 			writeFileSync(baselinePath, source);
@@ -634,7 +635,7 @@ for (const harness of ["omp", "pi"] as const) {
 					"show",
 					"79ce01a522ae5a9d65d6bb2ac81aadf16fa8285a:packages/pi-plugin/src/pi-dispatch-structure.ts",
 				],
-				{ encoding: "utf8", windowsHide: true },
+				{ encoding: "utf8", env: isolatedTestGitEnv(), windowsHide: true },
 			)
 				.replace(
 					'from "./pi-dispatch-responses-history"',

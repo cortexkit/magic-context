@@ -10,6 +10,7 @@ import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/comp
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { insertMemory } from "../memory";
 import {
@@ -906,8 +907,16 @@ describe("mapMemories disposition", () => {
             // The host rejects both in-repo untracked paths and paths outside the
             // repository. The mixed manifest proves the fallback is all-rejected,
             // not a special case for only one rejection reason.
-            execFileSync("git", ["init", "-q"], { windowsHide: true, cwd: dir });
-            execFileSync("git", ["add", "src/fact.ts"], { windowsHide: true, cwd: dir });
+            execFileSync("git", ["init", "-q"], {
+                windowsHide: true,
+                cwd: dir,
+                env: isolatedTestGitEnv(),
+            });
+            execFileSync("git", ["add", "src/fact.ts"], {
+                windowsHide: true,
+                cwd: dir,
+                env: isolatedTestGitEnv(),
+            });
             writeFileSync(
                 path.join(dir, "src", "untracked.ts"),
                 "export const draft = true;",
@@ -1596,8 +1605,16 @@ describe("map-memories module applier", () => {
         try {
             const projectIdentity = "git:module-map-fallback";
             const dir = tempProject();
-            execFileSync("git", ["init", "-q"], { windowsHide: true, cwd: dir });
-            execFileSync("git", ["add", "src/fact.ts"], { windowsHide: true, cwd: dir });
+            execFileSync("git", ["init", "-q"], {
+                windowsHide: true,
+                cwd: dir,
+                env: isolatedTestGitEnv(),
+            });
+            execFileSync("git", ["add", "src/fact.ts"], {
+                windowsHide: true,
+                cwd: dir,
+                env: isolatedTestGitEnv(),
+            });
             writeFileSync(
                 path.join(dir, "src", "untracked.ts"),
                 "export const draft = true;",

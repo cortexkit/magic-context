@@ -19,6 +19,7 @@ import {
     runMigrations,
 } from "@magic-context/core/features/magic-context/storage";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { isolatedTestGitEnv } from "@magic-context/core/shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { CLI_SCHEMA_FLOOR_VERSION, OutdatedSchemaVersionError } from "../lib/database-access";
 import { runMergeIdentityCli } from "./doctor-merge-identity";
@@ -164,7 +165,10 @@ describe("offline identity command", () => {
         const { path } = fixture();
         const directory = join(dirname(path), "source with spaces");
         mkdirSync(directory);
-        execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        execFileSync("git", ["init", "-q", directory], {
+            env: isolatedTestGitEnv(),
+            windowsHide: true,
+        });
         execFileSync(
             "git",
             [
@@ -177,7 +181,7 @@ describe("offline identity command", () => {
                 "-qm",
                 "first",
             ],
-            { cwd: directory, windowsHide: true },
+            { cwd: directory, env: isolatedTestGitEnv(), windowsHide: true },
         );
         const key = `dir:${createHash("md5").update(directory).digest("hex").slice(0, 12)}`;
         const db = new Database(path);
@@ -363,7 +367,11 @@ describe("offline identity command", () => {
 
 it("repairs a real same-directory split, backs up and updates the sidecar after commit", () => {
     const directory = tempDir();
-    execFileSync("git", ["init", directory], { stdio: "ignore", windowsHide: true });
+    execFileSync("git", ["init", directory], {
+        env: isolatedTestGitEnv(),
+        stdio: "ignore",
+        windowsHide: true,
+    });
     execFileSync(
         "git",
         [
@@ -378,9 +386,9 @@ it("repairs a real same-directory split, backs up and updates the sidecar after 
             "-m",
             "fixture",
         ],
-        { stdio: "ignore", windowsHide: true },
+        { env: isolatedTestGitEnv(), stdio: "ignore", windowsHide: true },
     );
-    const identity = `git:${execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8", windowsHide: true }).trim()}`;
+    const identity = `git:${execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8", env: isolatedTestGitEnv(), windowsHide: true }).trim()}`;
     const path = join(directory, "context.db");
     createCurrentDatabase(path);
     const db = new Database(path);

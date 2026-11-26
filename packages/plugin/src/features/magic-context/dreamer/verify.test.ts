@@ -11,6 +11,7 @@ import { hiddenModelCooldowns } from "../../../shared/hidden-model-cooldown";
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     getProjectEmbeddings,
@@ -73,15 +74,11 @@ function tempProject(): string {
  * load, so both are switched off here.
  */
 function fixtureGit(dir: string, args: string[], extraEnv: Record<string, string> = {}): void {
-    const env: Record<string, string | undefined> = { ...process.env, ...extraEnv };
-    for (const key of Object.keys(env)) {
-        if (key.startsWith("GIT_CONFIG_")) delete env[key];
-    }
-    execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", ...args], {
+    execFileSync("git", args, {
         windowsHide: true,
         cwd: dir,
         timeout: 10_000,
-        env,
+        env: isolatedTestGitEnv(extraEnv),
     });
 }
 
@@ -671,6 +668,7 @@ describe("runVerify disposition", () => {
             expect(afterFirst.get(first.id)?.verifiedAt).toBeGreaterThan(1_000);
             const head = execFileSync("git", ["rev-parse", "HEAD"], {
                 cwd: dir,
+                env: isolatedTestGitEnv(),
                 encoding: "utf8",
                 windowsHide: true,
             }).trim();

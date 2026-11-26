@@ -5,6 +5,7 @@ import { realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { isolatedTestGitEnv } from "@magic-context/core/shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { findIdentitySplits, formatIdentitySplits } from "./doctor-identity-splits";
 
@@ -103,7 +104,10 @@ test("reports directory data after the first commit before a git session binding
     const db = new Database(":memory:");
     const host = new Database(":memory:");
     try {
-        execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        execFileSync("git", ["init", "-q", directory], {
+            env: isolatedTestGitEnv(),
+            windowsHide: true,
+        });
         db.exec(
             "CREATE TABLE session_projects(session_id TEXT, harness TEXT, project_path TEXT); CREATE TABLE memories(project_path TEXT)",
         );
@@ -127,10 +131,11 @@ test("reports directory data after the first commit before a git session binding
                 "-qm",
                 "first",
             ],
-            { cwd: directory, windowsHide: true },
+            { cwd: directory, env: isolatedTestGitEnv(), windowsHide: true },
         );
         const root = execFileSync("git", ["rev-parse", "HEAD"], {
             cwd: directory,
+            env: isolatedTestGitEnv(),
             encoding: "utf8",
             windowsHide: true,
         }).trim();

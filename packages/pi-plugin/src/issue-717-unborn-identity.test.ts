@@ -10,6 +10,7 @@ import {
 } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { getMemoryById } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { isolatedTestGitEnv } from "@magic-context/core/shared/test-git-env";
 import {
 	cleanupTestTempDir,
 	createTestTempDirFromPath,
@@ -51,12 +52,7 @@ test.skipIf(process.platform === "win32")(
 		writeFileSync(gitConfig, "");
 		execFileSync("git", ["init", "-q"], {
 			cwd: directory,
-			env: {
-				...process.env,
-				GIT_CONFIG_GLOBAL: gitConfig,
-				GIT_CONFIG_NOSYSTEM: "1",
-				GIT_CONFIG_COUNT: "0",
-			},
+			env: isolatedTestGitEnv({ GIT_CONFIG_GLOBAL: gitConfig }),
 			windowsHide: true,
 		});
 		const bin = makeTempDir("pi-slow-git-");
