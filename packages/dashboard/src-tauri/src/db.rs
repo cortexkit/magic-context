@@ -5159,11 +5159,19 @@ pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, r
 /// in the session identity map. Missing rows are normal for sessions from before
 /// identity tracking was added; those sessions cannot safely contribute a
 /// project identity here.
-fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, String)> {
+fn mapped_session_directories(
+    identities: &SessionIdentityMap,
+    include_archived: bool,
+) -> Vec<(String, String)> {
     let mut dirs = Vec::new();
 
     if let Some(oc) = resolve_opencode_db_path() {
         if let Ok((conn, resolved)) = open_opencode_sessions(&oc) {
+            let archive_filter = if include_archived {
+                ""
+            } else {
+                " AND time_archived IS NULL"
+            };
             for &generation in &resolved.generations {
                 let harness = match generation {
                     OpenCodeStoreGeneration::V1 => Harness::Opencode,
@@ -5172,7 +5180,7 @@ fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, S
                 if let Ok(mut stmt) = conn.prepare(&format!(
                     "SELECT id, COALESCE(directory, '')
                  FROM {}
-                 WHERE directory IS NOT NULL AND directory != ''",
+                  WHERE directory IS NOT NULL AND directory != ''{archive_filter}",
                     opencode_session_table(generation)
                 )) {
                     if let Ok(rows) = stmt.query_map([], |row| {
@@ -5215,7 +5223,7 @@ fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, S
 
 fn session_identity_by_directory(identities: &SessionIdentityMap) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    for (identity, dir) in mapped_session_directories(identities) {
+    for (identity, dir) in mapped_session_directories(identities, true) {
         map.entry(dir).or_insert(identity);
     }
     map
@@ -5225,10 +5233,10 @@ fn session_identity_by_directory(identities: &SessionIdentityMap) -> HashMap<Str
 /// identities recorded in the session identity map. Sessions without a recorded
 /// identity are omitted because there is no authoritative project identity to
 /// group them under.
-fn session_directories_by_identity() -> HashMap<String, String> {
+fn session_directories_by_identity(include_archived: bool) -> HashMap<String, String> {
     let identities = load_session_identity_map();
     let mut map: HashMap<String, String> = HashMap::new();
-    for (identity, dir) in mapped_session_directories(&identities) {
+    for (identity, dir) in mapped_session_directories(&identities, include_archived) {
         map.entry(identity)
             .and_modify(|existing| {
                 if dir_is_better_representative(&dir, existing) {
@@ -5443,8 +5451,9 @@ pub fn get_project_cards(conn: &Connection) -> Vec<ProjectCard> {
 
     // Workspace membership: project identity → workspace name (members ≤ 1 ws).
     let workspace_by_identity = workspace_name_by_identity(conn);
-    // identity → representative real directory (resolves dir:<hash> to its cwd).
-    let dir_by_identity = session_directories_by_identity();
+    // Archived sessions can't name a live project's card or hide it by making
+    // the directory-existence check use a checkout that no longer exists.
+    let dir_by_identity = session_directories_by_identity(false);
     // Resolved once: the home probe canonicalizes the home directory, and asking
     // it per card would repeat that filesystem call for every project.
     let home_project = crate::workspaces::HomeProject::resolve();
@@ -8668,7 +8677,7 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
     // 2b. Reverse map identity → real directory from session.directory, so
     // `dir:<hash>` identities (non-git dirs OpenCode buckets under `global`,
     // invisible to the worktree-based enumeration) resolve to their real path.
-    let dir_by_identity = session_directories_by_identity();
+    let dir_by_identity = session_directories_by_identity(true);
 
     // 3. Global (user) dreamer schedules — the baseline every project inherits.
     let global_schedules = crate::jsonc::read_dreamer_task_schedules(
@@ -10483,6 +10492,94 @@ mod session_identity_map_tests {
             assert_eq!(card.session_count, 1);
             assert_eq!(card.memory_count, 1);
         });
+    }
+
+    fn assert_project_cards_ignore_archives(generation: OpenCodeStoreGeneration) {
+        with_temp_data_home(|data_home| {
+            let archived_only = data_home.join("archived-only");
+            let archived_checkout = data_home.join("main");
+            let live_worktree = data_home.join("live-worktree");
+            std::fs::create_dir(&archived_only).expect("archived-only project directory");
+            std::fs::create_dir_all(archived_checkout.join(".git")).expect("main checkout");
+            std::fs::create_dir(&live_worktree).expect("live worktree");
+            std::fs::write(
+                live_worktree.join(".git"),
+                "gitdir: ../main/.git/worktrees/live\n",
+            )
+            .expect("worktree git file");
+
+            let context = create_context_db(data_home, true);
+            let (oc, harness) = match generation {
+                OpenCodeStoreGeneration::V1 => (create_opencode_db(data_home), "opencode"),
+                OpenCodeStoreGeneration::V2 => (create_opencode2_db(data_home), "opencode2"),
+            };
+            let sql = format!(
+                "INSERT INTO {} (id, directory, time_updated, time_archived)
+                 VALUES (?1, ?2, ?3, ?4)",
+                opencode_session_table(generation)
+            );
+            for (id, dir, identity, updated, archived) in [
+                (
+                    "archived-only",
+                    &archived_only,
+                    "dir:archived-only",
+                    300,
+                    Some(400),
+                ),
+                (
+                    "archived-main",
+                    &archived_checkout,
+                    "git:mixed",
+                    200,
+                    Some(400),
+                ),
+                ("live-worktree", &live_worktree, "git:mixed", 100, None),
+            ] {
+                insert_session_project(&context, id, harness, identity);
+                oc.execute(
+                    &sql,
+                    (id, dir.to_str().expect("UTF-8 path"), updated, archived),
+                )
+                .expect("insert session");
+            }
+            context
+                .execute(
+                    "INSERT INTO memories (project_path) VALUES ('dir:archived-only')",
+                    [],
+                )
+                .expect("insert archived project's memory");
+            drop(oc);
+
+            let cards = get_project_cards(&context);
+            assert_eq!(cards.len(), 1, "only the mixed project should have a card");
+            assert_eq!(cards[0].identity, "git:mixed");
+            assert_eq!(cards[0].session_count, 1);
+            assert_eq!(cards[0].last_activity_ms, 100);
+            assert_eq!(cards[0].memory_count, 0);
+
+            // A missing representative directory can hide a card with no memories.
+            std::fs::remove_dir_all(&archived_checkout).expect("remove archived checkout");
+            let cards_after_removal = get_project_cards(&context);
+            let expected = Some(("live-worktree", live_worktree.to_str().unwrap()));
+            assert_eq!(
+                (
+                    cards.first().map(|card| (card.display_name.as_str(), card.primary_path.as_str())),
+                    cards_after_removal.first().map(|card| (card.display_name.as_str(), card.primary_path.as_str())),
+                ),
+                (expected, expected),
+                "the live worktree should represent the card before and after the archived checkout disappears"
+            );
+        });
+    }
+
+    #[test]
+    fn get_project_cards_ignore_archived_opencode1_sessions() {
+        assert_project_cards_ignore_archives(OpenCodeStoreGeneration::V1);
+    }
+
+    #[test]
+    fn get_project_cards_ignore_archived_opencode2_sessions() {
+        assert_project_cards_ignore_archives(OpenCodeStoreGeneration::V2);
     }
 
     #[test]
