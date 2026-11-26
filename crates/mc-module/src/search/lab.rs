@@ -677,8 +677,12 @@ pub(crate) struct Summary {
 }
 
 impl Timeline {
-    /// Summary references have no harness. Refuse a session that cannot be safely
-    /// attributed instead of picking one host's history on another's behalf.
+    /// The summaries of one session, for a reference a memory or a search hit
+    /// gives. A reference names a session and message numbers but not the host
+    /// program (OpenCode, Pi, a runner) the session ran under, and two hosts
+    /// can use the same session id. When the project has that id under more
+    /// than one host, nothing is returned: reading one host's history for
+    /// another's reference would be a wrong answer that looks right.
     pub(crate) fn load(
         conn: &Connection,
         project: &str,

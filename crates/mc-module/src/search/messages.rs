@@ -793,12 +793,21 @@ struct Within<'a> {
     dates: Option<DateRange>,
     visible: Option<&'a BTreeSet<i64>>,
     reach: &'a Reach,
+    /// Set only by the dreamer lab's history search. `None`, which every
+    /// other caller passes, adds nothing to the query.
     lab_role: Option<LabRole>,
 }
 
+/// Whose messages the dreamer lab's history search reads. It lists what the
+/// person wrote and what the agent wrote as separate groups, so the choice is
+/// made in the query, before the row limit, and not by dropping rows after.
 #[derive(Clone, Copy)]
 pub(super) enum LabRole {
+    /// Messages the person typed. A user-role message that starts with a
+    /// `<system-reminder>` block is a notice the host delivered, not the
+    /// person's words, and is left out.
     Person,
+    /// The agent's own replies.
     Agent,
 }
 
