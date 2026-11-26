@@ -37,7 +37,9 @@ For a 2.2.x, 2.3.x, or 2.4.x compatibility proof, install the CLI and pin
 `MC_E2E_OPENCODE2_AI_ROOT` to that install root alongside the CLI/version
 overrides. The runner refuses a mismatched or missing schema version and bundles
 the matching schema validator; it never disables validation or substitutes 2.1's
-schema. CI's exact-host installer sets this path for versions other than the
+schema. In CI, the step that installs the OpenCode version a matrix leg names
+also installs `@opencode/ai` at that same version and sets this path, for every
+version other than the
 2.0.x and 2.1.0 releases covered by the workspace's pinned schema packages.
 Testing another CLI does not change the primary dependency pin.
 

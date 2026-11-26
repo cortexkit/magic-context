@@ -123,7 +123,8 @@ test("the request after a manual compaction that rebuilt the history head carrie
             expect((JSON.parse(compaction.data) as { summary?: string }).summary).toBe(CHECKPOINT_NOTE);
             expect(text).not.toContain(JSON.stringify(CHECKPOINT_NOTE).slice(1, -1));
             // The head changed, so the provider cache was lost on this pass...
-            // OpenCode 2.3+ puts its Responses API developer header before m[0].
+            // OpenCode 2.3+ sends its own developer header as the first input item, so
+            // Magic Context's history head is the first user item, not the first item.
             const head = (input: string[]) => input.find((item) => JSON.parse(item).role === "user");
             expect(head(held)).toBeDefined();
             expect(head(after)).not.toBe(head(held));
