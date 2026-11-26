@@ -459,7 +459,7 @@ async fn cleanup_ride_only_publishes_and_records_candidates_with_independent_wor
         ("write", ToolStatus::Error),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+        let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
         let (mut session, client, settings) = transcript(
             old(tool, status, json!({"path":"f"})),
             later(tool, ToolStatus::Completed, json!({"path":"f"})),
