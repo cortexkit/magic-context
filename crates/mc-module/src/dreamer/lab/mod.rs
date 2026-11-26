@@ -1,4 +1,5 @@
-//! One unscheduled, read-only dreamer experiment.
+//! One unscheduled dreamer experiment using frozen inputs. Only the child
+//! session's attribution fact is written to the live context store.
 
 mod frozen;
 mod git;
@@ -25,8 +26,10 @@ use cortexkit_role_tool_provider::catalog::{self, composition_digest};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::attribution::{Attribution, Purpose};
 use crate::child_scopes::{WorkerScope, WorkerScopeGuard, LAB_WORKER_SCOPE};
 use crate::client::{Child, RunnerClient};
+use crate::context_db::ContextDb;
 use crate::routing::{self, Router};
 use crate::summary::fit::Window;
 use crate::summary::run::{ObservedSend, PlanRun};
@@ -167,21 +170,11 @@ impl Start {
         &self.spec.out_dir
     }
 
-    #[cfg(test)]
-    async fn execute<C: RunnerClient + Router>(
-        self,
-        client: Arc<C>,
-        registry: Arc<Registry>,
-        embedding: Option<crate::embedding::Provider>,
-    ) {
-        self.execute_with(client, registry, move |_, _| embedding)
-            .await;
-    }
-
     pub(crate) async fn execute_with<C: RunnerClient + Router>(
         mut self,
         client: Arc<C>,
         registry: Arc<Registry>,
+        attribution_db: Arc<ContextDb>,
         embedding: impl FnOnce(&Path, &str) -> Option<crate::embedding::Provider> + Send + 'static,
     ) {
         let start = Instant::now();
@@ -202,8 +195,14 @@ impl Start {
             .map_err(|e| run::LabEnd::Error(e.to_string()))?
             .map_err(run::LabEnd::Refused)?;
             let lab = loaded.insert(Arc::new(lab));
-            lab.execute(client.as_ref(), registry.as_ref(), &mut observed, deadline)
-                .await
+            lab.execute(
+                client.as_ref(),
+                registry.as_ref(),
+                attribution_db.as_ref(),
+                &mut observed,
+                deadline,
+            )
+            .await
         })
         .await;
         if let Some(lab) = &loaded {
@@ -333,6 +332,7 @@ impl Lab {
         self: &Arc<Self>,
         client: &C,
         registry: &Registry,
+        attribution_db: &ContextDb,
         observed: &mut Observed,
         deadline: tokio::time::Instant,
     ) -> Result<(), run::LabEnd> {
@@ -363,13 +363,18 @@ impl Lab {
             .then(|| WorkerScope::new(root, &self.spec.project, &id))
             .transpose()
             .map_err(|error| run::LabEnd::Refused(error.to_string()))?;
+        let demand = &routing::LAB_DEMAND;
+        let purpose = Purpose::dream(demand.kind, Some(&self.spec.project));
         let job = run::TaskRun {
-            demand: &routing::LAB_DEMAND,
+            demand,
             run_id: &id,
             project_root: root,
             reader: reader.as_deref(),
             remaining_tokens: u64::MAX,
-            attribution: None,
+            attribution: Some(Attribution {
+                db: attribution_db,
+                purpose: &purpose,
+            }),
         };
         observed.worker_scope = worker_scope.clone().map(WorkerScopeGuard);
         let result = in_child_scope(
