@@ -4136,10 +4136,35 @@ export function createTransform(deps: TransformDeps) {
                     : undefined);
             if (finalWireEstimate) {
                 logIncompleteFinalWire(finalWireEstimate, messages);
-                sessionLog(
-                    sessionId,
-                    `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
-                );
+                // The byte-bound refusal check reads message bytes up to the
+                // limit and does not tokenize, so its per-part counts are zero
+                // because nothing was tokenized, not because the request is
+                // empty. Say what it found instead of printing those zeros: a
+                // lower bound made of the provider's measured input for a
+                // prefix of the request (when there is one) plus the message
+                // bytes counted, divided by four. "Proven over" only when the
+                // bound is of the grade the refusal decision accepts (system
+                // prompt and tool definitions known).
+                const byteBound =
+                    finalWireEstimate.refusalBasis === "byte-bound" &&
+                    finalWireEstimate.refusalTokens !== undefined;
+                const envelope = `system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`;
+                if (byteBound) {
+                    const lower = finalWireEstimate.refusalTokens ?? finalWireEstimate.tokens;
+                    const prefix = finalWireEstimate.refusalBaselineTokens ?? 0;
+                    const verdict = finalWireEstimate.refusalGrade
+                        ? `proven over the window limit=${boundaryContextLimit}`
+                        : `over the window limit=${boundaryContextLimit} by a byte bound that is not refusal grade`;
+                    const counted = `lower bound ${lower} = measured prefix ${prefix} + message bytes/4 ${lower - prefix}${finalWireEstimate.countingStopped ? ", counted until the bound passed the limit" : ""}`;
+                    sessionLog(
+                        sessionId,
+                        `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} ${verdict}: ${counted}; conversation and tools not tokenized ${envelope}`,
+                    );
+                } else
+                    sessionLog(
+                        sessionId,
+                        `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} ${envelope}`,
+                    );
             }
             // Count the request this pass serves, for the next pass's execute
             // decision while the provider still reports no usage. A pass with a

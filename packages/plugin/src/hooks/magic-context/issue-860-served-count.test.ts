@@ -594,7 +594,7 @@ describe("issue 860: one very large tool result, then a reading of 800%", () => 
         // The pass that sent the result made no count of its own: its final
         // check stopped at a byte bound once the request was over the window.
         expect(current.sends.log).toMatch(
-            /final-wire telemetry estimate=\d+ trusted=false conversation=0 tools=0/,
+            /final-wire telemetry estimate=\d+ trusted=false proven over the window limit=\d+: lower bound \d+/,
         );
         expect(current.sends.log).not.toContain("emergency tiered drop");
         const count = calls[0]?.input.servedCountTokens;
@@ -921,6 +921,45 @@ describe("issue 860: a reading stuck at 134% of a request that fits", () => {
             `ISSUE860 stuck + provider refusal: current batches=${current.batches.join(",")}`,
         );
     }, 120_000);
+});
+
+describe("issue 860: the final check's log line", () => {
+    test("the final check's log line says what the byte bound counted, and not 'proven' below refusal grade", async () => {
+        const finalLine = (pass: Awaited<ReturnType<typeof runPass>>) =>
+            pass.lines.find((entry) => entry.startsWith("transform: final-wire telemetry"));
+        // No tool definitions measured: the drop skips, the request stays far
+        // over the window, and the bound is not refusal grade.
+        const unmeasured = openSession("ses-860-final-wire-line", {
+            tail: 42,
+            reading: 368_415,
+        });
+        const first = await runPass(unmeasured);
+        expect(first.error).toBeUndefined();
+        const line = finalLine(first);
+        expect(line).toMatch(
+            /^transform: final-wire telemetry estimate=(\d+) trusted=false over the window limit=\d+ by a byte bound that is not refusal grade: lower bound \1 = measured prefix 0 \+ message bytes\/4 \1, counted until the bound passed the limit; conversation and tools not tokenized system=/,
+        );
+        expect(line).not.toContain("proven");
+        expect(line).not.toContain("conversation=0 tools=0");
+    }, 60_000);
+
+    test("the final check's log line says 'proven over' at refusal grade", async () => {
+        const finalLine = (pass: Awaited<ReturnType<typeof runPass>>) =>
+            pass.lines.find((entry) => entry.startsWith("transform: final-wire telemetry"));
+        // System prompt and tool definitions known, and a fixed part truly
+        // above the reduction point: the drop skips and the bound is refusal grade.
+        measureToolDefinitions(15_134);
+        const measured = openSession("ses-860-final-wire-line-grade", {
+            tail: 42,
+            reading: 368_415,
+            systemPromptTokens: 20_000,
+        });
+        const second = await runPass(measured);
+        expect(second.error).toBeUndefined();
+        expect(finalLine(second)).toMatch(
+            /^transform: final-wire telemetry estimate=(\d+) trusted=false proven over the window limit=\d+: lower bound \1 = measured prefix 0 \+ message bytes\/4 \1, counted until the bound passed the limit; conversation and tools not tokenized system=20000 /,
+        );
+    }, 60_000);
 });
 
 describe("issue 860: the differential over this file's scenarios", () => {

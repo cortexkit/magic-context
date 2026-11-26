@@ -641,6 +641,19 @@ export interface FinalWireTokenEstimate {
     pressureComponents?: { system: number; tools: number; prose: number };
     completeness?: "complete" | "partial";
     componentsComplete?: boolean;
+    /**
+     * The byte-bound refusal check stopped reading the messages as soon as
+     * their bytes alone proved the request over the limit: `tokens` is then a
+     * lower bound at the point counting stopped, and `messageTokens` was
+     * never counted.
+     */
+    countingStopped?: boolean;
+    /**
+     * With a byte-bound refusal count: the part of `refusalTokens` that is the
+     * provider's measured input for a prefix of the request (0 without one).
+     * The rest is the counted message bytes divided by four.
+     */
+    refusalBaselineTokens?: number;
 }
 
 /**
@@ -703,6 +716,8 @@ export function estimateOutgoingWireForRefusal(
                     systemTokens: input.systemPromptTokens,
                     toolDefinitionTokens: tools,
                     toolDefinitionsMeasured: tools !== undefined,
+                    countingStopped: over && bytes.aborted,
+                    refusalBaselineTokens: over ? baseline : undefined,
                 };
             }
         }
