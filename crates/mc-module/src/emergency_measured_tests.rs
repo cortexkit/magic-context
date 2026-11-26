@@ -1120,7 +1120,7 @@ fn emergency_measured_a_count_under_a_view_with_another_checksum_is_older() {
         session.latest = Some(View::seal(1, Vec::new()));
         let mut ride = over_limit(&session, Some(60_000));
         if !same_checksum {
-            // The same version, built through another message.
+            // A different view with the same version (its checksum differs).
             let other = View::seal_with_policy(1, Vec::new(), Some("tool-34".into()), None);
             assert_ne!(other.checksum, session.latest.as_ref().unwrap().checksum);
             ride.applied_view = Some(other.applied());
