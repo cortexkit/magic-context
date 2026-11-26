@@ -166,6 +166,7 @@ Visual editor for Magic Context JSONC. Because every harness reads one shared Co
 
 - Toggle and edit fields that mirror `magic-context.schema.json` (the editor links the schema URL and parses JSONC including comments and trailing commas; saves abort on a parse error so comments and sibling keys are preserved).
 - **Save** writes real files on disk via the Tauri backend, not a preview buffer.
+- **Every save keeps a copy of the file it replaces.** The copy goes to `config-backups` in the Magic Context data folder (`~/.local/share/cortexkit/magic-context/config-backups`, or under `MAGIC_CONTEXT_STORAGE_DIR` or `XDG_DATA_HOME` when one is set), never into the config folder or a project. The newest 5 copies of each config are kept. To go back, copy one over the config file. If the copy cannot be made, the save is refused. On macOS and Linux the folder and the copies are readable only by you. On Windows they inherit the permissions of the Magic Context data folder, as the store beside them does.
 - Model pickers merge OpenCode and available Pi/OMP model lists (with provider prefixes normalized), and you can always type a model id directly when a discovered list is present — discovery is never exhaustive.
 
 Use [Configuration](/reference/configuration/) for the full generated key reference; use this section for day-to-day edits.
