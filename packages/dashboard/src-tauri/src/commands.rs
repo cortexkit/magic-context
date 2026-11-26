@@ -917,8 +917,8 @@ fn opencode_probe_command(bin: &str, args: &[&str], cwd: &Path) -> tokio::proces
     command
 }
 
-/// Working directory for OpenCode probes: the Magic Context data folder,
-/// created owner-only when it is missing.
+const NO_OPENCODE_PROBE_DIR: &str = "no safe working folder. Set MAGIC_CONTEXT_STORAGE_DIR to a folder outside the system temp folder and the AppImage mount.";
+
 fn opencode_probe_dir() -> Option<PathBuf> {
     let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
     opencode_probe_dir_from(
@@ -933,27 +933,40 @@ fn opencode_probe_dir_from(
     storage: Option<PathBuf>,
     home: Option<PathBuf>,
     temp: &Path,
-    _appdir: Option<&Path>,
+    appdir: Option<&Path>,
 ) -> Option<PathBuf> {
-    match storage {
-        // A relative folder would resolve under the launch directory again.
-        Some(dir) if !dir.is_absolute() => eprintln!(
-            "WARN: the Magic Context data folder {} is relative; using the home folder for the OpenCode probe",
-            dir.display()
-        ),
-        Some(dir) => match config::ensure_private_config_directory(&dir) {
-            Ok(()) => return Some(dir),
+    let safe_dir = |dir: &Path| {
+        if !dir.is_absolute() {
+            return None;
+        }
+        let dir = dir.canonicalize().ok()?;
+        (dir.is_dir()
+            && opencode_probe_dir_outside(&dir, temp)
+            && appdir.map_or(true, |root| opencode_probe_dir_outside(&dir, root)))
+        .then_some(dir)
+    };
+
+    if let Some(dir) = storage.filter(|dir| dir.is_absolute()) {
+        match config::ensure_private_config_directory(&dir) {
+            Ok(()) => {
+                if let Some(dir) = safe_dir(&dir) {
+                    return Some(dir);
+                }
+            }
             Err(err) => eprintln!(
-                "WARN: cannot create {} for the OpenCode probe ({err}); using the home folder",
+                "WARN: cannot prepare {} for the OpenCode probe ({err})",
                 dir.display()
             ),
-        },
-        None => eprintln!(
-            "WARN: no valid Magic Context data folder for the OpenCode probe; using the home folder"
-        ),
+        }
     }
-    // Never fall back to the process directory: that is the location #964 removes.
-    Some(home.unwrap_or_else(|| temp.to_path_buf()))
+    home.as_deref().and_then(safe_dir)
+}
+
+fn opencode_probe_dir_outside(dir: &Path, root: &Path) -> bool {
+    match root.canonicalize() {
+        Ok(root) => !dir.starts_with(root),
+        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -988,7 +1001,10 @@ async fn resolve_via_where(_tool: &str) -> Option<String> {
 }
 
 async fn opencode_cli_available() -> bool {
-    let cwd = opencode_probe_dir().unwrap_or_else(std::env::temp_dir);
+    let Some(cwd) = opencode_probe_dir() else {
+        eprintln!("WARN: cannot check the OpenCode version: {NO_OPENCODE_PROBE_DIR}");
+        return false;
+    };
     for bin in opencode_cli_candidates() {
         if run_bounded_command(opencode_probe_command(&bin, &["--version"], &cwd))
             .await
@@ -1144,8 +1160,9 @@ async fn probe_opencode_catalog(
 async fn probe_opencode_models(
     bin: &str,
     timeout: std::time::Duration,
+    cwd: &Path,
 ) -> Result<Vec<String>, String> {
-    probe_opencode_catalog(bin, timeout, false, &std::env::temp_dir())
+    probe_opencode_catalog(bin, timeout, false, cwd)
         .await
         .map(|catalog| catalog.models)
 }
@@ -1161,7 +1178,9 @@ async fn discover_opencode_models_with<F>(
 where
     F: std::future::Future<Output = Result<OpencodeCatalog, String>>,
 {
-    probe(cwd.unwrap_or_else(std::env::temp_dir)).await
+    let cwd =
+        cwd.ok_or_else(|| format!("Couldn't load models from OpenCode: {NO_OPENCODE_PROBE_DIR}"))?;
+    probe(cwd).await
 }
 
 async fn discover_opencode_models_in(cwd: PathBuf) -> Result<OpencodeCatalog, String> {
@@ -1833,7 +1852,6 @@ mod tests {
             "XDG_DATA_HOME",
             "XDG_STATE_HOME",
             "XDG_RUNTIME_DIR",
-            "MAGIC_CONTEXT_STORAGE_DIR",
         ] {
             let root = std::env::var(key).expect("private root required");
             assert!(
@@ -1842,6 +1860,16 @@ mod tests {
                 temp.display()
             );
         }
+        let storage = PathBuf::from(
+            std::env::var_os("MAGIC_CONTEXT_STORAGE_DIR").expect("private probe folder required"),
+        );
+        assert!(storage.is_absolute() && storage.is_dir());
+        let storage = storage.canonicalize().expect("real probe folder");
+        assert!(
+            storage.ends_with("magic-context-opencode-probe-test"),
+            "use a dedicated magic-context-opencode-probe-test folder outside system temp"
+        );
+        assert_eq!(super::opencode_probe_dir(), Some(storage));
         assert!(
             std::env::var("OPENCODE_DB").is_ok(),
             "private DB name required"
@@ -1869,14 +1897,15 @@ mod tests {
             "",
         );
         let empty = crate::test_bin::write_test_executable("opencode", "#!/bin/sh\nexit 0\n", "");
+        let cwd = tempfile::tempdir().unwrap();
         let bin = slow.to_str().expect("UTF-8 path");
         let timeout = std::time::Duration::from_millis(30);
-        assert!(probe_opencode_models(bin, timeout)
+        assert!(probe_opencode_models(bin, timeout, cwd.path())
             .await
             .unwrap_err()
             .contains("timed out after 0s"));
         assert_eq!(
-            probe_opencode_models(bin, std::time::Duration::from_secs(2))
+            probe_opencode_models(bin, std::time::Duration::from_secs(2), cwd.path())
                 .await
                 .unwrap(),
             vec!["opencode/big-pickle"]
@@ -1886,7 +1915,7 @@ mod tests {
         // for a malware scan) from surfacing as a timeout instead.
         let bin = empty.to_str().expect("UTF-8 path");
         assert!(
-            probe_opencode_models(bin, std::time::Duration::from_secs(2))
+            probe_opencode_models(bin, std::time::Duration::from_secs(2), cwd.path())
                 .await
                 .unwrap_err()
                 .contains("returned no models")
