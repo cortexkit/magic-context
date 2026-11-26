@@ -7,6 +7,7 @@
 //! full-text rank; a hit found by one scores that half alone, discounted.
 //! Notes match by words only.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{params, Connection};
@@ -661,6 +662,21 @@ pub fn search_commits(
     semantic: Option<Semantic<'_>>,
     halves: Option<&mut Halves<CommitHit>>,
 ) -> Vec<CommitHit> {
+    let mut hits = ranked_commits(conn, project, query, limit, dates, semantic, halves);
+    hits.truncate(limit);
+    hits
+}
+
+/// The commit ranking before the page cutoff, for the lab's date ordering.
+pub(super) fn ranked_commits(
+    conn: &Connection,
+    project: &str,
+    query: &str,
+    limit: usize,
+    dates: Option<DateRange>,
+    semantic: Option<Semantic<'_>>,
+    halves: Option<&mut Halves<CommitHit>>,
+) -> Vec<CommitHit> {
     let trimmed = query.trim();
     if trimmed.is_empty() || limit == 0 {
         return Vec::new();
@@ -798,7 +814,6 @@ pub fn search_commits(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(right.committed_at.cmp(&left.committed_at))
     });
-    hits.truncate(limit);
     hits
 }
 
@@ -990,6 +1005,14 @@ pub struct ChunkHit {
     pub snippet: Option<String>,
 }
 
+pub(super) type ChunkTie<'a> = &'a dyn Fn(&ChunkHit, &ChunkHit) -> Ordering;
+
+struct ChunkSession<'a> {
+    id: &'a str,
+    check_harness: bool,
+    tie: Option<ChunkTie<'a>>,
+}
+
 /// The session's summaries ranked by how close their best chunk is to the
 /// query, up to `cutoff` (later messages are in the model's view). A date
 /// range keeps summaries whose messages overlap it.
@@ -1004,7 +1027,11 @@ pub fn search_chunks(
 ) -> Vec<ChunkHit> {
     search_chunks_scoped(
         conn,
-        (session, false),
+        ChunkSession {
+            id: session,
+            check_harness: false,
+            tie: None,
+        },
         project,
         limit,
         cutoff,
@@ -1020,10 +1047,15 @@ pub(super) fn search_chunks_in_project(
     limit: usize,
     dates: Option<DateRange>,
     semantic: Semantic<'_>,
+    tie: Option<ChunkTie<'_>>,
 ) -> Vec<ChunkHit> {
     search_chunks_scoped(
         conn,
-        (session, true),
+        ChunkSession {
+            id: session,
+            check_harness: true,
+            tie,
+        },
         project,
         limit,
         i64::MAX,
@@ -1034,7 +1066,7 @@ pub(super) fn search_chunks_in_project(
 
 fn search_chunks_scoped(
     conn: &Connection,
-    (session, check_harness): (&str, bool),
+    session: ChunkSession<'_>,
     project: &str,
     limit: usize,
     cutoff: i64,
@@ -1071,7 +1103,12 @@ fn search_chunks_scoped(
               ORDER BY e.id ASC",
         )?;
         let rows = statement.query_map(
-            params![session, project, semantic.chunk_model_id, check_harness],
+            params![
+                session.id,
+                project,
+                semantic.chunk_model_id,
+                session.check_harness
+            ],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -1127,7 +1164,8 @@ fn search_chunks_scoped(
         right
             .score
             .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| session.tie.map_or(Ordering::Equal, |tie| tie(left, right)))
             .then(left.start.cmp(&right.start))
     });
     hits.truncate(limit);

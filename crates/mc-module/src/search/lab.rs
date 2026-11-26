@@ -1,6 +1,7 @@
 //! A project-history scope for frozen lab databases. Ordinary search still
 //! reads only its own session and hides messages already in the model's view.
 
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
@@ -9,6 +10,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use super::{messages, sources, text, Hit};
+
+// Bound the relevance ranking before sorting by date so newest stays about the subject.
+const NEWEST_RANK_LIMIT: usize = 30;
 
 pub(crate) fn memory_search(
     conn: &Connection,
@@ -264,10 +268,29 @@ impl History {
         input: &Value,
         semantic: Option<sources::Semantic<'_>>,
     ) -> Result<String, String> {
-        let query = checked_query("history_search", input, &["from", "to", "include_agent"])?;
+        let query = checked_query(
+            "history_search",
+            input,
+            &["from", "to", "include_agent", "order"],
+        )?;
+        let newest = match input.get("order") {
+            None => false,
+            Some(order) => match order.as_str() {
+                Some("relevance") => false,
+                Some("newest") => true,
+                _ => return Err("history_search order must be relevance or newest".into()),
+            },
+        };
         let dates = super::date_range(input)?;
         let multiplier = limit(input, 1, 3);
         let limit = 4 * multiplier;
+        let summary_query = SummaryQuery {
+            query,
+            limit,
+            dates,
+            semantic,
+            newest,
+        };
         let include_agent = input["include_agent"].as_bool().unwrap_or(false);
         let project = &self.project;
         let mut people = Vec::new();
@@ -291,22 +314,38 @@ impl History {
                     agents.extend(raw.search(conn, &session.id, "assistant")?);
                 }
             }
-            summaries.extend(summary_hits(
-                conn, project, session, query, limit, dates, semantic,
-            )?);
+            summaries.extend(summary_hits(conn, project, session, &summary_query)?);
         }
         summaries.sort_unstable_by(|a, b| {
             b.hit
                 .score()
                 .total_cmp(&a.hit.score())
+                .then_with(|| {
+                    if newest {
+                        b.date.last_day().cmp(&a.date.last_day())
+                    } else {
+                        Ordering::Equal
+                    }
+                })
                 .then_with(|| a.order.cmp(&b.order))
                 .then_with(|| a.session.cmp(&b.session))
                 .then_with(|| a.rowid.cmp(&b.rowid))
         });
         people.sort_unstable_by(compare_evidence);
         agents.sort_unstable_by(compare_evidence);
-        let commits =
-            sources::search_commits(conn, project, query, 3 * multiplier, dates, semantic, None);
+        let commit_limit = 3 * multiplier;
+        let commits = if newest {
+            newest_first(&mut summaries, |hit| hit.date.last_day());
+            newest_first(&mut people, |hit| hit.date.end());
+            newest_first(&mut agents, |hit| hit.date.end());
+            let mut pool =
+                sources::ranked_commits(conn, project, query, commit_limit, dates, semantic, None);
+            newest_first(&mut pool, |hit| hit.committed_at);
+            pool.truncate(commit_limit);
+            pool
+        } else {
+            sources::search_commits(conn, project, query, commit_limit, dates, semantic, None)
+        };
         let now = crate::memory_writes::now_ms();
         let mut groups = Vec::new();
         if skipped != 0 {
@@ -336,6 +375,12 @@ impl History {
         }
         Ok(groups.join("\n\n"))
     }
+}
+
+fn newest_first<T, D: Ord>(hits: &mut Vec<T>, date: impl Fn(&T) -> D) {
+    hits.truncate(NEWEST_RANK_LIMIT);
+    // Stable sorting keeps the existing rank order for equal dates.
+    hits.sort_by_key(|hit| Reverse(date(hit)));
 }
 
 fn raw_is_ambiguous(conn: &Connection, project: &str, session: &str) -> Result<bool, String> {
@@ -525,19 +570,40 @@ impl IndexedTimes {
     }
 }
 
+struct SummaryQuery<'a> {
+    query: &'a str,
+    limit: usize,
+    dates: Option<messages::DateRange>,
+    semantic: Option<sources::Semantic<'a>>,
+    newest: bool,
+}
+
 fn summary_hits<'a>(
     conn: &Connection,
     project: &str,
     session: &'a HistorySession,
-    query: &str,
-    limit: usize,
-    dates: Option<messages::DateRange>,
-    semantic: Option<sources::Semantic<'_>>,
+    query: &SummaryQuery<'_>,
 ) -> Result<Vec<Evidence<'a>>, String> {
+    let SummaryQuery {
+        query,
+        limit,
+        dates,
+        semantic,
+        newest,
+    } = *query;
     if dates.is_some() && session.times.0.is_empty() {
         return Ok(Vec::new());
     }
-    let (mut hits, excluded) = lexical_summaries(conn, project, session, query, limit, dates)?;
+    // Both candidate lists are capped per session. A same-score summary must
+    // survive that cut before the project-wide ranking can consider its date.
+    let by_date = |a: &sources::ChunkHit, b: &sources::ChunkHit| {
+        let last_day = |hit: &sources::ChunkHit| {
+            EvidenceDate::Range(session.times.range(hit.start, hit.end)).last_day()
+        };
+        last_day(b).cmp(&last_day(a))
+    };
+    let tie = newest.then_some(&by_date as sources::ChunkTie<'_>);
+    let (mut hits, excluded) = lexical_summaries(conn, project, session, query, limit, dates, tie)?;
     if let Some(semantic) = semantic {
         // The shared search would require exact boundary times. Filter by the
         // lab's ranges instead, allowing one extra slot per excluded summary.
@@ -548,6 +614,7 @@ fn summary_hits<'a>(
             limit + excluded,
             None,
             semantic,
+            tie,
         )
         .into_iter()
         .filter(|hit| session.times.matches(hit.start, hit.end, dates))
@@ -583,6 +650,7 @@ fn lexical_summaries(
     query: &str,
     limit: usize,
     dates: Option<messages::DateRange>,
+    tie: Option<sources::ChunkTie<'_>>,
 ) -> Result<(Vec<sources::ChunkHit>, usize), String> {
     // Compartments have an index by session and are much fewer than raw
     // messages. Stream only the selected session's summaries, keeping top hits.
@@ -634,6 +702,7 @@ fn lexical_summaries(
         hits.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
+                .then_with(|| tie.map_or(Ordering::Equal, |tie| tie(a, b)))
                 .then(a.start.cmp(&b.start))
                 .then(a.compartment_id.cmp(&b.compartment_id))
         });
@@ -656,6 +725,15 @@ enum EvidenceDate {
 }
 
 impl EvidenceDate {
+    fn last_day(&self) -> Option<chrono::NaiveDate> {
+        match self {
+            Self::Range(range) => range.map(|range| range.end.date_naive()),
+            Self::Instant(at) => at
+                .and_then(DateTime::from_timestamp_millis)
+                .map(|at| at.date_naive()),
+        }
+    }
+
     fn end(&self) -> Option<i64> {
         match self {
             Self::Instant(at) => *at,
@@ -735,6 +813,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn newest_prefers_recent_summaries_at_both_score_cutoffs() {
+        let start = DateTime::parse_from_rfc3339("2026-10-25T01:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let vector = [1.0, 0.0];
+        for split_sessions in [false, true] {
+            let conn = crate::context_db::ContextDb::fresh_in_memory();
+            for n in 1..=40 {
+                let session = if split_sessions {
+                    format!("session-{n:02}")
+                } else {
+                    "one-session".into()
+                };
+                if split_sessions || n == 1 {
+                    conn.execute(
+                        "INSERT INTO session_projects (session_id, harness, project_path, updated_at)
+                         VALUES (?1, 'mock', 'p', 1)",
+                        [&session],
+                    )
+                    .unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO compartments (id, session_id, harness, sequence, start_message, end_message, title, content, created_at)
+                     VALUES (?1, ?2, 'mock', ?1, ?1, ?1, 'Monthly review', 'reviewterm', 1)",
+                    params![n, session],
+                ).unwrap();
+                conn.execute(
+                    "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms)
+                     VALUES (?1, ?2, ?2, ?3)",
+                    params![session, n, start + (n - 1) * 30 / 39 * 86_400_000],
+                ).unwrap();
+                conn.execute(
+                    "INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness,
+                         window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+                     VALUES (?1, ?2, 'p', 'mock', 0, ?1, ?1, 'hash', 'model', 2, ?3, 1)",
+                    params![n, session, crate::embedding::encode(&vector)],
+                ).unwrap();
+            }
+            let history = History::load(&conn, "p", None).unwrap();
+            let semantic = sources::Semantic {
+                vector: &vector,
+                model_id: "model",
+                chunk_model_id: "model",
+            };
+            for (query, semantic, kind) in [
+                ("reviewterm", None, "lexical"),
+                ("anotherterm", Some(semantic), "semantic"),
+            ] {
+                let search = |order| {
+                    history.search(
+                    &conn,
+                    &serde_json::json!({"query":query,"from":"2026-10-25","to":"2026-11-24","order":order}),
+                    semantic,
+                ).unwrap()
+                };
+                let ids = |answer: &str| {
+                    answer
+                        .lines()
+                        .filter_map(|line| {
+                            let (_, fields) = line.split_once("score=0.80 compartment_id=")?;
+                            assert!(line.contains(&format!("match={kind}")), "{line}");
+                            Some(
+                                fields
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap()
+                                    .parse::<i64>()
+                                    .unwrap(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let relevant = search("relevance");
+                let newest = search("newest");
+                assert_eq!(ids(&relevant), [1, 2, 3, 4], "{relevant}");
+                assert_eq!(ids(&newest), [40, 39, 38, 37], "{newest}");
+                println!(
+                    "split_sessions={split_sessions} {kind}: relevance {:?}; newest {:?}",
+                    ids(&relevant),
+                    ids(&newest)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn summary_dates_filter_semantic_hits_before_the_result_limit() {
         let conn = crate::context_db::ContextDb::fresh_in_memory();
         conn.execute(
@@ -765,16 +929,36 @@ mod tests {
             ).unwrap();
         }
         let history = History::load(&conn, "p", None).unwrap();
-        let semantic = Some(sources::Semantic {
+        let semantic = sources::Semantic {
             vector: &vector,
             model_id: "model",
             chunk_model_id: "model",
+        };
+        let expected = [1, 2, 3, 4].map(|id| sources::ChunkHit {
+            compartment_id: id,
+            title: "Routine debugging".into(),
+            start: id * 3,
+            end: id * 3 + 2,
+            window: (id * 3, id * 3 + 2),
+            score: 0.8,
+            match_type: "semantic",
+            snippet: None,
         });
+        assert_eq!(
+            sources::search_chunks(&conn, "s", "p", 4, i64::MAX, None, semantic),
+            expected,
+            "ordinary summary search must still prefer lower ordinals on a score tie"
+        );
+        assert_eq!(
+            sources::search_chunks_in_project(&conn, "s", "p", 4, None, semantic, None),
+            expected,
+            "lab summary search with no date tie-break must also keep its original rank"
+        );
         let answer = history
             .search(
                 &conn,
                 &serde_json::json!({"query":"unrelatedterm", "from":"1970-01-02"}),
-                semantic,
+                Some(semantic),
             )
             .unwrap();
         assert_eq!(answer.matches("compartment_id=").count(), 1, "{answer}");

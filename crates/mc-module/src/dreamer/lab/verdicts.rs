@@ -49,7 +49,8 @@ pub(super) fn submit(
             )),
         }
     }
-    if !problems.is_empty() {
+    let saved = list.len() - problems.len();
+    if saved == 0 {
         return Err(problems.join("; "));
     }
     write(out, ids, &next)?;
@@ -57,7 +58,7 @@ pub(super) fn submit(
     let missing = missing(ids, current);
     let mut reply = format!(
         "recorded {}; {} of {} still open",
-        list.len(),
+        saved,
         missing.len(),
         ids.len()
     );
@@ -70,6 +71,11 @@ pub(super) fn submit(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    if !problems.is_empty() {
+        reply.push_str("; refused: ");
+        reply.push_str(&problems.join("; "));
+        reply.push_str(". Send only the refused verdicts again.");
     }
     Ok(reply)
 }

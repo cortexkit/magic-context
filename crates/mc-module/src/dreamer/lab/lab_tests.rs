@@ -252,7 +252,7 @@ async fn scripted_lab_records_verdicts_and_request_with_only_attribution_in_the_
             spec,
             Ends::LabTools(vec![
                 submit(&[verdict(2, "first result")]),
-                submit(&[verdict(2, "must not apply"), verdict(7000, "unknown id")]),
+                submit(&[verdict(2, "valid replacement"), verdict(7000, "unknown id")]),
                 submit(&[verdict(7, "other result"), verdict(2, "replacement")]),
             ]),
         )
@@ -267,11 +267,15 @@ async fn scripted_lab_records_verdicts_and_request_with_only_attribution_in_the_
         .as_str()
         .unwrap()
         .contains("1 of 2 still open; missing ids: 7"));
-    assert_eq!(calls[1]["isError"], true);
+    assert_ne!(calls[1]["isError"], true);
     assert!(calls[1]["content"][0]["text"]
         .as_str()
         .unwrap()
         .contains("unknown memory id 7000"));
+    assert_eq!(
+        client.lab_verdicts_after.lock().unwrap()[1],
+        json!([verdict(2, "valid replacement")])
+    );
     assert!(calls[2]["content"][0]["text"]
         .as_str()
         .unwrap()
@@ -354,7 +358,7 @@ async fn scripted_lab_records_verdicts_and_request_with_only_attribution_in_the_
     assert_eq!(properties("memory_search"), ["limit", "query"]);
     assert_eq!(
         properties("history_search"),
-        ["from", "include_agent", "limit", "query", "to"]
+        ["from", "include_agent", "limit", "order", "query", "to"]
     );
     assert_eq!(client.selects.lock().unwrap()[0].requirements.eq, Some(29));
     drop(sends);
@@ -882,10 +886,7 @@ async fn incomplete_lab_keeps_accepted_calls_and_lists_missing_ids() {
             spec,
             Ends::LabTools(vec![
                 submit(&[verdict(2, "only accepted answer")]),
-                submit(&[
-                    verdict(7, "would complete the run"),
-                    verdict(100, "invalid id"),
-                ]),
+                submit(&[verdict(100, "invalid id")]),
             ]),
         )
         .await;
@@ -993,6 +994,170 @@ async fn frozen_search_uses_only_project_sessions_and_indexed_messages() {
 }
 
 #[tokio::test]
+async fn frozen_search_history_order_relevance_keeps_fixture_bytes() {
+    let fixture = Fixture::new();
+    let lab = fixture.search_lab(None).await;
+    let expected = concat!(
+        "## Summaries\n",
+        "[1] [message] score=0.80 compartment_id=1 range=1-4 match=lexical title=A frozen summary date=1970-01-01 session=session-p ref=session-p:1-4\n",
+        "Snippet: sharedterm in the summary for session-p.\n\n",
+        "[2] [message] score=0.80 compartment_id=2 range=1-4 match=lexical title=A frozen summary date=1970-01-01 session=session-p2 ref=session-p2:1-4\n",
+        "Snippet: sharedterm in the summary for session-p2.\n\n",
+        "## The person's messages\n",
+        "[1] [message] score=0.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 session=session-p ref=session-p:12\n",
+        "sharedterm in the indexed project message.\n\n",
+        "[2] [message] score=0.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 session=session-p2 ref=session-p2:12\n",
+        "sharedterm in the other project session.\n\n",
+        "## Commits\nnone",
+    );
+    assert_eq!(
+        lab.clone()
+            .tool("history_search", json!({"query":"sharedterm"}))
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        lab.tool(
+            "history_search",
+            json!({"query":"sharedterm", "order":"relevance"}),
+        )
+        .await
+        .unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn frozen_search_history_order_newest_sorts_each_pool_before_paging() {
+    const DAY: i64 = 86_400_000;
+    let fixture = Fixture::new();
+    let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+    for (session, start, start_at, end_at, full_summary, repetitions, padding) in [
+        ("session-p", 20, DAY, DAY, true, 8, 0),
+        ("session-p", 22, 2 * DAY, 2 * DAY, true, 3, 5),
+        ("session-p", 24, 3 * DAY, 3 * DAY, true, 2, 5),
+        ("session-p", 26, 4 * DAY, 4 * DAY, true, 1, 5),
+        ("session-p", 28, 6 * DAY, 6 * DAY, false, 1, 70),
+        ("session-p2", 20, DAY, 5 * DAY + 100, false, 1, 20),
+        ("session-p2", 22, 5 * DAY + 200, 5 * DAY + 200, false, 1, 20),
+        ("session-p2", 24, 8 * DAY, 8 * DAY, true, 1, 0),
+    ] {
+        let end = start + 1;
+        let message = format!(
+            "{}{}",
+            "chronoterm turnterm ".repeat(repetitions),
+            "details ".repeat(padding)
+        );
+        index_message(&db, session, start, "user", "Start of the range.", start_at);
+        index_message(&db, session, end, "user", &message, end_at);
+        let summary = if full_summary {
+            "chronoterm turnterm"
+        } else {
+            "chronoterm"
+        };
+        db.execute("INSERT INTO compartments (session_id, harness, sequence, start_message, end_message, title, content, created_at)
+                    VALUES (?1, 'mock', ?2, ?2, ?3, 'A summary', ?4, 1)", params![session, start, end, summary]).unwrap();
+        db.execute("INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+                    VALUES (?1, 'p', ?1, ?2, 'author', ?3, 1)", params![format!("{session}-{start}"), message, end_at]).unwrap();
+    }
+    drop(db);
+    let lab = fixture.search_lab(None).await;
+    let mut input = json!({"query":"chronoterm turnterm", "from":"1970-01-02", "to":"1970-01-07"});
+    let relevance = lab
+        .clone()
+        .tool("history_search", input.clone())
+        .await
+        .unwrap();
+    input["order"] = json!("newest");
+    let newest = lab.tool("history_search", input).await.unwrap();
+    for (title, oldest, newest_refs) in [
+        (
+            "Summaries",
+            "session-p:20-21",
+            &[
+                "session-p2:20-21",
+                "session-p2:22-23",
+                "session-p:26-27",
+                "session-p:24-25",
+            ][..],
+        ),
+        (
+            "The person's messages",
+            "session-p:21",
+            &[
+                "session-p2:23",
+                "session-p2:21",
+                "session-p:27",
+                "session-p:25",
+            ][..],
+        ),
+        (
+            "Commits",
+            "session-p-20",
+            &["session-p-28", "session-p2-22", "session-p2-20"][..],
+        ),
+    ] {
+        let references = |answer| {
+            group(answer, title)
+                .lines()
+                .filter_map(|line| line.split_once(" ref=").map(|(_, r)| r))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(references(&relevance)[0], oldest, "{relevance}");
+        assert_eq!(references(&newest), newest_refs, "{newest}");
+    }
+    assert!(newest.contains("date=1970-01-02..1970-01-06 session=session-p2 ref=session-p2:20-21"));
+}
+
+#[test]
+fn frozen_search_history_order_newest_excludes_weak_commits_below_rank_bound() {
+    use crate::search::{lab::History, sources::Semantic};
+
+    let conn = ContextDb::fresh_in_memory();
+    let insert = |sha: &str, text: &str, at| {
+        conn.execute("INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+                      VALUES (?1, 'p', ?1, ?2, 'author', ?3, 1)", params![sha, text, at]).unwrap();
+    };
+    for n in 1..=30 {
+        insert(&format!("commit-{n}"), "chronoterm for the parser", n);
+    }
+    for n in 31..=32 {
+        insert(
+            &format!("commit-{n}"),
+            "chronoterm and a much longer discussion about the implementation of the parser",
+            n,
+        );
+    }
+    insert("unrelated", "Repaint the office", 100);
+    conn.execute(
+        "INSERT INTO git_commit_embeddings (project_path, sha, embedding, model_id, created_at)
+         VALUES ('p', 'unrelated', ?1, 'model', 1)",
+        [crate::embedding::encode(&[0.001, 1.0])],
+    )
+    .unwrap();
+    let history = History::load(&conn, "p", None).unwrap();
+    let answer = history
+        .search(
+            &conn,
+            &json!({"query":"chronoterm", "order":"newest"}),
+            Some(Semantic {
+                vector: &[1.0, 0.0],
+                model_id: "model",
+                chunk_model_id: "model",
+            }),
+        )
+        .unwrap();
+    let commits = group(&answer, "Commits");
+    assert!(!commits.contains("unrelated"), "{commits}");
+    let refs: Vec<_> = commits
+        .lines()
+        .filter_map(|line| line.split_once(" ref=").map(|(_, r)| r))
+        .collect();
+    assert_eq!(refs, ["commit-30", "commit-29", "commit-28"], "{commits}");
+}
+
+#[tokio::test]
 async fn memory_search_does_not_use_history_session_selection() {
     let fixture = Fixture::new();
     let mut spec = fixture.spec_value();
@@ -1004,6 +1169,12 @@ async fn memory_search_does_not_use_history_session_selection() {
         .await
         .unwrap();
     assert!(answer.contains("id=7"), "{answer}");
+    let newest = lab
+        .clone()
+        .tool("memory_search", json!({"query":"#7", "order":"newest"}))
+        .await
+        .unwrap_err();
+    assert!(newest.contains("does not accept \"order\""), "{newest}");
     let error = lab
         .tool("memory_search", json!({"query":"#7", "sources":["memory"]}))
         .await
@@ -1086,6 +1257,19 @@ async fn frozen_search_sizes_multiply_independently_per_group() {
         db.execute("INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at)
                     VALUES (?1, 'p', ?1, 'groupterm commit', 'author', ?2, 1000)", params![format!("commit-{n}"), n]).unwrap();
     }
+    use crate::search::sources::{search_commits, CommitHit};
+    assert_eq!(
+        search_commits(&db, "p", "groupterm", 2, None, None, None),
+        [(20, 0.8), (21, 0.4)].map(|(n, score)| CommitHit {
+            sha: format!("commit-{n}"),
+            short_sha: format!("commit-{n}"),
+            content: "groupterm commit".into(),
+            committed_at: n,
+            score,
+            match_type: "fts",
+        }),
+        "ordinary commit search must still return the score-ranked page",
+    );
     drop(db);
     let lab = fixture.search_lab(None).await;
     for (limit, multiplier) in [(Value::Null, 1), (json!(2), 2), (json!(99), 3)] {
@@ -1683,18 +1867,91 @@ async fn lab_review_merge_requires_an_active_project_destination_outside_or_insi
 }
 
 #[tokio::test]
+async fn lab_review_submit_saves_valid_verdicts_and_accepts_only_the_retry() {
+    let fixture = Fixture::new();
+    let clean = Fixture::new();
+    for fixture in [&fixture, &clean] {
+        let conn = rusqlite::Connection::open(&fixture.frozen).unwrap();
+        for id in [3, 4] {
+            conn.execute("INSERT INTO memories (id,level,owner_id,category,origin_category,content,normalized_hash,first_seen_at,created_at,updated_at,last_seen_at)
+                VALUES (?1,'project','p','swe:architecture','ARCHITECTURE',?2,?2,1,1,1,1)", params![id, format!("Extra memory {id}")]).unwrap();
+        }
+    }
+    let entries = [
+        verdict(7, "first"),
+        verdict(2, "second"),
+        verdict(3, "third"),
+        verdict(4, "retry"),
+    ];
+    let mut mixed = entries.clone();
+    mixed[3].as_object_mut().unwrap().remove("note");
+    let mut spec = fixture.spec_value();
+    spec["memory_ids"] = json!([7, 2, 3, 4]);
+    let client = fixture
+        .run(
+            spec.clone(),
+            Ends::LabTools(vec![submit(&mixed), submit(&entries[3..])]),
+        )
+        .await;
+    {
+        let replies = client.lab_tool_results.lock().unwrap();
+        assert_ne!(replies[0]["isError"], true, "{}", replies[0]);
+        let reply = replies[0]["content"][0]["text"].as_str().unwrap();
+        assert!(reply.contains("recorded 3; 1 of 4 still open"), "{reply}");
+        assert!(reply.contains("(id 4): missing field `note`"), "{reply}");
+        assert!(
+            reply.contains("Send only the refused verdicts again"),
+            "{reply}"
+        );
+        assert_ne!(replies[1]["isError"], true, "{}", replies[1]);
+    }
+    assert_eq!(
+        client.lab_verdicts_after.lock().unwrap()[0],
+        json!(entries[..3])
+    );
+    assert_eq!(fixture.output("run.json")["ended"], "complete");
+
+    let mut spec = clean.spec_value();
+    spec["memory_ids"] = json!([7, 2, 3, 4]);
+    clean
+        .run(spec, Ends::LabTools(vec![submit(&entries)]))
+        .await;
+    assert_eq!(
+        fs::read(fixture.out.join("verdicts.json")).unwrap(),
+        fs::read(clean.out.join("verdicts.json")).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn lab_review_invalid_submit_changes_no_entries_on_disk() {
     let fixture = Fixture::new();
+    let mut missing_note = verdict(2, "prior must stay");
+    missing_note.as_object_mut().unwrap().remove("note");
+    let mut blank_text = verdict(7, "blank rewrite");
+    blank_text["verdict"] = json!("rewrite");
+    blank_text["new_text"] = json!(" ");
+    let mut missing_ref = verdict(7, "bad citation");
+    missing_ref["evidence"] = json!([{"kind":"file", "quote":"without reference"}]);
     let client = fixture
         .run(
             fixture.spec_value(),
             Ends::LabTools(vec![
                 submit(&[verdict(2, "prior")]),
-                submit(&[verdict(7, "must not apply"), verdict(777, "unknown")]),
+                submit(&[missing_note, blank_text, missing_ref]),
                 submit(&[verdict(2, "only id touched later")]),
             ]),
         )
         .await;
+    let replies = client.lab_tool_results.lock().unwrap();
+    assert_eq!(replies[1]["isError"], true, "{}", replies[1]);
+    let reply = replies[1]["content"][0]["text"].as_str().unwrap();
+    for reason in [
+        "(id 2): missing field `note`",
+        "(id 7): new_text must not be blank",
+        "(id 7): missing field `ref`",
+    ] {
+        assert!(reply.contains(reason), "{reply}");
+    }
     let observed = client.lab_verdicts_after.lock().unwrap();
     assert_eq!(observed[1], json!([verdict(2, "prior")]));
     assert_eq!(
