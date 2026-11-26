@@ -15,6 +15,7 @@ export async function subagentWriteScenario(f: {
     parent: string;
     turn: (text: string) => Promise<unknown>;
     child: () => string;
+    waitForChild?: () => Promise<unknown>;
 }) {
     const calls = (prefix: string) => [
         {
@@ -118,6 +119,7 @@ export async function subagentWriteScenario(f: {
         return null;
     });
     await f.turn("LAUNCH-WORKER");
+    await f.waitForChild?.();
     expect(launched).toBe(true);
     expect(childRequests.length).toBeGreaterThan(0);
     const child = f.child();

@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
+import { isTitleRequest } from "../src/provider-system-text";
 import {
     createScenarioHarness,
     forEachHost,
@@ -42,35 +43,21 @@ forEachHost(import.meta.url, "opencode e2e smoke", (host) => {
 
         // Internal small-model requests do not carry Magic Context. Select the
         // main request by excluding each host's title/summary/compaction prompts.
-        await h.waitFor(
-            () => {
-                const hits = h.requests().filter((r) => {
-                    const body = JSON.stringify(r.body);
-                    if (!body.includes("hi there")) return false;
-                    if (body.includes("You are a title generator")) return false;
-                    if (body.includes("Generate a title for this conversation:")) return false;
-                    if (body.includes("Generate a summary of the conversation")) return false;
-                    if (body.includes("Compress the conversation history")) return false;
-                    return true;
-                });
-                return hits.length > 0;
-            },
-            { timeoutMs: 10_000, label: "main-agent request captured" },
-        );
+        const mainRequest = () => h.requests().find(({ body }) => {
+            const wire = JSON.stringify(body);
+            return wire.includes("hi there") && !isTitleRequest(body) &&
+                !wire.includes("Generate a title for this conversation:") &&
+                !wire.includes("Generate a summary of the conversation") &&
+                !wire.includes("Compress the conversation history");
+        });
+        await h.waitFor(() => mainRequest() !== undefined, {
+            timeoutMs: 10_000, label: "main-agent request captured",
+        });
 
         const requests = h.requests();
         expect(requests.length).toBeGreaterThanOrEqual(1);
 
-        const mainAgentBody = requests
-            .map((r) => JSON.stringify(r.body))
-            .find(
-                (b) =>
-                    b.includes("hi there") &&
-                    !b.includes("You are a title generator") &&
-                    !b.includes("Generate a title for this conversation:") &&
-                    !b.includes("Generate a summary of the conversation") &&
-                    !b.includes("Compress the conversation history"),
-            );
+        const mainAgentBody = JSON.stringify(mainRequest()?.body);
         expect(mainAgentBody, "main-agent request not captured").toBeDefined();
         expect(mainAgentBody).toMatch(/Magic Context|<session-history>/);
 

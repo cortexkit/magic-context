@@ -15,6 +15,7 @@ import { resolveProjectIdentityForSession } from "../../../plugin/src/features/m
 import { insertPrimerCandidates } from "../../../plugin/src/features/magic-context/storage-primers";
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { CLI, isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { providerSystemText } from "../../src/provider-system-text";
 
 const TASKS = ["retrospective", "curate", "map-memories", "verify", "classify-memories", "promote-primers"];
 
@@ -94,7 +95,7 @@ test("OpenCode 2 shapes all six dream routes and keeps timer work in its owning 
         let searchCalls = 0;
         host.mock.setDefault({ text: "ordinary reply", usage: { input_tokens: 100, output_tokens: 10 } });
         host.mock.addMatcher(body => {
-            const system = String(body.instructions);
+            const system = providerSystemText(body);
             const input = JSON.stringify(body.input) ?? "";
             const hasResult = input.includes("function_call_output");
             let text: string | undefined;

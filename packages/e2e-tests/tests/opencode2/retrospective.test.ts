@@ -11,6 +11,7 @@ import { getDreamTaskBacklog } from "../../../plugin/src/features/magic-context/
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { gaDatabasePath } from "../../../plugin/src/v2/store-reader";
 import { CLI, inspectOpenFiles, isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { providerSystemText } from "../../src/provider-system-text";
 
 for (const mode of ["manual", "scheduled"] as const) {
     test(`OpenCode 2 ${mode} retrospective reads five real user sessions and drains their backlog`, async () => {
@@ -41,7 +42,7 @@ for (const mode of ["manual", "scheduled"] as const) {
             await waitForPluginActive(client, host.cwd);
             host.mock.setDefault({ text: "ordinary reply", usage: { input_tokens: 100, output_tokens: 10 } });
             host.mock.addMatcher(body => {
-                if (String(body.instructions).includes("friction")) return { text: "n", usage: { input_tokens: 120, output_tokens: 5 } };
+                if (providerSystemText(body).includes("friction")) return { text: "n", usage: { input_tokens: 120, output_tokens: 5 } };
                 return null;
             });
             const sessions: string[] = [];
@@ -87,7 +88,7 @@ for (const mode of ["manual", "scheduled"] as const) {
             const run = contextDb.prepare("SELECT * FROM dream_runs WHERE project_path = ? ORDER BY id DESC LIMIT 1").get(project) as { tasks_json: string; tasks_succeeded: number };
             expect(run.tasks_succeeded).toBe(1);
             expect(JSON.parse(run.tasks_json)[0]).toMatchObject({ name: "retrospective", status: "completed", backlog: { pendingAtStart: 5, pendingAtEnd: 0, processed: 5 } });
-            const wire = host.mock.requests().filter(request => String(request.body.instructions).includes("friction"));
+            const wire = host.mock.requests().filter(request => providerSystemText(request.body).includes("friction"));
             expect(wire).toHaveLength(1);
             const input = JSON.stringify(wire[0]!.body.input);
             for (let index = 0; index < 5; index++) expect(input).toContain(`RETROSPECTIVE_REAL_USER_${index}`);
@@ -108,7 +109,7 @@ for (const mode of ["manual", "scheduled"] as const) {
                 await Bun.sleep(50);
             }
             expect(JSON.parse(second.tasks_json)[0]).toMatchObject({ status: "completed", backlog: { pendingAtStart: 1, pendingAtEnd: 0, processed: 1 } });
-            const secondWire = host.mock.requests().filter(request => String(request.body.instructions).includes("friction"));
+            const secondWire = host.mock.requests().filter(request => providerSystemText(request.body).includes("friction"));
             expect(secondWire).toHaveLength(2);
             expect(JSON.stringify(secondWire[1]!.body.input)).toContain("RETROSPECTIVE_REAL_USER_NEXT");
             expect(getDreamTaskBacklog(contextDb, project, "retrospective").pending).toBe(0);

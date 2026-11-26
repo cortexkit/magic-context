@@ -75,7 +75,11 @@ test("a hidden row edited in place expires cold fold provenance and rebuilds onc
     } finally { await host.stop(); }
 }, 180000);
 
-test("real instruction catalogs without wire ids retire only on a rebuilding pass", async () => {
+const changedCatalog = "The Code Mode tool catalog has changed.";
+const replacementCatalog = `${changedCatalog} This catalog supersedes the previous Code Mode tool catalog.`;
+const hostUsesCatalogDeltas = (version: string) => Number(/^opencode v2\.(\d+)\./.exec(version)?.[1]) >= 3;
+
+test("a rebuild retires superseding instruction catalogs without dropping deltas or changing defer replay", async () => {
     const fixture = isolation();
     fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
     const control = join(fixture.root, "catalog-description.txt");
@@ -133,7 +137,12 @@ test("real instruction catalogs without wire ids retire only on a rebuilding pas
         const rows = source.prepare("SELECT id, data FROM session_message WHERE session_id=? AND type='system' ORDER BY seq").all(session.id) as Array<{ id: string; data: string }>;
         const catalogs = rows.filter(row => JSON.parse(row.data).metadata?.instructionSources?.includes("core/codemode"));
         expect(catalogs).toHaveLength(2);
-        for (const row of catalogs) expect(JSON.parse(row.data).text).toStartWith("The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.");
+        // OpenCode 2.3+ sends a shorter catalog delta when it can, even if the
+        // catalog is partial. A delta does not supersede the full earlier catalog.
+        const deltas = hostUsesCatalogDeltas(spawnSync(CLI, ["--version"], { encoding: "utf8", env: fixture.env }).stdout);
+        for (const row of catalogs) {
+            expect(JSON.parse(row.data).text).toStartWith(deltas ? `${changedCatalog}\n\nNew tools are available:` : replacementCatalog);
+        }
         const incoming = JSON.parse(readFileSync(observed, "utf8")) as Array<{ id?: string; content: unknown }>;
         const incomingCatalogs = incoming.filter(message => wire(message.content).includes("CATALOG_"));
         expect(incomingCatalogs).toHaveLength(2);
@@ -142,11 +151,13 @@ test("real instruction catalogs without wire ids retire only on a rebuilding pas
         expect(wire((unchanged.body.input as unknown[]).slice(0, (held.body.input as unknown[]).length))).toBe(wire(held.body.input));
         await client.session.switchModel({ sessionID: session.id, model: { providerID: "openai", id: "catalog-rebuild" } });
         const rebuilt = await turn("A model switch already rebuilds the prefix.");
-        expect(wire(rebuilt.body.input)).not.toContain("CATALOG_FIRST_REPLACEMENT");
+        if (deltas) expect(wire(rebuilt.body.input)).toContain("CATALOG_FIRST_REPLACEMENT");
+        else expect(wire(rebuilt.body.input)).not.toContain("CATALOG_FIRST_REPLACEMENT");
         expect(wire(rebuilt.body.input)).toContain("CATALOG_SECOND_REPLACEMENT");
-        const lane = db.prepare("SELECT json_extract(trailing_blank_decisions, '$.instructionSupersession') AS ids FROM session_meta WHERE session_id=?").get(session.id) as { ids: string };
-        expect(JSON.parse(lane.ids)).toEqual([catalogs[0]!.id]);
-        const replay = await turn("Replay the retired catalog choice.");
+        const lane = db.prepare("SELECT json_extract(trailing_blank_decisions, '$.instructionSupersession') AS ids FROM session_meta WHERE session_id=?").get(session.id) as { ids: string | null };
+        const retired = JSON.parse(lane.ids ?? "[]");
+        expect(retired).toEqual(deltas ? [] : [catalogs[0]!.id]);
+        const replay = await turn("Replay the catalog choice.");
         expect(wire((replay.body.input as unknown[]).slice(0, (rebuilt.body.input as unknown[]).length))).toBe(wire(rebuilt.body.input));
         const paths = inspectOpenFiles(host.pid!, fixture.root, host.env).filter(path => /\.db(?:-wal|-shm)?$/.test(path));
         expect(paths.length).toBeGreaterThan(0);
@@ -154,8 +165,8 @@ test("real instruction catalogs without wire ids retire only on a rebuilding pas
         console.log("INSTRUCTION_SUPERSESSION_HOST_EVIDENCE", JSON.stringify({
             version: process.env.MC_E2E_OPENCODE2_VERSION, root: fixture.root,
             storedIDs: catalogs.map(row => row.id), incomingIDsAbsent: incomingCatalogs.every(message => message.id === undefined),
-            retiredIDs: JSON.parse(lane.ids), heldBoth: true, deferredPrefixIdentical: true,
-            rebuildingKeptNewestOnly: true, replayPrefixIdentical: true, paths,
+            retiredIDs: retired, heldBoth: true, deferredPrefixIdentical: true,
+            rebuildingKeptNewestOnly: !deltas, replayPrefixIdentical: true, paths,
         }));
     } finally { source.close(); db.close(); await host.stop(); }
 }, 180000);
@@ -163,8 +174,8 @@ test("real instruction catalogs without wire ids retire only on a rebuilding pas
 // A minimal MCP server over stdio (newline-delimited JSON-RPC): it answers the
 // initialize handshake with server instructions and lists fixed tools. The
 // "stable" server lists enough tools with long descriptions to make OpenCode's
-// Code Mode catalog partial, so every change to the connected servers restates
-// the whole catalog, as it does for users with large MCP tool sets.
+// Code Mode catalog partial. Older hosts restate the full partial catalog on
+// every change; 2.3+ prefer a shorter delta if one is available.
 const TOY_MCP_SERVER = `
 const name = process.argv[2];
 const tools = name === "stable"
@@ -208,7 +219,7 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
-test("MCP servers that connect and disconnect leave only the newest catalog row on every rebuild, including a post-compaction pass that rebuilds", async () => {
+test("MCP catalog replay keeps the newest restatement or the ordered deltas across rebuilds and compaction", async () => {
     const fixture = isolation();
     fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
     const script = join(fixture.root, "toy-mcp.mjs");
@@ -264,24 +275,34 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
             await Bun.sleep(1000);
         };
         const wire = (value: unknown) => JSON.stringify(value, (key, item) => key === "cache_control" ? undefined : item);
-        const replacement = "The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.";
-        const copies = (request: { body: { input?: unknown } }) => wire(request.body.input).split(replacement).length - 1;
+        const hostVersion = spawnSync(CLI, ["--version"], { encoding: "utf8", env: fixture.env }).stdout.trim();
+        const deltas = hostUsesCatalogDeltas(hostVersion);
         const served: Record<string, number> = {};
+        const updates: Record<string, string[]> = {};
+        const record = (key: string, request: { body: { input?: unknown } }) => {
+            const input = request.body.input as Array<{ role?: string; content?: string }>;
+            if (deltas) updates[key] = input
+                .filter(({ role, content }) => role === "developer" && typeof content === "string" && content.startsWith(changedCatalog))
+                .map(({ content }) => content!);
+            served[key] = deltas ? updates[key]!.length : wire(input).split(replacementCatalog).length - 1;
+        };
+        const catalogRows = () => (source.prepare("SELECT id, data FROM session_message WHERE session_id=? AND type='system' ORDER BY seq").all(session.id) as Array<{ id: string; data: string }>)
+            .map(row => ({ id: row.id, ...(JSON.parse(row.data) as { text: string; metadata?: { instructionSources?: string[] } }) }))
+            .filter(row => row.metadata?.instructionSources?.includes("core/codemode"));
         await turn("Establish the cache.");
         let connected = true;
         for (let i = 0; i < 6; i++) {
             connected = !connected;
             await toggle(connected);
-            served[`toggle ${i}`] = copies(await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
+            record(`toggle ${i}`, await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
         }
-        const rows = (source.prepare("SELECT id, data FROM session_message WHERE session_id=? AND type='system' ORDER BY seq").all(session.id) as Array<{ id: string; data: string }>)
-            .map(row => ({ id: row.id, ...(JSON.parse(row.data) as { text: string; metadata?: { instructionSources?: string[] } }) }));
+        const rows = catalogRows();
         await client.session.switchModel({ sessionID: session.id, model: { providerID: "openai", id: "catalog-rebuild" } });
-        served["model switch rebuild"] = copies(await turn("A model switch already rebuilds the prefix."));
+        record("model switch rebuild", await turn("A model switch already rebuilds the prefix."));
         for (let i = 6; i < 8; i++) {
             connected = !connected;
             await toggle(connected);
-            served[`toggle ${i}`] = copies(await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
+            record(`toggle ${i}`, await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
         }
         // Publish history before compacting. With history to move into the
         // frozen head, a manual /compact rebuilds that head on every version, so
@@ -300,17 +321,18 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
             await Bun.sleep(100);
         }
         await client.session.command({ sessionID: session.id, name: "ctx-flush", text: "" });
-        served["after flush"] = copies(await turn("Continue after publishing history."));
+        record("after flush", await turn("Continue after publishing history."));
         for (let i = 8; i < 10; i++) {
             connected = !connected;
             await toggle(connected);
-            served[`toggle ${i}`] = copies(await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
+            record(`toggle ${i}`, await turn(`Toggle ${i}: toggle server ${connected ? "connected" : "disconnected"}.`));
         }
+        const allDeltas = deltas ? catalogRows().map(row => row.text) : [];
         await client.session.compact({ sessionID: session.id });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60000) });
         const compactLogStart = host.pluginLog().length;
         const afterFold = await turn("Continue after the host fold.");
-        served["after host fold"] = copies(afterFold);
+        record("after host fold", afterFold);
         // The plugin buffers its log for up to half a second.
         const permissionLine = /rewrite permission: allowed=(\w+) ride=(\S+)/;
         const logDeadline = Date.now() + 5_000;
@@ -323,8 +345,7 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
         const compaction = source.prepare("SELECT data FROM session_message WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1").get(session.id) as { data: string };
         const storedSummary = (JSON.parse(compaction.data) as { summary?: string }).summary;
         await client.session.switchModel({ sessionID: session.id, model: { providerID: "openai", id: "mock-model" } });
-        served["rebuild after fold"] = copies(await turn("Switching back rebuilds the prefix again."));
-        const hostVersion = spawnSync(CLI, ["--version"], { encoding: "utf8", env: fixture.env }).stdout.trim();
+        record("rebuild after fold", await turn("Switching back rebuilds the prefix again."));
         console.log("ISSUE886_MCP_TOGGLE_EVIDENCE", JSON.stringify({
             version: hostVersion, root: fixture.root,
             rows: rows.map(row => ({ id: row.id, sources: row.metadata?.instructionSources,
@@ -334,32 +355,46 @@ test("MCP servers that connect and disconnect leave only the newest catalog row 
         expect(rows).toHaveLength(6);
         for (const [index, row] of rows.entries()) {
             expect(row.metadata?.instructionSources).toEqual(["core/codemode", "core/mcp-guidance"]);
-            expect(row.text).toStartWith(`${replacement}\n\n# Code Mode\n`);
+            expect(row.text).toStartWith(deltas
+                ? `${changedCatalog}\n\n${index % 2 === 0 ? "The following tool namespaces are no longer available" : "New tools are available:"}`
+                : `${replacementCatalog}\n\n# Code Mode\n`);
             expect(row.text.slice(row.text.lastIndexOf("\n\n") + 2)).toStartWith(index % 2 === 0
                 ? "Instructions for the following MCP servers are no longer available: toggle."
                 : "New MCP server instructions are available in addition to those previously listed:\n  <server name=\"toggle\">");
         }
         // Before the rebuild every row is served, so each change adds a copy.
         expect([0, 1, 2, 3, 4, 5].map(i => served[`toggle ${i}`])).toEqual([1, 2, 3, 4, 5, 6]);
-        // A rebuild keeps only the newest restatement; later changes append until the next one.
-        expect(served["model switch rebuild"]).toBe(1);
-        expect([served["toggle 6"], served["toggle 7"]]).toEqual([2, 3]);
-        // Publishing history is a flush, which rebuilds; later changes append again.
-        expect(served["after flush"]).toBe(1);
-        expect([served["toggle 8"], served["toggle 9"]]).toEqual([2, 3]);
+        if (deltas) {
+            // OpenCode 2.3+ supplies an initial catalog and then ordered deltas.
+            // A rebuild cannot safely retire the prior deltas like complete catalogs.
+            expect(allDeltas).toHaveLength(10);
+            for (let i = 0; i < 10; i++) expect(updates[`toggle ${i}`]).toEqual(allDeltas.slice(0, i + 1));
+            expect(updates["model switch rebuild"]).toEqual(allDeltas.slice(0, 6));
+            expect(updates["after flush"]).toEqual(allDeltas.slice(0, 8));
+            // The checkpoint covers the older updates. The stable catalog and
+            // the two post-coverage toggles still reach the provider in order.
+            expect(wire(afterFold.body.input)).toContain("STABLE_SERVER_GUIDANCE");
+            expect(updates["after host fold"]).toEqual(allDeltas.slice(-2));
+            expect(updates["rebuild after fold"]).toEqual(allDeltas.slice(-2));
+        } else {
+            // Rebuilds keep only the latest full restatement; later changes append.
+            expect(served["model switch rebuild"]).toBe(1);
+            expect([served["toggle 6"], served["toggle 7"]]).toEqual([2, 3]);
+            expect(served["after flush"]).toBe(1);
+            expect([served["toggle 8"], served["toggle 9"]]).toEqual([2, 3]);
+            expect(served["after host fold"]).toBe(1);
+            expect(served["rebuild after fold"]).toBe(1);
+        }
         // The manual /compact moved the published history into the frozen head,
         // so the pass after it serves a new head on every version. That rebuild
         // is the ride the catalog retirement lands on. It does not depend on
         // whether OpenCode also changed its system prompt after compacting
         // (fold reason system_hash on some 2.0.22 and 2.1.0 runs).
         expect(postCompact).toMatchObject({ rebuilt: true, ride: "hardFold", headChanged: "true" });
-        expect(served["after host fold"]).toBe(1);
         // The host stores Magic Context's fixed note as the checkpoint summary; the
         // request serves Magic Context's own history instead of that note.
         expect(storedSummary).toBe(CHECKPOINT_NOTE);
         expect(wire(afterFold.body.input)).not.toContain(CHECKPOINT_NOTE);
         expect(wire(afterFold.body.input)).toContain("HIST_SUMMARY");
-        // On every version the next rebuild keeps only the newest catalog row.
-        expect(served["rebuild after fold"]).toBe(1);
     } finally { source.close(); await host.stop(); }
 }, 240000);

@@ -89,8 +89,14 @@ for (const operation of ["session_move", "offline row deletion"] as const) {
             await turn("materialize the in-order baseline");
             if (operation === "session_move") {
                 copyFileSync(join(fixture.cwd, "opencode.json"), join(destination, "opencode.json"));
+                // OpenCode 2.4 nests the Code Mode operation under session.move.
+                // Use the name advertised by the host rather than hard-coding its version.
+                const catalog = JSON.stringify(mock.lastRequest()?.body);
+                const move = ["tools.opencode.session.move", "tools.opencode.session_move"]
+                    .find((name) => catalog.includes(name));
+                expect(move, "session move in the host catalog").toBeDefined();
                 mock.enqueue({ openaiOutput: [{ type: "function_call", call_id: "move-session", name: "execute", arguments: JSON.stringify({
-                    code: `await tools.opencode.session_move({ directory: ${JSON.stringify(destination)} });`,
+                    code: `await ${move}({ directory: ${JSON.stringify(destination)} });`,
                 }) }], usage: { input_tokens: 100, output_tokens: 10 } });
                 await turn("move the session to the destination directory");
                 expect((await client.session.get({ sessionID: session.id })).location.directory).toBe(destination);
