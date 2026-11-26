@@ -1,6 +1,8 @@
 // Structural host boundary: importing the GA context types also augments global
 // Error with Effect's readonly ignore flag, breaking the co-published v1 types.
 // These are only the mutable request and promise-domain fields this adapter uses.
+import type { HiddenChildHost } from "../hidden-child-record";
+
 export interface V2Message {
     id?: string;
     role: string;
@@ -78,6 +80,7 @@ export interface V2CommandDomain {
 }
 
 export interface V2Context {
+    app?: { version?: string };
     /** OpenCode 2 keys a location by directory and, when one is set, workspace. */
     location: { directory: string; workspaceID?: string };
     agent: V2AgentDomain;
@@ -157,17 +160,11 @@ export interface V2Context {
         ): Promise<unknown>;
     };
     session: {
-        create(input: {
-            title: string;
-            agent: string;
-            model: { providerID: string; id: string; variant?: string };
-            location: { directory: string };
-            metadata: { magic_context: "hidden-run"; role: "historian" | "dreamer" };
-            /** Kept only by hosts that also have the optional `session.remove` declared below. */
-            parentID?: string;
-            /** Session rules, evaluated after every rule of the session's agent. */
-            permissions?: Array<{ action: string; resource: string; effect: "allow" | "deny" }>;
-        }): Promise<{ id: string }>;
+        create(
+            input:
+                | Parameters<HiddenChildHost["create"]>[0]
+                | Parameters<NonNullable<HiddenChildHost["createHolder"]>>[0],
+        ): ReturnType<HiddenChildHost["create"]>;
         get(input: { sessionID: string }): Promise<{
             model?: { providerID: string; id: string; variant?: string };
             parentID?: string;

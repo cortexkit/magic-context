@@ -1486,7 +1486,7 @@
                 "ts": false,
                 "rust": false
             },
-            "rationale": "OpenCode 2.0.22 native hidden children are parented, removed at completion, and leave no root sessions; dedicated v2 lane",
+            "rationale": "Native hidden runs are removed at completion without touching the user's session or the permanent background holder; dedicated v2 lane",
             "contract_refs": [
                 "R44",
                 "OC2-S1"
@@ -1494,6 +1494,14 @@
             "hosts": [
                 "opencode2"
             ]
+        },
+        {
+            "path": "tests/opencode2/hidden-run-notifications.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Real OpenCode 2 host: historian and maintenance runs do not wake their holder or the user; the user's own completion remains notifiable; dedicated v2 lane",
+            "contract_refs": ["R44", "OC2-S1"],
+            "hosts": ["opencode2"]
         },
         {
             "path": "tests/opencode2/hidden-child-terminal-failure.test.ts",

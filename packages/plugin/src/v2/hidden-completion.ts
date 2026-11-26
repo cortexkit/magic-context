@@ -62,6 +62,7 @@ export interface V2HiddenCompletionOptions {
     openReader: () => HiddenChildRows & { close?: () => void };
     ensureAgent?(): Promise<void>;
     generation?: string;
+    hostVersion?: string;
     /** Maximum time shutdown waits for the host to remove a child. */
     removalTimeoutMs?: number;
     /**
@@ -533,6 +534,7 @@ export async function createV2HiddenCompletionExecutor(
             db: options.db,
             hook: options.hook,
             generation,
+            hostVersion: options.hostVersion,
             keepSubagents: options.keepSubagents === true,
             log: note,
             removalTimeoutMs: options.removalTimeoutMs,

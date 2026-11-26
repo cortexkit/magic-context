@@ -1274,6 +1274,7 @@ export async function registerContext(context: V2Context) {
         return createV2HiddenCompletionExecutor(
             {
                 ...context.session,
+                createHolder: (input) => context.session.create(input),
                 watchModelActivity: (sessionID, onOutput) =>
                     hiddenModelActivity.watch(sessionID, onOutput),
                 get: async (input) => {
@@ -1302,6 +1303,7 @@ export async function registerContext(context: V2Context) {
                     resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
                 directory,
                 hook: hiddenChildHook,
+                hostVersion: context.app?.version,
                 keepSubagents: config.keep_subagents === true,
                 ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
                 modelCatalog: () => Promise.resolve(context.model.list()),

@@ -16,17 +16,17 @@ import {
     forgetHiddenChild,
     recordHiddenChild,
 } from "./hidden-child-sweep";
+import { hiddenRunPlacement, supportsQuietHiddenChildren } from "./hidden-run-holder";
 import type { HiddenChildHook } from "./hooks/hidden-child";
 
 /**
  * The hidden-child lifecycle for OpenCode 2 hosts whose plugin session API has `session.remove`.
- * Every run gets a fresh root child in the run's directory, and the child is removed when the run
+ * Every run gets a fresh session in its directory, and the session is removed when the run
  * ends, whether it succeeded or failed. A context.db record survives failed removal or a crash
  * so an age-gated sweep can retry without touching another instance's live run.
  *
- * The child is never given the user's session as its parent: OpenCode 2.3 reports every idle of a
- * parented session to its parent and wakes the parent, so each historian or dreamer run would
- * start a turn in the user's session.
+ * A hidden run is never parented to the user's session: some hosts wake the parent, and
+ * a running child could otherwise suppress the user's own completion notification.
  */
 
 type RemoveSession = NonNullable<HiddenChildHost["removeSession"]>;
@@ -39,8 +39,8 @@ export function isLiveHiddenChild(id: string): boolean {
 
 /**
  * The feature gate for this lifecycle: the host's own `session.remove`, bound to its session API,
- * or undefined on hosts that do not expose one to plugins. Hosts are told apart by what they
- * offer, never by version: development builds report versions such as `0.0.0-dev-20358`.
+ * or undefined on hosts that do not expose one to plugins. Detect the API by capability;
+ * even development builds can have it, despite reporting versions like `0.0.0-dev-20358`.
  */
 export function nativeSessionRemove(session: object): RemoveSession | undefined {
     const remove = (session as { remove?: unknown }).remove;
@@ -66,11 +66,13 @@ export function createNativeHiddenChildren(
         db: Database;
         hook: HiddenChildHook;
         generation: string;
+        hostVersion?: string;
         keepSubagents: boolean;
         log: (message: string) => void;
         removalTimeoutMs?: number;
     },
 ): HiddenChildLifecycle {
+    const quiet = supportsQuietHiddenChildren(options.hostVersion);
     // Removals in flight, so a finished run can wait for the removal its own failure started.
     const removing = new Map<string, Promise<void>>();
 
@@ -126,6 +128,16 @@ export function createNativeHiddenChildren(
         model: HiddenChildModel,
     ): Promise<PersistedHiddenChild> => {
         const input = childCreateInput(identity, role, model);
+        let directory = identity.directory;
+        if (quiet) {
+            if (!host.createHolder)
+                throw new Error("OpenCode 2 background holder API is not wired");
+            const placement = await hiddenRunPlacement(host.createHolder, directory);
+            directory = placement.directory;
+            input.id = placement.id;
+            input.parentID = placement.parentID;
+            delete input.location;
+        }
         const created = await host.create(input);
         if (!created.id) throw new Error("OpenCode 2 did not return a child session id");
         const createdAt = Date.now();
@@ -134,7 +146,7 @@ export function createNativeHiddenChildren(
             try {
                 recordHiddenChild(options.db, {
                     id: created.id,
-                    directory: identity.directory,
+                    directory,
                     created_at: createdAt,
                     deadline_at: createdAt + identity.timeoutMs,
                 });
@@ -164,22 +176,33 @@ export function createNativeHiddenChildren(
                 throw storeError;
             }
         }
-        options.hook.registerChild(created.id, input.agent);
-        options.log(
-            `[magic-context] hidden child ${created.id} created role=${role} keep_subagents=${options.keepSubagents}`,
-        );
-        return {
+        const child: PersistedHiddenChild = {
             id: created.id,
             role,
             generation: options.generation,
             title: roleTitle(role),
             model,
             created_at: createdAt,
-            directory: identity.directory,
+            directory,
         };
+        // Refuse to prompt if the host lost the automation ID or the holder moved during creation.
+        if (
+            input.parentID &&
+            (created.id !== input.id ||
+                created.parentID !== input.parentID ||
+                created.location?.directory !== directory)
+        ) {
+            await remove(child);
+            throw new Error(`OpenCode created a background run outside its holder at ${directory}`);
+        }
+        options.hook.registerChild(created.id, input.agent);
+        options.log(
+            `[magic-context] hidden child ${created.id} created role=${role} keep_subagents=${options.keepSubagents}`,
+        );
+        return child;
     };
 
-    // keep_subagents retains inspectable runs as root sessions of the run's directory.
+    // keep_subagents retains inspectable runs, including children under a permanent holder.
     const kept = (child: PersistedHiddenChild) => keptUnderRetention(options.keepSubagents, child);
 
     return {

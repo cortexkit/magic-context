@@ -25,6 +25,7 @@ import {
 import { withoutHistorianTailCache } from "../../shared/historian-cache";
 import { log } from "../../shared/logger";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
+import { isHiddenRunHolder } from "../hidden-run-holder";
 import {
     claudeAgentInstructionsText,
     deliversInstructionsInUserMessage,
@@ -502,7 +503,9 @@ export class HiddenChildHook {
     }
 
     owns(sessionID: string): boolean {
-        return this.childIDs.has(sessionID);
+        // A holder has no registered attempt, even after a restart, so the existing
+        // hidden-run guard refuses a prompt on it rather than handing it to the transform.
+        return this.childIDs.has(sessionID) || isHiddenRunHolder(sessionID);
     }
 
     /** Runs on the final outbound HTTP request, after the SDK inserts automatic cache markers. */

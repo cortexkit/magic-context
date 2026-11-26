@@ -38,8 +38,22 @@ export interface PersistedHiddenChild {
 /** The parts of a retired child that the `keep_subagents` retention rule looks at. */
 export type RetentionFacts = Pick<PersistedHiddenChild, "role" | "ever_settled">;
 
+interface CreatedHiddenSession {
+    id: string;
+    parentID?: string;
+    location?: { directory: string };
+    metadata?: Record<string, unknown>;
+}
+
 export interface HiddenChildHost {
+    createHolder?(input: {
+        id: string;
+        title: string;
+        location: { directory: string };
+        metadata: { magic_context: "background-holder" };
+    }): Promise<CreatedHiddenSession>;
     create(input: {
+        id?: string;
         title: string;
         agent: string;
         model: { providerID: string; id: string; variant?: string };
@@ -49,7 +63,7 @@ export interface HiddenChildHost {
         parentID?: string;
         /** Session rules; the host evaluates them after every rule of the agent. */
         permissions?: HiddenPermissionRule[];
-    }): Promise<{ id: string }>;
+    }): Promise<CreatedHiddenSession>;
     get(input: { sessionID: string }): Promise<{
         model?: { providerID: string; id: string; variant?: string };
         /** Returned only when the host exposes an error for the terminal session. */

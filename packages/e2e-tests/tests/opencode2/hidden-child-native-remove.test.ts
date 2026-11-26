@@ -24,10 +24,8 @@ import {
 /**
  * Hidden runs (historian, dreamer) on a real OpenCode 2 host, through the shipped plugin.
  *
- * Each hidden child is a root session of the run's directory, never a child of the user's session:
- * OpenCode 2.3 reports every idle of a parented session to its parent and wakes it (issue 913).
- * The child is removed when the run ends, leaving no root session behind. The probe reports the
- * native capability and the parent and metadata observed while each child is running.
+ * The run sessions are removed individually, leaving only the permanent holder where supported.
+ * The probe reads the parent and metadata while each run session still exists.
  */
 
 const REVIEW_PROMPT_MARKER = "Review User Memory Candidates";
@@ -65,7 +63,7 @@ function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T, writ
     }
 }
 
-test("hidden runs on OpenCode 2 are unparented and removed with no leftover root sessions", async () => {
+test("hidden runs on OpenCode 2 are removed without touching the user or their holder", async () => {
     const fixture = isolation(createTestTempDir("hidden-child-native-remove-").dir);
     const bundleDir = join(fixture.root, "native-probe");
     const build = await Bun.build({
@@ -284,7 +282,15 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
             }
             const rootsAfter = await roots();
             console.log(JSON.stringify({ rootsAfter, childrenOfUser: await childrenOfUser() }));
-            expect(rootsAfter).toEqual(rootsBefore);
+            const newRoots = rootsAfter.filter((session) => !rootsBefore.some((root) => root.id === session.id));
+            expect(newRoots).toHaveLength(cliVersion === "2.3.0" ? 0 : 1);
+            const holderID = newRoots[0]?.id;
+            if (holderID) {
+                expect(await client.session.get({ sessionID: holderID })).toMatchObject({
+                    title: "Magic Context background runs",
+                    metadata: { magic_context: "background-holder" },
+                });
+            }
             expect(await childrenOfUser()).toEqual([]);
             const userMessagesAfter = (await client.message.list({ sessionID: user.id })).data;
             console.log(JSON.stringify({ cliVersion, userMessagesBefore: userMessagesBefore.length, userMessagesAfter: userMessagesAfter.length, historianChildren: historianChildren.length, dreamerChildren: dreamerChildren.length }));
@@ -293,7 +299,7 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
                 userMessagesBefore.map((row) => row.id),
             );
             // ...because it was never created under that session.
-            for (const child of hiddenChildren) expect(child.parentID ?? null).toBeNull();
+            for (const child of hiddenChildren) expect(child.parentID ?? null).toBe(holderID ?? null);
             // Successful removal drains the durable cleanup records.
             expect(
                 withContextDb(host.env, (db) =>
@@ -309,7 +315,7 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
         expect(pluginLog()).not.toContain("could not be removed");
         expect(pluginLog()).not.toContain("could not read back hidden child");
 
-        if (cliVersion === "2.3.0") {
+        if (cliVersion === "2.3.0" || cliVersion === "2.4.2") {
             // Kill an in-flight historian, preserving isolated context.db, opencode2.db and the mock.
             host.mock.reset();
             host.mock.setDefault({ text: "interrupted historian", delayMs: 60_000, usage: { input_tokens: 100, output_tokens: 10 } });
@@ -354,6 +360,16 @@ test("hidden runs on OpenCode 2 are unparented and removed with no leftover root
                 }
             }, "the startup sweep to remove the interrupted child");
             await eventually(() => withContextDb(host.env, (db) => db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(`hidden_child:${interrupted.sessionID}`)) ? undefined : true, "the startup sweep to drop the interrupted child's record");
+            if (interrupted.parentID) {
+                const holder = await sweptClient.session.get({ sessionID: interrupted.parentID });
+                expect(holder.title).toBe("Magic Context background runs");
+                host.mock.setDefault({ text: "ordinary reply after restart", usage: { input_tokens: 100, output_tokens: 10 } });
+                const next = new Set(probed("historian").map((row) => row.sessionID));
+                await sweptClient.session.command({ sessionID: user.id, name: "ctx-recomp", text: "" });
+                const child = await eventually(() => probed("historian").find((row) => !next.has(row.sessionID)), "the next historian after restart");
+                expect(child.parentID).toBe(holder.id);
+                console.log(JSON.stringify({ holderReusedAfterRestart: holder.id, sweptChildID: interrupted.sessionID, nextChildID: child.sessionID }));
+            }
             console.log(JSON.stringify({ cliVersion, interruptedChild: interrupted.sessionID, resumedTurnRefused: true, startupSweepRemoved: true, openDatabases: inspectOpenFiles(activeHost.pid!, activeHost.root, activeHost.env).filter((path) => /\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path)) }));
         }
     } catch (error) {
