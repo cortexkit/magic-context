@@ -128,7 +128,15 @@ fn emergency_credit_review_an_over_limit_request_with_a_new_cut_still_drops_outp
     with_summary(&mut session, dir.path(), "large");
     let logs = crate::test_log::capture();
     let view = session
-        .build(&settings, Some(144_000), false, None)
+        .build(
+            &settings,
+            Some(lanes::OverLimit {
+                count: lanes::RideCount::Stated(144_000),
+                newest_view: true,
+            }),
+            false,
+            None,
+        )
         .0
         .unwrap_or_else(|| panic!("built no view: {}", logs.text()));
     assert!(cuts_through(&view, "large"));

@@ -7,6 +7,18 @@ enum Sealed {
     RetryWithoutCut,
 }
 
+/// What [`Session::emergency_served`] finds the request costs.
+pub(super) struct EmergencyServed {
+    /// Each part as the new view would serve it.
+    pub(super) parts: std::collections::BTreeMap<lanes::PartKey, u64>,
+    /// The history head of the new view.
+    pub(super) head: u64,
+    /// Every part and the head, under the new view.
+    pub(super) total: i64,
+    /// The same under ck-mc's newest view.
+    pub(super) previous_total: i64,
+}
+
 impl Session {
     /// A ride: the runner is about to send a request whose bytes before the
     /// conversation change anyway, or that would not fit, or whose cache the
@@ -30,6 +42,12 @@ impl Session {
         let previous = reading_of(&self.conditions);
         let was_stale = self.reading_stale;
         self.take_conditions("ride", standing, &ride.conditions);
+        // Rides carry no surface counts (compaction contract W4.11), so the
+        // held ones describe the surfaces before this change until a notice
+        // brings fresh ones.
+        if standing == Standing::Current && ride.has(RideCause::SurfaceChange) {
+            self.surface_counts_stale = true;
+        }
         let stated = StatedView::of(standing, ride.applied_view.as_ref());
         self.take_signed_floor();
         // A late ride's own reading was not taken, so it is not named as
@@ -55,18 +73,28 @@ impl Session {
             Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
         }
         let over_limit = ride.has(RideCause::OverLimit).then(|| {
-            ride.request_tokens.unwrap_or_else(|| {
-                // The provider refused the request, so it exceeded the usable
-                // window even without a stated count. Keep any larger reading.
-                let floor = pass::usable_window(&self.conditions)
-                    .max(self.conditions.last_prompt_tokens.unwrap_or(0));
-                tracing::info!(
-                    session = %self.key.session,
-                    floor_tokens = %floor,
-                    "ck-mc: session: over_limit without request_tokens; using a request floor"
-                );
-                floor
-            })
+            let count = match ride.request_tokens {
+                Some(count) => lanes::RideCount::Stated(count),
+                None => {
+                    // The provider refused the request, so it exceeded the
+                    // usable window even without a stated count. Where the
+                    // fixed part is inferred from the reading, keep any
+                    // larger reading.
+                    let floor = pass::usable_window(&self.conditions)
+                        .max(self.conditions.last_prompt_tokens.unwrap_or(0));
+                    tracing::info!(
+                        session = %self.key.session,
+                        floor_tokens = %floor,
+                        "ck-mc: session: over_limit without request_tokens; using a request floor"
+                    );
+                    lanes::RideCount::Unstated { floor }
+                }
+            };
+            lanes::OverLimit {
+                count,
+                newest_view: ride.applied_view.as_ref().map(|view| view.version)
+                    == self.latest.as_ref().map(|view| view.version),
+            }
         });
         // Only a cause that changes the request's bytes before the
         // conversation folds the head for free. A forgotten cache (expiry, a
@@ -234,6 +262,92 @@ impl Session {
             .saturating_sub(after.values().sum::<u64>() + new_head)
     }
 
+    /// What ck-mc measures about the request this pass will serve, for the
+    /// emergency lane. `ops` are the edits of every lane planned before the
+    /// emergency lane on this pass, and `covered` the parts they change.
+    /// `None` when the fixed part can't be measured: a surface count is
+    /// absent or not exact, or a ride has reported a surface change since the
+    /// counts were taken. The lane then infers the fixed part from the
+    /// reading.
+    pub(super) fn emergency_measured(
+        &self,
+        history: &[EditOp],
+        ops: &[EditOp],
+        covered: &[lanes::PartKey],
+        over_limit: Option<lanes::OverLimit>,
+    ) -> Option<lanes::Measured> {
+        if self.surface_counts_stale {
+            return None;
+        }
+        let (Some(system), Some(tools)) = self.surface_tokens else {
+            return None;
+        };
+        if !system.exact || !tools.exact {
+            return None;
+        }
+        let served = self.emergency_served(history, ops);
+        let change = served.total - served.previous_total;
+        let request = match over_limit {
+            None => lanes::MeasuredRequest::Served,
+            Some(over) if !over.newest_view => lanes::MeasuredRequest::OlderView,
+            Some(lanes::OverLimit {
+                count: lanes::RideCount::Stated(count),
+                ..
+            }) => lanes::MeasuredRequest::Counted { count, change },
+            Some(_) => lanes::MeasuredRequest::Refused { change },
+        };
+        Some(lanes::Measured {
+            system_tokens: system.count,
+            tools_tokens: tools.count,
+            head_tokens: served.head,
+            notes_tokens: self
+                .notes
+                .pending
+                .filter(|notes| notes.exact)
+                .map(|notes| notes.count),
+            transcript_tokens: served.parts.values().sum(),
+            others: covered
+                .iter()
+                .map(|key| (key.clone(), served.parts.get(key).copied().unwrap_or(0)))
+                .collect(),
+            request,
+        })
+    }
+
+    /// The request the view this pass builds would serve before the
+    /// emergency lane adds to it: ck-mc's newest view with this pass's
+    /// history head and cut and the edits `ops` of the lanes planned so far.
+    /// As the view builder does, it keeps a head message or cut of the
+    /// newest view unless this pass replaces it, or the session has no
+    /// summaries left and this pass doesn't render it. Each part is priced at
+    /// what stays of it, so a placeholder costs what the placeholder does.
+    pub(super) fn emergency_served(&self, history: &[EditOp], ops: &[EditOp]) -> EmergencyServed {
+        let previous = || self.latest.iter().flat_map(|v| &v.edits).map(|e| &e.op);
+        let retire = retired_history(self.summaries.is_empty(), history);
+        let renders = |id: &str| {
+            history
+                .iter()
+                .any(|op| matches!(op, EditOp::Insert { message, .. } if message.id == id))
+        };
+        let new_cut = history.iter().any(|op| matches!(op, EditOp::Cut { .. }));
+        let carried = previous().filter(|op| match op {
+            EditOp::Insert { message, .. } => !renders(&message.id) && !retire(op),
+            EditOp::Cut { .. } => !new_cut && !retire(op),
+            _ => true,
+        });
+        let (before, old_head) = self.served_costs(previous());
+        let (parts, head) = self.served_costs(carried.chain(history.iter()).chain(ops.iter()));
+        let total = |costs: &std::collections::BTreeMap<lanes::PartKey, u64>, head: u64| {
+            (costs.values().sum::<u64>() + head) as i64
+        };
+        EmergencyServed {
+            total: total(&parts, head),
+            previous_total: total(&before, old_head),
+            parts,
+            head,
+        }
+    }
+
     /// A pass with permission to rebuild: every lane adds the parts it wants
     /// gone, and one view carries them. `None` when no lane has work.
     ///
@@ -242,9 +356,9 @@ impl Session {
     /// on every pass.
     ///
     /// `over_limit` is set when the runner asked for a view because its next
-    /// request was refused for length, and carries the provider's stated count
-    /// or a lower bound from the usable window and last reading. The
-    /// emergency drop then runs whatever the usage, and the protections that
+    /// request was refused for length, and carries the stated count or its
+    /// absence, and whether the refused request used ck-mc's newest view.
+    /// The emergency drop then runs whatever the usage, and the protections that
     /// can yield do. `prefix_changes` is set on a ride whose request's bytes
     /// before the conversation change anyway, so the cache is lost whether or
     /// not a view follows.
@@ -254,7 +368,7 @@ impl Session {
     pub(super) fn build(
         &mut self,
         settings: &Settings,
-        over_limit: Option<u64>,
+        over_limit: Option<lanes::OverLimit>,
         prefix_changes: bool,
         keep: Option<&BTreeSet<lanes::PartKey>>,
     ) -> (Option<View>, u64) {
@@ -294,7 +408,7 @@ impl Session {
     pub(super) fn build_for(
         &mut self,
         settings: &Settings,
-        over_limit: Option<u64>,
+        over_limit: Option<lanes::OverLimit>,
         prefix_changes: bool,
         keep: Option<&BTreeSet<lanes::PartKey>>,
         flush: bool,
@@ -389,7 +503,7 @@ impl Session {
     fn build_lanes(
         &mut self,
         settings: &Settings,
-        over_limit: Option<u64>,
+        over_limit: Option<lanes::OverLimit>,
         prefix_changes: bool,
         history: &[EditOp],
         cut: Option<u64>,
@@ -489,7 +603,7 @@ impl Session {
             let removed_tokens = self.emergency_removed_tokens(history, &queued_ops);
             let emergency = lanes::Emergency {
                 prompt_tokens: self.pressure().last_prompt_tokens.unwrap_or(0),
-                request_tokens: over_limit,
+                request_tokens: over_limit.map(lanes::OverLimit::request_tokens),
                 notes: self.notes.clone(),
                 ceiling_tokens: (usable as f64 * settings.execute_threshold_percentage / 100.0)
                     as u64,
@@ -497,13 +611,23 @@ impl Session {
                 over_limit: over_limit.is_some(),
                 priced,
                 removed_tokens,
+                measured: self.emergency_measured(history, &ops, &covered, over_limit),
             };
-            let emergency_edited = edited.including(&queued_covered);
+            // Measured, the request is already priced after every lane
+            // planned so far, so on a force pass none of their parts is a
+            // candidate again. A refused request may still take such a part
+            // whole, for what that lane leaves of it. The inferred plan, as
+            // before, leaves out only the queued drops.
+            let emergency_edited = if emergency.measured.is_some() && over_limit.is_none() {
+                edited.including(&covered)
+            } else {
+                edited.including(&queued_covered)
+            };
             let emergency_context = lanes::Context {
                 edited: &emergency_edited,
                 ..context
             };
-            let selected = lanes::emergency_drop_excluding(
+            let (selected, plan) = lanes::emergency_drop_planned(
                 &emergency_context,
                 cutoff,
                 &emergency,
@@ -515,6 +639,21 @@ impl Session {
                     self.failed_parts.contains(&key) || kept(&key)
                 },
             );
+            if let Some(plan) = plan {
+                tracing::info!(
+                    session = %self.key.session,
+                    fixed_tokens = plan.fixed_tokens,
+                    fixed_from = %plan.fixed_from,
+                    size_tokens = plan.size_tokens,
+                    size_from = %plan.size_from,
+                    ceiling_tokens = plan.ceiling_tokens,
+                    target_tokens = %plan
+                        .target_tokens
+                        .map_or_else(|| "none".to_owned(), |target| target.to_string()),
+                    selected = selected.len(),
+                    "ck-mc: session: emergency drop planned"
+                );
+            }
             if !selected.is_empty() {
                 // An over-limit request drops calls whole, whatever shape an
                 // earlier lane asked for.

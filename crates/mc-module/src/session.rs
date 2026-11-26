@@ -90,6 +90,11 @@ pub struct Session {
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
     ),
+    /// A ride reported a change to the system prompt or tool definitions
+    /// after `surface_tokens` were taken, so they describe the surfaces
+    /// before it until a notice brings fresh counts. Held in memory, as the
+    /// counts are.
+    pub(crate) surface_counts_stale: bool,
     pub(crate) notes: crate::prompt_notes::Notes,
     index: Index,
     view_validation: crate::view_builder::ValidationCache,

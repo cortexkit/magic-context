@@ -44,6 +44,7 @@ impl Session {
             warned_no_prompt: false,
             notes: Default::default(),
             surface_tokens: (None, None),
+            surface_counts_stale: false,
             threshold: (
                 crate::pass::Settings::default().execute_threshold_percentage,
                 "default",

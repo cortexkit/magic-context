@@ -2739,6 +2739,7 @@ const TEMPLATE_DATA = [
 "[magic-context] v2 context unavailable",
 "ck-mc: dreamer: a task run was skipped",
 "ck-mc: managed settings: state changed",
+"ck-mc: session: emergency drop planned",
 "compartment embedding dispatch failed:",
 "historian alert suppressed (cooldown):",
 "historian two-pass: editor call failed",

@@ -21,6 +21,9 @@ mod cleanup_ride_tests;
 #[path = "emergency_credit_review_tests.rs"]
 mod emergency_credit_review_tests;
 
+#[path = "emergency_measured_tests.rs"]
+mod emergency_measured_tests;
+
 #[path = "ride_cause_tests.rs"]
 mod ride_cause_tests;
 
@@ -1972,7 +1975,15 @@ fn lifecycle_notice_age_sweep_never_drops_the_persons_words_at_any_size() {
         session.index.extend(entries);
         session.reclaim_bookmark = u64::MAX;
         session.notice_reclaim_bookmark = u64::MAX;
-        let (view, _) = session.build(&settings, Some(99_000), true, None);
+        let (view, _) = session.build(
+            &settings,
+            Some(lanes::OverLimit {
+                count: lanes::RideCount::Stated(99_000),
+                newest_view: true,
+            }),
+            true,
+            None,
+        );
         assert!(!view
             .iter()
             .flat_map(|view| &view.edits)

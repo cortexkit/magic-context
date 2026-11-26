@@ -37,6 +37,8 @@ mod agent_surface;
 mod app_read;
 #[path = "scenarios/clock_note.rs"]
 mod clock_note;
+#[path = "scenarios/emergency_measured.rs"]
+mod emergency_measured;
 #[path = "support/lifecycle_scenarios.rs"]
 mod lifecycle_scenarios;
 #[path = "scenarios/one_summarizer.rs"]
