@@ -13,8 +13,8 @@ import { RAW_MESSAGE_TYPES, type V2ForkOrigin, type V2RowStamp } from "./store-r
  * Fork inheritance for OpenCode 2.
  *
  * An OpenCode 2 fork is a new session id. The host copies the parent's settled
- * rows up to the fork boundary into it, keeping each row's `seq`, `type`,
- * `time_created` and body, and gives every copied row a new id of the form
+ * rows up to the fork boundary into it, keeping each row's `seq`, `type` and
+ * `time_created`, and gives every copied row a new id of the form
  * `<id derived from the fork event>_<seq>` (`projectFork` in OpenCode's
  * `session/projector.ts`). It records the link in `session_v2.fork_session_id`
  * and `fork_boundary`. Magic Context keys its state by session and message id,
@@ -33,15 +33,15 @@ export interface V2ForkIdMap {
     parentToFork: Map<string, string>;
     /** 1-based position of each fork message among the rows Magic Context counts. */
     forkOrdinals: Map<string, number>;
-    /** The same positions for the parent's copied rows, by parent id. */
+    /** Counted parent rows through the boundary, including rows the fork did not copy. */
     parentOrdinals: Map<number, string>;
-    /** Highest parent `seq` the fork boundary includes. */
+    /** Inclusive parent sequence limit from the fork boundary, not proof of a copy. */
     throughSeq: number;
 }
 
 const RAW_TYPES = new Set<string>(RAW_MESSAGE_TYPES);
 
-/** The `seq` of the last parent row the fork copied, or undefined when the boundary row is gone. */
+/** Convert the host boundary to an inclusive parent sequence limit. */
 export function forkBoundarySeq(
     origin: V2ForkOrigin,
     sequenceForId: (sessionID: string, id: string) => number | undefined,
@@ -107,14 +107,14 @@ function splitMessageScopedId(id: string): { messageId: string; suffix: string }
 interface ForkCompartmentProof {
     sessionId: string;
     sequenceForId(id: string): number | undefined;
-    matchingBodies(): ReadonlySet<string>;
+    matchingBodies(): ReadonlyMap<string, string>;
 }
 
 function selectForkCompartments(
     source: readonly CloneCompartmentBoundary[],
     map: V2ForkIdMap,
     proof: ForkCompartmentProof,
-): { rows: Map<number, CloneCompartmentRow>; rawTailAfter: number | undefined } {
+): { rows: Map<number, CloneCompartmentRow>; keepRaw: Set<string> } {
     const rows = new Map<number, CloneCompartmentRow>();
     const forkId = (id: string) => map.parentToFork.get(id) ?? "";
     const ordinal = (id: string) => map.forkOrdinals.get(forkId(id));
@@ -122,16 +122,17 @@ function selectForkCompartments(
     const provePrefix = () => {
         const matching = proof.matchingBodies();
         let length = 0;
-        // Missing or extra counted rows, mismatched roles or creation times,
-        // and changed bodies invalidate position here even if later ids pair.
+        // Verify the current parent and fork, not what the historian originally
+        // read. Neither store can detect a parent edit made before both copies
+        // acquired the same new bytes. Missing or extra counted rows, mismatched
+        // stamps, and differences in body bytes invalidate position here.
         for (const [position, id] of map.parentOrdinals) {
-            if (ordinal(id) !== position || !matching.has(id)) break;
+            if (ordinal(id) !== position || matching.get(id) !== forkId(id)) break;
             length = position;
         }
         return length;
     };
     let stopped = false;
-    let rawTailAfter: number | undefined;
     let lastEnd = 0;
     for (const [i, row] of source.entries()) {
         const { sequence, startMessage, endMessage, startMessageId, endMessageId } = row;
@@ -142,24 +143,12 @@ function selectForkCompartments(
             // The history head cuts one prefix, not individual intervals. A
             // later summary would advance it past the raw history we just kept.
             reason = "after first skipped compartment";
-        } else if (start !== undefined && end !== undefined) {
-            rows.set(sequence, {
-                sequence,
-                startMessage: start,
-                endMessage: end,
-                startMessageId: forkId(startMessageId),
-                endMessageId: forkId(endMessageId),
-            });
-            lastEnd = end;
-            continue;
         } else {
             const startSeq = start === undefined ? proof.sequenceForId(startMessageId) : undefined;
             const endSeq = end === undefined ? proof.sequenceForId(endMessageId) : undefined;
-            const pastBoundary =
-                (startSeq ?? -1) > map.throughSeq || (endSeq ?? -1) > map.throughSeq;
             const previous = source[i - 1];
             const next = source[i + 1];
-            if (pastBoundary) {
+            if ((startSeq ?? -1) > map.throughSeq || (endSeq ?? -1) > map.throughSeq) {
                 reason = "outside the fork boundary";
             } else if (startSeq !== undefined || endSeq !== undefined) {
                 reason = "a live endpoint was not copied";
@@ -169,28 +158,29 @@ function selectForkCompartments(
                 !Number.isSafeInteger(startMessage) ||
                 !Number.isSafeInteger(endMessage) ||
                 startMessage < 1 ||
-                endMessage < startMessage ||
-                endMessage > map.parentOrdinals.size
+                endMessage < startMessage
             ) {
-                reason = "range is invalid or not wholly inside the fork boundary";
-            } else if (row.startBlockIndex !== null || row.endBlockIndex !== null) {
-                reason = "block boundaries cannot be proven by message order";
+                reason = "invalid message range";
+            } else if (startMessage !== lastEnd + 1) {
+                reason =
+                    startMessage <= lastEnd
+                        ? "range overlaps the inherited prefix"
+                        : "gap before range";
             } else if (
                 (start !== undefined && start !== startMessage) ||
                 (end !== undefined && end !== endMessage)
             ) {
                 reason = "live endpoint conflicts with the stored position";
             } else if (
-                // A complete host copy proves where current parent messages landed,
-                // not that these saved ordinals still name the original range.
-                // Bound each side with a live anchor at its saved coordinate or
-                // an abutting neighbour's live anchor (or the start of history).
-                (previous ? previous.endMessage !== startMessage - 1 : startMessage !== 1) ||
-                (next && next.startMessage !== endMessage + 1) ||
+                // A stale id needs a witness in today's projection: a live
+                // abutting anchor on that side, or the beginning of history.
                 (start === undefined &&
                     previous &&
                     ordinal(previous.endMessageId) !== startMessage - 1) ||
-                (end === undefined && (!next || ordinal(next.startMessageId) !== endMessage + 1))
+                (end === undefined &&
+                    (!next ||
+                        next.startMessage !== endMessage + 1 ||
+                        ordinal(next.startMessageId) !== endMessage + 1))
             ) {
                 reason = "live neighboring anchors do not prove the stored range";
             } else if (
@@ -199,6 +189,8 @@ function selectForkCompartments(
             ) {
                 reason = "parent and fork raw prefixes do not match in order and body";
             } else {
+                // Block indices are safe to keep only after the same byte check
+                // has proved both boundary messages, including all their parts.
                 rows.set(sequence, {
                     sequence,
                     startMessage,
@@ -210,26 +202,45 @@ function selectForkCompartments(
                 continue;
             }
             stopped = true;
-            if (!pastBoundary) rawTailAfter = lastEnd;
         }
         sessionLog(
             proof.sessionId,
             `v2 fork skipped compartment ${sequence} (${startMessage}-${endMessage}): ${reason}`,
         );
     }
-    return { rows, rawTailAfter };
+    // Only rows in a rejected summary lose replay. Outside those ranges an
+    // independent parent drop is still valid. Count a block boundary as covered
+    // here even when the summary describes only part of the message.
+    const keepRaw = new Set<string>();
+    if (stopped) {
+        const changes = new Int32Array(map.parentOrdinals.size + 2);
+        for (const row of source) {
+            if (rows.has(row.sequence)) continue;
+            const start = Math.max(1, row.startMessage);
+            const end = Math.min(map.parentOrdinals.size, row.endMessage);
+            if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) continue;
+            changes[start] = (changes[start] ?? 0) + 1;
+            changes[end + 1] = (changes[end + 1] ?? 0) - 1;
+        }
+        let covering = 0;
+        for (const [position, id] of map.parentOrdinals) {
+            covering += changes[position] ?? 0;
+            if (covering > 0) keepRaw.add(id);
+        }
+    }
+    return { rows, keepRaw };
 }
 
 /**
  * The clone filter for one fork. Message-scoped ids map through the paired
- * rows. Tool call ids are not message ids: the host copies the rows' bodies
- * unchanged, so a tool call keeps its id in the fork and is included when the
- * message that owns it was copied.
+ * rows. Tool calls are keyed by call id; their owner determines whether they
+ * were copied and whether replay would hide part of a rejected summary.
  */
 export function forkCloneFilter(
     idMap: V2ForkIdMap,
     copiedToolCallIds: ReadonlySet<string>,
     proof?: ForkCompartmentProof,
+    toolOwners?: ReadonlyMap<string, readonly string[]>,
 ): CloneSessionStateFilter {
     const mapMessageScoped = (id: string): string | undefined => {
         const direct = idMap.parentToFork.get(id);
@@ -239,35 +250,33 @@ export function forkCloneFilter(
         const mapped = idMap.parentToFork.get(messageId);
         return mapped ? `${mapped}${suffix}` : undefined;
     };
-    let rawTailAfter: number | undefined;
+    let keepRaw: ReadonlySet<string> | undefined;
+    const includeMessageId = (messageId: string) =>
+        mapMessageScoped(messageId) !== undefined || copiedToolCallIds.has(messageId);
     return {
         selectCompartments:
             proof &&
             ((source) => {
                 const plan = selectForkCompartments(source, idMap, proof);
-                rawTailAfter = plan.rawTailAfter;
+                keepRaw = plan.keepRaw;
                 return plan.rows;
             }),
         resolveBoundaryOrdinal: (messageId) => {
             const forkId = idMap.parentToFork.get(messageId);
             return forkId ? idMap.forkOrdinals.get(forkId) : undefined;
         },
-        includeMessageId: (messageId) =>
-            mapMessageScoped(messageId) !== undefined || copiedToolCallIds.has(messageId),
+        includeMessageId,
+        includeReplayMessageId: (messageId) =>
+            includeMessageId(messageId) &&
+            !keepRaw?.has(splitMessageScopedId(messageId).messageId) &&
+            !toolOwners?.get(messageId)?.some((owner) => keepRaw?.has(owner)),
         mapMessageId: (messageId) => mapMessageScoped(messageId) ?? messageId,
         includeTag: (tag) => {
-            if (rawTailAfter !== undefined) {
-                // A historian queues regular drops for covered content. In an
-                // unproven tail they are indistinguishable from other drops;
-                // neither the committed status nor the queue may hide that raw input.
-                const owner =
-                    tag.type === "tool"
-                        ? tag.toolOwnerMessageId
-                        : splitMessageScopedId(tag.messageId).messageId;
-                const copy = owner && idMap.parentToFork.get(owner);
-                if (!copy || (idMap.forkOrdinals.get(copy) ?? Infinity) > rawTailAfter)
-                    return false;
-            }
+            const owner =
+                tag.type === "tool"
+                    ? tag.toolOwnerMessageId
+                    : splitMessageScopedId(tag.messageId).messageId;
+            if (owner && keepRaw?.has(owner)) return false;
             if (tag.type === "tool") {
                 return (
                     tag.toolOwnerMessageId !== null &&
@@ -305,7 +314,11 @@ export interface V2ForkStore {
     sessionExists(sessionID: string): boolean;
     sequenceForId(sessionID: string, id: string): number | undefined;
     rowStampsThrough(sessionID: string, throughSeq: number): V2RowStamp[];
-    matchingForkBodies(parentID: string, forkID: string, throughSeq: number): ReadonlySet<string>;
+    matchingForkBodies(
+        parentID: string,
+        forkID: string,
+        throughSeq: number,
+    ): ReadonlyMap<string, string>;
 }
 
 function countSessionRows(db: Database, table: string, sessionId: string): number {
@@ -328,12 +341,12 @@ export function sessionHasMagicContextState(db: Database, sessionId: string): bo
  * the first time Magic Context meets the fork.
  *
  * The copy is `copySessionStateForClone`, the same copier `/clone` and Pi's
- * branch inheritance use: history blocks whose two ends were copied, with
- * their positions recomputed in the fork; the session facts; session notes
+ * branch inheritance use: a proved prefix of history blocks, mapped to real
+ * fork ids even when a saved endpoint is stale; the session facts; session notes
  * whose anchor was copied; tags whose message was copied, with their status
- * (compacted, dropped), source contents and queued operations; and the replay
- * decisions that keep the served bytes of the copied history the same as the
- * parent's. Usage, pressure and cached-render columns start fresh, so the
+ * (compacted, dropped), source contents and queued operations; and replay
+ * decisions. Removals in a rejected block cannot come along without the block.
+ * Usage, pressure and cached-render columns start fresh, so the
  * fork's first pass renders its history head from the copied history blocks.
  * Compartment events and chunk embeddings are not copied: the copier never
  * copies them (events are stored for future use and never rendered;
@@ -389,15 +402,28 @@ export function seedV2ForkFromParent(args: {
             )
             .map((row) => row.message_id),
     );
+    const toolOwners = new Map<string, string[]>();
+    for (const row of toolTags) {
+        if (!row.tool_owner_message_id) continue;
+        const owners = toolOwners.get(row.message_id) ?? [];
+        owners.push(row.tool_owner_message_id);
+        toolOwners.set(row.message_id, owners);
+    }
     const result = copySessionStateForClone(
         db,
         parentSessionID,
         sessionId,
-        forkCloneFilter(idMap, copiedToolCallIds, {
-            sessionId,
-            sequenceForId: (id) => store.sequenceForId(parentSessionID, id),
-            matchingBodies: () => store.matchingForkBodies(parentSessionID, sessionId, throughSeq),
-        }),
+        forkCloneFilter(
+            idMap,
+            copiedToolCallIds,
+            {
+                sessionId,
+                sequenceForId: (id) => store.sequenceForId(parentSessionID, id),
+                matchingBodies: () =>
+                    store.matchingForkBodies(parentSessionID, sessionId, throughSeq),
+            },
+            toolOwners,
+        ),
     );
     if (result.kind === "destination-not-empty")
         return { kind: "destination-not-empty", parentSessionID };

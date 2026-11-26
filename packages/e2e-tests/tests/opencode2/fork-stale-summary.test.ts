@@ -1,13 +1,22 @@
 import { expect, test } from "bun:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
+import { copySessionStateForClone } from "../../../plugin/src/features/magic-context/storage-clone";
 import { validateStoredCompartments } from "../../../plugin/src/hooks/magic-context/compartment-runner-validation";
 import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-session-formatting";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import {
+	buildForkIdMap,
+	forkCloneFilter,
+} from "../../../plugin/src/v2/fork-inheritance";
 import { FORK_HISTORY_NOTICE } from "../../../plugin/src/v2/hooks/storage-notice";
-import { RAW_MESSAGE_TYPES } from "../../../plugin/src/v2/store-reader";
+import {
+	RAW_MESSAGE_TYPES,
+	type V2RowStamp,
+	V2StoreReader,
+} from "../../../plugin/src/v2/store-reader";
 import {
 	inspectOpenFiles,
 	isolation,
@@ -31,13 +40,9 @@ const MARKERS = [
 	"JULIET",
 ];
 const MISSING_RAW = ["Original-BRAVO", "Original-DELTA"];
-// Captured with the original copier. The host versions render different system and tool bytes.
-const HEALTHY_FORK_BODY_SHA256: Record<string, string> = {
-	"2.0.22": "8afae0c006c9edf7da4d005a8707ce759f68c39a69901ced5a2aadffa7891097",
-	"2.1.0": "a00f530f4ff67fc0000e9bfbc32afe007fad20242d717f228f76b7c67f9cee41",
-	"2.3.2": "9f385d9570cc66ce8318530962de09f3a4e8a45f6ed8b5a2bd785b8c1bc37d71",
-	"2.4.2": "be52f0c339fe880ded99b673e9ae19cc9c08c5dcb51ee051ce2019b64dc9a907",
-};
+const NOTICE_QUESTION = "The first user pass after a pending repair notice.";
+const QUEUED_QUESTION =
+	"The next user message is queued behind the notice step.";
 
 interface Summary {
 	sequence: number;
@@ -76,7 +81,12 @@ async function until<T>(read: () => T | undefined, label: string): Promise<T> {
 	}
 }
 
-test("OpenCode 2 forks keep proven stale summaries, preserve unproven raw history, and repair old forks", async () => {
+test.each([
+	"healthy and stale fork bytes",
+	"straddling summary keeps copied raw messages",
+	"damaged parent fork keeps an uncut tail",
+	"fork notice is sent from a user pass and survives either crash boundary",
+] as const)("OpenCode 2: %s", async (scenario) => {
 	const fixture = isolation(createE2ETempDir("mc-issue-968-"));
 	const source = join(
 		required(fixture.env.XDG_DATA_HOME),
@@ -109,7 +119,7 @@ test("OpenCode 2 forks keep proven stale summaries, preserve unproven raw histor
         ORDER BY seq`)
 					.all(sessionID, ...RAW_MESSAGE_TYPES) as {
 					id: string;
-					type: string;
+					type: V2RowStamp["type"];
 					seq: number;
 					time_created: number;
 					data: string;
@@ -134,10 +144,45 @@ test("OpenCode 2 forks keep proven stale summaries, preserve unproven raw histor
 		);
 	let host: Awaited<ReturnType<typeof spawnOpencode2>> | undefined;
 	let repairing = false;
+	let noticeSession = "";
+	let followOnHeld = false;
+	const releaseFollowOn = Promise.withResolvers<void>();
+	const observer = scenario.includes("notice is sent")
+		? Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				async fetch(request) {
+					if (
+						new URL(request.url).searchParams.get("session") ===
+							noticeSession &&
+						!followOnHeld
+					) {
+						followOnHeld = true;
+						await releaseFollowOn.promise;
+					}
+					return new Response("ok");
+				},
+			})
+		: undefined;
+	const probe = observer && join(fixture.root, "queue-behind-fork-notice");
+	if (probe) {
+		mkdirSync(probe);
+		writeFileSync(
+			join(probe, "server.js"),
+			`export default { id: 'queue-behind-fork-notice', async setup(context) {
+			await context.session.hook('context', async draft => {
+				const question = draft.messages.findIndex(m => m.content.some(p => typeof p.text === 'string' && p.text.includes(${JSON.stringify(NOTICE_QUESTION)})));
+				if (question < 0 || !draft.messages.slice(question + 1).some(m => m.role === 'assistant')) return;
+				await (await fetch(${JSON.stringify(`http://127.0.0.1:${observer?.port}/?session=`)} + draft.sessionID)).text();
+			});
+		}};`,
+		);
+	}
 
 	async function start() {
 		const server = await spawnOpencode2({
 			existingIsolation: fixture,
+			...(probe ? { probePlugin: probe } : {}),
 			modelContextLimit: WINDOW,
 			modelOutputLimit: 1024,
 			compactionAuto: false,
@@ -170,7 +215,14 @@ test("OpenCode 2 forks keep proven stale summaries, preserve unproven raw histor
 			},
 		});
 		await waitForPluginActive(client, server.cwd);
+		if (probe)
+			await waitForPluginActive(client, server.cwd, "queue-behind-fork-notice");
 		return client;
+	}
+
+	async function stop() {
+		await required(host).stop();
+		host = undefined;
 	}
 
 	function audit() {
@@ -297,117 +349,271 @@ test("OpenCode 2 forks keep proven stale summaries, preserve unproven raw histor
 		};
 		const seen = ({ body }: ReturnType<typeof captures>[number]) =>
 			JSON.stringify(body.input ?? body.messages);
-		const forkPrompt = "Answer the fork's first request.";
-		const healthy = await fork();
-		const healthyParent = summaries(parent);
-		const healthyRequest = await turn(healthy, forkPrompt);
-		expectInherited(healthy);
-		expect(summaries(parent)).toEqual(healthyParent);
-		const healthyInput = seen(healthyRequest);
-		expect(healthyRequest.body.prompt_cache_key).toBe(parent);
-		// The host's cache key is the parent id and the mock mints fresh reply
-		// ids. Normalize those fixture values, not the request's content or shape.
-		const portableBody = required(healthyRequest.rawBody)
-			.replaceAll(fixture.root, "<fixture>")
-			.replace(/Today's date: [^"\\]+/g, "Today's date: <date>")
-			.replace(
-				`"prompt_cache_key":"${parent}"`,
-				'"prompt_cache_key":"<parent>"',
-			)
-			.replace(
-				/"id":"msg_resp_[0-9a-f]{24}(_\d+)"/g,
-				'"id":"msg_resp_<fixture>$1"',
+		function markDropped(sessionID: string, ordinal: number) {
+			const id = `${required(rawRows(sessionID)[ordinal - 1]).id}:p0`;
+			usingDb(
+				context,
+				(db) => {
+					// Match the identity and state of a normal historian or manual drop.
+					const updated = db
+						.prepare(
+							"UPDATE tags SET status = 'dropped' WHERE session_id = ? AND message_id = ?",
+						)
+						.run(sessionID, id);
+					if (Number(updated.changes) > 0) return;
+					db.prepare(`INSERT INTO tags (session_id, message_id, type, status, byte_size, tag_number, harness)
+				    VALUES (?, ?, 'message', 'dropped', 100, ?, 'opencode2')`).run(
+						sessionID,
+						id,
+						100 + ordinal,
+					);
+				},
+				false,
 			);
-		const pin =
-			HEALTHY_FORK_BODY_SHA256[
-				process.env.MC_E2E_OPENCODE2_VERSION ?? "2.0.22"
-			];
-		if (pin)
-			expect(createHash("sha256").update(portableBody).digest("hex")).toBe(pin);
+		}
+		if (scenario === "straddling summary keeps copied raw messages") {
+			const straddling = await fork();
+			await turn(parent, "The fork did not copy this final parent turn.");
+			const end = required(rawRows(parent).at(-1));
+			usingDb(
+				context,
+				(db) => {
+					db.prepare(
+						"DELETE FROM compartments WHERE session_id = ? AND sequence > 1",
+					).run(parent);
+					db.prepare(`UPDATE compartments SET end_message = 22, end_message_id = ?, title = 'StraddlingSummary'
+				    WHERE session_id = ? AND sequence = 1`).run(end.id, parent);
+				},
+				false,
+			);
+			markDropped(parent, 3);
+			const input = seen(
+				await turn(straddling, "The copied half is still raw."),
+			);
+			expect(summaries(straddling).map(({ sequence }) => sequence)).toEqual([
+				0,
+			]);
+			expect(input).not.toContain("StraddlingSummary");
+			expect(input).toContain("Original-BRAVO");
+			expect(input).not.toContain(
+				"The fork did not copy this final parent turn.",
+			);
+			return;
+		}
+		if (scenario === "healthy and stale fork bytes") {
+			const forkPrompt = "Answer the fork's first request.";
+			// GOLF is outside the last summary, so this independent drop must replay.
+			markDropped(parent, 13);
+			const healthy = await fork();
+			const control = await fork();
+			// The reference uses the original two-ID rule in the shared copier. The
+			// real sibling forks share parent messages, reply IDs and the cache key.
+			const through = required(parentRows.at(-1)).seq;
+			const controlMap = buildForkIdMap(parentRows, rawRows(control), through);
+			usingDb(
+				context,
+				(db) =>
+					copySessionStateForClone(
+						db,
+						parent,
+						control,
+						forkCloneFilter(controlMap, new Set()),
+					),
+				false,
+			);
+			const healthyParent = summaries(parent);
+			const healthyRequest = await turn(healthy, forkPrompt);
+			const controlRequest = await turn(control, forkPrompt);
+			expect(required(healthyRequest.rawBody)).toBe(
+				required(controlRequest.rawBody),
+			);
+			expectInherited(healthy);
+			expect(summaries(parent)).toEqual(healthyParent);
+			const healthyInput = seen(healthyRequest);
+			expect(healthyInput).not.toContain("Original-GOLF");
+			expect(healthyRequest.body.prompt_cache_key).toBe(parent);
 
-		setAnchor(1, "start", "missing-start");
-		setAnchor(3, "end", "missing-end");
-		const staleParent = summaries(parent);
-		const repaired = await fork();
-		const copies = rawRows(repaired);
-		expect(copies.map(({ id: _id, ...row }) => row)).toEqual(
-			parentRows.map(({ id: _id, ...row }) => row),
-		);
-		const repairedRequest = await turn(repaired, forkPrompt);
-		const repairedInput = seen(repairedRequest);
-		expectInherited(repaired);
-		expect(repairedInput).toBe(healthyInput);
-		expect(repairedRequest.rawBody).toBe(healthyRequest.rawBody);
-		for (const marker of MISSING_RAW)
-			expect(repairedInput).not.toContain(marker);
-		expect(repairedInput).toContain("Original-FOXTROT");
-		expect((await wrap(repaired)).status).toBe("success");
-		expect(summaries(repaired).at(-1)?.startMessage).toBe(11);
-		expect(summaries(parent)).toEqual(staleParent);
+			setAnchor(1, "start", "missing-start");
+			setAnchor(3, "end", "missing-end");
+			const staleParent = summaries(parent);
+			const repaired = await fork();
+			const copies = rawRows(repaired);
+			expect(copies.map(({ id: _id, ...row }) => row)).toEqual(
+				parentRows.map(({ id: _id, ...row }) => row),
+			);
+			const repairedRequest = await turn(repaired, forkPrompt);
+			const repairedInput = seen(repairedRequest);
+			expectInherited(repaired);
+			expect(repairedInput).toBe(healthyInput);
+			expect(repairedRequest.rawBody).toBe(healthyRequest.rawBody);
+			for (const marker of MISSING_RAW)
+				expect(repairedInput).not.toContain(marker);
+			expect(repairedInput).toContain("Original-FOXTROT");
+			expect((await wrap(repaired)).status).toBe("success");
+			expect(summaries(repaired).at(-1)?.startMessage).toBe(11);
+			expect(summaries(parent)).toEqual(staleParent);
 
-		// This anchor is live, but contradicts the saved end position. The next
-		// summary must not advance the cut across the resulting raw tail.
-		setAnchor(1, "end", required(parentRows[4]).id);
-		const unproven = await fork();
-		const unprovenRequest = await turn(unproven, "Read the intact raw tail.");
-		expect(summaries(unproven).map(({ sequence }) => sequence)).toEqual([0]);
-		for (const marker of MISSING_RAW)
-			expect(seen(unprovenRequest)).toContain(marker);
-		expect(seen(unprovenRequest)).not.toContain("FixtureSummary2");
-		const tokens = estimateTokens(JSON.stringify(unprovenRequest.body));
-		expect(tokens).toBeLessThan(WINDOW);
-		console.log(
-			"unproven fork estimated request tokens / window",
-			tokens,
-			WINDOW,
-		);
-		expect((await wrap(unproven)).status).toBe("success");
-		expect(summaries(unproven).at(-1)?.startMessage).toBe(3);
+			// This anchor is live, but contradicts the saved end position. The next
+			// summary must not advance the cut across the resulting raw tail.
+			setAnchor(1, "end", required(parentRows[4]).id);
+			const unproven = await fork();
+			const unprovenRequest = await turn(unproven, "Read the intact raw tail.");
+			expect(summaries(unproven).map(({ sequence }) => sequence)).toEqual([0]);
+			for (const marker of MISSING_RAW)
+				expect(seen(unprovenRequest)).toContain(marker);
+			expect(seen(unprovenRequest)).not.toContain("FixtureSummary2");
+			const tokens = estimateTokens(JSON.stringify(unprovenRequest.body));
+			expect(tokens).toBeLessThan(WINDOW);
+			console.log(
+				"unproven fork estimated request tokens / window",
+				tokens,
+				WINDOW,
+			);
+			expect((await wrap(unproven)).status).toBe("success");
+			expect(summaries(unproven).at(-1)?.startMessage).toBe(3);
+			return;
+		}
 
 		// Pre-seed the compartments as an older plugin left them, with a gap in
 		// the middle. A seed on the next turn must not silently recopy this fork.
-		const broken = await fork();
-		const brokenRows = rawRows(broken);
-		usingDb(
-			context,
-			(db) => {
-				for (const sequence of [0, 2, 4]) {
-					const start = sequence * 2;
-					db.prepare(`INSERT INTO compartments (session_id, sequence, start_message, end_message,
+		async function seedBroken() {
+			const broken = await fork();
+			const brokenRows = rawRows(broken);
+			usingDb(
+				context,
+				(db) => {
+					for (const sequence of [0, 2, 4]) {
+						const start = sequence * 2;
+						db.prepare(`INSERT INTO compartments (session_id, sequence, start_message, end_message,
                     start_message_id, end_message_id, title, content, p1, created_at, harness)
                     SELECT ?, sequence, start_message, end_message, ?, ?, title, content, p1, created_at, harness
                     FROM compartments WHERE session_id = ? AND sequence = ?`).run(
-						broken,
-						required(brokenRows[start]).id,
-						required(brokenRows[start + 1]).id,
-						parent,
-						sequence,
-					);
-				}
-			},
-			false,
-		);
-		const brokenFirst = seen(await turn(broken, "Before the repair notice."));
-		for (const marker of MISSING_RAW) expect(brokenFirst).not.toContain(marker);
+							broken,
+							required(brokenRows[start]).id,
+							required(brokenRows[start + 1]).id,
+							parent,
+							sequence,
+						);
+					}
+				},
+				false,
+			);
+			return broken;
+		}
+		const broken = await seedBroken();
+		if (scenario === "damaged parent fork keeps an uncut tail") {
+			// Ordinal 5 is in a validly anchored summary after the gap; ordinal 3
+			// is in no parent summary. Only the former removal depends on coverage.
+			markDropped(broken, 3);
+			markDropped(broken, 5);
+			const child = (await client.session.fork({ sessionID: broken })).id;
+			const input = seen(await turn(child, "Read the surviving fork history."));
+			expect(summaries(child).map(({ sequence }) => sequence)).toEqual([0]);
+			expect(input).toContain("Original-CHARLIE");
+			expect(input).toContain("Original-DELTA");
+			expect(input).not.toContain("Original-BRAVO");
+			return;
+		}
+		const noNotice = await seedBroken();
+		const noticeKey = `%:fork-history-notice/${broken}`;
+		const pendingValue = () =>
+			usingDb(
+				source,
+				(db) =>
+					db.prepare("SELECT value FROM kv WHERE key LIKE ?").get(noticeKey) as
+						| { value: string }
+						| undefined,
+			)?.value;
 		const calls = captures().length;
 		expect(await wrap(broken)).toEqual({
 			status: "failed",
 			failure_reason: "existing-validation: gap before message 5 (expected 3)",
 		});
-		await until(() => notices(broken)[0], "stored repair notice");
-		expect(notices(broken)).toHaveLength(1);
-		await client.session.wait(
-			{ sessionID: broken },
-			{ signal: AbortSignal.timeout(15_000) },
-		);
+		const pending = required(pendingValue());
+		expect(JSON.parse(pending)).toMatchObject({ id: expect.any(String) });
+		expect(notices(broken)).toHaveLength(0);
 		expect(captures()).toHaveLength(calls);
-		const defer = seen(await turn(broken, "After the repair notice."));
-		expect(defer).not.toContain(FORK_HISTORY_NOTICE);
 		const beforeRestart = summaries(parent);
 		audit();
-		await required(host).stop();
-		host = undefined;
+		await stop();
 
+		client = await start();
+		audit();
+		const controlRequest = await turn(noNotice, NOTICE_QUESTION);
+		noticeSession = broken;
+		const beforeSend = captures().length;
+		await client.session.prompt({ sessionID: broken, text: NOTICE_QUESTION });
+		await until(
+			() => (followOnHeld ? true : undefined),
+			"the host's notice follow-on step",
+		);
+		const first = required(captures()[beforeSend]);
+		expect(required(first.rawBody)).toBe(required(controlRequest.rawBody));
+		expect(seen(first)).not.toContain(FORK_HISTORY_NOTICE);
+		const queued = await client.session.prompt({
+			sessionID: broken,
+			text: QUEUED_QUESTION,
+			delivery: "queue",
+		});
+		expect(queued.delivery).toBe("queue");
+		releaseFollowOn.resolve();
+		await client.session.wait(
+			{ sessionID: broken },
+			{ signal: AbortSignal.timeout(20_000) },
+		);
+		const afterSend = captures().slice(beforeSend);
+		expect(afterSend).toHaveLength(3);
+		expect(seen(required(afterSend[2]))).toContain(QUEUED_QUESTION);
+		expect(
+			afterSend.every(
+				(request) => !required(request.rawBody).includes(FORK_HISTORY_NOTICE),
+			),
+		).toBe(true);
+		const notice = await until(
+			() => notices(broken)[0],
+			"notice sent from the live user pass",
+		);
+		expect(notice.id).toBe(JSON.parse(pending).id);
+		const user = rawRows(broken).find(
+			({ type, data }) =>
+				type === "user" && JSON.parse(data).text === NOTICE_QUESTION,
+		);
+		expect(notice.seq).toBeGreaterThan(required(user).seq);
+		const replies = rawRows(broken).filter(
+			({ type, seq }) => type === "assistant" && seq > required(user).seq,
+		);
+		expect(replies).toHaveLength(3);
+		const reader = new V2StoreReader(source);
+		try {
+			expect(
+				replies.map(({ id }) =>
+					reader.messageById(broken, id)?.data.content?.map(({ text }) => text),
+				),
+			).toEqual([["ordinary reply"], ["ordinary reply"], ["ordinary reply"]]);
+		} finally {
+			reader.close();
+		}
+		expect(
+			replies.every(({ data }) => JSON.parse(data).finish === "stop"),
+		).toBe(true);
+		const extra = required(afterSend[1]);
+		console.log("fork notice follow-on stored a second reply", {
+			requestBytes: required(extra.rawBody).length,
+			estimatedInput: estimateTokens(required(extra.rawBody)),
+			reportedUsage: JSON.parse(required(replies[1]).data).tokens,
+		});
+		audit();
+		await stop();
+		// Restore the durable snapshot of a process that died after projection
+		// and before clearing the pending record: keep the real projected row.
+		usingDb(
+			source,
+			(db) =>
+				db
+					.prepare("UPDATE kv SET value = ? WHERE key LIKE ?")
+					.run(pending, noticeKey),
+			false,
+		);
 		client = await start();
 		audit();
 		expect((await wrap(broken)).failure_reason).toContain(
@@ -415,9 +621,12 @@ test("OpenCode 2 forks keep proven stale summaries, preserve unproven raw histor
 		);
 		const afterRestart = await turn(broken, "After reopening the broken fork.");
 		expect(seen(afterRestart)).not.toContain(FORK_HISTORY_NOTICE);
-		expect(notices(broken)).toHaveLength(1);
+		expect(notices(broken).map(({ id }) => id)).toEqual([notice.id]);
+		expect(JSON.parse(required(pendingValue()))).toBe("delivered");
 		expect(historicalRequests()).toHaveLength(0);
 		const descendant = (await client.session.fork({ sessionID: broken })).id;
+		expect(notices(descendant)).toHaveLength(1);
+		expect(notices(descendant)[0]?.id).not.toBe(notice.id);
 		expect(
 			seen(await turn(descendant, "A fork of the session with a notice.")),
 		).not.toContain(FORK_HISTORY_NOTICE);
@@ -458,7 +667,9 @@ test("OpenCode 2 forks keep proven stale summaries, preserve unproven raw histor
 		);
 		throw error;
 	} finally {
+		releaseFollowOn.resolve();
 		await host?.stop();
+		observer?.stop(true);
 		cleanupE2ETempDir(fixture.root);
 	}
 }, 120_000);

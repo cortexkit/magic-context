@@ -513,9 +513,8 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             existingValidationError &&
             storedCompartmentFailureBackingOff(db, sessionId, existingValidationError)
         ) {
-            // The same stored rows already failed this check recently. Nothing
-            // but a rebuild changes them, so re-running now would only repeat
-            // the failure and its notice.
+            // Don't restart the historian for the same bad rows. The host can
+            // still schedule the fork history notice if the earlier attempt did not.
             if (unresolvedInvolved) {
                 sessionLog(
                     sessionId,

@@ -41,8 +41,6 @@ export interface CloneTagRow {
 }
 
 export interface CloneCompartmentBoundary extends CloneCompartmentRow {
-    startBlockIndex: number | null;
-    endBlockIndex: number | null;
     rebaseStatus: string | null;
 }
 
@@ -56,6 +54,8 @@ export interface CloneSessionStateFilter {
     ) => ReadonlyMap<number, CloneCompartmentRow>;
     includeTag(tag: CloneTagRow): boolean;
     includeMessageId(messageId: string): boolean;
+    /** An inherited note may still point at a message whose removal isn't safe to replay. */
+    includeReplayMessageId?: (messageId: string) => boolean;
     /** Map a source message/content id into the destination session. */
     mapMessageId?: (messageId: string) => string;
     /** Opt into remapping globally keyed tag ids; leave undefined for Pi compatibility. */
@@ -554,8 +554,6 @@ export function copySessionStateForClone(
                 endMessage: row.end_message,
                 startMessageId: row.start_message_id,
                 endMessageId: row.end_message_id,
-                startBlockIndex: row.start_block_index,
-                endBlockIndex: row.end_block_index,
                 rebaseStatus: row.rebase_status,
             })),
         );
@@ -765,7 +763,10 @@ export function copySessionStateForClone(
         if (pendingMarker === null)
             clearedMarker = getPendingPiCompactionMarkerState(db, destinationSessionId);
         const todoAnchor = meta?.todo_synthetic_anchor_message_id ?? "";
-        const migrateTodo = todoAnchor.length > 0 && filter.includeMessageId(todoAnchor);
+        const replayFilter = filter.includeReplayMessageId
+            ? { ...filter, includeMessageId: filter.includeReplayMessageId }
+            : filter;
+        const migrateTodo = todoAnchor.length > 0 && replayFilter.includeMessageId(todoAnchor);
 
         db.prepare(
             `INSERT INTO session_meta
@@ -803,10 +804,10 @@ export function copySessionStateForClone(
                 Number.isFinite(meta.pi_stable_id_scheme)
                 ? meta.pi_stable_id_scheme
                 : null,
-            filterStrippedPlaceholderBlob(meta?.stripped_placeholder_ids ?? null, filter),
-            filterIdBlob(meta?.stale_reduce_stripped_ids ?? null, filter),
-            filterProcessedImageBlob(meta?.processed_image_stripped_ids ?? null, filter),
-            clonePiContentDecisions(meta?.merged_reasoning_stripped_ids ?? null, filter),
+            filterStrippedPlaceholderBlob(meta?.stripped_placeholder_ids ?? null, replayFilter),
+            filterIdBlob(meta?.stale_reduce_stripped_ids ?? null, replayFilter),
+            filterProcessedImageBlob(meta?.processed_image_stripped_ids ?? null, replayFilter),
+            clonePiContentDecisions(meta?.merged_reasoning_stripped_ids ?? null, replayFilter),
             pendingMarker,
             migrateTodo ? (meta?.last_todo_state ?? "") : "",
             migrateTodo ? (meta?.todo_synthetic_call_id ?? "") : "",
@@ -824,7 +825,7 @@ export function copySessionStateForClone(
                 db,
                 sourceSessionId,
                 copiedToolCallIds,
-                filter,
+                replayFilter,
             );
             writeReplayDocument(db, destinationSessionId, replayDocument);
         }

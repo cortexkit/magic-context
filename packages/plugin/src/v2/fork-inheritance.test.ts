@@ -71,6 +71,9 @@ function createStore(
         withParentRow?: boolean;
         copyAll?: boolean;
         changedBodyAt?: number;
+        replacedCopyAt?: number;
+        omitIdle?: boolean;
+        partBody?: "same" | "changed";
     } = {},
 ) {
     const dir = createTestTempDirFromPath(join(tmpdir(), "mc-fork-inheritance-"));
@@ -99,14 +102,39 @@ function createStore(
         insert.run(parentId(row.seq), PARENT, row.type, row.seq, row.seq * 100, row.seq * 100);
         // The host copies settled rows through the boundary with the same seq,
         // type and timestamps.
-        if (row.seq <= BOUNDARY_SEQ && (options.copyAll || row.copied !== false))
-            insert.run(forkId(row.seq), FORK, row.type, row.seq, row.seq * 100, row.seq * 100);
+        if (
+            row.seq <= BOUNDARY_SEQ &&
+            (options.copyAll || row.copied !== false) &&
+            !(options.omitIdle && row.type === "idle")
+        )
+            insert.run(
+                options.replacedCopyAt === row.seq
+                    ? "msg_fork_native_replacement"
+                    : forkId(row.seq),
+                FORK,
+                row.type,
+                row.seq,
+                row.seq * 100,
+                row.seq * 100,
+            );
     }
     if (options.changedBodyAt !== undefined)
         db.prepare("UPDATE session_message SET data = ? WHERE id = ?").run(
             '{"text":"different content under the same copy stamps"}',
             forkId(options.changedBodyAt),
         );
+    if (options.partBody) {
+        db.exec(`CREATE TABLE session_part (message_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+            type TEXT NOT NULL, call_id TEXT, data TEXT NOT NULL, PRIMARY KEY (message_id, ordinal))`);
+        const part = db.prepare("INSERT INTO session_part VALUES (?, 0, 'text', NULL, ?)");
+        part.run(parentId(5), '{"type":"text","text":"parent part"}');
+        part.run(
+            forkId(5),
+            options.partBody === "same"
+                ? '{"type":"text","text":"parent part"}'
+                : '{"type":"text","text":"changed part"}',
+        );
+    }
     // The fork's own first turn, after the boundary.
     insert.run("msg_fork_native_user", FORK, "user", 11, 5_000, 5_000);
     db.close();
@@ -296,10 +324,110 @@ describe("seedV2ForkFromParent", () => {
     });
 
     it.each([
-        ["a counted row was not copied", {}, "old-start", parentId(6)],
+        ["a changed interior body", { copyAll: true, changedBodyAt: 5 }],
+        [
+            "an uncopied interior row with unchanged endpoint ordinals",
+            { copyAll: true, replacedCopyAt: 5 },
+        ],
+    ] as const)("rejects a range with two live endpoints and %s", (_name, options) => {
+        const { reader } = createStore(options);
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [5, parentId(6)]);
+        insertCompartment(db, PARENT, 2, [6, parentId(7)], [7, parentId(8)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(2) }]);
+    });
+
+    it.each([
+        "same",
+        "changed",
+    ] as const)("copies a block boundary only when its stored part body is %s", (partBody) => {
+        const { reader } = createStore({ copyAll: true, partBody });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [4, parentId(5)]);
+        db.prepare(
+            "UPDATE compartments SET end_block_index = 0 WHERE session_id = ? AND sequence = 1",
+        ).run(PARENT);
+        insertTag(db, PARENT, `${parentId(5)}:p0`, 1, "dropped");
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence, end_block_index FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual([
+            { sequence: 0, end_block_index: null },
+            ...(partBody === "same" ? [{ sequence: 1, end_block_index: 0 }] : []),
+        ]);
+        const dropped = forkRows(
+            db,
+            "SELECT message_id FROM tags WHERE session_id = ? AND status = 'dropped'",
+        );
+        expect(dropped).toEqual(partBody === "same" ? [{ message_id: `${forkId(5)}:p0` }] : []);
+    });
+
+    it.each([
+        ["gap", [4, parentId(5)], [5, parentId(6)]],
+        ["overlap", [2, parentId(2)], [5, parentId(6)]],
+    ] as const)("stops at a %s even though every summary anchor maps", (_name, start, end) => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 2, [...start], [...end]);
+        insertCompartment(db, PARENT, 4, [6, parentId(7)], [7, parentId(8)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(2) }]);
+    });
+
+    it("does not carry committed, pending, or placeholder removals inside a straddling range", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [8, parentId(9)]);
+        insertTag(db, PARENT, `${parentId(1)}:p0`, 1, "dropped");
+        insertTag(db, PARENT, `${parentId(5)}:p0`, 2, "dropped");
+        insertTag(db, PARENT, `${parentId(6)}:p0`, 3, "active");
+        db.prepare(
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, 3, 'drop', 1, 'opencode2')",
+        ).run(PARENT);
+        db.prepare("UPDATE session_meta SET stripped_placeholder_ids = ? WHERE session_id = ?").run(
+            JSON.stringify([parentId(1), parentId(6)]),
+            PARENT,
+        );
+
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(2) }]);
+        expect(
+            forkRows(
+                db,
+                "SELECT message_id, status FROM tags WHERE session_id = ? AND status = 'dropped'",
+            ),
+        ).toEqual([{ message_id: `${forkId(1)}:p0`, status: "dropped" }]);
+        expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
+        const [meta] = forkRows<{ stripped_placeholder_ids: string }>(
+            db,
+            "SELECT stripped_placeholder_ids FROM session_meta WHERE session_id = ?",
+        );
+        expect(JSON.parse(meta?.stripped_placeholder_ids ?? "[]")).toEqual([forkId(1)]);
+    });
+
+    it.each([
+        [
+            "a counted row was replaced",
+            { copyAll: true, replacedCopyAt: 5 },
+            "old-start",
+            parentId(6),
+        ],
         ["a copied body differs", { copyAll: true, changedBodyAt: 5 }, "old-start", parentId(6)],
         ["a live endpoint conflicts", { copyAll: true }, "old-start", parentId(5)],
-        ["a live endpoint was not copied", {}, parentId(5), "old-end"],
+        [
+            "a live non-counted endpoint was not copied",
+            { copyAll: true, omitIdle: true },
+            parentId(3),
+            parentId(6),
+        ],
     ] as const)("keeps the raw tail when %s", (_case, options, start, end) => {
         const { reader } = createStore(options);
         const db = createContextDb();
@@ -317,16 +445,27 @@ describe("seedV2ForkFromParent", () => {
         expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
     });
 
-    it("does not fill a stale boundary with a row excluded by a before fork", () => {
-        const { reader } = createStore({
-            copyAll: true,
-            boundary: JSON.stringify({ type: "before", messageID: parentId(8) }),
-        });
-        const db = createContextDb();
-        insertCompartment(db, PARENT, 0, [1, parentId(1)], [5, parentId(6)]);
-        insertCompartment(db, PARENT, 1, [6, parentId(7)], [7, "old-end"]);
-        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
-        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(6) }]);
+    it("proves a stale start through the named boundary, not before that same row", () => {
+        const byBoundary = (type: "before" | "through") => {
+            // The same row really exists in both stores; only the fork's boundary changes.
+            const { reader } = createStore({
+                copyAll: true,
+                boundary: JSON.stringify({ type, messageID: parentId(8) }),
+            });
+            const db = createContextDb();
+            insertCompartment(db, PARENT, 0, [1, parentId(1)], [5, parentId(6)]);
+            insertCompartment(db, PARENT, 1, [6, "old-start"], [7, parentId(8)]);
+            expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe(
+                "seeded",
+            );
+            return inherited(db);
+        };
+        const first = { sequence: 0, start: forkId(1), end: forkId(6) };
+        expect(byBoundary("through")).toEqual([
+            first,
+            { sequence: 1, start: forkId(7), end: forkId(8) },
+        ]);
+        expect(byBoundary("before")).toEqual([first]);
     });
 
     it("forks indexed temporal choices by mapped identity, retaining pending and empty rows", () => {
@@ -361,16 +500,15 @@ describe("seedV2ForkFromParent", () => {
         ).toEqual({ marker: null });
         expect(getTemporalDecisions(db, PARENT).has(parentId(10))).toBe(true);
     });
-    it("copies history blocks, tags, drops and queued operations up to the fork boundary", () => {
-        const { reader } = createStore();
+    it("copies a complete history prefix and only the safe replay at the fork boundary", () => {
+        const { reader } = createStore({ copyAll: true });
         const db = createContextDb();
         seedParentState(db);
 
         const outcome = seedV2ForkFromParent({ db, store: reader, sessionId: FORK });
 
         expect(outcome.kind).toBe("seeded");
-        // Blocks 1 and 2 lie within the boundary, with positions renumbered in
-        // the fork; block 3 ends past it.
+        // Blocks 1 and 2 lie wholly within the boundary; block 3 ends past it.
         expect(
             forkRows(
                 db,
@@ -387,7 +525,7 @@ describe("seedV2ForkFromParent", () => {
             {
                 sequence: 2,
                 start_message: 3,
-                end_message: 5,
+                end_message: 6,
                 start_message_id: forkId(4),
                 end_message_id: forkId(7),
             },
@@ -425,16 +563,14 @@ describe("seedV2ForkFromParent", () => {
                 tool_owner_message_id: forkId(7),
             },
             {
-                tag_number: 6,
-                message_id: `${forkId(8)}:p0`,
+                tag_number: 5,
+                message_id: `${forkId(5)}:p0`,
                 status: "active",
                 tool_owner_message_id: null,
             },
         ]);
-        // The queued drop on the boundary message comes along; the one past it does not.
-        expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([
-            { tag_id: 6 },
-        ]);
+        // The copied half of the rejected block stays raw, including its pending drop.
+        expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
         expect(forkRows(db, "SELECT content FROM session_facts WHERE session_id = ?")).toEqual([
             { content: "keep the module boundary" },
         ]);
@@ -448,7 +584,7 @@ describe("seedV2ForkFromParent", () => {
             db,
             "SELECT counter, last_input_tokens, last_context_percentage, stripped_placeholder_ids FROM session_meta WHERE session_id = ?",
         )[0];
-        expect(meta?.counter).toBe(6);
+        expect(meta?.counter).toBe(5);
         expect(meta?.last_input_tokens).toBe(0);
         expect(meta?.last_context_percentage).toBe(0);
         expect(JSON.parse(meta?.stripped_placeholder_ids ?? "[]")).toEqual([forkId(4)]);
@@ -473,7 +609,7 @@ describe("seedV2ForkFromParent", () => {
             db,
             "SELECT tag_number FROM tags WHERE session_id = ? ORDER BY tag_number",
         ).map((row) => row.tag_number);
-        expect(numbers).toEqual([1, 2, 3, 4]);
+        expect(numbers).toEqual([1, 2]);
         expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
     });
 

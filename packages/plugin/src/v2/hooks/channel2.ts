@@ -59,8 +59,8 @@ export async function deliverSynthetic(
     context: Pick<V2Context, "session" | "storage">,
     sessionID: string,
     text: string,
+    id = `msg_${randomBytes(12).toString("hex")}`,
 ): Promise<string> {
-    const id = `msg_${randomBytes(12).toString("hex")}`;
     forgetSyntheticAdmission(context.storage, sessionID);
     await context.storage.set(`synthetic/${sessionID}/${id}`, { id });
     let candidates = pendingCandidates.get(context.storage);

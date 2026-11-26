@@ -1310,13 +1310,25 @@ export class V2StoreReader {
     }
 
     /** Exact body equality for candidate fork pairs, without decoding or returning the bodies. */
-    matchingForkBodies(parentID: string, forkID: string, throughSeq: number): Set<string> {
+    matchingForkBodies(parentID: string, forkID: string, throughSeq: number): Map<string, string> {
+        // Assistant content may be in a separate host table. Compare both ways:
+        // a missing, changed or extra part makes this pair unfit for inheritance.
+        const matchParts = this.hasPartTable()
+            ? `
+               AND NOT EXISTS (
+                   SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = p.id
+                   EXCEPT SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = f.id
+               ) AND NOT EXISTS (
+                   SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = f.id
+                   EXCEPT SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = p.id
+               )`
+            : "";
         const rows = this.prepare(
-            `SELECT p.id FROM session_message p JOIN session_message f ON f.seq = p.seq
+            `SELECT p.id AS parentId, f.id AS forkId FROM session_message p JOIN session_message f ON f.seq = p.seq
              WHERE p.session_id = ? AND f.session_id = ? AND p.seq <= ?
-               AND p.type = f.type AND p.time_created = f.time_created AND p.data = f.data`,
-        ).all(parentID, forkID, throughSeq) as { id: string }[];
-        return new Set(rows.map(({ id }) => id));
+               AND p.type = f.type AND p.time_created = f.time_created AND p.data = f.data${matchParts}`,
+        ).all(parentID, forkID, throughSeq) as { parentId: string; forkId: string }[];
+        return new Map(rows.map(({ parentId, forkId }) => [parentId, forkId]));
     }
 
     latestSequenceForIds(sessionID: string, ids: readonly string[]): number {
