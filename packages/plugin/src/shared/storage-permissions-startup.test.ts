@@ -314,6 +314,24 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         expect(fs.lstatSync(directory).mode & 0o777).toBe(0o700);
     });
 
+    it("repairs a loose private directory when the marker is a directory", () => {
+        const { dir: root } = createTestTempDir("mc-marker-directory-");
+        roots.push(root);
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        const marker = join(root, markerName);
+        fs.unlinkSync(marker);
+        fs.mkdirSync(marker);
+        const sentinel = join(marker, "keep");
+        fs.writeFileSync(sentinel, "keep");
+        const directory = join(root, "some.json.locks");
+        fs.mkdirSync(directory);
+        fs.chmodSync(directory, 0o755);
+
+        expect(() => ensurePrivateStorageDirectorySync(directory)).not.toThrow();
+        expect(fs.lstatSync(directory).mode & 0o777).toBe(0o700);
+        expect(fs.readFileSync(sentinel, "utf8")).toBe("keep");
+    });
+
     it("repairs an unchecked directory when unlink fails on a read-only ancestor", () => {
         const { dir: parent } = createTestTempDir("mc-read-only-ancestor-");
         roots.push(parent);
