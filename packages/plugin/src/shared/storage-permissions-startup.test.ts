@@ -9,15 +9,16 @@ import {
     tightenStorageTreeSync,
     writeStorageFileDurableAtomicSync,
 } from "./storage-permissions";
-import { cleanupTestTempDir, createTestTempDir, createTestTempDirFromPath } from "./test-temp-dir";
+import { cleanupTestTempDir, createTestTempDir } from "./test-temp-dir";
 
 const roots: string[] = [];
 const markerName = ".storage-permissions-v1";
 
 function fixture(): string {
-    fs.mkdirSync("/tmp/opencode/mc-walk-pr", { recursive: true, mode: 0o700 });
-    const root = createTestTempDirFromPath("/tmp/opencode/mc-walk-pr/startup-");
-    roots.push(root);
+    const { dir: parent } = createTestTempDir("mc-storage-startup-");
+    roots.push(parent);
+    const root = join(parent, "storage");
+    fs.mkdirSync(root, { mode: 0o700 });
     fs.mkdirSync(join(root, "lkg-recovery-fences"), { mode: 0o700 });
     for (let i = 0; i < 2000; i++) {
         fs.writeFileSync(join(root, "lkg-recovery-fences", `${i}.json`), "{}", { mode: 0o600 });
@@ -289,15 +290,11 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         expect(tightenStorageTreeSync(root).failures).toBe(0);
         expect(fs.existsSync(join(root, markerName))).toBe(true);
         fs.writeFileSync(decoy, "1\n", { mode: 0o600 });
-        try {
-            const directory = join(root, "lkg-recovery-fences");
-            fs.chmodSync(directory, 0o755);
-            ensurePrivateStorageDirectorySync(directory);
-            expect(fs.existsSync(join(root, markerName))).toBe(false);
-            expect(fs.existsSync(decoy)).toBe(true);
-        } finally {
-            fs.rmSync(decoy, { force: true });
-        }
+        const directory = join(root, "lkg-recovery-fences");
+        fs.chmodSync(directory, 0o755);
+        ensurePrivateStorageDirectorySync(directory);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+        expect(fs.existsSync(decoy)).toBe(true);
     });
 
     it("removes certification while enforcement is off before a later private open", () => {

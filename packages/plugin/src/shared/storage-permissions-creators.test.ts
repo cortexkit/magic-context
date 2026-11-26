@@ -1,8 +1,8 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, readdirSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { cleanupTestTempDir, createTestTempDirFromPath } from "./test-temp-dir";
+import { cleanupTestTempDir, createTestTempDir } from "./test-temp-dir";
 
 const roots: string[] = [];
 
@@ -28,9 +28,8 @@ function child(root: string, script: string) {
 }
 
 describe.skipIf(process.platform === "win32")("storage creation under umask 0", () => {
-    beforeAll(() => mkdirSync("/tmp/opencode/mc-walk-pr", { recursive: true, mode: 0o700 }));
     it("creates helper outputs and public storage records privately before any startup walk", () => {
-        const root = createTestTempDirFromPath("/tmp/opencode/mc-walk-pr/creators-");
+        const { dir: root } = createTestTempDir("mc-storage-creators-");
         roots.push(root);
         const result = child(
             root,
@@ -116,7 +115,7 @@ try {
     });
 
     it("keeps SQLite DB, WAL and SHM private and bounded on a later real open", () => {
-        const root = createTestTempDirFromPath("/tmp/opencode/mc-walk-pr/sqlite-");
+        const { dir: root } = createTestTempDir("mc-storage-sqlite-");
         roots.push(root);
         const result = child(
             root,
@@ -155,7 +154,7 @@ try {
     });
 
     it("retains the full check for third-party model downloads under umask 0", () => {
-        const root = createTestTempDirFromPath("/tmp/opencode/mc-walk-pr/models-");
+        const { dir: root } = createTestTempDir("mc-storage-models-");
         roots.push(root);
         const result = child(
             root,
