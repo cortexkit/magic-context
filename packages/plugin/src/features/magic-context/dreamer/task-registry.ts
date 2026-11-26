@@ -29,6 +29,9 @@ export const CANONICAL_DREAM_TASKS = [
 
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
 
+/** Classification needs a live pool large enough to score memories relative to one another. */
+export const MIN_POOL_TO_CLASSIFY = 10;
+
 export function availableDreamTasks(smartNotesEnabled = true): DreamTaskName[] {
     return CANONICAL_DREAM_TASKS.filter(
         (task) => smartNotesEnabled || task !== "evaluate-smart-notes",

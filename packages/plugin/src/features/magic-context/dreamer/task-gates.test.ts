@@ -259,15 +259,23 @@ describe("dream task backlog probes", () => {
             pending: 1,
             total: 2,
         });
+        for (let index = 0; index < 8; index += 1) {
+            const memory = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "PROJECT_RULES",
+                content: `An existing classified rule ${index}.`,
+            });
+            setMemoryClassification(db, memory.id, { importance: 70 });
+        }
         expect(getDreamTaskBacklog(db, projectIdentity, "classify-memories")).toEqual({
             pending: 2,
-            total: 2,
+            total: 10,
         });
 
         setMemoryClassification(db, first.id, { importance: 80 });
         expect(getDreamTaskBacklog(db, projectIdentity, "classify-memories")).toEqual({
             pending: 1,
-            total: 2,
+            total: 10,
         });
     });
 
@@ -330,10 +338,6 @@ describe("dream task backlog probes", () => {
         expect(sidebarSqlCount).toBe(5);
         expect(expiredActiveCount).toBe(3);
         expect(executorCandidates).toHaveLength(2);
-        expect(getDreamTaskBacklog(db, projectIdentity, "classify-memories")).toEqual({
-            pending: executorCandidates.length,
-            total: 3,
-        });
         expect(getDreamTaskBacklog(db, projectIdentity, "map-memories")).toEqual({
             pending: 2,
             total: 3,
@@ -358,6 +362,18 @@ describe("dream task backlog probes", () => {
         expect(getDreamTaskBacklog(db, projectIdentity, "compress-cues")).toEqual({
             pending: 3,
             total: 3,
+        });
+        for (let index = 0; index < 7; index += 1) {
+            const memory = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "ARCHITECTURE",
+                content: `An existing classified architecture memory ${index}.`,
+            });
+            setMemoryClassification(db, memory.id, { importance: 70 });
+        }
+        expect(getDreamTaskBacklog(db, projectIdentity, "classify-memories")).toEqual({
+            pending: executorCandidates.length,
+            total: 10,
         });
     });
 
@@ -583,7 +599,7 @@ describe("evaluateTaskGate", () => {
         expect(evaluateTaskGate("retrospective", context)).toBe(false);
     });
 
-    test("classify-memories runs when active memories exist", () => {
+    test("classify-memories gates on the live pool irrespective of the last run time", () => {
         db = freshDb();
         const projectIdentity = "/repo/project";
         expect(
@@ -595,11 +611,13 @@ describe("evaluateTaskGate", () => {
             }),
         ).toBe(false);
 
-        insertMemory(db, {
-            projectPath: projectIdentity,
-            category: "PROJECT_RULES",
-            content: "Use Bun for package scripts in this repo.",
-        });
+        for (let index = 0; index < 10; index += 1) {
+            insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "PROJECT_RULES",
+                content: `A live project rule ${index}.`,
+            });
+        }
 
         expect(
             evaluateTaskGate("classify-memories", {
@@ -609,6 +627,67 @@ describe("evaluateTaskGate", () => {
                 promotionThreshold: 3,
             }),
         ).toBe(true);
+    });
+
+    test("classify-memories gate stays closed below the ten-live-memory floor", () => {
+        db = freshDb();
+        const projectIdentity = "/repo/classify-gate-floor";
+        const context = { db, projectIdentity, lastRunAt: null, promotionThreshold: 3 };
+        for (let index = 0; index < 9; index += 1) {
+            const memory = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "PROJECT_RULES",
+                content: `Already classified rule ${index}.`,
+            });
+            setMemoryClassification(db, memory.id, { importance: 70 });
+        }
+        expect(evaluateTaskGate("classify-memories", context)).toBe(false);
+
+        insertMemory(db, {
+            projectPath: projectIdentity,
+            category: "PROJECT_RULES",
+            content: "The tenth live memory is awaiting classification.",
+        });
+        expect(evaluateTaskGate("classify-memories", context)).toBe(true);
+    });
+
+    test("classify-memories backlog excludes pools below the ten-live-memory floor", () => {
+        db = freshDb();
+        const project = "/repo/classify-backlog-floor";
+        for (let index = 0; index < 8; index += 1) {
+            const memory = insertMemory(db, {
+                projectPath: project,
+                category: "PROJECT_RULES",
+                content: `Already classified rule ${index}.`,
+            });
+            setMemoryClassification(db, memory.id, { importance: 70 });
+        }
+        insertMemory(db, {
+            projectPath: project,
+            category: "PROJECT_RULES",
+            content: "One live memory is awaiting classification.",
+        });
+        insertMemory(db, {
+            projectPath: project,
+            category: "PROJECT_RULES",
+            content: "An expired memory does not count toward the floor.",
+            expiresAt: Date.now() - 1,
+        });
+        expect(getDreamTaskBacklogs(db, project, ["classify-memories"])["classify-memories"]).toEqual({
+            pending: 0,
+            total: 9,
+        });
+
+        const tenth = insertMemory(db, {
+            projectPath: project,
+            category: "PROJECT_RULES",
+            content: "The tenth live memory has already been classified.",
+        });
+        setMemoryClassification(db, tenth.id, { importance: 70 });
+        expect(getDreamTaskBacklogs(db, project, ["classify-memories"])["classify-memories"]).toEqual({
+            pending: 1,
+            total: 10,
+        });
     });
 
     test("only curate opens the memory lease for an expired-only pool", () => {
