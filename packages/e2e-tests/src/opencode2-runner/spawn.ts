@@ -330,8 +330,8 @@ export interface OpenCode2SpawnOptions {
 	compactionAuto?: boolean;
 	/**
 	 * The host's own compaction settings (`compaction` in opencode.json), in place of
-	 * the default `{ auto, buffer: 1024, keep: { tokens: 1024 } }`, for a scenario that
-	 * needs its own buffer or keep budget.
+	 * the default `{ auto, background: false, buffer: 1024, keep: { tokens: 1024 } }`,
+	 * for a scenario that needs different compaction behavior or budgets.
 	 */
 	compactionConfig?: Record<string, unknown>;
 	existingIsolation?: OpenCode2Isolation;
@@ -450,7 +450,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 					schemaGuard,
 				],
 				model: `${providerID}/${defaultModelID}`,
-				compaction: options.compactionConfig ?? { auto: options.compactionAuto ?? true, buffer: 1024, keep: { tokens: 1024 } },
+				compaction: options.compactionConfig ?? { auto: options.compactionAuto ?? true, background: false, buffer: 1024, keep: { tokens: 1024 } },
 				providers: {
 					[providerID]: {
 						settings: openCode2ProviderSettings(options, provider.baseURL),

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { openCodeHostGenerationFromVersion } from "@magic-context/core/shared/opencode-db-path";
 import { parse as parseJsonc } from "comment-json";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
@@ -354,6 +355,7 @@ describe("setup-opencode plugin key across host generations", () => {
         const config = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
         expect(config.plugin).toBeUndefined();
         expect(config.plugins).toEqual(["@cortexkit/opencode-magic-context@latest"]);
+        expect(config.compaction).toEqual({ auto: false, prune: false, background: false });
     });
 
     it("leaves a checkout registered under `plugins` alone on a v2 host", () => {
@@ -372,6 +374,7 @@ describe("setup-opencode plugin key across host generations", () => {
         const config = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
         expect(config.plugins).toEqual(["@cortexkit/opencode-magic-context@latest"]);
         expect(config.plugin).toBeUndefined();
+        expect(config.compaction).toEqual({ auto: false, prune: false, background: false });
     });
 
     it("keeps the singular `plugin` key on a v1 host", () => {
@@ -381,6 +384,66 @@ describe("setup-opencode plugin key across host generations", () => {
         const config = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
         expect(config.plugin).toEqual(["@cortexkit/opencode-magic-context@latest"]);
         expect(config.plugins).toBeUndefined();
+        expect(config.compaction).toEqual({ auto: false, prune: false });
+    });
+});
+
+describe("setup-opencode background compaction", () => {
+    const configWith = (fields: string) =>
+        `{\n  "plugins": ["@cortexkit/opencode-magic-context@latest"],\n  "compaction": { ${fields} }\n}\n`;
+
+    it.each([
+        "2.0.22",
+        "2.1.0",
+        "2.3.1",
+        "2.4.2",
+    ])("adds background: false on OpenCode %s even if auto is already off", (version) => {
+        const path = join(tempDir(), "opencode.jsonc");
+        writeFileSync(path, configWith('"auto": false, "prune": false'));
+
+        addPluginToOpenCodeConfig(
+            path,
+            "jsonc",
+            false,
+            true,
+            openCodeHostGenerationFromVersion(version),
+        );
+
+        expect(parseJsonc(readFileSync(path, "utf-8"))).toMatchObject({
+            compaction: { auto: false, prune: false, background: false },
+        });
+    });
+
+    it("switches an explicit background setting off without changing comments or other keys", () => {
+        const path = join(tempDir(), "opencode.jsonc");
+        const original = `\uFEFF{\n  "plugins": ["@cortexkit/opencode-magic-context@latest"],\n  "compaction": {\n    // keep the custom buffer\n    "buffer": 934,\n    "auto": false,\n    "prune": false,\n    "background": true // host setting\n  },\n  "model": "provider/model"\n}\n`;
+        writeFileSync(path, original);
+
+        addPluginToOpenCodeConfig(path, "jsonc", false, true, "v2");
+
+        expect(readFileSync(path, "utf-8")).toBe(
+            original.replace('"background": true', '"background": false'),
+        );
+    });
+
+    it.each([
+        [true, '"auto": false, "prune": false, "background": false'],
+        [false, '"auto": true, "prune": true, "background": true'],
+        [false, '"auto": true, "prune": true'],
+    ] as const)("leaves the existing file unchanged when Magic Context compaction is %s and nothing needs repair", (enabled, fields) => {
+        const path = join(tempDir(), "opencode.jsonc");
+        const original = configWith(fields);
+        writeFileSync(path, original);
+
+        addPluginToOpenCodeConfig(path, "jsonc", false, enabled, "v2");
+
+        expect(readFileSync(path, "utf-8")).toBe(original);
+    });
+
+    it("does not add a compaction block in compaction-off mode", () => {
+        const path = join(tempDir(), "opencode.jsonc");
+        addPluginToOpenCodeConfig(path, "none", false, false, "v2");
+        expect(parseJsonc(readFileSync(path, "utf-8"))).not.toHaveProperty("compaction");
     });
 });
 

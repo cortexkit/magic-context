@@ -123,6 +123,20 @@ After each Magic Context release, update both hosts before using either one, so 
 
 ---
 
+## `/compact` doesn't shrink the next request in OpenCode 2
+
+Starting with OpenCode 2.3.1, OpenCode can prepare a compaction after a high-usage reply. If `/compact` uses that prepared answer, Magic Context keeps your history, but the next request doesn't get smaller.
+
+From the affected project, run:
+
+```bash
+npx @cortexkit/magic-context@latest doctor --fix
+```
+
+This sets `compaction.background` to `false` in your OpenCode config. You don't need to restart OpenCode for this setting. If doctor names a config it couldn't change, set `compaction.background` to `false` there too.
+
+---
+
 ## Context stuck high
 
 **Symptom:** Context usage stays near or above the execution threshold even after several turns. Historian seems to be running but the percentage doesn't drop.

@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readJsoncFile } from "./jsonc-parser";
+import { parseJsonc, readJsoncFile } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigDirs, getOpenCodeGlobalConfigDir } from "./opencode-config-dir";
 import type { OpenCodeHostGeneration } from "./opencode-db-path";
@@ -8,6 +9,7 @@ import type { OpenCodeHostGeneration } from "./opencode-db-path";
 interface OpenCodeConfig {
     compaction?: {
         auto?: boolean;
+        background?: boolean;
         prune?: boolean;
         keep?: { tokens?: number };
         buffer?: number;
@@ -461,23 +463,54 @@ type CompactionBlock = NonNullable<OpenCodeConfig["compaction"]>;
 function readCompactionFromConfigFiles(
     directory: string,
     hostGeneration: OpenCodeHostGeneration,
+    readConfig = readJsoncFile<OpenCodeConfig>,
 ): CompactionBlock {
     const merged: CompactionBlock = {};
     for (const filePath of openCodeConfigFileChain(directory, hostGeneration)) {
         let block: CompactionBlock | undefined;
         try {
-            block = readJsoncFile<OpenCodeConfig>(filePath)?.compaction;
+            block = readConfig(filePath)?.compaction;
         } catch {
             // Intentional: each config read is best-effort. An unreadable file
             // leaves the chain inconclusive rather than failing detection.
         }
         if (!block || typeof block !== "object") continue;
         if (block.auto !== undefined) merged.auto = block.auto;
+        if (block.background !== undefined) merged.background = block.background;
         if (block.prune !== undefined) merged.prune = block.prune;
         if (block.buffer !== undefined) merged.buffer = block.buffer;
         if (block.keep !== undefined) merged.keep = { ...merged.keep, ...block.keep };
     }
     return merged;
+}
+
+/** File-based input to doctor's advisory finding; never used to block plugin boot. */
+export function readOpenCode2BackgroundCompaction(directory: string): {
+    enabled: boolean;
+    backgroundSource: string | undefined;
+    unreadable: string[];
+} {
+    let backgroundSource: string | undefined;
+    const unreadable: string[] = [];
+    const compaction = readCompactionFromConfigFiles(directory, "v2", (path) => {
+        try {
+            const text = readFileSync(path, "utf-8").replace(/^\uFEFF/, "");
+            const config = parseJsonc<OpenCodeConfig>(text);
+            if (!config || typeof config !== "object" || Array.isArray(config)) {
+                throw new Error("Expected an OpenCode config object");
+            }
+            if (config.compaction?.background !== undefined) backgroundSource = path;
+            return config;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable.push(path);
+            return null;
+        }
+    });
+    return {
+        enabled: compaction.auto !== false && compaction.background !== false,
+        backgroundSource,
+        unreadable,
+    };
 }
 
 /** Whether a merged block carries any key this host generation acts on. */

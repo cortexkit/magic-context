@@ -67,6 +67,12 @@ On later passes, when the store reader finds a checkpoint in the draft, the adap
 
 Attachments on restored rows must be instances of the host's own `Media.Asset` class on OpenCode 2.0.15 and later. `fold/host-media.ts` obtains the constructor from an asset the host already put in a draft, or from the host's schema; when neither works, the attachment is replaced by a short deterministic note so the replay stays byte-stable.
 
+### Background preparation in OpenCode 2.3.1 and later
+
+OpenCode can prepare a compaction after a high-usage reply, before anyone asks for one. It does this when both `compaction.auto` and `compaction.background` are on, which is the host default. Magic Context needs the running checkpoint row to tie its update to the compaction the host is actually saving. A prepared answer is made before that row exists. If OpenCode reuses it for `/compact`, Magic Context preserves the history, but the next request does not get smaller.
+
+Setup sets `compaction.background: false` when Magic Context manages compaction. For a hand-installed plugin, run `npx @cortexkit/magic-context@latest doctor --fix` from the affected project. No OpenCode restart is needed for this setting.
+
 ## Hidden completions
 
 OpenCode 2 gives plugins no child-session prompt loop, so hidden model work runs through `hidden-completion.ts`, a `generate`-backed executor. `hooks/hidden-child.ts` registers three hidden agents with no tools (`historian`, `dreamer-classifier`, and the base `dreamer` agent), shapes prompts that match a known marker into text-only drafts, applies output caps and temperature only when configured, and refuses unrecognised prompts on sessions it owns. Empty or length-capped completions are rejected before parsing.
