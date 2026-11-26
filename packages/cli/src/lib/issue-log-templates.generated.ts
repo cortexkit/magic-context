@@ -3571,6 +3571,7 @@ const SOURCE_FILE_DATA = [
 "16:ngle-store-refusal.ts",
 "15:torage-busy-refusal.ts",
 "18:e-ahead-refusal.ts",
+"19:d-compartment-gaps.ts",
 "16:rict-thinking-prefix.ts",
 "18:p-content.ts",
 "1a:structural-noise.ts",

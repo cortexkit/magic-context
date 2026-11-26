@@ -86,6 +86,13 @@ export interface CoordinateRebaseNotice {
      * of sessions stamped by an older build from running again.
      */
     neighbourRecoveryAt: number | null;
+    /** Conversion-only gaps copied into a fork; absent on a session the host converted. */
+    inheritedGaps?: InheritedCoordinateGap[];
+}
+
+export interface InheritedCoordinateGap {
+    start: number;
+    end: number;
 }
 
 /** One compartment named in the rebase notice: its sequence and message range. */
@@ -207,6 +214,22 @@ export function readCoordinateRebaseNotice(
                 : [];
         return {
             generation: record.generation,
+            ...(Object.hasOwn(record, "inheritedGaps")
+                ? {
+                      inheritedGaps: Array.isArray(record.inheritedGaps)
+                          ? record.inheritedGaps.flatMap((gap) =>
+                                gap &&
+                                typeof gap === "object" &&
+                                Number.isSafeInteger(gap.start) &&
+                                Number.isSafeInteger(gap.end) &&
+                                gap.start >= 1 &&
+                                gap.end >= gap.start
+                                    ? [{ start: gap.start as number, end: gap.end as number }]
+                                    : [],
+                            )
+                          : [],
+                  }
+                : {}),
             previousGeneration:
                 record.previousGeneration === "v1" || record.previousGeneration === "v2"
                     ? record.previousGeneration
@@ -1245,6 +1268,9 @@ export function recoverUnresolvedCompartments(
             const derivedSequences = new Set(result.derived.map((note) => note.sequence));
             const notice: CoordinateRebaseNotice = {
                 generation,
+                ...(previous?.inheritedGaps !== undefined
+                    ? { inheritedGaps: previous.inheritedGaps }
+                    : {}),
                 previousGeneration: previous?.previousGeneration ?? null,
                 at: previous?.at ?? now,
                 unresolvedCompartments: result.unresolved.length,

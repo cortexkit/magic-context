@@ -1331,6 +1331,21 @@ export class V2StoreReader {
         return new Map(rows.map(({ parentId, forkId }) => [parentId, forkId]));
     }
 
+    /** Step through counted rows without reading past the consumer's decision. */
+    *iterateRawMessageRange(sessionID: string, from: number, to: number): Iterable<StoreRow> {
+        if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from)
+            return;
+        // Read one row at a time. Older hosts report SQLite API misuse when
+        // a consumer stops early and closes a native statement iterator.
+        let anchor: RawMessageOrdinalAnchor | undefined;
+        for (let after = from - 1; after < to; after += 1) {
+            const [row] = this.messagePage(sessionID, after, 1, to, anchor);
+            if (!row) return;
+            anchor = { id: row.id, timeCreated: row.time_created ?? 0 };
+            yield row;
+        }
+    }
+
     latestSequenceForIds(sessionID: string, ids: readonly string[]): number {
         let latest = -1;
         for (let offset = 0; offset < ids.length; offset += 500) {

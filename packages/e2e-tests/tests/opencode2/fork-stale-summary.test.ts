@@ -6,6 +6,7 @@ import { OpenCode } from "@opencode/client";
 import { copySessionStateForClone } from "../../../plugin/src/features/magic-context/storage-clone";
 import { validateStoredCompartments } from "../../../plugin/src/hooks/magic-context/compartment-runner-validation";
 import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-session-formatting";
+import { nonNarrativeStoredGapRanges } from "../../../plugin/src/hooks/magic-context/stored-compartment-gaps";
 import type { StatusDetail } from "../../../plugin/src/shared/rpc-types";
 import {
 	type RpcPortFileRecord,
@@ -20,9 +21,11 @@ import {
 	buildForkIdMap,
 	forkCloneFilter,
 } from "../../../plugin/src/v2/fork-inheritance";
+import { readV2MessageRange } from "../../../plugin/src/v2/hooks/store";
 import {
 	RAW_MESSAGE_TYPES,
 	type V2RowStamp,
+	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
 import {
 	inspectOpenFiles,
@@ -85,12 +88,49 @@ async function until<T>(read: () => T | undefined, label: string): Promise<T> {
 	}
 }
 
+function discoverStatusRpc(directory: string, storage: string | undefined) {
+	return until(() => {
+		const path = rpcPortDir(required(storage), directory);
+		if (!existsSync(path)) return undefined;
+		const file = readdirSync(path).find((name) => /^port-.*\.json$/.test(name));
+		return file
+			? (JSON.parse(
+					readFileSync(join(path, file), "utf8"),
+				) as RpcPortFileRecord)
+			: undefined;
+	}, "local status RPC");
+}
+
+async function callStatusRpc(
+	discovery: RpcPortFileRecord,
+	directory: string,
+	method: "status-detail" | "sidebar-snapshot" | "recomp",
+	sessionId: string,
+): Promise<StatusDetail> {
+	const response = await fetch(
+		`http://127.0.0.1:${discovery.port}/rpc/${method}`,
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${discovery.token}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ sessionId, directory }),
+		},
+	);
+	expect(response.ok).toBe(true);
+	return (await response.json()) as StatusDetail;
+}
+
 test.each([
 	"healthy and stale fork bytes",
 	"straddling summary keeps copied raw messages",
 	"rejected live coverage restores raw messages beyond stored ordinals",
 	"damaged parent fork keeps an uncut tail",
 	"fork repair is shown until rebuild without changing the wire",
+	"converted gap remains valid in the fork and its descendant",
+	"an accepted gap still stops the prefix when its copied row differs",
+	"one-sided and neighbouring coverage protects the wire",
 ] as const)("OpenCode 2: %s", async (scenario) => {
 	const fixture = isolation(createE2ETempDir("mc-issue-968-"));
 	const source = join(
@@ -206,6 +246,7 @@ test.each([
 		const captures = () => required(host).mock.requests();
 		const historicalRequests = () =>
 			captures().filter(({ body }) => body.model === HISTORIAN);
+		const unseededForks = new Set<string>();
 		async function turn(sessionID: string, text: string) {
 			const before = captures().length;
 			await client.session.prompt({ sessionID, text });
@@ -220,6 +261,20 @@ test.each([
 						body.model === "mock-model" && JSON.stringify(body).includes(text),
 				);
 			expect(requests).toHaveLength(1);
+			if (unseededForks.delete(sessionID)) {
+				const reader = new V2StoreReader(source);
+				try {
+					const rows = summaries(sessionID);
+					const gaps = usingDb(context, (db) =>
+						nonNarrativeStoredGapRanges(db, sessionID, rows, (from, to) =>
+							readV2MessageRange(reader, sessionID, from, to),
+						),
+					);
+					expect(validateStoredCompartments(rows, gaps)).toBeNull();
+				} finally {
+					reader.close();
+				}
+			}
 			return required(requests[0]);
 		}
 		async function wrap(sessionID: string) {
@@ -282,8 +337,11 @@ test.each([
 						.run(value, parent, sequence),
 				false,
 			);
-		const fork = async () =>
-			(await client.session.fork({ sessionID: parent })).id;
+		const fork = async (sessionID = parent) => {
+			const child = (await client.session.fork({ sessionID })).id;
+			unseededForks.add(child);
+			return child;
+		};
 		const expectInherited = (sessionID: string) => {
 			const copies = rawRows(sessionID);
 			expect(
@@ -329,6 +387,141 @@ test.each([
 				},
 				false,
 			);
+		}
+		if (scenario === "one-sided and neighbouring coverage protects the wire") {
+			usingDb(
+				context,
+				(db) =>
+					db
+						.prepare(
+							"DELETE FROM compartments WHERE session_id = ? AND sequence > 1",
+						)
+						.run(parent),
+				false,
+			);
+			setAnchor(1, "end", required(parentRows[5]).id);
+			setAnchor(1, "start", "missing-start");
+			for (const ordinal of [3, 5, 7]) markDropped(parent, ordinal);
+			for (const neighbour of [false, true]) {
+				setAnchor(
+					0,
+					"end",
+					neighbour ? required(parentRows[1]).id : "missing-end",
+				);
+				usingDb(
+					context,
+					(db) =>
+						db
+							.prepare(
+								"UPDATE compartments SET start_message = ? WHERE session_id = ? AND sequence = 1",
+							)
+							.run(neighbour ? 4 : 3, parent),
+					false,
+				);
+				const sessionID = await fork();
+				const input = seen(
+					await turn(
+						sessionID,
+						"Keep raw content even when a saved endpoint is missing.",
+					),
+				);
+				expect(summaries(sessionID).map(({ sequence }) => sequence)).toEqual(
+					neighbour ? [0] : [],
+				);
+				expect(input).toContain("Original-CHARLIE");
+				expect(input).toContain("Original-BRAVO");
+				expect(input).not.toContain("Original-DELTA");
+			}
+			return;
+		}
+		if (
+			scenario ===
+				"converted gap remains valid in the fork and its descendant" ||
+			scenario ===
+				"an accepted gap still stops the prefix when its copied row differs"
+		) {
+			const changed = scenario.startsWith("an accepted gap");
+			usingDb(
+				context,
+				(db) => {
+					db.prepare("DELETE FROM compartments WHERE session_id = ?").run(
+						parent,
+					);
+					const insert =
+						db.prepare(`INSERT INTO compartments (session_id, sequence, start_message, end_message,
+					start_message_id, end_message_id, title, content, p1, created_at, harness)
+					VALUES (?,?,?,?,?,?,?,?,?,1,'opencode2')`);
+					for (const [sequence, [from, to]] of [
+						[1, 4],
+						[6, 10],
+						[11, 14],
+					].entries()) {
+						const text = `Summary through ${to}.`;
+						insert.run(
+							parent,
+							sequence,
+							from,
+							to,
+							required(parentRows[required(from) - 1]).id,
+							required(parentRows[required(to) - 1]).id,
+							`FixtureSummary${sequence}`,
+							text,
+							text,
+						);
+					}
+					db.prepare(
+						"UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?",
+					).run(JSON.stringify({ generation: "v2", healedGaps: 1 }), parent);
+				},
+				false,
+			);
+			const sessionID = await fork();
+			const parentGap = required(parentRows[4]).id;
+			const forkGap = required(rawRows(sessionID)[4]).id;
+			// The parent accepts this counted synthetic message only because
+			// of its v2 conversion record.
+			usingDb(
+				source,
+				(db) => {
+					db.prepare(
+						"UPDATE session_message SET type = 'synthetic' WHERE id IN (?, ?)",
+					).run(parentGap, forkGap);
+					if (changed)
+						db.prepare(
+							"UPDATE session_message SET data = json_set(data, '$.text', 'Changed copied gap') WHERE id = ?",
+						).run(forkGap);
+				},
+				false,
+			);
+			const input = seen(
+				await turn(sessionID, "Read from the converted fork."),
+			);
+			expect(summaries(sessionID).map(({ sequence }) => sequence)).toEqual(
+				changed ? [0] : [0, 1, 2],
+			);
+			const sidebar = async (id: string) =>
+				callStatusRpc(
+					await discoverStatusRpc(
+						fixture.cwd,
+						fixture.env.MAGIC_CONTEXT_STORAGE_DIR,
+					),
+					fixture.cwd,
+					"sidebar-snapshot",
+					id,
+				);
+			expect((await sidebar(sessionID)).forkHistoryGap).not.toBe(true);
+			if (!changed) {
+				for (const seq of [0, 1, 2])
+					expect(input).toContain(`FixtureSummary${seq}`);
+				const child = await fork(sessionID);
+				await turn(child, "Read from a descendant of the converted fork.");
+				expect(summaries(child).map(({ sequence }) => sequence)).toEqual([
+					0, 1, 2,
+				]);
+				expect((await sidebar(child)).forkHistoryGap).not.toBe(true);
+			}
+			expect((await wrap(sessionID)).status).toBe("success");
+			return;
 		}
 		if (scenario === "straddling summary keeps copied raw messages") {
 			const straddling = await fork();
@@ -408,13 +601,12 @@ test.each([
 			for (const marker of MISSING_RAW)
 				expect(repairedInput).not.toContain(marker);
 			expect(repairedInput).toContain("Original-FOXTROT");
-			expect((await wrap(repaired)).status).toBe("success");
-			expect(summaries(repaired).at(-1)?.startMessage).toBe(11);
 			expect(summaries(parent)).toEqual(staleParent);
 
 			// This anchor is live, but contradicts the saved end position. The next
 			// summary must not advance the cut across the resulting raw tail.
 			setAnchor(1, "end", required(parentRows[4]).id);
+			const conflictingParent = summaries(parent);
 			const unproven = await fork();
 			const unprovenRequest = await turn(unproven, "Read the intact raw tail.");
 			expect(summaries(unproven).map(({ sequence }) => sequence)).toEqual([0]);
@@ -428,8 +620,12 @@ test.each([
 				tokens,
 				WINDOW,
 			);
+			// Finish all fixture writes before starting either background historian.
+			expect((await wrap(repaired)).status).toBe("success");
+			expect(summaries(repaired).at(-1)?.startMessage).toBe(11);
 			expect((await wrap(unproven)).status).toBe("success");
 			expect(summaries(unproven).at(-1)?.startMessage).toBe(3);
+			expect(summaries(parent)).toEqual(conflictingParent);
 			return;
 		}
 		if (
@@ -463,6 +659,7 @@ test.each([
 		// the middle. A seed on the next turn must not silently recopy this fork.
 		async function seedBroken() {
 			const broken = await fork();
+			unseededForks.delete(broken); // Pre-existing broken history, not a clone seed.
 			const brokenRows = rawRows(broken);
 			usingDb(
 				context,
@@ -491,7 +688,7 @@ test.each([
 			// is in no parent summary. Only the former removal depends on coverage.
 			markDropped(broken, 3);
 			markDropped(broken, 5);
-			const child = (await client.session.fork({ sessionID: broken })).id;
+			const child = await fork(broken);
 			const input = seen(await turn(child, "Read the surviving fork history."));
 			expect(summaries(child).map(({ sequence }) => sequence)).toEqual([0]);
 			expect(input).toContain("Original-CHARLIE");
@@ -501,42 +698,14 @@ test.each([
 		}
 		const control = await seedBroken();
 		const server = required(host);
-		const discovery = await until(() => {
-			const directory = rpcPortDir(
-				required(fixture.env.MAGIC_CONTEXT_STORAGE_DIR),
-				fixture.cwd,
-			);
-			if (!existsSync(directory)) return undefined;
-			const file = readdirSync(directory).find((name) =>
-				/^port-.*\.json$/.test(name),
-			);
-			return file
-				? (JSON.parse(
-						readFileSync(join(directory, file), "utf8"),
-					) as RpcPortFileRecord)
-				: undefined;
-		}, "local status RPC");
+		const discovery = await discoverStatusRpc(
+			fixture.cwd,
+			fixture.env.MAGIC_CONTEXT_STORAGE_DIR,
+		);
 		const rpc = async (
 			method: "status-detail" | "sidebar-snapshot" | "recomp",
 			sessionID = broken,
-		) => {
-			const response = await fetch(
-				`http://127.0.0.1:${discovery.port}/rpc/${method}`,
-				{
-					method: "POST",
-					headers: {
-						Authorization: `Bearer ${discovery.token}`,
-						"Content-Type": "application/json",
-					},
-					body: JSON.stringify({
-						sessionId: sessionID,
-						directory: fixture.cwd,
-					}),
-				},
-			);
-			expect(response.ok).toBe(true);
-			return (await response.json()) as StatusDetail;
-		};
+		) => callStatusRpc(discovery, fixture.cwd, method, sessionID);
 		const allRows = () =>
 			usingDb(source, (db) =>
 				db

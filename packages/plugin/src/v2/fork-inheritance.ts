@@ -5,6 +5,7 @@ import {
     type CopySessionStateForCloneResult,
     copySessionStateForClone,
 } from "../features/magic-context/storage-clone";
+import type { InheritedCoordinateGap } from "../features/magic-context/store-generation-rebase";
 import { validateStoredCompartments } from "../hooks/magic-context/compartment-runner-validation";
 import { nonNarrativeStoredGapRanges } from "../hooks/magic-context/stored-compartment-gaps";
 import { sessionLog } from "../shared/logger";
@@ -118,14 +119,19 @@ interface ForkCompartmentProof {
     matchingBodies(): ReadonlyMap<string, string>;
     acceptedGaps(
         source: readonly CloneCompartmentBoundary[],
-    ): Array<{ start: number; end: number }>;
+        onConversionGap?: (gap: InheritedCoordinateGap) => void,
+    ): InheritedCoordinateGap[];
 }
 
 function selectForkCompartments(
     source: readonly CloneCompartmentBoundary[],
     map: V2ForkIdMap,
     proof: ForkCompartmentProof,
-): { rows: Map<number, CloneCompartmentRow>; keepRaw: Set<string> } {
+): {
+    rows: Map<number, CloneCompartmentRow>;
+    keepRaw: Set<string>;
+    inheritedGaps: InheritedCoordinateGap[];
+} {
     const rows = new Map<number, CloneCompartmentRow>();
     const forkId = (id: string) => map.parentToFork.get(id) ?? "";
     const ordinal = (id: string) => map.forkOrdinals.get(forkId(id));
@@ -136,9 +142,8 @@ function selectForkCompartments(
         // Compare the current parent and fork. An edit to the parent after the
         // summary was written but before forking can leave both rows with the
         // same new text; neither store records what the historian read.
-        // Keep the ordinal, preceding-anchor and boundary checks even where
-        // the other guards imply them: they detect extra counted rows, make
-        // stale-anchor proof explicit, and distinguish the fork-point rejection.
+        // Ordinal equality also rejects a counted row added to the fork,
+        // which the body comparison of paired rows alone cannot see.
         for (const [position, id] of map.parentOrdinals) {
             if (ordinal(id) !== position || matching.get(id) !== forkId(id)) break;
             length = position;
@@ -148,6 +153,8 @@ function selectForkCompartments(
     let stopped = false;
     let lastEnd = 0;
     let acceptedGaps: ReturnType<ForkCompartmentProof["acceptedGaps"]> | undefined;
+    const conversionGaps: InheritedCoordinateGap[] = [];
+    const inheritedGaps: InheritedCoordinateGap[] = [];
     for (const [i, row] of source.entries()) {
         const { sequence, startMessage, endMessage, startMessageId, endMessageId } = row;
         const start = ordinal(startMessageId);
@@ -162,6 +169,8 @@ function selectForkCompartments(
             const endSeq = end === undefined ? proof.sequenceForId(endMessageId) : undefined;
             const previous = source[i - 1];
             const next = source[i + 1];
+            // An out-of-bound ID also fails the uncopied-ID check. Keep the
+            // distinction so an ordinary fork point gets the right reason.
             if ((startSeq ?? -1) > map.throughSeq || (endSeq ?? -1) > map.throughSeq) {
                 reason = "outside the fork boundary";
             } else if (startSeq !== undefined || endSeq !== undefined) {
@@ -180,10 +189,12 @@ function selectForkCompartments(
             } else if (
                 startMessage > lastEnd + 1 &&
                 validateStoredCompartments(
-                    // The existing prefix already passed. Present only its end
-                    // and the candidate to the historian's own gap validator.
+                    // Collapse the already-accepted prefix so the validator
+                    // checks just the gap before this candidate.
                     lastEnd > 0 ? [{ startMessage: 1, endMessage: lastEnd }, row] : [row],
-                    (acceptedGaps ??= proof.acceptedGaps(source)),
+                    (acceptedGaps ??= proof.acceptedGaps(source, (gap) =>
+                        conversionGaps.push(gap),
+                    )),
                 ) !== null
             ) {
                 reason = "gap before range";
@@ -193,8 +204,9 @@ function selectForkCompartments(
             ) {
                 reason = "live endpoint conflicts with the stored position";
             } else if (
-                // A stale id needs a witness in today's projection: a live
-                // abutting anchor on that side, or the beginning of history.
+                // A stale ID needs an anchor among the host's current rows.
+                // The preceding check repeats the prior range proof, but
+                // makes the witness for a stale start explicit here.
                 (start === undefined && previous && ordinal(previous.endMessageId) !== lastEnd) ||
                 (end === undefined &&
                     (!next ||
@@ -217,6 +229,12 @@ function selectForkCompartments(
                     startMessageId: forkId(map.parentOrdinals.get(startMessage) ?? ""),
                     endMessageId: forkId(map.parentOrdinals.get(endMessage) ?? ""),
                 });
+                const conversionGap = conversionGaps.find(
+                    ({ start, end }) => start === lastEnd + 1 && end === startMessage - 1,
+                );
+                // Every position in this gap was proved equal in the fork,
+                // so the accepted interval already uses the fork's ordinals.
+                if (conversionGap) inheritedGaps.push(conversionGap);
                 lastEnd = endMessage;
                 continue;
             }
@@ -227,9 +245,9 @@ function selectForkCompartments(
             `v2 fork skipped compartment ${sequence} (${startMessage}-${endMessage}): ${reason}`,
         );
     }
-    // Only rows in a rejected summary lose replay. Outside those ranges an
-    // independent parent drop is still valid. Count a block boundary as covered
-    // here even when the summary describes only part of the message.
+    // Do not replay removals from a rejected summary: those messages need to
+    // remain raw. An independent drop outside those ranges still applies.
+    // Protect a boundary message even if the summary covers only part of it.
     const keepRaw = new Set<string>();
     if (stopped) {
         const count = map.parentOrdinals.size;
@@ -256,9 +274,9 @@ function selectForkCompartments(
         for (const [index, row] of source.entries()) {
             if (rows.has(row.sequence)) continue;
             markCovered(row.startMessage, row.endMessage);
-            // The parent can render using its live IDs instead of saved
-            // ordinals. Also retain anything covered by that reading, with
-            // the same neighboring endpoint fallback for a missing ID.
+            // The host can cut at a live end ID past the saved ordinal. Use
+            // the neighbouring live endpoint to bound a missing side. If
+            // only one side resolves, extend the stored range to cover it.
             const { start, end } = live[index] ?? {};
             if (start === undefined && end === undefined) continue;
             const previousEnd = live[index - 1]?.end;
@@ -268,6 +286,11 @@ function selectForkCompartments(
                 (previousEnd !== undefined ? previousEnd + 1 : index === 0 ? 1 : undefined);
             const to = end ?? (nextStart !== undefined ? nextStart - 1 : undefined);
             if (from !== undefined && to !== undefined) markCovered(from, to);
+            else
+                markCovered(
+                    Math.min(row.startMessage, from ?? row.startMessage),
+                    Math.max(row.endMessage, to ?? row.endMessage),
+                );
         }
         let covering = 0;
         for (const [position, id] of map.parentOrdinals) {
@@ -275,7 +298,7 @@ function selectForkCompartments(
             if (covering > 0) keepRaw.add(id);
         }
     }
-    return { rows, keepRaw };
+    return { rows, keepRaw, inheritedGaps };
 }
 
 /**
@@ -298,6 +321,7 @@ export function forkCloneFilter(
         return mapped ? `${mapped}${suffix}` : undefined;
     };
     let keepRaw: ReadonlySet<string> | undefined;
+    let inheritedGaps: InheritedCoordinateGap[] = [];
     const includeMessageId = (messageId: string) =>
         mapMessageScoped(messageId) !== undefined || copiedToolCallIds.has(messageId);
     return {
@@ -306,8 +330,10 @@ export function forkCloneFilter(
             ((source) => {
                 const plan = selectForkCompartments(source, idMap, proof);
                 keepRaw = plan.keepRaw;
+                inheritedGaps = plan.inheritedGaps;
                 return plan.rows;
             }),
+        inheritedCoordinateGaps: proof && (() => inheritedGaps),
         resolveBoundaryOrdinal: (messageId) => {
             const forkId = idMap.parentToFork.get(messageId);
             return forkId ? idMap.forkOrdinals.get(forkId) : undefined;
@@ -356,7 +382,7 @@ export type V2ForkSeedOutcome =
     | { kind: "destination-not-empty"; parentSessionID: string };
 
 /** What the seed reads from the OpenCode 2 store. */
-export interface V2ForkStore extends Pick<V2StoreReader, "messagePage"> {
+export interface V2ForkStore extends Pick<V2StoreReader, "iterateRawMessageRange"> {
     forkOrigin(sessionID: string): V2ForkOrigin | null;
     sessionExists(sessionID: string): boolean;
     sequenceForId(sessionID: string, id: string): number | undefined;
@@ -468,14 +494,19 @@ export function seedV2ForkFromParent(args: {
                 sequenceForId: (id) => store.sequenceForId(parentSessionID, id),
                 matchingBodies: () =>
                     store.matchingForkBodies(parentSessionID, sessionId, throughSeq),
-                acceptedGaps: (source) =>
-                    nonNarrativeStoredGapRanges(db, parentSessionID, source, (start, end) =>
-                        readV2MessageRange(
-                            store,
-                            parentSessionID,
-                            start,
-                            Math.min(end, idMap.parentOrdinals.size),
-                        ),
+                acceptedGaps: (source, onConversionGap) =>
+                    nonNarrativeStoredGapRanges(
+                        db,
+                        parentSessionID,
+                        source,
+                        (start, end) =>
+                            readV2MessageRange(
+                                store,
+                                parentSessionID,
+                                start,
+                                Math.min(end, idMap.parentOrdinals.size),
+                            ),
+                        onConversionGap,
                     ),
             },
             toolOwners,

@@ -8,18 +8,28 @@ import { runMigrations } from "../features/magic-context/migrations";
 import { copySessionStateForClone } from "../features/magic-context/storage-clone";
 import { initializeDatabase } from "../features/magic-context/storage-db";
 import {
+    readCoordinateRebaseNotice,
+    rebaseSessionCoordinates,
+} from "../features/magic-context/store-generation-rebase";
+import {
     freezeTemporalDecisions,
     getTemporalDecisions,
 } from "../features/magic-context/temporal-decisions";
+import { validateStoredCompartments } from "../hooks/magic-context/compartment-runner-validation";
+import { executeStatus } from "../hooks/magic-context/execute-status";
+import { nonNarrativeStoredGapRanges } from "../hooks/magic-context/stored-compartment-gaps";
+import { _resetHarnessForTesting, setHarness } from "../shared/harness";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
     buildForkIdMap,
     forkBoundarySeq,
-    seedV2ForkFromParent,
+    seedV2ForkFromParent as seed,
     sessionHasMagicContextState,
 } from "./fork-inheritance";
+import { readForkHistoryGap } from "./hooks/fork-history-status";
+import { readV2MessageRange } from "./hooks/store";
 import { type V2RowStamp, V2StoreReader } from "./store-reader";
 
 // Issue 608: an OpenCode 2 fork copies its parent's rows into a new session
@@ -29,6 +39,7 @@ import { type V2RowStamp, V2StoreReader } from "./store-reader";
 
 const PARENT = "ses_parent";
 const FORK = "ses_fork";
+const DESCENDANT = "ses_descendant";
 /** OpenCode derives the copied ids from the fork event's id. */
 const FORK_PREFIX = "msg_0ffb3ee0f002forkEvent00";
 
@@ -75,7 +86,8 @@ function createStore(
         omitIdle?: boolean;
         partBody?: "same" | "changed";
         copyThrough?: number;
-        syntheticAt?: number;
+        syntheticAt?: number | number[];
+        descendant?: boolean;
     } = {},
 ) {
     const dir = createTestTempDirFromPath(join(tmpdir(), "mc-fork-inheritance-"));
@@ -97,11 +109,22 @@ function createStore(
         boundary,
     );
     db.prepare("INSERT INTO session_v2 (id) VALUES ('ses_plain')").run();
+    if (options.descendant)
+        db.prepare(
+            "INSERT INTO session_v2 (id, fork_session_id, fork_boundary) VALUES (?,?,?)",
+        ).run(
+            DESCENDANT,
+            FORK,
+            JSON.stringify({
+                type: "through",
+                messageID: forkId(options.copyThrough ?? BOUNDARY_SEQ),
+            }),
+        );
     const insert = db.prepare(
         "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, '{}')",
     );
     for (const row of PARENT_ROWS) {
-        const type = options.syntheticAt === row.seq ? "synthetic" : row.type;
+        const type = [options.syntheticAt ?? []].flat().includes(row.seq) ? "synthetic" : row.type;
         insert.run(parentId(row.seq), PARENT, type, row.seq, row.seq * 100, row.seq * 100);
         // The host copies settled rows through the boundary with the same seq,
         // type and timestamps.
@@ -109,7 +132,7 @@ function createStore(
             row.seq <= (options.copyThrough ?? BOUNDARY_SEQ) &&
             (options.copyAll || row.copied !== false) &&
             !(options.omitIdle && row.type === "idle")
-        )
+        ) {
             insert.run(
                 options.replacedCopyAt === row.seq
                     ? "msg_fork_native_replacement"
@@ -120,6 +143,16 @@ function createStore(
                 row.seq * 100,
                 row.seq * 100,
             );
+            if (options.descendant)
+                insert.run(
+                    `msg_descendant_${row.seq}`,
+                    DESCENDANT,
+                    type,
+                    row.seq,
+                    row.seq * 100,
+                    row.seq * 100,
+                );
+        }
     }
     if (options.changedBodyAt !== undefined)
         db.prepare("UPDATE session_message SET data = ? WHERE id = ?").run(
@@ -230,6 +263,52 @@ function forkRows<T>(db: Database, sql: string): T[] {
     return db.prepare(sql).all(FORK) as T[];
 }
 
+function seedV2ForkFromParent(args: Parameters<typeof seed>[0]): ReturnType<typeof seed> {
+    const result = seed(args);
+    if (result.kind === "seeded") {
+        const { db, store, sessionId } = args;
+        const rows = db
+            .prepare(`SELECT start_message AS startMessage, end_message AS endMessage
+            FROM compartments WHERE session_id = ? ORDER BY sequence`)
+            .all(sessionId) as { startMessage: number; endMessage: number }[];
+        expect(
+            validateStoredCompartments(
+                rows,
+                nonNarrativeStoredGapRanges(db, sessionId, rows, (from, to) =>
+                    readV2MessageRange(store, sessionId, from, to),
+                ),
+            ),
+        ).toBeNull();
+    }
+    return result;
+}
+
+function convertedFork(edited = false, descendant = false) {
+    const { reader } = createStore({
+        copyAll: true,
+        copyThrough: 9,
+        syntheticAt: 4,
+        descendant,
+        changedBodyAt: edited ? 4 : undefined,
+        boundary: JSON.stringify({ type: "through", messageID: parentId(9) }),
+    });
+    const db = createContextDb();
+    insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+    insertCompartment(db, PARENT, 1, [4, parentId(5)], [6, parentId(7)]);
+    insertCompartment(db, PARENT, 2, [7, parentId(8)], [8, parentId(9)]);
+    db.prepare(
+        "INSERT INTO session_meta (session_id, harness, coordinate_rebase_notice) VALUES (?, 'opencode2', ?)",
+    ).run(PARENT, JSON.stringify({ generation: "v2", healedGaps: 12, neighbourRecoveryAt: 100 }));
+    return { db, reader };
+}
+
+function inheritedMark(db: Database, sessionID = FORK): unknown {
+    const row = db
+        .prepare("SELECT coordinate_rebase_notice AS mark FROM session_meta WHERE session_id = ?")
+        .get(sessionID) as { mark: string | null } | undefined;
+    return row?.mark ? JSON.parse(row.mark) : null;
+}
+
 describe("buildForkIdMap", () => {
     const stamps = (session: "parent" | "fork"): V2RowStamp[] =>
         PARENT_ROWS.filter(
@@ -308,20 +387,7 @@ describe("seedV2ForkFromParent", () => {
         false,
         true,
     ])("crosses a parent-accepted gap only if the gap bytes match (edited=%s)", (edited) => {
-        const { reader } = createStore({
-            copyAll: true,
-            copyThrough: 9,
-            syntheticAt: 4,
-            changedBodyAt: edited ? 4 : undefined,
-            boundary: JSON.stringify({ type: "through", messageID: parentId(9) }),
-        });
-        const db = createContextDb();
-        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
-        insertCompartment(db, PARENT, 1, [4, parentId(5)], [6, parentId(7)]);
-        insertCompartment(db, PARENT, 2, [7, parentId(8)], [8, parentId(9)]);
-        db.prepare(
-            "INSERT INTO session_meta (session_id, harness, coordinate_rebase_notice) VALUES (?, 'opencode2', ?)",
-        ).run(PARENT, JSON.stringify({ generation: "v2" }));
+        const { reader, db } = convertedFork(edited, !edited);
         expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
         expect(
             forkRows(
@@ -329,6 +395,136 @@ describe("seedV2ForkFromParent", () => {
                 "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
             ),
         ).toEqual((edited ? [0] : [0, 1, 2]).map((sequence) => ({ sequence })));
+        const marker = { generation: "v2", inheritedGaps: [{ start: 3, end: 3 }] };
+        expect(inheritedMark(db)).toEqual(edited ? null : marker);
+        if (!edited) {
+            expect(seedV2ForkFromParent({ db, store: reader, sessionId: DESCENDANT }).kind).toBe(
+                "seeded",
+            );
+            expect(inheritedMark(db, DESCENDANT)).toEqual(marker);
+        }
+    });
+
+    it("lets a conversion heal both gaps but limits a fork to its inherited interval", () => {
+        const { reader } = createStore({ copyAll: true, syntheticAt: [4, 6] });
+        const db = createContextDb();
+        const rows = [
+            { startMessage: 1, endMessage: 2 },
+            { startMessage: 4, endMessage: 4 },
+            { startMessage: 6, endMessage: 7 },
+        ];
+        const mark = db.prepare(
+            "INSERT INTO session_meta (session_id, coordinate_rebase_notice) VALUES (?, ?)",
+        );
+        mark.run(PARENT, JSON.stringify({ generation: "v2" }));
+        mark.run(FORK, JSON.stringify({ generation: "v2", inheritedGaps: [{ start: 3, end: 3 }] }));
+        const check = (id: string) =>
+            validateStoredCompartments(
+                rows,
+                nonNarrativeStoredGapRanges(db, id, rows, (from, to) =>
+                    readV2MessageRange(reader, id, from, to),
+                ),
+            );
+        expect(check(PARENT)).toBeNull();
+        expect(check(FORK)).toBe("gap before message 6 (expected 5)");
+    });
+
+    it.each([
+        false,
+        true,
+    ])("the inherited mark neither converts the fork nor interferes with neighbour recovery (repair=%s)", (repair) => {
+        const { reader, db } = convertedFork();
+        setHarness("opencode2");
+        try {
+            expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe(
+                "seeded",
+            );
+        } finally {
+            _resetHarnessForTesting();
+        }
+        const before = executeStatus(db, FORK);
+        expect(before).not.toContain("Store Conversion");
+        expect(before).not.toContain("Saved History Recovery");
+        let projectionReads = 0;
+        const rebase = () =>
+            rebaseSessionCoordinates({
+                db,
+                sessionId: FORK,
+                generation: "v2",
+                readMessages: () => {
+                    projectionReads++;
+                    return [...readV2MessageRange(reader, FORK, 1, 8)];
+                },
+            });
+        expect(rebase().status).toBe("stamped");
+        expect(projectionReads).toBe(0);
+        if (repair)
+            db.prepare(`UPDATE compartments SET end_message = 7, end_message_id = 'missing-end',
+                rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 1`).run(FORK);
+        expect(rebase().status).toBe(repair ? "repaired" : "unchanged");
+        expect(projectionReads).toBe(repair ? 1 : 0);
+        const mark = readCoordinateRebaseNotice(db, FORK);
+        expect(mark?.inheritedGaps).toEqual([{ start: 3, end: 3 }]);
+        expect(mark?.healedGaps).toBe(0);
+        expect(mark?.neighbourRecoveryAt === null).toBe(!repair);
+        const after = executeStatus(db, FORK);
+        expect(after).not.toContain("Store Conversion");
+        expect(after.includes("Saved History Recovery")).toBe(repair);
+    });
+
+    it("keeps one-sided live coverage and uses a live neighbour when available", () => {
+        for (const neighbour of [false, true]) {
+            const { reader } = createStore({ copyAll: true });
+            const db = createContextDb();
+            insertCompartment(
+                db,
+                PARENT,
+                0,
+                [1, parentId(1)],
+                [2, neighbour ? parentId(2) : "gone-end"],
+            );
+            insertCompartment(db, PARENT, 1, [neighbour ? 4 : 3, "gone-start"], [4, parentId(7)]);
+            for (const [i, seq] of [4, 6, 7, 8].entries())
+                insertTag(db, PARENT, `${parentId(seq)}:p0`, i + 1, "dropped");
+            expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe(
+                "seeded",
+            );
+            expect(
+                forkRows(
+                    db,
+                    "SELECT message_id FROM tags WHERE session_id = ? AND status = 'dropped'",
+                ),
+            ).toEqual([{ message_id: `${forkId(8)}:p0` }]);
+        }
+    });
+
+    it("stops the diagnosis at the first narrative row and caches until the summaries change", () => {
+        const { path } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, FORK, 0, [1, forkId(1)], [2, forkId(2)]);
+        insertCompartment(db, FORK, 1, [7, forkId(8)], [7, forkId(8)]);
+        let opens = 0;
+        let rows = 0;
+        const opened = () => {
+            opens++;
+            const reader = new V2StoreReader(path);
+            const iterate = reader.iterateRawMessageRange.bind(reader);
+            reader.iterateRawMessageRange = function* (...args) {
+                for (const row of iterate(...args)) {
+                    rows++;
+                    yield row;
+                }
+            };
+            return reader;
+        };
+        expect(readForkHistoryGap(db, opened, FORK)).toBe(true);
+        expect(rows).toBe(1);
+        expect(readForkHistoryGap(db, opened, FORK)).toBe(true);
+        expect(opens).toBe(1);
+        db.prepare("DELETE FROM compartments WHERE session_id = ?").run(FORK);
+        insertCompartment(db, FORK, 0, [1, forkId(1)], [7, forkId(8)]);
+        expect(readForkHistoryGap(db, opened, FORK)).toBe(false);
+        expect(opens).toBe(1);
     });
 
     it("restores removals covered by live IDs beyond a rejected stored range", () => {
@@ -776,7 +972,7 @@ describe("seedV2ForkFromParent", () => {
             sequenceForId: (session: string, id: string) => reader.sequenceForId(session, id),
             matchingForkBodies: (parent: string, fork: string, through: number) =>
                 reader.matchingForkBodies(parent, fork, through),
-            messagePage: reader.messagePage.bind(reader),
+            iterateRawMessageRange: reader.iterateRawMessageRange.bind(reader),
             rowStampsThrough: (session: string, through: number) => {
                 const rows = reader.rowStampsThrough(session, through);
                 if (session === FORK && !sessionHasMagicContextState(db, FORK)) {

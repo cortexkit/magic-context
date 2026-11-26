@@ -52,6 +52,8 @@ export interface CloneSessionStateFilter {
     selectCompartments?: (
         source: readonly CloneCompartmentBoundary[],
     ) => ReadonlyMap<number, CloneCompartmentRow>;
+    /** Conversion-only gaps crossed by this OpenCode 2 fork's copied prefix. */
+    inheritedCoordinateGaps?: () => readonly { start: number; end: number }[];
     includeTag(tag: CloneTagRow): boolean;
     includeMessageId(messageId: string): boolean;
     /** Filter saved content-removal decisions independently of copied message and note IDs. */
@@ -814,6 +816,12 @@ export function copySessionStateForClone(
             migrateTodo ? (mapMessageId(filter, todoAnchor) ?? "") : "",
             migrateTodo ? (meta?.todo_synthetic_state_json ?? "") : "",
         );
+        const inheritedGaps = filter.inheritedCoordinateGaps?.() ?? [];
+        if (inheritedGaps.length > 0) {
+            db.prepare(
+                "UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?",
+            ).run(JSON.stringify({ generation: "v2", inheritedGaps }), destinationSessionId);
+        }
         // Clone owns the whole replay document so its filtered native state
         // cannot be overwritten by the CLI's later generic metadata copy.
         const metaColumnRows = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{

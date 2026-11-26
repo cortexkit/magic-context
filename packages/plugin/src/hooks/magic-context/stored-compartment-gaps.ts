@@ -1,4 +1,7 @@
-import { readCoordinateRebaseNotice } from "../../features/magic-context/store-generation-rebase";
+import {
+    type InheritedCoordinateGap,
+    readCoordinateRebaseNotice,
+} from "../../features/magic-context/store-generation-rebase";
 import type { Database } from "../../shared/sqlite";
 import { readRawSessionMessageRange } from "./read-session-chunk";
 import {
@@ -11,10 +14,11 @@ export function nonNarrativeStoredGapRanges(
     db: Database,
     sessionId: string,
     compartments: ReadonlyArray<{ startMessage: number; endMessage: number }>,
-    readRange: (start: number, end: number) => RawMessage[] = (start, end) =>
+    readRange: (start: number, end: number) => Iterable<RawMessage> = (start, end) =>
         readRawSessionMessageRange(sessionId, start, end),
+    onConversionGap?: (gap: InheritedCoordinateGap) => void,
 ): Array<{ start: number; end: number }> {
-    const rebasedToV2 = readCoordinateRebaseNotice(db, sessionId)?.generation === "v2";
+    const notice = readCoordinateRebaseNotice(db, sessionId);
     const safeRanges: Array<{ start: number; end: number }> = [];
     for (let index = 0; index < compartments.length; index += 1) {
         const previous = compartments[index - 1];
@@ -23,18 +27,37 @@ export function nonNarrativeStoredGapRanges(
         const start = previous ? previous.endMessage + 1 : 1;
         const end = current.startMessage - 1;
         if (end < start) continue;
-        const messages = readRange(start, end);
-        const ordinals = new Set(messages.map((message) => message.ordinal));
-        const complete =
-            ordinals.size === end - start + 1 &&
-            messages.every(
-                (message) =>
-                    message.ordinal >= start &&
-                    message.ordinal <= end &&
-                    (areRustHistorianSyntheticParts(message.parts) ||
-                        (index > 0 && rebasedToV2 && isStrictGapHealingMessage(message))),
-            );
-        if (complete) safeRanges.push({ start, end });
+        const ordinals = new Set<number>();
+        let valid = true;
+        let needsConversion = false;
+        for (const message of readRange(start, end)) {
+            const { ordinal } = message;
+            if (ordinal < start || ordinal > end) {
+                valid = false;
+                break;
+            }
+            if (!areRustHistorianSyntheticParts(message.parts)) {
+                const insideInheritedGap = notice?.inheritedGaps?.some(
+                    (gap) => gap.start <= ordinal && ordinal <= gap.end,
+                );
+                if (
+                    index === 0 ||
+                    notice?.generation !== "v2" ||
+                    insideInheritedGap === false ||
+                    !isStrictGapHealingMessage(message)
+                ) {
+                    valid = false;
+                    break;
+                }
+                needsConversion = true;
+            }
+            ordinals.add(ordinal);
+        }
+        if (valid && ordinals.size === end - start + 1) {
+            const gap = { start, end };
+            safeRanges.push(gap);
+            if (needsConversion) onConversionGap?.(gap);
+        }
     }
     return safeRanges;
 }

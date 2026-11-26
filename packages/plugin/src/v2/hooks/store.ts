@@ -110,21 +110,17 @@ export function rawMessagePage(rows: readonly StoreRow[], afterOrdinal: number):
 }
 
 /** Read an exact ordinal range directly from the host store. */
-export function readV2MessageRange(
-    reader: Pick<V2StoreReader, "messagePage">,
+export function* readV2MessageRange(
+    reader: Pick<V2StoreReader, "iterateRawMessageRange">,
     sessionID: string,
     from: number,
     to: number,
-): RawMessage[] {
-    const messages: RawMessage[] = [];
-    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1) return messages;
-    for (let after = from - 1; after < to; ) {
-        const rows = reader.messagePage(sessionID, after, Math.min(to - after, 500), to);
-        messages.push(...rawMessagePage(rows, after));
-        if (rows.length === 0) break;
-        after += rows.length;
+): Iterable<RawMessage> {
+    let after = from - 1;
+    for (const row of reader.iterateRawMessageRange(sessionID, from, to)) {
+        yield* rawMessagePage([row], after);
+        after += 1;
     }
-    return messages;
 }
 
 export interface V2RawMessageReader {
