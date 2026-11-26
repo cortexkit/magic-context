@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import openCode2Versions from "../packages/e2e-tests/opencode2-versions.json";
 import {
     area,
     budgetedCommand,
@@ -82,7 +83,7 @@ test("local full expands CI's matrices, including both slow modes and every Rust
     ).toEqual([1, 2, 3, 4]);
     expect(
         full.filter((lane) => lane.id === "e2e-host-opencode2").map((lane) => lane.matrix.version),
-    ).toEqual(["2.0.22", "2.1.0", "2.0.22", "2.1.0"]);
+    ).toEqual([...openCode2Versions.compatibility, ...openCode2Versions.compatibility]);
     expect(full.some((lane) => lane.id === "rust-raw-replay-review")).toBe(true);
 });
 

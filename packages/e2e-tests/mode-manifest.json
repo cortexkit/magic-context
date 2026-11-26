@@ -636,6 +636,14 @@
                     "reason": "OpenCode 2 binds the host-created durable compaction row after the GA hook returns",
                     "contract_ref": "PARITY.md#2-fold-ownership"
                 }
+            ],
+            "knownFailures": [
+                {
+                    "hostVersions": ["2.3.2", "2.4.2"],
+                    "tests": ["deferred compaction marker (plan v6) [opencode2] > publishes a compartment and supplies a durable native checkpoint without a provider call"],
+                    "class": "defect",
+                    "reason": "Magic Context refuses the completed compaction boundary and does not write the admission that proves the checkpoint can be replayed after restart."
+                }
             ]
         },
         {
