@@ -63,8 +63,10 @@ pub mod seal;
 pub mod snapshot;
 pub mod wire;
 
-/// Unplaced legacy project rows have paths in place of addresses. A change
-/// already encoded for sending has its address in the saved envelope.
+/// Unplaced legacy project rows have paths in place of addresses, so they can
+/// never be sent. A change already encoded for sending is not counted: its
+/// `frozen` column holds the encoded message, which carries the address it was
+/// given when it was encoded, whatever the memory row says now.
 #[cfg(any(unix, feature = "memory-replica"))]
 pub(crate) fn local_only_outbox_count(conn: &Connection, states: &str) -> rusqlite::Result<u64> {
     let mut stmt = conn.prepare(&format!(
