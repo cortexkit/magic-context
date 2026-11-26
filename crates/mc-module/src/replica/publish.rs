@@ -75,7 +75,10 @@ fn log_unaddressable(kind: &str, owner: &str, reason: &str) {
         .insert(format!("{kind}:{owner}"))
     {
         tracing::warn!(
-            "ck-mc: replica: {kind} rows of owner {owner} stay on this computer: {reason}"
+            %kind,
+            %owner,
+            %reason,
+            "ck-mc: replica: rows of this kind stay on this computer"
         );
     }
 }
@@ -127,10 +130,11 @@ impl Replica {
             .to_bytes();
             if envelope.len() > MAX_ENVELOPE_BYTES {
                 tracing::warn!(
-                    "ck-mc: replica: {} at revision {} is {} bytes sealed, over the hub's {MAX_ENVELOPE_BYTES}; it stays on this computer",
-                    item.body.global_id,
-                    item.body.revision,
-                    envelope.len()
+                    global_id = %item.body.global_id,
+                    revision = %item.body.revision,
+                    bytes = %envelope.len(),
+                    max_bytes = %MAX_ENVELOPE_BYTES,
+                    "ck-mc: replica: the sealed envelope is over the hub's size limit; it stays on this computer"
                 );
                 let changes = self
                     .db

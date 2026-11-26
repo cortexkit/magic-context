@@ -98,7 +98,7 @@ fn drops(view: &View, mid: &str, part: &str) -> bool {
 /// The line logged when a repeat of the reading view `view` was built on is
 /// ignored.
 fn ignored_line(view: u64) -> String {
-    format!("ignoring a prompt of {READING} tokens: view {view} was built on this same reading")
+    format!("ignoring a prompt reading used to build the named view; no request under it has been measured yet, so waiting for a new reading session=s1 prompt_tokens={READING} view_version={view}")
 }
 
 /// The first notice at the threshold builds a view from its reading, and the

@@ -185,7 +185,7 @@ pub(crate) fn events_get(db: Option<&ContextDb>, params: &Value) -> Result<Value
     let proposal = db
         .with_connection(|conn| super::by_id(conn, id))
         .map_err(|error| {
-            tracing::warn!("ck-mc: events_get failed: {error}");
+            tracing::warn!(%error, "ck-mc: events_get failed");
             unavailable()
         })?
         .filter(|proposal| proposal.project == project)
@@ -210,7 +210,7 @@ pub(crate) fn state(db: Option<&ContextDb>, params: &Value) -> Result<Value, Err
     let db = db.ok_or_else(unavailable)?;
     let proposal = super::refresh_id(db, id)
         .map_err(|error| {
-            tracing::warn!("ck-mc: {STATE} failed: {error}");
+            tracing::warn!(method = %STATE, %error, "ck-mc: docs proposal state change failed");
             unavailable()
         })?
         .ok_or_else(not_visible)?;

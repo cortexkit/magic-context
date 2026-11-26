@@ -677,7 +677,7 @@ impl SynapseCatalog {
     fn scored(&self, module: &str) {
         let mut falling_back = self.falling_back.lock().expect("Synapse state");
         if std::mem::replace(&mut *falling_back, false) {
-            tracing::info!("ck-mc: ctx_search rerank: Synapse module {module} scores again");
+            tracing::info!(%module, "ck-mc: ctx_search rerank: Synapse module scores again");
         }
     }
 
@@ -685,7 +685,9 @@ impl SynapseCatalog {
         let mut falling_back = self.falling_back.lock().expect("Synapse state");
         if !std::mem::replace(&mut *falling_back, true) {
             tracing::info!(
-                "ck-mc: ctx_search rerank fallback ({reason}) from Synapse module {module}; keeping the original ranking until it scores again"
+                %reason,
+                %module,
+                "ck-mc: ctx_search rerank fallback from a Synapse module; keeping the original ranking until it scores again"
             );
         }
     }
@@ -946,7 +948,8 @@ pub fn log_fallback(reason: &str) {
     let mut logged = LOGGED.lock().expect("rerank log");
     if logged.insert(reason.to_owned(), ()).is_none() {
         tracing::info!(
-            "ck-mc: ctx_search rerank fallback ({reason}); keeping the original ranking"
+            %reason,
+            "ck-mc: ctx_search rerank fallback; keeping the original ranking"
         );
     }
 }

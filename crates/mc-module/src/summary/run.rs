@@ -323,12 +323,12 @@ pub async fn run<C: RunnerClient + Router>(
         // of it, so this line is the only place to see which model wrote a
         // session's summaries.
         tracing::info!(
-            "ck-mc: session {}: summary model {} on {}/{} (decision {})",
-            job.session.session,
-            answer.route.route_key(),
-            job.session.runner,
-            child_harness,
-            answer.decision_id,
+            session = %job.session.session,
+            model = %answer.route.route_key(),
+            runner = %job.session.runner,
+            %child_harness,
+            decision_id = %answer.decision_id,
+            "ck-mc: session: summary model was routed"
         );
         let window = fit::Window {
             counter: crate::count::Counter::for_model(Some(&answer.route.route_key())),
@@ -1326,9 +1326,10 @@ async fn send_and_wait_inner<C: RunnerClient>(
                 .and_then(|error| error.cause.as_deref())
                 .unwrap_or("unknown");
             tracing::info!(
-                "ck-mc: session {}: {} never ran: handover_failed (cause {cause})",
-                child.session.session,
-                how.send.name(),
+                session = %child.session.session,
+                operation = %how.send.name(),
+                %cause,
+                "ck-mc: session: the request never ran: handover_failed"
             );
             return Err(never_ran("handover_failed", how.send).into());
         }
@@ -1404,7 +1405,11 @@ async fn queued_timeout<C: RunnerClient>(
         ) {
             return never_ran(send_states::NOT_DELIVERED, send);
         }
-        tracing::warn!("ck-mc: queued summarizer submission {submission} in {} timed out without confirmed withdrawal", child.session.session);
+        tracing::warn!(
+            %submission,
+            session = %child.session.session,
+            "ck-mc: queued summarizer submission timed out without confirmed withdrawal"
+        );
     }
     SummaryError::Uncertain(TIMED_OUT.into())
 }
@@ -1858,13 +1863,16 @@ async fn cancel_waiting<C: RunnerClient>(client: &C, child: &Child, run_id: &str
     };
     match &cancelled {
         Ok(true) => tracing::info!(
-            "ck-mc: child run {run_id} in {} no longer has a reader; cancelled it",
-            child.session.session
+            %run_id,
+            session = %child.session.session,
+            "ck-mc: a child run no longer has a reader; cancelled it"
         ),
         Ok(false) => {}
         Err(error) => tracing::warn!(
-            "ck-mc: summarizer run {run_id} in {} was waiting without a reader; cancelling it failed: {error}",
-            child.session.session
+            %run_id,
+            session = %child.session.session,
+            %error,
+            "ck-mc: a summarizer run was waiting without a reader; cancelling it failed"
         ),
     }
     matches!(cancelled, Ok(true))

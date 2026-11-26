@@ -31,7 +31,7 @@ pub(super) fn store_unavailable() -> Refusal {
 
 /// A store error while reading: the store is there but the read failed.
 pub(super) fn store_error(error: rusqlite::Error) -> Refusal {
-    tracing::warn!("ck-mc: app read failed: {error}");
+    tracing::warn!(%error, "ck-mc: app read failed");
     store_unavailable()
 }
 

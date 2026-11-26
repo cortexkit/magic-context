@@ -138,6 +138,11 @@ const LOG_TEMPLATES = ISSUE_LOG_TEMPLATES.map((template) => ({
     ...template,
     sanitizedParts: template.parts.map((part) => sanitizeDiagnosticText(part)),
 }));
+const FIXED_MC_SENTENCES = new Set(
+    ISSUE_LOG_TEMPLATES.filter(
+        ({ parts, slots }) => slots.length === 0 && parts[0]?.startsWith("ck-mc:"),
+    ).map(({ parts }) => parts[0]),
+);
 
 function templateValues(value: string, parts: readonly string[]): string[] | null {
     if (!value.startsWith(parts[0])) return null;
@@ -299,8 +304,13 @@ export class IssuePrivacy {
         });
         // Legacy telemetry often writes timings in prose rather than structured fields.
         const timings = safe.match(/\b\d+(?:\.\d+)?(?:ms|µs|us|s)\b/g) ?? [];
-        // Match before splitting event fields: quotes, duplicate keys and order are source text.
+        // Older messages can contain field-like prose, so match them before splitting fields.
+        // A structured ck-mc sentence is safe after splitting only if it exactly matches a literal.
         const message = parsed?.rawMessage ?? globalLine?.[2] ?? line;
+        const fixedSentence =
+            parsed?.grammar === "fleet-r2" && FIXED_MC_SENTENCES.has(parsed.message)
+                ? parsed.message
+                : undefined;
         const identities = [...message.matchAll(LOG_ID)].map(([id]) => {
             if (id.startsWith("ses_") || id.startsWith("msg_")) return this.session(id);
             if (id.startsWith("dir:")) return this.path(id.slice(4));
@@ -315,7 +325,7 @@ export class IssuePrivacy {
                 : (globalLine?.[1] ?? ""),
             parsed?.level ?? line.match(/^(TRACE|DEBUG|INFO|WARN|ERROR)\b/)?.[1] ?? "LOG",
             `${logger}${session}`,
-            this.logMessage(message),
+            fixedSentence ?? this.logMessage(message),
             ...fields,
             ...timings,
             ...identities,

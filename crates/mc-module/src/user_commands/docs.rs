@@ -27,7 +27,7 @@ pub(super) fn dismiss<'a>(
     // was applied or went stale meanwhile is not offered for dismissal.
     let proposal = proposals::refresh_id(db, id)
         .map_err(|error| {
-            tracing::warn!("ck-mc: user command read failed: {error}");
+            tracing::warn!(%error, "ck-mc: user command read failed");
             super::owner::unavailable_error()
         })?
         .filter(|proposal| proposal.project == project)

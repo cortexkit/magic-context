@@ -210,7 +210,10 @@ pub fn classes_for(
     let profile = match crate::memory_profile::prompt_profile(context) {
         Ok(profile) => profile,
         Err(refusal) => {
-            tracing::warn!("ck-mc: the head ranks memories without decay classes: {refusal:?}");
+            tracing::warn!(
+                ?refusal,
+                "ck-mc: the head ranks memories without decay classes"
+            );
             return Arc::default();
         }
     };

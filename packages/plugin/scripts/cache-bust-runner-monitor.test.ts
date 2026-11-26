@@ -360,6 +360,44 @@ test("head log discovery excludes workers, summarizers and old setups, including
     expect([...loadRunnerHeads(root, NOW).keys()].sort()).toEqual([colon, "head"]);
 });
 
+test("head log discovery reads fixed decisions and quoted event fields in mixed logs", () => {
+    const root = directory();
+    const path = join(root, "fixture.log");
+    const structured = (at: number, body: string) =>
+        `${new Date(at).toISOString()} INFO  magic-context: [harness=local] ck-mc: session: ${body}`;
+    writeFileSync(path, [
+        line(NOW - 10, setup),
+        structured(NOW - 9, 'setup session=alfonso:head:agent_123 harness=pi preset=head model="a model"'),
+        structured(NOW - 8, "setup session=worker harness=pi preset=worker"),
+        structured(NOW - 7, 'view accepted session=alfonso:head:agent_123 view_version=4 edit_count=5 cut="cut through msg_4" note="private text with session=other and a \\"quote\\""'),
+        structured(NOW - 6, 'view accepted session=head view_version=1 edit_count=3 cut="no cut" note=""'),
+        structured(NOW - 5, "other activity session=alfonso:head:agent_123"),
+    ].join("\n"));
+    const heads = loadRunnerHeads(root, NOW, path);
+    expect([...heads.keys()]).toEqual(["head", "alfonso:head:agent_123"]);
+    expect(heads.get("alfonso:head:agent_123")).toMatchObject({
+        harness: "pi", lastLogAt: NOW - 5,
+        decisions: [{ kind: "setup" }, { kind: "view", version: 4, detail: "view=4 edits=5 cut=msg_4" }],
+    });
+    expect(heads.get("head")?.decisions.at(-1)?.detail).toBe("view=1 edits=3 cut=none");
+    const session = "session=head";
+    for (const [body, kind, version] of [
+        [`runner refused a view at a step boundary ${session} view_version=2 refusal=BadChecksum`, "view_refused", 2],
+        [`unknown answer to a view ${session} view_version=3 answer=unexpected`, "view_unknown", 3],
+        [`rebuilding a view instead of offering it again ${session} view_version=4 reason="missing policy"`, "view_reoffer_failed", 4],
+        [`ignoring a prompt reading from a stale view; waiting for a reading under the current view ${session} prompt_tokens=50`, "stale_reading", undefined],
+        [`the runner requested a ride ${session} causes="[ExplicitFlush, SignatureConstraint]" request_tokens=None`, "ride", undefined],
+        [`signed floor moved; the runner strips signed reasoning at or before it ${session} signed_floor=msg_5`, "signed_floor", undefined],
+        [`summary started over a message range ${session} first_ordinal=1 last_ordinal=4`, "summary_start", undefined],
+        [`published summaries ${session} summary_count=1 through_ordinal=4`, "summary_publish", undefined],
+        [`no summary started ${session} usage_pct=50 threshold_pct=75 reason="already running"`, "no_summary", undefined],
+    ] as const) {
+        const decision = parseRunnerDecision(structured(NOW, body), "head");
+        expect(decision?.kind).toBe(kind);
+        expect(decision?.version).toBe(version);
+    }
+});
+
 test("active heads without any feed row are visible, inactive heads and empty metered replies are not gaps", async () => {
     const root = directory();
     const path = join(root, "fixture.log");

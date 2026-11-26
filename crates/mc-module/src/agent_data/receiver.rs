@@ -128,9 +128,9 @@ pub(crate) async fn diverged<H: Host>(
             Err(error) => {
                 tracing::warn!(
                     cut = %cut,
-                    "ck-mc: agent-data cut {cut}: the rows of session {} here cannot be read ({}); diverged answers unknown",
-                    label(&incoming.session),
-                    error.message
+                    session = %label(&incoming.session),
+                    error = %error.message,
+                    "ck-mc: agent-data cut: local session rows cannot be read; diverged answers unknown"
                 );
                 DivergedState::Unknown
             }
@@ -192,10 +192,10 @@ pub(crate) async fn import<H: Host>(host: &H, cut: &str, refs: &Refs) -> Result<
     for (one, _) in &staged {
         tracing::info!(
             cut = %cut,
-            "ck-mc: session {}/{}/{} is staged by agent-data cut {cut} and refused session_moving until the move is activated or aborted",
-            one.runner,
-            one.harness,
-            one.session
+            runner = %one.runner,
+            harness = %one.harness,
+            session = %one.session,
+            "ck-mc: session: staged by an agent-data cut and refused session_moving until the move is activated or aborted"
         );
     }
     let cut = cut.to_owned();
@@ -818,8 +818,8 @@ async fn prepare_install<H: Host>(
     for session in &sessions {
         tracing::info!(
             cut = %cut,
-            "ck-mc: session {} is being installed by agent-data cut {cut}; it stays refused session_moving until the install is finished, by a repeat of activate or at the next start",
-            label(session)
+            session = %label(session),
+            "ck-mc: session: installation by an agent-data cut is in progress; refusing session_moving until the install is finished by repeating activate or at the next start"
         );
     }
     Ok(())
@@ -917,8 +917,9 @@ async fn release_one<H: Host>(
     crash::point("activate facts released").await;
     tracing::info!(
         cut = %cut,
-        "ck-mc: session {} is installed by agent-data cut {cut}: its mode3.db rows are cleared and {released} waiting facts are retryable; it is served once the cut is recorded activated",
-        label(&session)
+        session = %label(&session),
+        released_count = %released,
+        "ck-mc: session: installed by an agent-data cut; its mode3.db rows are cleared and waiting facts are retryable; it is served once the cut is recorded activated"
     );
     Ok(())
 }
@@ -960,8 +961,8 @@ pub(crate) async fn abort<H: Host>(host: &H, cut: &str, record: &Cut) -> Result<
     for session in &staged {
         tracing::info!(
             cut = %cut,
-            "ck-mc: agent-data cut {cut} was aborted before its install; its staged snapshot of session {} is deleted and the session's rows here are as they were",
-            label(session)
+            session = %label(session),
+            "ck-mc: agent-data cut: aborted before install; the staged snapshot is deleted and the session's rows here are unchanged"
         );
         after.push(After::Resume(session.clone()));
     }

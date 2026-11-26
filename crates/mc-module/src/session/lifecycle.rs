@@ -180,11 +180,11 @@ impl Session {
         let changed = context.workspace_id != workspace;
         if changed {
             tracing::info!(
-                "ck-mc: session {}: its project {} is now in workspace {}, was {}; the head shows the change at its next memory update",
-                self.key.session,
-                project.unwrap_or("(none)"),
-                workspace.as_deref().unwrap_or("(none)"),
-                context.workspace_id.as_deref().unwrap_or("(none)"),
+                session = %self.key.session,
+                project = %project.unwrap_or("(none)"),
+                workspace = %workspace.as_deref().unwrap_or("(none)"),
+                previous_workspace = %context.workspace_id.as_deref().unwrap_or("(none)"),
+                "ck-mc: session: the project's workspace changed; the head shows the change at its next memory update"
             );
             context.workspace_id = workspace;
             self.authority = crate::memory_levels::Authority::from_context(context);
@@ -546,12 +546,13 @@ impl Session {
             .await;
         let read = self.runner_reads.since(before);
         tracing::info!(
-            "ck-mc: session {}: setup done in {} ms: {} transcript reads returned {} entries; applied view read back: {}; {late} notices or rides built before one already taken arrived since the previous Setup",
-            self.key.session,
-            started.elapsed().as_millis(),
-            read.reads,
-            read.entries,
-            read.read_back()
+            session = %self.key.session,
+            elapsed_ms = %started.elapsed().as_millis(),
+            read_count = %read.reads,
+            entry_count = %read.entries,
+            applied_view = %read.read_back(),
+            late_notice_count = %late,
+            "ck-mc: session: setup done"
         );
     }
 
@@ -574,18 +575,18 @@ impl Session {
             .map(|stamp| stamp.to_string())
             .unwrap_or_else(|| "none".into());
         tracing::info!(
-            "ck-mc: session {}: setup ({}, preset {}, model {}/{}, child harness {}, window {}, reserve {}, applied view {:?}, statement epoch {}, stamp {})",
-            self.key.session,
-            self.key.harness,
-            request.preset,
-            request.model.provider,
-            request.model.model,
-            request.child_harness.as_deref().unwrap_or("none"),
-            request.context_window,
-            request.output_reserve,
-            request.applied_view.as_ref().map(|view| view.version),
-            statement_epoch,
-            statement_stamp
+            session = %self.key.session,
+            harness = %self.key.harness,
+            preset = %request.preset,
+            provider = %request.model.provider,
+            model = %request.model.model,
+            child_harness = %request.child_harness.as_deref().unwrap_or("none"),
+            window_tokens = request.context_window,
+            reserve_tokens = request.output_reserve,
+            applied_view = ?request.applied_view.as_ref().map(|view| view.version),
+            %statement_epoch,
+            %statement_stamp,
+            "ck-mc: session: setup"
         );
         // Summaries a resume could not read again are read first; until
         // then the Setup takes nothing (the worker holds it meanwhile).
@@ -804,8 +805,10 @@ impl Session {
             version => format!("view {version}"),
         };
         tracing::info!(
-            "ck-mc: session {}: Setup found the runner applying {applying} where its host may hold a compaction marker (ck-mc's newest view: {newest}); the history head is rebuilt and offered now",
-            self.key.session
+            session = %self.key.session,
+            applied_view = %applying,
+            newest_view = %newest,
+            "ck-mc: session: Setup found the runner applying a view where its host may hold a compaction marker; the history head is rebuilt and offered now"
         );
         let (view, _) = self.build_now(client, settings).await;
         if let Some(view) = view {

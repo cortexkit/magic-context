@@ -882,9 +882,9 @@ fn folder_of(route: &Route) -> Option<String> {
     if route.project.is_none() {
         if let Some(folder) = &route.workdir {
             tracing::info!(
-                "ck-mc: session {} has a folder but no project id ({folder}); \
-                 project memories and upkeep are off for it",
-                route.session.session
+                session = %route.session.session,
+                path = %folder,
+                "ck-mc: session: it has a folder but no project id; project memories and upkeep are off for it"
             );
         }
     }

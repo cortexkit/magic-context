@@ -143,7 +143,9 @@ impl Replica {
                     }
                 }
             }
-            Err(error) => tracing::warn!("ck-mc: app reads: loading session projects: {error}"),
+            Err(error) => {
+                tracing::warn!(%error, "ck-mc: app reads: loading session projects failed")
+            }
         }
     }
 

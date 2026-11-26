@@ -712,12 +712,17 @@ async fn take(
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::warn!(
                     ack_latency_ms,
-                    "ck-mc: dreamer: acknowledging {role} notice {seq} failed: {error}"
+                    %role,
+                    %seq,
+                    %error,
+                    "ck-mc: dreamer: acknowledging a role notice failed"
                 ),
                 Err(_) => tracing::warn!(
                     ack_latency_ms,
-                    "ck-mc: dreamer: acknowledging {role} notice {seq} took longer than {} seconds",
-                    ACK_DEADLINE.as_secs()
+                    %role,
+                    %seq,
+                    timeout_secs = %ACK_DEADLINE.as_secs(),
+                    "ck-mc: dreamer: acknowledging a role notice took longer than the deadline"
                 ),
             }
             true

@@ -167,10 +167,11 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
                 conn.execute("INSERT INTO app_read_decisions VALUES(?1,?2,?3,?4) ON CONFLICT(runner,harness,session) DO NOTHING", params![key.runner,key.harness,key.session,serde_json::to_string(&legacy.decisions).expect("decision JSON")]).map_err(|e|e.to_string())?;
             }
             Err(error) => tracing::warn!(
-                "ck-mc: skipping app checkpoint {}/{}/{}: {error}",
-                key.runner,
-                key.harness,
-                key.session
+                runner = %key.runner,
+                harness = %key.harness,
+                session = %key.session,
+                %error,
+                "ck-mc: skipping an unreadable app checkpoint"
             ),
         }
     }
@@ -334,10 +335,11 @@ fn load_rows(conn: &Connection, key: &SessionRef) -> rusqlite::Result<Option<Sna
         Ok(snapshot) => Ok(Some(snapshot)),
         Err(error) => {
             tracing::warn!(
-                "ck-mc: loading app checkpoint {}/{}/{}: {error}",
-                key.runner,
-                key.harness,
-                key.session
+                runner = %key.runner,
+                harness = %key.harness,
+                session = %key.session,
+                %error,
+                "ck-mc: loading an app checkpoint failed"
             );
             Err(rusqlite::Error::FromSqlConversionFailure(
                 0,

@@ -379,7 +379,7 @@ async fn a_reply_from_another_fingerprint_is_refused() {
     assert!(
         output
             .text()
-            .contains("ck-mc: Synapse embed.query answered for another fingerprint"),
+            .contains("ck-mc: a Synapse reply had a different fingerprint than the lane's; the vectors are refused method=embed.query"),
         "{}",
         output.text()
     );
@@ -526,7 +526,7 @@ async fn each_unavailable_cause_is_logged_once_and_search_uses_words() {
         assert_eq!(linked(&link).serving_model_id(), None);
     };
     let minute = || tokio::time::advance(Duration::from_secs(61));
-    let no_module = "ck-mc: semantic search is off: no Synapse module synapse answers, so search uses words only. To embed without Synapse, set an HTTP endpoint in `embedding` (provider \"openai-compatible\")";
+    let no_module = "ck-mc: semantic search is off: the Synapse module does not answer, so search uses words only. To embed without Synapse, set an HTTP endpoint in `embedding` (provider \"openai-compatible\") module=synapse";
     for _ in 0..3 {
         search().await;
     }
@@ -544,7 +544,7 @@ async fn each_unavailable_cause_is_logged_once_and_search_uses_words() {
         search().await;
         search().await;
     }
-    let no_gpu = "Synapse module synapse has no supported GPU on this machine (backend_unavailable), so search uses words only. To embed without Synapse, set an HTTP endpoint in `embedding` (provider \"openai-compatible\")";
+    let no_gpu = "the Synapse module has no supported GPU on this machine (backend_unavailable), so search uses words only. To embed without Synapse, set an HTTP endpoint in `embedding` (provider \"openai-compatible\") module=synapse";
     assert_eq!(output.count(no_gpu), 1, "{}", output.text());
 
     // The model not downloaded.
@@ -552,7 +552,7 @@ async fn each_unavailable_cause_is_logged_once_and_search_uses_words() {
     minute().await;
     search().await;
     search().await;
-    let download = "Synapse module synapse has not downloaded qwen3-embedding-0.6b (model_not_installed), so search uses words only. Download it (about 1.2 GB) with `ck-synapse-opctl models download qwen3-embedding-0.6b`";
+    let download = "the Synapse module has not downloaded the model (model_not_installed), so search uses words only. Download the model with `ck-synapse-opctl models download` module=synapse model=qwen3-embedding-0.6b download_size= (about 1.2 GB)";
     assert_eq!(output.count(download), 1, "{}", output.text());
 
     // No lane admitted.
@@ -561,7 +561,7 @@ async fn each_unavailable_cause_is_logged_once_and_search_uses_words() {
         minute().await;
         search().await;
     }
-    let no_lane = "Synapse module synapse lists no lane of qwen3-embedding-0.6b that admits requests, so search uses words only. Download the model (about 1.2 GB) with `ck-synapse-opctl models download qwen3-embedding-0.6b`, or set an HTTP endpoint in `embedding` (provider \"openai-compatible\")";
+    let no_lane = "the Synapse module lists no lane for the model that admits requests, so search uses words only. Download the model with `ck-synapse-opctl models download`, or set an HTTP endpoint in `embedding` (provider \"openai-compatible\") module=synapse model=qwen3-embedding-0.6b download_size= (about 1.2 GB)";
     assert_eq!(output.count(no_lane), 1, "{}", output.text());
     // Each cause once, and no line on any single search.
     assert_eq!(
@@ -579,13 +579,13 @@ async fn each_unavailable_cause_is_logged_once_and_search_uses_words() {
     assert!(linked(&link).embed_search_query("query").await.is_some());
     assert!(linked(&link).embed_search_query("query").await.is_some());
     assert_eq!(
-        output.count("ck-mc: semantic search is on again: Synapse lane qwen3-embedding-0.6b-ane of module synapse serves"),
+        output.count("ck-mc: semantic search is on again: a Synapse lane is serving lane_id=qwen3-embedding-0.6b-ane module=synapse"),
         1,
         "{}",
         output.text()
     );
     assert_eq!(
-        output.count("ck-mc: embeddings use Synapse lane"),
+        output.count("ck-mc: embeddings use a Synapse lane"),
         1,
         "{}",
         output.text()
@@ -623,7 +623,7 @@ async fn a_lane_change_is_a_new_identity() {
     assert_eq!(before.model_id(), ane);
     assert_eq!(
         output.count(
-            "ck-mc: embeddings now use Synapse lane qwen3-embedding-0.6b-metal of module synapse"
+            "ck-mc: embeddings switched to a Synapse lane; vectors from the previous lane are set aside and upkeep embeds again in the background lane_id=qwen3-embedding-0.6b-metal module=synapse"
         ),
         1,
         "{}",
@@ -655,7 +655,7 @@ async fn a_model_synapse_does_not_list_falls_back_to_the_default() {
             fake.params("embed.query")[0]["model"],
             "qwen3-embedding-0.6b-ane"
         );
-        let ignored = format!("ck-mc: embedding.model \"{leftover}\" is not an embedding model Synapse module synapse lists; embedding with qwen3-embedding-0.6b instead");
+        let ignored = format!("ck-mc: embedding.model is not an embedding model listed by the Synapse module; using the default instead model=\"{leftover}\" module=synapse fallback_model=qwen3-embedding-0.6b");
         assert_eq!(output.count(&ignored), 1, "{}", output.text());
     }
     // A model the catalog lists is used as named.

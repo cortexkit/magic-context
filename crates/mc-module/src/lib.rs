@@ -142,6 +142,8 @@ pub(crate) mod workspace_members;
 pub const MODULE_ID: &str = "magic-context";
 
 pub mod engram_catalog;
+#[cfg(test)]
+mod log_manifest_tests;
 pub mod private_permissions;
 pub mod storage_paths;
 #[cfg(test)]

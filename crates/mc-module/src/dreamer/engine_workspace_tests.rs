@@ -445,8 +445,8 @@ async fn without_guidance_for_head_agents_a_curate_runs_on_and_logs_why_once() {
         assert!(sent.contains("Run the gate script before delivering a change."));
         assert_eq!(outcome.as_deref(), Some("nothing_to_do"), "{why}");
         assert_eq!(calls.len(), 1, "{why}");
-        let line = format!("no workspace guidance shown ({why})");
-        assert_eq!(log.matches(&line).count(), 1, "{why}: {log}");
+        let line = format!("reason={why}");
+        assert_eq!(log.lines().filter(|entry| entry.contains("the run showed no workspace guidance") && entry.contains(&line)).count(), 1, "{why}: {log}");
         assert_eq!(log.matches("no workspace guidance").count(), 1, "{log}");
         assert!(log.contains(" INFO "), "{log}");
     }

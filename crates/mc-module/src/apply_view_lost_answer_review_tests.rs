@@ -13,9 +13,7 @@ fn wall_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// The acceptance line for `view` without the session prefix, in the shape
-/// the cache-bust analyzer parses: `view N accepted (E edits, cut through
-/// X)` or `view N accepted (E edits, no cut)`.
+/// The acceptance sentence and view fields recorded for `view`.
 fn accepted_line(view: &View) -> String {
     let cut = view
         .edits
@@ -26,7 +24,7 @@ fn accepted_line(view: &View) -> String {
         })
         .unwrap_or_else(|| "no cut".into());
     format!(
-        "view {} accepted ({} edits, {cut})",
+        "ck-mc: session: view accepted session=s1 view_version={} edit_count={} cut={cut}",
         view.version,
         view.edits.len()
     )

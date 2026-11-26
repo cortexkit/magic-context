@@ -139,10 +139,12 @@ impl Session {
             _ => "nothing".into(),
         };
         tracing::warn!(
-            "ck-mc: session {}: no view: cut_before_move_floor (move floor entry {} ({}), summaries reach {reach}, the view would carry {why}); the runner keeps the view it has",
-            self.key.session,
-            floor.ordinal,
-            floor.mid
+            session = %self.key.session,
+            floor_ordinal = %floor.ordinal,
+            floor_mid = %floor.mid,
+            summary_reach = %reach,
+            carried_head = %why,
+            "ck-mc: session: cut_before_move_floor; the runner keeps its current view"
         );
     }
 
@@ -153,10 +155,10 @@ impl Session {
         }
         if let Some(floor) = &self.move_floor {
             tracing::info!(
-                "ck-mc: session {}: views publish again: the cut reaches the move floor, entry {} ({})",
-                self.key.session,
-                floor.ordinal,
-                floor.mid
+                session = %self.key.session,
+                floor_ordinal = %floor.ordinal,
+                floor_mid = %floor.mid,
+                "ck-mc: session: views publish again because the cut reaches the move floor"
             );
         }
     }
@@ -215,8 +217,10 @@ impl Session {
             {
                 if log_failures {
                     tracing::info!(
-                        "ck-mc: session {}: the runner can't place entry {mid} against the move floor yet: {error:?}",
-                        self.key.session
+                        session = %self.key.session,
+                        %mid,
+                        ?error,
+                        "ck-mc: session: the runner can't place an entry against the move floor yet"
                     );
                 }
                 Placed::Later
@@ -224,8 +228,10 @@ impl Session {
             Err(error) => {
                 if log_failures && !error.message.starts_with("runner fault:") {
                     tracing::warn!(
-                        "ck-mc: session {}: reading entry {mid} to place it against the move floor failed: {error:?}",
-                        self.key.session
+                        session = %self.key.session,
+                        %mid,
+                        ?error,
+                        "ck-mc: session: reading an entry to place it against the move floor failed"
                     );
                 }
                 Placed::Nowhere
@@ -281,8 +287,12 @@ impl Session {
             }
         };
         tracing::warn!(
-            "ck-mc: session {}: runner refused view {version}: cut_before_move through {moved_through} (previous move floor: {previous}); {outcome}",
-            self.key.session
+            session = %self.key.session,
+            view_version = %version,
+            %moved_through,
+            previous_floor = %previous,
+            %outcome,
+            "ck-mc: session: runner refused a view with cut_before_move"
         );
         true
     }
@@ -306,8 +316,9 @@ impl Session {
             Ok(None) => return,
             Err(error) => {
                 tracing::warn!(
-                    "ck-mc: session {}: reading its move fence failed: {error}; no move floor is known",
-                    self.key.session
+                    session = %self.key.session,
+                    %error,
+                    "ck-mc: session: reading its move fence failed; no move floor is known"
                 );
                 return;
             }
@@ -330,14 +341,17 @@ impl Session {
         match self.place(client, mid).await {
             Placed::At(ordinal) => {
                 tracing::info!(
-                    "ck-mc: session {}: move floor entry {ordinal} ({mid}), from its move fence",
-                    self.key.session
+                    session = %self.key.session,
+                    %ordinal,
+                    %mid,
+                    "ck-mc: session: read the move floor entry from its move fence"
                 );
                 self.set_move_floor(Some((ordinal, mid)));
             }
             Placed::Nowhere | Placed::Later => tracing::warn!(
-                "ck-mc: session {}: its move fence names cut entry {mid}, which the runner cannot place; no move floor is known until a later Setup places it",
-                self.key.session
+                session = %self.key.session,
+                %mid,
+                "ck-mc: session: the runner cannot place the cut entry named by the move fence; no move floor is known until a later Setup places it"
             ),
         }
     }

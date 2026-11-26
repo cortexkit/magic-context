@@ -143,7 +143,7 @@ async fn render_failed_part_keeps_accepted_view_without_penalty_or_immediate_reb
         let logs = logs.text();
         assert!(
             logs.contains(
-                "session s1: render_failed view 1: mid=\"old\" part=\"p\" field=Some(\"output\")"
+                "session: render_failed; keeping the view and skipping all replaces of the part session=s1 view_version=1 mid=\"old\" part=\"p\" field=Some(\"output\")"
             ),
             "{logs}"
         );
@@ -154,7 +154,7 @@ async fn render_failed_part_keeps_accepted_view_without_penalty_or_immediate_reb
             1,
             "{logs}"
         );
-        assert!(!logs.contains("runner refused view"), "{logs}");
+        assert!(!logs.contains("runner refused a view"), "{logs}");
     }
 }
 
@@ -438,9 +438,9 @@ async fn render_failed_mid_holds_a_candidate_repeating_the_failed_reasoning_drop
     );
     assert!(session.queued.contains(&("task".into(), "p".into())));
     assert!(session.refused_once.is_empty());
-    assert!(logs
-        .text()
-        .contains("signed reasoning drop mid=\"old\" part=\"r\" already failed to render"));
+    assert!(logs.text().lines().any(|line| line
+        .contains("a signed reasoning drop already failed to render")
+        && line.contains("mid=\"old\" part=\"r\"")));
     let mut next = notice(
         &session,
         2,

@@ -363,7 +363,7 @@ async fn never_ran_handover_causes_are_typed_waits_and_logged_once() {
             assert!((6_000..=8_000).contains(&(wait.until_ms - wait.at_ms)));
             assert_eq!(log.lines().count(), 1, "{log}");
             assert!(
-                log.contains("INFO") && log.contains(&format!("cause {cause}")),
+                log.contains("INFO") && log.contains(&format!("cause={cause}")),
                 "{log}"
             );
         }

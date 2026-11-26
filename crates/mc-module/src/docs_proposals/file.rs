@@ -119,8 +119,10 @@ pub(crate) fn write_logged(id: i64, proposal: &NewProposal, tokens: u64, budget:
     let text = markdown(id, proposal, tokens, budget);
     if let Err(error) = write(Path::new(&proposal.checkout), id, &text) {
         tracing::warn!(
-            "ck-mc: dreamer: docs proposal {id} of {}: its markdown copy wasn't written: {error}",
-            proposal.project
+            proposal_id = %id,
+            project = %proposal.project,
+            %error,
+            "ck-mc: dreamer: the docs proposal's markdown copy wasn't written"
         );
     }
 }
@@ -132,8 +134,10 @@ pub(crate) fn remove(checkout: &Path, id: i64) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(
-            "ck-mc: docs proposal {id}: its markdown copy {} wasn't removed: {error}",
-            target.display()
+            proposal_id = %id,
+            path = %target.display(),
+            %error,
+            "ck-mc: docs proposal: its markdown copy wasn't removed"
         ),
     }
 }

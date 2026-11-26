@@ -572,8 +572,8 @@ pub(crate) async fn publish_pending(
             // Sent before a crash kept its row from being marked: the bus
             // holds the one message already.
             tracing::debug!(
-                "ck-mc: bus: docs proposal {} notice was already on the bus",
-                row.id
+                proposal_id = %row.id,
+                "ck-mc: bus: a docs proposal notice was already on the bus"
             );
         }
         db.with_connection(|conn| proposals::mark_published(conn, row.id, now_ms()))
@@ -950,14 +950,18 @@ impl DocsNotices {
         match result {
             Ok(published) => {
                 if published > 0 {
-                    tracing::info!("ck-mc: bus: {published} docs proposal notice(s) published");
+                    tracing::info!(
+                        published_count = %published,
+                        "ck-mc: bus: published docs proposal notices"
+                    );
                 }
                 self.logged.store(false, Ordering::Relaxed);
             }
             Err(error) => {
                 if !self.logged.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
-                        "ck-mc: bus: docs proposal notices wait unsent until the bus is reachable: {error}"
+                        %error,
+                        "ck-mc: bus: docs proposal notices wait unsent until the bus is reachable"
                     );
                 }
             }
@@ -1014,8 +1018,8 @@ pub(crate) async fn publish_unsent_facts(
             // Sent before a crash kept its row from being marked: the bus
             // holds the one message already.
             tracing::debug!(
-                "ck-mc: bus: attribution fact {} was already on the bus",
-                row.fact_id
+                fact_id = %row.fact_id,
+                "ck-mc: bus: an attribution fact was already on the bus"
             );
         }
         db.with_connection(|conn| attribution::mark_published(conn, row.seq, now_ms()))
@@ -1086,14 +1090,18 @@ impl AttributionEvents {
         match result {
             Ok(published) => {
                 if published > 0 {
-                    tracing::debug!("ck-mc: bus: {published} attribution fact event(s) published");
+                    tracing::debug!(
+                        published_count = %published,
+                        "ck-mc: bus: published attribution fact events"
+                    );
                 }
                 self.logged.store(false, Ordering::Relaxed);
             }
             Err(error) => {
                 if !self.logged.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
-                        "ck-mc: bus: attribution fact events wait unsent until the bus is reachable: {error}"
+                        %error,
+                        "ck-mc: bus: attribution fact events wait unsent until the bus is reachable"
                     );
                 }
             }
@@ -1251,11 +1259,11 @@ impl RunEndCursor {
                 // every waiting run every 15 seconds without an event.
                 Some(Pulled::Undecodable(undecodable)) => {
                     tracing::warn!(
-                        "ck-mc: run ends: terminating undecodable event {} on {} (delivered {} time(s)): {}",
-                        undecodable.stream_seq,
-                        undecodable.subject,
-                        undecodable.delivery_count,
-                        undecodable.error
+                        seq = %undecodable.stream_seq,
+                        subject = %undecodable.subject,
+                        delivery_count = %undecodable.delivery_count,
+                        error = %undecodable.error,
+                        "ck-mc: run ends: terminating an undecodable event"
                     );
                     self.binding
                         .cursor

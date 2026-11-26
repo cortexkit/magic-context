@@ -600,14 +600,14 @@ impl Http {
                 (None, outcome("rate_limited", "rate_limited,probe"))
             }
             Ok(Err(RequestFailure::Unavailable | RequestFailure::Unauthorized)) => {
-                tracing::warn!("ck-mc: {what} embedding failed or timed out");
+                tracing::warn!(operation = %what, "ck-mc: embedding failed or timed out");
                 attempt.failure();
                 (None, outcome("failed", "failed,probe"))
             }
             // The client's own limit is the same as the one around it, and
             // either may fire first.
             Ok(Err(RequestFailure::TimedOut)) | Err(_) => {
-                tracing::warn!("ck-mc: {what} embedding failed or timed out");
+                tracing::warn!(operation = %what, "ck-mc: embedding failed or timed out");
                 attempt.failure();
                 (None, outcome("timeout", "timeout,probe"))
             }

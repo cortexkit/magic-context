@@ -93,10 +93,11 @@ pub(crate) async fn cause<H: Host>(host: &H, session: &SessionRef) -> BusyEntry 
         }
         Err(error) => {
             tracing::warn!(
-                "ck-mc: session {}/{}/{}: its waiting facts could not be read for a move ({error}); answering busy unknown",
-                session.runner,
-                session.harness,
-                session.session
+                runner = %session.runner,
+                harness = %session.harness,
+                session = %session.session,
+                %error,
+                "ck-mc: session: waiting facts could not be read for a move; answering busy unknown"
             );
             BusyEntry::new(BusyState::Unknown)
                 .with_reason_code(UNKNOWN)
@@ -123,13 +124,10 @@ pub(crate) fn log_held_fact(session: &SessionRef, held: &HeldFact) {
     tracing::info!(
         session = %format!("{}/{}/{}", session.runner, session.harness, session.session),
         stage = %stage,
-        "ck-mc: session {}/{}/{} cannot move yet: fact {} of publication {} is in flight under second-turn stage {stage}; a later second turn in a session of project {} resolves or gives it up, then prepare can run again",
-        session.runner,
-        session.harness,
-        session.session,
-        held.fact_index,
-        held.publication,
-        held.project
+        fact_index = %held.fact_index,
+        publication = %held.publication,
+        project = %held.project,
+        "ck-mc: session: cannot move while a publication fact is in flight; a later second turn in the project resolves or gives it up, then prepare can run again"
     );
 }
 

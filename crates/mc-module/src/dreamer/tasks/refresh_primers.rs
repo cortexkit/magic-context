@@ -205,7 +205,9 @@ impl RefreshPrimers {
                 let pruned = promote::prune(conn, project, now)?;
                 if pruned > 0 {
                     tracing::info!(
-                        "ck-mc: dreamer: primers of {project}: {pruned} expired candidate(s) pruned"
+                        %project,
+                        pruned_count = %pruned,
+                        "ck-mc: dreamer: pruned expired primer candidates"
                     );
                 }
                 Ok::<_, rusqlite::Error>(
@@ -302,10 +304,11 @@ impl RefreshPrimers {
 
 fn log_promotion(project: &str, promoted: &promote::Promoted) {
     tracing::info!(
-        "ck-mc: dreamer: primers of {project}: {} candidate(s), {} promoted, {} updated",
-        promoted.candidates,
-        promoted.promoted,
-        promoted.updated
+        %project,
+        candidate_count = %promoted.candidates,
+        promoted_count = %promoted.promoted,
+        updated_count = %promoted.updated,
+        "ck-mc: dreamer: reviewed primer candidates for promotion and updates"
     );
 }
 
@@ -351,7 +354,8 @@ impl Task for RefreshPrimers {
                             .collect();
                     }
                     None => tracing::info!(
-                        "ck-mc: dreamer: primers of {project}: embedding unavailable; questions without a vector cluster by their text"
+                        %project,
+                        "ck-mc: dreamer: embedding unavailable; primer questions without a vector cluster by their text"
                     ),
                 }
             }

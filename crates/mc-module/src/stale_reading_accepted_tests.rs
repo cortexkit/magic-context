@@ -155,7 +155,7 @@ async fn stale_accepted_a_reading_from_before_the_runner_took_the_view_builds_no
     let logs = logs.text();
     assert!(
         logs.contains(&format!(
-            "ignoring a prompt of {HIGH} tokens: reading from view 18, newest applied 18, accepted 19;"
+            "ignoring a prompt reading from a stale view; waiting for a reading under the current view session=s1 prompt_tokens={HIGH} view_version=18 applied_view=18 accepted_note=, accepted 19"
         )),
         "{logs}"
     );
@@ -405,7 +405,7 @@ async fn stale_accepted_a_third_different_reading_stops_the_view_counting() {
         .any(|pending| pending.view.version == 19));
     assert!(!still_accepted(&session, 19));
     let warning = format!(
-        "runner accepted view 19 but measured a later request without it ({} tokens from view 18, after {HIGH} tokens from view 18 and {} tokens from view 18); counting readings against the applied view 18",
+        "runner accepted a view but measured a later request without it; counting readings against the applied view session=s1 accepted_view=19 prompt_tokens={} view_version=18 first_tokens={HIGH} first_view=18 second_tokens={} second_view=18 applied_view=18",
         LOW + 1_000,
         HIGH + 1_000
     );

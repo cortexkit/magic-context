@@ -156,8 +156,13 @@ impl Session {
                 self.prompt_views_untrusted = true;
                 self.ignored_reading = None;
                 tracing::warn!(
-                    "ck-mc: session {}: a second stale reading under applied view {applied}: {tokens} tokens from view {view}, after {ignored_tokens} tokens from view {ignored_view}; the runner names views it already replaced, so readings count whatever view they name until the next Setup",
-                    self.key.session
+                    session = %self.key.session,
+                    applied_view = %applied,
+                    prompt_tokens = %tokens,
+                    view_version = %view,
+                    %ignored_tokens,
+                    %ignored_view,
+                    "ck-mc: session: a second stale reading named a replaced view; readings count whatever view they name until the next Setup"
                 );
                 return;
             }
@@ -171,8 +176,12 @@ impl Session {
             String::new()
         };
         tracing::info!(
-            "ck-mc: session {}: ignoring a prompt of {tokens} tokens: reading from view {view}, newest applied {applied}{accepted_note}; waiting for a reading under the current view",
-            self.key.session
+            session = %self.key.session,
+            prompt_tokens = %tokens,
+            view_version = %view,
+            applied_view = %applied,
+            %accepted_note,
+            "ck-mc: session: ignoring a prompt reading from a stale view; waiting for a reading under the current view"
         );
         (
             self.conditions.last_prompt_tokens,
@@ -214,9 +223,16 @@ impl Session {
             pending.accepted = false;
         }
         tracing::warn!(
-            "ck-mc: session {}: runner accepted view {accepted} but measured a later request without it ({tokens} tokens from view {view}, after {first_tokens} tokens from view {first_view} and {second_tokens} tokens from view {second_view}); counting readings against the applied view {}",
-            self.key.session,
-            self.newest_applied
+            session = %self.key.session,
+            accepted_view = %accepted,
+            prompt_tokens = %tokens,
+            view_version = %view,
+            %first_tokens,
+            %first_view,
+            %second_tokens,
+            %second_view,
+            applied_view = %self.newest_applied,
+            "ck-mc: session: runner accepted a view but measured a later request without it; counting readings against the applied view"
         );
         false
     }

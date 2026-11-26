@@ -369,11 +369,11 @@ async fn waits_poll_fast_until_the_reader_has_read_and_again_once_it_stops() {
     assert_eq!(ends.poll_interval(), FAST_POLL);
     log.stop();
     assert_eq!(
-        log.count("ck-mc: run ends: reading m_magic-context_runs"),
+        log.count("ck-mc: run ends: reading the durable stream; summary and dreamer runs are read every 15 s as a backstop durable=m_magic-context_runs"),
         1
     );
     assert_eq!(
-        log.count("ck-mc: run ends: not reading m_magic-context_runs (nats_pull_failed)"),
+        log.count("ck-mc: run ends: not reading the durable stream; summary and dreamer runs are read every 500 ms durable=m_magic-context_runs reason=nats_pull_failed"),
         1
     );
 }
@@ -395,7 +395,7 @@ async fn a_missing_durable_is_logged_once_and_leaves_the_fast_poll() {
     log.stop();
     assert_eq!(
         log.count(
-            "ck-mc: run ends: not reading m_magic-context_runs (the durable is not provisioned)"
+            "ck-mc: run ends: not reading the durable stream; summary and dreamer runs are read every 500 ms durable=m_magic-context_runs reason=the durable is not provisioned"
         ),
         1
     );

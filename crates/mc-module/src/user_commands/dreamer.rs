@@ -141,7 +141,10 @@ where
     let reason = match &checked {
         Ok(_) => None,
         Err(refused) => Some(refused_reason(refused).ok_or_else(|| {
-            tracing::warn!("ck-mc: user command dreamer_run_now: {refused:?}");
+            tracing::warn!(
+                refusal = ?refused,
+                "ck-mc: user command dreamer_run_now was refused"
+            );
             super::owner::unavailable_error()
         })?),
     };

@@ -472,8 +472,9 @@ fn migrate_view_decisions(connection: &Connection) -> Result<(), String> {
             Ok(records) => records,
             Err(error) => {
                 tracing::warn!(
-                    "ck-mc: session {}: skipping its saved view decisions, which do not parse: {error}",
-                    key.session
+                    session = %key.session,
+                    %error,
+                    "ck-mc: session: skipping saved view decisions that do not parse"
                 );
                 continue;
             }
@@ -497,8 +498,9 @@ fn migrate_view_decisions(connection: &Connection) -> Result<(), String> {
         }
         if unkeyed > 0 {
             tracing::warn!(
-                "ck-mc: session {}: skipping {unkeyed} saved view decisions with no view version",
-                key.session
+                session = %key.session,
+                skipped_count = %unkeyed,
+                "ck-mc: session: skipping saved view decisions with no view version"
             );
         }
     }
@@ -773,8 +775,9 @@ impl Store {
             .optional()
             .unwrap_or_else(|error| {
                 tracing::warn!(
-                    "ck-mc: session {}: loading its state failed: {error}",
-                    key.session
+                    session = %key.session,
+                    %error,
+                    "ck-mc: session: loading its state failed"
                 );
                 None
             });
@@ -782,8 +785,9 @@ impl Store {
             let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
             if let Err(error) = crate::store_text::transform(&mut value, &connection, false) {
                 tracing::warn!(
-                    "ck-mc: session {}: loading state failed: {error}",
-                    key.session
+                    session = %key.session,
+                    %error,
+                    "ck-mc: session: loading state failed"
                 );
                 return None;
             }
@@ -1155,8 +1159,9 @@ impl Store {
             .optional()
             .unwrap_or_else(|error| {
                 tracing::warn!(
-                    "ck-mc: session {}: loading its memory context failed: {error}",
-                    key.session
+                    session = %key.session,
+                    %error,
+                    "ck-mc: session: loading its memory context failed"
                 );
                 None
             });
@@ -1175,8 +1180,9 @@ impl Store {
         );
         if let Err(error) = result {
             tracing::warn!(
-                "ck-mc: session {}: saving its memory context failed: {error}",
-                key.session
+                session = %key.session,
+                %error,
+                "ck-mc: session: saving its memory context failed"
             );
             return context;
         }
@@ -1196,8 +1202,9 @@ impl Store {
             Ok(changed) => changed != 0,
             Err(error) => {
                 tracing::warn!(
-                    "ck-mc: session {}: saving its new workspace failed: {error}",
-                    key.session
+                    session = %key.session,
+                    %error,
+                    "ck-mc: session: saving its new workspace failed"
                 );
                 false
             }
@@ -1246,7 +1253,7 @@ impl Store {
             Ok(found) => found,
             Err(error) => {
                 let _ = connection.execute_batch("ROLLBACK");
-                tracing::warn!("ck-mc: reading a stored command answer failed: {error}");
+                tracing::warn!(%error, "ck-mc: reading a stored command answer failed");
                 return OwnerAnswer::NotRun(None);
             }
         };
@@ -1289,7 +1296,7 @@ impl Store {
             Ok(()) => OwnerAnswer::Ran(reply),
             Err(error) => {
                 let _ = connection.execute_batch("ROLLBACK");
-                tracing::warn!("ck-mc: a command ran but its answer was not stored: {error}");
+                tracing::warn!(%error, "ck-mc: a command ran but its answer was not stored");
                 OwnerAnswer::RanUnrecorded(reply)
             }
         }

@@ -422,7 +422,12 @@ pub(super) fn index_with_generation(
             if number > mark + 1 {
                 // The watermark only moves over contiguous messages; ck-mc's
                 // view does not hold the missing ones, so stop here.
-                tracing::debug!("ck-mc: session {session}: search index stops at message {mark}; message {number} follows a gap");
+                tracing::debug!(
+                    %session,
+                    last_indexed = %mark,
+                    next_message = %number,
+                    "ck-mc: session: search index stops at a gap in the messages"
+                );
                 stopped = true;
                 break;
             }

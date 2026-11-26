@@ -190,8 +190,9 @@ pub fn references(
     let read = summaries.rows(chosen, store)?;
     if !read.missing.is_empty() {
         tracing::warn!(
-            "ck-mc: session {session_id}: summaries {:?} chosen as references are no longer in context.db; the run leaves them out",
-            read.missing
+            session = %session_id,
+            missing_ids = ?read.missing,
+            "ck-mc: session: summaries chosen as references are no longer in context.db; the run leaves them out"
         );
     }
     Ok(read
@@ -624,7 +625,7 @@ mod tests {
         assert_eq!(read, expected);
         assert!(
             log.contains(&format!(
-                "summaries [{deleted}] chosen as references are no longer in context.db"
+                "summaries chosen as references are no longer in context.db; the run leaves them out session=s1 missing_ids=[{deleted}]"
             )),
             "{log}"
         );

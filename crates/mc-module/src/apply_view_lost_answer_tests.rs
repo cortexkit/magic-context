@@ -35,7 +35,7 @@ fn assert_confirmed_once(logs: &str, view: &View, from: i64, to: i64) {
         );
     };
     let shape = regex::Regex::new(&format!(
-        r"ck-mc: session s1: {}{}(\d{{4}}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{{3}}Z)$",
+        r"{} note={}(\d{{4}}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{{3}}Z)$",
         regex::escape(&line),
         regex::escape(CONFIRMED)
     ))
@@ -52,9 +52,7 @@ fn assert_confirmed_once(logs: &str, view: &View, from: i64, to: i64) {
     );
 }
 
-/// The acceptance line for `view` in the shape the cache-bust analyzer
-/// parses (`view N accepted (E edits, cut through X)` or `..., no cut)`),
-/// without the session prefix.
+/// The acceptance sentence and view fields recorded for `view`.
 fn accepted_line(view: &View) -> String {
     let cut = view
         .edits
@@ -65,7 +63,7 @@ fn accepted_line(view: &View) -> String {
         })
         .unwrap_or_else(|| "no cut".into());
     format!(
-        "view {} accepted ({} edits, {cut})",
+        "ck-mc: session: view accepted session=s1 view_version={} edit_count={} cut={cut}",
         view.version,
         view.edits.len()
     )
@@ -153,7 +151,7 @@ async fn lost_answer_a_view_the_runner_holds_is_kept_and_confirmed_once() {
     );
     assert_eq!(status(&session, view.version), "offered");
     assert_eq!(
-        logs.count(" accepted ("),
+        logs.count("ck-mc: session: view accepted "),
         0,
         "no acceptance is logged before the runner says it took the view: {}",
         logs.text()

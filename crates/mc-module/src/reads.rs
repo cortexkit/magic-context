@@ -55,7 +55,12 @@ pub fn check_page(
     page: &ReadPage,
 ) -> Result<(), ClientError> {
     if page.entries.is_empty() && page.next_after.is_some() {
-        tracing::warn!("ck-mc: session {}: runner fault: empty read page after ordinal {:?} carries next_after {:?}", session.session, after, page.next_after);
+        tracing::warn!(
+            session = %session.session,
+            ?after,
+            next_after = ?page.next_after,
+            "ck-mc: session: runner fault: an empty read page carries a next_after marker"
+        );
         return Err(ClientError::new("runner fault: empty continuing read page"));
     }
     Ok(())
@@ -102,7 +107,10 @@ pub async fn named_detail<C: RunnerClient, N: Clone>(
                 break;
             }
             if retry {
-                tracing::warn!("ck-mc: session {}: runner fault: named read left names unanswered after their retry", session.session);
+                tracing::warn!(
+                    session = %session.session,
+                    "ck-mc: session: runner fault: named read left names unanswered after their retry"
+                );
                 return Err(ClientError::new(
                     "runner fault: named read left names unanswered after their retry",
                 ));

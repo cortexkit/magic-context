@@ -54,9 +54,9 @@ fn resolve_context_db_path(
             let path = root.join("magic-context").join("context.db");
             if old != path && !env.path_exists(&path) && env.path_exists(&old) {
                 tracing::warn!(
-                    "ck-mc: context.db exists at the previous path {}, but not at the resolved path {}; move the store or set MAGIC_CONTEXT_STORAGE_DIR to its directory",
-                    old.display(),
-                    path.display()
+                    previous_path = %old.display(),
+                    path = %path.display(),
+                    "ck-mc: context.db exists at the previous path but not at the resolved path; move the store or set MAGIC_CONTEXT_STORAGE_DIR to its directory"
                 );
             }
             Ok(path)
@@ -68,7 +68,11 @@ fn resolve_context_db_path(
             if env.path_exists(&old) {
                 use std::fmt::Write as _;
                 let _ = write!(message, "; previous store: {}", old.display());
-                tracing::warn!("{message}");
+                tracing::warn!(
+                    %error,
+                    previous_path = %old.display(),
+                    "ck-mc: cannot resolve context.db but the previous store exists; set MAGIC_CONTEXT_STORAGE_DIR to the store directory"
+                );
             }
             Err(message)
         }

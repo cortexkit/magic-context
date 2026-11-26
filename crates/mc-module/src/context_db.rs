@@ -410,14 +410,17 @@ impl ContextDb {
                     mode = selected;
                     if !mode.eq_ignore_ascii_case("wal") {
                         tracing::warn!(
-                            "ck-mc: context.db {}: WAL switch deferred; continuing in {mode} mode",
-                            path.display()
+                            path = %path.display(),
+                            %mode,
+                            "ck-mc: context.db: WAL switch deferred; continuing in the current mode"
                         );
                     }
                 }
                 Err(error) => tracing::warn!(
-                    "ck-mc: context.db {}: WAL switch deferred; continuing in {mode} mode: {error}",
-                    path.display()
+                    path = %path.display(),
+                    %mode,
+                    %error,
+                    "ck-mc: context.db: WAL switch deferred; continuing in the current mode"
                 ),
             }
         }

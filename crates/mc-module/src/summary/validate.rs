@@ -511,7 +511,11 @@ pub fn parse_compartment_output(
             }
             dropped_fact_blocks += 1;
             dropped_facts += count;
-            tracing::info!("ck-mc: {}", format_dropped_fact_category(category, count));
+            tracing::info!(
+                category,
+                fact_count = count,
+                "ck-mc: [historian] Dropped a <facts> category"
+            );
             continue;
         }
         for item in fact_items(block) {
@@ -1800,10 +1804,6 @@ fn is_zero(value: &usize) -> bool {
     *value == 0
 }
 
-fn format_dropped_fact_category(category: &str, count: usize) -> String {
-    format!("[historian] Dropped <facts> category {category} ({count} facts)")
-}
-
 /// Opening tag of a fact category block; group 1 = the category name.
 fn category_open_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -1903,13 +1903,19 @@ mod tests {
 
     #[test]
     fn unknown_fact_categories_report_every_drop() {
-        let parsed = parse_compartment_output("<output><facts><PROJECT_RULS>\n* One\n* Two\n</PROJECT_RULS><USER_DIRECTIVES>\n* Three\n</USER_DIRECTIVES><project-ruls>\n* Four\n</project-ruls></facts></output>").unwrap();
+        let (parsed, log) = crate::test_log::logged(|| {
+            parse_compartment_output("<output><facts><PROJECT_RULS>\n* One\n* Two\n</PROJECT_RULS><USER_DIRECTIVES>\n* Three\n</USER_DIRECTIVES><project-ruls>\n* Four\n</project-ruls></facts></output>").unwrap()
+        });
         assert!(parsed.facts.is_empty());
         assert_eq!(parsed.dropped_fact_blocks, 3);
         assert_eq!(parsed.dropped_facts, 4);
-        assert_eq!(
-            format_dropped_fact_category("PROJECT_RULS", 2),
-            "[historian] Dropped <facts> category PROJECT_RULS (2 facts)"
+        assert!(
+            log.lines().any(|line| {
+                line.contains("[historian] Dropped a <facts> category")
+                    && line.contains("category=\"PROJECT_RULS\"")
+                    && line.contains("fact_count=2")
+            }),
+            "{log}"
         );
     }
 

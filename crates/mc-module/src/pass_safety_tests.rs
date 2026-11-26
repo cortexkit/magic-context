@@ -435,7 +435,7 @@ fn a_view_failing_the_pre_publish_check_logs_the_refusal_reason() {
     assert!(
         logs.lines().any(|line| {
             line.contains("WARN")
-                && line.contains("ck-mc: session s1: no valid view:")
+                && line.contains("ck-mc: session: no valid view session=s1 refusal=")
                 && line.contains("FinalTurnRemoved")
         }),
         "the validation warning omitted the refusal reason: {logs}"

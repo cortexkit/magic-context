@@ -29,7 +29,7 @@ impl Session {
         self.accept(view.clone());
         let durable = self.durable();
         if let Err(error) = self.save_state(&durable) {
-            tracing::warn!("ck-mc: {error}");
+            tracing::warn!(%error, "ck-mc: session: failed to save view state");
             self.roll_back(view.version, false, None);
             return (false, None);
         }
@@ -49,9 +49,10 @@ impl Session {
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 if !self.take_move_refusal(client, view.version, &refusal).await {
                     tracing::warn!(
-                        "ck-mc: session {}: runner refused view {}: {refusal:?}",
-                        self.key.session,
-                        view.version
+                        session = %self.key.session,
+                        view_version = %view.version,
+                        ?refusal,
+                        "ck-mc: session: runner refused a view"
                     );
                 }
                 self.roll_back_refused(&view, view.version, &refusal);
@@ -61,9 +62,10 @@ impl Session {
             // and ck-mc takes whatever view the runner applies.
             Ok(other) => {
                 tracing::info!(
-                    "ck-mc: session {}: unknown answer to view {}: {other:?}",
-                    self.key.session,
-                    view.version
+                    session = %self.key.session,
+                    view_version = %view.version,
+                    answer = ?other,
+                    "ck-mc: session: unknown answer to a view"
                 );
                 self.roll_back(view.version, false, None);
                 self.adopt_runner_view(client).await;
@@ -83,9 +85,10 @@ impl Session {
             // rolls it back.
             Err(error) if error.outcome_unknown => {
                 tracing::warn!(
-                    "ck-mc: session {}: no answer to view {}, which the runner may hold: {error}; it waits for the runner's next report",
-                    self.key.session,
-                    view.version
+                    session = %self.key.session,
+                    view_version = %view.version,
+                    %error,
+                    "ck-mc: session: no answer to a view, which the runner may hold; waiting for the runner's next report"
                 );
                 if let Some(pending) = self
                     .unconfirmed
@@ -140,9 +143,10 @@ impl Session {
                 "no longer matches its checksum as saved"
             };
             tracing::warn!(
-                "ck-mc: session {}: view {} {why}; rebuilding instead of offering it again",
-                self.key.session,
-                view.version
+                session = %self.key.session,
+                view_version = %view.version,
+                reason = %why,
+                "ck-mc: session: rebuilding a view instead of offering it again"
             );
             self.roll_back(oldest, false, None);
             return;
@@ -165,9 +169,9 @@ impl Session {
             Ok(None) => {}
             Err(move_floor::PlaceLater) => {
                 tracing::info!(
-                    "ck-mc: session {}: view {} is offered again on the next notice: the runner can't place its cut yet",
-                    self.key.session,
-                    view.version
+                    session = %self.key.session,
+                    view_version = %view.version,
+                    "ck-mc: session: a view is offered again on the next notice because the runner can't place its cut yet"
                 );
                 self.reoffer_pending = true;
                 return;
@@ -203,19 +207,21 @@ impl Session {
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 if !self.take_move_refusal(client, view.version, &refusal).await {
                     tracing::warn!(
-                        "ck-mc: session {}: runner refused view {} offered again: {refusal:?} ({})",
-                        self.key.session,
-                        view.version,
-                        policy_members(&view)
+                        session = %self.key.session,
+                        view_version = %view.version,
+                        ?refusal,
+                        policy_members = %policy_members(&view),
+                        "ck-mc: session: runner refused a view offered again"
                     );
                 }
                 self.roll_back_refused(&view, oldest, &refusal);
             }
             Ok(other) => {
                 tracing::info!(
-                    "ck-mc: session {}: unknown answer to view {} offered again: {other:?}",
-                    self.key.session,
-                    view.version
+                    session = %self.key.session,
+                    view_version = %view.version,
+                    answer = ?other,
+                    "ck-mc: session: unknown answer to a view offered again"
                 );
                 self.roll_back(oldest, false, None);
             }
@@ -225,9 +231,10 @@ impl Session {
             // answer was lost too keeps that first handover's time.
             Err(error) if error.outcome_unknown => {
                 tracing::warn!(
-                    "ck-mc: session {}: no answer to view {} offered again, which the runner may hold: {error}; it waits for the runner's next report",
-                    self.key.session,
-                    view.version
+                    session = %self.key.session,
+                    view_version = %view.version,
+                    %error,
+                    "ck-mc: session: no answer to a view offered again, which the runner may hold; waiting for the runner's next report"
                 );
                 self.reoffer_pending = true;
             }
@@ -379,10 +386,10 @@ impl Session {
                 continue;
             }
             tracing::warn!(
-                "ck-mc: session {}: queued drop of {}/{} forgotten after a second refused view",
-                self.key.session,
-                part.0,
-                part.1
+                session = %self.key.session,
+                mid = %part.0,
+                part = %part.1,
+                "ck-mc: session: queued drop forgotten after a second refused view"
             );
             self.queued.remove(&part);
             self.app_projection.dirty.insert(part.0.clone());

@@ -294,7 +294,10 @@ fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Sett
             Some(listed) => {
                 settings.branches.insert(project.trim().to_owned(), listed);
             }
-            None => tracing::warn!("ck-mc: dreamer.branches.{project} is not a list of branch names; the project has one live branch"),
+            None => tracing::warn!(
+                %project,
+                "ck-mc: dreamer.branches entry is not a list of branch names; the project has one live branch"
+            ),
         }
     }
     for (kind, task) in dreamer
@@ -308,7 +311,11 @@ fn dreamer_settings(user: Option<&Value>) -> Option<crate::dreamer::engine::Sett
             if schedule.is_empty() || crate::dreamer::cron::Cron::parse(schedule).is_some() {
                 settings.schedules.insert(kind.clone(), schedule.to_owned());
             } else {
-                tracing::info!("ck-mc: dreamer.tasks.{kind}.schedule {schedule:?} is not a runnable five-field cron schedule; the default applies");
+                tracing::info!(
+                    task = %kind,
+                    ?schedule,
+                    "ck-mc: the dreamer task's schedule is not a runnable five-field cron schedule; the default applies"
+                );
             }
         }
     }
@@ -363,7 +370,10 @@ impl Loader {
                     return Err("MAGIC_CONTEXT_CONFIG_PATH must be an absolute path to a user config file (not blank)".into());
                 }
                 if !path.exists() {
-                    tracing::info!("ck-mc: MAGIC_CONTEXT_CONFIG_PATH file not found: {}; continuing without user config (no XDG or legacy fallback)", path.display());
+                    tracing::info!(
+                        path = %path.display(),
+                        "ck-mc: MAGIC_CONTEXT_CONFIG_PATH file not found; continuing without user config (no XDG or legacy fallback)"
+                    );
                 }
                 path
             }
@@ -501,7 +511,10 @@ impl Loader {
     }
 
     fn read(&self, path: &Path) -> Option<Value> {
-        self.read_with_warning(path, &mut |warning| tracing::info!("ck-mc: {warning}"))
+        self.read_with_warning(
+            path,
+            &mut |warning| tracing::info!(%warning, "ck-mc: configuration warning"),
+        )
     }
 
     fn read_with_warning(&self, path: &Path, warn: &mut dyn FnMut(String)) -> Option<Value> {
@@ -945,8 +958,9 @@ fn guidance_override(user: &Value, user_path: &Path) -> Option<String> {
         Ok(content) => Some(content),
         Err(why) => {
             tracing::info!(
-                "ck-mc: prompt_surface.guidance_override_path ({}) {why}; using built-in guidance",
-                path.display()
+                path = %path.display(),
+                reason = %why,
+                "ck-mc: prompt_surface.guidance_override_path could not be used; using built-in guidance"
             );
             None
         }
@@ -1315,7 +1329,10 @@ pub(crate) fn project_secret(text: &str) -> ApiKey {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id.to_owned())
         {
-            tracing::warn!("ck-mc: a project's magic-context.jsonc names the vault credential {id}; only the user's file may, so ck-mc does not read it and sends the setting as written");
+            tracing::warn!(
+                credential_id = %id,
+                "ck-mc: a project's magic-context.jsonc names a vault credential; only the user's file may, so ck-mc does not read it and sends the setting as written"
+            );
         }
     }
     ApiKey::Text(Secret::new(text.to_owned()))

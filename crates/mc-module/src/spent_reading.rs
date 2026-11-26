@@ -114,13 +114,17 @@ impl Session {
             let view = spent.view;
             if built_on {
                 tracing::info!(
-                    "ck-mc: session {}: ignoring a prompt of {tokens} tokens: view {view} was built on this same reading, so no request under it has been measured yet; waiting for a new reading",
-                    self.key.session
+                    session = %self.key.session,
+                    prompt_tokens = %tokens,
+                    view_version = %view,
+                    "ck-mc: session: ignoring a prompt reading used to build the named view; no request under it has been measured yet, so waiting for a new reading"
                 );
             } else {
                 tracing::info!(
-                    "ck-mc: session {}: ignoring a prompt of {tokens} tokens: it repeats, without its view, a reading ignored as measured before view {view}; waiting for a new reading",
-                    self.key.session
+                    session = %self.key.session,
+                    prompt_tokens = %tokens,
+                    view_version = %view,
+                    "ck-mc: session: ignoring a prompt reading repeated without its view after being ignored as measured before that view; waiting for a new reading"
                 );
             }
         }

@@ -391,7 +391,7 @@ fn open_context_db(path: &std::path::Path) -> Result<ContextDb, Box<dyn Error + 
     // From 0.50 the module owns the store: a machine without one gets a new
     // one, and a store the 0.49 plugin left behind is migrated on open.
     if !path.exists() {
-        tracing::info!("ck-mc: creating {}", path.display());
+        tracing::info!(path = %path.display(), "ck-mc: creating context.db");
         return Ok(ContextDb::create(path)?);
     }
     Ok(ContextDb::open(path)?)

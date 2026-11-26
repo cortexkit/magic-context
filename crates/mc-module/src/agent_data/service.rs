@@ -193,26 +193,27 @@ fn carry_out<H: Host>(host: &H, after: Vec<After>) {
             After::Forget(session, cut) => {
                 tracing::info!(
                     cut = %cut,
-                    "ck-mc: session {}/{}/{} was released to another machine by agent-data cut {cut}; it is refused session_moved here from now on, and its worker, Setup and cached project are dropped",
-                    session.runner,
-                    session.harness,
-                    session.session
+                    runner = %session.runner,
+                    harness = %session.harness,
+                    session = %session.session,
+                    "ck-mc: session: released to another machine by an agent-data cut; refusing session_moved here and dropping its worker, Setup and cached project"
                 );
                 host.forget(&session, &cut);
             }
             After::Activated(session, cut) => tracing::info!(
                 cut = %cut,
-                "ck-mc: session {}/{}/{} is activated by agent-data cut {cut} and served again from the rows the move installed",
-                session.runner,
-                session.harness,
-                session.session
+                runner = %session.runner,
+                harness = %session.harness,
+                session = %session.session,
+                "ck-mc: session: activated by an agent-data cut and served again from the rows the move installed"
             ),
             After::Remove(folder) => match std::fs::remove_dir_all(&folder) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => tracing::warn!(
-                    "ck-mc: agent-data could not delete {} ({error}); it holds only a finished move's snapshot and can be deleted by hand",
-                    folder.display()
+                    path = %folder.display(),
+                    %error,
+                    "ck-mc: agent-data could not delete a directory holding only a finished move's snapshot; it can be deleted by hand"
                 ),
             },
         }
@@ -415,7 +416,7 @@ impl Service {
             else {
                 tracing::error!(
                     cut = %cut,
-                    "ck-mc: agent-data cut {cut} has sessions being installed but no record of its refs; they stay refused session_moving until the journal is repaired"
+                    "ck-mc: agent-data cut: sessions are being installed but their refs were not recorded; refusing session_moving until the journal is repaired"
                 );
                 continue;
             };
@@ -425,15 +426,15 @@ impl Service {
                 Err(refusal) => {
                     tracing::error!(
                         cut = %cut,
-                        "ck-mc: agent-data cut {cut}'s install cannot be resumed: its recorded refs do not make an activate request ({})",
-                        refusal.message
+                        error = %refusal.message,
+                        "ck-mc: agent-data cut: installation cannot resume because the recorded refs do not make an activate request"
                     );
                     continue;
                 }
             };
             tracing::info!(
                 cut = %cut,
-                "ck-mc: finishing the install of agent-data cut {cut}, which the last run of ck-mc started"
+                "ck-mc: agent-data cut: finishing the install that the last run of ck-mc started"
             );
             match self
                 .keyed_then(host.journal(), &request, |record| {
@@ -445,14 +446,14 @@ impl Service {
                     carry_out(host, after);
                     tracing::info!(
                         cut = %cut,
-                        "ck-mc: agent-data cut {cut} is activated; its sessions are served again"
+                        "ck-mc: agent-data cut: activated; its sessions are served again"
                     );
                 }
                 Err(refusal) => tracing::warn!(
                     cut = %cut,
-                    "ck-mc: the install of agent-data cut {cut} could not be finished ({}: {}); its sessions stay refused session_moving until activate is sent again or ck-mc starts again",
-                    refusal.code.as_str(),
-                    refusal.message
+                    code = %refusal.code.as_str(),
+                    error = %refusal.message,
+                    "ck-mc: agent-data cut: the install could not finish; refusing session_moving until activate is sent again or ck-mc starts again"
                 ),
             }
         }
@@ -548,10 +549,10 @@ fn allowed(op: Op, refusal: ErrorBody) -> ErrorBody {
         return refusal;
     }
     tracing::warn!(
-        "ck-mc: agent-data {} produced {} ({}), which the contract does not allow for it; answering unavailable",
-        op.method(),
-        refusal.code.as_str(),
-        refusal.message
+        method = %op.method(),
+        code = %refusal.code.as_str(),
+        error = %refusal.message,
+        "ck-mc: agent-data operation returned a refusal the contract does not allow; answering unavailable"
     );
     ErrorBody::new(
         RefusalCode::Unavailable,
@@ -584,8 +585,9 @@ async fn describe<H: Host>(host: &H) -> Result<Vec<u8>, ErrorBody> {
         Ok(Ok(providers)) => providers,
         Ok(Err(error)) => {
             tracing::warn!(
-                    "ck-mc: agent-data describe declares no ref kinds: the daemon's catalog could not be read ({error})"
-                );
+                %error,
+                "ck-mc: agent-data describe declares no ref kinds because the daemon's catalog could not be read"
+            );
             Vec::new()
         }
         Err(_) => {

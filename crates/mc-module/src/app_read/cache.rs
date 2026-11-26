@@ -36,14 +36,14 @@ impl Replica {
             Ok(keys) => self.known = keys,
             Err(error) => {
                 self.load_failed = true;
-                tracing::warn!("ck-mc: app session lookup: {error}");
+                tracing::warn!(%error, "ck-mc: app session lookup failed");
             }
         }
         match keys("app_read_headers") {
             Ok(keys) => self.cache.checkpoints = keys,
             Err(error) => {
                 self.load_failed = true;
-                tracing::warn!("ck-mc: app replica load: {error}");
+                tracing::warn!(%error, "ck-mc: app replica load failed");
             }
         }
         self.load_projects();

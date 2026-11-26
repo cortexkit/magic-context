@@ -208,7 +208,9 @@ pub(super) async fn embed(
                 Ok(count) => saved += count,
                 Err(error) => {
                     tracing::warn!(
-                        "ck-mc: upkeep could not save history vectors for {project}: {error}"
+                        %project,
+                        %error,
+                        "ck-mc: upkeep could not save history vectors"
                     );
                     break;
                 }

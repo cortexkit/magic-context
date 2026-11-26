@@ -1078,7 +1078,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
             .copied()
             .collect();
         if !extra.is_empty() {
-            tracing::info!("ck-mc: turn two: ignored extra fact ids: {extra:?}");
+            tracing::info!(extra_ids = ?extra, "ck-mc: turn two: ignored extra fact ids");
         }
         let facts: Vec<FactRow> = self
             .db
@@ -1179,9 +1179,9 @@ impl<C: RunnerClient> Resolver<'_, C> {
                 .map(Ok),
             "retire" | "promote_rule" => {
                 tracing::info!(
-                    "ck-mc: turn two dropped {} for fact {}",
-                    decision.action,
-                    fact.id
+                    action = %decision.action,
+                    fact_id = %fact.id,
+                    "ck-mc: turn two: dropped an action for a fact"
                 );
                 let reason = format!("{}_dropped", decision.action);
                 self.pending(fact, reservation, &key, &reason, None, None)
@@ -1270,8 +1270,9 @@ impl<C: RunnerClient> Resolver<'_, C> {
         }
         let refused = |why: &str| {
             tracing::info!(
-                "ck-mc: turn two: fact {} asked to be stored for the workspace, but {why}; it is stored for its project",
-                fact.id
+                fact_id = %fact.id,
+                reason = %why,
+                "ck-mc: turn two: a fact asked to be stored for the workspace, but it is stored for its project"
             );
             None
         };
@@ -1699,7 +1700,7 @@ impl<C: RunnerClient> Resolver<'_, C> {
                         return Ok(Err(Stopped::AccountWait(wait)));
                     }
                     Err(error) => {
-                        tracing::warn!("ck-mc: turn two: check failed to send: {error}");
+                        tracing::warn!(%error, "ck-mc: turn two: check failed to send");
                         self.db
                             .with_connection(|conn| {
                                 conn.execute(
@@ -1848,8 +1849,9 @@ fn reserve(
     }
     if fitted.deferred != (0, 0) {
         tracing::info!(
-            "ck-mc: turn two: the prompt size bound left out {} fact(s) and {} item(s); they wait for a later run",
-            fitted.deferred.0, fitted.deferred.1
+            fact_count = %fitted.deferred.0,
+            item_count = %fitted.deferred.1,
+            "ck-mc: turn two: the prompt size bound left out facts and items; they wait for a later run"
         );
     }
     let attempts: serde_json::Map<String, Value> = available
@@ -1950,7 +1952,7 @@ async fn recover<C: RunnerClient>(
             Ok(None) => continue,
             Ok(Some(wait)) => return Ok(Some(wait)),
             Err(error) => {
-                tracing::warn!("ck-mc: turn two: recovering {stage} failed: {error}");
+                tracing::warn!(%stage, %error, "ck-mc: turn two: recovering a stage failed");
                 let given_up = db
                     .with_connection(|conn| -> rusqlite::Result<bool> {
                         if count_visit(conn, &stage)? >= UNKNOWN_MAX_VISITS {
@@ -1960,7 +1962,7 @@ async fn recover<C: RunnerClient>(
                     })
                     .unwrap_or(false);
                 if given_up {
-                    tracing::warn!("ck-mc: turn two: gave up {stage} (recovery_error)");
+                    tracing::warn!(%stage, "ck-mc: turn two: gave up a stage (recovery_error)");
                 }
             }
         }
@@ -1995,7 +1997,7 @@ async fn recover_one<C: RunnerClient>(
         db.with_connection(|conn| charge_stage(conn, stage, reason, state))
             .map(|given_up| {
                 if given_up {
-                    tracing::warn!("ck-mc: turn two: gave up {stage} ({reason})");
+                    tracing::warn!(%stage, %reason, "ck-mc: turn two: gave up a stage");
                 }
             })
             .map_err(|error| error.to_string())
@@ -2039,7 +2041,7 @@ async fn recover_one<C: RunnerClient>(
                 return Ok(Some(wait));
             }
             Err(SummaryError::Uncertain(error)) => {
-                tracing::warn!("ck-mc: turn two: reattaching {stage}: {error}");
+                tracing::warn!(%stage, %error, "ck-mc: turn two: reattaching a stage failed");
                 let visits = db
                     .with_connection(|conn| count_visit(conn, stage))
                     .map_err(|error| error.to_string())?;
@@ -2093,7 +2095,7 @@ pub async fn run<C: RunnerClient>(client: &C, db: &ContextDb, job: &Job) -> Outc
         Ok(None) => {}
         // This publication's own send would ask for the same accounts.
         Ok(Some(wait)) => return Outcome::after_wait(wait),
-        Err(error) => tracing::warn!("ck-mc: turn two: recovery failed: {error}"),
+        Err(error) => tracing::warn!(%error, "ck-mc: turn two: recovery failed"),
     }
     match send(client, db, job).await {
         Ok(outcome) => outcome,
@@ -2137,7 +2139,8 @@ async fn workspace_rule<C: RunnerClient>(client: &C, job: &Job) -> Option<Rule> 
                 .insert(workspace.clone());
             if first {
                 tracing::warn!(
-                    "ck-mc: turn two: Entorhinal did not say which projects workspace {workspace} holds; the second turn offers no workspace level, so new memories stay with their project"
+                    %workspace,
+                    "ck-mc: turn two: Entorhinal did not say which projects the workspace holds; the second turn offers no workspace level, so new memories stay with their project"
                 );
             }
             None

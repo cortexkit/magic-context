@@ -128,8 +128,12 @@ impl Session {
             if let (Some(mid), Some(part)) = (mid, part) {
                 self.render_failed.parts.insert((mid.clone(), part.clone()));
                 tracing::warn!(
-                    "ck-mc: session {}: render_failed view {version}: mid={mid:?} part={part:?} field={field:?}; keeping the view, skipping all replaces of the part",
-                    self.key.session
+                    session = %self.key.session,
+                    view_version = %version,
+                    ?mid,
+                    ?part,
+                    ?field,
+                    "ck-mc: session: render_failed; keeping the view and skipping all replaces of the part"
                 );
             } else {
                 if let Some(mid) = mid {
@@ -244,7 +248,12 @@ impl Session {
             self.queued.remove(&key);
             self.app_projection.dirty.insert(key.0.clone());
             if self.failed_parts.insert(key.clone()) {
-                tracing::warn!("ck-mc: session {}: queued drop mid={:?} part={:?} cannot render while its message is excluded; marking the part failed, not landed", self.key.session, key.0, key.1);
+                tracing::warn!(
+                    session = %self.key.session,
+                    mid = ?key.0,
+                    part = ?key.1,
+                    "ck-mc: session: queued drop cannot render while its message is excluded; marking the part failed, not landed"
+                );
             }
         }
     }
@@ -284,8 +293,13 @@ impl Session {
                 "reading again from the cut; rebuilding once if still current"
             };
             tracing::warn!(
-                "ck-mc: session {}: render_failed view {version}: mid={mid:?} part=None field={field:?}; {location}; {action}",
-                self.key.session
+                session = %self.key.session,
+                view_version = %version,
+                ?mid,
+                ?field,
+                %location,
+                %action,
+                "ck-mc: session: render_failed without a part"
             );
         }
     }
@@ -316,8 +330,11 @@ impl Session {
         });
         if let Some((mid, part)) = failed {
             tracing::warn!(
-                "ck-mc: session {}: holding view {}: signed reasoning drop mid={mid:?} part={part:?} already failed to render; keeping the runner fallback until a later permitted rebuild no longer needs it",
-                self.key.session, view.version
+                session = %self.key.session,
+                view_version = %view.version,
+                ?mid,
+                ?part,
+                "ck-mc: session: holding a view because a signed reasoning drop already failed to render; keeping the runner fallback until a later permitted rebuild no longer needs it"
             );
             // The one immediate recovery was attempted. If the failed
             // drop remains necessary, wait for a later permitted rebuild

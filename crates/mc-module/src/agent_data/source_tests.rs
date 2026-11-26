@@ -941,11 +941,11 @@ async fn a_prepare_refused_on_one_ref_leaves_neither_frozen_nor_reserved() {
     f.module.idle(&key("s1")).await.unwrap();
     let logged = log.text();
     assert!(
-        logged.contains("thalamus-harness/pi/s1: holding its Setup and notices"),
+        logged.contains("holding its Setup and notices while a move holds it; they run if the move is aborted runner=thalamus-harness harness=pi session=s1"),
         "{logged}"
     );
     assert!(
-        logged.contains("thalamus-harness/pi/s1: running 1 jobs held during a move"),
+        logged.contains("running jobs held during a move runner=thalamus-harness harness=pi session=s1 job_count=1"),
         "{logged}"
     );
     assert_eq!(f.states("s1", &["m2"]).await, Ok(vec!["raw".into()]));
@@ -1117,7 +1117,7 @@ async fn release_tombstones_the_session_and_keeps_its_facts_reserved() {
     );
     // The worker discards what it held once it gets to its last job.
     let discarded = format!(
-        "session thalamus-harness/pi/s1 was released to another machine by agent-data cut {CUT}; discarding the 1 Setup, notice and summary jobs held during the move"
+        "session: discarding Setup, notice and summary jobs held during an agent-data move runner=thalamus-harness harness=pi session=s1 state=was released to another machine cut={CUT} job_count=1"
     );
     for _ in 0..100 {
         if log.text().contains(&discarded) {

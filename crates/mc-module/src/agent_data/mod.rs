@@ -90,10 +90,14 @@ pub fn switch_from_environment() -> bool {
     let on = switch(value.as_deref(), ENV_HONOURED, FEATURE);
     match value.as_deref() {
         Some(value) if !ENV_HONOURED => tracing::warn!(
-            "ck-mc: {ENV}={value} is ignored: this release build was made without the agent-data feature, so it never serves moves"
+            setting = %ENV,
+            %value,
+            "ck-mc: the agent-data setting is ignored: this release build was made without the agent-data feature, so it never serves moves"
         ),
         Some(value) if value != "1" && value != "0" => tracing::warn!(
-            "ck-mc: {ENV}={value} is neither 1 nor 0, so it is ignored and the build's default applies"
+            setting = %ENV,
+            %value,
+            "ck-mc: the agent-data setting is neither 1 nor 0, so it is ignored and the build's default applies"
         ),
         _ => {}
     }

@@ -105,8 +105,8 @@ pub(crate) fn resolve(
         context.profile.pin = Some(pin.clone());
         if pin["status"].is_null() {
             tracing::info!(
-                "ck-mc: memory-profile pin {} has no registry status record",
-                text(pin, "name")
+                profile = %text(pin, "name"),
+                "ck-mc: memory-profile pin has no registry status record"
             );
         }
         if pin["status"]["blocked"] == true {

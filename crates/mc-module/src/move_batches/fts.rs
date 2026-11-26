@@ -34,7 +34,7 @@ pub(crate) fn ordinal_update(conn: &Connection) -> rusqlite::Result<&'static str
         }
         None => "FTS declaration is not the supported internal UNINDEXED layout",
     };
-    tracing::info!("ck-mc move-in: FTS ordinal path=public-update; {reason}");
+    tracing::info!(%reason, "ck-mc move-in: FTS ordinal path=public-update");
     Ok(PUBLIC_UPDATE)
 }
 

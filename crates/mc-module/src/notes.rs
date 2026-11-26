@@ -204,7 +204,11 @@ fn save_note(
     // The note is committed; failing to read the receipt's counts must not
     // tell the caller to retry the write.
     let active = read_active().unwrap_or_else(|error| {
-        tracing::warn!("ck-mc: could not read active notes after saving note #{id}: {error}");
+        tracing::warn!(
+            note_id = %id,
+            %error,
+            "ck-mc: could not read active notes after saving a note"
+        );
         Vec::new()
     });
     Ok(write_reply(id, &active, now_ms))

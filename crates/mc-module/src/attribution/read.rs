@@ -121,7 +121,7 @@ pub(crate) fn handle(db: Option<&ContextDb>, body: &[u8]) -> Result<Value, Error
     let result = db
         .with_search_reader(|conn, _| read(conn, &page))
         .map_err(|error| {
-            tracing::warn!("ck-mc: {METHOD} failed: {error}");
+            tracing::warn!(method = %METHOD, %error, "ck-mc: attribution method failed");
             unavailable()
         })?;
     Ok(json!({ "result": result }))

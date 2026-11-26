@@ -78,8 +78,9 @@ impl Session {
                 return Some((entries[end].ordinal, through));
             };
             tracing::info!(
-                "ck-mc: session {}: the cut stops before message {}, whose tool call is still running",
-                self.key.session, entries[running].ordinal
+                session = %self.key.session,
+                ordinal = %entries[running].ordinal,
+                "ck-mc: session: the cut stops before a message whose tool call is still running"
             );
             // With nothing held before the running call, no new cut: the
             // view carries the cut the runner has now.
@@ -468,8 +469,9 @@ impl Session {
             .map_err(|error| error.to_string());
         drawn.unwrap_or_else(|error| {
             tracing::warn!(
-                "ck-mc: session {}: the memory mural was left out of this fold: {error}",
-                self.key.session
+                session = %self.key.session,
+                %error,
+                "ck-mc: session: the memory mural was left out of this fold"
             );
             None
         })
@@ -481,7 +483,7 @@ impl Session {
         use base64::Engine as _;
         if let Some(store) = &self.store {
             if let Err(error) = store.save_head_mural(&self.key, &mural.content_hash, &mural.png) {
-                tracing::warn!("ck-mc: {error}");
+                tracing::warn!(%error, "ck-mc: session: saving the memory mural failed");
             }
         }
         let data = base64::engine::general_purpose::STANDARD.encode(&mural.png);
@@ -503,8 +505,8 @@ impl Session {
                 .and_then(|store| store.head_mural(&self.key, hash));
             let Some(png) = png else {
                 tracing::info!(
-                    "ck-mc: session {}: the mural image m[0] shows is gone; m[0] goes without it",
-                    self.key.session
+                    session = %self.key.session,
+                    "ck-mc: session: the mural image m[0] shows is gone; m[0] goes without it"
                 );
                 return None;
             };
@@ -612,8 +614,9 @@ impl Session {
 
     pub(super) fn head_as_shown(&mut self, why: &str) -> Vec<EditOp> {
         tracing::info!(
-            "ck-mc: session {}: history head kept as shown, {why}",
-            self.key.session
+            session = %self.key.session,
+            reason = %why,
+            "ck-mc: session: history head kept as shown"
         );
         self.next_baseline = None;
         self.latest

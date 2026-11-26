@@ -545,12 +545,12 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
         (
             "runner/mock/frozen",
             "cut-f",
-            "agent-data moves are off in this build, so a build with them on must abort or finish the move",
+            "refusing session_moving until a build with agent-data moves enabled aborts or finishes the move",
         ),
         (
             "runner/mock/staged",
             "cut-s",
-            "agent-data moves are off in this build, so a build with them on must abort or finish the move",
+            "refusing session_moving until a build with agent-data moves enabled aborts or finishes the move",
         ),
         (
             "runner/mock/released",
@@ -570,7 +570,7 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
         lines
             .iter()
             .any(|line| line.contains("runner/mock/released")
-                && line.contains(&format!("released to computer {BOX} "))),
+                && line.contains(&format!("destination=computer {BOX}"))),
         "{log}"
     );
     assert!(!log.contains("mac-b"), "{log}");

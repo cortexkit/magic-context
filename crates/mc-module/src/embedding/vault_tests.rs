@@ -385,11 +385,19 @@ async fn a_vault_down_at_start_fails_requests_like_a_timeout_until_it_answers() 
     assert_eq!(endpoint.seen(), [bearer("key-one")]);
     // Once for the outage however many reads failed, once for the recovery.
     assert_eq!(
-        capture.count("ck-mc: the vault could not be read for the API key apikey:voyage"),
+        capture
+            .text()
+            .lines()
+            .filter(
+                |line| line.contains("ck-mc: the vault could not be read for the API key")
+                    && line.contains("credential_id=apikey:voyage")
+            )
+            .count(),
         1
     );
     assert_eq!(
-        capture.count("ck-mc: read the API key apikey:voyage from the vault, record version 1"),
+        capture
+            .count("ck-mc: read an API key from the vault credential_id=apikey:voyage version=1"),
         1
     );
 }
@@ -442,8 +450,17 @@ async fn a_refusal_is_a_configuration_problem_logged_once_per_change() {
     let provider = loader.resolve(None, OPUS, 100_000).embedding.unwrap();
     assert_eq!(provider.embed_query("query").await, None);
     assert!(endpoint.seen().is_empty());
-    let refused = "ck-mc: the vault refused to serve the API key apikey:voyage";
-    assert_eq!(capture.count(refused), 1);
+    let refused = || {
+        capture
+            .text()
+            .lines()
+            .filter(|line| {
+                line.contains("ck-mc: the vault refused to serve the API key")
+                    && line.contains("credential_id=apikey:voyage")
+            })
+            .count()
+    };
+    assert_eq!(refused(), 1);
 
     // Another refusal is a change, and logged once more.
     source.fail(ReadError::refused(
@@ -455,7 +472,7 @@ async fn a_refusal_is_a_configuration_problem_logged_once_per_change() {
         source.reads().len() >= reads + 3
     })
     .await;
-    assert_eq!(capture.count(refused), 2);
+    assert_eq!(refused(), 2);
 
     // A refusal withdraws a key held before (a revoked grant).
     source.serve("key-one", "1");
@@ -505,7 +522,7 @@ async fn a_project_file_cannot_name_a_vault_key() {
     assert_eq!(source.reads(), [KEY_ID]);
     assert!(source.reports().is_empty());
     assert_eq!(
-        capture.count("names the vault credential apikey:project-named; only the user's file may"),
+        capture.count("names a vault credential; only the user's file may, so ck-mc does not read it and sends the setting as written credential_id=apikey:project-named"),
         1
     );
     // A project may not configure the reranker's key at all.
@@ -622,7 +639,7 @@ async fn the_key_text_never_reaches_a_log_line_an_error_or_debug_output() {
     until("the key is withdrawn", || held_version(&vault).is_none()).await;
 
     let log = capture.text();
-    assert!(log.contains("record version 3") && log.contains("record version 4"));
+    assert!(log.contains("version=3") && log.contains("version=4"));
     assert!(log.contains("refused to serve the API key"));
     texts.push(log);
     for text in texts {

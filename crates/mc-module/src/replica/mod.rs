@@ -330,7 +330,11 @@ impl Replica {
             .with_connection(|conn| queue_unsent(conn, &self.box_id));
         let queued = queued.map_err(|error| error.to_string())?;
         let at = self.position()?;
-        tracing::info!("ck-mc: replica: joined the memory stream at {at}; {queued} rows queued");
+        tracing::info!(
+            seq = %at,
+            queued_count = %queued,
+            "ck-mc: replica: joined the memory stream and queued rows"
+        );
         Ok(())
     }
 
@@ -437,7 +441,7 @@ pub(crate) fn new_store_id(conn: &Connection, why: &str) -> rusqlite::Result<()>
         "UPDATE replica_state SET store_id = lower(hex(randomblob(16))) WHERE id = 1",
         [],
     )?;
-    tracing::info!("ck-mc: replica: this store takes a new store id: {why}");
+    tracing::info!(reason = %why, "ck-mc: replica: this store takes a new store id");
     Ok(())
 }
 
@@ -515,9 +519,11 @@ fn same_stream(
     };
     if let Some(why) = &why {
         tracing::warn!(
-            "ck-mc: replica: the hub's memory stream was made anew ({why}; created {}, last message {}, this store had read to {position}); it is read from its start, and every row is sent again",
-            info.created,
-            info.last_seq
+            reason = %why,
+            created = %info.created,
+            last_seq = %info.last_seq,
+            %position,
+            "ck-mc: replica: the hub's memory stream was recreated; reading from its start and sending every row again"
         );
         start_over(&tx)?;
     }

@@ -424,7 +424,8 @@ pub(crate) async fn abort<H: Host>(host: &H, cut: &str) -> Result<Done, ErrorBod
         crash::point("abort reservation released").await;
         tracing::info!(
             cut = %cut,
-            "ck-mc: agent-data cut {cut} is aborted: {released} reserved facts are retryable again"
+            released_count = %released,
+            "ck-mc: agent-data cut: aborted; reserved facts are retryable again"
         );
     }
     let mut after = Vec::new();
@@ -434,8 +435,8 @@ pub(crate) async fn abort<H: Host>(host: &H, cut: &str) -> Result<Done, ErrorBod
     for session in &frozen {
         tracing::info!(
             cut = %cut,
-            "ck-mc: session {} is served again: agent-data cut {cut} was aborted, and the jobs it held run now",
-            label(session)
+            session = %label(session),
+            "ck-mc: session: served again after aborting the agent-data cut; the jobs it held run now"
         );
         after.push(After::Resume(session.clone()));
     }
@@ -472,9 +473,10 @@ async fn unfreeze<H: Host>(host: &H, db: &Path, cut: &str, refusal: ErrorBody) -
     if let Err(error) = blocking(db, move |conn| release_reservation(conn, &key)).await {
         tracing::error!(
             cut = %cut,
-            "ck-mc: prepare for agent-data cut {cut} was refused ({}), and its reserved facts could not be released ({}); sessions {names} stay frozen until prepare is sent again or the move is aborted",
-            refusal.message,
-            error.message
+            refusal = %refusal.message,
+            error = %error.message,
+            sessions = %names,
+            "ck-mc: prepare for an agent-data cut was refused and its reserved facts could not be released; sessions stay frozen until prepare is sent again or the move is aborted"
         );
         return unavailable(format!(
             "{} The sessions this prepare froze could not be unfrozen ({}); send the same prepare again or abort the move.",
@@ -490,8 +492,10 @@ async fn unfreeze<H: Host>(host: &H, db: &Path, cut: &str, refusal: ErrorBody) -
     if let Err(error) = lifted {
         tracing::error!(
             cut = %cut,
-            "ck-mc: prepare for agent-data cut {cut} was refused ({}), and the journal could not unfreeze sessions {names} ({error}); they stay frozen until prepare is sent again or the move is aborted",
-            refusal.message
+            refusal = %refusal.message,
+            sessions = %names,
+            %error,
+            "ck-mc: prepare for an agent-data cut was refused and the journal could not unfreeze sessions; they stay frozen until prepare is sent again or the move is aborted"
         );
         return unavailable(format!(
             "{} The sessions this prepare froze could not be unfrozen ({error}); send the same prepare again or abort the move.",
@@ -502,8 +506,9 @@ async fn unfreeze<H: Host>(host: &H, db: &Path, cut: &str, refusal: ErrorBody) -
     let _ = std::fs::remove_dir_all(cut_folder(db, cut));
     tracing::info!(
         cut = %cut,
-        "ck-mc: prepare for agent-data cut {cut} was refused ({}); sessions {names} are unfrozen and the jobs held for them run now",
-        refusal.message
+        refusal = %refusal.message,
+        sessions = %names,
+        "ck-mc: prepare for an agent-data cut was refused; sessions are unfrozen and the jobs held for them run now"
     );
     for session in &froze {
         host.resume(session);
@@ -554,11 +559,12 @@ pub fn sweep(context_db: &Path, journal: &Journal) {
             match std::fs::remove_dir_all(folder.path()) {
                 Ok(()) => tracing::info!(
                     cut = %cut,
-                    "ck-mc: deleted the files of agent-data cut {cut}, which has ended"
+                    "ck-mc: deleted the files of an agent-data cut that has ended"
                 ),
                 Err(error) => tracing::warn!(
                     cut = %cut,
-                    "ck-mc: the files of ended agent-data cut {cut} could not be deleted ({error}); they can be deleted by hand"
+                    %error,
+                    "ck-mc: the files of an ended agent-data cut could not be deleted; they can be deleted by hand"
                 ),
             }
         }

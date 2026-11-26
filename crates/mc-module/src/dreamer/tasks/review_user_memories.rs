@@ -569,7 +569,8 @@ impl ReviewUserMemories {
             .map_err(|error| format!("reading the person's memories and observations: {error}"))?;
         if decayed > 0 {
             tracing::info!(
-                "ck-mc: dreamer: {decayed} observation(s) about the person waited over 30 days and left review"
+                decayed_count = %decayed,
+                "ck-mc: dreamer: observations about the person waited over 30 days and left review"
             );
         }
         if candidates.len() < threshold && !memories.iter().any(Memory::unsorted) {

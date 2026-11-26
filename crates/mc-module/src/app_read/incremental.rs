@@ -920,7 +920,10 @@ impl Session {
                     // timer retry continuously between session jobs.
                     self.app_projection.snapshot_retry =
                         Some(tokio::time::Instant::now() + SNAPSHOT_DELAY);
-                    tracing::warn!("ck-mc: {error}");
+                    tracing::warn!(
+                        %error,
+                        "ck-mc: app reads: saving a checkpoint snapshot failed"
+                    );
                 }
             }
         }
@@ -967,7 +970,7 @@ impl Session {
         let rows: Vec<_> = p.pending_rows.values().cloned().collect();
         if let Some(store) = &self.store {
             if let Err(error) = store.save_app_index(&self.key, &rows, p.revert_from) {
-                tracing::warn!("ck-mc: {error}");
+                tracing::warn!(%error, "ck-mc: app reads: saving the app index failed");
                 return;
             }
             p.persisted = Some(

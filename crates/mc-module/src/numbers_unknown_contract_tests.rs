@@ -924,6 +924,6 @@ async fn numbers_unknown_contract_a_running_call_below_the_floor_is_named_once()
         let (view, _) = session.build(&settings, None, false, None);
         assert!(view.is_none(), "a view cut before m5: {view:?}");
     }
-    assert_eq!(logs.count("bash call call-7 is still running"), 1);
+    assert_eq!(logs.count("tool=bash call_id=call-7"), 1);
     std::fs::remove_dir_all(dir).unwrap();
 }

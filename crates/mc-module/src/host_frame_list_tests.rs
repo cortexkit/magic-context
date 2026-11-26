@@ -189,10 +189,11 @@ fn refused_read() {
         result.is_err(),
         "duplicate part facts must refuse the wire read"
     );
-    let reason = "refused host-frame facts: entry \"fixture-duplicate-frame\": host_frames must be unique and in stored part order";
+    let reason =
+        "entry \"fixture-duplicate-frame\": host_frames must be unique and in stored part order";
     assert!(
         log.contains(&format!(
-            "session host-frame-sample: session.entries {reason}"
+            "a runner method refused host-frame facts session=host-frame-sample method=session.entries detail={reason}"
         )),
         "{log}"
     );
@@ -208,7 +209,7 @@ fn refused_read() {
     assert!(result.is_err());
     assert!(
         log.contains(&format!(
-            "session host-frame-sample: compaction.notice {reason}"
+            "a runner method refused host-frame facts session=host-frame-sample method=compaction.notice detail={reason}"
         )),
         "{log}"
     );
