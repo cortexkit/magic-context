@@ -112,15 +112,15 @@ async-trait = "0.1"
 zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
+cortexkit-doctor = "=0.2.0"
 # `time`: the monotonic clock a dreamer run reads its role lease's acting
 # window on (`dreamer::lease::monotonic_ms`).
-nix = { version = "0.31.3", features = ["fs", "time", "user"] }
+nix = { version = "0.31.3", features = ["dir", "fs", "time", "user"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
-cortexkit-doctor = "=0.2.0"
 cortexkit-log-manifest = "=0.2.0"
 cortexkit-role-tool-provider-conformance = "=0.15.18"
 rusqlite = { workspace = true, features = ["trace"] }
@@ -145,9 +145,17 @@ subc-control = { workspace = true }
 subc-transport = { workspace = true }
 cortexkit-test-support = "=0.1.14"
 
+[target.'cfg(unix)'.dev-dependencies]
+cortexkit-doctor-conformance = "=0.2.0"
+
 [[bin]]
 name = "ck-mc"
 path = "src/main.rs"
+
+[[test]]
+name = "doctor_conformance"
+path = "tests/doctor_conformance.rs"
+harness = false
 
 # Measures what the module holds in memory after Setup, on a copy of real
 # stores. It replaces the global allocator, so its body compiles only with the

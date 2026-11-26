@@ -4,6 +4,7 @@ use std::sync::{Mutex, PoisonError};
 
 use tokio::time::Instant;
 
+use super::OUTBOX_BACKLOG;
 use crate::context_db::ContextDb;
 
 /// The replica loop samples the store at its existing wakeups. Only one
@@ -74,11 +75,10 @@ impl Health {
 }
 
 fn read_store(conn: &mut rusqlite::Connection) -> rusqlite::Result<Store> {
-    const BACKLOG: &str = "('pending', 'sending', 'too_large', 'unaddressable')";
     // Older versions recorded these two kinds of harmless skips as refusals.
     // Do not count them as refusals while they age out of the table.
     let mut store = conn.query_row(
-        &format!("SELECT (SELECT COUNT(*) FROM replica_outbox WHERE state IN {BACKLOG}),
+        &format!("SELECT (SELECT COUNT(*) FROM replica_outbox WHERE state IN {OUTBOX_BACKLOG}),
                 (SELECT COUNT(*) FROM replica_rejects
                   WHERE reason NOT GLOB 'a copy of *, applied here before: a send tried again after the hub''s duplicate window'
                     AND reason NOT GLOB 'a dreamer change written under generation *, older than generation * the stream holds a change of this row under'),
@@ -101,7 +101,7 @@ fn read_store(conn: &mut rusqlite::Connection) -> rusqlite::Result<Store> {
     // alone: they have an address fixed independently of the current row.
     let mut stmt = conn.prepare(&format!(
         "SELECT m.owner_id FROM replica_outbox o JOIN memories m ON m.id = o.local_id
-          WHERE o.state IN {BACKLOG} AND o.kind = 'memory' AND o.frozen IS NULL AND m.level = 'project'"
+          WHERE o.state IN {OUTBOX_BACKLOG} AND o.kind = 'memory' AND o.frozen IS NULL AND m.level = 'project'"
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {

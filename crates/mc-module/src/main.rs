@@ -10,6 +10,7 @@
 
 use std::error::Error;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use std::sync::Arc;
 
@@ -24,7 +25,21 @@ use mc_module::transport::{manifest_for, Handler, SubcRunnerClient};
 
 const DEFAULT_MODULE_ID: &str = mc_module::MODULE_ID;
 
-fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+fn main() -> Result<ExitCode, Box<dyn Error + Send + Sync>> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new("doctor")) {
+        #[cfg(unix)]
+        return Ok(mc_module::doctor::run(&args.collect::<Vec<_>>()));
+        #[cfg(not(unix))]
+        {
+            eprintln!("ck-mc doctor is not available on this platform yet.");
+            return Ok(ExitCode::from(2));
+        }
+    }
+    run_module_cli().map(|()| ExitCode::SUCCESS)
+}
+
+fn run_module_cli() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Development tool: run an experiment in the already running module,
     // without starting a second module or opening a context store here.
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("lab")) {

@@ -392,7 +392,11 @@ pub(crate) fn read(path: &Path) -> Result<Contents, String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Contents::default()),
         Err(error) => return Err(error.to_string()),
     };
-    let contents: Contents = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    parse(&bytes)
+}
+
+pub(crate) fn parse(bytes: &[u8]) -> Result<Contents, String> {
+    let contents: Contents = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     if contents.format != FORMAT {
         return Err(format!(
             "format {:?}, this build reads {FORMAT:?}",

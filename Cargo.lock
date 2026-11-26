@@ -691,6 +691,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortexkit-doctor-conformance"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b12ccd25f3e14fec9a58295be7705b02c55457147706801ff4e04cd5271f06"
+dependencies = [
+ "cortexkit-doctor",
+ "rustix",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "cortexkit-lease"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1788,6 +1800,7 @@ dependencies = [
  "cortexkit-claustrum-client",
  "cortexkit-compaction-view",
  "cortexkit-doctor",
+ "cortexkit-doctor-conformance",
  "cortexkit-log",
  "cortexkit-log-manifest",
  "cortexkit-paths",
