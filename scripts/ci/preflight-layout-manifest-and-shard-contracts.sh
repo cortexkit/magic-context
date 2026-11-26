@@ -5,6 +5,8 @@ source scripts/ci/checks.sh
 check cortexkit-layout bash scripts/check-cortexkit-layout.sh
 check docs-layout bash scripts/check-docs-layout.sh
 check docs-layout-tests bash scripts/check-docs-layout.test.sh
+check retired-session-name-self-test python3 scripts/check-retired-session-name.py --self-test
+check retired-session-name python3 scripts/check-retired-session-name.py
 check shell-exit-guards bash scripts/check-shell-exit-guards.sh
 check shell-exit-guard-tests bash scripts/check-shell-exit-guards.test.sh
 check file-sizes-self-test python3 scripts/check-file-sizes.py --self-test
