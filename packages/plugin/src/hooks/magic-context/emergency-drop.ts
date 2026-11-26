@@ -172,6 +172,21 @@ export function planEmergencyDrop(input: {
      * something left to reclaim. Zero when the caller does not measure it.
      */
     removedThisPassTokens?: number;
+    /**
+     * Our own count of the last request this session served, in the same units
+     * as the tag counts (system prompt, tool definitions and messages, counted
+     * with the session's calibration). Absent when there is no count, or when
+     * the count was made for a different model than the one this pass serves.
+     *
+     * The fixed part of the request is inferred by subtracting our count of
+     * the active tags from a size of the whole request. The provider's reading
+     * is in the provider's units; every token by which it exceeds our count of
+     * the same request would otherwise land in the fixed part, and a fixed
+     * part inflated that way makes the drop skip as if tool drops could never
+     * help. Taking the smaller of the two sizes can only lower the fixed part,
+     * so the selection can only grow; it never turns a drop into a skip.
+     */
+    servedCountTokens?: number;
     /** ceiling = contextLimit × executeThreshold%. */
     ceilingTokens: number;
     /**
@@ -260,15 +275,20 @@ export function planEmergencyDrop(input: {
     // it keeps today's meaning, the size the planner works against, with a
     // fixed floor of zero.
     const removedMeasured = Math.max(input.removedThisPassTokens ?? 0, 0);
+    // The size the fixed part is inferred from: the reading, or our own count
+    // of the same request when that is smaller (see `servedCountTokens`). The
+    // size the planner works against (`served`) stays the reading's.
+    const servedCount = input.servedCountTokens;
+    const floorBase =
+        servedCount !== undefined && Number.isFinite(servedCount) && servedCount > 0
+            ? Math.min(currentTotalInputTokens, servedCount)
+            : currentTotalInputTokens;
     // Floor, served size and gap of one accounting. `newerInReading` says
     // whether the tags newer than the reading are treated as part of it.
     const account = (newerInReading: boolean) => {
         const measuredTail = newerInReading ? tailTokens + newerTailTokens : tailTokens;
-        const removed = Math.min(
-            removedMeasured,
-            Math.max(currentTotalInputTokens - measuredTail, 0),
-        );
-        const floor = Math.max(currentTotalInputTokens - removed - measuredTail, 0);
+        const removed = Math.min(removedMeasured, Math.max(floorBase - measuredTail, 0));
+        const floor = Math.max(floorBase - removed - measuredTail, 0);
         const served =
             currentTotalInputTokens >= measuredTail
                 ? currentTotalInputTokens - removed + (newerInReading ? 0 : newerTailTokens)
@@ -296,9 +316,12 @@ export function planEmergencyDrop(input: {
     const { removed: removedThisPass, floor: fixedFloor, served: servedInputTokens } = accounting;
     const reclaimTokens = accounting.reclaim;
     const servedNote =
-        removedMeasured > 0 || newerTailTokens > 0
+        (removedMeasured > 0 || newerTailTokens > 0
             ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass${removedThisPass < removedMeasured ? ` (≈${Math.round(removedMeasured)} measured)` : ""}${newerTailTokens > 0 ? `, ≈${Math.round(newerTailTokens)} newer than the reading${olderAccounting ? " (counted in the reading)" : ""}` : ""}`
-            : "";
+            : "") +
+        (floorBase < currentTotalInputTokens
+            ? `, floor from our count ≈${Math.round(floorBase)} of the last request (reading ${Math.round(currentTotalInputTokens)})`
+            : "");
     // Tool drops cannot repair oversized fixed overhead. Preserve the working
     // results and leave admission to the overflow/refusal path, even on a pass
     // whose cache rewrite is already priced by another mutation.
