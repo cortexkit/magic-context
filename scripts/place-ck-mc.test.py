@@ -12,7 +12,37 @@ import unittest
 SCRIPT = Path(__file__).with_name("place-ck-mc.sh")
 ROOT = SCRIPT.parent.parent
 NEW = "6d76aeea576fe2a25ac6d5ed0d9c8125a1fff9f2"
-OLD = subprocess.check_output(["git", "rev-parse", NEW + "^"], cwd=ROOT, text=True).strip()
+
+
+def parent_of_known_commit():
+    """The parent of NEW, a commit every full clone of this repository has.
+
+    These tests need two real commits where one is the other's parent. If the
+    lookup fails, the checkout has no history for NEW (it happened once on the
+    build server). Print what the repository looks like before failing, so the
+    cause can be found from the job's output.
+    """
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", NEW + "^"], cwd=ROOT, text=True
+        ).strip()
+    except subprocess.CalledProcessError:
+        probe = (
+            "pwd -P; git cat-file -t HEAD; git rev-parse --is-shallow-repository; "
+            "git count-objects -v; ls .git/objects/info/ .git/shallow 2>&1; "
+            'echo "source commit: $CK_REMOTE_SOURCE_COMMIT"'
+        )
+        shown = subprocess.run(
+            ["bash", "-c", probe], cwd=ROOT, capture_output=True, text=True
+        )
+        print(
+            f"commit {NEW} has no parent in this checkout:\n{shown.stdout}{shown.stderr}",
+            flush=True,
+        )
+        raise
+
+
+OLD = parent_of_known_commit()
 REAL_GIT = shutil.which("git")
 
 
