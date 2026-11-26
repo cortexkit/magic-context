@@ -32,7 +32,7 @@ version locally, install its CLI separately and set both
 `MC_E2E_OPENCODE2_VERSION=2.1.0`. The version assertions still require an exact
 match; changing only the binary override will not bypass them.
 
-For an unpinned 2.2.x compatibility proof, install its CLI and the same exact
+For an unpinned 2.2.x, 2.3.x, or 2.4.x compatibility proof, install its CLI and the same exact
 `@opencode/ai` version under a private throwaway root. Set
 `MC_E2E_OPENCODE2_AI_ROOT` to that install root alongside the CLI/version
 overrides. The runner refuses a mismatched or missing schema version and bundles

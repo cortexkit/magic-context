@@ -50,5 +50,11 @@ test("an unpinned 2.3 host requires its exact external schema rather than the pi
 	expect(schemaGeneration("opencode v2.3.0", "2.3.0")).toBe("2.3");
 	expect(() => schemaGeneration("opencode v2.3.0")).toThrow("No e2e LLM schema bundle");
 	expect(() => schemaGeneration("opencode v2.3.0", "2.2.2")).toThrow("No e2e LLM schema bundle");
-	expect(() => schemaGeneration("opencode v2.4.0", "2.4.0")).toThrow("No e2e LLM schema bundle");
+});
+
+test("an unpinned 2.4 host requires its exact external schema rather than the pinned oracle", () => {
+	expect(schemaGeneration("opencode v2.4.2", "2.4.2")).toBe("2.4");
+	expect(() => schemaGeneration("opencode v2.4.2")).toThrow("No e2e LLM schema bundle");
+	expect(() => schemaGeneration("opencode v2.4.2", "2.4.1")).toThrow("No e2e LLM schema bundle");
+	expect(() => schemaGeneration("opencode v2.5.0", "2.5.0")).toThrow("No e2e LLM schema bundle");
 });

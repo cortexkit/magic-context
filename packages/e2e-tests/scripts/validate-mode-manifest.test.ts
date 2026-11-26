@@ -32,7 +32,7 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(92);
+        expect(ts).toHaveLength(94);
         expect(rust).toHaveLength(60);
         expect(rust).toContain("tests/rust-compaction-marker-catchup.test.ts");
         expect(rust).toContain("tests/rust-tool-attachments.test.ts");
@@ -55,7 +55,7 @@ describe("mode manifest validator", () => {
         expect(ts).toContain("tests/reasoning-token-budget.test.ts");
         expect(rust).not.toContain("tests/reasoning-token-budget.test.ts");
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(36);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(54);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(56);
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
@@ -81,6 +81,8 @@ describe("mode manifest validator", () => {
             "tests/opencode2/native-fold-hidden-edit.test.ts",
             "tests/opencode2/native-fold-fork-cache-review.test.ts",
             "tests/opencode2/native-fold-provenance.test.ts",
+            "tests/opencode2/image-attachment.test.ts",
+            "tests/opencode2/restored-image-system-first-draft.test.ts",
         ]) {
             expect(filesForMode(validation, "ts", "opencode2")).toContain(path);
             expect(filesForMode(validation, "ts", "opencode")).not.toContain(path);
@@ -139,7 +141,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/hidden-child-two-directories.test.ts",
             "tests/opencode2/hidden-mapping-transcript.test.ts",
             "tests/opencode2/hidden-step-limit.test.ts",
-            "tests/opencode2/image-attachment.test.ts",
             "tests/opencode2/mapper-step-finalize.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
             "tests/opencode2/missing-history-boundary.test.ts",
@@ -150,7 +151,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/probes.test.ts",
             "tests/opencode2/prompt-surface-s6.test.ts",
             "tests/opencode2/restart-system-prompt-change.test.ts",
-            "tests/opencode2/restored-image-system-first-draft.test.ts",
             "tests/opencode2/rpc-s2-listener.test.ts",
             "tests/opencode2/runner.test.ts",
             "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",

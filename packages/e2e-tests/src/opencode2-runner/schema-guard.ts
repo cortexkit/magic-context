@@ -20,11 +20,12 @@ export async function requireSchemaGuard(
 	);
 }
 
-export function schemaGeneration(version: string, externalVersion?: string): "2.0" | "2.1" | "2.2" | "2.3" {
+export function schemaGeneration(version: string, externalVersion?: string): "2.0" | "2.1" | "2.2" | "2.3" | "2.4" {
 	if (/^opencode v2\.0\.\d+$/.test(version)) return "2.0";
 	if (version === "opencode v2.1.0") return "2.1";
 	if (/^opencode v2\.2\.\d+$/.test(version) && version === `opencode v${externalVersion}`) return "2.2";
 	if (/^opencode v2\.3\.\d+$/.test(version) && version === `opencode v${externalVersion}`) return "2.3";
+	if (/^opencode v2\.4\.\d+$/.test(version) && version === `opencode v${externalVersion}`) return "2.4";
 	throw new Error(`No e2e LLM schema bundle for ${version}`);
 }
 
@@ -59,7 +60,7 @@ export async function prepareSchemaGuard(
 						setup(build) {
 							build.onResolve({ filter: /^@opencode\/ai\// }, ({ path }) => ({
 								path: Bun.resolveSync(
-									(generation === "2.2" || generation === "2.3") && externalRoot
+									(generation === "2.2" || generation === "2.3" || generation === "2.4") && externalRoot
 										? join(externalRoot, "node_modules/@opencode/ai/dist", `${path.slice("@opencode/ai/".length)}.js`)
 										: path.replace("@opencode/ai", module),
 									import.meta.dir,
