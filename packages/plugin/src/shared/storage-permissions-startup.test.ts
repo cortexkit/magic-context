@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import { join } from "node:path";
+import { withStorageFileMutex } from "./storage-file-mutex";
 import {
     __resetStoragePrivatePermissionEnforcementForTests,
     ensurePrivateStorageDirectorySync,
     setStoragePrivatePermissionEnforcement,
     tightenStorageTreeSync,
+    writeStorageFileDurableAtomicSync,
 } from "./storage-permissions";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "./test-temp-dir";
 
@@ -50,6 +52,26 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         expect(fs.readFileSync(fixed, "utf8")).toBe("keep");
     });
 
+    it("does not unlink an old legacy temp before its live publisher renames it", () => {
+        const root = fixture();
+        const fence = join(root, "lkg-recovery-fences", "pending.json");
+        const temp = `${fence}.${process.pid}.${"a".repeat(24)}.tmp`;
+        const old = new Date(Date.now() - 11 * 60_000);
+        withStorageFileMutex(`${fence}.locks`, () => {
+            writeStorageFileDurableAtomicSync(
+                fence,
+                "published",
+                () => {
+                    fs.utimesSync(temp, old, old);
+                    expect(tightenStorageTreeSync(root).failures).toBe(0);
+                },
+                temp,
+            );
+        });
+        expect(fs.readFileSync(fence, "utf8")).toBe("published");
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+    });
+
     it("sweeps only empty orphan fence lock directories during the full pass", () => {
         const root = fixture();
         const fences = join(root, "lkg-recovery-fences");
@@ -90,6 +112,14 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         } finally {
             lstat.mockRestore();
         }
+    });
+
+    it("does not certify a storage root that is a symbolic link", () => {
+        const root = fixture();
+        const alias = join(root, "alias");
+        fs.symlinkSync(root, alias);
+        expect(tightenStorageTreeSync(alias).failures).toBe(1);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
     });
 
     for (const target of ["context.db", ".", "context.db-wal", "context.db-shm"]) {
@@ -206,6 +236,25 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         expect(fs.existsSync(join(root, markerName))).toBe(false);
     });
 
+    it("invalidates the certificate before a repair can hide the loose root", () => {
+        const root = fixture();
+        const marker = join(root, markerName);
+        fs.writeFileSync(marker, "1\n", { mode: 0o600 });
+        fs.chmodSync(root, 0o755);
+        const chmodSync = fs.chmodSync;
+        const markerDuringRepair: boolean[] = [];
+        const chmod = spyOn(fs, "chmodSync").mockImplementation((path, mode) => {
+            if (path === root) markerDuringRepair.push(fs.existsSync(marker));
+            return chmodSync(path, mode);
+        });
+        try {
+            expect(tightenStorageTreeSync(root)).toEqual({ tightened: 1, failures: 0 });
+            expect(markerDuringRepair).toEqual([false]);
+        } finally {
+            chmod.mockRestore();
+        }
+    });
+
     it("stops marker invalidation at the storage root", () => {
         const root = fixture();
         const parent = join(root, "..");
@@ -262,6 +311,23 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
             }
             expect(fs.readFileSync(marker, "utf8")).toBe("1\n");
         }
+    });
+
+    it("rejects an oversized certificate without a whole-file read", () => {
+        const root = fixture();
+        const marker = join(root, markerName);
+        const deep = join(root, "lkg-recovery-fences", "5.json");
+        fs.writeFileSync(marker, "1\n", { mode: 0o600 });
+        fs.truncateSync(marker, 1024 * 1024);
+        fs.chmodSync(deep, 0o644);
+        const readFile = spyOn(fs, "readFileSync");
+        try {
+            expect(tightenStorageTreeSync(root)).toEqual({ tightened: 1, failures: 0 });
+            expect(readFile.mock.calls.some(([path]) => path === marker)).toBe(false);
+        } finally {
+            readFile.mockRestore();
+        }
+        expect(fs.readFileSync(marker, "utf8")).toBe("1\n");
     });
 
     it("does not certify a full pass that keeps a fresh legacy fence temp", () => {

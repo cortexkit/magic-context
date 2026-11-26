@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { existsSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { __resetRpcIdentityTestHooks, __setRpcIdentityTestHooks } from "./rpc-utils";
@@ -83,6 +84,28 @@ test("mutex keeps retrying ticket creation while cleanups remove the directory",
         expect(attempts).toBe(5);
     } finally {
         writer.mockRestore();
+        cleanup();
+    }
+});
+
+test("mutex retries when retirement removes the lock directory before validation", () => {
+    const { dir: root, cleanup } = createTestTempDir("mc-mutex-validate-race-");
+    const directory = join(root, "locks");
+    const lstatSync = fs.lstatSync;
+    let removals = 0;
+    const lstat = spyOn(fs, "lstatSync").mockImplementation((...args) => {
+        if (args[0] === directory && removals < 2) {
+            rmdirSync(directory);
+            removals++;
+        }
+        return lstatSync(...args);
+    });
+    try {
+        expect(withStorageFileMutex(directory, () => "acquired")).toBe("acquired");
+        expect(removals).toBe(2);
+        expect(existsSync(directory)).toBe(false);
+    } finally {
+        lstat.mockRestore();
         cleanup();
     }
 });
