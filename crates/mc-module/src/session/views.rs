@@ -39,11 +39,12 @@ impl Session {
             Standing::Older { .. } => "late, reading ignored".to_owned(),
         };
         tracing::info!(
-            "ck-mc: session {}: ride {:?}, request {:?} tokens, last prompt {last_prompt}, applied view {:?}",
-            self.key.session,
-            ride.causes,
-            ride.request_tokens,
-            ride.applied_view.as_ref().map(|view| view.version),
+            session = %self.key.session,
+            causes = ?ride.causes,
+            request_tokens = ?ride.request_tokens,
+            last_prompt_tokens = %last_prompt,
+            applied_view = ?ride.applied_view.as_ref().map(|view| view.version),
+            "ck-mc: session: the runner requested a ride"
         );
         self.settle_stated(stated, &[]);
         // A provider refusal still permits reclaim when the last reading is
@@ -60,8 +61,9 @@ impl Session {
                 let floor = pass::usable_window(&self.conditions)
                     .max(self.conditions.last_prompt_tokens.unwrap_or(0));
                 tracing::info!(
-                    "ck-mc: session {}: over_limit without request_tokens: using a request floor of {floor} tokens",
-                    self.key.session
+                    session = %self.key.session,
+                    floor_tokens = %floor,
+                    "ck-mc: session: over_limit without request_tokens; using a request floor"
                 );
                 floor
             })
@@ -91,9 +93,9 @@ impl Session {
         };
         if !permitted {
             tracing::info!(
-                "ck-mc: session {}: ride {:?} adds no rebuild permission; the current view stays",
-                self.key.session,
-                ride.causes,
+                session = %self.key.session,
+                causes = ?ride.causes,
+                "ck-mc: session: ride adds no rebuild permission; the current view stays"
             );
             return None;
         }
@@ -313,8 +315,8 @@ impl Session {
         }
         if self.latest_unknown {
             tracing::info!(
-                "ck-mc: session {}: no view until the runner's applied view is read back",
-                self.key.session
+                session = %self.key.session,
+                "ck-mc: session: no view until the runner's applied view is read back"
             );
             return (None, 0);
         }
@@ -814,8 +816,9 @@ impl Session {
                 self.next_latch = false;
                 self.next_rearm = false;
                 tracing::warn!(
-                    "ck-mc: session {}: no valid view: {refusal:?}",
-                    self.key.session
+                    session = %self.key.session,
+                    ?refusal,
+                    "ck-mc: session: no valid view"
                 );
                 None
             }
@@ -863,16 +866,18 @@ impl Session {
         // aside, so the same oversized view isn't built again on every pass.
         self.failed_parts.extend(covered.iter().cloned());
         tracing::info!(
-            "ck-mc: session {}: view {} not sent: view_too_large ({size} bytes, limit {MAX_VIEW_BYTES})",
-            self.key.session, view.version
+            session = %self.key.session,
+            view_version = %view.version,
+            bytes = %size,
+            max_bytes = %MAX_VIEW_BYTES,
+            "ck-mc: session: view not sent: view_too_large"
         );
         true
     }
 
-    /// The cache-bust analyzer parses this line to tell which request first
-    /// carried a rebuilt view and how far its cut reached, so keep its shape:
-    /// `cut through <message id>` or `no cut`. A `note`, when given, follows
-    /// the closing parenthesis after `; `, so the line still starts the same.
+    /// The cache-bust analyzer reads the view version, edit count and cut
+    /// to tell which request first carried a rebuilt view. The cut field
+    /// distinguishes `cut through <message id>` from `no cut`.
     pub(super) fn log_view_accepted(&self, view: &View, note: Option<&str>) {
         let cut = view
             .edits
@@ -884,10 +889,12 @@ impl Session {
             .unwrap_or_else(|| "no cut".to_string());
         let note = note.map(|note| format!("; {note}")).unwrap_or_default();
         tracing::info!(
-            "ck-mc: session {}: view {} accepted ({} edits, {cut}){note}",
-            self.key.session,
-            view.version,
-            view.edits.len()
+            session = %self.key.session,
+            view_version = %view.version,
+            edit_count = %view.edits.len(),
+            %cut,
+            %note,
+            "ck-mc: session: view accepted"
         );
     }
 }

@@ -140,11 +140,12 @@ impl Session {
     /// epoch, once.
     pub(super) fn log_foreign(&self, kind: &str, conditions: &Conditions) {
         tracing::info!(
-            "ck-mc: session {}: dropped a {kind} from statement epoch {:?} (stamp {:?}) on the session's worker: the Setup it took last named epoch {:?}; nothing in it is taken",
-            self.key.session,
-            conditions.statement_epoch,
-            conditions.statement_seq,
-            self.statement_epoch
+            session = %self.key.session,
+            %kind,
+            statement_epoch = ?conditions.statement_epoch,
+            statement_seq = ?conditions.statement_seq,
+            setup_epoch = ?self.statement_epoch,
+            "ck-mc: session: the worker dropped a statement from a different epoch than the last Setup; nothing in it is taken"
         );
     }
 
@@ -172,8 +173,11 @@ impl Session {
         };
         self.late_statements += 1;
         tracing::info!(
-            "ck-mc: session {}: {kind} stamped {stamp} was built before the statement stamped {held} that ck-mc already took; keeping the runner state and the reading held, taking only its entries and events",
-            self.key.session
+            session = %self.key.session,
+            %kind,
+            statement_stamp = %stamp,
+            held_stamp = %held,
+            "ck-mc: session: received a statement built before the one already taken; keeping the held runner state and reading, taking only entries and events"
         );
     }
 

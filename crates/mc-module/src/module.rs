@@ -790,11 +790,12 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let admitted = crate::session::epoch_admits(held.as_deref(), conditions);
         if !admitted {
             tracing::info!(
-                "ck-mc: session {}: dropped a {kind} from statement epoch {:?} (stamp {:?}): the session's Setup named epoch {:?}; asking the runner to set the session up again",
-                session.session,
-                conditions.statement_epoch,
-                conditions.statement_seq,
-                held
+                session = %session.session,
+                %kind,
+                statement_epoch = ?conditions.statement_epoch,
+                statement_seq = ?conditions.statement_seq,
+                setup_epoch = ?held,
+                "ck-mc: session: dropped a statement from a different epoch; asking the runner to set the session up again"
             );
         }
         Some(admitted)
@@ -1024,7 +1025,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         let user = self.inner.config.resolve(None, "", 0);
         let workspace_embedded = crate::upkeep::run_workspace(&db, &user).await;
         if workspace_embedded > 0 {
-            tracing::info!("ck-mc: upkeep embedded {workspace_embedded} workspace memories");
+            tracing::info!(
+                embedded_count = %workspace_embedded,
+                "ck-mc: upkeep embedded workspace memories"
+            );
         }
         let now = now_ms();
         let projects: Vec<(String, String)> = {
@@ -1077,7 +1081,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             )
             .await;
             if report != crate::upkeep::Report::default() {
-                tracing::info!("ck-mc: upkeep for {id}: {report:?}");
+                tracing::info!(project = %id, ?report, "ck-mc: upkeep finished for a project");
             }
             reports.push((id, report));
         }
@@ -1143,11 +1147,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 unreachable!("only parked carries expire")
             };
             tracing::info!(
-                "ck-mc: session {}/{}/{}: dropped its quiet carry after {} s without a job",
-                key.runner,
-                key.harness,
-                key.session,
-                now.duration_since(quiet.idle_since).as_secs()
+                runner = %key.runner,
+                harness = %key.harness,
+                session = %key.session,
+                idle_secs = %now.duration_since(quiet.idle_since).as_secs(),
+                "ck-mc: session: dropped its quiet carry after being idle without a job"
             );
         }
     }
@@ -1319,8 +1323,19 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             .as_ref()
                             .and_then(|store| store.memory_context(&session));
                         match crate::memory_profile::prompt_profile(context.as_ref()) {
-                            Ok(profile) => engine.see_project(&db, &project, &root, Arc::new(profile), &settings, now),
-                            Err(refusal) => tracing::warn!("ck-mc: dreamer: {project}'s memory profile can't load: {refusal:?}"),
+                            Ok(profile) => engine.see_project(
+                                &db,
+                                &project,
+                                &root,
+                                Arc::new(profile),
+                                &settings,
+                                now,
+                            ),
+                            Err(refusal) => tracing::warn!(
+                                %project,
+                                ?refusal,
+                                "ck-mc: dreamer: the project's memory profile could not load"
+                            ),
                         }
                         engine.see_workspace(
                             &project,
@@ -1764,11 +1779,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                         // The move let the session go: what it held runs
                         // first, in order, then this job and the rest.
                         tracing::info!(
-                            "ck-mc: session {}/{}/{}: running {} jobs held during a move",
-                            held_key.runner,
-                            held_key.harness,
-                            held_key.session,
-                            held.len()
+                            runner = %held_key.runner,
+                            harness = %held_key.harness,
+                            session = %held_key.session,
+                            job_count = %held.len(),
+                            "ck-mc: session: running jobs held during a move"
                         );
                         let rest = std::mem::take(&mut ready);
                         ready.extend(held.drain(..));
@@ -2019,11 +2034,13 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             "was released to another machine"
                         };
                         tracing::info!(
-                            "ck-mc: session {}/{}/{} {what} by agent-data cut {cut}; discarding the {} Setup, notice and summary jobs held during the move",
-                            held_key.runner,
-                            held_key.harness,
-                            held_key.session,
-                            held.len()
+                            runner = %held_key.runner,
+                            harness = %held_key.harness,
+                            session = %held_key.session,
+                            state = %what,
+                            %cut,
+                            job_count = %held.len(),
+                            "ck-mc: session: discarding Setup, notice and summary jobs held during an agent-data move"
                         );
                         break;
                     }
@@ -2147,7 +2164,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             match store.save(session.key(), &durable) {
                                 Ok(()) => saved = Some(durable),
                                 Err(error) => {
-                                    tracing::warn!("ck-mc: {error}");
+                                    tracing::warn!(
+                                        %error,
+                                        "ck-mc: session: saving durable state after a worker job failed"
+                                    );
                                     save_failed = true;
                                 }
                             }
@@ -2336,7 +2356,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                             }
                             Err(error) => {
                                 retry_save = true;
-                                tracing::warn!("ck-mc: {error}");
+                                tracing::warn!(
+                                    %error,
+                                    "ck-mc: session: retrying a durable state save failed"
+                                );
                             }
                         }
                     }
@@ -2362,7 +2385,7 @@ fn retry_checkpoint(
             true
         }
         Err(error) => {
-            tracing::warn!("ck-mc: {error}");
+            tracing::warn!(%error, "ck-mc: session: saving durable state failed");
             false
         }
     }
@@ -2503,11 +2526,11 @@ fn hold(
         | Job::Workspace { .. } => {
             if held.is_empty() {
                 tracing::info!(
-                    "ck-mc: session {}/{}/{}: holding its Setup and notices while a move holds it ({}); they run if the move is aborted",
-                    key.runner,
-                    key.harness,
-                    key.session,
-                    gated.cut.as_deref().unwrap_or("journal unreadable")
+                    runner = %key.runner,
+                    harness = %key.harness,
+                    session = %key.session,
+                    cut = %gated.cut.as_deref().unwrap_or("journal unreadable"),
+                    "ck-mc: session: holding its Setup and notices while a move holds it; they run if the move is aborted"
                 );
             }
             held.push_back(job);
@@ -2648,9 +2671,9 @@ fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
         }
         *session = None;
         tracing::info!(
-            "ck-mc: session {}: freed after {} s without a job; its next job reads it again",
-            key.session,
-            freed.quiet_for.as_secs()
+            session = %key.session,
+            idle_secs = %freed.quiet_for.as_secs(),
+            "ck-mc: session: freed after being idle without a job; its next job reads it again"
         );
         return true;
     }
@@ -2683,9 +2706,9 @@ fn free_quiet<'a, C: RunnerClient + Router + Send + Sync + 'static>(
         return false;
     }
     tracing::info!(
-        "ck-mc: session {}: freed after {} s without a job; its next job reads it again",
-        key.session,
-        freed.quiet_for.as_secs()
+        session = %key.session,
+        idle_secs = %freed.quiet_for.as_secs(),
+        "ck-mc: session: freed after being idle without a job; its next job reads it again"
     );
     true
 }
@@ -2755,9 +2778,9 @@ async fn resume<C: RunnerClient + Router + Send + Sync + 'static>(
     let started = std::time::Instant::now();
     let session = Session::resume_quiet(carry);
     tracing::info!(
-        "ck-mc: session {}: resumed after a quiet free in {} ms",
-        key.session,
-        started.elapsed().as_millis()
+        session = %key.session,
+        elapsed_ms = %started.elapsed().as_millis(),
+        "ck-mc: session: resumed after a quiet free"
     );
     session
 }
@@ -2935,8 +2958,9 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
         // writes its memories; one notice after it covers all of them.
         db.changed(crate::app_read::Change::project_memories(&job.project));
         tracing::info!(
-            "ck-mc: session {}: turn two: {outcome:?}",
-            job.owner.session
+            session = %job.owner.session,
+            ?outcome,
+            "ck-mc: session: turn two finished"
         );
         if let crate::summary::two_pass::turn_two::Outcome::AccountWait(wait) = outcome {
             if let Some(worker) = worker.upgrade() {

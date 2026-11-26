@@ -356,7 +356,7 @@ pub(super) fn read<T>(
     read: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
 ) -> Result<T, ErrorBody> {
     db.with_connection(|conn| read(conn)).map_err(|error| {
-        tracing::warn!("ck-mc: user command read failed: {error}");
+        tracing::warn!(%error, "ck-mc: user command read failed");
         unavailable_error()
     })
 }
@@ -468,7 +468,7 @@ pub(super) fn person_refused(command: &str, error: PersonError) -> Refused {
 
 /// A store error during a run's write: its transaction rolled back.
 pub(super) fn store_failed(command: &str, error: &str) -> Refused {
-    tracing::warn!("ck-mc: user command {command} failed: {error}");
+    tracing::warn!(%command, %error, "ck-mc: user command failed");
     Refused::Error(unavailable_error())
 }
 

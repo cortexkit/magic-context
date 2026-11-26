@@ -321,7 +321,7 @@ async fn a_named_remote_synapse_is_the_only_module_called() {
     );
     let text = output.text();
     assert_eq!(
-        text.matches(&format!("from Synapse module {REMOTE}; keeping"))
+        text.matches(&format!("from a Synapse module; keeping the original ranking until it scores again reason=unknown_module module={REMOTE}"))
             .count(),
         1,
         "{text}"

@@ -54,8 +54,9 @@ impl Session {
             }
             Err(error) => {
                 tracing::warn!(
-                    "ck-mc: session {}: reading its summaries again after a quiet free failed: {error}; nothing runs on it until a read succeeds",
-                    self.key.session
+                    session = %self.key.session,
+                    %error,
+                    "ck-mc: session: reading its summaries again after a quiet free failed; nothing runs on it until a read succeeds"
                 );
                 false
             }
@@ -77,8 +78,10 @@ impl Session {
             return;
         }
         tracing::info!(
-            "ck-mc: session {}: saved state is ahead of context.db's summaries (cut {:?}, summaries through {covered:?}); rebuilding from context.db",
-            self.key.session, cut
+            session = %self.key.session,
+            ?cut,
+            ?covered,
+            "ck-mc: session: saved state is ahead of context.db's summaries; rebuilding from context.db"
         );
         // Views saved before the restart may rest on those summaries too.
         // Setup reads back the one the runner applies before any is built.
@@ -135,8 +138,9 @@ impl Session {
             return;
         };
         tracing::warn!(
-            "ck-mc: session {}: summaries {missing:?} are no longer in context.db; the session reads its summaries from there again",
-            self.key.session
+            session = %self.key.session,
+            missing_ids = ?missing,
+            "ck-mc: session: some summaries are no longer in context.db; the session reads its summaries from there again"
         );
         self.load_summaries();
         self.adopt_stored_summaries();
@@ -156,8 +160,9 @@ impl Session {
                 self.app_projection.summaries_dirty = true;
             }
             Err(error) => tracing::warn!(
-                "ck-mc: session {}: loading summaries failed: {error}",
-                self.key.session
+                session = %self.key.session,
+                %error,
+                "ck-mc: session: loading summaries failed"
             ),
         }
     }
@@ -260,8 +265,9 @@ impl Session {
                 db.delete_compartments_from(&self.key.harness, &self.key.session, sequence)
             {
                 tracing::warn!(
-                    "ck-mc: session {}: deleting reverted summaries failed: {error}",
-                    self.key.session
+                    session = %self.key.session,
+                    %error,
+                    "ck-mc: session: deleting reverted summaries failed"
                 );
             }
         }
@@ -373,8 +379,9 @@ impl Session {
                 Err(error) => {
                     if !error.message.starts_with("runner fault:") {
                         tracing::warn!(
-                            "ck-mc: session {}: reconciling summaries failed: {error:?}",
-                            self.key.session
+                            session = %self.key.session,
+                            ?error,
+                            "ck-mc: session: reconciling summaries failed"
                         );
                     }
                     return None;
@@ -410,10 +417,14 @@ impl Session {
             |cursor| format!("entry {} ({})", cursor.ordinal, cursor.mid),
         );
         tracing::error!(
-            "ck-mc: session {}: transcript_behind_summaries: {failed} of {} summaries end on messages the transcript no longer holds at their position, and the runner reported no revert (the check stops after {}); the newest summary ends at message {end} ({end_id}); the runner's newest entry: {runner}. Nothing is forgotten; the session reads, builds and summarizes nothing until a check finds those messages again",
-            self.key.session,
-            self.summaries.len(),
-            IMPLICIT_FORGET_LIMIT + 1
+            session = %self.key.session,
+            failed_count = failed,
+            summary_count = self.summaries.len(),
+            check_limit = IMPLICIT_FORGET_LIMIT + 1,
+            end_ordinal = end,
+            end_mid = %end_id,
+            newest = %runner,
+            "ck-mc: session: transcript_behind_summaries: summaries end on messages the transcript no longer holds at their position, and the runner reported no revert. Nothing is forgotten; the session reads, builds and summarizes nothing until a check finds those messages again"
         );
     }
 
@@ -422,8 +433,9 @@ impl Session {
     pub(super) fn release_transcript_hold(&mut self) {
         if let Some(checks) = self.transcript_behind.take() {
             tracing::info!(
-                "ck-mc: session {}: transcript_behind_summaries: the transcript holds the summaries' messages again after {checks} failed checks; the session resumes",
-                self.key.session
+                session = %self.key.session,
+                failed_count = %checks,
+                "ck-mc: session: transcript_behind_summaries: the transcript holds the summaries' messages again; the session resumes"
             );
         }
     }

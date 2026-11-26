@@ -337,9 +337,9 @@ impl HeldKey {
                     .is_none_or(|held| held.version != credential.version);
                 if state.problem.take().is_some() || new_version {
                     tracing::info!(
-                        "ck-mc: read the API key {} from the vault, record version {}",
-                        self.id,
-                        credential.version
+                        credential_id = %self.id,
+                        version = %credential.version,
+                        "ck-mc: read an API key from the vault"
                     );
                 }
                 state.held = Some(credential);
@@ -380,14 +380,16 @@ impl HeldKey {
             state.refused_version = Some(version.to_owned());
         }
         tracing::warn!(
-            "ck-mc: the provider refused the API key {} at record version {version} again after a fresh read; ck-mc reports it to the vault, which marks it for renewal, and sends that version no more",
-            self.id
+            credential_id = %self.id,
+            %version,
+            "ck-mc: the provider refused the API key again after a fresh read; ck-mc reports it to the vault, which marks it for renewal, and sends that version no more"
         );
         if let Some(source) = &self.source {
             if let Err(error) = source.report_auth_failure(&self.id, version, 401).await {
                 tracing::warn!(
-                    "ck-mc: the vault did not take the report on the API key {} ({error})",
-                    self.id
+                    credential_id = %self.id,
+                    %error,
+                    "ck-mc: the vault did not take the report on the API key"
                 );
             }
         }
@@ -398,13 +400,19 @@ impl HeldKey {
 fn log_problem(id: &str, error: &ReadError, holding: bool) {
     match (error.kind, holding) {
         (ReadErrorKind::Unavailable, true) => tracing::warn!(
-            "ck-mc: the vault could not be read for the API key {id} ({error}); the key read before keeps serving while ck-mc tries again"
+            credential_id = %id,
+            %error,
+            "ck-mc: the vault could not be read for the API key; the key read before keeps serving while ck-mc tries again"
         ),
         (ReadErrorKind::Unavailable, false) => tracing::warn!(
-            "ck-mc: the vault could not be read for the API key {id} ({error}); requests that need the key fail as timed-out requests do until ck-mc reads it, and it keeps trying"
+            credential_id = %id,
+            %error,
+            "ck-mc: the vault could not be read for the API key; requests that need the key fail as timed-out requests do until ck-mc reads it, and it keeps trying"
         ),
         (ReadErrorKind::Refused, _) => tracing::warn!(
-            "ck-mc: the vault refused to serve the API key {id} ({error}); check the credential id and that magic-context holds a read grant for it. Requests that need the key fail until then"
+            credential_id = %id,
+            %error,
+            "ck-mc: the vault refused to serve the API key; check the credential id and that magic-context holds a read grant for it. Requests that need the key fail until then"
         ),
     }
 }

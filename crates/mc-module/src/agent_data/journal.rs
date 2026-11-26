@@ -329,7 +329,8 @@ impl Journal {
             Err(reason) => {
                 tracing::error!(
                     journal = %path.display(),
-                    "ck-mc: the agent-data move journal cannot be read ({reason}); every session is refused session_moving until it is repaired or restored from a backup"
+                    %reason,
+                    "ck-mc: the agent-data move journal cannot be read; every session is refused session_moving until it is repaired or restored from a backup"
                 );
                 gate.refuse_all(reason);
                 None
@@ -439,25 +440,20 @@ fn log_held(contents: &Contents, agent_data: bool) {
                 session = %session,
                 cut = %moving.cut,
                 state = moving.state.describe(),
-                "ck-mc: session {session} is {} by agent-data cut {} and is refused session_moving until Entorhinal aborts or finishes the move",
-                moving.state.describe(),
-                moving.cut
+                "ck-mc: session: the agent-data cut is in progress; refusing session_moving until Entorhinal aborts or finishes the move"
             ),
             (Some(moving), _) => tracing::warn!(
                 session = %session,
                 cut = %moving.cut,
                 state = moving.state.describe(),
-                "ck-mc: session {session} is {} by agent-data cut {} and is refused session_moving; agent-data moves are off in this build, so a build with them on must abort or finish the move",
-                moving.state.describe(),
-                moving.cut
+                "ck-mc: session: the agent-data cut is in progress; refusing session_moving until a build with agent-data moves enabled aborts or finishes the move"
             ),
             (None, Some(released)) => tracing::info!(
                 session = %session,
                 cut = %released.cut,
                 holder_box = released.holder_box.as_deref(),
-                "ck-mc: session {session} was released to {} by agent-data cut {} and is refused session_moved here; only a move back to this machine serves it here again",
-                released.destination(),
-                released.cut
+                destination = %released.destination(),
+                "ck-mc: session: released by an agent-data cut and refused session_moved here; only a move back to this machine serves it here again"
             ),
             (None, None) => {}
         }

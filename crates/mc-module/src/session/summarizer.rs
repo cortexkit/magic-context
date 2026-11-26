@@ -114,7 +114,11 @@ impl Session {
         let held = |why: std::fmt::Arguments<'_>| {
             if at_threshold {
                 tracing::info!(
-                    "ck-mc: session {session}: no summary at {usage:.0}% (threshold {threshold:.0}%): {why}"
+                    %session,
+                    usage_pct = %format_args!("{:.0}", usage),
+                    threshold_pct = %format_args!("{:.0}", threshold),
+                    reason = %why,
+                    "ck-mc: session: no summary started"
                 );
             }
         };
@@ -274,9 +278,9 @@ impl Session {
             .sum();
         let Some(reservation) = self.drain.reserve(&quota, requested) else {
             tracing::info!(
-                "ck-mc: session {}: summary skipped: drain budget spent ({} tokens this window)",
-                self.key.session,
-                self.drain.spent
+                session = %self.key.session,
+                spent_tokens = %self.drain.spent,
+                "ck-mc: session: summary skipped: drain budget spent"
             );
             return None;
         };
@@ -331,8 +335,11 @@ impl Session {
             .sum();
         self.summarizing = true;
         tracing::info!(
-            "ck-mc: session {}: summary started over messages {from}..{until} (~{requested} tokens)",
-            self.key.session
+            session = %self.key.session,
+            first_ordinal = %from,
+            last_ordinal = %until,
+            requested_tokens = %requested,
+            "ck-mc: session: summary started over a message range"
         );
         run::Request {
             limits: self.limits,
@@ -487,10 +494,12 @@ impl Session {
         if !waiting.skip_logged {
             waiting.skip_logged = true;
             tracing::info!(
-                "ck-mc: session {session}: summary skipped at {usage:.0}%: summaries wait until {} ms since the epoch ({} after the {}); no summary run starts before then",
-                waiting.refusal.until_ms,
-                waiting.refusal.code,
-                waiting.refusal.send.name()
+                %session,
+                usage_pct = %format_args!("{:.0}", usage),
+                until_at_ms = %waiting.refusal.until_ms,
+                code = %waiting.refusal.code,
+                operation = %waiting.refusal.send.name(),
+                "ck-mc: session: summary skipped during an account wait; no summary run starts before the wait ends"
             );
         }
         None
@@ -504,8 +513,9 @@ impl Session {
             AccountAdmit::AfterWait => {
                 if let Some(waiting) = self.account_wait.take() {
                     tracing::info!(
-                        "ck-mc: session {session}: the first summary run after the account wait started (the wait ran until {} ms since the epoch)",
-                        waiting.refusal.until_ms
+                        %session,
+                        until_at_ms = %waiting.refusal.until_ms,
+                        "ck-mc: session: the first summary run after the account wait started"
                     );
                 }
             }
@@ -513,8 +523,10 @@ impl Session {
                 if let Some(waiting) = &mut self.account_wait {
                     waiting.emergency_at = newest;
                     tracing::info!(
-                        "ck-mc: session {session}: summary run started at {usage:.0}% inside the account wait (until {} ms since the epoch): one try for this history",
-                        waiting.refusal.until_ms
+                        %session,
+                        usage_pct = %format_args!("{:.0}", usage),
+                        until_at_ms = %waiting.refusal.until_ms,
+                        "ck-mc: session: summary run started inside the account wait: one try for this history"
                     );
                 }
             }
@@ -549,11 +561,12 @@ impl Session {
         });
         let seconds = (wait.until_ms - crate::summary::account_wait::now_ms()).max(0) / 1000;
         tracing::info!(
-            "ck-mc: session {}: summaries wait until {} ms since the epoch (in {seconds} s): the runner held back the {} with {}",
-            self.key.session,
-            wait.until_ms,
-            wait.send.name(),
-            wait.code
+            session = %self.key.session,
+            until_at_ms = %wait.until_ms,
+            wait_secs = %seconds,
+            operation = %wait.send.name(),
+            code = %wait.code,
+            "ck-mc: session: summaries wait because the runner held back a request"
         );
         self.account_wait = Some(crate::summary::account_wait::Waiting::new(
             wait,
@@ -640,8 +653,9 @@ impl Session {
                 }
                 let error = error.to_string();
                 tracing::warn!(
-                    "ck-mc: session {}: summary failed: {error}",
-                    self.key.session
+                    session = %self.key.session,
+                    %error,
+                    "ck-mc: session: summary failed"
                 );
                 self.record_summary_failure(error);
                 return None;
@@ -681,8 +695,9 @@ impl Session {
         }
         if let Err(error) = self.store_publication(&publication, now_ms) {
             tracing::warn!(
-                "ck-mc: session {}: storing summaries failed, retrying: {error}",
-                self.key.session
+                session = %self.key.session,
+                %error,
+                "ck-mc: session: storing summaries failed, retrying"
             );
             publication.error = error;
             for delay in PUBLICATION_BACKOFF_MS {
@@ -698,8 +713,8 @@ impl Session {
                 match self.store_publication(&publication, now_ms) {
                     Ok(()) => {
                         tracing::info!(
-                            "ck-mc: session {}: summary publication recovered",
-                            self.key.session
+                            session = %self.key.session,
+                            "ck-mc: session: summary publication recovered"
                         );
                         return self
                             .show_publication(client, settings, publication.result, now_ms)
@@ -709,9 +724,9 @@ impl Session {
                 }
             }
             tracing::warn!(
-                "ck-mc: session {}: holding validated summaries for the next job: {}",
-                self.key.session,
-                publication.error
+                session = %self.key.session,
+                error = %publication.error,
+                "ck-mc: session: holding validated summaries for the next job"
             );
             self.pending_publication = Some(Box::new(publication));
             return None;
@@ -750,8 +765,8 @@ impl Session {
             return None;
         }
         tracing::info!(
-            "ck-mc: session {}: held summary publication recovered",
-            self.key.session
+            session = %self.key.session,
+            "ck-mc: session: held summary publication recovered"
         );
         // Store first; the incoming job decides whether the prompt may change,
         // from the runner's view, the context usage, and whether recent signed
@@ -787,9 +802,9 @@ impl Session {
 
     fn give_up_publication(&mut self, publication: PendingPublication) {
         tracing::warn!(
-            "ck-mc: session {}: discarding a held summary after its transcript changed: {}",
-            self.key.session,
-            publication.error,
+            session = %self.key.session,
+            error = %publication.error,
+            "ck-mc: session: discarding a held summary after its transcript changed"
         );
         let error = format!(
             "discarding a held summary after its transcript changed: {}",
@@ -924,19 +939,16 @@ impl Session {
             self.app.failures_since_success = 0;
             self.summary_unshown = true;
             tracing::info!(
-                "ck-mc: session {}: {} summaries published, through message {}",
-                self.key.session,
-                validated.compartments.len(),
-                validated
-                    .compartments
-                    .last()
-                    .map_or(0, |compartment| compartment.end_message)
+                session = %self.key.session,
+                summary_count = %validated.compartments.len(),
+                through_ordinal = %validated.compartments.last().map_or(0, |compartment| compartment.end_message),
+                "ck-mc: session: published summaries"
             );
         }
         if self.writable_memory_level().is_none() {
             tracing::info!(
-                "ck-mc: session {}: no second summary turn: the session has no memory level it can write to",
-                self.key.session
+                session = %self.key.session,
+                "ck-mc: session: no second summary turn: the session has no memory level it can write to"
             );
         }
         continuation.filter(|_| self.db.is_some())

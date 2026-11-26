@@ -33,14 +33,15 @@ impl Session {
             Ok(_) => self.clock_note.last_sent_ms = Some(now_ms),
             Err(error) if crate::clock_note::plan_lacks_template(&error) => {
                 tracing::info!(
-                    "ck-mc: session {}: the runner refused the clock note because the session's plan holds no clock template; none is sent until the next Setup",
-                    self.key.session
+                    session = %self.key.session,
+                    "ck-mc: session: the runner refused the clock note because the session's plan holds no clock template; none is sent until the next Setup"
                 );
                 self.clock_note.refused = true;
             }
             Err(error) => tracing::warn!(
-                "ck-mc: session {}: session.send of the clock note failed: {error:?}",
-                self.key.session
+                session = %self.key.session,
+                ?error,
+                "ck-mc: session: session.send of the clock note failed"
             ),
         }
     }

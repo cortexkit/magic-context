@@ -6,6 +6,19 @@ import { ISSUE_LOG_TEMPLATES } from "./issue-log-templates.generated";
 import { IssuePrivacy } from "./issue-privacy";
 import { parseLogLine } from "./log-lines";
 
+test("a structured ck-mc event keeps its fixed sentence and omits free-text fields", () => {
+    const privacy = new IssuePrivacy({});
+    const line =
+        '2026-11-11T00:00:00.000Z WARN  magic-context: ck-mc: dreamer: acknowledging a role notice failed ack_latency_ms=12 role=dreamer seq=7 error="PRIVATE_ERROR_CANARY session=inside-error"';
+    const report = privacy.logLine(line);
+    expect(report).toContain("ck-mc: dreamer: acknowledging a role notice failed");
+    expect(report).not.toContain("PRIVATE_ERROR_CANARY");
+    expect(report).not.toContain("inside-error");
+    expect(
+        privacy.logLine(line.replace("acknowledging a role notice failed", "PRIVATE_TEXT_CANARY")),
+    ).not.toContain("PRIVATE_TEXT_CANARY");
+});
+
 test("captured transform passes and historian success/failure retain wording without private values", async () => {
     const { dir: root, cleanup } = createTestTempDir("issue-log-capture-");
     try {

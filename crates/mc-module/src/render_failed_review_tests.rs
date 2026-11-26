@@ -242,7 +242,8 @@ async fn render_failed_review_excluded_part_frees_no_tokens_and_logs_once() {
     assert_eq!(
         logs.text()
             .lines()
-            .filter(|line| line.contains("queued drop mid=\"old\" part=\"p\" cannot render"))
+            .filter(|line| line.contains("queued drop cannot render")
+                && line.contains("mid=\"old\" part=\"p\""))
             .count(),
         1
     );
@@ -494,7 +495,7 @@ async fn render_failed_review_queued_drop_in_excluded_message_is_not_forgotten_a
         !session.next_covered.contains(&key),
         "the excluded drop was counted as landed"
     );
-    assert!(logs.text().contains("queued drop mid=\"old\" part=\"p\" cannot render while its message is excluded; marking the part failed, not landed"));
+    assert!(logs.text().contains("queued drop cannot render while its message is excluded; marking the part failed, not landed session=s1 mid=\"old\" part=\"p\""));
 }
 
 fn signed_message_fixture() -> (Session, Client, Settings, View, View) {

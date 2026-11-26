@@ -95,7 +95,7 @@ impl Upkeep {
         });
         self.next_prune = Some(now + REJECT_PRUNE_INTERVAL);
         if let Err(error) = pruned {
-            tracing::warn!("ck-mc: replica: pruning old refusals failed: {error}");
+            tracing::warn!(%error, "ck-mc: replica: pruning old refusals failed");
         }
     }
 }
@@ -331,17 +331,19 @@ impl Reporter {
         self.failing = None;
         match refusal {
             Refusal::NoBox(why) => tracing::warn!(
-                "ck-mc: replica: this computer's box id is unknown ({why}); memories are not shared and changes wait in the outbox until the bus names it"
+                reason = %why,
+                "ck-mc: replica: this computer's box id is unknown; memories are not shared and changes wait in the outbox until the bus names it"
             ),
             Refusal::Unavailable => tracing::info!(
                 "ck-mc: replica: the hub is not available (no hub link yet, or the vault's federation signer is not there yet); changes wait in the outbox, and ck-bus is asked again"
             ),
             Refusal::NotGranted => tracing::warn!(
-                "ck-mc: replica: ck-bus does not grant magic-context the hub; changes wait in the outbox, and ck-bus is asked again every {} minutes",
-                RETRY_MAX.as_secs() / 60
+                retry_minutes = %RETRY_MAX.as_secs() / 60,
+                "ck-mc: replica: ck-bus does not grant magic-context the hub; changes wait in the outbox and ck-bus is asked again periodically"
             ),
             Refusal::Failed(why) => tracing::warn!(
-                "ck-mc: replica: connecting to the hub failed: {why}; changes wait in the outbox, and it is tried again"
+                error = %why,
+                "ck-mc: replica: connecting to the hub failed; changes wait in the outbox and it is tried again"
             ),
         }
     }
@@ -364,7 +366,7 @@ impl Reporter {
             }
             Err(error) => {
                 if self.failing.as_deref() != Some(error.as_str()) {
-                    tracing::warn!("ck-mc: replica: a round failed: {error}; it is tried again");
+                    tracing::warn!(%error, "ck-mc: replica: a round failed; it is tried again");
                     self.failing = Some(error.clone());
                 }
             }

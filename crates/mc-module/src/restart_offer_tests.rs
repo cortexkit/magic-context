@@ -206,7 +206,7 @@ async fn restart_a_refused_offer_logs_the_policy_members_it_carried() {
     logs.stop();
     assert!(
         logs.text().contains(
-            "runner refused view 2 offered again: BadChecksum (built_through present, new_signed strip)"
+            "runner refused a view offered again session=s1 view_version=2 refusal=BadChecksum policy_members=built_through present, new_signed strip"
         ),
         "{}",
         logs.text()
@@ -269,7 +269,7 @@ async fn restart_a_view_saved_without_its_policy_members_is_rebuilt_not_offered_
     );
     assert!(
         logs.text().contains(
-            "view 2 saved without its policy members; rebuilding instead of offering it again"
+            "rebuilding a view instead of offering it again session=s1 view_version=2 reason=saved without its policy members"
         ),
         "{}",
         logs.text()

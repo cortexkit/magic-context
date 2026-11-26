@@ -141,8 +141,9 @@ impl Replica {
             }
             if let Err(error) = self.hub.ack(message.seq).await {
                 tracing::debug!(
-                    "ck-mc: replica: acknowledging {} failed: {error}",
-                    message.seq
+                    seq = %message.seq,
+                    %error,
+                    "ck-mc: replica: acknowledging a stream message failed"
                 );
             }
         }
@@ -166,13 +167,17 @@ impl Replica {
                 Ok(first) => {
                     if first {
                         tracing::error!(
-                            "ck-mc: replica: the memory stream is held for fleet epoch {epoch}, whose key this computer's vault doesn't hold; nothing is sent until it does: {why}"
+                            %epoch,
+                            reason = %why,
+                            "ck-mc: replica: the memory stream is held for a fleet epoch whose key this computer's vault doesn't hold; nothing is sent until it does"
                         );
                     }
                     return why.to_owned();
                 }
                 Err(error) => tracing::debug!(
-                    "ck-mc: replica: recording the hold for fleet epoch {epoch} failed: {error}"
+                    %epoch,
+                    %error,
+                    "ck-mc: replica: recording the hold for a fleet epoch failed"
                 ),
             }
         }
@@ -182,9 +187,9 @@ impl Replica {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if held.as_deref() != Some(why) {
             if alert {
-                tracing::error!("ck-mc: replica: the memory stream is held: {why}");
+                tracing::error!(reason = %why, "ck-mc: replica: the memory stream is held");
             } else {
-                tracing::info!("ck-mc: replica: the memory stream is held: {why}");
+                tracing::info!(reason = %why, "ck-mc: replica: the memory stream is held");
             }
             *held = Some(why.to_owned());
         }
@@ -341,7 +346,11 @@ impl Replica {
                         Opening::Skip(why) => why,
                         _ => format!("message {seq} names another row than {global}"),
                     };
-                    tracing::error!("ck-mc: replica: reading {global} again: {why}");
+                    tracing::error!(
+                        global_id = %global,
+                        reason = %why,
+                        "ck-mc: replica: reading the memory again"
+                    );
                     self.db
                         .with_connection(|conn| {
                             conn.execute(
@@ -592,10 +601,7 @@ fn restore_message(
 }
 
 fn reject(tx: &Connection, message: &HubMessage, reason: &str) -> rusqlite::Result<()> {
-    tracing::info!(
-        "ck-mc: replica: stream message {} skipped: {reason}",
-        message.seq
-    );
+    tracing::info!(seq = %message.seq, %reason, "ck-mc: replica: skipped a stream message");
     tx.execute(
         "INSERT INTO replica_rejects (stream_seq, subject, global_id, reason, recorded_at)
          VALUES (?1, ?2, NULL, ?3, ?4)",

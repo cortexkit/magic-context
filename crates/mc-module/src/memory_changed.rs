@@ -235,7 +235,10 @@ impl Publisher {
         let revision = match db.with_connection(|conn| revision(conn)) {
             Ok(revision) => revision,
             Err(error) => {
-                tracing::warn!("ck-mc: bus: reading the memory revision failed; this round's memory wakes are dropped: {error}");
+                tracing::warn!(
+                    %error,
+                    "ck-mc: bus: reading the memory revision failed; this round's memory wakes are dropped"
+                );
                 return Vec::new();
             }
         };
@@ -277,7 +280,8 @@ impl Publisher {
             Err(error) => {
                 if !std::mem::replace(&mut self.logged, true) {
                     tracing::warn!(
-                        "ck-mc: bus: memory change wakes are dropped until the bus is reachable: {error}"
+                        %error,
+                        "ck-mc: bus: memory change wakes are dropped until the bus is reachable"
                     );
                 }
             }

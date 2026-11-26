@@ -112,7 +112,9 @@ fn upgrade_through(connection: &mut Connection, found: i64, last: u32) -> Result
     if found < i64::from(PLUGIN_SCHEMA_VERSION) {
         catch_up::catch_up(connection, found, now_ms())?;
         tracing::info!(
-            "ck-mc: context.db brought from the plugin's version {found} to {PLUGIN_SCHEMA_VERSION}"
+            previous_version = %found,
+            version = %PLUGIN_SCHEMA_VERSION,
+            "ck-mc: context.db brought from the plugin's version to the current schema version"
         );
         found = i64::from(PLUGIN_SCHEMA_VERSION);
     }
@@ -124,9 +126,9 @@ fn upgrade_through(connection: &mut Connection, found: i64, last: u32) -> Result
         apply(connection, migration)
             .map_err(|error| format!("migration {}: {error}", migration.version))?;
         tracing::info!(
-            "ck-mc: context.db migrated to version {} ({})",
-            migration.version,
-            migration.description
+            version = %migration.version,
+            migration = %migration.description,
+            "ck-mc: context.db migrated to a new schema version"
         );
         at = i64::from(migration.version);
     }
@@ -339,7 +341,8 @@ fn drop_write_guards(tx: &Transaction) -> rusqlite::Result<()> {
         )?
     };
     tracing::info!(
-        "ck-mc: context.db migration 106 removes the removed Rust transform mode's write guards; {guarded} projects were still guarded"
+        guarded_count = %guarded,
+        "ck-mc: context.db migration 106 removed the old Rust transform mode's write guards"
     );
     tx.execute_batch(
         "DROP TRIGGER IF EXISTS memories_authority_guard_insert;
@@ -750,7 +753,8 @@ fn git_commits_per_project_108(tx: &Transaction) -> rusqlite::Result<()> {
     )?;
     if orphaned > 0 {
         tracing::info!(
-            "ck-mc: context.db migration 108 drops {orphaned} commit vectors whose commit is gone"
+            orphaned_count = %orphaned,
+            "ck-mc: context.db migration 108 dropped orphaned commit vectors"
         );
     }
     tx.execute_batch(

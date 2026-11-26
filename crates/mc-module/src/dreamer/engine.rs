@@ -275,10 +275,11 @@ impl Engine {
         match db.with_connection(|conn| store::close_interrupted(conn, now)) {
             Ok(0) => {}
             Ok(closed) => tracing::info!(
-                "ck-mc: dreamer: {closed} run(s) left open by a stopped process marked interrupted"
+                closed_count = %closed,
+                "ck-mc: dreamer: runs left open by a stopped process were marked interrupted"
             ),
             Err(error) => {
-                tracing::warn!("ck-mc: dreamer: closing interrupted runs failed: {error}")
+                tracing::warn!(%error, "ck-mc: dreamer: closing interrupted runs failed")
             }
         }
     }
@@ -586,7 +587,7 @@ impl Engine {
             Ok::<_, rusqlite::Error>(())
         });
         if let Err(error) = scheduled {
-            tracing::warn!("ck-mc: dreamer: scheduling {project} failed: {error}");
+            tracing::warn!(%project, %error, "ck-mc: dreamer: scheduling a project failed");
             return;
         }
         tell(db, &owner);
@@ -629,7 +630,7 @@ impl Engine {
         let due = match db.with_connection(|conn| store::due(conn, now)) {
             Ok(due) => due,
             Err(error) => {
-                tracing::warn!("ck-mc: dreamer: reading due tasks failed: {error}");
+                tracing::warn!(%error, "ck-mc: dreamer: reading due tasks failed");
                 return;
             }
         };
@@ -736,7 +737,9 @@ impl Engine {
                             Ok::<_, rusqlite::Error>(())
                         }) {
                             tracing::warn!(
-                                "ck-mc: dreamer: scheduling workspace {workspace} failed: {error}"
+                                %workspace,
+                                %error,
+                                "ck-mc: dreamer: scheduling a workspace failed"
                             );
                         }
                     }
@@ -794,7 +797,10 @@ impl Engine {
                     Ok(record) => record,
                     Err(error) => {
                         tracing::warn!(
-                            "ck-mc: dreamer: reading {task}'s record for {project} failed: {error}"
+                            %task,
+                            %project,
+                            %error,
+                            "ck-mc: dreamer: reading the task's record for the project failed"
                         );
                         continue;
                     }
@@ -814,7 +820,10 @@ impl Engine {
                     Ok(false) => continue,
                     Err(error) => {
                         tracing::warn!(
-                            "ck-mc: dreamer: reading {project}'s earlier runs for {task} failed: {error}"
+                            %project,
+                            %task,
+                            %error,
+                            "ck-mc: dreamer: reading the project's earlier runs for the task failed"
                         );
                         continue;
                     }
@@ -882,7 +891,11 @@ impl Engine {
             if let Err(error) =
                 db.with_connection(|conn| store::unlock_all(conn, &locks, &self.holder))
             {
-                tracing::warn!("ck-mc: dreamer: releasing {project}'s locks failed: {error}");
+                tracing::warn!(
+                    %project,
+                    %error,
+                    "ck-mc: dreamer: releasing the project's locks failed"
+                );
             }
         };
         // It writes both owners' memories, so it acts only while this
@@ -894,7 +907,11 @@ impl Engine {
             Ok(leases) => leases,
             Err(reason) => {
                 tracing::info!(
-                    "ck-mc: dreamer: {task} for {project} in workspace {workspace} skipped: {reason}"
+                    %task,
+                    %project,
+                    %workspace,
+                    %reason,
+                    "ck-mc: dreamer: skipped a project task in a workspace"
                 );
                 let end = RunEnd {
                     outcome: "skipped".into(),
@@ -905,7 +922,10 @@ impl Engine {
                     store::settle_once(conn, &owner, task, workspace, None, &end, now_ms())
                 }) {
                     tracing::warn!(
-                        "ck-mc: dreamer: recording {task} for {project} failed: {error}"
+                        %task,
+                        %project,
+                        %error,
+                        "ck-mc: dreamer: recording a task for the project failed"
                     );
                 }
                 tell(db, &owner);
@@ -924,7 +944,12 @@ impl Engine {
                 return;
             }
             Err(error) => {
-                tracing::warn!("ck-mc: dreamer: locking {project} for {task} failed: {error}");
+                tracing::warn!(
+                    %project,
+                    %task,
+                    %error,
+                    "ck-mc: dreamer: locking a project for the task failed"
+                );
                 close(leases).await;
                 return;
             }
@@ -950,7 +975,11 @@ impl Engine {
         let (run, end) = match begin_run(db, &due, kind, &seen.profile) {
             Ok(run_id) => {
                 tracing::info!(
-                    "ck-mc: dreamer: run {run_id} {task} for {project} in workspace {workspace} started"
+                    %run_id,
+                    %task,
+                    %project,
+                    %workspace,
+                    "ck-mc: dreamer: a project task run started in a workspace"
                 );
                 let end = self
                     .run_task(
@@ -991,7 +1020,12 @@ impl Engine {
         if let Err(error) = db.with_connection(|conn| {
             store::settle_once(conn, &owner, task, workspace, run, &end, ended)
         }) {
-            tracing::warn!("ck-mc: dreamer: recording {task} for {project} failed: {error}");
+            tracing::warn!(
+                %task,
+                %project,
+                %error,
+                "ck-mc: dreamer: recording a task for the project failed"
+            );
         }
         if kind == super::tasks::lift_workspace::KIND && end.applied > 0 {
             self.curate_after_lift(db, settings, seen, workspace, ended);
@@ -1035,7 +1069,10 @@ impl Engine {
                 store::due_at(conn, &owner, task, ended + CURATE_AFTER_LIFT)
             }) {
                 tracing::warn!(
-                    "ck-mc: dreamer: bringing {task} for workspace {workspace} forward failed: {error}"
+                    %task,
+                    %workspace,
+                    %error,
+                    "ck-mc: dreamer: bringing a workspace task forward failed"
                 );
             }
         }
@@ -1056,9 +1093,10 @@ impl Engine {
                 store::settle(conn, &due.owner, &due.task, &settled, None, now_ms())
             }) {
                 tracing::warn!(
-                    "ck-mc: dreamer: settling {} for {} failed: {error}",
-                    due.task,
-                    due.owner.owner_id
+                    task = %due.task,
+                    owner_id = %due.owner.owner_id,
+                    %error,
+                    "ck-mc: dreamer: settling a task for its owner failed"
                 );
             }
             tell(db, &due.owner);
@@ -1103,9 +1141,10 @@ impl Engine {
             Ok(leases) => leases,
             Err(reason) => {
                 tracing::info!(
-                    "ck-mc: dreamer: {} for {} skipped: {reason}",
-                    due.task,
-                    due.owner.owner_id
+                    task = %due.task,
+                    owner_id = %due.owner.owner_id,
+                    %reason,
+                    "ck-mc: dreamer: skipped a task for its owner"
                 );
                 settle(Settled::Skipped { reason });
                 return;
@@ -1260,16 +1299,18 @@ impl Engine {
             store::settle(conn, &due.owner, &due.task, &settled, None, now_ms())
         }) {
             tracing::warn!(
-                "ck-mc: dreamer: settling {} for {} failed: {error}",
-                due.task,
-                due.owner.owner_id
+                task = %due.task,
+                owner_id = %due.owner.owner_id,
+                %error,
+                "ck-mc: dreamer: settling a task for its owner failed"
             );
         }
         if let Err(error) = db.with_connection(|conn| store::unlock(conn, &due.owner, &self.holder))
         {
             tracing::warn!(
-                "ck-mc: dreamer: releasing {}'s lock failed: {error}",
-                due.owner.owner_id
+                owner_id = %due.owner.owner_id,
+                %error,
+                "ck-mc: dreamer: releasing the owner's lock failed"
             );
         }
         // The schedule moves on before the lock is released, so no other
@@ -1397,8 +1438,10 @@ impl Engine {
             }
         };
         tracing::info!(
-            "ck-mc: dreamer: run {run_id} {} for {project} started by the person",
-            due.task
+            %run_id,
+            task = %due.task,
+            %project,
+            "ck-mc: dreamer: a person started a project task run"
         );
         let task = due.task.clone();
         let engine = Arc::clone(self);
@@ -1491,7 +1534,11 @@ impl Engine {
                 if let Err(error) =
                     db.with_connection(|conn| store::finish_run(conn, run_id, &end, now_ms()))
                 {
-                    tracing::warn!("ck-mc: dreamer: recording run {run_id}'s end failed: {error}");
+                    tracing::warn!(
+                        %run_id,
+                        %error,
+                        "ck-mc: dreamer: recording the end of a run failed"
+                    );
                 }
                 return end;
             }
@@ -1517,9 +1564,11 @@ impl Engine {
                 Ok(guidance) => Some(guidance),
                 Err(reason) => {
                     tracing::info!(
-                        "ck-mc: dreamer: run {run_id} {} for {}: no workspace guidance shown ({reason})",
-                        due.task,
-                        due.owner.owner_id
+                        %run_id,
+                        task = %due.task,
+                        owner_id = %due.owner.owner_id,
+                        %reason,
+                        "ck-mc: dreamer: the run showed no workspace guidance"
                     );
                     None
                 }
@@ -1559,8 +1608,10 @@ impl Engine {
             }) => match self.write_planned(db, locks, run_id, leases, write).await {
                 Ok(recorded) => {
                     tracing::info!(
-                            "ck-mc: dreamer: run {run_id}: recorded {recorded} changes that needed no model"
-                        );
+                        %run_id,
+                        recorded_count = %recorded,
+                        "ck-mc: dreamer: recorded changes that needed no model"
+                    );
                     Ok(batches)
                 }
                 Err((outcome, reason)) => Err((outcome, None, reason)),
@@ -1588,19 +1639,24 @@ impl Engine {
             }
         }
         tracing::info!(
-            "ck-mc: dreamer: run {run_id} {} for {}: {} ({} of {} proposals applied, {} batches, {} tokens)",
-            due.task,
-            due.owner.owner_id,
-            end.outcome,
-            end.applied,
-            end.proposed,
-            end.batches.len(),
-            end.input_tokens + end.output_tokens
+            %run_id,
+            task = %due.task,
+            owner_id = %due.owner.owner_id,
+            outcome = %end.outcome,
+            applied_count = %end.applied,
+            proposed_count = %end.proposed,
+            batch_count = %end.batches.len(),
+            tokens = %end.input_tokens + end.output_tokens,
+            "ck-mc: dreamer: a task run ended"
         );
         if let Err(error) =
             db.with_connection(|conn| store::finish_run(conn, run_id, &end, now_ms()))
         {
-            tracing::warn!("ck-mc: dreamer: recording run {run_id}'s end failed: {error}");
+            tracing::warn!(
+                %run_id,
+                %error,
+                "ck-mc: dreamer: recording the end of a run failed"
+            );
         }
         end
     }
@@ -1642,26 +1698,27 @@ impl Engine {
                 }
             }
         }
-        let (resumed_run, carried) = match db
-            .with_connection(|conn| store::resumed_budget(conn, due, run_id))
-        {
-            Ok(Some((prior, tokens))) => {
-                tracing::info!(
-                        "ck-mc: dreamer: run {run_id} {} for {}: carrying over {tokens} tokens from account waits",
-                        due.task,
-                        due.owner.owner_id
+        let (resumed_run, carried) =
+            match db.with_connection(|conn| store::resumed_budget(conn, due, run_id)) {
+                Ok(Some((prior, tokens))) => {
+                    tracing::info!(
+                        %run_id,
+                        task = %due.task,
+                        owner_id = %due.owner.owner_id,
+                        %tokens,
+                        "ck-mc: dreamer: a run carried over tokens from account waits"
                     );
-                (Some(prior), tokens)
-            }
-            Ok(None) => (None, 0),
-            Err(error) => {
-                end.outcome = "failed".into();
-                end.error = Some(format!(
-                    "reading the scheduled occurrence's token spend: {error}"
-                ));
-                return;
-            }
-        };
+                    (Some(prior), tokens)
+                }
+                Ok(None) => (None, 0),
+                Err(error) => {
+                    end.outcome = "failed".into();
+                    end.error = Some(format!(
+                        "reading the scheduled occurrence's token spend: {error}"
+                    ));
+                    return;
+                }
+            };
         // The run's children are attributed to the task, and to the project
         // when a project owns the run; a workspace's or the person's run
         // serves no one project.
@@ -1765,15 +1822,14 @@ impl Engine {
                         entry.insert("skipped".into(), json!(skipped.reason));
                     }
                     tracing::info!(
-                        "ck-mc: dreamer: run {run_id} {} for {}: batch {index} (memories {:?}) reached its step cap without a usable answer after {} steps, so it counts as skipped: {}",
-                        due.task,
-                        due.owner.owner_id,
-                        batch.memory_ids(),
-                        skipped
-                            .reply
-                            .steps
-                            .map_or_else(|| "unreported".to_owned(), |steps| steps.to_string()),
-                        skipped.reason
+                        task = %due.task,
+                        owner_id = %due.owner.owner_id,
+                        %run_id,
+                        batch_index = %index,
+                        memory_ids = ?batch.memory_ids(),
+                        steps = %skipped.reply.steps.map_or_else(|| "unreported".to_owned(), |steps| steps.to_string()),
+                        reason = %skipped.reason,
+                        "ck-mc: dreamer: a batch reached its step cap without a usable answer, so it counts as skipped"
                     );
                     write_fenced(None)
                 }
@@ -2049,13 +2105,14 @@ fn end_skipped(db: &ContextDb, run_id: i64, due: &store::Due, reason: String) ->
         ..RunEnd::default()
     };
     tracing::info!(
-        "ck-mc: dreamer: run {run_id} {} for {}: skipped ({})",
-        due.task,
-        due.owner.owner_id,
-        end.error.as_deref().unwrap_or_default()
+        %run_id,
+        task = %due.task,
+        owner_id = %due.owner.owner_id,
+        reason = %end.error.as_deref().unwrap_or_default(),
+        "ck-mc: dreamer: a task run was skipped"
     );
     if let Err(error) = db.with_connection(|conn| store::finish_run(conn, run_id, &end, now_ms())) {
-        tracing::warn!("ck-mc: dreamer: recording run {run_id}'s end failed: {error}");
+        tracing::warn!(%run_id, %error, "ck-mc: dreamer: recording the end of a run failed");
     }
     end
 }

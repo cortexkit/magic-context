@@ -89,7 +89,7 @@ impl Session {
             .collect();
         match store.save_app_decisions(&self.key, &writes) {
             Ok(()) => self.app_decisions_unsaved.clear(),
-            Err(error) => tracing::warn!("ck-mc: {error}"),
+            Err(error) => tracing::warn!(%error, "ck-mc: app reads: saving view decisions failed"),
         }
     }
 

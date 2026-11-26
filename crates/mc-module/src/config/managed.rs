@@ -116,8 +116,9 @@ impl Managed {
             Ok(None) => State::Waiting { since: None },
             Err(why) => {
                 tracing::warn!(
-                    "ck-mc: the saved settings view {} can't be read ({why}); waiting for the daemon's",
-                    view_path.display()
+                    path = %view_path.display(),
+                    reason = %why,
+                    "ck-mc: the saved settings view cannot be read; waiting for the daemon's settings view"
                 );
                 State::Waiting { since: None }
             }
@@ -223,7 +224,10 @@ impl Managed {
     /// Say, once, where the first resolution's user tier came from.
     fn log_first(&self, from: &str) {
         if !self.logged.swap(true, Ordering::Relaxed) {
-            tracing::info!("ck-mc: the first settings resolution used {from}");
+            tracing::info!(
+                source = %from,
+                "ck-mc: the first settings resolution selected a source"
+            );
         }
     }
 
@@ -455,13 +459,14 @@ pub fn rewrite_0_49(user_path: &Path, data_dir: &Path) -> Rewrite {
     let rewrite = rewrite_file(user_path, data_dir);
     match &rewrite {
         Rewrite::Rewritten(saved) => tracing::info!(
-            "ck-mc: rewrote {} in the shape of the daemon's managed settings; the file as it was is saved at {}",
-            user_path.display(),
-            saved.display()
+            path = %user_path.display(),
+            backup_path = %saved.display(),
+            "ck-mc: rewrote the user file in the shape of the daemon's managed settings and saved a copy of the original"
         ),
         Rewrite::Refused(why) => tracing::warn!(
-            "ck-mc: {} was not converted to the managed settings' shape: {why}",
-            user_path.display()
+            path = %user_path.display(),
+            reason = %why,
+            "ck-mc: the user file was not converted to the managed settings' shape"
         ),
         Rewrite::Missing | Rewrite::Unchanged => {}
     }
@@ -491,7 +496,11 @@ fn rewrite_file(user_path: &Path, data_dir: &Path) -> Rewrite {
     }
     let (edits, notes) = super::convert::convert_0_49(&parsed.value);
     for note in &notes {
-        tracing::info!("ck-mc: {}: {note}", user_path.display());
+        tracing::info!(
+            path = %user_path.display(),
+            %note,
+            "ck-mc: managed settings: user file conversion notice"
+        );
     }
     if edits.is_empty() {
         return Rewrite::Unchanged;
@@ -667,17 +676,20 @@ impl Loader {
         }
         match state {
             ConfigState::Failed { reasons, .. } => {
-                tracing::warn!("ck-mc: managed settings: failed: {}", reasons.join("; "))
+                tracing::warn!(
+                    reasons = %reasons.join("; "),
+                    "ck-mc: managed settings: failed"
+                )
             }
             ConfigState::ConfigGated { refusal, .. }
             | ConfigState::NotDeliveryTarget { refusal, .. }
             | ConfigState::AnchorPending { refusal, .. } => tracing::warn!(
-                "ck-mc: managed settings: {}: {}: {}",
-                state.as_str(),
-                refusal.code,
-                refusal.message
+                state = %state.as_str(),
+                code = %refusal.code,
+                error = %refusal.message,
+                "ck-mc: managed settings: request was refused"
             ),
-            _ => tracing::info!("ck-mc: managed settings: {}", state.as_str()),
+            _ => tracing::info!(state = %state.as_str(), "ck-mc: managed settings: state changed"),
         }
         if let Some(managed) = &self.managed {
             managed.state_arrived(state);

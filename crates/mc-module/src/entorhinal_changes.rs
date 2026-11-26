@@ -91,9 +91,7 @@ impl WatchState {
                 None => tracing::info!(
                     "ck-mc: entorhinal changes: watching the registry marker; workspaces and legacy project rows are read again when it changes"
                 ),
-                Some(effect) => tracing::info!(
-                    "ck-mc: entorhinal changes: watching a marker; when it changes, {effect}"
-                ),
+                Some(effect) => tracing::info!(%effect, "ck-mc: entorhinal changes: watching a marker"),
             }
         }
     }
@@ -103,10 +101,13 @@ impl WatchState {
         if self.mark_down() != Some(false) {
             match self.effect {
                 None => tracing::info!(
-                    "ck-mc: entorhinal changes: no watch on the registry marker ({why}); workspaces are read at each Setup and legacy project rounds run hourly, and the watch is tried again"
+                    reason = %why,
+                    "ck-mc: entorhinal changes: no watch on the registry marker; workspaces are read at each Setup and legacy project rounds run hourly, and the watch is tried again"
                 ),
                 Some(effect) => tracing::info!(
-                    "ck-mc: entorhinal changes: no watch on a marker ({why}); it is tried again, and meanwhile what it would do ({effect}) waits for its timer"
+                    reason = %why,
+                    %effect,
+                    "ck-mc: entorhinal changes: no watch on a marker; it is tried again, and meanwhile its work waits for the timer"
                 ),
             }
         }
@@ -172,7 +173,9 @@ pub(crate) fn spawn_marker(
             };
             state.mark_down();
             tracing::warn!(
-                "ck-mc: entorhinal changes: marker task for {key} ended ({reason}); reopening after backoff"
+                %key,
+                %reason,
+                "ck-mc: entorhinal changes: marker task ended; reopening after backoff"
             );
             tokio::select! {
                 biased;

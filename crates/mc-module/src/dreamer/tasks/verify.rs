@@ -774,8 +774,11 @@ impl Verify {
                     // read their branch.
                     Err(error) => {
                         tracing::warn!(
-                            "ck-mc: dreamer: {} for {project}: the memories learned on {branch} are not checked this run: {error}",
-                            declared.task
+                            task = %declared.task,
+                            %project,
+                            %branch,
+                            %error,
+                            "ck-mc: dreamer: memories learned on a branch are not checked this run"
                         );
                         continue;
                     }
@@ -800,30 +803,30 @@ impl Verify {
             // one of their files changes, or the wait is over.
             if held > 0 {
                 tracing::info!(
-                    "ck-mc: dreamer: {} for {project}: {held} memories checked in the last {} days wait until they or their files change",
-                    declared.task,
-                    RECHECK_AFTER_MS / DAY_MS
+                    task = %declared.task,
+                    %project,
+                    held_count = %held,
+                    recheck_days = %RECHECK_AFTER_MS / DAY_MS,
+                    "ck-mc: dreamer: recently checked memories wait until they or their files change"
                 );
             }
             // Nothing is written for them, so they are not counted as
             // checked and a later run plans them again.
             if !left_out.is_empty() {
                 tracing::info!(
-                    "ck-mc: dreamer: {} for {project}: {} older memories are not checked this run: every file each is mapped to differs between live branches (ids {})",
-                    declared.task,
-                    left_out.len(),
-                    left_out
-                        .iter()
-                        .map(i64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    task = %declared.task,
+                    %project,
+                    skipped_count = %left_out.len(),
+                    memory_ids = %left_out.iter().map(i64::to_string).collect::<Vec<_>>().join(", "),
+                    "ck-mc: dreamer: older memories are not checked this run because every file each is mapped to differs between live branches"
                 );
             }
             if lookup.cut {
                 tracing::warn!(
-                    "ck-mc: dreamer: {} for {project}: the plain search stopped after {} of the checkout's files; no citation is listed as not found",
-                    declared.task,
-                    lookup.files
+                    task = %declared.task,
+                    %project,
+                    file_count = %lookup.files,
+                    "ck-mc: dreamer: plain search stopped before searching all checkout files; no citation is listed as not found"
                 );
             }
             planned.push(Plans {

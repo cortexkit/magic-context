@@ -170,7 +170,7 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
         .collect();
     assert_eq!(texts, [m0, m1]);
     assert!(
-        log.contains("history head kept as shown, reading summaries: "),
+        log.contains("history head kept as shown session=s1 reason=reading summaries: "),
         "{log}"
     );
     assert!(session.summaries_missing.is_none(), "nothing to reload");
@@ -217,7 +217,9 @@ fn the_newest_summary_deleted_elsewhere_moves_the_cut_back_and_keeps_earlier_edi
     let (view, log) = crate::test_log::logged(|| build(&mut session, &settings));
     assert!(view.is_none(), "the head stays as shown");
     assert!(
-        log.contains("history head kept as shown, summaries [4] are not in context.db"),
+        log.contains(
+            "history head kept as shown session=s1 reason=summaries [4] are not in context.db"
+        ),
         "{log}"
     );
     // The next build reads the summaries again. The cut moves back past
@@ -225,7 +227,7 @@ fn the_newest_summary_deleted_elsewhere_moves_the_cut_back_and_keeps_earlier_edi
     let (view, log) = crate::test_log::logged(|| build(&mut session, &settings));
     assert!(view.is_none());
     assert!(
-        log.contains("summaries [4] are no longer in context.db"),
+        log.contains("some summaries are no longer in context.db; the session reads its summaries from there again session=s1 missing_ids=[4]"),
         "{log}"
     );
     assert_eq!(session.summaries.len(), 3);

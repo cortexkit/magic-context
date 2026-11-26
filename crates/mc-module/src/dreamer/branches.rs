@@ -226,8 +226,9 @@ impl Refs {
         for name in named {
             let Some(commit) = self.heads.get(name).or_else(|| self.origin.get(name)) else {
                 tracing::info!(
-                    "ck-mc: dreamer: live branch {name} is not a branch of {}; it is left out",
-                    repo.display()
+                    branch = %name,
+                    path = %repo.display(),
+                    "ck-mc: dreamer: live branch is not a branch of the repository; it is left out"
                 );
                 continue;
             };
@@ -489,8 +490,9 @@ impl Drop for Copy {
         if let Err(error) = std::fs::remove_dir_all(&self.path) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(
-                    "ck-mc: dreamer: removing the copy {} failed: {error}",
-                    self.path.display()
+                    path = %self.path.display(),
+                    %error,
+                    "ck-mc: dreamer: removing the copy failed"
                 );
             }
         }

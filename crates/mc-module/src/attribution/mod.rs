@@ -147,8 +147,9 @@ impl Attribution<'_> {
             Ok(true) => self.db.attribution_recorded(),
             Ok(false) => {}
             Err(error) => tracing::warn!(
-                "ck-mc: attribution: child {} runs without an attribution fact: {error}",
-                child.session
+                session = %child.session,
+                %error,
+                "ck-mc: attribution: a child runs without an attribution fact"
             ),
         }
     }

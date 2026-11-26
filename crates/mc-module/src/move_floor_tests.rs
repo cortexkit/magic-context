@@ -166,8 +166,8 @@ async fn move_floor_summaries_below_the_floor_publish_no_view() {
         1,
         "logged once per hold"
     );
-    assert_eq!(logs.count("move floor entry 9 (m9)"), 1);
-    assert_eq!(logs.count("summaries reach entry 5 (m5)"), 1);
+    assert_eq!(logs.count("floor_ordinal=9 floor_mid=m9"), 1);
+    assert_eq!(logs.count("summary_reach=entry 5 (m5)"), 1);
 }
 
 /// Once a new summary reaches past the floor, the next rebuild publishes a
@@ -520,10 +520,7 @@ async fn move_floor_apply_refusal_teaches_the_missing_floor() {
             mid: RUNNER_FLOOR.1.into()
         })
     );
-    assert_eq!(
-        logs.count("cut_before_move through msg_a2 (previous move floor: none)"),
-        1
-    );
+    assert_eq!(logs.count("moved_through=msg_a2 previous_floor=none"), 1);
     moved.notice(3).await;
     assert!(
         moved.session.move_floor_held,
@@ -669,8 +666,8 @@ async fn move_floor_notice_retries_unplaced_floor_without_repeating_the_warning(
         assert_eq!(session.move_floor.as_ref().unwrap().ordinal, 2);
     }
     assert_eq!(logs.count("cannot place the runner's move floor"), 2);
-    assert_eq!(logs.count("cut_before_move through unplaced"), 1);
-    assert_eq!(logs.count("cut_before_move through absent"), 1);
+    assert_eq!(logs.count("moved_through=unplaced"), 1);
+    assert_eq!(logs.count("moved_through=absent"), 1);
 
     let entry = text(7, "unplaced");
     client.entries.lock().unwrap().push(entry.clone());

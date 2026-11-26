@@ -71,7 +71,12 @@ pub(crate) fn decode_entry_notice(
 }
 
 fn log_host_frame_refusal(session: &str, method: &str, detail: &str) {
-    tracing::warn!("ck-mc: session {session}: {method} refused host-frame facts: {detail}");
+    tracing::warn!(
+        %session,
+        %method,
+        %detail,
+        "ck-mc: session: a runner method refused host-frame facts"
+    );
 }
 
 /// On a failed page or notice, locate the entry the contract rejected. The
@@ -287,7 +292,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
                     Some(provenance.with_launch_nonce_source(subc_client_rs::launch_nonce_source()))
                 }
                 Err(error) => {
-                    tracing::warn!("ck-mc: MC_BUILD_SHA rejected, build not declared: {error}");
+                    tracing::warn!(%error, "ck-mc: MC_BUILD_SHA rejected, build not declared");
                     None
                 }
             },
@@ -692,7 +697,7 @@ impl crate::routing::Router for SubcRunnerClient {
 
     async fn report(&self, request: ReportRequest) {
         if let Err(error) = self.route_call("route.report", &request).await {
-            tracing::warn!("ck-mc: route.report failed: {error}");
+            tracing::warn!(%error, "ck-mc: route.report failed");
         }
     }
 }

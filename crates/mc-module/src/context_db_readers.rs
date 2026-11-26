@@ -120,8 +120,9 @@ impl Readers {
                         pool.open -= 1;
                         if pool.retry_at.is_none() {
                             tracing::info!(
-                                "ck-mc: context.db {}: searches read on the shared connection: {error}",
-                                path.display()
+                                path = %path.display(),
+                                %error,
+                                "ck-mc: context.db: searches read on the shared connection"
                             );
                         }
                         pool.retry_at = Some(Instant::now() + RETRY_AFTER);

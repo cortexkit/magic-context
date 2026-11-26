@@ -245,7 +245,7 @@ fn a_key_two_projects_claim_is_copied_to_both_and_logged() {
     assert!(report.complete);
     assert!(
         log.contains(&format!(
-            "ck-mc: legacy project rows copied from {} to pj-a, pj-b: pj-a (memories=1); pj-b (memories=1)",
+            "ck-mc: copied legacy project rows to the new project previous_project={} project=pj-a, pj-b rows=pj-a (memories=1); pj-b (memories=1)",
             golden_key()
         )),
         "{log}"
@@ -295,7 +295,10 @@ fn a_folder_git_cannot_read_is_skipped_and_said_once() {
         vec!["Moves despite the broken folder."]
     );
     assert!(fixture.memories("pj-bad").is_empty());
-    let said = format!("ck-mc: no legacy project key for {}", broken.display());
+    let said = format!(
+        "ck-mc: no legacy project key; its rows stay where they are path={}",
+        broken.display()
+    );
     assert_eq!(first.matches(&said).count(), 1, "{first}");
     assert_eq!(second.matches(&said).count(), 0, "{second}");
 }

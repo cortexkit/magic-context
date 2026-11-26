@@ -32,10 +32,10 @@ async fn setup_log_names_the_received_child_harness() {
         .await;
         let setup = logs
             .lines()
-            .find(|line| line.contains(": setup ("))
+            .find(|line| line.contains(": setup session="))
             .unwrap();
         assert!(
-            setup.contains(&format!("child harness {},", child.unwrap_or("none"))),
+            setup.contains(&format!("child_harness={} ", child.unwrap_or("none"))),
             "{setup}"
         );
     }
@@ -64,11 +64,11 @@ async fn setup_log_names_the_epoch_prefix_and_statement_stamp() {
         .await;
         let setup = logs
             .lines()
-            .find(|line| line.contains(": setup ("))
+            .find(|line| line.contains(": setup session="))
             .expect("Setup INFO line");
         assert!(
             setup.contains(&format!(
-                "applied view None, statement epoch {prefix}, stamp {printed_stamp})"
+                "applied_view=None statement_epoch={prefix} statement_stamp={printed_stamp}"
             )),
             "{setup}"
         );
@@ -696,13 +696,16 @@ async fn order_a_late_rides_log_line_names_no_reading() {
         conditions.last_prompt_tokens = Some(20_000);
     });
     let (_, logged) = crate::test_log::logged(|| session.ride(&settings, &newer));
-    assert!(logged.contains("last prompt Some(20000)"), "{logged}");
+    assert!(
+        logged.contains("last_prompt_tokens=Some(20000)"),
+        "{logged}"
+    );
     let late = ride(&session, Some(8), None, |conditions| {
         conditions.last_prompt_tokens = Some(FORCE);
     });
     let (_, logged) = crate::test_log::logged(|| session.ride(&settings, &late));
     assert!(
-        logged.contains("last prompt late, reading ignored"),
+        logged.contains("last_prompt_tokens=late, reading ignored"),
         "{logged}"
     );
     assert!(!logged.contains(&FORCE.to_string()), "{logged}");

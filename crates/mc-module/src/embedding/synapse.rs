@@ -240,7 +240,10 @@ impl Link {
         self.with_choice(module, model, |choice| {
             if ignored && !std::mem::replace(&mut choice.ignored_logged, true) {
                 tracing::info!(
-                    "ck-mc: embedding.model {model:?} is not an embedding model Synapse module {module} lists; embedding with {DEFAULT_MODEL} instead"
+                    ?model,
+                    %module,
+                    fallback_model = %DEFAULT_MODEL,
+                    "ck-mc: embedding.model is not an embedding model listed by the Synapse module; using the default instead"
                 );
             }
             match chosen {
@@ -248,13 +251,15 @@ impl Link {
                     let identity = lane.identity();
                     match choice.last.replace(identity.clone()) {
                         Some(last) if last != identity => tracing::info!(
-                            "ck-mc: embeddings now use Synapse lane {} of module {module}; vectors from the previous lane are set aside and upkeep embeds again in the background",
-                            lane.id
+                            lane_id = %lane.id,
+                            %module,
+                            "ck-mc: embeddings switched to a Synapse lane; vectors from the previous lane are set aside and upkeep embeds again in the background"
                         ),
                         Some(_) => {}
                         None => tracing::info!(
-                            "ck-mc: embeddings use Synapse lane {} of module {module}",
-                            lane.id
+                            lane_id = %lane.id,
+                            %module,
+                            "ck-mc: embeddings use a Synapse lane"
                         ),
                     }
                     choice.lane = Some(lane.clone());
@@ -283,8 +288,10 @@ impl Link {
                     choice.record(module, cause);
                 }
                 None if pinned => tracing::info!(
-                    "ck-mc: Synapse lane {} of module {module} no longer serves its fingerprint ({code}); its lanes are listed again",
-                    lane.id
+                    lane_id = %lane.id,
+                    %module,
+                    %code,
+                    "ck-mc: a Synapse lane no longer serves its fingerprint; listing the module's lanes again"
                 ),
                 None => {}
             }
@@ -297,8 +304,9 @@ impl Link {
         self.with_choice(module, model, |choice| {
             if choice.cause.take().is_some() {
                 tracing::info!(
-                    "ck-mc: semantic search is on again: Synapse lane {} of module {module} serves",
-                    lane.id
+                    lane_id = %lane.id,
+                    %module,
+                    "ck-mc: semantic search is on again: a Synapse lane is serving"
                 );
             }
         });
@@ -315,7 +323,9 @@ impl Link {
             .insert(key)
         {
             tracing::warn!(
-                "ck-mc: Synapse {method} for embeddings failed ({code}); that request falls back to words only"
+                %method,
+                %code,
+                "ck-mc: a Synapse method for embeddings failed; that request falls back to words only"
             );
         }
     }
@@ -348,8 +358,9 @@ impl Link {
                 }
                 Ok(_) => {
                     tracing::warn!(
-                        "ck-mc: Synapse {method} answered for another fingerprint than lane {}'s; the vectors are refused",
-                        lane.id
+                        %method,
+                        lane_id = %lane.id,
+                        "ck-mc: a Synapse reply had a different fingerprint than the lane's; the vectors are refused"
                     );
                     self.forget(module, model, lane, "fingerprint_mismatch", None);
                     return Err(Failure::Failed);
@@ -453,18 +464,24 @@ impl Cause {
         };
         match self {
             Self::NoModule => tracing::info!(
-                "ck-mc: semantic search is off: no Synapse module {module} answers, so search uses words only. To embed without Synapse, set an HTTP endpoint in `embedding` (provider \"openai-compatible\")"
+                %module,
+                "ck-mc: semantic search is off: the Synapse module does not answer, so search uses words only. To embed without Synapse, set an HTTP endpoint in `embedding` (provider \"openai-compatible\")"
             ),
             Self::NoBackend => tracing::info!(
-                "ck-mc: semantic search is off: Synapse module {module} has no supported GPU on this machine (backend_unavailable), so search uses words only. To embed without Synapse, set an HTTP endpoint in `embedding` (provider \"openai-compatible\")"
+                %module,
+                "ck-mc: semantic search is off: the Synapse module has no supported GPU on this machine (backend_unavailable), so search uses words only. To embed without Synapse, set an HTTP endpoint in `embedding` (provider \"openai-compatible\")"
             ),
             Self::NotInstalled(model) => tracing::info!(
-                "ck-mc: semantic search is off: Synapse module {module} has not downloaded {model} (model_not_installed), so search uses words only. Download it{} with `ck-synapse-opctl models download {model}`",
-                size(model)
+                %module,
+                %model,
+                download_size = %size(model),
+                "ck-mc: semantic search is off: the Synapse module has not downloaded the model (model_not_installed), so search uses words only. Download the model with `ck-synapse-opctl models download`"
             ),
             Self::NoLane(model) => tracing::info!(
-                "ck-mc: semantic search is off: Synapse module {module} lists no lane of {model} that admits requests, so search uses words only. Download the model{} with `ck-synapse-opctl models download {model}`, or set an HTTP endpoint in `embedding` (provider \"openai-compatible\")",
-                size(model)
+                %module,
+                %model,
+                download_size = %size(model),
+                "ck-mc: semantic search is off: the Synapse module lists no lane for the model that admits requests, so search uses words only. Download the model with `ck-synapse-opctl models download`, or set an HTTP endpoint in `embedding` (provider \"openai-compatible\")"
             ),
         }
     }

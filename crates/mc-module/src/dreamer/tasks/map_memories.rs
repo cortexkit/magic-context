@@ -799,8 +799,10 @@ impl MapMemories {
             })
         });
         tracing::info!(
-            "ck-mc: dreamer: {} for {project}: skipped {recent} memories tried in the last seven days",
-            context.task_id()
+            task = %context.task_id(),
+            %project,
+            skipped_count = %recent,
+            "ck-mc: dreamer: skipped memories tried in the last seven days"
         );
         let shared = Arc::new(Run {
             profile: context.profile.clone(),

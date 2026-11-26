@@ -284,7 +284,11 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), String> {
                 // Loading this row already yields no state. Leave its bytes
                 // untouched so one damaged session cannot prevent all others
                 // from opening or migrating their valid state.
-                tracing::warn!("ck-mc: session {session}: skipping undecodable state during migration: {error}");
+                tracing::warn!(
+                    %session,
+                    %error,
+                    "ck-mc: session: skipping undecodable state during migration"
+                );
                 continue;
             }
         };

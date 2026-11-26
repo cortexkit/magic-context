@@ -240,7 +240,7 @@ async fn a_message_under_an_epoch_the_vault_doesnt_hold_yet_holds_the_stream_unt
         "a hold for the same epoch keeps the time it began"
     );
     assert_eq!(
-        log.count("the memory stream is held for fleet epoch 2"),
+        log.count("the memory stream is held for a fleet epoch whose key this computer's vault doesn't hold; nothing is sent until it does epoch=2"),
         1,
         "logged once: {}",
         log.text()

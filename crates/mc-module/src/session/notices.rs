@@ -99,8 +99,10 @@ impl Session {
             // view is no longer waiting for confirmation.
             if !self.take_move_refusal(client, *version, refusal).await {
                 tracing::warn!(
-                    "ck-mc: session {}: runner refused view {version} at a step boundary: {refusal:?}",
-                    self.key.session
+                    session = %self.key.session,
+                    view_version = %version,
+                    ?refusal,
+                    "ck-mc: session: runner refused a view at a step boundary"
                 );
             }
             refused.push((*version, refusal.clone()));
@@ -171,8 +173,9 @@ impl Session {
                 // the model still sees (compaction contract W1.5).
                 other => {
                     tracing::info!(
-                        "ck-mc: session {}: unknown notice event {other:?}; reading the transcript again",
-                        self.key.session
+                        session = %self.key.session,
+                        event = ?other,
+                        "ck-mc: session: unknown notice event; reading the transcript again"
                     );
                     self.index = Index::starting_at(self.cut.unwrap_or(1));
                 }
@@ -366,8 +369,9 @@ impl Session {
             return;
         }
         tracing::info!(
-            "ck-mc: session {}: the runner applies no view after ck-mc's view {version}; the history head is rebuilt and offered on this notice",
-            self.key.session
+            session = %self.key.session,
+            view_version = %version,
+            "ck-mc: session: the runner applies no view after a ck-mc view; the history head is rebuilt and offered on this notice"
         );
         self.lost_view_due = true;
     }
@@ -410,9 +414,9 @@ impl Session {
         self.lost_view_offers += 1;
         if self.lost_view_offers == LOST_VIEW_OFFERS {
             tracing::warn!(
-                "ck-mc: session {}: the runner refused or dropped {} views in a row that ck-mc offered because the runner applied none of its views, with no new message since; none is forced until the transcript grows or the next Setup, and a view waits for a summary or for the usage to call for one",
-                self.key.session,
-                self.lost_view_offers
+                session = %self.key.session,
+                view_count = %self.lost_view_offers,
+                "ck-mc: session: the runner repeatedly refused or dropped views offered because it applied none, and no new message arrived; none is forced until the transcript grows or the next Setup, and a view waits for a summary or for the usage to call for one"
             );
         }
     }

@@ -809,7 +809,11 @@ impl Replica {
                 .borrow_mut()
                 .insert((key.clone(), version))
             {
-                tracing::warn!("ck-mc: session {}: context.head view {} has an unrecognized section; serving its remaining text unsplit",key.session,version);
+                tracing::warn!(
+                    session = %key.session,
+                    view_version = %version,
+                    "ck-mc: session: context.head view has an unrecognized section; serving its remaining text unsplit"
+                );
             }
         }
     }
@@ -882,8 +886,9 @@ impl Replica {
                 }
                 Err(error) => {
                     tracing::warn!(
-                        "ck-mc: session {}: reading its summaries for the apps: {error}",
-                        snapshot.key.session
+                        session = %snapshot.key.session,
+                        %error,
+                        "ck-mc: session: reading summaries for the apps failed"
                     );
                     self.summaries_unread
                         .borrow_mut()

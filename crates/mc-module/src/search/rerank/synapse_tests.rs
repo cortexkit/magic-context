@@ -207,7 +207,7 @@ async fn absent_synapse_logs_its_fallback_once_even_after_reprobes() {
     let text = output.text();
     assert_eq!(
         text.matches(
-            "ck-mc: ctx_search rerank fallback (unknown_module) from Synapse module synapse; keeping the original ranking until it scores again"
+            "ck-mc: ctx_search rerank fallback from a Synapse module; keeping the original ranking until it scores again reason=unknown_module module=synapse"
         )
         .count(),
         1,
@@ -223,11 +223,15 @@ fn a_module_is_logged_once_per_change_of_state() {
     let cache = SynapseCatalog::new();
     let output = crate::test_log::capture();
     let fell_back = |text: &str| {
-        text.matches(&format!("from Synapse module {module}; keeping"))
+        text.lines()
+            .filter(|line| {
+                line.contains("ctx_search rerank fallback from a Synapse module")
+                    && line.contains(&format!("module={module}"))
+            })
             .count()
     };
     let scores_again = |text: &str| {
-        text.matches(&format!("Synapse module {module} scores again"))
+        text.matches(&format!("Synapse module scores again module={module}"))
             .count()
     };
     // Reaching the module from the start logs nothing.
@@ -238,7 +242,7 @@ fn a_module_is_logged_once_per_change_of_state() {
     }
     let text = output.text();
     assert_eq!((fell_back(&text), scores_again(&text)), (1, 0), "{text}");
-    assert!(text.contains("fallback (unknown_module) from"), "{text}");
+    assert!(text.contains("reason=unknown_module"), "{text}");
     cache.scored(module);
     cache.scored(module);
     let text = output.text();

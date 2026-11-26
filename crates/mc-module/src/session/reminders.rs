@@ -48,8 +48,9 @@ impl Session {
             let request = self.reminder(client, send_id, template, kind).await;
             if let Err(error) = client.send(&self.key, request).await {
                 tracing::warn!(
-                    "ck-mc: session {}: session.send failed: {error:?}",
-                    self.key.session
+                    session = %self.key.session,
+                    ?error,
+                    "ck-mc: session: session.send failed"
                 );
             } else if kind == crate::nudges::CEILING_KIND {
                 self.nudges.ceiling_sent = true;
@@ -74,8 +75,9 @@ impl Session {
         if let Some(prompt) = reported {
             self.warned_no_prompt = true;
             tracing::warn!(
-                "ck-mc: session {}: the runner's conditions carry no last_prompt_tokens, though its steps report usage ({prompt} prompt tokens); no threshold can be reached",
-                self.key.session
+                session = %self.key.session,
+                prompt_tokens = %prompt,
+                "ck-mc: session: the runner's conditions carry no last_prompt_tokens, though its steps report usage; no threshold can be reached"
             );
         }
     }
@@ -88,7 +90,7 @@ impl Session {
         self.reminder_counter = self.reminder_counter.checked_add(1)?;
         if let Some(store) = &self.store {
             if let Err(error) = store.save(&self.key, &self.durable()) {
-                tracing::warn!("ck-mc: {error}");
+                tracing::warn!(%error, "ck-mc: session: saving the reminder identifier failed");
                 return None;
             }
         }
@@ -133,8 +135,9 @@ impl Session {
         match client.send(&self.key, request).await {
             Ok(_) => self.keep_requested = true,
             Err(error) => tracing::warn!(
-                "ck-mc: session {}: session.send failed: {error:?}",
-                self.key.session
+                session = %self.key.session,
+                ?error,
+                "ck-mc: session: session.send failed"
             ),
         }
     }
@@ -163,12 +166,17 @@ impl Session {
         let flagged = self.conditions.window_over_budget == Some(true);
         if flagged && !self.window_over_budget {
             tracing::info!(
-                "ck-mc: session {}: window_over_budget: {} entries; stated budget entries {:?}, bytes {:?} (None means no bound stated)",
-                self.key.session, self.index.entries().len(),
-                self.limits.window_entries, self.limits.window_bytes
+                session = %self.key.session,
+                entry_count = %self.index.entries().len(),
+                max_entries = ?self.limits.window_entries,
+                max_bytes = ?self.limits.window_bytes,
+                "ck-mc: session: window_over_budget (None means no bound stated)"
             );
             if self.limits.window_entries.is_none() && self.limits.window_bytes.is_none() {
-                tracing::warn!("ck-mc: session {}: runner fault: window_over_budget without a stated window budget", self.key.session);
+                tracing::warn!(
+                    session = %self.key.session,
+                    "ck-mc: session: runner fault: window_over_budget without a stated window budget"
+                );
             }
         }
         self.window_over_budget = flagged;

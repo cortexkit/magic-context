@@ -8,13 +8,15 @@ impl Session {
     /// `suspended`); any other failure leaves it to the next notice.
     pub(super) fn runner_call_failed(&mut self, what: &str, error: &crate::client::ClientError) {
         tracing::warn!(
-            "ck-mc: session {}: {what} failed: {error}",
-            self.key.session
+            session = %self.key.session,
+            operation = %what,
+            %error,
+            "ck-mc: session: runner operation failed"
         );
         if error.not_permitted() && !self.suspended {
             tracing::warn!(
-                "ck-mc: session {}: the runner refused ck-mc as its compaction provider; suspended until its next Setup",
-                self.key.session
+                session = %self.key.session,
+                "ck-mc: session: the runner refused ck-mc as its compaction provider; suspended until its next Setup"
             );
             self.suspended = true;
             self.index_ready = false;
@@ -103,10 +105,10 @@ impl Session {
             if self.cut.is_some_and(|cut| runner_newest < cut) {
                 if rebuilt {
                     tracing::info!(
-                        "ck-mc: session {}: transcript keeps changing under a read (runner's newest {:?} is before the cut {:?})",
-                        self.key.session,
-                        page.head.newest,
-                        self.cut
+                        session = %self.key.session,
+                        newest = ?page.head.newest,
+                        cut = ?self.cut,
+                        "ck-mc: session: transcript keeps changing under a read; the runner's newest entry is before the cut"
                     );
                     return false;
                 }
@@ -149,10 +151,10 @@ impl Session {
                                 continue;
                             }
                             tracing::info!(
-                                "ck-mc: session {}: transcript keeps changing under a read (the last page ends at {:?}, but its head says {:?})",
-                                self.key.session,
-                                self.index.cursor(),
-                                page.head.newest
+                                session = %self.key.session,
+                                last_entry = ?self.index.cursor(),
+                                newest = ?page.head.newest,
+                                "ck-mc: session: transcript keeps changing under a read; the last page ends at a different entry than its head reports"
                             );
                             return false;
                         }
@@ -164,13 +166,13 @@ impl Session {
                 }
                 outcome @ (Extend::Gap | Extend::Diverged) => {
                     tracing::info!(
-                        "ck-mc: session {}: transcript keeps changing under a read ({:?} in the page after {:?}, ordinals {:?}..{:?}; index ends at {:?})",
-                        self.key.session,
-                        outcome,
-                        read_from,
-                        page_span.0,
-                        page_span.1,
-                        self.index.cursor()
+                        session = %self.key.session,
+                        ?outcome,
+                        ?read_from,
+                        first_ordinal = ?page_span.0,
+                        last_ordinal = ?page_span.1,
+                        last_entry = ?self.index.cursor(),
+                        "ck-mc: session: transcript keeps changing under a read"
                     );
                     return false;
                 }
@@ -289,8 +291,9 @@ impl Session {
                 // The reader already logged a runner fault once for this read.
                 Err(error) if error.message.starts_with("runner fault:") => {}
                 Err(error) => tracing::warn!(
-                    "ck-mc: session {}: reading tool results with images failed: {error:?}",
-                    self.key.session
+                    session = %self.key.session,
+                    ?error,
+                    "ck-mc: session: reading tool results with images failed"
                 ),
             }
         }

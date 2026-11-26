@@ -216,14 +216,17 @@ impl Drop for Writer<'_> {
         // restoring automatic checkpoints; committed progress remains resumable.
         if !self.finished {
             if let Err(error) = self.checkpoint() {
-                tracing::warn!("ck-mc: {error}");
+                tracing::warn!(
+                    %error,
+                    "ck-mc: move-in: checkpointing the unfinished move failed"
+                );
             }
         }
         if let Err(error) = self
             .conn
             .pragma_update(None, "wal_autocheckpoint", self.previous)
         {
-            tracing::warn!("ck-mc: restoring move checkpoint policy: {error}");
+            tracing::warn!(%error, "ck-mc: restoring move checkpoint policy failed");
         }
     }
 }

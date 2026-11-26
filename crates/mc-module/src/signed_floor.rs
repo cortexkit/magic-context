@@ -91,9 +91,11 @@ impl Session {
                     disproved.warned = true;
                     let (mid, part) = &disproved.part;
                     tracing::warn!(
-                        "ck-mc: session {}: signed_floor_contradicted: the runner names signed floor {} again, but it refused a view for keeping signed part {mid}/{part}, which only that floor makes valid; ck-mc takes no floor until the runner states another one or none",
-                        self.key.session,
-                        disproved.floor
+                        session = %self.key.session,
+                        signed_floor = %disproved.floor,
+                        %mid,
+                        %part,
+                        "ck-mc: session: signed_floor_contradicted: the runner repeats a floor but refused a signed part valid only under that floor; ck-mc takes no floor until the runner states another one or none"
                     );
                 }
                 return;
@@ -107,8 +109,10 @@ impl Session {
                     .ordinal_of(&held)
                     .map_or_else(|| "not held".to_owned(), |at| format!("message {at}"));
                 tracing::warn!(
-                    "ck-mc: session {}: signed_floor_regressed: ck-mc held signed floor {held} ({held_at}), the runner now states no floor; ck-mc follows it and judges the signed reasoning that floor covered as sent",
-                    self.key.session
+                    session = %self.key.session,
+                    previous_floor = %held,
+                    previous_floor_ordinal = %held_at,
+                    "ck-mc: session: signed_floor_regressed: the runner now states no floor; ck-mc follows it and judges the signed reasoning the previous floor covered as sent"
                 );
             }
             return;
@@ -129,9 +133,11 @@ impl Session {
             |held| format!("{held} ({})", at(held)),
         );
         tracing::info!(
-            "ck-mc: session {}: signed floor moved to {through} ({}) from {from}; the runner strips signed reasoning at or before it",
-            self.key.session,
-            at(&through)
+            session = %self.key.session,
+            signed_floor = %through,
+            floor_ordinal = %at(&through),
+            previous_floor = %from,
+            "ck-mc: session: signed floor moved; the runner strips signed reasoning at or before it"
         );
         self.signed_floor = Some(through);
     }
@@ -207,10 +213,14 @@ impl Session {
             ordinal.map_or_else(|| "not held".to_owned(), |at| format!("message {at}"))
         };
         tracing::warn!(
-            "ck-mc: session {}: signed_floor_regressed: ck-mc held signed floor {held} ({}), the runner refused view {version} for keeping signed part {mid}/{part} ({}), which only that floor makes valid; the runner does not apply it, so ck-mc drops its floor",
-            self.key.session,
-            at(held_at),
-            at(self.index.ordinal_of(mid))
+            session = %self.key.session,
+            previous_floor = %held,
+            previous_floor_ordinal = %at(held_at),
+            view_version = %version,
+            %mid,
+            %part,
+            part_ordinal = %at(self.index.ordinal_of(mid)),
+            "ck-mc: session: signed_floor_regressed: the runner refused a view for keeping a signed part the held floor alone makes valid; ck-mc drops its floor"
         );
         self.disproved_floor = Some(Disproved {
             floor: held,

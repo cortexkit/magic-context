@@ -151,7 +151,8 @@ impl Mover {
                 let folder_path = root.display().to_string();
                 if self.once(format!("missing:{folder_path}")) {
                     tracing::info!(
-                        "ck-mc: no legacy project key for {folder_path}: not a folder on this machine"
+                        path = %folder_path,
+                        "ck-mc: no legacy project key: the path is not a folder on this machine"
                     );
                 }
                 continue;
@@ -176,7 +177,11 @@ impl Mover {
                             Err(why) => {
                                 let folder_path = root.display().to_string();
                                 if self.once(format!("git:{folder_path}")) {
-                                    tracing::warn!("ck-mc: no legacy project key for {folder_path}; its rows stay where they are: {why}");
+                                    tracing::warn!(
+                                        path = %folder_path,
+                                        reason = %why,
+                                        "ck-mc: no legacy project key; its rows stay where they are"
+                                    );
                                 }
                                 continue;
                             }
@@ -204,7 +209,8 @@ impl Mover {
             Ok(keys) => keys,
             Err(error) => {
                 tracing::warn!(
-                    "ck-mc: reading legacy project keys failed; retrying later: {error}"
+                    %error,
+                    "ck-mc: reading legacy project keys failed; retrying later"
                 );
                 report.complete = false;
                 return report;
@@ -235,9 +241,19 @@ impl Mover {
                 let to = settled.done.keys().cloned().collect::<Vec<_>>().join(", ");
                 let rows = described(&settled.done);
                 if projects.len() == 1 {
-                    tracing::info!("ck-mc: legacy project rows moved from {key} to {to}: {rows}");
+                    tracing::info!(
+                        previous_project = %key,
+                        project = %to,
+                        %rows,
+                        "ck-mc: moved legacy project rows to the new project"
+                    );
                 } else {
-                    tracing::info!("ck-mc: legacy project rows copied from {key} to {to}: {rows}");
+                    tracing::info!(
+                        previous_project = %key,
+                        project = %to,
+                        %rows,
+                        "ck-mc: copied legacy project rows to the new project"
+                    );
                 }
             }
             if let Some(why) = &settled.held {
@@ -252,12 +268,19 @@ impl Mover {
                 };
                 if self.once(format!("held:{key}:{why}")) {
                     let to = projects.iter().cloned().collect::<Vec<_>>().join(", ");
-                    tracing::info!("ck-mc: legacy project rows under {key} held for {to}: {why}");
+                    tracing::info!(
+                        previous_project = %key,
+                        project = %to,
+                        reason = %why,
+                        "ck-mc: held legacy project rows for the new project"
+                    );
                 }
             }
             if let Some(error) = &settled.failed {
                 tracing::warn!(
-                    "ck-mc: moving legacy project rows from {key} failed; retrying later: {error}"
+                    project = %key,
+                    %error,
+                    "ck-mc: moving legacy project rows failed; retrying later"
                 );
                 report.complete = false;
             }

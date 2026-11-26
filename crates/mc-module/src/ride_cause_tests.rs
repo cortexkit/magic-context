@@ -241,7 +241,7 @@ fn ride_over_limit_without_a_count_uses_the_usable_window() {
         "a provider refusal without a count kept every tool output"
     );
     assert!(logs.text().contains(
-        "ck-mc: session s1: over_limit without request_tokens: using a request floor of 99000 tokens"
+        "ck-mc: session: over_limit without request_tokens; using a request floor session=s1 floor_tokens=99000"
     ));
 
     let (mut session, _) = head_with_unmeasured_growth();
@@ -306,7 +306,7 @@ fn ride_over_limit_without_a_count_never_floors_below_the_last_reading() {
     let view = session.ride(&settings, &request);
     assert!(reclaimed_tools(view.as_ref()) > 0);
     assert!(logs.text().contains(
-        "ck-mc: session s1: over_limit without request_tokens: using a request floor of 120000 tokens"
+        "ck-mc: session: over_limit without request_tokens; using a request floor session=s1 floor_tokens=120000"
     ));
 }
 

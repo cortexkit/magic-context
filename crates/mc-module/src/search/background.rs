@@ -233,8 +233,9 @@ impl Background {
                             let non_wal = error.contains("context_wal_required:");
                             if !non_wal || !pending.warned_non_wal {
                                 tracing::warn!(
-                                    "ck-mc: session {}: background search index: {error}",
-                                    key.session
+                                    session = %key.session,
+                                    %error,
+                                    "ck-mc: session: updating the background search index failed"
                                 );
                             }
                             pending.warned_non_wal |= non_wal;

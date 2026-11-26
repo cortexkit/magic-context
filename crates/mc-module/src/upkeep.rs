@@ -201,8 +201,9 @@ fn missing_root(project: &str, root: &Path) -> bool {
     if missing {
         if projects.insert(project.to_owned()) {
             tracing::info!(
-                "ck-mc: skipping commit sweep for {project}: project root is missing ({})",
-                root.display()
+                %project,
+                path = %root.display(),
+                "ck-mc: skipping commit sweep because the project root is missing"
             );
         }
     } else {
@@ -249,7 +250,7 @@ async fn embed_memories(db: &ContextDb, project: Option<&str>, provider: &Provid
         Ok(rows) if !rows.is_empty() => rows,
         Ok(_) => return 0,
         Err(error) => {
-            tracing::warn!("ck-mc: upkeep could not read memories for {scope}: {error}");
+            tracing::warn!(%scope, %error, "ck-mc: upkeep could not read memories");
             return 0;
         }
     };
@@ -280,7 +281,7 @@ async fn embed_memories(db: &ContextDb, project: Option<&str>, provider: &Provid
         Ok(saved)
     });
     saved.unwrap_or_else(|error| {
-        tracing::warn!("ck-mc: upkeep could not save memory vectors for {scope}: {error}");
+        tracing::warn!(%scope, %error, "ck-mc: upkeep could not save memory vectors");
         0
     })
 }
@@ -381,7 +382,7 @@ fn park(db: &ContextDb, project: &str, holder: &str, clock: &(impl Fn() -> i64 +
 
 fn fail(db: &ContextDb, project: &str, holder: &str, message: String) -> Sweep {
     let _ = db.with_connection(|conn| release_lease(conn, project, holder));
-    tracing::warn!("ck-mc: commit sweep failed for {project}: {message}");
+    tracing::warn!(%project, error = %message, "ck-mc: commit sweep failed");
     Sweep::Failed(message)
 }
 
@@ -1059,7 +1060,9 @@ mod tests {
             ..Plan::default()
         };
         let logs = crate::test_log::capture();
-        let skip = format!("ck-mc: skipping commit sweep for {project}: project root is missing");
+        let skip = format!(
+            "ck-mc: skipping commit sweep because the project root is missing project={project}"
+        );
         let now = 1_800_000_000_000;
         for _ in 0..3 {
             let report = run_project(&db, &project, &root, &plan, &|| now).await;
@@ -1105,7 +1108,7 @@ mod tests {
         let report = run_project(&db, "pj-git-error", &root, &plan, &|| 1).await;
         assert!(matches!(report.sweep, Some(Sweep::Failed(_))), "{report:?}");
         assert_eq!(
-            logs.count("ck-mc: commit sweep failed for pj-git-error:"),
+            logs.count("ck-mc: commit sweep failed project=pj-git-error error="),
             1,
             "{}",
             logs.text()

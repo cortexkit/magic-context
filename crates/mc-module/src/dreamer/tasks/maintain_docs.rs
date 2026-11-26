@@ -346,7 +346,12 @@ impl Task for MaintainDocs {
         match self.planned(context)? {
             Planned::Batch(batch) => Ok(vec![batch as Box<dyn Batch>]),
             Planned::Skip(reason) => {
-                tracing::info!("ck-mc: dreamer: {KIND} for {key}: {reason}");
+                tracing::info!(
+                    task = %KIND,
+                    %key,
+                    %reason,
+                    "ck-mc: dreamer: a task reported an issue for a key"
+                );
                 self.skipped
                     .lock()
                     .expect("skip reasons")

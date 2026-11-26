@@ -322,7 +322,7 @@ impl NatsHub {
                     return;
                 }
                 Err(error) => {
-                    tracing::debug!("ck-mc: replica: {error}; the consumer is made again");
+                    tracing::debug!(%error, "ck-mc: replica: remaking the consumer");
                     if let Some(follower) = slot.take() {
                         follower.delivery.close().await;
                     }
@@ -359,7 +359,11 @@ impl Hub for NatsHub {
             .await
             .map_err(|fault| match fault {
                 Fault::Full(why) => {
-                    tracing::debug!("ck-mc: replica: the hub refused {message_id}: {why}");
+                    tracing::debug!(
+                        %message_id,
+                        reason = %why,
+                        "ck-mc: replica: the hub refused a message"
+                    );
                     HubError(STREAM_FULL.to_owned())
                 }
                 Fault::Failed(why) => HubError(why),

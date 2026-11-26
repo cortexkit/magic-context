@@ -229,7 +229,8 @@ impl RunEnds {
         if *reader != Reader::Reading {
             *reader = Reader::Reading;
             tracing::info!(
-                "ck-mc: run ends: reading {DURABLE}; summary and dreamer runs are read every 15 s as a backstop"
+                durable = %DURABLE,
+                "ck-mc: run ends: reading the durable stream; summary and dreamer runs are read every 15 s as a backstop"
             );
         }
     }
@@ -245,7 +246,9 @@ impl RunEnds {
         *reader = Reader::Stopped;
         drop(reader);
         tracing::info!(
-            "ck-mc: run ends: not reading {DURABLE} ({reason}); summary and dreamer runs are read every 500 ms"
+            durable = %DURABLE,
+            %reason,
+            "ck-mc: run ends: not reading the durable stream; summary and dreamer runs are read every 500 ms"
         );
         if was == Reader::Reading {
             // A wait asleep for the backstop interval would sleep it out:
@@ -414,8 +417,8 @@ fn handle(ends: &RunEnds, subjects: &RunEndSubjects, delivery: &Delivery) -> Out
     let Some(session_ref) = session_ref_of(&delivery.headers) else {
         if !ends.unnamed_logged.swap(true, Ordering::Relaxed) {
             tracing::warn!(
-                "ck-mc: run ends: an event on {} has no session_ref header; acknowledged without waking anyone, and later ones are not logged",
-                delivery.subject
+                subject = %delivery.subject,
+                "ck-mc: run ends: an event has no session_ref header; acknowledged without waking anyone, and later ones are not logged"
             );
         }
         return Outcome::NoSession;
@@ -430,7 +433,10 @@ fn handle(ends: &RunEnds, subjects: &RunEndSubjects, delivery: &Delivery) -> Out
             .rsplit_once(".event.")
             .map_or(delivery.subject.as_str(), |(_, event)| event);
         tracing::info!(
-            "ck-mc: run ends: {event} for session ref {session_ref} woke {waits} wait(s)"
+            %event,
+            %session_ref,
+            wait_count = %waits,
+            "ck-mc: run ends: a session event woke waits"
         );
     }
     Outcome::Ended(woke)

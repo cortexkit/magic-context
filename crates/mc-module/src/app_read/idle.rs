@@ -40,10 +40,10 @@ pub(crate) async fn fetch<C: RunnerClient>(
         }
     };
     tracing::info!(
-        "ck-mc: session {}: idle context.head outcome={} runner_ms={}",
-        key.session,
-        outcome,
-        runner_ms
+        session = %key.session,
+        %outcome,
+        %runner_ms,
+        "ck-mc: session: idle context.head call finished"
     );
     result
 }

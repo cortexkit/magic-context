@@ -436,11 +436,14 @@ async fn window_flag_logs_once_per_crossing_without_index_bytes_and_changes_no_p
     let log = capture.text();
     let crossings: Vec<_> = log
         .lines()
-        .filter(|line| line.contains("INFO") && line.contains("window_over_budget:"))
+        .filter(|line| {
+            line.contains("INFO")
+                && line.contains("window_over_budget (None means no bound stated)")
+        })
         .collect();
     assert_eq!(crossings.len(), 2);
     assert!(crossings.iter().all(|line| line.ends_with(
-        "ck-mc: session s1: window_over_budget: 1 entries; stated budget entries Some(4), bytes Some(1024) (None means no bound stated)"
+        "ck-mc: session: window_over_budget (None means no bound stated) session=s1 entry_count=1 max_entries=Some(4) max_bytes=Some(1024)"
     )), "{log}");
     let mut ride = RideRequest::new(
         vec![RideCause::WindowOverBudget],
@@ -482,8 +485,8 @@ async fn flag_without_a_stated_window_budget_logs_fault_and_still_does_nothing()
     assert_eq!(
         log.lines()
             .filter(|line| line.contains("INFO")
-                && line.contains("window_over_budget:")
-                && line.contains("entries None, bytes None"))
+                && line.contains("window_over_budget (None means no bound stated)")
+                && line.contains("max_entries=None max_bytes=None"))
             .count(),
         1
     );

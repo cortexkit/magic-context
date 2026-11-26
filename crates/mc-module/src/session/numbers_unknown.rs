@@ -133,8 +133,11 @@ impl Session {
             return;
         }
         tracing::warn!(
-            "ck-mc: session {}: no cut can pass the history without part numbers while message {ordinal}'s {name} call {call_id} is still running; views wait until the runner finishes or fails it",
-            self.key.session
+            session = %self.key.session,
+            %ordinal,
+            tool = %name,
+            %call_id,
+            "ck-mc: session: no cut can pass the history without part numbers while a tool call is still running; views wait until the runner finishes or fails it"
         );
         self.numbers_running_logged = Some(call_id);
     }
@@ -153,10 +156,12 @@ impl Session {
             _ => "nothing".into(),
         };
         tracing::warn!(
-            "ck-mc: session {}: no view: cut_before_numbers (last entry without part numbers {} ({}), summaries reach {reach}, the view would carry {why}); views wait for a summary through that entry",
-            self.key.session,
-            floor.ordinal,
-            floor.mid
+            session = %self.key.session,
+            floor_ordinal = %floor.ordinal,
+            floor_mid = %floor.mid,
+            summary_reach = %reach,
+            carried_head = %why,
+            "ck-mc: session: no view: cut_before_numbers; views wait for a summary through the last entry without part numbers"
         );
     }
 
@@ -166,8 +171,8 @@ impl Session {
             return;
         }
         tracing::info!(
-            "ck-mc: session {}: views publish again: the cut reaches past the history without part numbers",
-            self.key.session
+            session = %self.key.session,
+            "ck-mc: session: views publish again: the cut reaches past the history without part numbers"
         );
     }
 
@@ -187,8 +192,10 @@ impl Session {
             // next Setup; its drops stay queued, blamed on nothing.
             if !std::mem::replace(&mut self.numbers_views_held, true) {
                 tracing::warn!(
-                    "ck-mc: session {}: runner refused view {version}: cut_before_numbers through {unknown_through}; this session has no summarizer to cut through it, so it builds no view until the next Setup",
-                    self.key.session
+                    session = %self.key.session,
+                    view_version = %version,
+                    %unknown_through,
+                    "ck-mc: session: runner refused a view with cut_before_numbers; this session has no summarizer to cut through it, so it builds no view until the next Setup"
                 );
             }
             return true;
@@ -196,8 +203,11 @@ impl Session {
         match self.index.ordinal_of(unknown_through) {
             Some(ordinal) => {
                 tracing::info!(
-                    "ck-mc: session {}: runner refused view {version}: cut_before_numbers through entry {ordinal} ({unknown_through}); views wait for a summary through it",
-                    self.key.session
+                    session = %self.key.session,
+                    view_version = %version,
+                    %ordinal,
+                    %unknown_through,
+                    "ck-mc: session: runner refused a view with cut_before_numbers; views wait for a summary through the entry"
                 );
                 let floor = MoveFloor {
                     ordinal,
@@ -217,8 +227,10 @@ impl Session {
             // read, it holds the marked entries and takes the floor from
             // them.
             None => tracing::info!(
-                "ck-mc: session {}: runner refused view {version}: cut_before_numbers through {unknown_through}, an entry ck-mc's index doesn't hold",
-                self.key.session
+                session = %self.key.session,
+                view_version = %version,
+                %unknown_through,
+                "ck-mc: session: runner refused a view with cut_before_numbers at an entry ck-mc's index doesn't hold"
             ),
         }
         true
@@ -325,10 +337,10 @@ impl Session {
             emergency,
         });
         tracing::info!(
-            "ck-mc: session {}: summarizing toward entry {} ({}), the last without part numbers, before any view",
-            self.key.session,
-            floor.ordinal,
-            floor.mid
+            session = %self.key.session,
+            floor_ordinal = %floor.ordinal,
+            floor_mid = %floor.mid,
+            "ck-mc: session: summarizing toward the last entry without part numbers before any view"
         );
         Some(Some(self.begin_summary(
             settings,
@@ -347,10 +359,10 @@ impl Session {
             return;
         }
         tracing::info!(
-            "ck-mc: session {}: entries through {} ({}), the last without part numbers, hold nothing a summary would keep; the cut passes them without one",
-            self.key.session,
-            floor.ordinal,
-            floor.mid
+            session = %self.key.session,
+            floor_ordinal = %floor.ordinal,
+            floor_mid = %floor.mid,
+            "ck-mc: session: entries through the last without part numbers hold nothing a summary would keep; the cut passes them without one"
         );
         self.numbers_covered = Some(floor.clone());
     }

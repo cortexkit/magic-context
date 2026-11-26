@@ -8,6 +8,7 @@ export interface RunnerDecision {
     kind: "setup" | "view" | "view_refused" | "view_unknown" | "view_reoffer_failed" | "stale_reading" | "ride" | "signed_floor" | "summary_start" | "summary_publish" | "no_summary";
     detail: string;
     version?: number;
+    setup?: { harness: string; preset: string };
     line?: string;
 }
 export interface RunnerEvidence {
@@ -17,12 +18,90 @@ export interface RunnerEvidence {
 }
 
 export function parseRunnerDecision(line: string, session: string): RunnerDecision | null {
+    const record = parseRunnerLogLine(line);
+    return record?.session === session ? record.decision : null;
+}
+
+export function parseRunnerLogLine(line: string): { at: number; session: string; decision: RunnerDecision | null } | null {
     const at = Date.parse(line.match(/(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/)?.[1] ?? "");
-    const match = line.match(/ck-mc: session (\S+): (.*)$/);
-    if (!Number.isFinite(at) || match?.[1] !== session) return null;
-    const body = match[2]!;
+    if (!Number.isFinite(at)) return null;
+    const match = /ck-mc: session(?: (\S+))?: (.*)$/.exec(line);
+    if (!match) return null;
+    const [, legacySession, body] = match;
+    if (legacySession) return { at, session: legacySession, decision: parseLegacyDecision(at, body!, line) };
+    const start = body!.search(/ [a-z_][\w.]*=/);
+    if (start === -1) return null;
+    const fields = readEventFields(body!.slice(start));
+    const session = fields?.get("session");
+    if (!fields || !session) return null;
+    return { at, session, decision: parseStructuredDecision(at, body!.slice(0, start), body!, fields, line) };
+}
+
+function readEventFields(suffix: string): Map<string, string> | null {
+    // cortexkit-log leaves unquoted fields verbatim and uses JSON escapes in
+    // quoted ones. Consume each complete field so text inside it is not a key.
+    const field = / ([a-z_][\w.]*)=("(?:[^"\\]|\\.)*"|[^ "\r\n]+)/gy;
+    const fields = new Map<string, string>();
+    let end = 0;
+    for (const match of suffix.matchAll(field)) {
+        if (match.index !== end) return null;
+        end += match[0].length;
+        const value = match[2]!;
+        try {
+            fields.set(match[1]!, value.startsWith('"') ? JSON.parse(value) : value);
+        } catch {
+            return null;
+        }
+    }
+    return end === suffix.length ? fields : null;
+}
+
+function parseStructuredDecision(at: number, sentence: string, body: string, fields: Map<string, string>, line: string): RunnerDecision | null {
+    const versionText = fields.get("view_version");
+    const version = versionText && /^\d+$/.test(versionText) ? Number(versionText) : undefined;
+    switch (sentence) {
+        case "setup": {
+            const harness = fields.get("harness");
+            const preset = fields.get("preset");
+            return harness && preset ? { at, kind: "setup", detail: body, line, setup: { harness, preset } } : null;
+        }
+        case "view accepted": {
+            if (version === undefined) return null;
+            const cut = fields.get("cut");
+            return { at, kind: "view", version, line, detail: `view=${version} edits=${fields.get("edit_count") ?? "unlogged"} cut=${cut === "no cut" ? "none" : cut?.replace(/^cut through /, "") ?? "unlogged"}` };
+        }
+        case "runner refused a view":
+        case "runner refused a view at a step boundary":
+        case "runner refused a view with cut_before_move":
+        case "runner refused a view with cut_before_numbers; this session has no summarizer to cut through it, so it builds no view until the next Setup":
+        case "runner refused a view with cut_before_numbers; views wait for a summary through the entry":
+        case "runner refused a view with cut_before_numbers at an entry ck-mc's index doesn't hold":
+            return version === undefined ? null : { at, kind: "view_refused", version, detail: body, line };
+        case "unknown answer to a view":
+            return version === undefined ? null : { at, kind: "view_unknown", version, detail: body, line };
+        case "runner refused a view offered again":
+        case "unknown answer to a view offered again":
+        case "rebuilding a view instead of offering it again":
+            return version === undefined ? null : { at, kind: "view_reoffer_failed", version, detail: body, line };
+        case "ignoring a prompt reading from a stale view; waiting for a reading under the current view":
+            return { at, kind: "stale_reading", detail: body, line };
+        case "the runner requested a ride":
+            return { at, kind: "ride", detail: `ride ${fields.get("causes") ?? "[]"}, request ${fields.get("request_tokens")} tokens, last prompt ${fields.get("last_prompt_tokens")}, applied view ${fields.get("applied_view")}`, line };
+        case "signed floor moved; the runner strips signed reasoning at or before it":
+            return { at, kind: "signed_floor", detail: body, line };
+        case "summary started over a message range": return { at, kind: "summary_start", detail: body };
+        case "published summaries": return { at, kind: "summary_publish", detail: body };
+        case "no summary started": return { at, kind: "no_summary", detail: body };
+        default: return null;
+    }
+}
+
+function parseLegacyDecision(at: number, body: string, line: string): RunnerDecision | null {
     // Setup is a handshake, not proof that the provider's cached prefix changed.
-    if (body.startsWith("setup (")) return { at, kind: "setup", detail: body, line };
+    if (body.startsWith("setup (")) {
+        const match = /^setup \(([^,]+), preset ([^,]+),/.exec(body);
+        return { at, kind: "setup", detail: body, line, ...(match && { setup: { harness: match[1]!, preset: match[2]! } }) };
+    }
     // Old shape: b99525c82a, crates/mc-module/src/session.rs:3040.
     // Cut-through/no-cut shape: 8c75aafa8d, the same file at :3051.
     const view = /^view (\d+) accepted\b/.exec(body);

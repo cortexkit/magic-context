@@ -86,7 +86,7 @@ fn category_levels(context: &MemoryContext) -> BTreeMap<String, Vec<String>> {
     let profile = match crate::memory_profile::prompt_profile(Some(context)) {
         Ok(profile) => profile,
         Err(refusal) => {
-            tracing::warn!("ck-mc: memory writes see no allowed levels: {refusal:?}");
+            tracing::warn!(?refusal, "ck-mc: memory writes see no allowed levels");
             return BTreeMap::new();
         }
     };

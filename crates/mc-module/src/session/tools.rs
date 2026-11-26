@@ -499,8 +499,8 @@ impl Session {
         };
         let Ok(hits) = tokio::time::timeout(deadline, search).await else {
             tracing::info!(
-                "ck-mc: session {}: memory search took too long; the message has no hint",
-                self.key.session
+                session = %self.key.session,
+                "ck-mc: session: memory search took too long; the message has no hint"
             );
             return answer;
         };
