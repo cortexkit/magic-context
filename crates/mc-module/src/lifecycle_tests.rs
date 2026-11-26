@@ -1983,6 +1983,7 @@ fn lifecycle_notice_age_sweep_never_drops_the_persons_words_at_any_size() {
             Some(lanes::OverLimit {
                 count: lanes::RideCount::Stated(99_000),
                 newest_view: true,
+                late: false,
             }),
             true,
             None,

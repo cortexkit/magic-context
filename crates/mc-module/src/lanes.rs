@@ -267,17 +267,57 @@ pub enum Shape {
     StripInjection,
 }
 
+/// The facts about the whole index that deciding how a part drops needs:
+/// the newest tool tags, the protected tool results, and the messages the
+/// transcript starts and ends on. Computed once for a batch of parts, since
+/// each takes a walk over the index.
+pub(crate) struct DropFacts<'a> {
+    recent: Vec<u64>,
+    protected: BTreeSet<PartKey>,
+    newest_mid: Option<&'a str>,
+    first_mid: Option<&'a str>,
+}
+
+impl<'a> DropFacts<'a> {
+    pub(crate) fn new(context: &Context<'a>) -> Self {
+        Self::with_protected(
+            context,
+            protected_tool_parts(context.index, context.protected_tools),
+        )
+    }
+
+    /// For a caller that already holds the protected set.
+    pub(crate) fn with_protected(context: &Context<'a>, protected: BTreeSet<PartKey>) -> Self {
+        let index = context.index;
+        Self {
+            recent: index.newest_tool_tags(RECENT_TOOL_WINDOW),
+            protected,
+            newest_mid: transcript_end_mid(index),
+            first_mid: index.entries().first().map(|entry| entry.mid.as_str()),
+        }
+    }
+}
+
 /// The edits that drop `parts`, and which of them those edits cover. A part
 /// requested twice keeps the shape of its first request. A part already
 /// changed by the latest view counts as covered and gets no new edit. A part
 /// that cannot go yet (a running tool call, a protected result) is left out
 /// of both, so a queued drop of it waits.
 pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, Vec<PartKey>) {
+    drop_ops_with(context, &DropFacts::new(context), parts)
+}
+
+/// [`drop_ops`] with the index facts already computed.
+pub(crate) fn drop_ops_with(
+    context: &Context,
+    facts: &DropFacts,
+    parts: &[(PartKey, Shape)],
+) -> (Vec<EditOp>, Vec<PartKey>) {
     let index = context.index;
-    let recent = index.newest_tool_tags(RECENT_TOOL_WINDOW);
-    let protected = protected_tool_parts(index, context.protected_tools);
-    let newest_mid = transcript_end_mid(index);
-    let first_mid = index.entries().first().map(|entry| entry.mid.as_str());
+    let recent = &facts.recent;
+    let protected = &facts.protected;
+    let newest_mid = facts.newest_mid;
+    let first_mid = facts.first_mid;
     let mut shapes: BTreeMap<&PartKey, Shape> = BTreeMap::new();
     for (key, shape) in parts {
         shapes.entry(key).or_insert(*shape);
@@ -357,7 +397,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                 let Some(tag) = part.tag else {
                     continue;
                 };
-                let small_recent = small_recent_call(tool, tag, &recent);
+                let small_recent = small_recent_call(tool, tag, recent);
                 let ends = ends_transcript(entry, part, newest_mid);
                 if sealed {
                     // Its output can't be replaced; removing the call that
@@ -587,10 +627,19 @@ pub fn edit_marker(name: &str, value: &Value) -> Option<String> {
     ))
 }
 
+#[cfg(test)]
+thread_local! {
+    // How many times this thread walked the index for its protected tool
+    // results, so a test can check a plan does it once.
+    pub(crate) static PROTECTED_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The newest results of each configured protected tool, plus all calls to
 /// person-facing tools. Their inputs can be the agent's only reply text.
 pub fn protected_tool_parts(index: &Index, counts: &BTreeMap<String, u64>) -> BTreeSet<PartKey> {
     let _timing = crate::notice_cost_timing::span("lanes.protected_tool_parts");
+    #[cfg(test)]
+    PROTECTED_WALKS.with(|walks| walks.set(walks.get() + 1));
     let mut left: BTreeMap<String, u64> = counts.clone();
     let mut protected = BTreeSet::new();
     for entry in index.entries().iter().rev() {
@@ -1615,8 +1664,13 @@ pub struct OverLimit {
     pub count: RideCount,
     /// The refused request was built under ck-mc's newest view, the one
     /// this pass builds on. Otherwise neither its count nor its refusal
-    /// describes the request this pass will serve.
+    /// describes the request this pass will serve. Read by the measured plan
+    /// only.
     pub newest_view: bool,
+    /// The ride is older than the conditions ck-mc holds, so a count it
+    /// states was taken under runner state that has since changed. The
+    /// measured plan treats it as no count; the inferred plan takes it.
+    pub late: bool,
 }
 
 /// What the runner said about a refused request's size. A stated count and
@@ -1711,15 +1765,21 @@ pub struct EmergencyPlan {
     pub size_from: &'static str,
     /// The ceiling the target is set from: the execute ceiling, or the
     /// usable window for a refused request whose fixed part reaches the
-    /// execute ceiling. A plan that stops at `margin` sets neither.
+    /// execute ceiling. A plan that stops at `margin` never compared with a
+    /// ceiling (it compared the fixed part with the usable window less
+    /// 2,000) and reports the execute ceiling.
     pub ceiling_tokens: u64,
     /// `None` when the plan stopped before setting a target.
     pub target_tokens: Option<u64>,
     /// Where the plan ended: `margin` (a refused request whose fixed part
-    /// leaves less than 2,000 tokens of the usable window), `ceiling` (the
+    /// leaves 2,000 tokens of the usable window or less), `ceiling` (the
     /// fixed part is above the ceiling), `target` (too little above the
     /// target to be worth a drop), `minimum` (what the candidates free is
-    /// below the minimum), or `selected`.
+    /// below the minimum), or `selected`: the selection ran to the end. It
+    /// can be empty when no candidate was left. The minimum doesn't apply
+    /// when another lane's edits already rewrite the prompt on this rebuild,
+    /// or when a refused request is planned against the usable window, so
+    /// those plans can end here with nothing selected.
     pub stop: &'static str,
 }
 
@@ -1822,13 +1882,18 @@ pub fn emergency_drop(
 /// transcript, saves only its result less the placeholder.
 pub(crate) fn drop_saving(
     context: &Context,
+    facts: &DropFacts,
     entry: &Entry,
     part: &Part,
     shape: Shape,
     before: u64,
     count: impl Fn(&str) -> u64,
 ) -> u64 {
-    let (ops, _) = drop_ops(context, &[((entry.mid.clone(), part.id.clone()), shape)]);
+    let (ops, _) = drop_ops_with(
+        context,
+        facts,
+        &[((entry.mid.clone(), part.id.clone()), shape)],
+    );
     let mut edits = Vec::new();
     for op in &ops {
         match op {
@@ -1896,7 +1961,7 @@ pub(crate) fn emergency_drop_planned(
     let fit_target = emergency.over_limit && fixed >= ceiling;
     if emergency.over_limit {
         if fixed >= emergency.usable_tokens.saturating_sub(EMERGENCY_MIN_TOKENS) as f64 {
-            // Even dropping the whole indexed transcript would leave less
+            // Even dropping the whole indexed transcript would leave no more
             // than the safety margin for estimation error.
             return (Vec::new(), Some(plan));
         }
@@ -1950,6 +2015,9 @@ pub(crate) fn emergency_drop_planned(
                 && (emergency.over_limit || !in_tail(part, cutoff))
         })
         .collect();
+    // Pricing each candidate's drop needs the same facts about the index;
+    // they are taken once for the plan, not once per candidate.
+    let facts = DropFacts::with_protected(context, protected);
     let shape = if emergency.over_limit {
         Shape::Whole
     } else {
@@ -1975,7 +2043,7 @@ pub(crate) fn emergency_drop_planned(
                 .and_then(|measured| measured.parts.get(&key))
                 .copied()
                 .unwrap_or_else(|| tokens::part(part));
-            reclaimed += drop_saving(context, entry, part, shape, before, |text| {
+            reclaimed += drop_saving(context, &facts, entry, part, shape, before, |text| {
                 counter.count(text)
             });
             selected.push((key, shape));

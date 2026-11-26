@@ -44,15 +44,19 @@ impl Session {
         self.take_conditions("ride", standing, &ride.conditions);
         // Rides carry no surface counts (compaction contract W4.11), so the
         // held ones describe what was sent before a change a ride reports,
-        // until a notice brings fresh ones. A ride built after the notice
-        // they came from says so even when it arrives after a newer
-        // statement.
+        // until a notice brings fresh ones. Statement order decides whether
+        // the change came after them, whatever order the statements arrive
+        // in: a ride with the stamp of the notice that stored them states
+        // that same runner state, which the notice already counted. Without
+        // both stamps nothing proves the order, and the counts go.
         if ride.has(RideCause::SurfaceChange) || ride.has(RideCause::ModelChange) {
-            let after_counts = match standing {
-                Standing::Current => true,
-                Standing::Older { stamp, .. } => self
-                    .surface_counts_stamp
-                    .is_none_or(|counted| stamp > counted),
+            let ride_stamp = match standing {
+                Standing::Current => ride.conditions.statement_seq,
+                Standing::Older { stamp, .. } => Some(stamp),
+            };
+            let after_counts = match (ride_stamp, self.surface_counts_stamp) {
+                (Some(ride), Some(counted)) => ride > counted,
+                _ => true,
             };
             if after_counts {
                 self.surface_counts_stale = true;
@@ -83,7 +87,10 @@ impl Session {
             Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
         }
         let over_limit = ride.has(RideCause::OverLimit).then(|| {
-            let count = match ride.request_tokens {
+            // A stated count of zero says nothing about the request, so
+            // both the measured and the inferred emergency plan treat it as
+            // no count.
+            let count = match ride.request_tokens.filter(|&count| count > 0) {
                 Some(count) => lanes::RideCount::Stated(count),
                 None => {
                     // The provider refused the request, so it exceeded the
@@ -102,6 +109,10 @@ impl Session {
             };
             lanes::OverLimit {
                 count,
+                // Only the measured plan reads these two; the inferred plan
+                // keeps its arithmetic and takes the count whatever the view
+                // or the ride's age.
+                //
                 // The count describes ck-mc's newest view only when the
                 // runner applies that very view, checksum included, as
                 // settling a view requires.
@@ -110,6 +121,9 @@ impl Session {
                     (None, None) => true,
                     _ => false,
                 },
+                // A ride older than the conditions ck-mc holds counted the
+                // request under runner state that has since moved on.
+                late: matches!(standing, Standing::Older { .. }),
             }
         });
         // Only a cause that changes the request's bytes before the
@@ -309,11 +323,11 @@ impl Session {
         let request = match over_limit {
             None => lanes::MeasuredRequest::Served,
             Some(over) if !over.newest_view => lanes::MeasuredRequest::OlderView,
-            // A stated count of zero says nothing about the request.
             Some(lanes::OverLimit {
                 count: lanes::RideCount::Stated(count),
+                late: false,
                 ..
-            }) if count > 0 => lanes::MeasuredRequest::Counted { count, change },
+            }) => lanes::MeasuredRequest::Counted { count, change },
             Some(_) => lanes::MeasuredRequest::Refused { change },
         };
         Some(lanes::Measured {
@@ -565,21 +579,19 @@ impl Session {
             .filter(|key| !wanted.iter().any(|(earlier, _)| earlier == key))
             .collect();
         wanted.extend(injected);
-        // In the force band the emergency lane owns tool reclaim, so the age
-        // sweep of tool outputs and both supersession lanes (spent
-        // control-plane calls, superseded edits) stand down there, as in the
-        // TypeScript transform (`toolReclaimAdmitted`). Duplicate lookups,
-        // injection strips, reasoning clearing and the sweep of old notices
-        // are routine cleanup there and keep running.
-        let tool_reclaim = !pass::in_force_band(&self.pressure(), settings);
-        if tool_reclaim {
-            wanted.extend(lanes::superseded_edits(
-                &context,
-                cutoff,
-                self.reclaim_bookmark,
-            ));
-            wanted.extend(lanes::spent_control_plane(&context, cutoff));
-        }
+        // These tool-reclaim lanes (superseded edits, spent control-plane
+        // calls, and the tool part of the age sweep below) run in the force
+        // band too. The emergency lane can't always reclaim there (a fixed
+        // part above the ceiling, a spent episode), and these lanes are then
+        // all that keeps the request shrinking. Whether they should stand
+        // down in the band, as the TypeScript transform's tool-reclaim
+        // admission does, is an open design question.
+        wanted.extend(lanes::superseded_edits(
+            &context,
+            cutoff,
+            self.reclaim_bookmark,
+        ));
+        wanted.extend(lanes::spent_control_plane(&context, cutoff));
         wanted.extend(lanes::duplicate_lookups(&context, cutoff));
         // An unmarked notice may carry the person's words. Without notice_keep,
         // sweeping notices could drop them, so neither select nor bookmark them.
@@ -588,14 +600,9 @@ impl Session {
         } else {
             0
         };
-        let tool_reclaim_bookmark = if tool_reclaim {
-            self.reclaim_bookmark
-        } else {
-            0
-        };
         wanted.extend(lanes::age_sweep(
             &context,
-            tool_reclaim_bookmark,
+            self.reclaim_bookmark,
             notice_reclaim_bookmark,
             cutoff,
         ));
