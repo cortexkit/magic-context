@@ -150,6 +150,85 @@ describe("Pi emergency drop: the fixed part is capped by our count of the last r
 		});
 	});
 
+	it("a count is made only with the system prompt and the active tools measured; otherwise the plan is the release's", async () => {
+		const sessionId = "pi-860-envelope-measured";
+		const h = createHarness({ sessionId, session: buildSession(6) });
+		open.push(h);
+		await h.pass(4_000);
+		const count = (envelope: ReturnType<typeof envelopeFor>) =>
+			countPiLastServedRequest({
+				sessionId,
+				envelope,
+				calibration: { systemRatio: 1, toolsRatio: 1, proseRatio: 1 },
+				recovery: false,
+			});
+		const measured = envelopeFor("mock/mock");
+		expect(count(measured)).toEqual({ tokens: expect.any(Number) });
+		const unmeasured = {
+			unavailable: "the system prompt or the active tools cannot be sized",
+		};
+		// Without the active tool set the envelope carries no signature.
+		const noActiveSet = readPiLkgFitEnvelope(
+			{ getSystemPrompt: () => SYSTEM_PROMPT },
+			{ getAllTools: () => TOOLS },
+			"mock/mock",
+			calibrationForModelKey("mock/mock"),
+		);
+		expect(noActiveSet?.envelopeSignature).toBeUndefined();
+		expect(count(noActiveSet)).toEqual(unmeasured);
+		// Without a system prompt there is no envelope at all.
+		expect(count(envelopeFor("mock/mock", ""))).toEqual(unmeasured);
+		// An envelope built another way, with the signature of the saved request
+		// but a part of it unmeasured, is not counted either.
+		if (!measured) throw new Error("the envelope must be readable");
+		expect(count({ ...measured, systemTokens: 0 })).toEqual(unmeasured);
+		expect(
+			count({ ...measured, refusalToolDefinitionTokens: undefined }),
+		).toEqual(unmeasured);
+	});
+
+	it("pin: a host that does not list its tools saves no countable request; the plan is the release's", async () => {
+		const sessionId = "pi-860-no-tools";
+		const session = buildSession(20);
+		const h = createHarness({ sessionId, session, tools: false });
+		open.push(h);
+		await h.pass(4_000);
+		await h.pass(2 * localRequestTokens(session));
+		const plan = planLine(h.lines);
+		expect(plan?.line).toContain("already exceeds ceiling");
+		expect(plan?.line).not.toContain("floor from our count");
+		expect(droppedCalls(h.statuses())).toEqual([]);
+		expect(h.lines.join("\n")).toContain("emergency served count unavailable:");
+	});
+
+	it("a reading that stays at the one the batch was planned on plans without the count; a changed reading uses it again", async () => {
+		const sessionId = "pi-860-stuck-reading";
+		const session = buildSession(20);
+		const h = createHarness({ sessionId, session });
+		open.push(h);
+		await h.pass(4_000);
+		const stuck = 2 * localRequestTokens(session);
+		h.lines.length = 0;
+		await h.pass(stuck);
+		expect(planLine(h.lines)?.line).toContain("floor from our count");
+		const firstBatch = droppedCalls(h.statuses());
+		expect(firstBatch.length).toBeGreaterThan(0);
+		// Two more results arrive; the provider still reports the same reading.
+		for (const steps of [21, 22]) {
+			h.setSession(buildSession(steps));
+			h.lines.length = 0;
+			await h.pass(stuck);
+			const plan = planLine(h.lines)?.line ?? "";
+			console.log(`STUCK_READING steps=${steps} plan=${plan}`);
+			expect(plan).not.toContain("floor from our count");
+			expect(droppedCalls(h.statuses())).toEqual(firstBatch);
+		}
+		// A new reading: the count is used again.
+		h.lines.length = 0;
+		await h.pass(stuck + 2_000);
+		expect(planLine(h.lines)?.line).toContain("floor from our count");
+	});
+
 	it("our count of the saved request minus our count of its active tags matches an independent count of its untagged content", async () => {
 		const sessionId = "pi-860-count-agrees";
 		const session = buildSession(20);

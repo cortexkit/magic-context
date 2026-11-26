@@ -30,6 +30,16 @@ export type PiServedCount = { tokens: number } | { unavailable: string };
  * the current pass; the count is made only when the saved request was sent to
  * the same model with the same envelope signature, so those sizes are the
  * ones it carried.
+ *
+ * A count that leaves out part of the system prompt or the tool definitions
+ * would understate the fixed part without bound, so both must have been
+ * measured. readPiLkgFitEnvelope gives a signature only when it read a
+ * non-empty system prompt, every registered tool definition and the active
+ * tool set, with the real tokenizer loaded; the capture stores a request only
+ * with such a signature; and the signature hashes that prompt, those
+ * definitions and the active names. A match therefore means the saved request
+ * carried exactly the prompt and tools measured on this pass. The explicit
+ * check below keeps that true for an envelope built any other way.
  */
 export function countPiLastServedRequest(args: {
 	sessionId: string;
@@ -43,7 +53,11 @@ export function countPiLastServedRequest(args: {
 			unavailable: "no saved copy of the last request served in this process",
 		};
 	const { envelope } = args;
-	if (!envelope?.envelopeSignature)
+	if (
+		!envelope?.envelopeSignature ||
+		!(envelope.systemTokens > 0) ||
+		envelope.refusalToolDefinitionTokens === undefined
+	)
 		return {
 			unavailable: "the system prompt or the active tools cannot be sized",
 		};
