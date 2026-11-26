@@ -28,7 +28,6 @@ import {
 import { stripSystemInjection } from "./system-injection-stripper";
 import type { MessageLike, TagTarget } from "./tag-messages";
 import { stripTagPrefix } from "./tag-part-guards";
-import { recordEmergencyBatch, refusedSinceEmergencyBatch } from "./transform-context-state";
 
 /** A pass whose drain had nothing to apply removed nothing before planning. */
 const NOTHING_SERVED_BEFORE_PASS: EmergencyServedSnapshot = {
@@ -107,14 +106,6 @@ export function applyHeuristicCleanup(
              * `servedCountTokens` on `planEmergencyDrop`.
              */
             servedCountTokens?: (calibration: DecisionCalibration) => number | undefined;
-            /**
-             * Overflow recovery is armed: the provider refused a request as
-             * too large (or the model's window shrank, or the history could
-             * not be cut to fit). With Magic Context's own refusals, this is
-             * the evidence that lifts the episode latch at 95% or more when
-             * the reading has not been renewed since the last batch.
-             */
-            recoveryArmed?: boolean;
         };
         /**
          * Whether ordinary deduplication, injection stripping, and caveman
@@ -226,8 +217,6 @@ export function applyHeuristicCleanup(
             currentTotalInputTokens: emergency.currentTotalInputTokens,
             removedThisPassTokens,
             servedCountTokens: emergency.servedCountTokens?.(calibration),
-            refusedSinceLastBatch:
-                emergency.recoveryArmed === true || refusedSinceEmergencyBatch(db, sessionId),
             ceilingTokens: emergency.ceilingTokens,
             usagePercentage: emergency.usagePercentage,
             priorInputSample,
@@ -270,7 +259,6 @@ export function applyHeuristicCleanup(
         // A no-op spent no cache rewrite and must not consume the episode's batch.
         if (emergencyDroppedTools > 0) {
             setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
-            recordEmergencyBatch(db, sessionId);
         }
     }
 

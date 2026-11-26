@@ -30,7 +30,6 @@ import {
 } from "../../features/magic-context/storage";
 import {
     addProcessedImageStrippedIds,
-    recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
     setEmergencyDropSample,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -59,7 +58,6 @@ import { estimateMessageTokens } from "./final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import * as smallWindowNotice from "./small-window-notice";
 import { createTransform } from "./transform";
-import { recordUsageRefusal } from "./transform-context-state";
 
 const PROVIDER = "litellm";
 const MODEL = "proxy-model";
@@ -465,9 +463,6 @@ function plannerSpy(serve: "current" | "release") {
 function expectExtendsRelease(calls: readonly PlannerCall[]) {
     for (const { current, release } of calls) {
         differentialCases++;
-        // The one allowed shortfall: a batch withheld because the reading
-        // has not been renewed since the episode's batch and nothing was refused.
-        if (current.reason.includes("has not been renewed since the last batch")) continue;
         if (release.shouldDrop) {
             expect(current.shouldDrop).toBe(true);
             expect(current.tagNumbers.slice(0, release.tagNumbers.length)).toEqual(
@@ -557,6 +552,9 @@ describe("issue 860: the reporter's session through the transform", () => {
         for (const call of current.outcome.kept)
             expect(tailCalls(current.session.turns, "read")).toContain(call);
         console.log(
+            `ISSUE860 trace reporter: release batches=${batchesOf([release.first, release.second]).join(",")} current batches=${batchesOf([current.first, current.second]).join(",")}`,
+        );
+        console.log(
             `ISSUE860 reporter: count=${Math.round(count ?? 0)} floor=${floor} removed=${current.outcome.removed.length} kept=${current.outcome.kept.join(",")} servedAfter=${requestTokens(current.session, current.second.output, SYSTEM_PROMPT_TOKENS)}`,
         );
     }, 120_000);
@@ -612,6 +610,9 @@ describe("issue 860: one very large tool result, then a reading of 800%", () => 
         expect(release.firstOutcome.removed).toEqual([]);
         expect(current.first.log).toMatch(/emergency tiered drop: tiered drop: \d+ tags/);
         expect(current.firstOutcome.removed).toContain(huge(current.session));
+        console.log(
+            `ISSUE860 trace jump (saved copy): release batches=${batchesOf([release.sends, release.first, release.second]).join(",")} current batches=${batchesOf([current.sends, current.first, current.second]).join(",")}`,
+        );
         console.log(
             `ISSUE860 jump (saved copy): count=${Math.round(count ?? 0)} first=${current.first.lines.find((l) => l.startsWith("emergency tiered drop"))} servedAfter=${requestTokens(current.session, current.first.output, SYSTEM_PROMPT_TOKENS)}`,
         );
@@ -852,15 +853,30 @@ describe("issue 860: the reviewed regressions, compared with the release", () =>
     }, 120_000);
 });
 
+/** Emergency tool-drop batches per pass, by the number of tags each dropped. */
+function batchesOf(passes: ReadonlyArray<{ log: string }>): number[] {
+    return passes.map((pass) =>
+        Number(/emergency tiered drop: tiered drop: (\d+) tags/.exec(pass.log)?.[1] ?? 0),
+    );
+}
+
+/** The planner's inputs repeat the latch's reading (the state where the count is set aside). */
+function readingIsLatched(input: PlannerInput): boolean {
+    return (
+        input.hasPriorDrop && Math.round(input.currentTotalInputTokens) === input.priorInputSample
+    );
+}
+
 describe("issue 860: a reading stuck at 134% of a request that fits", () => {
     /**
      * One provider reading, 60,138 tokens (133.6% of the usable 45,000), that
      * never changes while each step adds a result of about 4,340 tokens. The
-     * request itself is about 61% of the window.
+     * request itself is about 61% of the window. `renewAt` gives the reading
+     * a new value from that step on.
      */
-    async function stuck(serve: string, refusal?: "own" | "provider") {
+    async function stuck(serve: string, renewAt?: number) {
         measureToolDefinitions(4_344);
-        const session = openSession(`ses-860-stuck-${serve}-${refusal ?? "none"}`, {
+        const session = openSession(`ses-860-stuck-${serve}-${renewAt ?? "none"}`, {
             tail: 18,
             reading: 4_500,
             systemPromptTokens: 1_800,
@@ -870,36 +886,23 @@ describe("issue 860: a reading stuck at 134% of a request that fits", () => {
         expect((await runPass(session)).error).toBeUndefined();
         setReading(session, 60_138);
         const passes = [await runPass(session)];
-        for (let step = 2; step <= 4; step++) {
+        for (let step = 2; step <= 8; step++) {
             appendBashStep(session, 4_340);
-            if (step === 3 && refusal === "own") recordUsageRefusal(session.db, session.sessionId);
-            if (step === 3 && refusal === "provider")
-                recordOverflowDetected(
-                    session.db,
-                    session.sessionId,
-                    60_000,
-                    `${PROVIDER}/${MODEL}`,
-                    "provider_overflow",
-                    "unknown",
-                    64_000,
-                );
+            if (step === renewAt) setReading(session, 61_500);
             passes.push(await runPass(session));
         }
         for (const pass of passes) expect(pass.error).toBeUndefined();
-        const batches = passes.map((pass) =>
-            Number(/emergency tiered drop: tiered drop: (\d+) tags/.exec(pass.log)?.[1] ?? 0),
-        );
-        return { session, passes, batches };
+        return { session, passes, batches: batchesOf(passes) };
     }
 
-    test("one batch on the first pass, then none while the reading is not renewed", async () => {
-        const { current, release } = await againstRelease((serve) => stuck(serve));
+    test("after the first batch, each pass on the unchanged reading plans what the release plans", async () => {
+        const { current, release, calls } = await againstRelease((serve) => stuck(serve));
         expect(current.batches[0]).toBeGreaterThan(0);
-        expect(current.batches.slice(1)).toEqual([0, 0, 0]);
-        for (const pass of current.passes.slice(1))
-            expect(pass.log).toContain("has not been renewed since the last batch");
-        // Nothing before each appended step changes on steps 2 to 4.
-        for (let step = 1; step < current.passes.length; step++) {
+        const latched = calls.filter((call) => readingIsLatched(call.input));
+        expect(latched.length).toBeGreaterThan(0);
+        for (const call of latched) expect(call.current).toEqual(call.release);
+        // The passes right after the batch change nothing before the appended step.
+        for (let step = 1; step < 3; step++) {
             const previous = current.passes[step - 1]!.output.messages;
             const kept = previous.length - 1;
             expect(JSON.stringify(current.passes[step]!.output.messages.slice(0, kept))).toBe(
@@ -907,27 +910,51 @@ describe("issue 860: a reading stuck at 134% of a request that fits", () => {
             );
         }
         console.log(
-            `ISSUE860 stuck: release batches=${release.batches.join(",")} current batches=${current.batches.join(",")}`,
+            `ISSUE860 trace stuck: release batches=${release.batches.join(",")} current batches=${current.batches.join(",")}`,
         );
     }, 120_000);
 
-    test("Magic Context's own refusal after the batch lifts the latch once", async () => {
-        const { current } = await againstRelease((serve) => stuck(serve, "own"));
-        expect(current.batches[0]).toBeGreaterThan(0);
-        expect(current.batches[1]).toBe(0);
-        expect(current.batches[2]).toBeGreaterThan(0);
-        expect(current.batches[3]).toBe(0);
-        console.log(`ISSUE860 stuck + own refusal: current batches=${current.batches.join(",")}`);
-    }, 120_000);
-
-    test("a provider refusal after the batch lifts the latch", async () => {
-        const { current } = await againstRelease((serve) => stuck(serve, "provider"));
-        expect(current.batches[0]).toBeGreaterThan(0);
-        expect(current.batches[1]).toBe(0);
-        expect(current.batches[2]).toBeGreaterThan(0);
+    test("a pass after the batch whose reading changed uses the count again", async () => {
+        const { current, calls } = await againstRelease((serve) => stuck(serve, 3));
+        // Pass 3 (the third planner call) carries the renewed reading.
+        const renewed = calls.find((call) => call.input.currentTotalInputTokens === 61_500);
+        expect(renewed?.input.hasPriorDrop).toBe(true);
+        expect(renewed?.input.servedCountTokens).toBeGreaterThan(0);
+        expect(renewed?.current.reason).toContain("floor from our count");
         console.log(
-            `ISSUE860 stuck + provider refusal: current batches=${current.batches.join(",")}`,
+            `ISSUE860 trace stuck, renewed at step 3: current batches=${current.batches.join(",")} renewed pass: ${renewed?.current.reason}`,
         );
+    }, 120_000);
+});
+
+describe("issue 860: a warm session that enters the band at 90%", () => {
+    test("batches of the release and of this build, side by side", async () => {
+        const { current, release } = await againstRelease(async (serve) => {
+            measureToolDefinitions(15_134);
+            const session = openSession(`ses-860-warm90-${serve}`, {
+                tail: 6,
+                reading: 4_500,
+                bashTokens: 1_350,
+                systemPromptHash: "system-prompt-v1",
+            });
+            expect((await runPass(session)).error).toBeUndefined();
+            // The provider counts the request about 25% higher than we do, and
+            // each step adds a result of about 4,340 tokens and a new reading.
+            const passes = [];
+            let reading = 40_500;
+            for (let step = 1; step <= 6; step++) {
+                setReading(session, reading);
+                passes.push(await runPass(session));
+                appendBashStep(session, 4_340);
+                reading += 5_400;
+            }
+            for (const pass of passes) expect(pass.error).toBeUndefined();
+            return { passes, batches: batchesOf(passes) };
+        });
+        console.log(
+            `ISSUE860 trace warm 90%: release batches=${release.batches.join(",")} current batches=${current.batches.join(",")}`,
+        );
+        expect(current.batches.length).toBe(release.batches.length);
     }, 120_000);
 });
 

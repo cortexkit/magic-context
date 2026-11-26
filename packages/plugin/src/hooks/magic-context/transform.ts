@@ -3983,7 +3983,6 @@ export function createTransform(deps: TransformDeps) {
             emergencyCeilingTokens,
             servedCountTokens: (calibration) =>
                 servedRequestCounts.tokens(sessionId, localReadingModelKey, calibration),
-            emergencyRecoveryArmed,
             pendingCompartmentInjection,
             prefixTrimSourceOrder,
             coveredHostInstructions,

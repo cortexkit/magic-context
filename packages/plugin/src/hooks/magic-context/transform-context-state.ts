@@ -31,37 +31,6 @@ export function recordUsageRefusal(
     if (!sessions.has(sessionId)) sessions.set(sessionId, refusedAt);
 }
 
-// When each session's last emergency tool-drop batch was applied, in this
-// process. Together with the refusal record above it answers whether Magic
-// Context refused a turn since that batch.
-const emergencyBatches = new WeakMap<ContextDatabase, Map<string, number>>();
-
-export function recordEmergencyBatch(
-    db: ContextDatabase,
-    sessionId: string,
-    appliedAt = Date.now(),
-): void {
-    let sessions = emergencyBatches.get(db);
-    if (!sessions) {
-        sessions = new Map();
-        emergencyBatches.set(db, sessions);
-    }
-    sessions.set(sessionId, appliedAt);
-}
-
-/**
- * Whether Magic Context's own check refused a turn of this session after its
- * last emergency batch. The refusal record lives in memory until a newer
- * provider reading arrives; a batch applied before this process started has no
- * time here, so any refusal recorded since then is after it.
- */
-export function refusedSinceEmergencyBatch(db: ContextDatabase, sessionId: string): boolean {
-    const refusedAt = usageRefusals.get(db)?.get(sessionId);
-    if (refusedAt === undefined) return false;
-    const batchAt = emergencyBatches.get(db)?.get(sessionId);
-    return batchAt === undefined || refusedAt >= batchAt;
-}
-
 /** Reset a pre-refusal reading only when history changes after that refusal. */
 export function shouldResetRefusedUsage(
     db: ContextDatabase,
