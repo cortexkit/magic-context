@@ -334,6 +334,23 @@ export function createFinalWireUsageTracker() {
             driftLogged?: boolean;
         }
     >();
+    // A copy kept only so the emergency drop can count the request later, for
+    // a request `served` cannot hold because its route's tool definitions
+    // have no measurement signature (OpenCode 2, where the transform is not
+    // told the agent the tools were measured under). It carries the tool
+    // total of that request's own recorded set. `estimate` never reads it, so
+    // reuse of provider usage is unchanged.
+    const countCopies = new Map<
+        string,
+        {
+            providerID: string;
+            modelID: string;
+            agentName: string | undefined;
+            systemPromptTokens: number;
+            toolDefinitionTokens: number;
+            prefix: string[];
+        }
+    >();
     const wireRows = (input: FinalWireTokenEstimateInput) =>
         input.messages.filter((message) =>
             message.parts.some(
@@ -375,17 +392,30 @@ export function createFinalWireUsageTracker() {
          */
         savedRequest(sessionId: string): SavedServedRequest | undefined {
             const saved = served.get(sessionId);
-            if (!saved) return undefined;
+            const copy = saved ? undefined : countCopies.get(sessionId);
+            if (!saved && !copy) return undefined;
             let counted: ReturnType<SavedServedRequest["count"]> | null = null;
             return {
                 count() {
                     if (counted !== null) return counted;
                     counted = undefined;
                     try {
-                        const [providerID, modelID, agentName, , systemPromptTokens] = JSON.parse(
-                            saved.envelope,
-                        ) as [string, string, string | undefined, string, number];
-                        const messages = saved.prefix.map((text) => {
+                        const [providerID, modelID, agentName, , systemPromptTokens] = saved
+                            ? (JSON.parse(saved.envelope) as [
+                                  string,
+                                  string,
+                                  string | undefined,
+                                  string,
+                                  number,
+                              ])
+                            : [
+                                  copy!.providerID,
+                                  copy!.modelID,
+                                  copy!.agentName,
+                                  "",
+                                  copy!.systemPromptTokens,
+                              ];
+                        const messages = (saved?.prefix ?? copy!.prefix).map((text) => {
                             const row = JSON.parse(text) as {
                                 id: string;
                                 role: string;
@@ -399,6 +429,10 @@ export function createFinalWireUsageTracker() {
                         const estimate = estimateFinalWireInputTokens({
                             messages,
                             systemPromptTokens,
+                            // A copy without a signature carries its own
+                            // request's tool total; a saved request looks its
+                            // route's measurement up, as before.
+                            toolDefinitionTokens: copy?.toolDefinitionTokens,
                             providerID,
                             modelID,
                             agentName,
@@ -487,10 +521,21 @@ export function createFinalWireUsageTracker() {
             }
             return estimateOutgoingWireForRefusal({ ...input, measuredPrefix }, limit);
         },
-        capture(sessionId: string, request: FinalWireTokenEstimateInput): void {
+        /**
+         * Save the request a pass served. `requestToolDefinitionTokens` is the
+         * tool total of this very request's recorded tool set (OpenCode 2),
+         * used only to keep a copy for counting when the route has no
+         * measurement signature.
+         */
+        capture(
+            sessionId: string,
+            request: FinalWireTokenEstimateInput,
+            requestToolDefinitionTokens?: number,
+        ): void {
             const input = { ...request, sessionId: request.sessionId ?? sessionId };
             const previous = served.get(sessionId);
             served.delete(sessionId);
+            countCopies.delete(sessionId);
             try {
                 const alreadyLogged = fallbackLogged.delete(sessionId);
                 const fallbackSteps = opaqueThinkingFallbackSteps(input.messages);
@@ -542,11 +587,29 @@ export function createFinalWireUsageTracker() {
                 const envelope = envelopeFor(input);
                 const rows = wireRows(input);
                 const parent = [...rows].reverse().find((row) => row.info.role === "user")?.info.id;
-                if (!envelope || typeof parent !== "string" || !rows.every(hasCountableParts))
+                if (typeof parent !== "string" || !rows.every(hasCountableParts)) return;
+                if (
+                    !envelope &&
+                    (requestToolDefinitionTokens === undefined ||
+                        !input.providerID ||
+                        !input.modelID)
+                )
                     return;
                 const prefix = rows.map(rowBytes);
                 // Keep this exact-match evidence small without limiting the larger durable replay cache.
                 if (prefix.reduce((sum, text) => sum + text.length, 0) > 4 * 1024 * 1024) return;
+                if (!envelope) {
+                    if (countCopies.size >= 16) countCopies.delete(countCopies.keys().next().value!);
+                    countCopies.set(sessionId, {
+                        providerID: input.providerID!,
+                        modelID: input.modelID!,
+                        agentName: input.agentName,
+                        systemPromptTokens: input.systemPromptTokens,
+                        toolDefinitionTokens: requestToolDefinitionTokens!,
+                        prefix,
+                    });
+                    return;
+                }
                 if (served.size >= 16) served.delete(served.keys().next().value!);
                 const signed = input.messages.some((row) =>
                     row.parts.some((part) => {

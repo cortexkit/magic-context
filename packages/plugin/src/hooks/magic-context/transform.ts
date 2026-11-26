@@ -67,6 +67,7 @@ import type { Tagger } from "../../features/magic-context/tagger";
 import { observeTemporalDecisions } from "../../features/magic-context/temporal-decisions";
 import {
     getMeasuredToolDefinitionTokens,
+    getSessionRequestToolSet,
     getToolDefinitionsRevision,
 } from "../../features/magic-context/tool-definition-tokens";
 import {
@@ -969,7 +970,7 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         deps.onMessagesPassStarted?.(sessionId, messages);
-        servedRequestCounts.passStarted(sessionId);
+        servedRequestCounts.passStarted(sessionId, getSessionRequestToolSet(sessionId));
         const dateRequest =
             systemDateRequestForOutput(deps.historyRefreshSessions, output) ??
             beginSystemDateRequest(
@@ -5182,17 +5183,30 @@ export function createTransform(deps: TransformDeps) {
                 `thinking binding recovery: stripped bound reasoning from ${bindingRecovery.messageIds.length} assistant(s) [${bindingRecovery.messageIds.join(",")}]; flag=${cleared === undefined ? "kept" : cleared ? "cleared" : "rearmed"}`,
             );
         }
+        // On OpenCode 2 the transform is not told the agent a request's tools
+        // were measured under, so the route lookup finds no measurement; the
+        // session's own recorded tool set is that measurement, but only when it
+        // was recorded for the request this pass served (undefined otherwise,
+        // and always on OpenCode 1).
+        const requestToolSet = servedRequestCounts.requestToolSet(
+            sessionId,
+            getSessionRequestToolSet(sessionId),
+        );
         if (passOutcome.captureEligible)
             afterCapture(sessionId, "final wire usage capture", () =>
-                finalWireUsage.capture(sessionId, {
-                    messages,
-                    systemPromptTokens: sessionMeta.systemPromptTokens,
-                    providerID: modelForBudget?.providerID,
-                    modelID: modelForBudget?.modelID,
-                    agentName: notificationParams.agent,
+                finalWireUsage.capture(
                     sessionId,
-                    systemPromptHash: sessionMeta.systemPromptHash,
-                }),
+                    {
+                        messages,
+                        systemPromptTokens: sessionMeta.systemPromptTokens,
+                        providerID: modelForBudget?.providerID,
+                        modelID: modelForBudget?.modelID,
+                        agentName: notificationParams.agent,
+                        sessionId,
+                        systemPromptHash: sessionMeta.systemPromptHash,
+                    },
+                    requestToolSet?.total,
+                ),
             );
         // Keep our count of the request this pass served for the next pass's
         // emergency drop: the count this pass already made, or else the copy
@@ -5204,11 +5218,14 @@ export function createTransform(deps: TransformDeps) {
                 modelKey: localReadingModelKey,
                 // Only a count whose system prompt and tool definitions were
                 // measured: one that leaves part of that envelope out would
-                // understate the fixed part without bound.
+                // understate the fixed part without bound. Without a route
+                // measurement the estimate takes the session's last recorded
+                // set, which is this request's own when `requestToolSet` is set.
                 components:
-                    finalWireEstimate?.toolDefinitionsMeasured === true &&
+                    (finalWireEstimate?.toolDefinitionsMeasured === true ||
+                        requestToolSet !== undefined) &&
                     sessionMeta.systemPromptTokens > 0
-                        ? finalWireEstimate.pressureComponents
+                        ? finalWireEstimate?.pressureComponents
                         : undefined,
                 saved: passOutcome.captureEligible
                     ? finalWireUsage.savedRequest(sessionId)

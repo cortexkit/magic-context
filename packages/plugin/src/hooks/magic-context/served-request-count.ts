@@ -35,10 +35,22 @@ export interface ServedRequestRecord {
 
 const MAX_SESSIONS = 64;
 
+/** One request's tool set as OpenCode 2 recorded it (`getSessionRequestToolSet`). */
+export interface RequestToolSet {
+    request: number;
+    total: number;
+}
+
 export function createServedRequestCounts() {
     const previousPass = new Map<string, ServedRequestRecord>();
     const thisPass = new Map<string, ServedRequestRecord>();
-    const bounded = (map: Map<string, ServedRequestRecord>) => {
+    // OpenCode 2 records a request's tool set just before the transform pass
+    // that builds that request. `seenRequest` is the request number the last
+    // pass started with; `passTools` is the set the current pass started
+    // with, kept only when it was recorded after the last pass started.
+    const seenRequest = new Map<string, number>();
+    const passTools = new Map<string, RequestToolSet>();
+    const bounded = <T>(map: Map<string, T>) => {
         while (map.size > MAX_SESSIONS) {
             const oldest = map.keys().next().value;
             if (oldest === undefined) break;
@@ -46,8 +58,12 @@ export function createServedRequestCounts() {
         }
     };
     return {
-        /** Start a pass: the last pass's record becomes the one to read. */
-        passStarted(sessionId: string): void {
+        /**
+         * Start a pass: the last pass's record becomes the one to read.
+         * `requestTools` is the session's recorded request tool set as the
+         * pass starts (OpenCode 2 only).
+         */
+        passStarted(sessionId: string, requestTools?: RequestToolSet): void {
             const record = thisPass.get(sessionId);
             thisPass.delete(sessionId);
             previousPass.delete(sessionId);
@@ -55,6 +71,31 @@ export function createServedRequestCounts() {
                 previousPass.set(sessionId, record);
                 bounded(previousPass);
             }
+            passTools.delete(sessionId);
+            if (requestTools) {
+                const last = seenRequest.get(sessionId);
+                seenRequest.delete(sessionId);
+                seenRequest.set(sessionId, requestTools.request);
+                bounded(seenRequest);
+                if (requestTools.request !== last) {
+                    passTools.set(sessionId, requestTools);
+                    bounded(passTools);
+                }
+            }
+        },
+        /**
+         * The tool set of the request this pass serves, or undefined when it
+         * can't be tied to that request. It is that request's only when the
+         * set was recorded after the previous pass started (a set a previous
+         * pass already started with belongs to an earlier request) and no
+         * other request was recorded while this pass ran (`requestTools` is
+         * the session's recorded set read now).
+         */
+        requestToolSet(sessionId: string, requestTools?: RequestToolSet): RequestToolSet | undefined {
+            const started = passTools.get(sessionId);
+            if (!started || !requestTools || requestTools.request !== started.request)
+                return undefined;
+            return started;
         },
         /** Record the request this pass served. */
         record(sessionId: string, record: ServedRequestRecord): void {
@@ -66,6 +107,8 @@ export function createServedRequestCounts() {
         forget(sessionId: string): void {
             previousPass.delete(sessionId);
             thisPass.delete(sessionId);
+            seenRequest.delete(sessionId);
+            passTools.delete(sessionId);
         },
         /**
          * Our count of the last request served, priced with `calibration`, or

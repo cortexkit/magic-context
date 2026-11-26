@@ -38,6 +38,7 @@ import {
     __resetToolDefinitionMeasurements,
     getMeasuredToolDefinitionTokens,
     recordToolDefinition,
+    recordToolDefinitionSet,
 } from "../../features/magic-context/tool-definition-tokens";
 import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
@@ -282,6 +283,8 @@ function openSession(
         subagent?: boolean;
         decision?: "execute" | "defer";
         systemPromptHash?: string;
+        /** The agent the transform is told; null for none, as on OpenCode 2. */
+        agent?: string | null;
     },
 ): Session {
     const model = options.model ?? MODEL;
@@ -322,7 +325,11 @@ function openSession(
         db,
         liveModelBySession: new Map([[sessionId, { providerID: PROVIDER, modelID: model }]]),
         getModelKey: () => `${PROVIDER}/${model}`,
-        getNotificationParams: () => ({ agent: AGENT, providerId: PROVIDER, modelId: model }),
+        getNotificationParams: () => ({
+            agent: options.agent === null ? undefined : (options.agent ?? AGENT),
+            providerId: PROVIDER,
+            modelId: model,
+        }),
         historyRefreshSessions: new Set<string>(),
         pendingMaterializationSessions: new Set<string>(),
         lastHeuristicsTurnId: new Map<string, string>(),
@@ -586,6 +593,141 @@ describe("issue 860: a count is valid only with the fixed envelope measured", ()
             expect(current.second.log).toContain("already exceeds ceiling");
             expect(release.second.log).toContain("already exceeds ceiling");
         }, 120_000);
+});
+
+/**
+ * What OpenCode 2's context hook does before each transform pass: record the
+ * request draft's exact tool set under the draft's agent. The transform itself
+ * is told no agent there.
+ */
+function recordRequestTools(session: Session, tokens = 15_134): void {
+    const tools = Math.max(1, Math.round(tokens / 1_500));
+    recordToolDefinitionSet(
+        PROVIDER,
+        MODEL,
+        AGENT,
+        Array.from({ length: tools }, (_, i) => ({
+            id: `tool_${i}`,
+            description: `Tool ${i}. ${"Runs a command in the workspace and returns its output. ".repeat(130)}`,
+            parameters: { type: "object", properties: { command: { type: "string" } } },
+        })),
+        session.sessionId,
+    );
+}
+
+describe("issue 860 on OpenCode 2: the tool set recorded from the session's own request", () => {
+    test("makes the count valid: the reporter's session drops where the release skips", async () => {
+        const { current, release, calls } = await againstRelease(async (serve) => {
+            const session = openSession(`ses-860-oc2-reporter-${serve}`, {
+                tail: 42,
+                reading: 368_415,
+                systemPromptHash: "system-prompt-v1",
+                agent: null,
+            });
+            recordRequestTools(session);
+            const first = await runPass(session);
+            recordRequestTools(session);
+            const second = await runPass(session);
+            return { session, first, second, outcome: toolOutcomes(session, second.output) };
+        });
+        // The transform's own route lookup finds no measurement here.
+        expect(getMeasuredToolDefinitionTokens(PROVIDER, MODEL, undefined)).toBeUndefined();
+        expect(calls[0]?.input.servedCountTokens).toBeUndefined();
+        const count = calls[1]?.input.servedCountTokens;
+        expect(count).toBeDefined();
+        const served = requestTokens(current.session, current.first.output, SYSTEM_PROMPT_TOKENS);
+        expect(Math.abs((count ?? 0) - served) / served).toBeLessThan(0.02);
+        expect(release.second.log).toContain("already exceeds ceiling 29250");
+        expect(release.outcome.removed).toEqual([]);
+        expect(current.second.log).toMatch(/emergency tiered drop: tiered drop: \d+ tags/);
+        for (const call of tailCalls(current.session.turns, "bash"))
+            expect(current.outcome.removed).toContain(call);
+        for (const call of current.outcome.kept)
+            expect(tailCalls(current.session.turns, "read")).toContain(call);
+        console.log(
+            `ISSUE860 trace OpenCode 2 reporter: release batches=${batchesOf([release.first, release.second]).join(",")} current batches=${batchesOf([current.first, current.second]).join(",")} count=${Math.round(count ?? 0)} servedAfter=${requestTokens(current.session, current.second.output, SYSTEM_PROMPT_TOKENS)}`,
+        );
+    }, 120_000);
+
+    test("a saved copy counts with its own request's set: one very large result, then 800%", async () => {
+        const { current, release, calls } = await againstRelease(async (serve) => {
+            const session = openSession(`ses-860-oc2-jump-${serve}`, {
+                tail: 10,
+                reading: 13_500,
+                bashTokens: 1_350,
+                decision: "defer",
+                systemPromptHash: "system-prompt-v1",
+                agent: null,
+            });
+            appendBashStep(session, 300_000);
+            recordRequestTools(session);
+            const ownTools =
+                getMeasuredToolDefinitionTokens(PROVIDER, MODEL, AGENT, session.sessionId) ?? 0;
+            const sends = await runPass(session);
+            setReading(session, 360_000);
+            session.decision = "execute";
+            // The next request carries a much smaller tool set: the saved copy
+            // still counts the set its own request carried.
+            recordRequestTools(session, 3_000);
+            const first = await runPass(session);
+            return { session, sends, first, ownTools, outcome: toolOutcomes(session, first.output) };
+        });
+        // The pass that sent the result was below the band and made no count
+        // of its own, so the count is the saved copy's.
+        expect(current.sends.log).not.toContain("emergency tiered drop");
+        const count = calls[0]?.input.servedCountTokens ?? 0;
+        expect(count).toBeGreaterThan(300_000);
+        const messages = servedMessageTokens(current.sends.output) + SYSTEM_PROMPT_TOKENS;
+        // Within 1% of the request with its own set; the smaller set is
+        // about 12,000 tokens (4%) less.
+        expect(current.ownTools).toBeGreaterThan(14_000);
+        expect(Math.abs(count - (messages + current.ownTools)) / count).toBeLessThan(0.01);
+        expect(count).toBeLessThan(360_000);
+        expect(release.first.log).toContain("already exceeds ceiling");
+        expect(current.first.log).toMatch(/emergency tiered drop: tiered drop: \d+ tags/);
+        expect(current.outcome.removed).toContain(`bash:${current.session.turns.at(-1)?.callId}`);
+    }, 120_000);
+
+    test("a set recorded for an earlier request is not this request's: no count from that pass", async () => {
+        const { calls } = await againstRelease(async (serve) => {
+            const session = openSession(`ses-860-oc2-stale-set-${serve}`, {
+                tail: 42,
+                reading: 368_415,
+                systemPromptHash: "system-prompt-v1",
+                agent: null,
+            });
+            // Recorded for the first pass's request only.
+            recordRequestTools(session);
+            await runPass(session);
+            await runPass(session);
+            await runPass(session);
+        });
+        expect(calls.length).toBe(3);
+        // The second pass counts the first pass's request, whose set was its own.
+        expect(calls[1]?.input.servedCountTokens).toBeDefined();
+        // The second pass served a request with no set recorded for it.
+        expect(calls[2]?.input.servedCountTokens).toBeUndefined();
+    }, 120_000);
+
+    test("pin: no request recorded in this process (a restart before any request): no count, the release's plan", async () => {
+        const { current, calls } = await againstRelease(async (serve) => {
+            const session = openSession(`ses-860-oc2-restart-${serve}`, {
+                tail: 42,
+                reading: 368_415,
+                systemPromptHash: "system-prompt-v1",
+                agent: null,
+            });
+            const first = await runPass(session);
+            const second = await runPass(session);
+            return { first, second };
+        });
+        expect(calls.length).toBe(2);
+        for (const call of calls) {
+            expect(call.input.servedCountTokens).toBeUndefined();
+            expect(call.current).toEqual(call.release);
+        }
+        expect(current.second.log).toContain("already exceeds ceiling");
+    }, 120_000);
 });
 
 describe("issue 860: one very large tool result, then a reading of 800%", () => {

@@ -75,3 +75,42 @@ describe("our count of the last request served", () => {
         expect(counted).toBe(1);
     });
 });
+
+describe("the recorded tool set of the request a pass serves (OpenCode 2)", () => {
+    const set = (request: number) => ({ request, total: 4_698 });
+
+    it("a set recorded after the previous pass started is this pass's request's", () => {
+        const counts = createServedRequestCounts();
+        counts.passStarted("s", set(1));
+        expect(counts.requestToolSet("s", set(1))).toEqual(set(1));
+        counts.passStarted("s", set(2));
+        expect(counts.requestToolSet("s", set(2))).toEqual(set(2));
+    });
+
+    it("a set a previous pass already started with belongs to an earlier request", () => {
+        const counts = createServedRequestCounts();
+        counts.passStarted("s", set(1));
+        counts.passStarted("s", set(1));
+        expect(counts.requestToolSet("s", set(1))).toBeUndefined();
+        // A pass with no set recorded since keeps the earlier number in mind.
+        counts.passStarted("s");
+        counts.passStarted("s", set(1));
+        expect(counts.requestToolSet("s", set(1))).toBeUndefined();
+    });
+
+    it("a set recorded while the pass ran is another request's", () => {
+        const counts = createServedRequestCounts();
+        counts.passStarted("s", set(1));
+        expect(counts.requestToolSet("s", set(2))).toBeUndefined();
+        expect(counts.requestToolSet("s", undefined)).toBeUndefined();
+    });
+
+    it("no set at the start of the pass is no set", () => {
+        const counts = createServedRequestCounts();
+        counts.passStarted("s");
+        expect(counts.requestToolSet("s", set(1))).toBeUndefined();
+        // Another session's set is not this session's.
+        counts.passStarted("t", set(3));
+        expect(counts.requestToolSet("s", set(3))).toBeUndefined();
+    });
+});
