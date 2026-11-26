@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { FULL_PARAMETER_DESCRIPTIONS } from "@magic-context/core/tools/parameter-descriptions";
 import { createTestDb } from "../test-utils.test";
+import { createCtxMemoryListTool } from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";
 import { createCtxSearchTool } from "./ctx-search";
 
@@ -36,6 +37,19 @@ describe("Pi host-local parameter descriptions match the shared full preset", ()
 			);
 			expect(properties.note_ids?.description).toBe(
 				FULL_PARAMETER_DESCRIPTIONS.ctx_note.note_ids,
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("ctx_memory_list category is an optional list filter", () => {
+		const db = createTestDb();
+		try {
+			const properties = createCtxMemoryListTool({ db }).parameters
+				.properties as Properties;
+			expect(properties.category?.description).toBe(
+				"Filter listed memories to this category (optional).",
 			);
 		} finally {
 			closeQuietly(db);

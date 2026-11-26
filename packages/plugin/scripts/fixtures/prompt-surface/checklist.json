@@ -597,7 +597,7 @@
       "source": {
         "file": "packages/plugin/src/tools/ctx-memory/constants.ts",
         "symbol": "CTX_MEMORY_DESCRIPTION",
-        "lines": "2-13",
+        "lines": "2-15",
         "evidence": "Durable facts about this project"
       },
       "sharedAcrossPresets": false,

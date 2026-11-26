@@ -29,10 +29,10 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
     ctx_memory: {
         action: "write | update | archive | merge | get",
         content:
-            "The memory text — one standalone fact (write, update, merge). Archive and get take an empty string.",
+            "Send on every call — the memory text for write, update and merge; pass an empty string for archive and get.",
         category:
-            "Kind of fact: the new fact's kind for write; on update/merge, the memory's current category to keep it. Archive and get ignore it.",
-        ids: "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get. Write takes an empty list.",
+            "Send on every call — the fact's kind for write; on update/merge, the memory's current category to keep it; archive and get ignore it, so pass any valid category.",
+        ids: "Send on every call — one id for update, one or more for archive, two or more distinct ids of memories in the same category for merge, 1–20 for get; write takes an empty list.",
         reason: "Why it is being archived (optional).",
     },
     ctx_search: {
@@ -69,10 +69,11 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
     },
     ctx_memory: {
         action: "write | update | archive | merge | get",
-        content: "One standalone fact (write, update, merge). Archive and get: empty string.",
+        content:
+            "Send on every call: the fact (write, update, merge); empty string for archive/get.",
         category:
-            "Kind of fact (write; on update/merge pass the current category to keep it). Archive and get ignore it.",
-        ids: "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get. Write: empty list.",
+            "Send on every call: kind for write; current category for update/merge; any category for archive/get (ignored).",
+        ids: "Send on every call: one id for update, 1+ for archive, 2+ distinct same-category ids for merge, 1–20 for get; write: empty list.",
         reason: "Why it is archived (optional).",
     },
     ctx_search: {
