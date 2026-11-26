@@ -16,7 +16,11 @@ import {
     forgetHiddenChild,
     recordHiddenChild,
 } from "./hidden-child-sweep";
-import { hiddenRunPlacement, supportsQuietHiddenChildren } from "./hidden-run-holder";
+import {
+    hiddenRunPlacement,
+    matchesHiddenRunLocation,
+    supportsQuietHiddenChildren,
+} from "./hidden-run-holder";
 import type { HiddenChildHook } from "./hooks/hidden-child";
 
 /**
@@ -128,12 +132,11 @@ export function createNativeHiddenChildren(
         model: HiddenChildModel,
     ): Promise<PersistedHiddenChild> => {
         const input = childCreateInput(identity, role, model);
-        let directory = identity.directory;
+        const directory = identity.directory;
         if (quiet) {
             if (!host.createHolder)
                 throw new Error("OpenCode 2 background holder API is not wired");
             const placement = await hiddenRunPlacement(host.createHolder, directory);
-            directory = placement.directory;
             input.id = placement.id;
             input.parentID = placement.parentID;
             delete input.location;
@@ -185,12 +188,13 @@ export function createNativeHiddenChildren(
             created_at: createdAt,
             directory,
         };
-        // Refuse to prompt if the host lost the automation ID or the holder moved during creation.
+        // A different ID could re-enable OpenCode's report to the parent. A different
+        // parent or location could send the prompt to a plugin instance that did not register it.
         if (
             input.parentID &&
             (created.id !== input.id ||
                 created.parentID !== input.parentID ||
-                created.location?.directory !== directory)
+                !matchesHiddenRunLocation(directory, created.location?.directory))
         ) {
             await remove(child);
             throw new Error(`OpenCode created a background run outside its holder at ${directory}`);

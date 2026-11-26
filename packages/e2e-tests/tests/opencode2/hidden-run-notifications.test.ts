@@ -5,10 +5,13 @@ import {
 	mkdirSync,
 	readFileSync,
 	renameSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
+import { findV2DreamParentSession } from "../../../plugin/src/v2/hooks/dream-timer";
+import { V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import {
 	inspectOpenFiles,
 	isolation,
@@ -57,9 +60,9 @@ function dbInventory(host: Host) {
 	console.log("LSOF", host.pid, JSON.stringify(paths));
 }
 
-function control(host: Host) {
+function control(host: Host, directory = host.cwd) {
 	const file = (suffix: string) =>
-		join(host.cwd, `hidden-run-${host.pid}-${suffix}`);
+		join(directory, `hidden-run-${host.pid}-${suffix}`);
 	const read = <T>(suffix: string) =>
 		waitFor(suffix, () => {
 			const path = file(suffix);
@@ -96,6 +99,38 @@ function control(host: Host) {
 				.map((line) => JSON.parse(line));
 		},
 	};
+}
+
+const runKinds = ["historian", "maintenance"] as const;
+type RunKind = (typeof runKinds)[number];
+
+function respondToHiddenRun(
+	host: Host,
+	seq: number,
+	kind: RunKind,
+	delayMs = 0,
+): string {
+	const notice = `HIDDEN_NOTICE_${kind}_${seq}`;
+	let steps = 0;
+	host.mock.addMatcher((body) => {
+		if (!JSON.stringify(body).includes(notice)) return null;
+		if (++steps === 1 && kind === "maintenance")
+			return {
+				openaiOutput: [
+					{
+						type: "function_call",
+						id: "fc_notice",
+						call_id: "call_notice",
+						name: "ctx_memory",
+						arguments: "{}",
+					},
+				],
+				delayMs,
+				usage,
+			};
+		return { text: notice, delayMs: kind === "historian" ? delayMs : 0, usage };
+	});
+	return notice;
 }
 
 async function openFixture() {
@@ -138,36 +173,10 @@ test("hidden runs do not signal root completion or wake the holder or user", asy
 			model,
 		});
 		let holderID: string | undefined;
-		for (const [seq, kind] of (
-			["historian", "maintenance"] as const
-		).entries()) {
-			const notice = `HIDDEN_NOTICE_${kind}_${seq}`;
+		for (const [seq, kind] of runKinds.entries()) {
+			const notice = respondToHiddenRun(host, seq, kind, 1500);
 			const offset = drive.events().length;
 			const requestsBefore = host.mock.requests().length;
-			let hiddenSteps = 0;
-			host.mock.addMatcher((body) => {
-				if (!JSON.stringify(body).includes(notice)) return null;
-				hiddenSteps++;
-				if (kind === "maintenance" && hiddenSteps === 1)
-					return {
-						openaiOutput: [
-							{
-								type: "function_call",
-								id: "fc_notice",
-								call_id: "call_notice",
-								name: "ctx_memory",
-								arguments: "{}",
-							},
-						],
-						delayMs: 1500,
-						usage,
-					};
-				return {
-					text: notice,
-					delayMs: kind === "historian" ? 1500 : 0,
-					usage,
-				};
-			});
 			const run = drive.start(seq, user.id, kind);
 			const opened = await run.opened();
 			const requests = (id: string) =>
@@ -268,6 +277,157 @@ test("hidden runs do not signal root completion or wake the holder or user", asy
 		await host.stop();
 	}
 }, 120_000);
+
+const rootOnlyHost = process.env.MC_E2E_OPENCODE2_VERSION === "2.3.0";
+
+test.skipIf(rootOnlyHost)(
+	"runs historian and tool-using maintenance at the linked OpenCode location",
+	async () => {
+		const { host } = await openFixture();
+		try {
+			const client = hostClient(host);
+			dbInventory(host);
+			const target = join(host.root, "project-target");
+			const link = join(host.root, "project-link");
+			mkdirSync(target);
+			copyFileSync(
+				join(host.cwd, "opencode.json"),
+				join(target, "opencode.json"),
+			);
+			symlinkSync(target, link, "dir");
+			const user = await client.session.create({
+				title: "project via link",
+				location: { directory: link },
+				model,
+			});
+			expect(user.location.directory).toBe(link);
+			await waitForPluginActive(client, link, probeName);
+			const drive = control(host, link);
+			await drive.ready();
+			for (const [seq, kind] of runKinds.entries()) {
+				const notice = respondToHiddenRun(host, seq, kind);
+				const result = await drive.start(seq, user.id, kind).done();
+				console.log(JSON.stringify({ linkedLocation: link, kind, ...result }));
+				expect(result).toMatchObject({ ok: true, text: notice });
+				expect(result.id).toStartWith("ses_aut_");
+				expect(result.parentID).toStartWith("ses_mc_bg_");
+				expect(
+					(await client.session.get({ sessionID: result.parentID! })).location
+						.directory,
+				).toBe(link);
+				if (kind === "maintenance") {
+					const requests = host.mock
+						.requests()
+						.filter((r) => r.headers["x-opencode-session-id"] === result.id);
+					expect(requests).toHaveLength(2);
+					expect(JSON.stringify(requests[1]?.body)).toContain(
+						"MAINTENANCE_TOOL_RESULT",
+					);
+				}
+			}
+		} finally {
+			await host.stop();
+		}
+	},
+	120_000,
+);
+
+test.skipIf(rootOnlyHost)(
+	"the dream timer still borrows the user session after quiet runs",
+	async () => {
+		const { host } = await openFixture();
+		try {
+			const client = hostClient(host);
+			await waitForPluginActive(client, host.cwd, probeName);
+			dbInventory(host);
+			const user = await client.session.create({
+				title: "user",
+				location: { directory: host.cwd },
+				model,
+			});
+			await client.session.prompt({
+				sessionID: user.id,
+				text: "A user turn before the nightly run",
+			});
+			await client.session.wait({ sessionID: user.id });
+			const openReader = () =>
+				new V2StoreReader(
+					join(host.env.XDG_DATA_HOME!, "opencode", "opencode2.db"),
+				);
+			expect(findV2DreamParentSession(openReader, host.cwd)).toBe(user.id);
+			await Bun.sleep(1100);
+			const drive = control(host);
+			for (const [seq, kind] of runKinds.entries()) {
+				const notice = respondToHiddenRun(host, seq, kind);
+				const result = await drive.start(seq, user.id, kind).done();
+				expect(result).toMatchObject({ ok: true, text: notice });
+				expect(result.parentID).toStartWith("ses_mc_bg_");
+			}
+			expect(findV2DreamParentSession(openReader, host.cwd)).toBe(user.id);
+		} finally {
+			await host.stop();
+		}
+	},
+	120_000,
+);
+
+test.skipIf(rootOnlyHost)(
+	"choosing the background holder for chat is refused before a provider request",
+	async () => {
+		const { host } = await openFixture();
+		try {
+			const client = hostClient(host);
+			await waitForPluginActive(client, host.cwd, probeName);
+			dbInventory(host);
+			const user = await client.session.create({
+				title: "user",
+				location: { directory: host.cwd },
+				model,
+			});
+			const drive = control(host);
+			const result = await drive.start(0, user.id).done();
+			expect(result).toMatchObject({ ok: true });
+			expect(result.parentID).toStartWith("ses_mc_bg_");
+			const holderID = result.parentID!;
+			await client.session.prompt({
+				sessionID: holderID,
+				text: "Can we chat here?",
+			});
+			await client.session.wait({ sessionID: holderID });
+			const outcome = await waitFor("holder execution outcome", () =>
+				drive
+					.events()
+					.find(
+						(event) =>
+							event.id === holderID &&
+							(event.type === succeeded ||
+								event.type === "session.execution.failed"),
+					),
+			);
+			expect(outcome.type).toBe("session.execution.failed");
+			expect(
+				host.mock
+					.requests()
+					.filter((r) => r.headers["x-opencode-session-id"] === holderID),
+			).toEqual([]);
+			const log = await waitFor("holder refusal explanation", () =>
+				host
+					.pluginLog()
+					.split("\n")
+					.find(
+						(line) =>
+							line.includes("hidden child refused:") && line.includes(holderID),
+					),
+			);
+			expect(log).toContain(
+				"This session holds Magic Context's background runs and can't be used for chat.",
+			);
+		} finally {
+			await host.stop();
+		}
+	},
+	120_000,
+);
 
 // The current host exercises cascade removal and the two-process creation race. The matrix
 // above also checks that 2.3.0 still runs without a parent, so it cannot wake a holder.

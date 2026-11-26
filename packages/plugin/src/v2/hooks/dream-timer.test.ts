@@ -266,6 +266,12 @@ describe("OpenCode 2 timer parent lookup", () => {
                 metadata: JSON.stringify({ magic_context: "hidden-run", role: "dreamer" }),
                 time_updated: 9,
             },
+            {
+                id: "ses-holder",
+                directory: "/work/app",
+                metadata: JSON.stringify({ magic_context: "background-holder" }),
+                time_updated: 10,
+            },
             { id: "ses-archived", directory: "/work/app", time_updated: 9, time_archived: 9 },
             { id: "ses-sibling", directory: "/work/app-worktree", time_updated: 9 },
         ]);

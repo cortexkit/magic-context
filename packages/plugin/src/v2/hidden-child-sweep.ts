@@ -17,7 +17,7 @@ export interface HiddenChildCleanupRecord {
     failed_at?: number;
 }
 
-/** Root sessions have no parent to clean them up after a crash; keep a durable removal retry. */
+/** Record each run so the sweep can retry removal after a crash without touching its holder. */
 export function recordHiddenChild(db: Database, child: HiddenChildCleanupRecord): void {
     db.prepare("INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)").run(
         `${PREFIX}${child.id}`,

@@ -748,11 +748,10 @@ export class V2StoreReader {
 
     /**
      * The most recently updated top-level user session the host created in
-     * `directory`, or undefined when there is none. Children, Magic Context's
-     * own hidden runs and archived sessions are never returned. The session must
-     * be in this very directory: OpenCode 2 puts a child session in its parent's
-     * location, and only the plugin context of that location recognises the
-     * child, so a parent from a sibling checkout would strand the run.
+     * `directory`, or undefined when there is none. Exclude children, archived
+     * sessions, and Magic Context's internal runs and holders. The timer borrows
+     * a user session in this directory for task context and model selection, not
+     * as the parent of a hidden child.
      *
      * The directory is compared by `sameProjectDirectory`, not by SQL equality.
      * OpenCode 2 on Windows stores `D:/work/app` while the plugin's location is
@@ -771,7 +770,7 @@ export class V2StoreReader {
         const page = this.prepare(
             `SELECT id, COALESCE(directory, '') AS directory FROM session_v2
                  WHERE parent_id IS NULL${archived}
-                   AND COALESCE(json_extract(metadata, '$.magic_context'), '') <> 'hidden-run'
+                   AND COALESCE(json_extract(metadata, '$.magic_context'), '') NOT IN ('hidden-run', 'background-holder')
                  ORDER BY ${order} LIMIT ? OFFSET ?`,
         );
         const pageSize = 500;
@@ -783,7 +782,7 @@ export class V2StoreReader {
         }
     }
 
-    /** Native user activity on root sessions; internal children must never become
+    /** Native user activity on root sessions; internal runs and holders must never become
      * retrospective input. Activity is read from the source, not project-binding
      * times or optional activity keys in Magic Context's store. */
     rootSessionActivity(sessionIDs: readonly string[]): Map<string, number> {
@@ -795,7 +794,7 @@ export class V2StoreReader {
                     WHERE session_id = session_v2.id AND type = 'user'
                 ) AS time FROM session_v2
                 WHERE parent_id IS NULL
-                  AND COALESCE(json_extract(metadata, '$.magic_context'), '') <> 'hidden-run'
+                  AND COALESCE(json_extract(metadata, '$.magic_context'), '') NOT IN ('hidden-run', 'background-holder')
                   AND id IN (${chunk.map(() => "?").join(",")})`).all(...chunk) as Array<{
                 id: string;
                 time: number | null;
