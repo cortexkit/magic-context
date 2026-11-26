@@ -36,6 +36,18 @@ describe("our count of the last request served", () => {
         expect(counts.tokens("s", undefined, neutral)).toBeUndefined();
     });
 
+    it("a count that is not finite or not above zero is no count", () => {
+        const counts = createServedRequestCounts();
+        for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 0]) {
+            counts.record("s", {
+                modelKey: "p/m",
+                components: { system: bad, tools: 0, prose: 0 },
+            });
+            counts.passStarted("s");
+            expect(counts.tokens("s", "p/m", neutral)).toBeUndefined();
+        }
+    });
+
     it("prices with the caller's ratios and adds what the host adds", () => {
         const counts = createServedRequestCounts();
         counts.record("s", { modelKey: "p/m", components, hostAddedTokens: 500 });

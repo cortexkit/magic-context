@@ -560,6 +560,34 @@ describe("issue 860: the reporter's session through the transform", () => {
     }, 120_000);
 });
 
+describe("issue 860: a count is valid only with the fixed envelope measured", () => {
+    for (const [name, setup] of [
+        ["tool definitions not measured", { measureTools: false, systemPromptTokens: undefined }],
+        ["system prompt size unknown", { measureTools: true, systemPromptTokens: 0 }],
+    ] as const)
+        test(`pin: ${name}: no count, so the release's plan`, async () => {
+            const { current, release, calls } = await againstRelease(async (serve) => {
+                if (setup.measureTools) measureToolDefinitions(15_134);
+                const session = openSession(`ses-860-no-envelope-${serve}-${name.length}`, {
+                    tail: 42,
+                    reading: 368_415,
+                    systemPromptHash: "system-prompt-v1",
+                    systemPromptTokens: setup.systemPromptTokens,
+                });
+                const first = await runPass(session);
+                const second = await runPass(session);
+                return { first, second };
+            });
+            expect(calls.length).toBe(2);
+            for (const call of calls) {
+                expect(call.input.servedCountTokens).toBeUndefined();
+                expect(call.current).toEqual(call.release);
+            }
+            expect(current.second.log).toContain("already exceeds ceiling");
+            expect(release.second.log).toContain("already exceeds ceiling");
+        }, 120_000);
+});
+
 describe("issue 860: one very large tool result, then a reading of 800%", () => {
     /**
      * A session well below the threshold gets one result of about 300,000
@@ -938,15 +966,19 @@ describe("issue 860: a warm session that enters the band at 90%", () => {
                 systemPromptHash: "system-prompt-v1",
             });
             expect((await runPass(session)).error).toBeUndefined();
-            // The provider counts the request about 25% higher than we do, and
-            // each step adds a result of about 4,340 tokens and a new reading.
+            // The first reading is 90% of the usable window. After that each
+            // step adds a result of about 4,340 tokens, and the provider's
+            // reading of each request is 25% above our count of it.
             const passes = [];
             let reading = 40_500;
             for (let step = 1; step <= 6; step++) {
                 setReading(session, reading);
-                passes.push(await runPass(session));
+                const pass = await runPass(session);
+                passes.push(pass);
                 appendBashStep(session, 4_340);
-                reading += 5_400;
+                reading = Math.round(
+                    1.25 * (requestTokens(session, pass.output, SYSTEM_PROMPT_TOKENS) + 4_346),
+                );
             }
             for (const pass of passes) expect(pass.error).toBeUndefined();
             return { passes, batches: batchesOf(passes) };

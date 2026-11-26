@@ -404,7 +404,14 @@ export function createFinalWireUsageTracker() {
                             agentName,
                             sessionId,
                         });
-                        if (estimate.pressureComponents)
+                        // A count that leaves out part of the fixed envelope
+                        // would understate the fixed part without bound, so it
+                        // counts only with both sizes measured.
+                        if (
+                            estimate.pressureComponents &&
+                            estimate.toolDefinitionsMeasured === true &&
+                            systemPromptTokens > 0
+                        )
                             counted = {
                                 modelKey: `${providerID}/${modelID}`,
                                 components: estimate.pressureComponents,

@@ -5202,7 +5202,14 @@ export function createTransform(deps: TransformDeps) {
         afterCapture(sessionId, "served request count", () =>
             servedRequestCounts.record(sessionId, {
                 modelKey: localReadingModelKey,
-                components: finalWireEstimate?.pressureComponents,
+                // Only a count whose system prompt and tool definitions were
+                // measured: one that leaves part of that envelope out would
+                // understate the fixed part without bound.
+                components:
+                    finalWireEstimate?.toolDefinitionsMeasured === true &&
+                    sessionMeta.systemPromptTokens > 0
+                        ? finalWireEstimate.pressureComponents
+                        : undefined,
                 saved: passOutcome.captureEligible
                     ? finalWireUsage.savedRequest(sessionId)
                     : undefined,
