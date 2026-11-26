@@ -18,10 +18,10 @@ import {
 
 // OpenCode can call the compaction hook while no checkpoint row is running.
 // From 2.3.1 it prepares a compaction in the background after a reply that
-// reports high usage (on by default). Its automatic checkpoints, on every
-// tested version, ask the hook before any row exists too, and so do 2.0.22 and
-// 2.1.0 for a model in provider compaction mode. Nothing is cut when the hook
-// runs, and the stored history head must stay what the session last sent: the
+// reports high usage (on by default). Automatic checkpoints on 2.0.22 and 2.1.0
+// ask the hook before any row exists too, and so do those hosts for a model in
+// provider compaction mode. Nothing is cut when the hook runs, and the stored
+// history head must stay what the session last sent: the
 // two head messages (m[0] and m[1]) replay byte for byte on every later pass
 // that has no rebuild of its own, and a queued drop waits for a rebuild that
 // pays for a rewrite (a later real fold, or pressure at 85% of the window and above).
@@ -67,12 +67,14 @@ function barrierPlugin(root: string, label: "before" | "after", observer: string
 }
 
 /**
- * background: 2.3.1+ with every host compaction setting at its default; a
- * reply at 45% of the window makes the host prepare a compaction while nothing
- * is due. provider: 2.0.22/2.1.0 with the model in provider compaction mode.
- * auto: the runner's ordinary automatic compaction. In those two a reply just
- * past the host's compaction threshold makes it ask the hook, store a completed
- * automatic checkpoint and send the next turn under pressure.
+ * background: 2.3.1+ with background preparation turned on explicitly and
+ * every other host compaction setting at its default; a reply at 45% of the
+ * window makes the host prepare a compaction while nothing is due.
+ * provider: 2.0.22/2.1.0 with the model in provider compaction mode.
+ * auto: the runner's ordinary automatic compaction (its default host settings,
+ * background preparation off). In those two a reply just past the host's
+ * compaction threshold makes it ask the hook, store a completed automatic
+ * checkpoint and send the next turn under pressure.
  */
 type Arm = "background" | "provider" | "auto";
 
@@ -137,7 +139,8 @@ async function scenario(arm: Arm) {
         // The historian's /ctx-wrapup publishes nothing on a 16k window, so every
         // arm uses a 100k window and scales the pressure to it.
         modelContextLimit: 100_000,
-        ...(arm === "background" ? { compactionConfig: {} } : {}),
+        // The runner turns background preparation off by default; this arm needs it.
+        ...(arm === "background" ? { compactionConfig: { background: true } } : {}),
         ...(arm === "provider" ? { modelCompaction: { mode: "provider" } } : {}),
         magicContextConfig: {
             cache_ttl: "never",
@@ -320,16 +323,17 @@ async function scenario(arm: Arm) {
             );
             expect(snapshots.map((entry) => entry.label)).toEqual(["before", "after"]);
             const [before, after] = snapshots as [Snapshot, Snapshot];
-            // No checkpoint row before the hook ran, and no provider request
-            // between the two snapshots. From 2.3.1 an automatic checkpoint
-            // records its start while the hooks run, so the row can appear
-            // between the two snapshots and Magic Context may then answer it as
-            // a running checkpoint (the hold before it makes that likely);
-            // either way the stored row must not change. Older hosts record the
-            // row only after the hooks return.
-            expect(before.checkpoints).toBe(0);
-            expect([0, ...(arm === "auto" && backgroundHost ? [1] : [])]).toContain(
-                after.checkpoints,
+            // No provider request between the two snapshots. Background and
+            // provider-mode requests, and automatic checkpoints on 2.0.22/2.1.0,
+            // have no checkpoint row while the hooks run. The auto arm runs with
+            // the runner's default host settings, which turn background
+            // preparation off; with it off, 2.3.1+ records the automatic
+            // checkpoint's running row before it calls the hooks, so Magic
+            // Context answers a running checkpoint there. The stored row must
+            // not change either way.
+            const hostRecordsRowFirst = arm === "auto" && backgroundHost;
+            expect([before.checkpoints, after.checkpoints]).toEqual(
+                hostRecordsRowFirst ? [1, 1] : [0, 0],
             );
             expect(after.requests).toBe(before.requests);
             expect(after.summary).toBe(CHECKPOINT_NOTE);
@@ -484,10 +488,11 @@ async function scenario(arm: Arm) {
 );
 
 // On 2.0.22 and 2.1.0 this arm fails when the hook stores what it renders: there
-// the hook is asked before the row
-// exists. On 2.3.1+ the host usually records the row first once the plugin ahead
-// of Magic Context has held the call, so Magic Context answers it as a running
-// checkpoint and this arm passes with or without the fix there: on those hosts
-// it is a compatibility check, and the background arm is the guard.
+// the hook is asked before the row exists. On 2.3.1+ it runs with the runner's
+// default host settings, which turn background preparation off, so the host
+// records the automatic checkpoint's running row before it asks the hook and
+// Magic Context answers a running checkpoint. This arm passes with or without
+// the fix there: on those hosts it is a compatibility check, and the background
+// arm is the guard.
 test(`an automatic checkpoint keeps the served history head (OpenCode ${hostVersion})`, () =>
     scenario("auto"), 300000);
