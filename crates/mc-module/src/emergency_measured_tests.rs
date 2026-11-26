@@ -1341,3 +1341,61 @@ async fn emergency_measured_a_late_rides_count_is_not_planned_from() {
     let view = session.ride(&settings, &refused);
     assert_eq!(taken(view.as_ref()), whole(2..=31));
 }
+
+/// Twenty notices, each adding a 1,000-token result, on a worker whose
+/// reading is stuck at 39,000, in the force band. The request rises and
+/// falls in a sawtooth: an emergency batch, then sweeps of far-behind
+/// output that let a second batch land. Its highest size and the number of
+/// views published (each one a cache rewrite) must stay as good as the
+/// build before the measured plan: on 9039e1762e this trace peaked at
+/// 24,150 tokens and published 3 views.
+#[tokio::test]
+async fn emergency_measured_a_stuck_in_band_reading_keeps_the_sawtooth() {
+    const RUNNING_PEAK: u64 = 24_150;
+    const RUNNING_VIEWS: u64 = 3;
+    let (_, client, route, _, mut settings) = fixture();
+    settings.memory_enabled = false;
+    let setup = SetupRequest::new(
+        "worker",
+        ModelRef::new("test", "model"),
+        60_000,
+        15_000,
+        ProviderRules::new(SignedParts::None, EditCost::Suffix),
+        vec![],
+        1,
+    );
+    let mut session = Session::new(
+        &route,
+        &setup,
+        crate::preset::features("worker").unwrap(),
+        None,
+    );
+    let mut entries = vec![counted(1, "task", 1_000)];
+    entries.extend((2..=34).map(|tag| result(tag, 1_000)));
+    session
+        .index
+        .extend_counted(entries.clone(), Some("family"));
+    session.index_ready = true;
+    *client.entries.lock().unwrap() = entries;
+    let mut peak = 0;
+    let mut views = 0;
+    for seq in 1..=20 {
+        let entry = result(34 + seq, 1_000);
+        client.entries.lock().unwrap().push(entry.clone());
+        let mut request = notice(&session, seq, Some(cursor(&entry)));
+        request.conditions.last_prompt_tokens = Some(39_000);
+        request.conditions.last_prompt_view =
+            Some(session.latest.as_ref().map_or(0, |view| view.version));
+        request.applied_view = session.latest.as_ref().map(View::applied);
+        request.conditions.system_tokens = exact(4_000);
+        request.conditions.tools_tokens = exact(6_000);
+        request.token_family = Some("family".into());
+        request.entries = vec![entry];
+        let version = session.version;
+        session.notice(&client, &settings, request).await;
+        views += session.version - version;
+        peak = peak.max(served_with(&session, 10_000));
+    }
+    assert!(peak <= RUNNING_PEAK + 1_000, "peak {peak}");
+    assert!(views <= RUNNING_VIEWS, "{views} views");
+}
