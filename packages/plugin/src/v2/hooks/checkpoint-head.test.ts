@@ -125,7 +125,7 @@ async function fixture(
             get: async () => ({ location: { directory: dir } }),
         },
     } as unknown as V2Context;
-    const duties = await registerContext(host);
+    let duties = await registerContext(host);
     const checkpoint = {
         id: "cut",
         role: "user",
@@ -151,7 +151,7 @@ async function fixture(
         runningCut: 2,
         materialize: () => summary,
         ...(options.stored === undefined ? {} : { checkpointText: options.stored }),
-        ...(options.checkpointID === undefined ? {} : { checkpointID: options.checkpointID }),
+        checkpointID: options.checkpointID ?? "cut",
     });
     return {
         db,
@@ -165,6 +165,11 @@ async function fixture(
         insideTransformHadRecent: () => insideTransformHadRecent,
         insideHostEstimate: () => insideHostEstimate,
         transformInput: () => transformInput,
+        async restart() {
+            await duties.dispose();
+            hooks.clear();
+            duties = await registerContext(host);
+        },
         async close() {
             await duties.dispose();
             transform.mockRestore();
@@ -349,6 +354,50 @@ test("a checkpoint that stores the note is served and measured with the head its
     }
 });
 
+test("a new legacy checkpoint cannot inherit a reverted checkpoint's head at the same sequence", async () => {
+    const logs = spyOn(logger, "sessionLog");
+    const f = await fixture({ stored: CHECKPOINT_NOTE, head: false, checkpointID: "cut" });
+    try {
+        const earlier = f.draft();
+        await f.hooks.get("context")!(earlier);
+        const oldHead = "<session-history>summary</session-history>";
+        expect(JSON.stringify(earlier.messages)).toContain(oldHead);
+        expect(((await f.storage.get("fold/v1/s")) as FoldIdentity).rendered?.id).toBe("cut");
+
+        f.source.exec(`DELETE FROM session_message WHERE id = 'cut';
+            INSERT INTO session_message VALUES ('replacement','s','compaction',2,300,300,
+                '{"status":"running","reason":"auto","mode":"local"}');`);
+        const compaction = f.draft();
+        compaction.messages = [
+            { id: "u1", role: "user", content: [{ type: "text", text: "unarchived source" }] },
+        ];
+        await f.hooks.get("compaction")!(compaction);
+        expect(compaction.result?.summary).toBe(CHECKPOINT_NOTE);
+        f.source
+            .prepare("UPDATE session_message SET data = ? WHERE id = 'replacement'")
+            .run(JSON.stringify({ status: "completed", summary: CHECKPOINT_NOTE, mode: "local" }));
+
+        const pass = async () => {
+            const outgoing = f.draft();
+            outgoing.messages[0]!.id = "replacement";
+            await f.hooks.get("context")!(outgoing);
+            return JSON.stringify(outgoing.messages);
+        };
+        const recovered = await pass();
+        expect(recovered).not.toContain(oldHead);
+        expect(recovered).not.toContain("<conversation-checkpoint>");
+        expect(recovered).toContain("unarchived source");
+        expect(await pass()).toBe(recovered);
+        await f.restart();
+        expect(await pass()).toBe(recovered);
+        const lines = logs.mock.calls.map((args) => args.map(String).join(" "));
+        expect(lines.filter((line) => line.includes("HARD reason=boot_recovery"))).toHaveLength(1);
+    } finally {
+        logs.mockRestore();
+        await f.close();
+    }
+});
+
 test("a rebuilt fold record still never serves the checkpoint note as history in a window without a head message", async () => {
     // After a revert the host can give a new checkpoint the sequence number of
     // a checkpoint Magic Context already recorded. FoldOwner.supply then reuses
@@ -423,13 +472,10 @@ test("a note checkpoint whose rebuilt record has no head serves restored history
     }
 });
 
-test("a note checkpoint the rebuilt record answered keeps serving the recorded head", async () => {
-    // The fold record answered this checkpoint row too (a revert let it reuse the
-    // sequence number of the checkpoint it was served for), so its head carries over.
+test("a note checkpoint keeps serving the head recorded for its own row", async () => {
     for (const head of [true, false]) {
         const f = await fixture({ stored: CHECKPOINT_NOTE, head, checkpointID: "cut" });
         try {
-            await rebindToRevertedCheckpoint(f);
             const first = f.draft();
             await f.hooks.get("context")!(first);
             const served = JSON.stringify(first.messages);
