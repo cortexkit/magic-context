@@ -3,6 +3,8 @@
 import { Glob } from "bun";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import versions from "../opencode2-versions.json";
+import { validateKnownOpenCode2Failures, type KnownOpenCode2Failure } from "./validate-known-oc2-failures";
 
 export const E2E_ROOT = resolve(import.meta.dir, "..");
 export const MANIFEST_PATH = resolve(E2E_ROOT, "mode-manifest.json");
@@ -28,6 +30,7 @@ export interface ModeManifestEntry {
     hosts: Host[];
     behavior?: boolean;
     divergences?: HostDivergence[];
+    knownFailures?: KnownOpenCode2Failure[];
     rationale: string;
     contract_refs: string[];
 }
@@ -63,7 +66,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function validateEntry(value: unknown, index: number): ModeManifestEntry {
     if (!isRecord(value)) throw new Error(`entry ${index} is not an object`);
     const requiredKeys = ["path", "tier", "invocation", "hosts", "rationale", "contract_refs"];
-    const allowedKeys = [...requiredKeys, "behavior", "divergences"];
+    const allowedKeys = [...requiredKeys, "behavior", "divergences", "knownFailures"];
     const actualKeys = Object.keys(value).sort();
     if (
         requiredKeys.some((key) => !actualKeys.includes(key)) ||
@@ -197,7 +200,7 @@ export function validateManifestDocument(
     const entries = raw.entries.map(validateEntry);
     const expectedSet = new Set(expectedFiles);
     const seen = new Map<string, number>();
-    for (const entry of entries) {
+    for (const [index, entry] of entries.entries()) {
         seen.set(entry.path, (seen.get(entry.path) ?? 0) + 1);
         if (!expectedSet.has(entry.path)) {
             throw new Error(`dead or out-of-scope manifest path: ${entry.path}`);
@@ -210,6 +213,14 @@ export function validateManifestDocument(
         }
         if (seen.get(entry.path)! > 1) {
             throw new Error(`duplicate manifest entry: ${entry.path}`);
+        }
+        const original = raw.entries[index] as Record<string, unknown>;
+        if (original.knownFailures !== undefined) {
+            if (!entry.invocation.ts || !entry.hosts.includes("opencode2")) {
+                throw new Error(`${entry.path}: known failures are allowed only on selected OpenCode 2 host tests`);
+            }
+            entry.knownFailures = validateKnownOpenCode2Failures(original.knownFailures, entry.path,
+                readFileSync(resolve(E2E_ROOT, entry.path), "utf8"), versions.compatibility);
         }
     }
 

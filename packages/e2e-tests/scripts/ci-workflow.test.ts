@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import openCode2Versions from "../opencode2-versions.json";
 import { failedRequiredJobs, slowUnitRequired } from "./check-ci-results";
 
 const root = resolve(import.meta.dir, "../../..");
@@ -98,7 +99,7 @@ test("artifact consumers start setup immediately and gate tests on artifacts", (
         }
     }
     expect(workflow.jobs["e2e-host-opencode"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1, 2, 3] } });
-    expect(workflow.jobs["e2e-host-opencode2"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1], version: ["2.0.22", "2.1.0"] } });
+    expect(workflow.jobs["e2e-host-opencode2"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1], version: openCode2Versions.compatibility } });
 });
 
 test("same-run artifact downloads retry transient failures and guard consumers", () => {
