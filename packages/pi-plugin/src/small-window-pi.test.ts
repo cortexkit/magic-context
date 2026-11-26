@@ -144,3 +144,45 @@ describe("Pi: telling the user the window is too small", () => {
 		expect(notify).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("Pi: the small-window notice on Oh My Pi", () => {
+	test("sizes Oh My Pi's tools through its wire-schema converter", () => {
+		const base = host(1_500);
+		// Oh My Pi hands extensions tool schemas as functions that validate
+		// arguments; only its converter turns them into the provider's schema.
+		const validator = Object.assign(() => true, {
+			jsonSchema: { type: "object" },
+		});
+		const tools = [
+			{
+				name: "bash",
+				description: sentence.repeat(1_500),
+				parameters: validator,
+			},
+			{ name: "read", description: "Read a file.", parameters: validator },
+		];
+		const pi = {
+			getAllTools: () => tools,
+			getActiveTools: () => ["bash", "read"],
+		};
+		const args = {
+			ctx: base.ctx,
+			pi,
+			sessionId: "omp-small",
+			modelKey: "anthropic/claude-sonnet-5",
+			reductionPointTokens: 20_000,
+			calibration: () => resolveDecisionCalibration(undefined, undefined),
+		};
+		// Without the converter the tools cannot be sized: nothing is said.
+		expect(reportPiSmallWindow(args)).toBe(false);
+		resetPiSmallWindowReportsForTest();
+		expect(
+			reportPiSmallWindow({
+				...args,
+				wireSchema: (tool) =>
+					(tool.parameters as { jsonSchema: unknown }).jsonSchema,
+			}),
+		).toBe(true);
+		expect(base.notify).toHaveBeenCalledTimes(1);
+	});
+});

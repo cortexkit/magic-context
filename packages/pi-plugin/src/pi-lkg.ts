@@ -227,6 +227,27 @@ export function notePiLkgProviderUsage(
 	}
 }
 
+/**
+ * The last request this session served, as the last applied pass captured it:
+ * the served messages' JSON, the model it was sent to and the signature of the
+ * system prompt and tools it was sent with (the prompt and tools themselves
+ * are not saved). Undefined when no pass has been captured with a known
+ * envelope since this process started or the state was cleared.
+ */
+export function piLkgLastServedRequest(
+	sessionId: string,
+):
+	| { json: string; modelKey: string | null; envelopeSignature: string }
+	| undefined {
+	const request = piLkgSessionStates.get(sessionId)?.capturedRequest;
+	if (!request) return;
+	return {
+		json: request.jsonPrefix,
+		modelKey: request.modelKey,
+		envelopeSignature: request.envelopeSignature,
+	};
+}
+
 export function clearPiLkgSessionState(sessionId: string): void {
 	const state = piLkgSessionStates.get(sessionId);
 	if (state) state.captureSequence += 1;

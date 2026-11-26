@@ -5,6 +5,7 @@ import {
 	smallWindowCondition,
 } from "@magic-context/core/shared/small-window";
 import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
+import type { PiToolWireSchema } from "./pi-tool-wire-schema";
 
 /** Sessions and models already told in this process. */
 const notified = new Set<string>();
@@ -54,6 +55,12 @@ export function reportPiSmallWindow(args: {
 	reductionPointTokens: number | undefined;
 	/** Read only when a decision is due (see below). */
 	calibration: () => DecisionCalibration;
+	/**
+	 * Oh My Pi's converter from its tool schemas (functions that validate
+	 * arguments) to the JSON Schema the provider receives. Without it those
+	 * tools cannot be sized and nothing is reported.
+	 */
+	wireSchema?: PiToolWireSchema;
 }): boolean {
 	if (!args.modelKey) return false;
 	const key = `${args.sessionId}\0${args.modelKey}`;
@@ -98,6 +105,7 @@ export function reportPiSmallWindow(args: {
 		args.pi,
 		args.modelKey,
 		calibration,
+		args.wireSchema,
 	);
 	if (!envelope || envelope.refusalToolDefinitionTokens === undefined)
 		return false;

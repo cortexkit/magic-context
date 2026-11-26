@@ -156,6 +156,17 @@ export interface PiHeuristicCleanupConfig {
 		 * reading never measured them, so they do not lower the floor.
 		 */
 		sinceReading?: ReadonlySet<number>;
+		/**
+		 * Our own count of the last request this session served (see
+		 * `servedCountTokens` on planEmergencyDrop), in the units of the given
+		 * calibration, the one this pass prices its tags with. Called only when
+		 * the planner is about to run; undefined when there is no count.
+		 */
+		servedCountTokens?: (calibration: {
+			systemRatio?: number;
+			toolsRatio: number;
+			proseRatio: number;
+		}) => number | undefined;
 	};
 	/**
 	 * Age-tier caveman text compression settings. Caller is responsible
@@ -619,6 +630,7 @@ export function applyPiHeuristicCleanup(
 			`emergency candidates: loaded=${tags.length} active=${activeTags.length} activeTools=${activeTags.filter((tag) => tag.type === "tool").length} visibleCompleteTools=${droppableTags.length} windowYields=${(emergency.usagePercentage ?? 0) >= 95} cutoff=${protectedCutoff}`,
 		);
 		const tPlan = performance.now();
+		const servedCountTokens = emergency.servedCountTokens?.(calibration);
 		const plan = planEmergencyDrop({
 			tags: droppableTags as readonly EmergencyDropTag[],
 			floorTags: activeTags as readonly EmergencyDropTag[],
@@ -626,6 +638,7 @@ export function applyPiHeuristicCleanup(
 			protectedCutoff,
 			currentTotalInputTokens: emergency.currentTotalInputTokens,
 			removedThisPassTokens,
+			servedCountTokens,
 			ceilingTokens: emergency.ceilingTokens,
 			usagePercentage: emergency.usagePercentage,
 			priorInputSample,

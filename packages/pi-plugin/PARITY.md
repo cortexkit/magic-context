@@ -405,29 +405,6 @@ outside Pi's extension API.
 
 ---
 
-## 9d. Emergency drop's fixed part: OpenCode caps it by its own count, Pi infers it (known gap)
-
-**This entry is a known gap, not a deliberate difference.** It is listed here
-so auditors know it is tracked, not so it is accepted.
-
-**OpenCode (1 and 2):** the emergency tool drop infers the fixed part of the
-request (what no tool drop can remove) as a size of the whole request minus
-its count of the active tags. That size is the smaller of the provider's
-usage reading and Magic Context's own count of the last request it served
-(system prompt, tool definitions and messages, priced with the same
-calibration as the tags), so a provider that counts the same request higher
-no longer inflates the fixed part. Without a count (the first pass after a
-restart, a model change, or no saved copy of the last request) it uses the
-reading alone. At 95% or more, a reading that has not been renewed since the
-episode's batch lifts the latch only after a refusal.
-
-**Pi and Oh My Pi:** the drop still infers the fixed part from the last usage
-reading alone. A reading in other units than the local count inflates the
-fixed part, and the drop then skips with removable tool output in the request
-(issue 860).
-
----
-
 ## 10. Cleared reasoning: historical-cleared / newest-native
 
 When Magic Context clears an aged reasoning/thinking block, the two harnesses use
