@@ -364,7 +364,7 @@ import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import {
 	clearPiLatchedReading,
 	type PiProviderReading,
-	piProviderReadingIdentity,
+	piProviderReadingFromBranch,
 	piReadingRepeatsLatch,
 	recordPiLatchedReading,
 } from "./emergency-latch-reading-pi";
@@ -6145,10 +6145,8 @@ export function registerPiContextHandler(
 			// The provider's own reading this pass rests on (what the last reply
 			// reported, before Pi's estimate of the later messages is added) and
 			// the reply that reported it; see emergency-latch-reading-pi.ts.
-			const emergencyProviderReading: PiProviderReading = {
-				tokens: Math.max(0, sessionMetaForUsage.lastInputTokens),
-				identity: piProviderReadingIdentity(branchEntries),
-			};
+			const emergencyProviderReading =
+				piProviderReadingFromBranch(branchEntries);
 			const pipelineArgs: RunPipelineArgs = {
 				emergencyProviderReading,
 				emergencyServedCount: (calibration, recovery) => {

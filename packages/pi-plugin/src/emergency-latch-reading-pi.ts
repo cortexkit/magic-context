@@ -15,27 +15,35 @@
  * every request while the provider's reading stays put, so the planner's
  * comparison alone sees a new reading on alternate requests.
  *
- * This module keeps the provider's own reading (the prompt size the last
- * reply reported, as stored at message_end) and its identity (the session
- * entry of that reply) for the latch, and answers whether the reading on this
- * pass is still that one: the same identity, or the same value. A new reply
- * that reports the same value after we removed content is a reading that does
- * not respond to what we send, which is the case the latch exists for. Only
- * when both differ (or, without an identity, when the value differs) has the
- * provider measured something new.
+ * This module reads the provider's own reading from the branch: the newest
+ * reply that reports usage (the one Pi anchors its live figure on), its
+ * prompt size as the provider reported it, and the session entry of that
+ * reply as its identity. The figure message_end stores is not used: after a
+ * tool result it stores Pi's live figure, which already includes the
+ * estimate. The reading is kept with the latch, and a later pass asks
+ * whether its reading is still that one: the same reply, or the same value.
+ * A new reply that reports the same value after we removed content is a
+ * reading that does not respond to what we send, which is the case the latch
+ * exists for. Only when both differ has the provider measured something new.
+ * A pass whose branch shows no such reply has no provider reading to compare,
+ * and the planner's own comparison decides.
  *
  * Kept in memory only, like the saved copy of the last request the count is
  * made from. A latch stored by an earlier process has no record here; the
  * reading then counts as new and the planner's own comparison still applies.
  */
 
-import { piMessageAnchorsLiveUsage } from "./pi-pressure";
+import {
+	extractAssistantUsage,
+	piMessageAnchorsLiveUsage,
+	piUsageInputTokens,
+} from "./pi-pressure";
 
 /** The provider's reading a pass is based on. */
 export interface PiProviderReading {
-	/** Prompt tokens the last reply reported; 0 when none is stored. */
+	/** Prompt tokens the reply reported; 0 when its usage has no prompt size. */
 	tokens: number;
-	/** Session entry id of that reply, when the branch shows one. */
+	/** Session entry id of that reply, when it has one. */
 	identity?: string;
 }
 
@@ -47,13 +55,13 @@ interface LatchedReading extends PiProviderReading {
 const latchedReadingBySession = new Map<string, LatchedReading>();
 
 /**
- * The newest reply on the branch whose usage Pi anchors its live figure on
- * (see piMessageAnchorsLiveUsage): the entry id identifies the provider
- * reading. Undefined when the branch shows no such reply.
+ * The provider reading on the branch: the newest reply whose usage Pi anchors
+ * its live figure on (see piMessageAnchorsLiveUsage), with the prompt size it
+ * reported and its entry id. Undefined when the branch shows no such reply.
  */
-export function piProviderReadingIdentity(
+export function piProviderReadingFromBranch(
 	branchEntries: readonly unknown[] | null | undefined,
-): string | undefined {
+): PiProviderReading | undefined {
 	if (!branchEntries) return undefined;
 	for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
 		const entry = branchEntries[index] as
@@ -63,13 +71,15 @@ export function piProviderReadingIdentity(
 		if (!entry || typeof entry !== "object" || entry.type !== "message")
 			continue;
 		if (!piMessageAnchorsLiveUsage(entry.message)) continue;
-		return typeof entry.id === "string" && entry.id.length > 0
-			? entry.id
-			: undefined;
+		return {
+			tokens: piUsageInputTokens(extractAssistantUsage(entry.message)) ?? 0,
+			...(typeof entry.id === "string" && entry.id.length > 0
+				? { identity: entry.id }
+				: {}),
+		};
 	}
 	return undefined;
 }
-
 /** Record the provider reading beside the latch sample just stored. */
 export function recordPiLatchedReading(
 	sessionId: string,

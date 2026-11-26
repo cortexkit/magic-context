@@ -219,15 +219,17 @@ export interface Harness {
 	db: ReturnType<typeof createTestDb>;
 	lines: string[];
 	/**
-	 * Serve one pass at a provider reading of `tokens` (what message_end stored).
+	 * Serve one pass at a provider reading of `tokens`.
 	 * `live` is Pi's live figure (the reading plus Pi's estimate of the
 	 * messages after the reply that reported it; `tokens` by default).
-	 * `reportedBy` gives that usage to the assistant message with this id, so
-	 * the branch shows which reply reported the reading.
+	 * `stored` is the figure message_end stored for the session (`tokens` by
+	 * default; after a tool result Pi stores its live figure there).
+	 * `reportedBy` gives the reading to the assistant message with this id as
+	 * its usage, so the branch shows which reply reported it.
 	 */
 	pass: (
 		tokens: number,
-		options?: { live?: number; reportedBy?: string },
+		options?: { live?: number; stored?: number; reportedBy?: string },
 	) => Promise<unknown[]>;
 	/** Change the host's system prompt from the next pass on. */
 	setSystemPrompt: (prompt: string) => void;
@@ -294,6 +296,7 @@ export function createHarness(options: HarnessOptions): Harness {
 		async pass(tokens, passOptions = {}) {
 			const messages = session.messages();
 			const live = passOptions.live ?? tokens;
+			const stored = passOptions.stored ?? tokens;
 			if (passOptions.reportedBy !== undefined) {
 				const reply = messages[session.ids.indexOf(passOptions.reportedBy)] as
 					| { role?: string; usage?: Record<string, unknown> }
@@ -313,8 +316,8 @@ export function createHarness(options: HarnessOptions): Harness {
 			updateSessionMeta(db, sessionId, {
 				lastResponseTime: Date.now(),
 				cacheTtl: "59m",
-				lastContextPercentage: (tokens / WINDOW) * 100,
-				lastInputTokens: tokens,
+				lastContextPercentage: (stored / WINDOW) * 100,
+				lastInputTokens: stored,
 			});
 			const result = await handler({ messages }, {
 				...fakeContext(sessionId, process.cwd(), session.ids, messages),

@@ -242,7 +242,9 @@ describe("Pi emergency drop: the fixed part is capped by our count of the last r
 		const firstBatch = droppedCalls(h.statuses());
 		expect(firstBatch.length).toBeGreaterThan(0);
 		// Each step adds a result; a new reply reports the same value, and Pi's
-		// live figure adds its estimate of the messages after that reply.
+		// live figure adds its estimate of the messages after that reply. After
+		// a tool result message_end stores that live figure for the session too
+		// (as Oh My Pi does here), so only the reply carries the provider's own.
 		for (const [steps, trailing] of [
 			[21, 4_000],
 			[22, 8_000],
@@ -252,6 +254,7 @@ describe("Pi emergency drop: the fixed part is capped by our count of the last r
 			h.lines.length = 0;
 			await h.pass(reading, {
 				live: reading + trailing,
+				stored: reading + trailing,
 				reportedBy: `a-${steps - 1}`,
 			});
 			const plan = planLine(h.lines)?.line ?? "";
@@ -288,7 +291,7 @@ describe("Pi emergency drop: the fixed part is capped by our count of the last r
 		);
 	});
 
-	it("pi: the same reply read again stays latched even when the stored value and Pi's live figure moved", async () => {
+	it("pi: the same reply read again stays latched even when the value it carries, the stored figure and Pi's live figure moved", async () => {
 		const sessionId = "pi-860-latch-same-reply";
 		const session = buildSession(20);
 		const h = createHarness({ sessionId, session });
@@ -304,6 +307,7 @@ describe("Pi emergency drop: the fixed part is capped by our count of the last r
 		h.lines.length = 0;
 		await h.pass(reading + 1_500, {
 			live: reading + 6_000,
+			stored: reading + 6_000,
 			reportedBy: "a-19",
 		});
 		const plan = planLine(h.lines)?.line ?? "";
