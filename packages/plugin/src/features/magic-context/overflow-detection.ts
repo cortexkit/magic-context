@@ -54,7 +54,7 @@ export const OVERFLOW_PATTERNS: ReadonlyArray<RegExp> = [
     overflowPattern`context length is only ${TOKEN_COUNT} tokens?\b`, // vLLM
     /input length.*exceeds.*context length/i, // vLLM
     /\bContextWindowExceededError\b/i, // LiteLLM
-    overflowPattern`\bthe input \(${TOKEN_COUNT} tokens?\) is longer than the model's context length \(${TOKEN_COUNT} tokens?\)`, // LiteLLM
+    overflowPattern`\binput \(${TOKEN_COUNT} tokens?\) is longer than the model's context length \(${TOKEN_COUNT} tokens?\)`, // LiteLLM
     /prompt too long; exceeded (?:max )?context length/i, // Ollama explicit overflow
     overflowPattern`too large for model with ${TOKEN_COUNT} maximum context length`, // Mistral
     /model_context_window_exceeded/i, // z.ai non-standard finish_reason
@@ -108,7 +108,7 @@ const LIMIT_EXTRACTION_PATTERNS: ReadonlyArray<LimitExtractionPattern> = [
         provenance: "combined",
     }, // vLLM overflow
     {
-        pattern: overflowPattern`\bthe input \(${TOKEN_COUNT} tokens?\) is longer than the model's context length \((${TOKEN_COUNT}) tokens?\)`,
+        pattern: overflowPattern`\binput \(${TOKEN_COUNT} tokens?\) is longer than the model's context length \((${TOKEN_COUNT})(?: tokens?)?\)`,
         provenance: "combined",
     }, // LiteLLM
     {
@@ -383,10 +383,77 @@ export function detectOverflow(error: unknown): OverflowDetection {
         }
     }
 
+    matched ??= unitlessLiteLLMOverflow(error, message);
+
     if (!matched && !hasStatus413) {
         return { isOverflow: false };
     }
+    return overflowDetection(message, matched);
+}
 
+/**
+ * LiteLLM's refusal can give the model's limit without a unit: "input
+ * (485974 tokens) is longer than the model's context length (262144)" (issue
+ * 860). Without the unit the sentence is weaker evidence: other errors can
+ * quote it (an authentication failure echoing a request, a schema error
+ * echoing an example). So it counts only when
+ * - its own numbers describe an overflow (the input is larger than the limit),
+ * - every HTTP status the error carries, at any nesting level, is one a
+ *   too-large request gets (400 or 413), and
+ * - nothing in the error says it is an authentication or permission failure:
+ *   no such error type or name at any level, and no such wording in the text.
+ * Statuses are read from status fields only, never from the text, where a
+ * grouped count such as "401,974 tokens" would read as a status.
+ */
+const LITELLM_UNITLESS_OVERFLOW = overflowPattern`\binput \((${TOKEN_COUNT}) tokens?\) is longer than the model's context length \((${TOKEN_COUNT})\)`;
+const OVERFLOW_STATUSES: ReadonlySet<number> = new Set([400, 413]);
+const AUTH_FAILURE_TYPE = /auth|permission|forbidden|unauthori[sz]ed|api[_ ]?key/i;
+const AUTH_FAILURE_TEXT =
+    /unauthori[sz]ed|forbidden|(?:invalid|incorrect) api key|authentication|permission denied|access denied/i;
+
+/** Every status, type, code and name field of an error and the objects nested in it. */
+function errorFields(error: unknown): { statuses: number[]; kinds: string[] } {
+    const statuses: number[] = [];
+    const kinds: string[] = [];
+    if (!error || typeof error !== "object") return { statuses, kinds };
+    const seen = new Set<object>();
+    const queue: object[] = [error];
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || seen.has(current)) continue;
+        seen.add(current);
+        const record = current as Record<string, unknown>;
+        for (const key of ["status", "statusCode", "status_code"]) {
+            const value = record[key];
+            if (typeof value === "number") statuses.push(value);
+            else if (typeof value === "string" && /^\d{3}$/.test(value))
+                statuses.push(Number(value));
+        }
+        for (const key of ["type", "code", "name"]) {
+            const value = record[key];
+            if (typeof value === "string") kinds.push(value);
+        }
+        for (const value of Object.values(record)) {
+            if (value && typeof value === "object") queue.push(value);
+        }
+    }
+    return { statuses, kinds };
+}
+
+function unitlessLiteLLMOverflow(error: unknown, message: string): RegExp | undefined {
+    const match = LITELLM_UNITLESS_OVERFLOW.exec(message);
+    if (!match) return undefined;
+    const input = parseTokenCount(match[1]);
+    const limit = parseTokenCount(match[2]);
+    if (input === null || limit === null || input <= limit) return undefined;
+    const { statuses, kinds } = errorFields(error);
+    if (statuses.some((status) => !OVERFLOW_STATUSES.has(status))) return undefined;
+    if (kinds.some((kind) => AUTH_FAILURE_TYPE.test(kind))) return undefined;
+    if (AUTH_FAILURE_TEXT.test(message)) return undefined;
+    return LITELLM_UNITLESS_OVERFLOW;
+}
+
+function overflowDetection(message: string, matched: RegExp | undefined): OverflowDetection {
     const reportedLimit = parseReportedLimit(message);
     const reportedInputTokens = parseReportedInputTokens(message);
 
@@ -405,7 +472,7 @@ const INPUT_EXTRACTION_PATTERNS = [
     overflowPattern`input length\s*(${TOKEN_COUNT})`,
     overflowPattern`prompt was\s*(${TOKEN_COUNT})`,
     overflowPattern`messages resulted in\s*(${TOKEN_COUNT})\s*tokens?\b`,
-    overflowPattern`\bthe input \((${TOKEN_COUNT}) tokens?\) is longer than the model's context length \(${TOKEN_COUNT} tokens?\)`,
+    overflowPattern`\binput \((${TOKEN_COUNT}) tokens?\) is longer than the model's context length \(${TOKEN_COUNT}(?: tokens?)?\)`,
     overflowPattern`\(\s*(${TOKEN_COUNT})\s+in the messages,\s*${TOKEN_COUNT}\s+in the completion\s*\)`,
     overflowPattern`${ESTIMATED_REQUEST}\s+(${TOKEN_COUNT})`,
 ];
