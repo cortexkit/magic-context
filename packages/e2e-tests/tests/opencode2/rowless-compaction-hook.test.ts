@@ -24,7 +24,7 @@ import {
 // runs, and the stored history head must stay what the session last sent: the
 // two head messages (m[0] and m[1]) replay byte for byte on every later pass
 // that has no rebuild of its own, and a queued drop waits for a rebuild that
-// pays for a rewrite (a later real fold, or the force band under pressure).
+// pays for a rewrite (a later real fold, or pressure at 85% of the window and above).
 // Before the fix the hook stored a newly rendered head (the summary served in
 // m[1] moved into m[0]) and the next pass sent it, rewriting the provider's
 // cached prefix while it logged a cache hit.
@@ -390,7 +390,8 @@ async function scenario(arm: Arm) {
                     return [data.status, data.summary];
                 }),
             ).toEqual([["completed", CHECKPOINT_NOTE]]);
-            // Pressure pays for a rewrite of the conversation (the force band), not
+            // Pressure at 85% of the window and above pays for a rewrite of the
+            // conversation, not
             // of the history head: both head messages stay as served, the summary
             // stays in m[1], and the queued drop lands on that request.
             const pressureLog = sessionLog().slice(logged).join("\n");
@@ -482,7 +483,8 @@ async function scenario(arm: Arm) {
     300000,
 );
 
-// On 2.0.22 and 2.1.0 this guards the fix: the hook is asked before the row
+// On 2.0.22 and 2.1.0 this arm fails when the hook stores what it renders: there
+// the hook is asked before the row
 // exists. On 2.3.1+ the host usually records the row first once the plugin ahead
 // of Magic Context has held the call, so Magic Context answers it as a running
 // checkpoint and this arm passes with or without the fix there: on those hosts

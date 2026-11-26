@@ -181,8 +181,8 @@ test("a compaction request with a running checkpoint row that native admission d
         const before = baselineColumns(f);
         const id = await f.nativeFold(3, 0, "");
         // A real cut is in progress here: with native admission declined, the
-        // FoldOwner fallback materializes and keeps the baseline the checkpoint
-        // stands for, as it always has.
+        // fallback path renders the baseline the checkpoint stands for and stores
+        // it, as it always has.
         const after = baselineColumns(f);
         expect(after.cached_m0_bytes).not.toBe(before.cached_m0_bytes);
         expect(after.cached_m0_max_compartment_seq).toBe("1");
