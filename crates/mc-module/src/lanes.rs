@@ -397,7 +397,7 @@ pub(crate) fn drop_ops_with(
                 let Some(tag) = part.tag else {
                     continue;
                 };
-                let small_recent = small_recent_call(tool, tag, &recent);
+                let small_recent = small_recent_call(tool, tag, recent);
                 let ends = ends_transcript(entry, part, newest_mid);
                 if sealed {
                     // Its output can't be replaced; removing the call that
@@ -627,8 +627,6 @@ pub fn edit_marker(name: &str, value: &Value) -> Option<String> {
     ))
 }
 
-/// The newest results of each configured protected tool, plus all calls to
-/// person-facing tools. Their inputs can be the agent's only reply text.
 #[cfg(test)]
 thread_local! {
     // How many times this thread walked the index for its protected tool
@@ -636,6 +634,8 @@ thread_local! {
     pub(crate) static PROTECTED_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// The newest results of each configured protected tool, plus all calls to
+/// person-facing tools. Their inputs can be the agent's only reply text.
 pub fn protected_tool_parts(index: &Index, counts: &BTreeMap<String, u64>) -> BTreeSet<PartKey> {
     let _timing = crate::notice_cost_timing::span("lanes.protected_tool_parts");
     #[cfg(test)]
