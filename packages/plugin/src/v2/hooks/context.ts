@@ -166,7 +166,7 @@ import { CTX_NOTE_DESCRIPTION, withoutSmartNoteText } from "../../tools/ctx-note
 import { CTX_NOTE_LIGHT_DESCRIPTION } from "../../tools/light-descriptions";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
-import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
+import { hostMediaAsset, rememberHostMedia } from "../fold/host-media";
 import { HostFoldIdle } from "../fold/idle";
 import {
     reclaimInstructionRows,
@@ -2345,20 +2345,14 @@ export async function registerContext(context: V2Context) {
             .filter((row) => !retiredInstructions(row))
             .filter((row) => !present.has(row.id))
             .flatMap((row) =>
-                restoreRow(
-                    row,
-                    draft.model,
-                    hostUsesMediaAssets()
-                        ? {
-                              asset: hostMediaAsset,
-                              unavailable: (detail) =>
-                                  sessionLog(
-                                      draft.sessionID,
-                                      `v2 restore: attachment replaced by a note row=${detail.rowID} name=${JSON.stringify(detail.name ?? null)} mediaType=${detail.mediaType} reason=${JSON.stringify(detail.reason)}`,
-                                  ),
-                          }
-                        : undefined,
-                ),
+                restoreRow(row, draft.model, {
+                    asset: hostMediaAsset,
+                    unavailable: (detail) =>
+                        sessionLog(
+                            draft.sessionID,
+                            `v2 restore: attachment replaced by a note row=${detail.rowID} name=${JSON.stringify(detail.name ?? null)} mediaType=${detail.mediaType} reason=${JSON.stringify(detail.reason)}`,
+                        ),
+                }),
             );
         return [
             // Instruction rows the history boundary covers come first,

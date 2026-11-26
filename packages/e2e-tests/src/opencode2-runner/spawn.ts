@@ -294,6 +294,10 @@ export interface OpenCode2SpawnOptions {
 	defaultModelID?: string;
     visionModel?: boolean;
 	additionalModelIDs?: string[];
+	/** The host's `variants` list for every configured model (`[{ id: "high" }]`), so a
+	 * session can switch its reasoning variant; OpenCode 2.3 renders that switch as a system
+	 * message whose only content is the new effort level. */
+	modelVariants?: Array<{ id: string; settings?: Record<string, unknown> }>;
 	mockResponse?: MockResponse;
 	extraConfig?: Record<string, unknown>;
 	magicContextConfig?: Record<string, unknown>;
@@ -453,6 +457,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 								id,
 								{
 									name: id,
+									...(options.modelVariants ? { variants: options.modelVariants } : {}),
 	                                ...(options.visionModel ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
 									limit: {
 										// 2.0.5 required() is unchanged, but 16k minus a 32k output

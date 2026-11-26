@@ -13,7 +13,7 @@ import {
 } from "../../hooks/magic-context/tool-drop-target";
 import * as logger from "../../shared/logger";
 import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
-import { restoreRow } from "../fold/restore";
+import { restoreRow, unavailableAttachmentNote } from "../fold/restore";
 import type { StoreRow } from "../store-reader";
 import { adaptPayload } from "./payload";
 import { rawMessages } from "./store";
@@ -696,6 +696,100 @@ describe("adaptPayload", () => {
                 type: "text",
                 text: "§1§ what is in this image?",
             });
+        });
+    });
+
+    // Every supported OpenCode 2 host needs its own asset instance in a media part. A part
+    // without one (the flat `{ mediaType, data }` shape an older build restored, possibly
+    // replayed from a saved request) makes OpenCode 2.3 fail the request before any
+    // provider call, on every later turn. commit() is the last step before the host gets
+    // the request, so it replaces such a part with the restore's note.
+    describe("#given a media part that holds no host asset instance", () => {
+        class HostAsset {
+            constructor(
+                readonly source: { type: string; data: string; mediaType: string },
+                readonly mediaType: string,
+            ) {}
+        }
+        const flat = () => ({
+            type: "media",
+            mediaType: "image/png",
+            data: "iVBORw0KGgo=",
+            filename: "pixel.png",
+        });
+        const commitWith = (part: Record<string, unknown>) => {
+            const context = draft([
+                { id: "msg-user", role: "user", content: [{ type: "text", text: "look" }] },
+            ]);
+            const payload = adaptPayload(context);
+            payload.messages[0].parts.push(part);
+            payload.commit();
+            return context;
+        };
+
+        it("#then commit() sends the restore's note in its place, the same bytes every time, logged once", () => {
+            const warnings: string[] = [];
+            const logSpy = spyOn(logger, "sessionLog").mockImplementation((_session, message) => {
+                warnings.push(message);
+            });
+            let first: SessionContext | undefined;
+            let second: SessionContext | undefined;
+            try {
+                first = commitWith(flat());
+                second = commitWith(flat());
+            } finally {
+                logSpy.mockRestore();
+            }
+            expect(first!.messages[0]?.content).toEqual([
+                { type: "text", text: "look" },
+                { type: "text", text: unavailableAttachmentNote("pixel.png", "image/png") },
+            ]);
+            expect(JSON.stringify(second!.messages)).toBe(JSON.stringify(first!.messages));
+            const replaced = warnings.filter((line) => line.includes("no host asset"));
+            expect(replaced).toHaveLength(1);
+            expect(replaced[0]).toContain("part=1 mediaType=image/png");
+            expect(() => Message.make(first!.messages[0])).not.toThrow();
+        });
+
+        it("#then a plain-object copy of an asset that matches no host part gets the note too, keeping its cache hint", () => {
+            const context = commitWith({
+                type: "media",
+                media: { source: { type: "base64", data: "AAAA", mediaType: "image/jpeg" } },
+                cache: { type: "ephemeral" },
+            });
+            expect(context.messages[0]?.content[1]).toEqual({
+                type: "text",
+                text: unavailableAttachmentNote(undefined, "image/jpeg"),
+                cache: { type: "ephemeral" },
+            });
+        });
+
+        it("#then a part holding the host's asset, and every request without one, keep their exact bytes", () => {
+            const asset = new HostAsset(
+                { type: "base64", data: "iVBORw0KGgo=", mediaType: "image/png" },
+                "image/png",
+            );
+            const withAsset: V2Message[] = [
+                {
+                    id: "msg-image",
+                    role: "user",
+                    content: [
+                        { type: "text", text: "what is in this image?" },
+                        { type: "media", media: asset, filename: "pixel.png" },
+                    ],
+                },
+                ...toolTurn("msg-1", "call-1", "shell", "output"),
+            ];
+            const context = draft(withAsset);
+            const before = JSON.stringify(context.messages);
+            adaptPayload(context).commit();
+            expect(JSON.stringify(context.messages)).toBe(before);
+            expect(context.messages[0]?.content[1]?.media).toBe(asset);
+
+            const plain = toolTurn("msg-2", "call-2", "shell", "output");
+            const textOnly = draft(structuredClone(plain));
+            adaptPayload(textOnly).commit();
+            expect(JSON.stringify(textOnly.messages)).toBe(JSON.stringify(plain));
         });
     });
 

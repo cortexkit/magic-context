@@ -9,9 +9,11 @@ import { markServedShapeRepair } from "../../hooks/magic-context/served-shape-re
 import { getEmptyImageParts } from "../../hooks/magic-context/strip-content";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
+import { isRecord } from "../../shared/record-type-guard";
 import { hostMediaAsset } from "../fold/host-media";
 import type { SupersessionRow } from "../fold/instruction-supersession";
 import { nativeRowID } from "../fold/native-replay";
+import { unavailableAttachmentNote } from "../fold/restore";
 import { isToolError, toolErrorText, toolStateContent } from "../tool-result";
 import { stripCopiedTagNotation } from "./copied-tag-notation";
 import type { SessionContext, V2Message } from "./types";
@@ -35,6 +37,36 @@ function rejectContentPart(message: MessageLike, part: Part, reason: string): vo
     const text = `v2 context omitted a content part the host would reject: type=${type} message=${String(message.info.id ?? "<head>")} reason=${reason}`;
     if (typeof message.info.sessionID === "string") sessionLog(message.info.sessionID, text);
     else log(text);
+}
+
+/** Session, message and part positions whose media replacement has been logged. */
+const mediaReplacementLogged = new Set<string>();
+
+/**
+ * The note that stands in for a media part holding no host asset. It depends only on the
+ * part, so every request that still carries such a part gets the same bytes and the
+ * prompt cache keeps the corrected prefix. Logged once per part.
+ */
+function mediaWithoutHostAsset(message: MessageLike, partIndex: number, part: Part): Part {
+    const media = isRecord(part.media) ? part.media : undefined;
+    const source = isRecord(media?.source) ? media.source : undefined;
+    const mediaType = [part.mediaType, media?.mediaType, source?.mediaType].find(
+        (value): value is string => typeof value === "string",
+    );
+    const name = typeof part.filename === "string" ? part.filename : undefined;
+    const sessionID = typeof message.info.sessionID === "string" ? message.info.sessionID : "";
+    const key = JSON.stringify([sessionID, message.info.id ?? null, partIndex]);
+    if (!mediaReplacementLogged.has(key)) {
+        mediaReplacementLogged.add(key);
+        const text = `v2 context replaced a media part that has no host asset by a note: message=${String(message.info.id ?? "<head>")} part=${partIndex} mediaType=${mediaType ?? "unknown"} fields=${Object.keys(part).join(",")}`;
+        if (sessionID) sessionLog(sessionID, text);
+        else log(text);
+    }
+    return {
+        type: "text",
+        text: unavailableAttachmentNote(name, mediaType ?? "unknown media type"),
+        ...(part.cache === undefined ? {} : { cache: part.cache }),
+    };
 }
 
 /** Sessions whose empty-text omission has been logged in this process. */
@@ -581,6 +613,18 @@ export function adaptPayload(
                                 ? hostParts.get(contentKey(clean))
                                 : undefined;
                         const projected = original ?? clean;
+                        // The last check before the host gets the request: every request,
+                        // from a managed pass or a replay of a saved one, passes here. A media
+                        // part must hold the host's own asset instance. One that does not (the
+                        // flat `{ mediaType, data }` shape an older build's restore produced,
+                        // or a plain copy of an asset) makes the host fail the request before
+                        // any provider call, on every later turn too. It is replaced by the
+                        // same note a restore uses for an attachment it cannot rebuild, so the
+                        // session keeps working.
+                        if (projected.type === "media" && !isHostInstance(projected.media)) {
+                            content.push(mediaWithoutHostAsset(message, partIndex, projected));
+                            continue;
+                        }
                         if (imageOmissions.get(message.info.id ?? "")?.has(partIndex))
                             emptyImages.add(projected);
                         content.push(projected);

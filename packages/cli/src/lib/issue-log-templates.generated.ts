@@ -583,6 +583,7 @@ const TEMPLATE_DATA = [
 "mc-module: pending drops held session=\x01 reason=no_originating_cache_bust scheduler=\x01 historian_active=\x01",
 "OMP structural comparison skipped: \x01; stale prepared requests are not detected on this pass; session=\x01",
 "served check: content changed with the same shape first_index=\x01 seen_by=\x01 kind=replay permitted=\x01 host=\x01",
+"v2 context replaced a media part that has no host asset by a note: message=\x01 part=\x01 mediaType=\x01 fields=\x01",
 "WARNING unwritten served-ledger tail session=\x01 file=\x01 ignored_zero_bytes=\x01 retained_bytes=\x01 total_bytes=\x01\x020s,1p",
 "historian deferred: exact ordinals not ready (chunk start unreadable); a later pass starts it again",
 "Pi note-nudge: latest user message has no resolved SessionEntry id; deferring delivery to next pass",

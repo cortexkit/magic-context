@@ -1,13 +1,10 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { Media } from "@opencode/ai/media";
+import { Message } from "@opencode/ai/schema/messages";
 import type { StoreRow } from "../store-reader";
-import {
-    hostMediaAsset,
-    hostUsesMediaAssets,
-    rememberHostMedia,
-    resetHostMediaForTests,
-} from "./host-media";
+import { hostMediaAsset, rememberHostMedia, resetHostMediaForTests } from "./host-media";
 import { type RestoreMedia, restoreRow, unavailableAttachmentNote } from "./restore";
 
 const MODEL = { providerID: "openai", id: "mock-model" };
@@ -30,8 +27,7 @@ const imageRow = (): StoreRow =>
         },
     }) as unknown as StoreRow;
 
-// Stand-ins for the host's classes. The host's `Asset` takes `{ source }`; its message
-// class is an Effect Schema class whose AST names "Media.Asset" on 2.0.15 and later.
+// Stand-ins for the host's classes. The host's `Asset` takes `{ source }`.
 class HostAsset {
     readonly source: { mediaType: string };
     readonly mediaType: string;
@@ -41,22 +37,33 @@ class HostAsset {
     }
 }
 class HostMessage {
-    static ast = { annotations: { expected: "Media.Asset" } };
     constructor(readonly content: unknown[]) {}
 }
 
 afterEach(() => resetHostMediaForTests());
 
 describe("restoreRow attachments", () => {
-    it("keeps the plain media shape when no host media builder is given (hosts before 2.0.15)", () => {
+    // Every supported OpenCode 2 host (2.0.22 and later) needs its own asset instance in a
+    // media part; the plain `{ mediaType, data }` part makes 2.3.x fail the whole request
+    // before any provider call. It must never be produced, with or without a builder.
+    it("never produces the plain media part: with nothing learned from the host, the attachment becomes the note", () => {
         const [message] = restoreRow(imageRow(), MODEL);
-        expect(message?.content[1]).toEqual({
-            type: "media",
-            mediaType: "image/png",
-            data: "iVBORw0KGgo=",
-            filename: "pixel.png",
-            metadata: undefined,
-        });
+        expect(message?.content).toEqual([
+            { type: "text", text: "what is in this image?" },
+            { type: "text", text: unavailableAttachmentNote("pixel.png", "image/png") },
+        ]);
+    });
+
+    it("rebuilds the attachment in the host's own asset class by default once a host message was seen", () => {
+        // The host's own message class, as the context hook sees it in a draft without any
+        // attachment: the asset is decoded through the host's message schema.
+        rememberHostMedia([
+            Message.make({ role: "user", content: [{ type: "text", text: "hi" }] }),
+        ]);
+        const part = restoreRow(imageRow(), MODEL)[0]?.content[1];
+        expect(part?.media).toBeInstanceOf(Media.Asset);
+        expect(part?.media).toEqual(Media.base64("iVBORw0KGgo=", "image/png"));
+        expect(Object.keys(part ?? {})).toEqual(["type", "media", "filename", "metadata"]);
     });
 
     it("builds the part around the host's asset, in the host's own key order", () => {
@@ -121,26 +128,15 @@ describe("host media classes", () => {
             data: "AAAA",
             mediaType: "image/png",
         });
-        expect(hostUsesMediaAssets()).toBe(true);
     });
 
-    it("detects an asset-shaped host from its message schema before any attachment is seen", () => {
+    it("reports why no asset could be built when the host's message classes show no media member", () => {
         rememberHostMedia([new HostMessage([{ type: "text", text: "hello" }])]);
-        expect(hostUsesMediaAssets()).toBe(true);
-        // No host asset was seen and this stand-in schema has no decode path, so the reason
+        // No host asset was seen and this stand-in has no content schema, so the reason
         // names why each of the two rebuild methods failed.
         expect(hostMediaAsset("AAAA", "image/png")).toBe(
-            "no Media.Asset seen in this process; host content schema has no union members",
+            "no Media.Asset seen in this process; no host message schema with a media member seen",
         );
-    });
-
-    it("treats a host whose message schema never names Media.Asset as the plain-shape host", () => {
-        class OlderHostMessage {
-            static ast = { annotations: { identifier: "LLM.Message" } };
-            readonly content: unknown[] = [];
-        }
-        rememberHostMedia([new OlderHostMessage()]);
-        expect(hostUsesMediaAssets()).toBe(false);
     });
 });
 
@@ -174,6 +170,59 @@ describe("host media schema decoding", () => {
             mediaType: "image/png",
         });
     }
+
+    // OpenCode 2.3 has one class per role, and its system and tool classes have no media
+    // member. A draft can start with a system message (the effort message a reasoning
+    // variant switch renders), and that may be the first draft a fresh process sees.
+    it("finds the schema on a later message class when the draft starts with a system message that has no media member", () => {
+        const textMember = { fields: { type: { ast: { literal: "text" } } } };
+        const effortMember = { fields: { type: { ast: { literal: "effort" } } } };
+        class SystemMessage extends HostMessage {
+            static ast = { annotations: { identifier: "LLM.SystemMessage" } };
+            static fields = { content: { value: { members: [textMember, effortMember] } } };
+        }
+        // Effect schemas can be callable: the media field schema here is a function.
+        const assetSchema = Object.assign(() => undefined, {
+            ast: {
+                encoding: [
+                    {
+                        transformation: {
+                            decode: {
+                                _tag: "Transform",
+                                transform: (encoded: { source: { mediaType: string } }) =>
+                                    new HostAsset(encoded),
+                            },
+                        },
+                    },
+                ],
+            },
+        });
+        class UserMessage extends HostMessage {
+            static fields = {
+                content: {
+                    value: {
+                        members: [
+                            textMember,
+                            {
+                                fields: {
+                                    type: { ast: { literal: "media" } },
+                                    media: assetSchema,
+                                },
+                            },
+                        ],
+                    },
+                },
+            };
+        }
+        rememberHostMedia([
+            new SystemMessage([{ type: "effort", effort: "high" }]),
+            new UserMessage([{ type: "text", text: "hello" }]),
+        ]);
+        expectImageAsset();
+        const part = restoreRow(imageRow(), MODEL)[0]?.content[1];
+        expect(part?.type).toBe("media");
+        expect(part?.media).toBeInstanceOf(HostAsset);
+    });
 
     it("rebuilds an asset through the legacy run getter without a live image", () => {
         rememberSchema({

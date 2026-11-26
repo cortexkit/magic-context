@@ -1138,6 +1138,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/restored-image-system-first-draft.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: an image restored from before a host compaction checkpoint, after a host restart whose first draft starts with a system message (a reasoning-variant switch the host renders as an effort message). OpenCode 2.3 has one message class per role and its system class has no media member; the restore must still hand the host its own Media.Asset, never the flat { mediaType, data } part that makes 2.3.2 fail every later turn before any provider call. The v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/execute-threshold-model.test.ts",
             "tier": "excluded",
             "invocation": {

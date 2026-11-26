@@ -9,7 +9,7 @@ import {
     type V2StoreReader,
 } from "../store-reader";
 import { supersededInstructionIDs } from "./code-mode-catalog";
-import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "./host-media";
+import { rememberHostMedia } from "./host-media";
 import { retiredLiveInstructionIDs } from "./instruction-supersession";
 import type { NativeFoldCache, NativeRowRecord } from "./memory-cache";
 import { encodeNative, NativeReplayUnavailable, reviveNative } from "./native-codec";
@@ -34,7 +34,7 @@ import {
     validReplayState,
 } from "./native-replay-v3";
 import { foldDigest, stripCheckpointRecentContext } from "./owner";
-import { restoreRow } from "./restore";
+import { HOST_RESTORE_MEDIA, restoreRow } from "./restore";
 import { isCheckpointNote } from "./summary";
 
 interface NativeTail {
@@ -1089,16 +1089,7 @@ export class NativeFoldReplay {
         return this.replayInput(args, replay);
     }
     private rendered(row: StoreRow, model: SessionContext["model"]): V2Message[] {
-        return restoreRow(
-            row,
-            model,
-            hostUsesMediaAssets()
-                ? {
-                      asset: hostMediaAsset,
-                      unavailable: () => {},
-                  }
-                : undefined,
-        );
+        return restoreRow(row, model, HOST_RESTORE_MEDIA);
     }
     private record(
         row: Pick<StoreRow, "id" | "seq" | "type">,
