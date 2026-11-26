@@ -188,8 +188,8 @@ test("progressing timeouts do not trip the no-progress breaker", async () => {
     expect(result.stopReason).not.toBe("timeout-circuit-breaker");
 });
 
-test("two failed attempts defer unmapped memories across runs", async () => {
-    const { args } = fixture(5);
+test("repeated prompt aborts keep unmapped memories eligible across runs", async () => {
+    const { args, memories } = fixture(5);
     args.client = {
         session: {
             create: async () => ({ data: { id: "failed-child" } }),
@@ -204,11 +204,11 @@ test("two failed attempts defer unmapped memories across runs", async () => {
     expect(failed.failure).toBeInstanceOf(Error);
     expect((failed.failure as Error).message).toContain("MessageAbortedError");
     expect(failed.failureStage).toBe("prompt");
-    await mapMemories(args);
-    expect((await mapMemories(args)).deferred).toBe(true);
+    expect((await mapMemories(args)).failureStage).toBe("prompt");
+    expect((await mapMemories(args)).failureStage).toBe("prompt");
     expect(
         selectMapMemoryInputs(args.db, args.projectIdentity, args.sessionDirectory),
-    ).toHaveLength(0);
+    ).toHaveLength(5);
     const newer = insertMemory(args.db, {
         projectPath: args.projectIdentity,
         category: "ARCHITECTURE",
@@ -216,19 +216,10 @@ test("two failed attempts defer unmapped memories across runs", async () => {
         sourceSessionId: "fixture",
     });
     expect(
-        selectMapMemoryInputs(args.db, args.projectIdentity, args.sessionDirectory).map(
-            (m) => m.id,
-        ),
-    ).toEqual([newer.id]);
-    const originalNow = Date.now;
-    Date.now = () => originalNow() + 3_600_001;
-    try {
-        expect(
-            selectMapMemoryInputs(args.db, args.projectIdentity, args.sessionDirectory),
-        ).toHaveLength(6);
-    } finally {
-        Date.now = originalNow;
-    }
+        selectMapMemoryInputs(args.db, args.projectIdentity, args.sessionDirectory)
+            .map((m) => m.id)
+            .sort((a, b) => a - b),
+    ).toEqual([...memories.map((m) => m.id), newer.id]);
 });
 
 test("hidden carrier salvages emitted mappings before closing on abort", async () => {

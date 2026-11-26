@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,7 @@ import { runMigrations } from "../migrations";
 import { advanceSessionActivity } from "../session-activity";
 import { recordSessionProjectIdentity } from "../session-project-storage";
 import { initializeDatabase } from "../storage-db";
+import { setDreamState } from "./storage-dream-state";
 import {
     evaluateTaskGate,
     getDreamTaskBacklog,
@@ -238,6 +240,69 @@ describe("dream task backlog probes", () => {
             ).toEqual({ pending: 0, total: 0 });
         } finally {
             Date.now = originalNow;
+        }
+    });
+
+    test.each([
+        "time",
+        "text",
+        "category",
+    ] as const)("a deferred mapping only opens the gate and backlog when %s makes it eligible", (reset) => {
+        db = freshDb();
+        const project = "git:map-retry-gate";
+        let now = Date.now();
+        const clock = spyOn(Date, "now").mockImplementation(() => now);
+        try {
+            const content = "Mapping will try again once eligible.";
+            const memory = insertMemory(db, {
+                projectPath: project,
+                category: "ARCHITECTURE",
+                content,
+            });
+            const context = {
+                db,
+                projectIdentity: project,
+                lastRunAt: null,
+                promotionThreshold: 3,
+            };
+            const deferUntil = now + 3_600_000;
+            setDreamState(
+                db,
+                `map-memories:retry:${project}`,
+                JSON.stringify({
+                    [memory.id]: {
+                        content: createHash("sha256")
+                            .update(`ARCHITECTURE\n${content}`)
+                            .digest("hex"),
+                        failures: 2,
+                        deferUntil,
+                    },
+                }),
+            );
+            const backlog = () =>
+                getDreamTaskBacklogs(db!, project, ["map-memories"])["map-memories"];
+            expect(backlog()).toEqual({ pending: 0, total: 1 });
+            expect(evaluateTaskGate("map-memories", context)).toBe(false);
+
+            if (reset === "time") {
+                now = deferUntil - 1;
+                expect(backlog()).toEqual({ pending: 0, total: 1 });
+                now = deferUntil;
+            } else if (reset === "text") {
+                db.prepare("UPDATE memories SET content = ? WHERE id = ?").run(
+                    `${content} Edited.`,
+                    memory.id,
+                );
+            } else {
+                db.prepare("UPDATE memories SET category = ? WHERE id = ?").run(
+                    "PROJECT_RULES",
+                    memory.id,
+                );
+            }
+            expect(backlog()).toEqual({ pending: 1, total: 1 });
+            expect(evaluateTaskGate("map-memories", context)).toBe(true);
+        } finally {
+            clock.mockRestore();
         }
     });
     test("map and classify probes match seeded candidate counts", () => {
@@ -673,7 +738,9 @@ describe("evaluateTaskGate", () => {
             content: "An expired memory does not count toward the floor.",
             expiresAt: Date.now() - 1,
         });
-        expect(getDreamTaskBacklogs(db, project, ["classify-memories"])["classify-memories"]).toEqual({
+        expect(
+            getDreamTaskBacklogs(db, project, ["classify-memories"])["classify-memories"],
+        ).toEqual({
             pending: 0,
             total: 9,
         });
@@ -684,7 +751,9 @@ describe("evaluateTaskGate", () => {
             content: "The tenth live memory has already been classified.",
         });
         setMemoryClassification(db, tenth.id, { importance: 70 });
-        expect(getDreamTaskBacklogs(db, project, ["classify-memories"])["classify-memories"]).toEqual({
+        expect(
+            getDreamTaskBacklogs(db, project, ["classify-memories"])["classify-memories"],
+        ).toEqual({
             pending: 1,
             total: 10,
         });
