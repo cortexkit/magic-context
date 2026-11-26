@@ -15,7 +15,7 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
     let module = test_module(
         Config::Files(settings),
         Some(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap()),
-        Some(Store::open(&dir.path().join("mode3.db")).unwrap()),
+        Some(Store::open(&dir.path().join("sessions.db")).unwrap()),
     );
     module
         .setup(
@@ -49,7 +49,7 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
         json!({
             "opened": true,
             "context_db_schema_version": crate::context_db::SCHEMA_VERSION,
-            "mode3_db_schema_version": crate::store::SCHEMA_VERSION,
+            "sessions_db_schema_version": crate::store::SCHEMA_VERSION,
         })
     );
     assert_eq!(metrics["sessions"], json!({"count": 1}));
@@ -59,7 +59,7 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
         "session_count",
         "bus_connected",
         "context_db_schema_version",
-        "mode3_db_schema_version",
+        "sessions_db_schema_version",
         "dreamer_enabled",
         "settings_source",
     ];
@@ -77,7 +77,7 @@ async fn health_hook_reports_the_open_stores_and_in_memory_state() {
         crate::context_db::SCHEMA_VERSION
     );
     assert_eq!(
-        metrics["mode3_db_schema_version"],
+        metrics["sessions_db_schema_version"],
         crate::store::SCHEMA_VERSION
     );
     assert_eq!(metrics["dreamer_enabled"], false);
@@ -97,7 +97,7 @@ async fn health_remains_healthy_while_a_statement_holds_the_setup_lock() {
     let module = test_module(
         Settings::default(),
         Some(ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap()),
-        Some(Store::open(&dir.path().join("mode3.db")).unwrap()),
+        Some(Store::open(&dir.path().join("sessions.db")).unwrap()),
     );
     let idle = module.health(false);
     let statement = module.inner.set_up.lock().unwrap();
@@ -117,7 +117,7 @@ async fn health_hook_degrades_when_a_store_was_not_opened() {
     let module = test_module(
         Settings::default(),
         None,
-        Some(Store::open(&dir.path().join("mode3.db")).unwrap()),
+        Some(Store::open(&dir.path().join("sessions.db")).unwrap()),
     );
     let report = Handler::new(module).health().await;
 
@@ -128,7 +128,7 @@ async fn health_hook_degrades_when_a_store_was_not_opened() {
     assert_eq!(metrics["store"]["context_db_schema_version"], Value::Null);
     assert_eq!(metrics["context_db_schema_version"], Value::Null);
     assert_eq!(
-        metrics["store"]["mode3_db_schema_version"],
+        metrics["store"]["sessions_db_schema_version"],
         crate::store::SCHEMA_VERSION
     );
 }
@@ -219,7 +219,7 @@ fn managed_test_module(dir: &std::path::Path) -> Module<SubcRunnerClient> {
     test_module(
         Config::Files(Loader::with_user_path(user).managed(dir)),
         Some(ContextDb::create_for_tests(&dir.join("context.db")).unwrap()),
-        Some(Store::open(&dir.join("mode3.db")).unwrap()),
+        Some(Store::open(&dir.join("sessions.db")).unwrap()),
     )
 }
 

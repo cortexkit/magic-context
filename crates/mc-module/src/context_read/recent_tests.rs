@@ -223,7 +223,7 @@ pub(super) struct Fixture {
 
 impl Fixture {
     /// A module over a fresh context.db, where `session` has three
-    /// summaries (messages 1-2, 3-4 and 5-6), and a fresh mode3.db, where
+    /// summaries (messages 1-2, 3-4 and 5-6), and a fresh sessions.db, where
     /// each of `saved` has saved state.
     pub fn new(session: &str, saved: &[SessionRef]) -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -246,7 +246,7 @@ impl Fixture {
                 .unwrap();
             }
         });
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         for key in saved {
             store
                 .save(

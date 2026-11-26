@@ -158,9 +158,15 @@ else
     echo "staged build SHA: $staged_sha (compare with the build source; use --source-ref REF to enforce)"
 fi
 fences=$("$staged" --print-fences) || die "staged binary does not report supported fences"
-[[ "$fences" =~ ^context\.db=([0-9]+)[[:space:]]mode3\.db=([0-9]+)$ ]] || die "invalid --print-fences output: $fences"
+previous_store_name=mode3.db
+current_store_name=sessions.db
+fence_pattern='^context\.db=([0-9]+)[[:space:]]([a-z0-9]+\.db)=([0-9]+)$'
+[[ "$fences" =~ $fence_pattern ]] || die "invalid --print-fences output: $fences"
 context_supported=${BASH_REMATCH[1]}
-store_supported=${BASH_REMATCH[2]}
+store_name=${BASH_REMATCH[2]}
+store_supported=${BASH_REMATCH[3]}
+[[ "$store_name" == "$current_store_name" || "$store_name" == "$previous_store_name" ]] ||
+    die "invalid --print-fences output: $fences"
 context_path=$(python3 - <<'PY'
 import os
 from pathlib import Path
@@ -181,27 +187,70 @@ else:
 print(path)
 PY
 )
-mode3_path=${MAGIC_CONTEXT_MODE3_STORE:-$(dirname "$context_path")/mode3.db}
-read_version() {
+data_dir=$(dirname "$context_path")
+previous_store="$data_dir/$previous_store_name"
+current_default="$data_dir/$current_store_name"
+current_store=${MAGIC_CONTEXT_SESSIONS_STORE:-$current_default}
+present() { [[ -e "$1" || -L "$1" ]]; }
+if [[ "$current_store" != "$current_default" ]]; then
+    override_previous="$(dirname "$current_store")/$previous_store_name"
+    if present "$previous_store" || present "$override_previous" || [[ "$store_name" == "$previous_store_name" ]]; then
+        die "unset MAGIC_CONTEXT_SESSIONS_STORE before switching session store names; the two builds must use the same data directory"
+    fi
+fi
+if present "$previous_store" && present "$current_default"; then
+    die "both $previous_store and $current_default exist; determine which holds the session state before placing"
+fi
+target_store=$current_store
+other_store=$previous_store
+if [[ "$store_name" == "$previous_store_name" ]]; then
+    target_store=$previous_store
+    other_store=$current_store
+fi
+rename_from=
+store_path=$target_store
+if present "$other_store"; then
+    rename_from=$other_store
+    store_path=$rename_from
+    ((no_restart == 0)) || die "--no-restart cannot rename $rename_from to $target_store: the old process would keep running with the store open under the old name"
+fi
+read_version() (
     local path=$1 sql=$2 value
+    local scratch="" finished=0
     [[ -f "$path" ]] || die "missing live store: $path"
-    # A WAL-mode store closed cleanly has no -wal/-shm files, and a read-only
-    # connection cannot create them (SQLITE_CANTOPEN). With no -wal file every
-    # committed page is in the main file, so an immutable read sees the same data.
-    if ! value=$(sqlite3 -readonly "$path" "$sql" 2>/dev/null); then
-        [[ ! -e "$path-wal" ]] || die "cannot read schema version from $path"
+    if present "$path-wal" && { ((dry_run)) || [[ -n "$rename_from" ]] || ! present "$path-shm"; }; then
+        # Even a read-only WAL connection can create shared memory. Inspect a
+        # disposable copy instead; preflight must not create a sidecar.
+        scratch=$(mktemp -d) || die "cannot make a temporary schema probe"
+        trap 'status=$?
+        if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
+            printf "%s\n" "$0: exited before successful completion" >&2
+            status=1
+        fi
+        rm -rf "$scratch" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+        exit "$status"' EXIT
+        cp "$path" "$scratch/store.db" && cp "$path-wal" "$scratch/store.db-wal" ||
+            die "cannot copy $path and its WAL for a read-only schema probe"
+        path=$scratch/store.db
+    fi
+    # With no WAL every committed page is in the main file. An immutable
+    # reader can check it without creating any SQLite sidecars.
+    if present "$path-wal"; then
+        value=$(sqlite3 -readonly "$path" "$sql") || die "cannot read schema version from $path"
+    else
         value=$(sqlite3 "file:$path?immutable=1" "$sql") || die "cannot read schema version from $path"
     fi
     [[ "$value" =~ ^[0-9]+$ ]] || die "invalid schema version from $path: $value"
     printf '%s\n' "$value"
-}
+    finished=1
+)
 context_live=$(read_version "$context_path" 'SELECT COALESCE(MAX(version), 0) FROM schema_migrations;')
 store_live=0
-if [[ -e "$mode3_path" ]]; then
-    store_live=$(read_version "$mode3_path" 'PRAGMA user_version;')
+if present "$store_path"; then
+    store_live=$(read_version "$store_path" 'PRAGMA user_version;')
 fi
-echo "context.db: live=$context_live staged=$context_supported; mode3.db: live=$store_live staged=$store_supported"
-((10#$context_supported >= 10#$context_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; mode3.db live=$store_live staged=$store_supported"
+echo "context.db: live=$context_live staged=$context_supported; $store_name: live=$store_live staged=$store_supported"
+((10#$context_supported >= 10#$context_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; $store_name live=$store_live staged=$store_supported"
 # Up to version 105 the standalone plugin migrated context.db, and ck-mc
 # opened it only at exactly the version it was built for: placing such a
 # build over an older database would leave it refusing to start. From 106 on
@@ -215,16 +264,18 @@ else
     ((10#$context_live >= released_plugin_version)) || die "context.db is at $context_live; ck-mc migrates only from $released_plugin_version, the released 0.49 plugin's version: open it once with Magic Context 0.49 first"
     ((10#$context_live == 10#$context_supported)) || echo "context.db: ck-mc migrates it from $context_live to $context_supported when it starts"
 fi
-((10#$store_supported >= 10#$store_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; mode3.db live=$store_live staged=$store_supported"
+((10#$store_supported >= 10#$store_live)) || die "rollback refused: context.db live=$context_live staged=$context_supported; $store_name live=$store_live staged=$store_supported"
 
 bin_dir=$HOME/.local/share/cortexkit/bin
 deployed=$bin_dir/ck-mc
 [[ -f "$deployed" && -x "$deployed" ]] || die "missing deployed ck-mc: $deployed"
 deployed_sha=$(sha_from "$deployed")
 deployed_fences=$("$deployed" --print-fences) || die "deployed binary does not report supported fences"
-if [[ "$deployed_fences" =~ ^context\.db=[0-9]+[[:space:]]store\.db=[0-9]+$ ]]; then
+[[ "$deployed_fences" =~ $fence_pattern ]] || die "invalid deployed --print-fences output: $deployed_fences"
+deployed_store_name=${BASH_REMATCH[2]}
+if [[ "$deployed_store_name" == store.db ]]; then
     echo "deployed build uses the old store.db; old store.db isn't checked for this placement (left untouched)"
-elif [[ ! "$deployed_fences" =~ ^context\.db=[0-9]+[[:space:]]mode3\.db=[0-9]+$ ]]; then
+elif [[ "$deployed_store_name" != "$current_store_name" && "$deployed_store_name" != "$previous_store_name" ]]; then
     die "invalid deployed --print-fences output: $deployed_fences"
 fi
 # Every pin the deployed build serves must still be honoured by the staged one
@@ -299,8 +350,20 @@ PY
 fi
 rollback=$bin_dir/staging/ck-mc.rollback.$deployed_sha
 printf -v rollback_cmd 'cp %q %q && ck module restart magic-context' "$rollback" "$deployed"
+if [[ -n "$rename_from" ]]; then
+    # A binary-only rollback would reopen the wrong file name. Let placement
+    # stop the module and switch the store name back with the binary.
+    printf -v rollback_cmd 're-place the rollback binary %q using this script (reconcile the shared staging declaration first, if needed)' "$rollback"
+fi
 if ((dry_run)); then
-    echo "dry-run: would preserve $deployed as $rollback (without overwriting), atomically place $staged, restart magic-context, verify inode/version/digest/health"
+    echo "dry-run: would preserve $deployed as $rollback (without overwriting)"
+    if [[ -n "$rename_from" ]]; then
+        echo "dry-run: would stop magic-context, wait for its PID to exit and store handles to close, rename $rename_from to $target_store (with any -wal and -shm files), atomically place $staged, start magic-context and verify inode/version/digest/health"
+    elif ((no_restart)); then
+        echo "dry-run: no store rename needed; would atomically place $staged and verify it on disk without restarting"
+    else
+        echo "dry-run: no store rename needed; would atomically place $staged, restart magic-context, verify inode/version/digest/health"
+    fi
     finished=1
     exit 0
 fi
@@ -324,7 +387,166 @@ rm -f "$tmp" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_stat
 exit "$status"' EXIT
 cp -p "$staged" "$tmp"
 [[ $(shasum -a 256 "$tmp" | cut -d' ' -f1) == "$staged_digest" ]] || die "staged binary changed during placement"
-mv -f "$tmp" "$deployed"
+poll_seconds=${PLACE_CK_MC_POLL_SECONDS:-2}
+module_pid() {
+    local data
+    data=$(ck --json provenance magic-context) || return 2
+    python3 -c '
+import json, sys
+modules = json.load(sys.stdin)["modules"]
+if not isinstance(modules, list):
+    sys.exit("invalid module list")
+for module in modules:
+    if module["module_id"] == "magic-context":
+        observed = module["daemon_observed"]
+        if observed is None:
+            pid = None
+        elif "pid" in observed:
+            pid = observed["pid"]
+        elif observed.get("running_image", {}).get("status") == "unavailable":
+            pid = None
+        else:
+            sys.exit("missing magic-context PID or stopped state")
+        if pid is not None:
+            if type(pid) is not int or pid < 1:
+                sys.exit("invalid magic-context PID")
+            print(pid)
+        break
+else:
+    sys.exit("missing magic-context module entry")' <<< "$data" || return 3
+}
+stores_are_closed() {
+    local path suffix output status=0
+    local paths=()
+    for path in "$context_path" "$previous_store" "$current_store"; do
+        for suffix in '' -wal -shm .lock; do
+            if present "$path$suffix"; then paths+=("$path$suffix"); fi
+        done
+    done
+    ((${#paths[@]})) || { echo "no store files found to check"; return 1; }
+    output=$(lsof -nP -Fpcn -- "${paths[@]}" 2>&1) || status=$?
+    # lsof exits 1 without output when no process holds any named file. A
+    # warning, inability to inspect, or an actual holder cannot prove that.
+    if [[ "$status" == 1 && -z "$output" ]]; then return 0; fi
+    printf 'store handles could not be ruled out (lsof exit %s): %s\n' "$status" "$output"
+    return 1
+}
+start_original() {
+    ck module start magic-context || echo "place-ck-mc: could not start the original magic-context; run ck module start magic-context" >&2
+}
+wait_stopped() {
+    local before=$1 detail holders
+    for _ in $(seq 1 60); do
+        detail=
+        if [[ -n "$before" ]] && ! process_is_gone "$before"; then
+            detail="cannot confirm magic-context PID $before exited"
+        fi
+        if ! holders=$(stores_are_closed); then detail="${detail:+$detail; }$holders"; fi
+        [[ -n "$detail" ]] || return 0
+        sleep "$poll_seconds"
+    done
+    echo "$detail"
+    return 1
+}
+process_is_gone() {
+    local pid_info status=0
+    pid_info=$(ps -p "$1" -o pid= 2>&1) || status=$?
+    [[ "$status" == 1 && -z "$pid_info" ]]
+}
+check_for_restarted_module() {
+    local observed pid_info status=0
+    observed=$(module_pid 2>/dev/null) || status=$?
+    if [[ "$status" == 2 ]]; then
+        echo "post-stop provenance command failed; using the process and store handle checks"
+    elif [[ "$status" == 3 ]]; then
+        echo "post-stop provenance returned an unrecognized reply; using the process and store handle checks"
+    elif [[ -z "$observed" ]]; then
+        echo "post-stop provenance did not report a PID"
+    elif pid_info=$(ps -p "$observed" -o pid= 2>/dev/null) && [[ "$pid_info" =~ ^[[:space:]]*$observed[[:space:]]*$ ]]; then
+        echo "daemon reported a live magic-context PID $observed after stop"
+        return 1
+    else
+        echo "post-stop provenance reported PID $observed but the process check did not find it alive"
+    fi
+}
+place_with_rename() {
+    local before detail suffix index moves=0
+    local moved=()
+    before=$(module_pid) || die "cannot identify the running magic-context process before renaming the session store"
+    # Do not run ck module rescan or restart the daemon between stop and start.
+    if ! ck module stop magic-context; then
+        start_original
+        die "cannot stop magic-context; session store and binary left in place"
+    fi
+    if ! detail=$(wait_stopped "$before"); then
+        start_original
+        die "timed out waiting for magic-context to stop; session store and binary left in place: $detail"
+    fi
+    for suffix in '' -wal -shm; do
+        if present "$target_store$suffix"; then
+            start_original
+            die "cannot rename the session store: target already exists: $target_store$suffix"
+        fi
+    done
+    if [[ ! -f "$rename_from" ]] || ! cmp -s "$deployed" "$rollback"; then
+        start_original
+        die "the session store or deployed binary changed during placement; nothing was renamed"
+    fi
+    if ! store_live=$(read_version "$rename_from" 'PRAGMA user_version;') ||
+        ((10#$store_supported < 10#$store_live)); then
+        start_original
+        die "cannot confirm the stopped session store at $rename_from is compatible with fence $store_supported; nothing was renamed"
+    fi
+    if ! detail=$(check_for_restarted_module); then
+        die "session store and binary left in place: $detail"
+    fi
+    echo "$detail"
+    if ! detail=$(stores_are_closed); then
+        start_original
+        die "session store and binary left in place: $detail"
+    fi
+    # Keep any committed pages still in the WAL. Move sidecars first and roll
+    # back in reverse order if a move or the binary swap fails.
+    for suffix in -wal -shm ''; do
+        if ! present "$rename_from$suffix"; then
+            [[ -n "$suffix" ]] && continue
+            break
+        fi
+        if ! mv -n "$rename_from$suffix" "$target_store$suffix" || present "$rename_from$suffix"; then
+            break
+        fi
+        moved[moves]=$suffix
+        moves=$((moves + 1))
+        if [[ -z "$suffix" ]]; then
+            if [[ ! -f "$target_store" ]] || present "$rename_from"; then
+                echo "place-ck-mc: could not verify the renamed session store at $target_store" >&2
+            elif ! detail=$(stores_are_closed); then
+                echo "place-ck-mc: cannot place the binary after renaming $target_store: $detail" >&2
+            elif mv -f "$tmp" "$deployed"; then
+                echo "renamed $rename_from to $target_store and placed ck-mc while magic-context was stopped"
+                return 0
+            fi
+        fi
+    done
+    for ((index=moves - 1; index >= 0; index--)); do
+        suffix=${moved[index]}
+        mv -n "$target_store$suffix" "$rename_from$suffix" && ! present "$target_store$suffix" ||
+            die "cannot restore $rename_from$suffix from $target_store$suffix; magic-context is stopped; restore the original store files before starting it"
+    done
+    # The swap is atomic. Verify the original survived the failure, or put
+    # the verified rollback copy back before letting the daemon open the store.
+    if ! cmp -s "$deployed" "$rollback"; then
+        cp -p "$rollback" "$tmp" && mv -f "$tmp" "$deployed" && cmp -s "$deployed" "$rollback" ||
+            die "cannot restore $rollback to $deployed; magic-context is stopped; restore the original binary before starting it"
+    fi
+    start_original
+    die "session store rename or binary swap failed; restored original store and binary"
+}
+if [[ -n "$rename_from" ]]; then
+    place_with_rename
+else
+    mv -f "$tmp" "$deployed"
+fi
 trap 'echo "placement verification failed; rollback binary only when both stores are compatible: $rollback_cmd" >&2' ERR
 if ((no_restart)); then
     [[ "$(sha_from "$deployed")" == "$staged_sha" ]] || false
@@ -336,10 +558,13 @@ if ((no_restart)); then
     finished=1
     exit 0
 fi
-ck module restart magic-context
+if [[ -n "$rename_from" ]]; then
+    ck module start magic-context
+else
+    ck module restart magic-context
+fi
 # The restart returns while the old process drains, before the new one has declared its
 # build. Wait for the new process to report a build instead of reading a half-started state.
-poll_seconds=${PLACE_CK_MC_POLL_SECONDS:-2}
 running=""
 for _ in $(seq 1 60); do
     provenance=$(ck --json provenance magic-context 2>/dev/null) || provenance=""
@@ -383,5 +608,5 @@ done
 [[ $health_ok -eq 1 ]] || { echo "ck health is not ok after the restart" >&2; false; }
 trap - ERR
 publish_shared_stage
-echo "placed ck-mc $staged_sha; context.db $context_live/$context_supported store.db $store_live/$store_supported; inode/version/digest/health ok"
+echo "placed ck-mc $staged_sha; context.db $context_live/$context_supported $store_name $store_live/$store_supported; inode/version/digest/health ok"
 finished=1

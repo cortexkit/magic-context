@@ -191,7 +191,7 @@ fn trace(sql: &str) {
                 [
                     "mode3_renumber:opencode:moving",
                     "mode3_rekey:moving",
-                    "mode3_cap",
+                    "move_cap",
                 ]
                 .contains(&key.as_str())
                     && normalized
@@ -260,7 +260,7 @@ fn every_move_write_transaction_has_bounded_work_and_releases_the_lock() {
     let _guard = observe(&db, &path, Clock::Stop, 1);
     move_in(
         db,
-        &Store::open(&dir.path().join("mode3.db")).unwrap(),
+        &Store::open(&dir.path().join("sessions.db")).unwrap(),
         &crate::pass::Settings::default().into(),
         &request(2_000),
     )
@@ -326,7 +326,7 @@ fn move_in_never_stop_clock_still_commits_at_the_unit_cap() {
         for _ in 0..4097 * 32 {
             plan.execute("UPDATE cap_probe SET value=value+1 WHERE rowid=?1", &[&1]).unwrap();
         }
-        plan.stage(conn, "mode3_cap", serde_json::json!({})).unwrap();
+        plan.stage(conn, "move_cap", serde_json::json!({})).unwrap();
         assert_eq!(conn.query_row("SELECT value FROM cap_probe", [], |row| row.get::<_, usize>(0)).unwrap(), 4097 * 32);
     });
     let observed = finish(Some(&db));

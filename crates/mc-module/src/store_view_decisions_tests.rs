@@ -1,4 +1,4 @@
-//! mode3.db version 7: each view decision in its own `view_decisions` row,
+//! sessions.db version 7: each view decision in its own `view_decisions` row,
 //! moved there from version 6's per-session lists, and deleted once it has
 //! been kept for the retention period.
 
@@ -78,7 +78,7 @@ fn version_six(path: &Path) {
 #[test]
 fn a_version_six_store_moves_every_decision_record_into_its_own_row() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     version_six(&path);
     let one = vec![
         record(1, "applied", 3_000),
@@ -163,7 +163,7 @@ fn a_version_six_store_moves_every_decision_record_into_its_own_row() {
 #[test]
 fn a_session_holds_its_newest_decisions_and_clearing_it_deletes_its_rows() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let store = Store::open(&path).unwrap();
     let key = SessionRef::new("runner", "pi", "busy");
     let other = SessionRef::new("runner", "pi", "other");
@@ -217,7 +217,7 @@ fn a_session_holds_its_newest_decisions_and_clearing_it_deletes_its_rows() {
 #[test]
 fn expired_decisions_are_deleted_when_the_store_opens_and_at_most_hourly_after() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let key = SessionRef::new("runner", "pi", "aging");
     let store = Store::open(&path).unwrap();
     let expired = record(1, "applied", 31 * DAY_MS);

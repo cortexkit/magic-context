@@ -56,7 +56,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
         let conn = Connection::open(dir.path().join("context.db")).unwrap();
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let rows = messages(host);
         let last = rows.iter().rev().find(|r| r.entry.is_some()).unwrap();
         let request: MoveRequest = serde_json::from_value(json!({
@@ -185,7 +185,7 @@ impl Fixture {
     fn dumps(&self) -> (String, String) {
         (
             dump(&self.conn),
-            dump(&Connection::open(self.dir.path().join("mode3.db")).unwrap()),
+            dump(&Connection::open(self.dir.path().join("sessions.db")).unwrap()),
         )
     }
 
@@ -565,7 +565,7 @@ fn plugin_numbering_refuses_a_different_source_session_before_writing() {
 #[test]
 fn runner_move_resumes_after_the_destination_state_save_fails() {
     let fixture = Fixture::new("opencode2");
-    let state = Connection::open(fixture.dir.path().join("mode3.db")).unwrap();
+    let state = Connection::open(fixture.dir.path().join("sessions.db")).unwrap();
     state.execute_batch("CREATE TRIGGER fail_destination BEFORE INSERT ON sessions WHEN NEW.harness='broca' BEGIN SELECT RAISE(FAIL,'destination unavailable'); END;").unwrap();
     let refused = fixture.run().unwrap_err();
     assert!(refused.starts_with("state_save_failed:"), "{refused}");
@@ -613,7 +613,7 @@ fn runner_move_refuses_corrupt_or_auxiliary_only_destination_state() {
         .store
         .save(&fixture.request.session, &Durable::default())
         .unwrap();
-    let state = Connection::open(fixture.dir.path().join("mode3.db")).unwrap();
+    let state = Connection::open(fixture.dir.path().join("sessions.db")).unwrap();
     state
         .execute(
             "UPDATE sessions SET state='{' WHERE runner='broca' AND harness='broca'",
@@ -632,7 +632,7 @@ fn runner_move_refuses_corrupt_or_auxiliary_only_destination_state() {
     fixture.refuses_unchanged("target_exists:");
 
     let fixture = Fixture::new("pi");
-    let state = Connection::open(fixture.dir.path().join("mode3.db")).unwrap();
+    let state = Connection::open(fixture.dir.path().join("sessions.db")).unwrap();
     state
         .execute_batch(
             "CREATE TABLE future_state(runner TEXT,harness TEXT,session TEXT,payload BLOB)",

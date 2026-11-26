@@ -99,7 +99,7 @@ fn dates_versions_references_ids_and_names_are_not_quantities() {
         "0.49's verify",
         "Opus 5.5 and Sonnet 5.5",
         "issue #123 and §2",
-        "Mode 3",
+        "Mode 4",
         "row 12, step 2, invariant 4",
         "task.rs:12",
         "commit 7fca5ac695 and 2fa5f24c",

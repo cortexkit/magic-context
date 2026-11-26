@@ -76,7 +76,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let journal = Arc::new(Journal::in_memory());
         let module = Module::with_journal(
             Client,
@@ -579,7 +579,7 @@ async fn moves_recorded_with_moves_on_stay_enforced_after_a_restart_with_them_of
         with_moves_on.contains("until Entorhinal aborts or finishes the move"),
         "{with_moves_on}"
     );
-    let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = Store::open(&dir.path().join("sessions.db")).unwrap();
     let module = Module::with_journal(
         Client,
         Settings::default(),
@@ -640,7 +640,7 @@ async fn a_session_command_starts_no_worker_for_a_session_a_move_holds() {
         Client,
         Settings::default(),
         None,
-        Some(Store::open(&f._dir.path().join("mode3.db")).unwrap()),
+        Some(Store::open(&f._dir.path().join("sessions.db")).unwrap()),
         f.journal.clone(),
         false,
     );

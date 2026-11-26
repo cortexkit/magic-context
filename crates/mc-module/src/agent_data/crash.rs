@@ -5,7 +5,7 @@
 //! nothing after it happens, and nothing kept in memory survives. The tests
 //! reproduce that by stopping the op at one of these points, dropping the
 //! module, and starting a new one over the same files. Each write a move
-//! makes (a journal change, a `context.db` or `mode3.db` transaction, a file
+//! makes (a journal change, a `context.db` or `sessions.db` transaction, a file
 //! it stages, a page it admits to Engram's session door) is followed by a
 //! point, so stopping at every point a run reaches covers a crash after
 //! every one of its writes. The install's own transactions are covered by

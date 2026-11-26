@@ -1,7 +1,7 @@
 //! The person's commands on memories, observations, the dreamer and notes,
 //! through the module's real command entry point (`commands.preview` and
 //! `commands.run` from Occipital), on a `context.db` at the module's schema
-//! and a `mode3.db` that keeps their answers.
+//! and a `sessions.db` that keeps their answers.
 
 use super::*;
 use crate::context_db::ContextDb;
@@ -33,7 +33,7 @@ fn caller() -> Value {
     json!({"app": "desktop", "admission": "operator_app"})
 }
 
-/// A module with `context.db` and `mode3.db` in a folder of its own, and one
+/// A module with `context.db` and `sessions.db` in a folder of its own, and one
 /// session of [`PROJECT`] set up, so the app reads (and these commands) know
 /// the project.
 struct Owner {
@@ -50,7 +50,7 @@ impl Owner {
 
     fn open(dir: tempfile::TempDir) -> Self {
         let db = ContextDb::open(&dir.path().join("context.db")).unwrap();
-        let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
         let module = crate::module::Module::new(
             Client::default(),
             Settings::default(),
@@ -723,7 +723,7 @@ async fn a_retried_request_after_a_restart_replays_its_answer_without_acting_aga
         .await;
     assert_eq!(other["outcome"], "applied");
     // Answers older than a day are gone.
-    let store = Connection::open(owner.dir.path().join("mode3.db")).unwrap();
+    let store = Connection::open(owner.dir.path().join("sessions.db")).unwrap();
     store
         .execute(
             "UPDATE owner_command_answers SET stored_at = stored_at - 86400001",

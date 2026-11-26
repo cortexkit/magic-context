@@ -564,7 +564,7 @@ pub enum Install {
 }
 
 const HOST_STATE: &str =
-    "a standalone plugin host's per-session transform state; a runner session keeps its own state in mode3.db, which the move does not carry";
+    "a standalone plugin host's per-session transform state; a runner session keeps its own state in sessions.db, which the move does not carry";
 const SEARCH_INDEX: &str =
     "search index rows, rebuilt on the receiver from the transcript and the summaries";
 const TELEMETRY: &str = "this machine's run records and telemetry";

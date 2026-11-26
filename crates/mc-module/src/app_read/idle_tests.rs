@@ -99,7 +99,7 @@ fn cold_replica(fixture: &Fixture) -> Replica {
     replica.snapshots.clear();
     replica.store = Some(
         Connection::open_with_flags(
-            fixture.dir.path().join("mode3.db"),
+            fixture.dir.path().join("sessions.db"),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap(),
@@ -257,7 +257,7 @@ async fn idle_keep_is_lru_bounded_and_released_on_setup_and_forget() {
 #[tokio::test]
 async fn idle_legacy_baseline_does_not_claim_zero_summaries() {
     let fixture = Fixture::new(true, false, true, "head").await;
-    let conn = Connection::open(fixture.dir.path().join("mode3.db")).unwrap();
+    let conn = Connection::open(fixture.dir.path().join("sessions.db")).unwrap();
     conn.execute(
         "UPDATE sessions SET state=json_set(state,'$.baseline.summary_items',json('[]'))",
         [],
@@ -348,7 +348,7 @@ impl Fixture {
         } else {
             baseline
         };
-        let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
         store
             .save(
                 &key,
@@ -422,7 +422,7 @@ impl Fixture {
     }
     fn stored(&self) -> String {
         let conn = Connection::open_with_flags(
-            self.dir.path().join("mode3.db"),
+            self.dir.path().join("sessions.db"),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();

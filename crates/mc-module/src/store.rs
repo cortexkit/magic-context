@@ -228,7 +228,7 @@ pub(crate) fn session_tables(connection: &Connection) -> rusqlite::Result<Vec<St
     Ok(result)
 }
 
-/// The newest mode3.db schema this build can read and write. Version 6 adds
+/// The newest sessions.db schema this build can read and write. Version 6 adds
 /// `owner_command_answers`, the stored answers of commands a person runs on
 /// memories, notes and the dreamer rather than on one session. Version 7
 /// keeps each view decision in its own `view_decisions` row, replacing the
@@ -1484,7 +1484,7 @@ mod tests {
     #[test]
     fn a_new_store_records_the_supported_schema_version() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("mode3.db");
+        let path = root.path().join("sessions.db");
         drop(Store::open(&path).unwrap());
         let connection = Connection::open(path).unwrap();
         let version: u32 = connection
@@ -1525,7 +1525,7 @@ mod tests {
     #[test]
     fn a_newer_store_is_refused_without_changing_it() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("mode3.db");
+        let path = root.path().join("sessions.db");
         let connection = Connection::open(&path).unwrap();
         connection
             .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
@@ -1538,13 +1538,13 @@ mod tests {
         assert!(error.contains("store_too_new"), "{error}");
         assert!(error.contains(&path.display().to_string()), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert!(!path.with_file_name("mode3.db-wal").exists());
+        assert!(!path.with_file_name("sessions.db-wal").exists());
     }
 
     #[test]
-    fn an_unversioned_mode3_store_is_adopted_without_losing_rows() {
+    fn an_unversioned_session_store_is_adopted_without_losing_rows() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("mode3.db");
+        let path = root.path().join("sessions.db");
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch("CREATE TABLE sessions (runner TEXT, harness TEXT, session TEXT, state TEXT, PRIMARY KEY(runner, harness, session)); INSERT INTO sessions VALUES ('r', 'h', 's', '{}');").unwrap();
         drop(connection);
@@ -1562,7 +1562,7 @@ mod tests {
     #[test]
     fn repeated_successful_save_does_not_write_again() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mode3.db");
+        let path = dir.path().join("sessions.db");
         let store = Store::open(&path).unwrap();
         let key = SessionRef::new("runner", "pi", "session");
         let state = Durable::default();
@@ -1619,7 +1619,7 @@ mod tests {
             .unwrap();
         assert!(saved(&path).contains(r#""summary_items":["copied"]"#));
 
-        let path = dir.path().join("mode3.db");
+        let path = dir.path().join("sessions.db");
         let store = Store::open(&path).unwrap();
         let mut state = with_items(SummaryItems::new(items(3)));
         store.save(&key, &state).unwrap();
@@ -1640,7 +1640,7 @@ mod tests {
         use cortexkit_role_compaction::read::Role;
         use cortexkit_role_compaction::view::{Edit, EditOp, InsertAt, InsertedMessage, View};
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mode3.db");
+        let path = dir.path().join("sessions.db");
         let legacy = Store::create_version_three_for_tests(&path).unwrap();
         let old = Baseline {
             m0: "old immutable history ".repeat(1_000).into(),
@@ -1711,7 +1711,7 @@ mod tests {
     #[test]
     fn failed_normalized_save_does_not_cache_uncommitted_text_references() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mode3.db");
+        let path = dir.path().join("sessions.db");
         let store = Store::open(&path).unwrap();
         let key = SessionRef::new("runner", "pi", "retry");
         let state = Durable {
@@ -1733,7 +1733,7 @@ mod tests {
     #[test]
     fn retired_history_text_is_collected_only_after_its_last_session_reference() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let one = SessionRef::new("runner", "pi", "one");
         let two = SessionRef::new("runner", "pi", "two");
         let original = Durable {

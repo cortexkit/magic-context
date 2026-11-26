@@ -19,7 +19,7 @@ fn time_of(n: u64) -> u64 {
 }
 
 /// [`super::head_bytes_tests::head`], with every message written at
-/// `written_at(n)` and a `mode3.db` that keeps the times of messages the
+/// `written_at(n)` and a `sessions.db` that keeps the times of messages the
 /// index lets go.
 fn timed_head(dir: &std::path::Path, written_at: impl Fn(u64) -> u64) -> (Session, Settings) {
     let (mut session, settings) = super::head_bytes_tests::head(dir);
@@ -30,7 +30,7 @@ fn timed_head(dir: &std::path::Path, written_at: impl Fn(u64) -> u64) -> (Sessio
         entry
     }));
     session.store = Some(Arc::new(
-        crate::store::Store::open(&dir.join("mode3.db")).unwrap(),
+        crate::store::Store::open(&dir.join("sessions.db")).unwrap(),
     ));
     (session, settings)
 }

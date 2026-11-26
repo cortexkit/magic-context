@@ -84,7 +84,8 @@ fn a_session_follows_its_project_to_another_workspace_and_keeps_it_stored() {
     let dir = std::env::temp_dir().join(format!("ck-mc-workspace-follow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch folder");
-    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).expect("open the store"));
+    let store =
+        Arc::new(crate::store::Store::open(&dir.join("sessions.db")).expect("open the store"));
     let key = SessionRef::new("test", "mock", "s1");
     let stored = store.keep_memory_context(&key, context(Some("team")));
     let mut session = session_with(Some(Arc::clone(&store)));
@@ -135,7 +136,7 @@ fn a_session_without_a_memory_context_follows_nothing() {
 #[test]
 fn the_same_workspace_answer_retries_a_departure_blocked_on_disk() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let store = Arc::new(crate::store::Store::open(&path).unwrap());
     let key = SessionRef::new("test", "mock", "s1");
     let mut session = session_with(Some(Arc::clone(&store)));

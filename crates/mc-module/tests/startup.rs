@@ -7,7 +7,7 @@ fn command(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ck-mc"));
     for name in [
         "MAGIC_CONTEXT_DB",
-        "MAGIC_CONTEXT_MODE3_STORE",
+        "MAGIC_CONTEXT_SESSIONS_STORE",
         "MAGIC_CONTEXT_TEST_DATA_DIR",
         "MAGIC_CONTEXT_STORAGE_DIR",
         "SUBC_MODULE_ID",
@@ -42,7 +42,7 @@ fn probes_need_no_connection_and_create_no_files() {
             assert_eq!(
                 line,
                 format!(
-                    "context.db={} mode3.db={}\n",
+                    "context.db={} sessions.db={}\n",
                     mc_module::context_db::SCHEMA_VERSION,
                     mc_module::store::SCHEMA_VERSION
                 )
@@ -103,7 +103,7 @@ fn startup_opens_default_stores_writes_catalog_and_leaves_rollback_store_alone()
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(data.join("mode3.db").exists(), "{}", stderr(&output));
+    assert!(data.join("sessions.db").exists(), "{}", stderr(&output));
     assert_eq!(
         std::fs::read(data.join("store.db")).unwrap(),
         b"rollback bytes"
@@ -116,7 +116,7 @@ fn startup_opens_default_stores_writes_catalog_and_leaves_rollback_store_alone()
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            std::fs::metadata(data.join("mode3.db"))
+            std::fs::metadata(data.join("sessions.db"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -143,6 +143,42 @@ fn startup_opens_default_stores_writes_catalog_and_leaves_rollback_store_alone()
 }
 
 #[test]
+fn startup_refuses_an_unrenamed_session_store() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data/cortexkit/magic-context");
+    std::fs::create_dir_all(&data).unwrap();
+    drop(mc_module::context_db::ContextDb::create_for_tests(&data.join("context.db")).unwrap());
+    let old = data.join("mode3.db");
+    let new = data.join("sessions.db");
+    drop(mc_module::store::Store::open(&old).unwrap());
+    for both in [false, true] {
+        if both {
+            drop(mc_module::store::Store::open(&new).unwrap());
+        }
+        let output = command(root.path())
+            .args(["--subc", "missing-connection.json"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = stderr(&output);
+        assert!(error.contains(data.to_str().unwrap()), "{error}");
+        assert!(
+            error.contains("mode3.db") && error.contains("sessions.db"),
+            "{error}"
+        );
+        if both {
+            assert!(error.contains("both"), "{error}");
+        } else {
+            for text in ["stop", "rename", "-wal", "-shm", "place-ck-mc.sh"] {
+                assert!(error.contains(text), "missing {text}: {error}");
+            }
+        }
+        assert!(old.exists());
+        assert_eq!(new.exists(), both);
+    }
+}
+
+#[test]
 fn explicit_paths_are_shared_by_startup_and_move_in() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("explicit");
@@ -152,13 +188,16 @@ fn explicit_paths_are_shared_by_startup_and_move_in() {
     for args in [vec!["--subc", "missing-connection.json"], vec!["move-in"]] {
         let output = command(root.path())
             .env("MAGIC_CONTEXT_DB", &context)
-            .env("MAGIC_CONTEXT_MODE3_STORE", data.join("override-mode3.db"))
+            .env(
+                "MAGIC_CONTEXT_SESSIONS_STORE",
+                data.join("override-sessions.db"),
+            )
             .args(args)
             .output()
             .unwrap();
         assert!(!output.status.success());
         assert!(
-            data.join("override-mode3.db").exists(),
+            data.join("override-sessions.db").exists(),
             "{}",
             stderr(&output)
         );
@@ -168,7 +207,7 @@ fn explicit_paths_are_shared_by_startup_and_move_in() {
             .exists());
         assert!(!root
             .path()
-            .join("data/cortexkit/magic-context/mode3.db")
+            .join("data/cortexkit/magic-context/sessions.db")
             .exists());
     }
 }
@@ -243,7 +282,7 @@ fn move_in_refuses_a_session_a_move_holds_with_its_code_and_cut() {
         assert!(!output.status.success(), "{}", stderr(&output));
         assert!(stderr(&output).contains(expected), "{}", stderr(&output));
         assert!(output.stdout.is_empty());
-        let store = mc_module::store::Store::open(&data.join("mode3.db")).unwrap();
+        let store = mc_module::store::Store::open(&data.join("sessions.db")).unwrap();
         assert!(store.load(&target).is_none());
     }
 }

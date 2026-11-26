@@ -23,7 +23,7 @@ pub const ROLE: (&str, &str) = ("mc-context-read", "v1");
 pub const OPS: [&str; 3] = ["context.memories", "context.summaries", "context.recent"];
 
 /// How long a caller should wait before asking again about a session whose
-/// state ck-mc keeps in mode3.db but whose project it hasn't learned since
+/// state ck-mc keeps in sessions.db but whose project it hasn't learned since
 /// starting. Such a session sends a new Setup on its next step after a ck-mc
 /// restart, so the wait is usually shorter.
 const PROJECT_PENDING_RETRY_MS: u64 = 30_000;
@@ -316,7 +316,7 @@ impl Reader {
         ))
     }
 
-    /// The runners mode3.db keeps the session's saved state under.
+    /// The runners sessions.db keeps the session's saved state under.
     fn saved_runners(&self, harness: &str, session: &str) -> Result<Vec<String>, Refusal> {
         let Some(path) = &self.store else {
             return Ok(Vec::new());
@@ -505,7 +505,7 @@ impl Reader {
             workspace_id = workspaces.into_iter().next().flatten();
             store_tx.rollback().map_err(|_| unavailable())?;
         }
-        // A session whose state ck-mc keeps in mode3.db learns its project only
+        // A session whose state ck-mc keeps in sessions.db learns its project only
         // from its Setup route, so after a restart, until that session's next
         // Setup, its project is unknown rather than absent. An empty list would read as final, and a caller
         // could cache a pack with no memories, so this answers "try later".

@@ -966,9 +966,9 @@ fn lifecycle_rolling_back_an_earlier_view_restores_a_later_head_retry() {
 async fn lifecycle_failed_write_ahead_save_never_hands_over_a_view() {
     let (mut session, client, _, _, settings) = fixture();
     let dir = scratch("write-ahead");
-    let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.join("sessions.db")).unwrap();
     session.set_store(Some(Arc::new(store)));
-    rusqlite::Connection::open(dir.join("mode3.db"))
+    rusqlite::Connection::open(dir.join("sessions.db"))
         .unwrap()
         .execute("DROP TABLE sessions", [])
         .unwrap();
@@ -987,8 +987,8 @@ async fn lifecycle_failed_write_ahead_save_never_hands_over_a_view() {
 #[test]
 fn lifecycle_store_save_reports_failure_and_never_waits_on_a_writer() {
     let dir = scratch("locks");
-    let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
-    let blocker = rusqlite::Connection::open(dir.join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.join("sessions.db")).unwrap();
+    let blocker = rusqlite::Connection::open(dir.join("sessions.db")).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let (session, _, _, _, _) = fixture();
     let start = std::time::Instant::now();
@@ -1214,7 +1214,7 @@ fn lifecycle_the_index_keeps_compact_sizes_tags_and_full_checksums() {
 #[test]
 fn a_restarted_session_serves_the_same_mural_image_from_the_store() {
     let dir = scratch("mural-restart");
-    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.join("sessions.db")).unwrap());
     let (mut session, _, _, _, _) = fixture();
     session.set_store(Some(store.clone()));
     session.keep_mural(crate::mural::Mural {
@@ -1279,7 +1279,7 @@ async fn lifecycle_a_refused_provider_does_no_work_until_the_next_setup() {
 
 #[tokio::test]
 async fn lifecycle_restored_state_ahead_of_context_db_moves_the_cut_back() {
-    // A backup can pair a fresh mode3.db with an older context.db. Here the
+    // A backup can pair a fresh sessions.db with an older context.db. Here the
     // saved state cuts through message d, behind a summary context.db no
     // longer has.
     let (mut session, client, route, mut request, settings) = fixture();
@@ -2268,7 +2268,7 @@ async fn settled(label: &str) -> (Session, Client, crate::app_read::AppRead, Set
     })
     .unwrap();
     session.db = Some(Arc::new(db));
-    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.join("sessions.db")).unwrap());
     session.set_store(Some(Arc::clone(&store)));
     let app = crate::app_read::AppRead::new(Some(store.path.clone()), Some(dir.join("context.db")));
     session.load_summaries();

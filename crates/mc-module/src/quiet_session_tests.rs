@@ -141,7 +141,7 @@ impl Fixture {
     async fn configured(preset: &str, hold: bool, user: Option<&str>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db = ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap();
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let config = if let Some(user) = user {
             let path = dir.path().join("magic-context.jsonc");
             std::fs::write(&path, user).unwrap();
@@ -293,7 +293,7 @@ impl Fixture {
         reads
     }
 
-    /// The state saved to `mode3.db`, without wall-clock times: those of
+    /// The state saved to `sessions.db`, without wall-clock times: those of
     /// `*_ms` members, and the time each part's tag was stamped.
     fn saved(&self) -> Value {
         let store = self.module.inner.store.as_ref().unwrap();

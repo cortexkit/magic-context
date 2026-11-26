@@ -64,13 +64,15 @@ fn samples_v18() {
     }
     let copied = samples.len();
 
-    // The `producers` form still reads exactly as the v17 example shows.
+    // Preserve the v17 `producers` example, including its retired member.
     let mut replica = replica(None);
     replica.snapshots.clear();
     replica.publish(crate::session::Session::app_sample_snapshot());
     let params = request(json!({"producers":[{"producer_ref":"runner-step"}]}));
+    let mut result = replica.read(METHOD, &params).unwrap();
+    pin_retired_session_kind(&mut result, &v17.join("cache-why.json"));
     assert_eq!(
-        sample("cache-why", &params, replica.read(METHOD, &params)),
+        sample("cache-why", &params, Ok(result)),
         samples["cache-why.json"],
         "the producers form changed"
     );

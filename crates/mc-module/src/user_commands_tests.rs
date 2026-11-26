@@ -849,7 +849,7 @@ async fn user_commands_failed_save_never_pushes_and_saved_push_failure_stays_rol
     for failed_save in [true, false] {
         let (mut session, client, settings) = ready();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mode3.db");
+        let path = dir.path().join("sessions.db");
         let store = Arc::new(crate::store::Store::open(&path).unwrap());
         session.set_store(Some(store.clone()));
         if failed_save {
@@ -896,7 +896,7 @@ async fn user_commands_failed_save_never_pushes_and_saved_push_failure_stays_rol
 async fn user_commands_a_flush_whose_answer_was_lost_stays_scheduled() {
     let (mut session, client, settings) = ready();
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
     session.set_store(Some(store.clone()));
     *client.lose_apply_answers.lock().unwrap() = 1;
     let p = preview(&mut session, &client, &settings, "flush").await;

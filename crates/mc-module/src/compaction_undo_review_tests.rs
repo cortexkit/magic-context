@@ -22,7 +22,7 @@ use super::*;
 /// The session saved to a store and loaded into a new session, as a ck-mc
 /// restart does.
 fn restarted(session: &Session, dir: &std::path::Path) -> Session {
-    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.join("sessions.db")).unwrap());
     store.save(&session.key, &session.durable()).unwrap();
     let (mut restored, _, _, _, _) = fixture();
     restored.db = session.db.clone();

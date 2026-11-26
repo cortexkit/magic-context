@@ -24,7 +24,7 @@ struct Run {
 impl Run {
     fn new(label: &str, kept: bool) -> Self {
         let dir = scratch(label);
-        let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
+        let store = crate::store::Store::open(&dir.join("sessions.db")).unwrap();
         let (session, settings) = head(&dir);
         Self {
             session,
@@ -128,7 +128,7 @@ impl Run {
         self.store
             .save(&self.session.key, &self.session.durable())
             .unwrap();
-        let state: String = rusqlite::Connection::open(self.dir.join("mode3.db"))
+        let state: String = rusqlite::Connection::open(self.dir.join("sessions.db"))
             .unwrap()
             .query_row("SELECT state FROM sessions WHERE session='s1'", [], |row| {
                 row.get(0)

@@ -510,7 +510,7 @@ impl Session {
 
     /// The session `carry` was made from, with what the stores hold of it
     /// read again: its summaries from `context.db` and the apps' decisions
-    /// from `mode3.db`. Nothing is read from the runner: the carry kept the
+    /// from `sessions.db`. Nothing is read from the runner: the carry kept the
     /// transcript index and the view. Summaries that can't be read leave the
     /// session marked unread ([`Session::summaries_ready`]).
     pub(crate) fn resume_quiet(carry: QuietCarry) -> Self {

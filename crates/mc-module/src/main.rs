@@ -61,7 +61,7 @@ fn run_module_cli() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     if std::env::args().skip(1).any(|arg| arg == "--print-fences") {
         println!(
-            "context.db={} mode3.db={}",
+            "context.db={} sessions.db={}",
             mc_module::context_db::SCHEMA_VERSION,
             mc_module::store::SCHEMA_VERSION
         );
@@ -193,6 +193,7 @@ async fn serve(dreamer: &tokio::runtime::Handle) -> Result<(), Box<dyn Error + S
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODULE_ID.to_owned());
     let context_path = context_db_path()?;
+    let sessions_path = store_path(&context_path)?;
     // With managed settings, a 0.49-shaped user file is converted once,
     // before ck-mc connects to the daemon or reads its settings.
     #[cfg(feature = "managed-settings")]
@@ -203,7 +204,7 @@ async fn serve(dreamer: &tokio::runtime::Handle) -> Result<(), Box<dyn Error + S
         settings.managed(&data_dir)
     };
     let db = open_context_db(&context_path)?;
-    let store = Store::open(&store_path(&context_path))?;
+    let store = Store::open(&sessions_path)?;
     // Moves are enforced in every build: the journal is read before any
     // session is served, so a session a move holds is refused from the
     // first request on. Serving new moves is a separate switch.
@@ -293,7 +294,7 @@ fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err(MISSING_STORE.into());
     }
     let db = open_context_db(&context_path)?;
-    let store = Store::open(&store_path(&context_path))?;
+    let store = Store::open(&store_path(&context_path)?)?;
     let request: mc_module::move_in::MoveRequest = serde_json::from_reader(std::io::stdin())?;
     // The session's rows are rewritten under both the harness it runs as and
     // the one the plugin kept it under; a move holding either is refused.
@@ -348,7 +349,7 @@ fn rekey_runner() -> Result<(), Box<dyn Error + Send + Sync>> {
             .iter()
             .map(|session| (request.harness.as_str(), session.as_str())),
     )?;
-    let summary = mc_module::rekey::rekey_runner(&store_path(&context), &context, &request)?;
+    let summary = mc_module::rekey::rekey_runner(&store_path(&context)?, &context, &request)?;
     println!("{}", serde_json::to_string(&summary)?);
     Ok(())
 }
@@ -387,7 +388,7 @@ fn tag_floor() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err(MISSING_STORE.into());
     }
     // ContextDb startup writes to the shared store. Move preparation needs
-    // this read without module startup or opening mode3.db.
+    // this read without module startup or opening sessions.db.
     let conn =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;

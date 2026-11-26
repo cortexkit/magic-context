@@ -242,7 +242,7 @@ fn large_move_lock_measurement() {
 fn run(dir: &std::path::Path, request: &MoveRequest) -> Result<Moved, String> {
     move_in(
         ContextDb::open(&dir.join("context.db")).unwrap(),
-        &Store::open(&dir.join("mode3.db")).unwrap(),
+        &Store::open(&dir.join("sessions.db")).unwrap(),
         &crate::pass::Settings::default().into(),
         request,
     )

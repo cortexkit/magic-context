@@ -188,7 +188,10 @@ impl InProcess {
                 } else {
                     ContextDb::create_for_tests(&db_path).unwrap()
                 };
-                (Some(db), Some(Store::open(&dir.join("mode3.db")).unwrap()))
+                (
+                    Some(db),
+                    Some(Store::open(&dir.join("sessions.db")).unwrap()),
+                )
             }
             None => (None, None),
         };
@@ -285,7 +288,7 @@ fn config(preset: &str) -> SessionConfig {
 }
 
 /// A head with its own project folder `dir`, whose `context.db` and
-/// `mode3.db` ck-mc uses.
+/// `sessions.db` ck-mc uses.
 fn head_in(dir: &std::path::Path) -> SessionConfig {
     let mut config = config("head");
     config.project = Some(mc_mock_runner::runner::Project {

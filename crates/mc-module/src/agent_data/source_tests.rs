@@ -365,7 +365,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("context.db");
         let context = crate::context_db::ContextDb::create_for_tests(&db).unwrap();
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let journal = Arc::new(Journal::load(journal_file::path(&db)));
         let module = Module::with_journal(
             Mover::default(),
@@ -1748,7 +1748,7 @@ impl Fixture {
             Mover::default(),
             Settings::default(),
             Some(crate::context_db::ContextDb::open(&db).unwrap()),
-            Some(Store::open(&_dir.path().join("mode3.db")).unwrap()),
+            Some(Store::open(&_dir.path().join("sessions.db")).unwrap()),
             journal,
             true,
         );

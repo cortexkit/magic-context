@@ -186,7 +186,7 @@ The relay supplies the real applied runner record, not a scalar watermark.
 `reloadSession()` must reload the current host journal and return its
 `readBranchEntries`/`appendCompaction` methods together. It runs under the shared
 MC database writer lease, so different processes cannot append concurrently;
-retry rechecks the journal before appending. All mode-3 Pi native appends for that
+retry rechecks the journal before appending. All native Pi appends to that
 session must use this owner, not the standalone context-handler appender.
 Use the owner's fallback method rather than the record-only helper: it loads the
 committed native boundary from MC's store and checks it against the active

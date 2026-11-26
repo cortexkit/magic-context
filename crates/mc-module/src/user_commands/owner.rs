@@ -11,7 +11,7 @@
 //! those rows changes. A run plans again, refuses `preview_stale` when the
 //! version moved, and otherwise writes through the module's own writers in
 //! one transaction that checks the targets again. Its answer is kept in
-//! `mode3.db` for a day ([`crate::store::Store::owner_command`]), so a
+//! `sessions.db` for a day ([`crate::store::Store::owner_command`]), so a
 //! retried request id after a restart replays the answer instead of acting
 //! twice.
 

@@ -186,7 +186,7 @@ async fn audit_restart_without_summaries_preserves_the_warm_head() {
     );
     assert!(!first.durable().head_stale);
 
-    let store = Store::open(&root.path().join("mode3.db")).unwrap();
+    let store = Store::open(&root.path().join("sessions.db")).unwrap();
     store.save(&route.session, &first.durable()).unwrap();
     std::fs::write(
         &docs,

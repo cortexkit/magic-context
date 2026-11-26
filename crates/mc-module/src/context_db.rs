@@ -7,7 +7,7 @@
 //! [`SCHEMA_VERSION`] when it opens it. A store at any other version is
 //! refused by name, so a newer or older build can never be misread.
 //!
-//! A mode-3 session's rows are keyed by its host (`harness`) and the host's own
+//! A runner-hosted session's rows are keyed by its host (`harness`) and the host's own
 //! session id, the same key a standalone plugin uses for that session. Writes
 //! are short `BEGIN IMMEDIATE` transactions, since standalone hosts write the
 //! same file.

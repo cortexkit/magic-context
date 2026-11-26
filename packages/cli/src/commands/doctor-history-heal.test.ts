@@ -766,7 +766,12 @@ it("refuses mode-3 handoffs during planning and when they appear after a plan", 
         `mode3_move:opencode:${id}`,
     );
     expect(plan().sessions[0].refusals[0].code).toBe("already_moved");
-    expect(() => apply(p)).toThrow("already_moved");
+    expect(plan().sessions[0].refusals[0].message).toBe(
+        "Session has moved to CortexKit; standalone history heal must not change it",
+    );
+    expect(() => apply(p)).toThrow(
+        "standalone history heal must not change a session that moved to CortexKit",
+    );
     expect(readdirSync(root).filter((n) => n.startsWith("history-heal-backup-"))).toEqual([]);
     expect(
         db.prepare("SELECT start_message,end_message FROM compartments WHERE sequence=1").get(),

@@ -185,7 +185,7 @@ async fn render_failed_part_counts_original_and_omits_all_replaces_after_store_r
     assert_eq!(old.row["items"][0]["state"], "live");
 
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     store.save(&route.session, &session.durable()).unwrap();
     let durable = store.load(&route.session).unwrap();
     let mut restored = Session::new(&route, &setup, session.features, None);

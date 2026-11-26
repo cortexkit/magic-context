@@ -1,4 +1,4 @@
-//! Regression tests for two defects found before mode 3 went live:
+//! Regression tests for two defects found before the module went live:
 //! - a head re-rendered `m[0]` whenever the context window the runner
 //!   reports changed, even when it grew, and that rebuild landed drops below
 //!   the execute threshold;

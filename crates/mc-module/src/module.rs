@@ -244,7 +244,7 @@ enum Slot {
 struct Quiet {
     carry: crate::session::QuietCarry,
     idle_since: tokio::time::Instant,
-    /// The state last saved to `mode3.db`, so the next worker saves only a
+    /// The state last saved to `sessions.db`, so the next worker saves only a
     /// change.
     saved: Option<crate::store::Durable>,
     /// The session has no summarizer, so its worker follows the runner's
@@ -407,7 +407,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     pub(crate) fn health(&self, bus_connected: bool) -> subc_client_rs::HealthReport {
         crate::health::Health {
             context_open: self.inner.db.is_some(),
-            mode3_open: self.inner.store.is_some(),
+            sessions_open: self.inner.store.is_some(),
             session_count: self.inner.setup_count.load(Ordering::Relaxed),
             dreamer_enabled: self.inner.dreamer_enabled.load(Ordering::Relaxed),
             bus_connected,
@@ -618,7 +618,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     /// the session's worker: only the worker holds the session's transcript
     /// index. The request names no runner, so a live worker of the harness
     /// and session answers, the first by runner name when several do. When
-    /// no worker is live but mode3.db holds the session's saved state, a
+    /// no worker is live but sessions.db holds the session's saved state, a
     /// worker is started for it, as for a command run, and the read restores
     /// the session from that state.
     async fn recent(
@@ -1609,7 +1609,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
 
     /// A command on memories, observations, the dreamer or notes. It runs on
     /// the calling task: each is a few short transactions on `context.db`,
-    /// and its answer is kept in `mode3.db`, not in a session.
+    /// and its answer is kept in `sessions.db`, not in a session.
     async fn owner_command(
         &self,
         request: crate::user_commands::Request,

@@ -44,7 +44,7 @@ use crate::client::{DoorRefusal, EntorhinalRefusal};
 
 /// The stores `describe` declares, each with its sync class: the session's
 /// own history (summaries, notes and waiting facts), its machine-local state
-/// in `mode3.db`, the project memories every agent of a project shares, and
+/// in `sessions.db`, the project memories every agent of a project shares, and
 /// the search indexes, which each machine rebuilds for itself.
 const STORES: &[(&str, &str)] = &[
     ("session-history", sync_class::AGENT),
@@ -104,10 +104,10 @@ pub trait Host: Send + Sync {
     /// Whether the session has a worker in this process: a Setup started
     /// it, and only a move's release or install drops it.
     fn active(&self, session: &SessionRef) -> bool;
-    /// Every row `mode3.db` holds for the session, per table, for an undo
+    /// Every row `sessions.db` holds for the session, per table, for an undo
     /// image; an empty object when it holds none.
     fn state_rows(&self, session: &SessionRef) -> Result<Value, String>;
-    /// Delete every row `mode3.db` holds for the session, in one
+    /// Delete every row `sessions.db` holds for the session, in one
     /// transaction.
     fn clear_state(&self, session: &SessionRef) -> Result<(), String>;
     /// One call to Engram's session door, given at most `deadline`: the

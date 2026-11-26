@@ -118,21 +118,21 @@ fn tag_floor_leaves_database_bytes_and_modification_time_unchanged() {
 }
 
 #[test]
-fn tag_floor_uses_the_explicit_context_path_without_opening_mode3() {
+fn tag_floor_uses_the_explicit_context_path_without_opening_sessions_db() {
     let root = tempfile::tempdir().unwrap();
     let path = fixture(root.path());
     let explicit = root.path().join("explicit.db");
     std::fs::rename(path, &explicit).unwrap();
-    let mode3 = root.path().join("mode3.db");
-    std::fs::write(&mode3, b"not a database").unwrap();
+    let sessions = root.path().join("sessions.db");
+    std::fs::write(&sessions, b"not a database").unwrap();
     let output = command(root.path())
         .env("MAGIC_CONTEXT_DB", explicit)
-        .env("MAGIC_CONTEXT_MODE3_STORE", &mode3)
+        .env("MAGIC_CONTEXT_SESSIONS_STORE", &sessions)
         .args(["--session", "s1", "--harness", "opencode"])
         .output()
         .unwrap();
     assert_eq!(answer(output)["tag_floor"], 42);
-    assert_eq!(std::fs::read(mode3).unwrap(), b"not a database");
+    assert_eq!(std::fs::read(sessions).unwrap(), b"not a database");
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn move_in_checkpoint_matches_tag_floor_without_a_request_floor() {
     };
     let moved = move_in(
         db,
-        &Store::open(&root.path().join("mode3.db")).unwrap(),
+        &Store::open(&root.path().join("sessions.db")).unwrap(),
         &Settings::default().into(),
         &request,
     )

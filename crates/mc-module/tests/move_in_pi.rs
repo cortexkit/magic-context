@@ -125,7 +125,7 @@ impl Fixture {
     fn run(&self) -> Result<Moved, String> {
         move_in(
             ContextDb::open(&self.dir.join("context.db")).unwrap(),
-            &Store::open(&self.dir.join("mode3.db")).unwrap(),
+            &Store::open(&self.dir.join("sessions.db")).unwrap(),
             &Settings::default().into(),
             &self.request,
         )
@@ -208,7 +208,7 @@ impl Fixture {
             self.strings("SELECT anchor_ordinal || '' FROM notes ORDER BY id"),
             ["3", "4", "7"]
         );
-        assert!(Store::open(&self.dir.join("mode3.db"))
+        assert!(Store::open(&self.dir.join("sessions.db"))
             .unwrap()
             .load(&self.request.session)
             .is_none());

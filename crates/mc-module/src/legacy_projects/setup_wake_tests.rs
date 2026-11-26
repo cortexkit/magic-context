@@ -95,7 +95,7 @@ async fn woken(module: &Module<Client>) -> bool {
 #[tokio::test]
 async fn a_setup_naming_a_new_project_id_wakes_the_rounds() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = Store::open(&dir.path().join("sessions.db")).unwrap();
     let module = Module::new(Client, Settings::default(), None, Some(store));
     setup(&module, "s1", "pj-first");
     assert!(woken(&module).await, "a new project id wakes a round");

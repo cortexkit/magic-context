@@ -52,7 +52,7 @@ async fn user_commands_preview_erases_refusal_history_and_changes_the_next_ordin
 async fn user_commands_refused_flush_discards_queued_work_instead_of_saving_the_rollback() {
     let (mut session, client, settings) = ready();
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
     session.set_store(Some(store.clone()));
 
     // Establish a real earlier refusal, not an artificial queue marker.
@@ -93,7 +93,7 @@ async fn user_commands_refused_flush_discards_queued_work_instead_of_saving_the_
 async fn user_commands_refused_flush_saves_the_runners_move_floor() {
     let (mut session, client, settings) = ready();
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
     session.set_store(Some(store.clone()));
     *client.refuse.lock().unwrap() = true;
     *client.refusal.lock().unwrap() = Some(ViewRefusal::CutBeforeMove {
@@ -218,7 +218,7 @@ async fn user_commands_failed_run_restores_all_saved_fields_except_answer_and_re
     for transport in [false, true] {
         let (mut session, client, settings) = ready();
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+        let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
         session.set_store(Some(store.clone()));
         *client.refuse.lock().unwrap() = true;
         let (view, _) = session.build(&settings, None, false, None);

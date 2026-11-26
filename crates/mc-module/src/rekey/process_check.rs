@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn rekey_lsof_parser_handles_pids_and_unrelated_mount_warnings() {
-        let paths = vec![PathBuf::from("/store/mode3.db")];
+        let paths = vec![PathBuf::from("/store/sessions.db")];
         let warning = b"lsof: WARNING: can't stat() xfs file system /unrelated/lower\nOutput information may be incomplete.\n";
         assert!(parse_lsof(Some(1), b"", b"", &paths, 10).is_ok());
         assert!(parse_lsof(Some(1), b"", warning, &paths, 10).is_ok());
@@ -271,7 +271,7 @@ mod tests {
             (
                 Some(1),
                 b"".as_slice(),
-                b"lsof: can't stat /store/mode3.db\n".as_slice(),
+                b"lsof: can't stat /store/sessions.db\n".as_slice(),
             ),
         ] {
             assert!(parse_lsof(status, stdout, stderr, &paths, 10)

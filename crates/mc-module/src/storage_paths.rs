@@ -6,18 +6,54 @@ use cortexkit_paths::{EnvSource, SystemEnv};
 
 pub(crate) const MODULE_DIR: &str = "magic-context";
 pub(crate) const CONTEXT_DB: &str = "context.db";
-pub(crate) const SESSION_DB: &str = "mode3.db";
+pub(crate) const SESSION_DB: &str = "sessions.db";
 
 pub fn context_db_path() -> Result<PathBuf, String> {
     resolve_context_db_path(&SystemEnv, std::env::home_dir)
 }
 
-pub fn store_path(context_db: &Path) -> PathBuf {
-    resolve_store_path(&SystemEnv, context_db)
+pub fn store_path(context_db: &Path) -> Result<PathBuf, String> {
+    let store = resolve_store_path(&SystemEnv, context_db);
+    let context_default = context_db.with_file_name("sessions.db");
+    let store_default = store.with_file_name("sessions.db");
+    refuse_previous_store(&context_default)?;
+    if store_default != context_default {
+        refuse_previous_store(&store_default)?;
+    }
+    Ok(store)
+}
+
+fn refuse_previous_store(current: &Path) -> Result<(), String> {
+    let previous = current.with_file_name("mode3.db");
+    if !store_file_exists(&previous)? {
+        return Ok(());
+    }
+    let dir = current
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let reason = if store_file_exists(current)? {
+        "both mode3.db and sessions.db exist; stop the module and determine which file holds the session state before moving either file"
+    } else {
+        "mode3.db has not been renamed; stop the module and rename mode3.db to sessions.db (also rename mode3.db-wal and mode3.db-shm to sessions.db-wal and sessions.db-shm if present), or place the build with scripts/place-ck-mc.sh to rename it"
+    };
+    Err(format!(
+        "ck-mc: cannot open the session store in {}: {reason}",
+        dir.display()
+    ))
+}
+
+// Count a dangling link as present; creating a new store must not hide it.
+fn store_file_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("ck-mc: cannot check {}: {error}", path.display())),
+    }
 }
 
 fn resolve_store_path(env: &impl EnvSource, context_db: &Path) -> PathBuf {
-    path_var(env, "MAGIC_CONTEXT_MODE3_STORE")
+    path_var(env, "MAGIC_CONTEXT_SESSIONS_STORE")
         .unwrap_or_else(|| context_db.with_file_name(SESSION_DB))
 }
 
@@ -168,7 +204,7 @@ mod tests {
                     ("MAGIC_CONTEXT_DB", ""),
                     ("MAGIC_CONTEXT_TEST_DATA_DIR", " "),
                     ("MAGIC_CONTEXT_STORAGE_DIR", ""),
-                    ("MAGIC_CONTEXT_MODE3_STORE", ""),
+                    ("MAGIC_CONTEXT_SESSIONS_STORE", ""),
                 ],
                 root: HOME_ROOT,
                 db: HOME_DB,
@@ -216,11 +252,11 @@ mod tests {
                     ("MAGIC_CONTEXT_DB", " selected.db "),
                     ("MAGIC_CONTEXT_TEST_DATA_DIR", "test"),
                     ("MAGIC_CONTEXT_STORAGE_DIR", "explicit"),
-                    ("MAGIC_CONTEXT_MODE3_STORE", " selected-mode3.db "),
+                    ("MAGIC_CONTEXT_SESSIONS_STORE", " selected-sessions.db "),
                 ],
                 root: HOME_ROOT,
                 db: " selected.db ",
-                store_override: Some(" selected-mode3.db "),
+                store_override: Some(" selected-sessions.db "),
             },
         ];
         for Case {
@@ -250,8 +286,10 @@ mod tests {
                 root,
                 "{vars:?}"
             );
-            let expected_store = store_override
-                .map_or_else(|| Path::new(db).with_file_name("mode3.db"), PathBuf::from);
+            let expected_store = store_override.map_or_else(
+                || Path::new(db).with_file_name("sessions.db"),
+                PathBuf::from,
+            );
             assert_eq!(
                 resolve_store_path(&env, &actual).as_os_str(),
                 expected_store.as_os_str(),

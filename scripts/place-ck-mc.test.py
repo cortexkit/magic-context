@@ -39,20 +39,20 @@ class PlacementTests(unittest.TestCase):
         self.staged = once(root, f'''#!/bin/sh
 case "$1" in
  --version) echo 'ck-mc 0.1.0 ({NEW})' ;;
- --print-fences) echo "${{FAKE_STAGED_FENCES:-context.db=91 mode3.db=50}}" ;;
+ --print-fences) echo "${{FAKE_STAGED_FENCES:-context.db=91 sessions.db=50}}" ;;
  --print-tool-pins) printf '%s\n' "${{FAKE_STAGED_PINS:-ctx_memory 1 aaa current}}" ;;
  *) exit 2 ;;
 esac
 ''')
-        deployed = once(root, f'''#!/bin/sh
+        self.deployed = once(root, f'''#!/bin/sh
 case "$1" in
  --version) echo 'ck-mc 0.1.0 ({OLD})' ;;
- --print-fences) echo 'context.db=90 store.db=49' ;;
+ --print-fences) echo "${{FAKE_DEPLOYED_FENCES:-context.db=90 store.db=49}}" ;;
  --print-tool-pins) printf '%s\n' "${{FAKE_DEPLOYED_PINS:-ctx_memory 1 aaa current}}" ;;
  *) exit 2 ;;
 esac
 ''')
-        (self.bin / "ck-mc").write_bytes(deployed.read_bytes())
+        (self.bin / "ck-mc").write_bytes(self.deployed.read_bytes())
         (self.bin / "ck-mc").chmod(0o755)
         for name, body in {
             "stat": '''#!/bin/sh
@@ -71,11 +71,28 @@ exec {REAL_GIT} -c safe.directory={ROOT} "$@"
             "ck": '''#!/bin/sh
 case "$*" in
   'module restart magic-context') [ -n "${FAKE_RESTART_LOG:-}" ] && echo restarted >> "$FAKE_RESTART_LOG"; exit 0 ;;
+  'module stop magic-context')
+    echo stopped >> "$FAKE_LIFECYCLE"
+    touch "$FAKE_STOPPED"
+    ;;
+  'module start magic-context')
+    if [ -f "$MAGIC_CONTEXT_STORAGE_DIR/sessions.db" ]; then store=sessions.db; else store=mode3.db; fi
+    echo "started $store $("$FAKE_DEPLOYED" --version)" >> "$FAKE_LIFECYCLE"
+    rm -f "$FAKE_STOPPED"
+    ;;
   '--json provenance magic-context')
     # FAKE_DRAINING_POLLS makes the first N reads look like a restart still in progress:
     # the new process has not declared its build yet.
     n=$(cat "$FAKE_POLL_COUNT" 2>/dev/null || echo 0); echo $((n + 1)) > "$FAKE_POLL_COUNT"
-    if [ "$n" -lt "${FAKE_DRAINING_POLLS:-0}" ]; then
+    if [ -f "$FAKE_STOPPED" ]; then
+      case "${FAKE_STOPPED_PROVENANCE:-}" in
+        failed) exit 7 ;;
+        unknown) echo '{"module":{"name":"magic-context"}}' ;;
+        restarted) echo '{"modules":[{"module_id":"magic-context","daemon_observed":{"pid":4321}}]}' ;;
+        null) echo '{"modules":[{"module_id":"magic-context","daemon_observed":{"pid":null},"module_declared":{}}]}' ;;
+        *) echo '{"modules":[{"module_id":"magic-context","module_declared":{},"registration_declaration":{},"daemon_observed":{"running_image":{"status":"unavailable","reason":"not_running"}}}]}' ;;
+      esac
+    elif [ "$n" -lt "${FAKE_DRAINING_POLLS:-0}" ]; then
       echo '{"modules":[{"module_id":"magic-context","daemon_observed":{"pid":1234},"module_declared":{}}]}'
     else
       echo '{"modules":[{"module_id":"magic-context","daemon_observed":{"pid":1234},"module_declared":{"build":{"build_git_sha":"6d76aeea576fe2a25ac6d5ed0d9c8125a1fff9f2"}}}]}'
@@ -85,7 +102,26 @@ case "$*" in
 esac
 ''',
             "lsof": '''#!/bin/sh
+if [ "$2" = '-Fpcn' ]; then
+    [ -f "$FAKE_STOPPED" ] || exit 2
+    if [ "${FAKE_HOLDER:-}" = 1 ]; then
+        for path do
+            case "$path" in *.lock) printf 'p4242\\ncoffline-reader\\nn%s\\n' "$path"; exit 0;; esac
+        done
+    fi
+    exit 1
+fi
 python3 -c 'import os; p=os.environ["FAKE_DEPLOYED"]; print("i" + str(os.stat(p).st_ino) + "\\nn" + p)'
+''',
+            "ps": '''#!/bin/sh
+if [ "$2" = 4321 ] && [ "${FAKE_STOPPED_PROVENANCE:-}" = restarted ]; then echo 4321; exit 0; fi
+if [ "${FAKE_WONT_STOP:-}" = 1 ] || [ ! -f "$FAKE_STOPPED" ]; then echo 1234; exit 0; fi
+exit 1
+''',
+            "mv": f'''#!/bin/sh
+if [ "${{FAKE_SWAP_FAIL:-}}" = 1 ] && [ "$*" = "-f ${{2}} $FAKE_DEPLOYED" ]; then exit 77; fi
+if [ "${{FAKE_RENAME_FAIL:-}}" = 1 ] && [ "$3" = "$MAGIC_CONTEXT_STORAGE_DIR/sessions.db-shm" ]; then exit 77; fi
+exec {shutil.which('mv')} "$@"
 ''',
             # A stripped release lists no debug-map (STABS) entries; FAKE_UNSTRIPPED
             # lists two, the shape a failed rust-objcopy strip leaves behind.
@@ -105,7 +141,8 @@ printf '0000000100000000 T _main\\n'
                         CK_STAGING=str(self.shared_staging),
                         PATH=str(self.shims) + os.pathsep + os.environ["PATH"],
                         PYTHONPYCACHEPREFIX=str(root / "pycache"), XDG_CACHE_HOME=str(root / "cache"),
-                        FAKE_DEPLOYED=str(self.bin / "ck-mc"), FAKE_POLL_COUNT=str(root / "poll-count"),
+                         FAKE_DEPLOYED=str(self.bin / "ck-mc"), FAKE_POLL_COUNT=str(root / "poll-count"),
+                         FAKE_STOPPED=str(root / "stopped"), FAKE_LIFECYCLE=str(root / "lifecycle"),
                         # The deployed fake reports pins: its revision contains the commit
                         # that added the flag.
                         PLACE_CK_MC_TOOL_PINS_COMMIT=OLD,
@@ -114,7 +151,7 @@ printf '0000000100000000 T _main\\n'
     def versions(self, context, store):
         for name, sql, version in (
             ("context.db", "CREATE TABLE schema_migrations(version INTEGER)", context),
-            ("mode3.db", f"PRAGMA user_version = {store}", store),
+            ("sessions.db", f"PRAGMA user_version = {store}", store),
         ):
             path = self.store / name
             path.unlink(missing_ok=True)
@@ -138,6 +175,143 @@ printf '0000000100000000 T _main\\n'
         return subprocess.run(["bash", str(SCRIPT), "--dry-run", *args, str(self.staged)],
                               env=self.env, cwd=ROOT, capture_output=True, text=True)
 
+    def place(self, *args):
+        return subprocess.run(["bash", str(SCRIPT), *args, str(self.staged)],
+                              env=self.env, cwd=ROOT, capture_output=True, text=True)
+
+    def legacy_store(self):
+        self.env["FAKE_DEPLOYED_FENCES"] = "context.db=91 mode3.db=49"
+        previous = self.store / "mode3.db"
+        (self.store / "sessions.db").rename(previous)
+        return previous
+
+    def store_with_wal(self, destination):
+        source = self.store / "wal-fixture.db"
+        conn = sqlite3.connect(source)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+            conn.execute("PRAGMA user_version=49")
+            conn.execute("CREATE TABLE saved_view(view TEXT NOT NULL)")
+            conn.execute("INSERT INTO saved_view VALUES ('saved state in the WAL')")
+            conn.commit()
+            contents = {}
+            for suffix in ("", "-wal", "-shm"):
+                contents[suffix] = Path(f"{source}{suffix}").read_bytes()
+                Path(f"{destination}{suffix}").write_bytes(contents[suffix])
+            return contents
+        finally:
+            conn.close()
+            source.unlink()
+
+    def test_renames_in_both_directions_while_stopped(self):
+        for destination, source in (("sessions.db", "mode3.db"), ("mode3.db", "sessions.db")):
+            with self.subTest(destination=destination):
+                for name in (source, destination):
+                    for suffix in ("", "-wal", "-shm"):
+                        (self.store / f"{name}{suffix}").unlink(missing_ok=True)
+                self.versions(91, 49)
+                (self.bin / "ck-mc").write_bytes(self.deployed.read_bytes())
+                if source == "mode3.db":
+                    self.legacy_store()
+                else:
+                    self.env["FAKE_STAGED_FENCES"] = "context.db=91 mode3.db=50"
+                    self.env["FAKE_DEPLOYED_FENCES"] = "context.db=91 sessions.db=49"
+                if self.shared_staging.exists():
+                    shutil.rmtree(self.shared_staging)
+                Path(self.env["FAKE_LIFECYCLE"]).unlink(missing_ok=True)
+                Path(self.env["FAKE_STOPPED"]).unlink(missing_ok=True)
+                payloads = self.store_with_wal(self.store / source)
+                run = self.place()
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("post-stop provenance did not report a PID", run.stdout)
+                for suffix, payload in payloads.items():
+                    self.assertFalse((self.store / f"{source}{suffix}").exists())
+                    self.assertEqual((self.store / f"{destination}{suffix}").read_bytes(), payload)
+                with sqlite3.connect(self.store / destination) as conn:
+                    self.assertEqual(conn.execute("SELECT view FROM saved_view").fetchone(),
+                                     ("saved state in the WAL",))
+                conn.close()
+                self.assertEqual(Path(self.env["FAKE_LIFECYCLE"]).read_text().splitlines(),
+                                 ["stopped", f"started {destination} ck-mc 0.1.0 ({NEW})"])
+
+    def test_rename_dry_run_and_no_restart_make_no_changes(self):
+        old = self.legacy_store()
+        self.store_with_wal(old)
+        Path(f"{old}-shm").unlink()
+        original = (self.bin / "ck-mc").read_bytes()
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"rename {old} to {self.store / 'sessions.db'}", run.stdout)
+        run = self.place("--no-restart")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("old process would keep running", run.stderr)
+        self.assertTrue(old.exists())
+        self.assertFalse(Path(f"{old}-shm").exists(), "dry-run must not create shared memory")
+        self.assertFalse((self.store / "sessions.db").exists())
+        self.assertFalse(Path(self.env["FAKE_LIFECYCLE"]).exists())
+        self.assertEqual((self.bin / "ck-mc").read_bytes(), original)
+
+    def test_rename_refuses_when_pid_or_store_holder_remains(self):
+        old = self.legacy_store()
+        Path(f"{old}.lock").touch()
+        original = (self.bin / "ck-mc").read_bytes()
+        for flag, message in [("FAKE_WONT_STOP", "PID 1234"), ("FAKE_HOLDER", "offline-reader")]:
+            with self.subTest(flag=flag):
+                self.env[flag] = "1"
+                run = self.place()
+                self.env.pop(flag)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn(message, run.stderr)
+                self.assertTrue(old.exists())
+                self.assertFalse((self.store / "sessions.db").exists())
+                self.assertEqual((self.bin / "ck-mc").read_bytes(), original)
+        self.assertIn(f"started mode3.db ck-mc 0.1.0 ({OLD})", Path(self.env["FAKE_LIFECYCLE"]).read_text())
+
+    def test_failed_or_unknown_post_stop_provenance_does_not_block_a_verified_stop(self):
+        for status, message in (("failed", "command failed"), ("unknown", "returned an unrecognized reply"),
+                                ("null", "did not report a PID")):
+            with self.subTest(status=status):
+                self.versions(91, 49)
+                old = self.legacy_store()
+                self.env["FAKE_STOPPED_PROVENANCE"] = status
+                (self.bin / "ck-mc").write_bytes(self.deployed.read_bytes())
+                run = self.place()
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn(f"post-stop provenance {message}", run.stdout)
+                self.assertFalse(old.exists())
+                self.assertTrue((self.store / "sessions.db").exists())
+
+    def test_live_post_stop_pid_refuses_without_renaming(self):
+        old = self.legacy_store()
+        original = (self.bin / "ck-mc").read_bytes()
+        self.env["FAKE_STOPPED_PROVENANCE"] = "restarted"
+        run = self.place()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("daemon reported a live magic-context PID 4321 after stop", run.stderr)
+        self.assertTrue(old.exists())
+        self.assertFalse((self.store / "sessions.db").exists())
+        self.assertEqual((self.bin / "ck-mc").read_bytes(), original)
+
+    def test_rename_or_binary_swap_failure_restores_store_and_restarts_original(self):
+        old = self.legacy_store()
+        original = (self.bin / "ck-mc").read_bytes()
+        payloads = self.store_with_wal(old)
+        for flag in ("FAKE_RENAME_FAIL", "FAKE_SWAP_FAIL"):
+            with self.subTest(flag=flag):
+                Path(self.env["FAKE_LIFECYCLE"]).unlink(missing_ok=True)
+                self.env[flag] = "1"
+                run = self.place()
+                self.env.pop(flag)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("restored original store and binary", run.stderr)
+                for suffix, payload in payloads.items():
+                    self.assertEqual(Path(f"{old}{suffix}").read_bytes(), payload)
+                    self.assertFalse((self.store / f"sessions.db{suffix}").exists())
+                self.assertEqual((self.bin / "ck-mc").read_bytes(), original)
+                self.assertEqual(Path(self.env["FAKE_LIFECYCLE"]).read_text().splitlines(),
+                                 ["stopped", f"started {old.name} ck-mc 0.1.0 ({OLD})"])
+
     def test_unstripped_binary_refuses(self):
         self.env["FAKE_UNSTRIPPED"] = "1"
         run = self.run_script()
@@ -148,14 +322,14 @@ printf '0000000100000000 T _main\\n'
         self.versions(92, 49)
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn("context.db live=92 staged=91; mode3.db live=49 staged=50", run.stdout + run.stderr)
+        self.assertIn("context.db live=92 staged=91; sessions.db live=49 staged=50", run.stdout + run.stderr)
         self.assertIn("rollback refused", run.stderr)
 
     def test_store_fence_refuses(self):
         self.versions(91, 51)
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn("context.db live=91 staged=91; mode3.db live=51 staged=50", run.stdout + run.stderr)
+        self.assertIn("context.db live=91 staged=91; sessions.db live=51 staged=50", run.stdout + run.stderr)
         self.assertIn("rollback refused", run.stderr)
 
     def test_an_unmigrated_context_db_refuses(self):
@@ -169,7 +343,7 @@ printf '0000000100000000 T _main\\n'
     def test_a_build_that_migrates_the_store_itself_may_be_placed_over_an_older_one(self):
         # From 106 on ck-mc migrates context.db when it starts, from the
         # released 0.49 plugin's version (95) up.
-        self.env["FAKE_STAGED_FENCES"] = "context.db=110 mode3.db=50"
+        self.env["FAKE_STAGED_FENCES"] = "context.db=110 sessions.db=50"
         self.versions(105, 49)
         run = self.run_script()
         self.assertEqual(run.returncode, 0, run.stderr)
@@ -230,16 +404,16 @@ esac
         self.assertIn("TAGGER_FEATURE_EPOCH: 3 -> 4 CHANGED", refused.stdout)
         self.assertIn("epochs changed", refused.stderr)
 
-    def test_missing_mode3_is_version_zero_and_old_store_is_untouched(self):
-        (self.store / "mode3.db").unlink()
+    def test_missing_session_store_is_version_zero_and_old_store_is_untouched(self):
+        (self.store / "sessions.db").unlink()
         old_store = self.store / "store.db"
         old_store.write_bytes(b"rollback store must not be opened")
         run = self.run_script()
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("mode3.db: live=0 staged=50", run.stdout)
+        self.assertIn("sessions.db: live=0 staged=50", run.stdout)
         self.assertIn("old store.db isn't checked", run.stdout)
         self.assertEqual(old_store.read_bytes(), b"rollback store must not be opened")
-        self.assertFalse((self.store / "mode3.db").exists())
+        self.assertFalse((self.store / "sessions.db").exists())
 
     def test_missing_epochs_skip_and_strict_only_refuses_one_sided_constants(self):
         for missing, side in (("old", "deployed"), ("new", "staged"), ("both", "both deployed")):
@@ -265,7 +439,7 @@ esac
         self.versions(999, 999)
         run = self.run_script()
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("context.db: live=91 staged=91; mode3.db: live=0", run.stdout)
+        self.assertIn("context.db: live=91 staged=91; sessions.db: live=0", run.stdout)
 
     def test_placement_verifies_and_preserves_rollback(self):
         run = subprocess.run(["bash", str(SCRIPT), str(self.staged)], env=self.env,

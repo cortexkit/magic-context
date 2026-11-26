@@ -22,8 +22,8 @@
 //!    runner's own move installs the view as its stored current view and
 //!    writes the number as the checkpoint on its compaction marker, so new
 //!    tag numbers continue above every number the model has seen;
-//! 6. writes the fence the standalone plugin checks
-//!    (`mode3_move:<harness>:<session>` in `schema_migrations_meta`), last,
+//! 6. writes the fence the 0.49 plugin checks, in
+//!    `schema_migrations_meta`, last,
 //!    as the move's commit point. From then on that plugin stands down on
 //!    the session.
 //!
@@ -238,7 +238,7 @@ pub fn move_in(
     })?;
     if already.is_some() {
         return Err(format!(
-            "session_already_moved: {} was already moved to mode 3",
+            "session_already_moved: {} was already moved to a runner",
             key.session
         ));
     }

@@ -54,7 +54,7 @@ async fn bound_caller(handler: &Handler, request: RouteBindRequest) -> AppCaller
 fn handler(fixture: &Fixture) -> Handler {
     fixture.add_summary();
     let db = ContextDb::open(&fixture.dir.path().join("context.db")).unwrap();
-    let store = Store::open(&fixture.dir.path().join("mode3.db")).unwrap();
+    let store = Store::open(&fixture.dir.path().join("sessions.db")).unwrap();
     let handler = Handler::new(Module::new(
         SubcRunnerClient::new(
             fixture.dir.path().join("unused-relay-socket"),
@@ -296,6 +296,14 @@ async fn samples_v19() {
         let mut response = reply(&handler, &caller, &request).await;
         pin_as_of(&mut response);
         let name = format!("fed-app-{}", method.replace(['.', '_'], "-"));
+        if method == "context.states" {
+            crate::app_read::pin_retired_session_kind(
+                &mut response["result"],
+                &testdata()
+                    .join("mc-app-read-samples-v19")
+                    .join(format!("{name}.json")),
+            );
+        }
         let bytes = sample(&name, &caller, &request, &response);
         assert!(samples.insert(format!("{name}.json"), bytes).is_none());
     }
@@ -364,7 +372,14 @@ async fn samples_v20() {
         ("fed-phone-context-states", &first, &rows),
         ("fed-phone-context-states-unchanged", &again, &unchanged),
     ] {
-        let bytes = sample(name, &phone, request, response);
+        let mut response = response.clone();
+        crate::app_read::pin_retired_session_kind(
+            &mut response["result"],
+            &testdata()
+                .join("mc-app-read-samples-v20")
+                .join(format!("{name}.json")),
+        );
+        let bytes = sample(name, &phone, request, &response);
         assert!(samples.insert(format!("{name}.json"), bytes).is_none());
     }
     assert_eq!(samples.len(), copied + 2);

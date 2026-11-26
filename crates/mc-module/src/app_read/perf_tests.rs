@@ -38,7 +38,7 @@ fn entry(ordinal: u64) -> Entry {
 #[ignore = "large synthetic session app-read cost measurement"]
 async fn app_read_seed_cost() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
     let app = crate::app_read::AppRead::new(Some(store.path.clone()), None);
     let route = Route {
         session: SessionRef::new("runner", "seed", "cost"),
@@ -152,6 +152,6 @@ async fn app_read_seed_cost() {
         (30, 0, 0),
         "ordinary notices append one identity each, without checkpoints or decision writes"
     );
-    println!("APP_READ_COST messages=9000 summaries=93 notices=30 mean_us={} p95_us={} max_us={} mode3_write_max_us={} setup_write_max_us={} index_rows={} snapshot_writes={} decision_writes={}", times.iter().sum::<u64>()/times.len() as u64/1000, times[28]/1000, times[29]/1000, store.take_write_max_ns()/1000,setup_write_max_us,writes.0,writes.1,writes.2);
+    println!("APP_READ_COST messages=9000 summaries=93 notices=30 mean_us={} p95_us={} max_us={} sessions_write_max_us={} setup_write_max_us={} index_rows={} snapshot_writes={} decision_writes={}", times.iter().sum::<u64>()/times.len() as u64/1000, times[28]/1000, times[29]/1000, store.take_write_max_ns()/1000,setup_write_max_us,writes.0,writes.1,writes.2);
     println!("APP_SNAPSHOT_COST messages=9000 bytes={snapshot_bytes} materialize_us={materialize_us} serialize_and_save_us={save_us} dirty_rows=1 dirty_bytes={dirty_bytes} dirty_serialize_and_save_us={dirty_save_us} dirty_write_max_us={dirty_write_max_us} states_50_mean_us={} states_50_p95_us={} breakdown_mean_us={} breakdown_p95_us={}", state_reads.iter().sum::<u128>()/30, state_reads[28], breakdown_reads.iter().sum::<u128>()/30, breakdown_reads[28]);
 }

@@ -1,6 +1,6 @@
 //! Regression tests for properties ck-mc kept before its per-notice cost
 //! work moved message search indexing to a background thread, stored large
-//! history text by content digest in the version-4 `mode3.db`, and made
+//! history text by content digest in the version-4 `sessions.db`, and made
 //! writable opens of `context.db` switch it to WAL.
 //!
 //! Each test states one such property. They drive the public `Module` API
@@ -488,7 +488,7 @@ async fn a_repeated_setup_over_an_unchanged_transcript_rewrites_no_search_rows()
 #[test]
 fn a_version_three_store_with_one_undecodable_row_still_opens() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(

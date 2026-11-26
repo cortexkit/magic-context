@@ -1,6 +1,6 @@
 # The Rust module (ck-mc)
 
-`ck-mc` is Magic Context for sessions that live in an llm-runner instead of a host with the plugin (mode 3 in [ARCHITECTURE.md](../../ARCHITECTURE.md)). It is a module of the subconscious daemon (subc), built from `crates/mc-module`. The runner holds the conversation and renders every request. ck-mc decides how the history is shortened and says so as a **view**: a list of edits (the history head, drops, placeholders, the cut) that the runner applies to every request until a newer view replaces it.
+`ck-mc` is Magic Context for sessions that live in an llm-runner instead of a host with the plugin (see [Where the transform runs](../../ARCHITECTURE.md#where-the-transform-runs)). It is a module of the subconscious daemon (subc), built from `crates/mc-module`. The runner holds the conversation and renders every request. ck-mc decides how the history is shortened and says so as a **view**: a list of edits (the history head, drops, placeholders, the cut) that the runner applies to every request until a newer view replaces it.
 
 The TypeScript transform is the specification. ck-mc must make the same decisions, lane for lane; the differences it is allowed are listed, with their reasons, in `crates/mc-module/src/pass_decision_tests.rs`, which checks ck-mc against a decision table generated from the TypeScript gates.
 
@@ -32,7 +32,7 @@ Paths are under `crates/mc-module/src/`.
 | `summary/` | The summarizer: trigger, chunking, prompt, validation, the history head (`head.rs`), and the two-pass run that reconciles new facts with the project's memories (`two_pass/`). |
 | `reduce.rs`, `expand.rs`, `notes.rs`, `memory_tool.rs`, `search/` | The five tools. Argument rules and reply text are the TypeScript tools', so an agent reads the same in both. |
 | `nudges.rs` | Reminders to call `ctx_reduce`. |
-| `store.rs`, `store_text.rs` | ck-mc's own store, `mode3.db`. |
+| `store.rs`, `store_text.rs` | ck-mc's own store, `sessions.db`. |
 | `context_db.rs` | Access to `context.db`, the store shared with the plugin. |
 | `memory_context/`, `memory_profile/`, `memory_sync/`, `workspace.rs` | A session's project, workspace and memory profile; sync of new memories to the backup service. |
 | `upkeep.rs`, `embedding.rs`, `chunk_embedding.rs` | Background project work: memory and commit vectors, commit indexing. |
@@ -57,13 +57,13 @@ The summarizer runs beside the session's worker, since a run can take minutes. I
 ## Stores
 
 - **`context.db`** is shared with every standalone plugin: summaries, memories, notes and the search index. ck-mc never migrates it. The TypeScript plugin owns the schema, and ck-mc opens it only at exactly the version the build was compiled against; any other version is refused by name. Writes are short `BEGIN IMMEDIATE` transactions.
-- **`mode3.db`** is ck-mc's own (`store.rs`, schema version in `SCHEMA_VERSION`): per session, the decisions that are not in the runner's transcript or view and must survive a restart, such as held drops and the state of the last view. Views themselves are not kept: after a restart ck-mc takes the runner's current view from the runner. A `mode3.db` newer than the build is refused without being changed. A running module holds a shared lock on `mode3.db.lock`, so an offline tool refuses to run while the module does.
+- **`sessions.db`** is ck-mc's own (`store.rs`, schema version in `SCHEMA_VERSION`): per session, the decisions that are not in the runner's transcript or view and must survive a restart, such as held drops and the state of the last view. Views themselves are not kept: after a restart ck-mc takes the runner's current view from the runner. A `sessions.db` newer than the build is refused without being changed. A running module holds a shared lock on `sessions.db.lock`, so an offline tool refuses to run while the module does.
 
-Back up and restore the two together. If `mode3.db` names summaries that `context.db` no longer has, ck-mc trusts `context.db`: it moves the cut back to the summaries that exist, rebuilds the head, and lets the summarizer cover those messages again.
+Back up and restore the two together. If `sessions.db` names summaries that `context.db` no longer has, ck-mc trusts `context.db`: it moves the cut back to the summaries that exist, rebuilds the head, and lets the summarizer cover those messages again.
 
 ## Moving a session to another machine
 
-`agent_data/` lets ck-mc take part when Entorhinal moves an agent to another machine (the `agent-data/v1` contract). Per runner session it carries, through Engram's session door, the session's `context.db` rows: summaries with their events, scores and facts, session notes, the project link, and the committed publications that still hold facts waiting for the summarizer's second turn. `mode3.db` state, search indexes and project memories stay behind; the runner carries its applied view, and ck-mc adopts it at the first Setup on the destination.
+`agent_data/` lets ck-mc take part when Entorhinal moves an agent to another machine (the `agent-data/v1` contract). Per runner session it carries, through Engram's session door, the session's `context.db` rows: summaries with their events, scores and facts, session notes, the project link, and the committed publications that still hold facts waiting for the summarizer's second turn. `sessions.db` state, search indexes and project memories stay behind; the runner carries its applied view, and ck-mc adopts it at the first Setup on the destination.
 
 - **The flag.** Serving moves is off unless the build says otherwise. The `agent-data` Cargo feature (off by default) turns it on. A build with debug assertions or with the feature also reads `MAGIC_CONTEXT_AGENT_DATA` (`1` or `0`). A release build without the feature ignores the variable and never serves a move. With the flag off, the manifest declares no `agent-data` service and its requests are refused.
 - **The gate.** Every move is recorded in `agent-data/journal.json` beside `context.db`, and the journal is enforced in every build, flag on or off. A session frozen at the source, or staged or being installed at the destination, is refused `session_moving`. A session released to another machine is refused `session_moved`, and the refusal names the new holder. Both refusals apply to Setup, notices, rides, tool calls, app and context reads, `ck-mc move-in` and `ck-mc rekey-runner`. A journal that cannot be read refuses every session. At startup an install the journal records as started is finished, and the files of ended moves are deleted. Jobs a frozen session's worker holds live only in memory, so a crash loses them: after the move is aborted, the runner's next notice is answered `setup_required`.

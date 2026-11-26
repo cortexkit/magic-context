@@ -80,7 +80,7 @@ fn conditions(model: &str) -> Conditions {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let module = Module::new(Client, Settings::default(), None, Some(store));
         Self {
             module,

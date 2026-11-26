@@ -1221,7 +1221,7 @@ impl Replica {
                     result["messages"] = body["messages"].clone();
                     result["compartments"] = body["compartments"].clone();
                 }
-                result["session_kind"] = json!("mode3");
+
                 result["moved_from_standalone"] = json!(false);
                 result
             }
@@ -1293,7 +1293,7 @@ impl Replica {
                     // Compaction entries expose mid and generated_under, but not
                     // llm-runner's run_id/step_id/attempt_id. None can be derived
                     // from an ordinal or notice sequence, including after reverts.
-                    json!({"join":"unavailable", "join_reason":"runner_step_identity_not_recorded", "producer_ref_kind":null, "session_kind":"mode3", "managed":{"value":snapshot.breakdown.without_summaries()["managed"]["value"], "by":"ck_mc"}, "missing":[], "decisions":[], "next_cursor":null, "retention":{"max_rows":256, "oldest_retained_at_ms":snapshot.decisions.first().map(|v| &v["at_ms"])}})
+                    json!({"join":"unavailable", "join_reason":"runner_step_identity_not_recorded", "producer_ref_kind":null, "managed":{"value":snapshot.breakdown.without_summaries()["managed"]["value"], "by":"ck_mc"}, "missing":[], "decisions":[], "next_cursor":null, "retention":{"max_rows":256, "oldest_retained_at_ms":snapshot.decisions.first().map(|v| &v["at_ms"])}})
                 }
             }
             _ => unreachable!(),
@@ -1401,6 +1401,20 @@ pub(crate) fn strings(value: Option<&Value>, limit: usize) -> Result<Vec<String>
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn pin_retired_session_kind(result: &mut Value, frozen_sample: &std::path::Path) {
+    assert!(
+        result.get("session_kind").is_none(),
+        "live app replies must omit session_kind: {result}"
+    );
+    // The older golden still documents a reply that included the member.
+    let sample: Value = serde_json::from_slice(&std::fs::read(frozen_sample).unwrap()).unwrap();
+    result["session_kind"] = sample["response"]["result"]
+        .get("session_kind")
+        .expect("the frozen app reply carried session_kind")
+        .clone();
+}
 
 #[cfg(test)]
 mod lazy_tests;

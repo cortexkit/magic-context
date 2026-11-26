@@ -624,7 +624,7 @@ async fn a_held_message_is_read_again_when_the_epoch_marker_changes() {
 fn health_report(health: Arc<super::health::Health>) -> subc_client_rs::HealthReport {
     crate::health::Health {
         context_open: true,
-        mode3_open: true,
+        sessions_open: true,
         session_count: 0,
         dreamer_enabled: false,
         bus_connected: false,

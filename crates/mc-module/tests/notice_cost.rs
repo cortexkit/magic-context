@@ -413,7 +413,7 @@ impl Fixture {
             }
             conn.pragma_update(None,"synchronous","FULL").unwrap();
         });
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let settings = Settings::default();
         let newest = cursor(&entries[cut - 1]);
         let view = if moved {
@@ -437,7 +437,10 @@ impl Fixture {
                 .env("XDG_CONFIG_HOME", dir.path())
                 .env("XDG_DATA_HOME", dir.path())
                 .env("MAGIC_CONTEXT_DB", dir.path().join("context.db"))
-                .env("MAGIC_CONTEXT_MODE3_STORE", dir.path().join("mode3.db"))
+                .env(
+                    "MAGIC_CONTEXT_SESSIONS_STORE",
+                    dir.path().join("sessions.db"),
+                )
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -492,7 +495,7 @@ impl Fixture {
             store.save(&key, &session.durable()).unwrap();
             view
         };
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let durable = store.load(&key).unwrap();
         Self {
             dir,
@@ -521,7 +524,7 @@ impl Fixture {
             tx.execute("UPDATE message_history_index SET last_indexed_ordinal=?2,dirty_floor_ordinal=0 WHERE session_id=?1",params![self.key.session,from-1]).unwrap();
             tx.commit().unwrap();
         });
-        let conn = Connection::open(self.path("mode3.db")).unwrap();
+        let conn = Connection::open(self.path("sessions.db")).unwrap();
         conn.execute_batch("DELETE FROM app_read_headers; DELETE FROM app_read_messages; DELETE FROM view_decisions;")
             .unwrap();
         conn.execute(
@@ -529,7 +532,7 @@ impl Fixture {
             [self.entries.len() as i64],
         )
         .unwrap();
-        Store::open(&self.path("mode3.db"))
+        Store::open(&self.path("sessions.db"))
             .unwrap()
             .save(&self.key, &self.durable)
             .unwrap();
@@ -651,7 +654,7 @@ fn trial_recording(
             client.clone(),
             Settings::default(),
             Some(ContextDb::open(&fixture.path("context.db")).unwrap()),
-            Some(Store::open(&fixture.path("mode3.db")).unwrap()),
+            Some(Store::open(&fixture.path("sessions.db")).unwrap()),
         );
         module.setup(route.clone(), setup).unwrap();
         drain(&module, &fixture.key).await;
@@ -1073,7 +1076,7 @@ fn notice_cost_profile() {
         for size in [1_000, 150_000] {
             let fixture = Fixture::create(shape, size, false);
             let db = ContextDb::open(&fixture.path("context.db")).unwrap();
-            let store = Store::open(&fixture.path("mode3.db")).unwrap();
+            let store = Store::open(&fixture.path("sessions.db")).unwrap();
             let mut pending = vec![fixture.entries.last().unwrap().clone()];
             pending.push(assistant(size as u64 + 1, 2_048));
             if matches!(shape, Shape::Pi) {

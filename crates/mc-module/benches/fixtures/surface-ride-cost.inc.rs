@@ -82,7 +82,7 @@ fn surface_fixture(summaries: usize, memories: usize, tier_repeat: usize) -> Fix
         tx.commit().unwrap();
         mc_module::search::messages::index(conn, &key.harness, &key.session, &entries).unwrap();
     });
-    let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = Store::open(&dir.path().join("sessions.db")).unwrap();
     let route = Route {
         session: key.clone(),
         project: Some(mc_module::route::Project {
@@ -182,7 +182,7 @@ fn surface_ride_cost() {
             let row = runtime.block_on(async {
                 let client = Client(Arc::new(Mutex::new(RunnerState { original:fixture.entries.clone(),added:vec![],view:fixture.view.clone(),offered:0,views:vec![],record_views:false,foreground_reads:0,background_reads:0 })));
                 let route = surface_route(&fixture);
-                let module = Module::new(client.clone(),surface_settings(),Some(ContextDb::open(&fixture.path("context.db")).unwrap()),Some(Store::open(&fixture.path("mode3.db")).unwrap()));
+                let module = Module::new(client.clone(),surface_settings(),Some(ContextDb::open(&fixture.path("context.db")).unwrap()),Some(Store::open(&fixture.path("sessions.db")).unwrap()));
                 let mut setup = SetupRequest::new("head",surface_model(),WINDOW,RESERVE,rules(),vec![],1).with_newest(client.newest());
                 setup.accepts_images = Some(true);
                 setup.applied_view = Some(client.applied());
@@ -211,7 +211,7 @@ fn surface_ride_cost() {
                 assert!(!answer.starts_with("Error"),"{answer}");
                 drain(&module,&fixture.key).await;
                 module.search_idle(&fixture.key).await.unwrap();
-                let before = Store::open(&fixture.path("mode3.db")).unwrap().load(&fixture.key).unwrap();
+                let before = Store::open(&fixture.path("sessions.db")).unwrap().load(&fixture.key).unwrap();
                 assert!(!before.queued.is_empty(), "prepare a drop that has not already landed in view 2");
                 let cold_mural = std::env::var_os("SURFACE_COLD_MURAL").is_some();
                 if cold_mural {
@@ -233,7 +233,7 @@ fn surface_ride_cost() {
                 assert_eq!(view.version,3);
                 assert_eq!(client.0.lock().unwrap().foreground_reads,reads);
                 assert!(stages.iter().any(|s| s.stage=="head.fold"));
-                let saved = Store::open(&fixture.path("mode3.db")).unwrap().load(&fixture.key).unwrap();
+                let saved = Store::open(&fixture.path("sessions.db")).unwrap().load(&fixture.key).unwrap();
                 assert!(saved.queued.is_empty(), "the SurfaceChange ride must land queued drops");
                 assert_eq!(saved.baseline.as_ref().unwrap().through_sequence, summaries as i64-1);
                 let view_json = serde_json::to_vec(&view).unwrap();

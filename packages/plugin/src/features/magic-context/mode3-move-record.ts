@@ -13,7 +13,7 @@ export const MODE3_MOVE_RECORD_PREFIX = "mode3_move:opencode:";
 
 /** The one message a user sees when this plugin meets a moved session. */
 export const MOVED_SESSION_MESSAGE =
-    "Magic Context: this session was moved to Magic Context mode 3 and is now managed by its session runner, not by this plugin. Open it through the runner (THALAMUS). This plugin will not read or change it.";
+    "Magic Context: this session now runs under CortexKit, and Magic Context manages it there, not through this plugin. Open it there. This plugin will not read or change it.";
 
 /** Whether context.db records that `sessionId` was moved to mode 3. */
 export function isSessionMovedToMode3(db: Database, sessionId: string): boolean {
@@ -48,7 +48,7 @@ export function createMovedSessionCheck(
             const moved = isSessionMovedToMode3(db, sessionId);
             if (moved) {
                 known.set(sessionId, true);
-                log(`[magic-context] session ${sessionId} was moved to mode 3; standing down`);
+                log(`[magic-context] session ${sessionId} moved to CortexKit; standing down`);
             }
             return moved;
         } catch (error) {

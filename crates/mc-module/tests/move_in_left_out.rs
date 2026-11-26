@@ -82,7 +82,7 @@ impl Fixture {
             tag_floor: None,
             before_newest: None,
         };
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         Self {
             dir,
             conn,
@@ -354,9 +354,9 @@ fn snapshot(conn: &Connection) -> Vec<(String, Vec<String>)> {
 fn summary_covering_only_left_out_rows_refuses_without_changing_either_store() {
     let f = Fixture::new(&tail(), &[(1, 4), (5, 6)]);
     f.references(5, 6);
-    let mode3 = Connection::open(f.dir.path().join("mode3.db")).unwrap();
+    let sessions = Connection::open(f.dir.path().join("sessions.db")).unwrap();
     let before_context = snapshot(&f.conn);
-    let before_mode3 = snapshot(&mode3);
+    let before_sessions = snapshot(&sessions);
     let error = f.run().unwrap_err();
     assert!(
         error.starts_with("summary_covers_no_runner_entry:"),
@@ -364,7 +364,7 @@ fn summary_covering_only_left_out_rows_refuses_without_changing_either_store() {
     );
     assert!(error.contains("summary 1 of s1"), "{error}");
     assert_eq!(snapshot(&f.conn), before_context);
-    assert_eq!(snapshot(&mode3), before_mode3);
+    assert_eq!(snapshot(&sessions), before_sessions);
 }
 
 #[test]
@@ -404,16 +404,16 @@ fn saved_renumber_plan_with_left_out_endpoint_refuses_without_writes() {
         f.conn
             .execute("UPDATE compartments SET harness=?1", params![harness])
             .unwrap();
-        let mode3 = Connection::open(f.dir.path().join("mode3.db")).unwrap();
+        let sessions = Connection::open(f.dir.path().join("sessions.db")).unwrap();
         let before_context = snapshot(&f.conn);
-        let before_mode3 = snapshot(&mode3);
+        let before_sessions = snapshot(&sessions);
         let error = f.run().unwrap_err();
         assert!(
             error.starts_with("renumber_plan_has_left_out_endpoint:"),
             "{state}: {error}"
         );
         assert_eq!(snapshot(&f.conn), before_context, "{state}");
-        assert_eq!(snapshot(&mode3), before_mode3, "{state}");
+        assert_eq!(snapshot(&sessions), before_sessions, "{state}");
     }
 }
 

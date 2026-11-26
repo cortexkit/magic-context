@@ -273,7 +273,7 @@ export function planHealSession(db: Database, host: Database, id: string): HealS
         if (hasMode3MoveRecord(db, id))
             refuse(
                 "already_moved",
-                "Session has moved to mode 3; standalone history heal must not change it",
+                "Session has moved to CortexKit; standalone history heal must not change it",
             );
         if (getPendingCompactionMarkerState(db, id))
             refuse("pending_marker", "retry after the pending marker settles");

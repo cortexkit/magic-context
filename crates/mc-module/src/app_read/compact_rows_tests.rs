@@ -163,7 +163,7 @@ fn tables(conn: &Connection) -> Vec<String> {
 #[test]
 fn opening_a_version_seven_store_compacts_its_rows_and_drops_its_summaries() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let saved = version_seven_store(&path);
     let before: u64 = Connection::open(&path)
         .unwrap()
@@ -223,7 +223,7 @@ fn opening_a_version_seven_store_compacts_its_rows_and_drops_its_summaries() {
 #[test]
 fn an_interrupted_compaction_leaves_version_seven_and_runs_again() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let saved = version_seven_store(&path);
     let conn = Connection::open(&path).unwrap();
     // A crash part way through: the transaction the store opens in never
@@ -299,7 +299,7 @@ fn compacting_a_large_store() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(900_000);
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let mut conn = Connection::open(&path).unwrap();
     conn.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
     conn.execute_batch(VERSION_SEVEN).unwrap();

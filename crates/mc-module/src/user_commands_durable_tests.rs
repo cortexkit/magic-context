@@ -25,7 +25,7 @@ async fn user_commands_durable_answer_replays_after_restart_without_publication(
     for outcome in ["scheduled", "refused", "transport"] {
         let (mut session, client, settings) = ready();
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(&dir.path().join("mode3.db")).unwrap());
+        let store = Arc::new(Store::open(&dir.path().join("sessions.db")).unwrap());
         session.set_store(Some(store.clone()));
         *client.refuse.lock().unwrap() = outcome == "refused";
         *client.fail_apply.lock().unwrap() = outcome == "transport";
@@ -54,7 +54,7 @@ async fn user_commands_durable_answer_replays_after_restart_without_publication(
             Client::default(),
             settings.clone(),
             None,
-            Some(Store::open(&dir.path().join("mode3.db")).unwrap()),
+            Some(Store::open(&dir.path().join("sessions.db")).unwrap()),
         );
         let caller = subc_protocol::Principal::Reserved {
             module_id: "occipital".into(),
@@ -94,7 +94,7 @@ async fn user_commands_durable_answer_replays_after_restart_without_publication(
 async fn user_commands_crash_before_apply_reply_replays_the_write_ahead_answer() {
     let (mut session, client, settings) = ready();
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open(&dir.path().join("mode3.db")).unwrap());
+    let store = Arc::new(Store::open(&dir.path().join("sessions.db")).unwrap());
     session.set_store(Some(store.clone()));
     let p = preview(&mut session, &client, &settings, "flush").await;
     let request =
@@ -131,7 +131,7 @@ async fn user_commands_crash_before_apply_reply_replays_the_write_ahead_answer()
 async fn user_commands_rollback_save_failure_returns_error_and_replays_durable_state() {
     let (mut session, client, settings) = ready();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let store = Arc::new(Store::open(&path).unwrap());
     session.set_store(Some(store.clone()));
     *client.refuse.lock().unwrap() = true;
@@ -180,7 +180,7 @@ async fn user_commands_rollback_save_failure_returns_error_and_replays_durable_s
 fn user_commands_every_save_prunes_expired_answers_and_omits_an_empty_list() {
     let (mut session, _, _) = ready();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let store = Arc::new(Store::open(&path).unwrap());
     session.set_store(Some(store.clone()));
     let request =
@@ -209,7 +209,7 @@ fn user_commands_every_save_prunes_expired_answers_and_omits_an_empty_list() {
 async fn user_commands_per_session_bound_refuses_new_ids_without_evicting_live_answers() {
     let (mut session, client, settings) = ready();
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open(&dir.path().join("mode3.db")).unwrap());
+    let store = Arc::new(Store::open(&dir.path().join("sessions.db")).unwrap());
     session.set_store(Some(store.clone()));
     let p = preview(&mut session, &client, &settings, "flush").await;
     let request =

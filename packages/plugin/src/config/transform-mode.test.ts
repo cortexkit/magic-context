@@ -5,7 +5,6 @@ import {
     hasDeprecatedTransformKeys,
     resetTransformModeDeprecationWarningForTest,
     resolveTransformMode,
-    TRANSFORM_MODE_DEPRECATION_WARNING,
     warnTransformModeDeprecatedOnce,
 } from "./transform-mode";
 
@@ -51,7 +50,9 @@ describe("transform_mode deprecation", () => {
             warnTransformModeDeprecatedOnce();
             warnTransformModeDeprecatedOnce();
             expect(log.mock.calls).toEqual([
-                [`[magic-context] ${TRANSFORM_MODE_DEPRECATION_WARNING}`],
+                [
+                    "[magic-context] transform_mode is no longer used; Magic Context runs its TypeScript transform. Sessions that moved to CortexKit are managed there.",
+                ],
             ]);
         } finally {
             log.mockRestore();
