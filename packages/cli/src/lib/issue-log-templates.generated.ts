@@ -3149,6 +3149,8 @@ const TEMPLATE_DATA = [
 "note:\x01",
 "rust.\x01",
 "WARN \x01",
+"\x01-shm\x020p",
+"\x01-wal\x020p",
 "full",
 "type",
 "dir:\x01",
