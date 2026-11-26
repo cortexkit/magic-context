@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
-use super::{messages, sources, text, Hit};
+use super::{messages, rerank, sources, text, Hit};
 
 // Bound the relevance ranking before sorting by date so newest stays about the subject.
 const NEWEST_RANK_LIMIT: usize = 30;
@@ -262,12 +262,25 @@ impl History {
         self.skipped_session_ids
     }
 
+    #[cfg(test)]
     pub(crate) fn search(
         &self,
         conn: &Connection,
         input: &Value,
         semantic: Option<sources::Semantic<'_>>,
     ) -> Result<String, String> {
+        self.prepare(conn, input, semantic, None, false)
+            .map(PreparedHistory::render)
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        conn: &Connection,
+        input: &Value,
+        semantic: Option<sources::Semantic<'_>>,
+        rerank_pool: Option<usize>,
+        summaries_only: bool,
+    ) -> Result<PreparedHistory, String> {
         let query = checked_query(
             "history_search",
             input,
@@ -282,11 +295,20 @@ impl History {
             },
         };
         let dates = super::date_range(input)?;
+        let rerank_pool = rerank_pool.filter(|_| !newest);
         let multiplier = limit(input, 1, 3);
         let limit = 4 * multiplier;
+        let depth = (limit * 3).max(super::DEFAULT_LIMIT);
+        let depth = if newest {
+            depth.max(NEWEST_RANK_LIMIT)
+        } else if rerank_pool.is_some() {
+            depth.max(rerank::LANE_LIMIT)
+        } else {
+            depth
+        };
         let summary_query = SummaryQuery {
             query,
-            limit,
+            limit: depth,
             dates,
             semantic,
             newest,
@@ -298,82 +320,206 @@ impl History {
         let mut summaries = Vec::new();
         let mut skipped = self.skipped_session_ids;
         let mut coverage = self.coverage.lock().expect("lab history coverage");
+        let probes = text::literal_probes(query);
         for session in &self.sessions {
             if session.ambiguous {
                 skipped += 1;
-            } else {
+            } else if !summaries_only {
                 let reach = messages::reach(conn, &mut coverage, &session.id, dates);
-                let raw = RawQuery {
-                    query,
-                    limit,
+                let raw = messages::Query {
+                    text: query,
+                    limit: depth,
+                    probes: &probes,
                     dates,
-                    reach,
+                    visible: None,
                 };
-                people.extend(raw.search(conn, &session.id, "user")?);
+                people.extend(raw_hits(
+                    conn,
+                    session,
+                    &raw,
+                    &reach,
+                    messages::LabRole::Person,
+                )?);
                 if include_agent {
-                    agents.extend(raw.search(conn, &session.id, "assistant")?);
+                    agents.extend(raw_hits(
+                        conn,
+                        session,
+                        &raw,
+                        &reach,
+                        messages::LabRole::Agent,
+                    )?);
                 }
             }
             summaries.extend(summary_hits(conn, project, session, &summary_query)?);
         }
-        summaries.sort_unstable_by(|a, b| {
-            b.hit
-                .score()
-                .total_cmp(&a.hit.score())
-                .then_with(|| {
-                    if newest {
-                        b.date.last_day().cmp(&a.date.last_day())
-                    } else {
-                        Ordering::Equal
-                    }
-                })
-                .then_with(|| a.order.cmp(&b.order))
-                .then_with(|| a.session.cmp(&b.session))
-                .then_with(|| a.rowid.cmp(&b.rowid))
-        });
-        people.sort_unstable_by(compare_evidence);
-        agents.sort_unstable_by(compare_evidence);
+        drop(coverage);
+        rank_across_sessions(&mut summaries, newest);
+        rank_across_sessions(&mut people, newest);
+        rank_across_sessions(&mut agents, newest);
         let commit_limit = 3 * multiplier;
-        let commits = if newest {
+        let mut halves = rerank_pool.is_some().then(sources::Halves::default);
+        let mut commits = if summaries_only {
+            Vec::new()
+        } else {
+            sources::ranked_commits(
+                conn,
+                project,
+                query,
+                depth,
+                dates,
+                semantic,
+                halves.as_mut(),
+            )
+        };
+        if newest {
             newest_first(&mut summaries, |hit| hit.date.last_day());
             newest_first(&mut people, |hit| hit.date.end());
             newest_first(&mut agents, |hit| hit.date.end());
-            let mut pool =
-                sources::ranked_commits(conn, project, query, commit_limit, dates, semantic, None);
-            newest_first(&mut pool, |hit| hit.committed_at);
-            pool.truncate(commit_limit);
-            pool
-        } else {
-            sources::search_commits(conn, project, query, commit_limit, dates, semantic, None)
-        };
-        let now = crate::memory_writes::now_ms();
-        let mut groups = Vec::new();
-        if skipped != 0 {
-            groups.push(format!("{skipped} sessions skipped: ambiguous id"));
+            newest_first(&mut commits, |hit| hit.committed_at);
         }
-        groups.push(render_group(
-            "Summaries",
-            summaries.into_iter().take(limit),
-            now,
-        ));
-        groups.push(render_group(
-            "The person's messages",
-            people.into_iter().take(limit),
-            now,
-        ));
-        groups.push(render_group(
-            "Commits",
-            commits.into_iter().map(Evidence::commit),
-            now,
-        ));
-        if include_agent {
+        let keep = |page: usize| page.max(rerank_pool.unwrap_or(0));
+        summaries.truncate(keep(limit));
+        people.truncate(keep(limit));
+        agents.truncate(keep(limit));
+        commits.truncate(keep(commit_limit));
+        for hit in &mut summaries {
+            if let Hit::Chunk(chunk) = &mut hit.hit {
+                if chunk.snippet.is_none() {
+                    let body = summary_body(conn, chunk.compartment_id)?;
+                    let snippet = text::matched_snippet(&body, query, 400);
+                    chunk.snippet = Some(if snippet.is_empty() {
+                        char_prefix(&body, 400).0.to_owned()
+                    } else {
+                        snippet
+                    });
+                }
+            }
+        }
+        let mut groups = vec![Group::new("Summaries", limit, summaries)];
+        if !summaries_only {
+            groups.push(Group::new("The person's messages", limit, people));
+            groups.push(Group::new(
+                "Commits",
+                commit_limit,
+                commits.into_iter().map(Evidence::commit).collect(),
+            ));
+            if let Some(halves) = halves {
+                groups[2].rerank_candidates = rerank::fuse(&rerank::Lanes {
+                    git_fts: halves.words.into_iter().map(Hit::Commit).collect(),
+                    git_vector: halves.meaning.into_iter().map(Hit::Commit).collect(),
+                    ..Default::default()
+                })
+                .into_iter()
+                .map(|hit| match hit {
+                    Hit::Commit(hit) => Evidence::commit(hit),
+                    _ => unreachable!("only commits were fused"),
+                })
+                .collect();
+            }
+            if include_agent {
+                groups.push(Group::new("Agent messages", limit, agents));
+            }
+        }
+        if let Some(pool) = rerank_pool {
+            for group in &mut groups {
+                if group.rerank_candidates.is_empty() {
+                    group.rerank_candidates = group.hits.iter().take(pool).cloned().collect();
+                } else {
+                    group.rerank_candidates.truncate(pool);
+                }
+                group.documents = group
+                    .rerank_candidates
+                    .iter()
+                    .map(|hit| {
+                        let session = hit.session.as_deref().unwrap_or("");
+                        if let Hit::Chunk(chunk) = &hit.hit {
+                            let location = format!(
+                                "compartment {} {session} @{}-{}",
+                                chunk.compartment_id, chunk.start, chunk.end
+                            );
+                            let body = summary_body(conn, chunk.compartment_id)?;
+                            Ok(rerank::candidate_text(&location, &chunk.title, &body))
+                        } else {
+                            Ok(rerank::candidate_texts(
+                                conn,
+                                session,
+                                project,
+                                std::slice::from_ref(&hit.hit),
+                            )
+                            .pop()
+                            .expect("one hit yields one document"))
+                        }
+                    })
+                    .collect::<Result<_, String>>()?;
+            }
+        }
+        Ok(PreparedHistory { skipped, groups })
+    }
+}
+
+pub(crate) struct PreparedHistory {
+    skipped: usize,
+    pub(crate) groups: Vec<Group>,
+}
+
+impl PreparedHistory {
+    pub(crate) fn render(self) -> String {
+        let mut groups = Vec::new();
+        if self.skipped != 0 {
+            groups.push(format!("{} sessions skipped: ambiguous id", self.skipped));
+        }
+        let now = crate::memory_writes::now_ms();
+        for group in self.groups {
             groups.push(render_group(
-                "Agent messages",
-                agents.into_iter().take(limit),
+                group.title,
+                group.hits.into_iter().take(group.limit),
                 now,
             ));
         }
-        Ok(groups.join("\n\n"))
+        groups.join("\n\n")
+    }
+
+    pub(crate) fn render_two_summaries(mut self) -> String {
+        self.groups[0].limit = 2;
+        self.render()
+    }
+}
+
+pub(crate) struct Group {
+    title: &'static str,
+    limit: usize,
+    hits: Vec<Evidence>,
+    rerank_candidates: Vec<Evidence>,
+    pub(crate) documents: Vec<String>,
+}
+
+impl Group {
+    fn new(title: &'static str, limit: usize, hits: Vec<Evidence>) -> Self {
+        Self {
+            title,
+            limit,
+            hits,
+            rerank_candidates: Vec::new(),
+            documents: Vec::new(),
+        }
+    }
+
+    pub(crate) fn reorder(&mut self, scores: &[f64]) {
+        if scores.len() != self.rerank_candidates.len() || scores.is_empty() {
+            return;
+        }
+        let mut ranked: Vec<_> = scores
+            .iter()
+            .copied()
+            .zip(std::mem::take(&mut self.rerank_candidates))
+            .collect();
+        // Equal scores retain the candidates' existing order. A small configured pool only
+        // reorders its candidates, never removes the group's other results.
+        ranked.sort_by(|(left, _), (right, _)| right.partial_cmp(left).unwrap_or(Ordering::Equal));
+        let keys: BTreeSet<_> = ranked.iter().map(|(_, hit)| hit.identity()).collect();
+        self.hits.retain(|hit| !keys.contains(&hit.identity()));
+        self.hits
+            .splice(..0, ranked.into_iter().map(|(_, hit)| hit));
     }
 }
 
@@ -397,108 +543,49 @@ fn raw_is_ambiguous(conn: &Connection, project: &str, session: &str) -> Result<b
     ).map_err(show)
 }
 
-struct RawQuery<'a> {
-    query: &'a str,
-    limit: usize,
-    dates: Option<messages::DateRange>,
-    reach: messages::Reach,
+fn raw_hits(
+    conn: &Connection,
+    session: &HistorySession,
+    query: &messages::Query<'_>,
+    reach: &messages::Reach,
+    role: messages::LabRole,
+) -> Result<Vec<Evidence>, String> {
+    let list = messages::search_at_with_role(
+        conn,
+        &session.id,
+        query,
+        &[query.limit],
+        i64::MAX,
+        true,
+        reach,
+        Some(role),
+    )
+    .pop()
+    .unwrap_or_default();
+    let mut times = conn.prepare_cached("SELECT m.message_time_ms FROM message_fts_rowid_map m
+        JOIN message_history_fts f ON f.rowid = m.fts_rowid
+        WHERE m.session_id = ?1 AND m.message_ordinal = ?2 AND f.session_id = ?1 AND f.message_id = ?3").map_err(show)?;
+    list.into_iter()
+        .enumerate()
+        .map(|(rank, hit)| {
+            Ok(Evidence {
+                date: EvidenceDate::Instant(
+                    times
+                        .query_row(params![session.id, hit.number, hit.message_id], |row| {
+                            row.get(0)
+                        })
+                        .optional()
+                        .map_err(show)?
+                        .flatten(),
+                ),
+                order: hit.number,
+                rank: contribution(rank),
+                session: Some(session.id.clone()),
+                hit: Hit::Message(hit),
+            })
+        })
+        .collect()
 }
-
-impl RawQuery<'_> {
-    fn search<'a>(
-        &self,
-        conn: &Connection,
-        session: &'a str,
-        role: &str,
-    ) -> Result<Vec<Evidence<'a>>, String> {
-        // The rowid screen avoids opening rows from other sessions for broad
-        // FTS matches. Always check the row's session id as well, since a map
-        // entry alone doesn't prove which session owns the text.
-        let screen = match self.reach {
-            messages::Reach::Nothing => return Ok(Vec::new()),
-            messages::Reach::Mapped => {
-                "+message_history_fts.rowid IN (
-                SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id = ?1) AND"
-            }
-            messages::Reach::Partly(_) => {
-                "+message_history_fts.rowid IN (
-                SELECT fts_rowid FROM message_fts_rowid_map WHERE session_id = ?1
-                UNION ALL SELECT value FROM json_each(?7)) AND"
-            }
-            messages::Reach::Unmapped => "",
-        };
-        // The user-role prefix check is a lab heuristic for host notices in
-        // the message-history index, not a general test of authorship. Apply it to the
-        // indexed text before snippets can remove the wrapper and before LIMIT.
-        let sql = format!(
-            "SELECT CAST(message_history_fts.message_ordinal AS INTEGER) AS ordinal, message_id, content,
-                    bm25(message_history_fts), map.message_time_ms, message_history_fts.rowid
-               FROM message_history_fts
-               LEFT JOIN message_fts_rowid_map map ON map.session_id = ?1
-                  AND map.message_ordinal = CAST(message_history_fts.message_ordinal AS INTEGER)
-                  AND map.fts_rowid = message_history_fts.rowid
-              WHERE {screen} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
-                AND role = ?3 AND ordinal > 0
-                AND (?3 <> 'user' OR instr(content, '<system-reminder>') <> 1)
-                AND (?4 IS NULL OR map.message_time_ms BETWEEN ?4 AND ?5)
-              ORDER BY bm25(message_history_fts), map.message_time_ms DESC, ordinal ASC,
-                       message_history_fts.rowid ASC
-              LIMIT ?6"
-        );
-        let mut statement = conn.prepare_cached(&sql).map_err(show)?;
-        let run = |statement: &mut rusqlite::Statement<'_>, fts: String| {
-            if fts.is_empty() {
-                return Ok(Vec::new());
-            }
-            let matches = format!("content : ({fts})");
-            let mut values = vec![
-                rusqlite::types::Value::from(session.to_owned()),
-                matches.into(),
-                role.to_owned().into(),
-                self.dates.map(|dates| dates.from).into(),
-                self.dates.map(|dates| dates.to).into(),
-                (self.limit as i64).into(),
-            ];
-            if let messages::Reach::Partly(rowids) = &self.reach {
-                values.push(
-                    serde_json::to_string(rowids.as_ref())
-                        .expect("rowids serialize")
-                        .into(),
-                );
-            }
-            let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
-                let number = row.get(0)?;
-                let content: String = row.get(2)?;
-                let snippet = text::matched_snippet(&content, self.query, text::PREVIEW_LIMIT);
-                Ok(Evidence {
-                    hit: Hit::Message(messages::MessageHit {
-                        number,
-                        message_id: row.get(1)?,
-                        role: role.to_owned(),
-                        content: if snippet.is_empty() {
-                            text::preview(&content)
-                        } else {
-                            snippet
-                        },
-                        score: -row.get::<_, f64>(3)?,
-                    }),
-                    session: Some(session),
-                    date: EvidenceDate::Instant(row.get(4)?),
-                    order: number,
-                    rowid: row.get(5)?,
-                })
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-        };
-        let strict = run(&mut statement, text::sanitize_fts_query(self.query)).map_err(show)?;
-        if strict.is_empty() {
-            run(&mut statement, text::relaxed_fts_query(self.query)).map_err(show)
-        } else {
-            Ok(strict)
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct SummaryRange {
     start: DateTime<Utc>,
@@ -540,14 +627,19 @@ impl IndexedTimes {
         Ok(Self(times))
     }
 
-    fn range(&self, start: i64, end: i64) -> Option<SummaryRange> {
+    fn inside(&self, start: i64, end: i64) -> (usize, &[(i64, DateTime<Utc>)]) {
         let first = self.0.partition_point(|(ordinal, _)| *ordinal < start);
         let rest = &self.0[first..];
         let inside = rest.partition_point(|(ordinal, _)| *ordinal <= end);
-        if inside != 0 {
+        (first, &rest[..inside])
+    }
+
+    fn range(&self, start: i64, end: i64) -> Option<SummaryRange> {
+        let (first, inside) = self.inside(start, end);
+        if let (Some(first), Some(last)) = (inside.first(), inside.last()) {
             return Some(SummaryRange {
-                start: rest[0].1,
-                end: rest[inside - 1].1,
+                start: first.1,
+                end: last.1,
             });
         }
         // A gap in the text index still belongs to the session's timeline.
@@ -570,6 +662,341 @@ impl IndexedTimes {
     }
 }
 
+pub(crate) struct Timeline {
+    session: String,
+    summaries: Vec<Summary>,
+}
+
+pub(crate) struct Summary {
+    id: i64,
+    start: i64,
+    end: i64,
+    title: String,
+    days: Option<SummaryRange>,
+    message_times: Option<(i64, i64)>,
+}
+
+impl Timeline {
+    /// Summary references have no harness. Refuse a session that cannot be safely
+    /// attributed instead of picking one host's history on another's behalf.
+    pub(crate) fn load(
+        conn: &Connection,
+        project: &str,
+        session: &str,
+    ) -> Result<Option<Self>, String> {
+        Self::load_mapped(conn, project, session, true)
+    }
+
+    fn load_mapped(
+        conn: &Connection,
+        project: &str,
+        session: &str,
+        for_origin: bool,
+    ) -> Result<Option<Self>, String> {
+        let mapped: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT harness) FROM session_projects
+              WHERE project_path = ?1 AND session_id = ?2",
+                params![project, session],
+                |row| row.get(0),
+            )
+            .map_err(show)?;
+        if mapped != 1 {
+            return Ok(None);
+        }
+        let ambiguous = raw_is_ambiguous(conn, project, session)?;
+        if ambiguous && for_origin {
+            return Ok(None);
+        }
+        let times = if ambiguous {
+            IndexedTimes::default()
+        } else {
+            IndexedTimes::load(conn, session)?
+        };
+        let mut statement = conn
+            .prepare_cached(
+                "SELECT c.id, c.start_message, c.end_message, c.title FROM compartments c
+              JOIN session_projects p ON p.session_id = c.session_id AND p.harness = c.harness
+              WHERE c.session_id = ?1 AND p.project_path = ?2
+              ORDER BY c.start_message, c.end_message, c.id",
+            )
+            .map_err(show)?;
+        let summaries = statement
+            .query_map(params![session, project], |row| {
+                let (start, end) = (row.get(1)?, row.get(2)?);
+                let (_, inside) = times.inside(start, end);
+                let message_times = inside.iter().map(|(_, time)| time.timestamp_millis()).fold(
+                    None::<(i64, i64)>,
+                    |range, time| {
+                        Some(range.map_or((time, time), |(first, last)| {
+                            (first.min(time), last.max(time))
+                        }))
+                    },
+                );
+                Ok(Summary {
+                    id: row.get(0)?,
+                    start,
+                    end,
+                    title: row.get(3)?,
+                    days: times.range(start, end),
+                    message_times,
+                })
+            })
+            .map_err(show)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(show)?;
+        Ok(Some(Self {
+            session: session.to_owned(),
+            summaries,
+        }))
+    }
+
+    pub(crate) fn origin(&self, spans: &[(i64, i64)], created: i64) -> Option<Origin> {
+        let valid = || {
+            spans
+                .iter()
+                .copied()
+                .filter(|&(start, end)| start >= 0 && end >= start)
+        };
+        let covers = |start, end| {
+            self.summaries
+                .iter()
+                .find(|s| s.start <= start && end <= s.end)
+        };
+        let all = valid()
+            .map(|(start, _)| start)
+            .min()
+            .zip(valid().map(|(_, end)| end).max());
+        let (summary, later) =
+            if let Some(summary) = all.and_then(|(start, end)| covers(start, end)) {
+                (summary, false)
+            } else if let Some(summary) = valid().find_map(|(start, end)| covers(start, end)) {
+                (summary, true)
+            } else if let Some(summary) = self.summaries.iter().find(|s| {
+                s.message_times
+                    .is_some_and(|(start, end)| start <= created && created <= end)
+            }) {
+                (summary, false)
+            } else {
+                let earlier = self
+                    .summaries
+                    .iter()
+                    .filter_map(|s| {
+                        let (_, end) = s.message_times?;
+                        (end < created).then_some((end, s))
+                    })
+                    .max_by_key(|&(end, s)| (end, s.start, s.id))?
+                    .1;
+                (earlier, false)
+            };
+        Some(Origin {
+            id: summary.id,
+            label: summary.label(&self.session),
+            later,
+        })
+    }
+}
+
+pub(crate) struct Origin {
+    id: i64,
+    label: String,
+    later: bool,
+}
+
+impl Origin {
+    pub(crate) fn label(&self) -> String {
+        format!(
+            "{}{}",
+            self.label,
+            if self.later { " and later" } else { "" }
+        )
+    }
+
+    pub(crate) fn render(&self, conn: &Connection) -> Result<String, String> {
+        let body = summary_body(conn, self.id)?;
+        let (body, cut) = char_prefix(&body, 4_000);
+        Ok(format!(
+            "{}\n{body}{}",
+            self.label(),
+            if cut {
+                "\n[origin text cut at 4,000 characters; use history_read for the rest]"
+            } else {
+                ""
+            }
+        ))
+    }
+}
+
+impl Summary {
+    fn reference(&self, session: &str) -> String {
+        format!("{session}:{}-{}", self.start, self.end)
+    }
+
+    fn label(&self, session: &str) -> String {
+        let days = self
+            .days
+            .map_or_else(|| "unknown".to_owned(), SummaryRange::render);
+        format!(
+            "ref={} date={days} title={}",
+            self.reference(session),
+            self.title.replace(['\r', '\n'], " ")
+        )
+    }
+
+    fn dates_match(&self, dates: messages::DateRange) -> bool {
+        self.days.is_some_and(|range| {
+            range.start.timestamp_millis() <= dates.to && range.end.timestamp_millis() >= dates.from
+        })
+    }
+}
+
+fn summary_body(conn: &Connection, id: i64) -> Result<String, String> {
+    conn.query_row(
+        "SELECT COALESCE(NULLIF(p1, ''), content) FROM compartments WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )
+    .map_err(show)
+}
+
+fn char_prefix(text: &str, limit: usize) -> (&str, bool) {
+    match text.char_indices().nth(limit) {
+        Some((end, _)) => (&text[..end], true),
+        None => (text, false),
+    }
+}
+
+pub(crate) fn history_read(
+    conn: &Connection,
+    project: &str,
+    input: &Value,
+) -> Result<String, String> {
+    const SHAPE: &str =
+        "history_read needs a ref (optionally with offset), or session, from and to";
+    let object = input.as_object().ok_or(SHAPE)?;
+    let (session, exact, offset, dates) = if let Some(reference) = object.get("ref") {
+        if object.keys().any(|key| key != "ref" && key != "offset") {
+            return Err(SHAPE.into());
+        }
+        let parse_ref = || {
+            let (session, range) = reference.as_str()?.rsplit_once(':')?;
+            let (start, end) = range.split_once('-')?;
+            let (start, end) = (start.parse::<i64>().ok()?, end.parse::<i64>().ok()?);
+            (!session.is_empty() && start >= 0 && start <= end).then_some((session, (start, end)))
+        };
+        let (session, range) =
+            parse_ref().ok_or("history_read ref must be <session>:<start>-<end>")?;
+        let offset = match object.get("offset") {
+            None => 0,
+            Some(value) => value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or("history_read offset must be a non-negative integer")?,
+        };
+        (session, Some(range), offset, None)
+    } else {
+        if object.len() != 3 || !input["from"].is_string() || !input["to"].is_string() {
+            return Err(SHAPE.into());
+        }
+        let session = input["session"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or(SHAPE)?;
+        (session, None, 0, super::date_range(input)?)
+    };
+    let timeline = Timeline::load_mapped(conn, project, session, false)?.ok_or_else(|| {
+        format!("history_read session {session:?} does not belong to this project with an unambiguous id")
+    })?;
+    let matches = timeline
+        .summaries
+        .iter()
+        .filter(|s| {
+            exact.is_none_or(|range| (s.start, s.end) == range)
+                && dates.is_none_or(|range| s.dates_match(range))
+        })
+        .collect::<Vec<_>>();
+    if exact.is_some() && matches.len() > 1 {
+        return Err("history_read ref matches multiple stored summaries".into());
+    }
+    render_read(conn, session, &matches, offset)
+}
+
+fn render_read(
+    conn: &Connection,
+    session: &str,
+    matches: &[&Summary],
+    offset: usize,
+) -> Result<String, String> {
+    const CAP: usize = 16_000;
+    let more = |shown: usize| {
+        matches.get(shown).map_or_else(String::new, |next| {
+            format!(
+                "\n\n{} more summaries match. Next: history_read {}",
+                matches.len() - shown,
+                serde_json::json!({"ref":next.reference(session)})
+            )
+        })
+    };
+    let mut answer = String::new();
+    for (index, summary) in matches.iter().take(3).enumerate() {
+        let header = format!(
+            "{}{}\n",
+            if index == 0 { "" } else { "\n\n" },
+            summary.label(session)
+        );
+        let body = summary_body(conn, summary.id)?;
+        let start = if offset == 0 {
+            0
+        } else {
+            body.char_indices()
+                .nth(offset)
+                .ok_or("history_read offset is past the end of the summary")?
+                .0
+        };
+        let body = &body[start..];
+        let tail = more(index + 1);
+        let room = CAP
+            .saturating_sub(answer.chars().count() + header.chars().count() + tail.chars().count());
+        let (_, too_long) = char_prefix(body, room);
+        if !too_long && room != 0 {
+            answer.push_str(&header);
+            answer.push_str(body);
+        } else if index != 0 {
+            answer.push_str(&more(index));
+            return Ok(answer);
+        } else {
+            let next = |at| {
+                format!(
+                    "\n\nContinue this summary: history_read {}",
+                    serde_json::json!({"ref":summary.reference(session), "offset":at})
+                )
+            };
+            let room = room.saturating_sub(next(offset.saturating_add(CAP)).chars().count());
+            if room == 0 {
+                return Err("history_read reference or title is too long to fit".into());
+            }
+            let (prefix, _) = char_prefix(body, room);
+            let cut = prefix
+                .char_indices()
+                .rev()
+                .take(200)
+                .find_map(|(i, c)| matches!(c, '\n' | '.' | '!' | '?').then_some(i + c.len_utf8()))
+                .unwrap_or(prefix.len());
+            let prefix = &prefix[..cut];
+            return Ok(format!(
+                "{header}{prefix}{}{tail}",
+                next(offset + prefix.chars().count())
+            ));
+        }
+    }
+    if answer.is_empty() {
+        Ok("No summaries match.".into())
+    } else {
+        answer.push_str(&more(matches.len().min(3)));
+        Ok(answer)
+    }
+}
+
 struct SummaryQuery<'a> {
     query: &'a str,
     limit: usize,
@@ -578,12 +1005,12 @@ struct SummaryQuery<'a> {
     newest: bool,
 }
 
-fn summary_hits<'a>(
+fn summary_hits(
     conn: &Connection,
     project: &str,
-    session: &'a HistorySession,
+    session: &HistorySession,
     query: &SummaryQuery<'_>,
-) -> Result<Vec<Evidence<'a>>, String> {
+) -> Result<Vec<Evidence>, String> {
     let SummaryQuery {
         query,
         limit,
@@ -603,11 +1030,11 @@ fn summary_hits<'a>(
         last_day(b).cmp(&last_day(a))
     };
     let tie = newest.then_some(&by_date as sources::ChunkTie<'_>);
-    let (mut hits, excluded) = lexical_summaries(conn, project, session, query, limit, dates, tie)?;
-    if let Some(semantic) = semantic {
+    let (words, excluded) = lexical_summaries(conn, project, session, query, limit, dates, tie)?;
+    let meaning = semantic.map_or_else(Vec::new, |semantic| {
         // The shared search would require exact boundary times. Filter by the
         // lab's ranges instead, allowing one extra slot per excluded summary.
-        for hit in sources::search_chunks_in_project(
+        sources::search_chunks_in_project(
             conn,
             &session.id,
             project,
@@ -619,26 +1046,34 @@ fn summary_hits<'a>(
         .into_iter()
         .filter(|hit| session.times.matches(hit.start, hit.end, dates))
         .take(limit)
-        {
-            if let Some(prior) = hits
-                .iter_mut()
-                .find(|prior| prior.compartment_id == hit.compartment_id)
-            {
-                prior.score = prior.score.max(hit.score);
-                prior.match_type = "lexical+semantic";
-            } else {
-                hits.push(hit);
+        .collect()
+    });
+    let mut fused = BTreeMap::<_, (sources::ChunkHit, f64)>::new();
+    for lane in [meaning, words] {
+        for (rank, hit) in lane.into_iter().enumerate() {
+            let weight = contribution(rank);
+            let slot = fused.entry(hit.compartment_id);
+            match slot {
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let (prior, score) = slot.get_mut();
+                    *score += weight;
+                    prior.snippet = hit.snippet;
+                    prior.match_type = "lexical+semantic";
+                }
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((hit, weight));
+                }
             }
         }
     }
-    Ok(hits
-        .into_iter()
-        .map(|hit| Evidence {
+    Ok(fused
+        .into_values()
+        .map(|(hit, rank)| Evidence {
             date: EvidenceDate::Range(session.times.range(hit.start, hit.end)),
             order: hit.start,
-            rowid: hit.compartment_id,
+            rank,
             hit: Hit::Chunk(hit),
-            session: Some(&session.id),
+            session: Some(session.id.clone()),
         })
         .collect())
 }
@@ -711,14 +1146,16 @@ fn lexical_summaries(
     Ok((hits, excluded))
 }
 
-struct Evidence<'a> {
+#[derive(Clone)]
+struct Evidence {
     hit: Hit,
-    session: Option<&'a str>,
+    session: Option<String>,
     date: EvidenceDate,
     order: i64,
-    rowid: i64,
+    rank: f64,
 }
 
+#[derive(Clone, Copy)]
 enum EvidenceDate {
     Instant(Option<i64>),
     Range(Option<SummaryRange>),
@@ -742,19 +1179,27 @@ impl EvidenceDate {
     }
 }
 
-impl Evidence<'_> {
+impl Evidence {
     fn commit(hit: sources::CommitHit) -> Self {
         Self {
             date: EvidenceDate::Instant(Some(hit.committed_at)),
             hit: Hit::Commit(hit),
             session: None,
             order: 0,
-            rowid: 0,
+            rank: 0.0,
         }
     }
 
+    fn identity(&self) -> (Option<String>, String) {
+        let key = match &self.hit {
+            Hit::Message(hit) => format!("message:{}", hit.number),
+            _ => rerank::key(&self.hit),
+        };
+        (self.session.clone(), key)
+    }
+
     fn render(self, index: usize, now: i64) -> String {
-        let session = self.session.unwrap_or("");
+        let session = self.session.as_deref().unwrap_or("");
         let reference = match &self.hit {
             Hit::Commit(hit) => format!(" ref={}", hit.sha),
             Hit::Message(hit) => {
@@ -777,17 +1222,33 @@ impl Evidence<'_> {
     }
 }
 
-fn compare_evidence(a: &Evidence<'_>, b: &Evidence<'_>) -> std::cmp::Ordering {
-    b.hit
-        .score()
-        .total_cmp(&a.hit.score())
-        .then_with(|| b.date.end().cmp(&a.date.end()))
-        .then_with(|| a.session.cmp(&b.session))
-        .then_with(|| a.order.cmp(&b.order))
-        .then_with(|| a.rowid.cmp(&b.rowid))
+fn contribution(rank: usize) -> f64 {
+    1.0 / (super::RRF_K + rank as f64)
 }
 
-fn render_group<'a>(title: &str, hits: impl Iterator<Item = Evidence<'a>>, now: i64) -> String {
+fn rank_across_sessions(hits: &mut Vec<Evidence>, newest: bool) {
+    hits.sort_by(|a, b| b.rank.total_cmp(&a.rank)
+        .then_with(|| {
+            if newest {
+                if matches!(&a.hit, Hit::Chunk(_)) {
+                    b.date.last_day().cmp(&a.date.last_day())
+                } else {
+                    b.date.end().cmp(&a.date.end())
+                }
+            } else { Ordering::Equal }
+        })
+        // A meaning hit wins a tie with a word-only hit at the same rank.
+        .then_with(|| {
+            let semantic = |hit: &Evidence| matches!(&hit.hit, Hit::Chunk(chunk) if chunk.match_type != "lexical");
+            semantic(b).cmp(&semantic(a))
+        })
+        .then_with(|| a.order.cmp(&b.order))
+        .then_with(|| a.session.cmp(&b.session)));
+    let mut seen = BTreeSet::new();
+    hits.retain(|hit| seen.insert(hit.identity()));
+}
+
+fn render_group(title: &str, hits: impl Iterator<Item = Evidence>, now: i64) -> String {
     let blocks: Vec<_> = hits
         .enumerate()
         .map(|(n, hit)| hit.render(n + 1, now))

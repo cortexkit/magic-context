@@ -1518,9 +1518,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
             self.inner.labs.clone(),
             live.clone(),
             move |root, project| {
-                config
-                    .resolve_for_project(root.to_str(), Some(project), "", 0)
-                    .embedding
+                let settings = config.resolve_for_project(root.to_str(), Some(project), "", 0);
+                (settings.embedding, settings.rerank)
             },
         ));
         Ok(reply)

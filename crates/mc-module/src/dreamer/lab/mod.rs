@@ -6,6 +6,7 @@
 mod frozen;
 mod git;
 mod persona;
+mod ranking;
 mod spec;
 #[cfg(test)]
 #[path = "lab_tests.rs"]
@@ -40,7 +41,13 @@ use super::{plan, run};
 use spec::{Route, Spec, Tool};
 
 static RUNS: AtomicU64 = AtomicU64::new(0);
-const OWN_NAMES: [&str; 4] = ["git_read", "memory_search", "history_search", "submit"];
+const OWN_NAMES: [&str; 5] = [
+    "git_read",
+    "memory_search",
+    "history_search",
+    "history_read",
+    "submit",
+];
 const READER_NAMES: [&str; 9] = [
     "read",
     "grep",
@@ -115,11 +122,12 @@ impl Drop for Registered<'_> {
 pub(crate) struct Lab {
     spec: Spec,
     context: String,
-    memories: String,
+    memories: frozen::Memories,
     persona: persona::Persona,
     store: Mutex<rusqlite::Connection>,
     history: Option<crate::search::lab::History>,
     embedding: Option<crate::embedding::Provider>,
+    ranking: ranking::Runtime,
     tools: Vec<Value>,
     verdicts: Mutex<verdicts::Verdicts>,
     called_tool: AtomicBool,
@@ -169,7 +177,14 @@ impl Start {
         client: Arc<C>,
         registry: Arc<Registry>,
         attribution_db: Arc<ContextDb>,
-        embedding: impl FnOnce(&Path, &str) -> Option<crate::embedding::Provider> + Send + 'static,
+        search_settings: impl FnOnce(
+                &Path,
+                &str,
+            ) -> (
+                Option<crate::embedding::Provider>,
+                crate::search::rerank::Reranker,
+            ) + Send
+            + 'static,
     ) {
         let start = Instant::now();
         let deadline =
@@ -181,9 +196,12 @@ impl Start {
         let mut observed = Observed::default();
         let mut loaded = None;
         let outcome = tokio::time::timeout_at(deadline, async {
+            let search_client = client.clone();
             let lab = tokio::task::spawn_blocking(move || {
-                let embedding = embedding(&self.spec.root, &self.spec.project);
-                Lab::load(self, embedding)
+                let (embedding, reranker) = search_settings(&self.spec.root, &self.spec.project);
+                let mut lab = Lab::load(self, embedding)?;
+                lab.ranking = ranking::Runtime::new(search_client, reranker);
+                Ok::<_, String>(lab)
             })
             .await
             .map_err(|e| run::LabEnd::Error(e.to_string()))?
@@ -225,6 +243,9 @@ impl Start {
                     .as_ref()
                     .map(crate::search::lab::History::skipped_session_ids)
             });
+            let ranking = loaded
+                .as_ref()
+                .map(|lab| lab.ranking.report(lab.spec.rerank));
             let missing = loaded.map_or(ids, |lab| {
                 verdicts::missing(
                     &lab.spec.memory_ids,
@@ -242,6 +263,9 @@ impl Start {
             let mut result = observed.result(stop, missing, error, start.elapsed().as_millis());
             if let Some(skipped) = history_session_ids_skipped {
                 result["history_session_ids_skipped"] = json!(skipped);
+            }
+            if let Some(ranking) = ranking {
+                result["rerank"] = ranking;
             }
             verdicts::write_json(&out, "run.json", &result)
         })
@@ -293,9 +317,7 @@ impl Lab {
         spec::reject_live(&spec.store, &live)?;
         let store = frozen::open(&spec.store)?;
         let memories = frozen::memories(&store, &spec.project, &spec.memory_ids)?;
-        let history = spec
-            .tools
-            .contains(&Tool::HistorySearch)
+        let history = (spec.tools.contains(&Tool::HistorySearch) || spec.confirm_record_removals)
             .then(|| {
                 crate::search::lab::History::load(
                     &store,
@@ -315,6 +337,7 @@ impl Lab {
             store: Mutex::new(store),
             history,
             embedding,
+            ranking: ranking::Runtime::default(),
             tools,
             verdicts: Mutex::default(),
             called_tool: AtomicBool::new(false),
@@ -507,7 +530,7 @@ impl Lab {
                 tools,
                 &checkout_paths,
                 &owned.context,
-                &owned.memories,
+                &owned.memories.text,
             )?;
             if system.trim().is_empty() || prompt.trim().is_empty() {
                 return Err("the lab system text and first message must not be empty".into());
@@ -543,6 +566,7 @@ impl Lab {
         registry: &'a Registry,
         child: &Child,
     ) -> Registered<'a> {
+        self.ranking.bind(&child.session);
         registry.register(child.clone(), self.clone())
     }
 
@@ -589,95 +613,180 @@ impl Lab {
                     .ok_or_else(|| format!("unknown checkout {:?}", request.checkout))?;
                 request.read(root).await
             }
-            "submit" => tokio::task::spawn_blocking(move || {
-                let mut current = self.verdicts.lock().expect("lab verdicts");
-                if self.stopped.load(Ordering::Acquire) {
-                    return Err("the dreamer lab has ended".into());
-                }
-                verdicts::submit(
-                    &self.spec.out_dir,
-                    &self.spec.memory_ids,
-                    &mut current,
-                    input,
-                    |id| self.active_merge(id),
-                )
-            })
-            .await
-            .map_err(|e| e.to_string())?,
-            "memory_search" => self.search(Tool::MemorySearch, input).await,
-            "history_search" => self.search(Tool::HistorySearch, input).await,
+            "submit" => self.submit(input).await,
+            "memory_search" => self.memory_search(input).await,
+            "history_search" => self.history_search(input, false).await,
+            "history_read" => self.history_read(input).await,
             _ => Err(format!("unknown lab tool {name}")),
         }
     }
 
-    async fn search(self: Arc<Self>, tool: Tool, input: Value) -> Result<String, String> {
-        let timed_out = match tool {
-            Tool::MemorySearch => "memory_search timed out; narrow the query",
-            Tool::HistorySearch => "history_search timed out; narrow the query",
-            _ => unreachable!("only search tools use a frozen-store deadline"),
-        };
-        tokio::time::timeout(
-            frozen::SEARCH_LIMIT,
-            self.search_frozen(tool, input, timed_out),
-        )
-        .await
-        .map_err(|_| timed_out.to_owned())?
-    }
-
-    async fn search_frozen(
-        self: Arc<Self>,
-        tool: Tool,
-        input: Value,
-        timed_out: &'static str,
-    ) -> Result<String, String> {
-        let deadline = Instant::now() + frozen::SEARCH_LIMIT;
-        let query = input
-            .get("query")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim();
-        let semantic = match &self.embedding {
+    async fn embed(&self, query: &str) -> Option<(Vec<f32>, String, String)> {
+        match &self.embedding {
             Some(provider) if !query.is_empty() => provider
                 .embed_search_query_traced(query)
                 .await
                 .0
                 .map(|vector| (vector, provider.model_id(), provider.chunk_model_id())),
             _ => None,
-        };
-        tokio::task::spawn_blocking(move || {
+        }
+    }
+
+    async fn memory_search(self: Arc<Self>, input: Value) -> Result<String, String> {
+        const TIMEOUT: &str = "memory_search timed out; narrow the query";
+        let deadline = Instant::now() + frozen::SEARCH_LIMIT;
+        let embedded = tokio::time::timeout_at(deadline.into(), self.embed(query_text(&input)))
+            .await
+            .map_err(|_| TIMEOUT.to_owned())?;
+        self.read_frozen(deadline, TIMEOUT, move |lab, conn| {
+            crate::search::lab::memory_search(conn, &lab.spec.project, &input, semantic(&embedded))
+        })
+        .await
+    }
+
+    async fn history_search(
+        self: Arc<Self>,
+        input: Value,
+        summaries_only: bool,
+    ) -> Result<String, String> {
+        const TIMEOUT: &str = "history_search timed out; narrow the query";
+        let deadline = Instant::now() + frozen::SEARCH_LIMIT;
+        let query = query_text(&input).to_owned();
+        let can_rerank =
+            self.spec.rerank && input.get("order").is_none_or(|order| order == "relevance");
+        let (embedded, scorer) = tokio::join!(
+            tokio::time::timeout_at(deadline.into(), self.embed(&query)),
+            async {
+                if can_rerank {
+                    self.ranking.prepare(&query, deadline).await
+                } else {
+                    None
+                }
+            },
+        );
+        let embedded = embedded.map_err(|_| TIMEOUT.to_owned())?;
+        let pool = scorer.as_ref().map(ranking::Scorer::pool);
+        let mut prepared = self
+            .clone()
+            .read_frozen(deadline, TIMEOUT, move |lab, conn| {
+                lab.history
+                    .as_ref()
+                    .expect("history search has a session scope")
+                    .prepare(conn, &input, semantic(&embedded), pool, summaries_only)
+            })
+            .await?;
+        if let Some(scorer) = scorer {
+            scorer.apply(&query, &mut prepared, deadline).await;
+        }
+        Ok(if summaries_only {
+            prepared.render_two_summaries()
+        } else {
+            prepared.render()
+        })
+    }
+
+    async fn history_read(self: Arc<Self>, input: Value) -> Result<String, String> {
+        self.read_frozen(
+            Instant::now() + frozen::SEARCH_LIMIT,
+            "history_read timed out; narrow the date range",
+            move |lab, conn| crate::search::lab::history_read(conn, &lab.spec.project, &input),
+        )
+        .await
+    }
+
+    async fn read_frozen<T: Send + 'static>(
+        self: Arc<Self>,
+        deadline: Instant,
+        timed_out: &'static str,
+        work: impl FnOnce(&Self, &rusqlite::Connection) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let task = tokio::task::spawn_blocking(move || {
             let conn = self.store.lock().expect("frozen store");
             frozen::search_with_limit(
                 &conn,
                 deadline.saturating_duration_since(Instant::now()),
                 timed_out,
-                |conn| {
-                    let semantic = semantic.as_ref().map(|(vector, model, chunk)| {
-                        crate::search::sources::Semantic {
-                            vector,
-                            model_id: model,
-                            chunk_model_id: chunk,
-                        }
-                    });
-                    match tool {
-                        Tool::MemorySearch => crate::search::lab::memory_search(
-                            conn,
-                            &self.spec.project,
-                            &input,
-                            semantic,
-                        ),
-                        Tool::HistorySearch => self
-                            .history
-                            .as_ref()
-                            .expect("history tool has a session scope")
-                            .search(conn, &input, semantic),
-                        _ => unreachable!("only search tools use the frozen index"),
-                    }
-                },
+                |conn| work(&self, conn),
+            )
+        });
+        tokio::time::timeout_at(deadline.into(), task)
+            .await
+            .map_err(|_| timed_out.to_owned())?
+            .map_err(|e| e.to_string())?
+    }
+
+    async fn submit(self: Arc<Self>, input: Value) -> Result<String, String> {
+        let lab = self.clone();
+        let verdicts::Submission {
+            mut reply,
+            challenges,
+        } = tokio::task::spawn_blocking(move || {
+            let mut current = lab.verdicts.lock().expect("lab verdicts");
+            if lab.stopped.load(Ordering::Acquire) {
+                return Err("the dreamer lab has ended".into());
+            }
+            verdicts::submit(
+                &lab.spec.out_dir,
+                &lab.spec.memory_ids,
+                &mut current,
+                input,
+                lab.spec.confirm_record_removals,
+                |id| lab.active_merge(id),
             )
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+        for (id, challenge) in challenges {
+            if matches!(challenge, verdicts::Challenge::Evidence) {
+                let (origin, summaries) = self.clone().removal_evidence(id).await;
+                reply.push_str(&format!(
+                    "\n\n### Memory {id}: confirmation evidence\nOrigin:\n{origin}\n\n{summaries}"
+                ));
+            }
+            reply.push_str(&format!("\nMemory {id} is unconfirmed. Send the same verdict with `confirmed: true`, or send a different verdict."));
+        }
+        Ok(reply)
     }
+
+    async fn removal_evidence(self: Arc<Self>, id: i64) -> (String, String) {
+        let deadline = Instant::now() + frozen::SEARCH_LIMIT;
+        let frozen = self.clone().read_frozen(deadline, "reading the origin timed out", move |lab, conn| {
+            let origin = lab.memories.origins.get(&id).map(|origin| origin.render(conn))
+                .transpose()?.unwrap_or_else(|| "No origin summary could be located.".into());
+            let content: String = conn.query_row("SELECT content FROM memories WHERE id = ?1 AND level = 'project' AND owner_id = ?2",
+                rusqlite::params![id, lab.spec.project], |row| row.get(0)).map_err(|e| format!("reading frozen memory {id}: {e}"))?;
+            Ok((origin, content))
+        }).await;
+        match frozen {
+            Ok((origin, content)) => {
+                let summaries = self
+                    .history_search(json!({"query":content,"order":"newest"}), true)
+                    .await
+                    .unwrap_or_else(|error| format!("## Summaries\nUnavailable: {error}"));
+                (origin, summaries)
+            }
+            Err(error) => (
+                format!("Unavailable: {error}"),
+                "## Summaries\nUnavailable: could not read the frozen memory text.".into(),
+            ),
+        }
+    }
+}
+
+fn query_text(input: &Value) -> &str {
+    input["query"].as_str().unwrap_or("").trim()
+}
+
+fn semantic(
+    embedded: &Option<(Vec<f32>, String, String)>,
+) -> Option<crate::search::sources::Semantic<'_>> {
+    embedded
+        .as_ref()
+        .map(|(vector, model, chunk)| crate::search::sources::Semantic {
+            vector,
+            model_id: model,
+            chunk_model_id: chunk,
+        })
 }
 
 pub(super) struct Prepared {
@@ -840,20 +949,28 @@ fn tool_definitions(spec: &Spec) -> Result<Vec<Value>, String> {
     if spec.tools.contains(&Tool::HistorySearch) {
         add(
             "history_search",
-            "Find what was said or decided in this project, and when. Returns separate groups of summaries, the person's indexed messages and commits, with dates and references you can cite. Agent messages are omitted unless requested, in which case they have their own group. Use the optional UTC dates to narrow the search.",
+            "Search the project's history: summaries of past work, the person's own messages, and commits. Ask a question in plain language and include the exact names you expect (a file, a setting, a command). `from` and `to` bound the dates. `order: newest` returns the most recent matches first; use it to learn what was done last about a subject. Each summary hit has a `ref`; `history_read` shows that summary in full.",
             json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{
                 "query":{"type":"string"},
                 "from":{"type":"string","description":"Inclusive start date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
                 "to":{"type":"string","description":"Inclusive end date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
-                "limit":{"type":"integer","minimum":1,"maximum":3,"default":1,"description":"Multiply group sizes: 4 summaries, 4 person messages, 3 commits, and 4 agent messages if included."},
+                "limit":{"type":"integer","minimum":1,"maximum":3,"default":1,"description":"1 to 3. Each step adds 4 summaries, 4 of the person's messages and 3 commits."},
                 "order":{"type":"string","enum":["relevance","newest"],"default":"relevance","description":"Use newest to learn what was done most recently about the subject."},
                 "include_agent":{"type":"boolean","default":false}
             }}),
             true,
         )?;
     }
+    if spec.tools.contains(&Tool::HistoryRead) {
+        add("history_read", "Read summaries of past work in full. Give the `ref` of a `history_search` hit or of a memory's `origin`, or a `session` with `from` and `to` dates.",
+            json!({"type":"object","additionalProperties":false,"properties":{
+                "ref":{"type":"string"},"session":{"type":"string"},
+                "from":{"type":"string"},"to":{"type":"string"},
+                "offset":{"type":"integer","minimum":0,"description":"Continue a long summary from this character position; the previous result names the value."}
+            },"oneOf":[{"required":["ref"]},{"required":["session","from","to"]}]}), true)?;
+    }
     if spec.tools.contains(&Tool::Submit) {
-        add("submit", "Record verdicts for some lab memories. Later calls may replace an earlier verdict for the same id.", verdicts::schema(), false)?;
+        add("submit", "Record verdicts for some lab memories. Supply reasoning for every verdict except keep. Later calls may replace an earlier verdict for the same id.", verdicts::schema(spec.confirm_record_removals), false)?;
     }
     Ok(tools)
 }
