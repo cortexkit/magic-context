@@ -724,6 +724,10 @@ fn ensure_private_backup_directory(dir: &Path) -> std::io::Result<()> {
             handle.set_permissions(std::fs::Permissions::from_mode(0o700))?;
         }
     }
+    // On Windows this code sets no permissions: the folder inherits the
+    // permissions of the Magic Context data folder, as the store adjacent to
+    // it does. This is intentional. Owner-only permissions on the copies alone
+    // cannot prevent more access, because the store has the same permissions.
     Ok(())
 }
 
@@ -746,6 +750,9 @@ fn write_backup_copy(
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
         }
+        // On Windows the copy inherits the permissions of the backup folder,
+        // and thus of the Magic Context data folder. This is intentional: the
+        // store adjacent to it has the same permissions.
         let mut file = match options.open(&copy_path) {
             Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
