@@ -9,6 +9,11 @@ use super::*;
 use crate::context_db::ContextDb;
 use crate::dreamer::run::tests::{Client, Ends};
 
+#[path = "history_tools_tests.rs"]
+mod history_tools;
+#[path = "rerank_lab_tests.rs"]
+mod rerank_lab;
+
 const SYSTEM: &str = include_str!("fixtures/PERSONA.md");
 const MESSAGE: &str = include_str!("fixtures/first-message.md");
 
@@ -20,8 +25,10 @@ impl Start {
         embedding: Option<crate::embedding::Provider>,
     ) {
         let db = Arc::new(ContextDb::open(&self.live).unwrap());
-        self.execute_with(client, registry, db, move |_, _| embedding)
-            .await;
+        self.execute_with(client, registry, db, move |_, _| {
+            (embedding, crate::search::rerank::Reranker::Off)
+        })
+        .await;
     }
 }
 
@@ -417,7 +424,7 @@ async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
         pins,
         [
             "b7094a89a773d890f4ef21f2a5175ccb2642986aa577b15c95555e0f3769fbe2",
-            "a32d53392fd942f9ef6407e3a952f50a2c99a043dd8b92098b0640d805063c37",
+            "9eb675f9215e8d3b5577f32212ca69c005e1e661371ce9903d0416c6e0413e54",
         ]
     );
 }
@@ -994,7 +1001,7 @@ async fn frozen_search_uses_only_project_sessions_and_indexed_messages() {
 }
 
 #[tokio::test]
-async fn frozen_search_history_order_relevance_keeps_fixture_bytes() {
+async fn frozen_search_history_default_and_relevance_share_fixture_bytes() {
     let fixture = Fixture::new();
     let lab = fixture.search_lab(None).await;
     let expected = concat!(
@@ -1004,9 +1011,9 @@ async fn frozen_search_history_order_relevance_keeps_fixture_bytes() {
         "[2] [message] score=0.80 compartment_id=2 range=1-4 match=lexical title=A frozen summary date=1970-01-01 session=session-p2 ref=session-p2:1-4\n",
         "Snippet: sharedterm in the summary for session-p2.\n\n",
         "## The person's messages\n",
-        "[1] [message] score=0.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 session=session-p ref=session-p:12\n",
+        "[1] [message] score=1.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 session=session-p ref=session-p:12\n",
         "sharedterm in the indexed project message.\n\n",
-        "[2] [message] score=0.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 session=session-p2 ref=session-p2:12\n",
+        "[2] [message] score=1.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 session=session-p2 ref=session-p2:12\n",
         "sharedterm in the other project session.\n\n",
         "## Commits\nnone",
     );
@@ -1076,20 +1083,20 @@ async fn frozen_search_history_order_newest_sorts_each_pool_before_paging() {
             "Summaries",
             "session-p:20-21",
             &[
+                "session-p:28-29",
                 "session-p2:20-21",
                 "session-p2:22-23",
                 "session-p:26-27",
-                "session-p:24-25",
             ][..],
         ),
         (
             "The person's messages",
             "session-p:21",
             &[
+                "session-p:29",
                 "session-p2:23",
                 "session-p2:21",
                 "session-p:27",
-                "session-p:25",
             ][..],
         ),
         (
@@ -1374,10 +1381,10 @@ async fn frozen_search_dated_messages_use_inclusive_utc_bounds_and_total_tie_ord
     assert_eq!(
         references,
         [
+            "session-p:14",
+            "session-p2:15",
             "session-p:15",
             "session-p:16",
-            "session-p2:15",
-            "session-p:14"
         ],
         "{answer}"
     );
@@ -1846,7 +1853,7 @@ async fn lab_review_merge_requires_an_active_project_destination_outside_or_insi
            VALUES (?1,'project','p','swe:architecture','ARCHITECTURE',?1,?1,1,1,1,1,?2)", params![id,status]).unwrap();
     }
     drop(conn);
-    let merge = |into| json!({"id":7,"verdict":"merge","into":into,"new_text":"updated","life":"long","proof":"none","evidence":[],"note":"merge test"});
+    let merge = |into| json!({"id":7,"verdict":"merge","into":into,"new_text":"updated","life":"long","proof":"none","evidence":[],"note":"merge test","reasoning":"Checked that the destination is active in the project."});
     let client = fixture
         .run(
             fixture.spec_value(),

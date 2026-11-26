@@ -793,6 +793,29 @@ struct Within<'a> {
     dates: Option<DateRange>,
     visible: Option<&'a BTreeSet<i64>>,
     reach: &'a Reach,
+    lab_role: Option<LabRole>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum LabRole {
+    Person,
+    Agent,
+}
+
+impl LabRole {
+    fn filter(role: Option<Self>) -> &'static str {
+        match role {
+            Some(Self::Person) => {
+                "AND role = 'user' AND instr(content, '<system-reminder>') <> 1
+                AND CAST(message_history_fts.message_ordinal AS INTEGER) > 0"
+            }
+            Some(Self::Agent) => {
+                "AND role = 'assistant'
+                AND CAST(message_history_fts.message_ordinal AS INTEGER) > 0"
+            }
+            None => "",
+        }
+    }
 }
 
 impl Within<'_> {
@@ -840,6 +863,7 @@ fn query_raw_after(
         ("", 9)
     };
     let screen = screen(within.reach, screen_start);
+    let role_filter = LabRole::filter(within.lab_role);
     let sql = format!(
         "SELECT message_history_fts.message_ordinal, message_history_fts.message_id,
                 message_history_fts.role, message_history_fts.content,
@@ -848,7 +872,7 @@ fn query_raw_after(
           WHERE {screen} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
             AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?3 {date_filter}
             AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?7))
-            {after_filter}
+             {after_filter}{role_filter}
           ORDER BY bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER) ASC,
                    message_history_fts.rowid ASC
            LIMIT ?4 OFFSET ?8"
@@ -968,6 +992,7 @@ fn app_rows(
         dates: None,
         visible: None,
         reach,
+        lab_role: None,
     };
     let base = sanitize_fts_query(text.trim());
     let read = |fts: &str| {
@@ -997,6 +1022,7 @@ fn count_matches(conn: &Connection, within: Within, fts: &str) -> u64 {
     let matching = format!("content : ({fts})");
     let visible = serde_json::to_string(&within.visible.cloned().unwrap_or_default())
         .expect("ordinals serialize");
+    let role_filter = LabRole::filter(within.lab_role);
     let (sql, mut values): (String, Vec<rusqlite::types::Value>) = match within.dates {
         Some(dates) => (
             format!(
@@ -1006,7 +1032,7 @@ fn count_matches(conn: &Connection, within: Within, fts: &str) -> u64 {
                   WHERE {} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
                     AND map.message_time_ms BETWEEN ?3 AND ?4
                     AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?5
-                    AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?6))",
+                     AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?6)){role_filter}",
                 screen(within.reach, 7)
             ),
             vec![
@@ -1023,7 +1049,7 @@ fn count_matches(conn: &Connection, within: Within, fts: &str) -> u64 {
                 "SELECT COUNT(*) FROM message_history_fts
                   WHERE {} message_history_fts.session_id = ?1 AND message_history_fts MATCH ?2
                     AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?3
-                    AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?4))",
+                     AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?4)){role_filter}",
                 screen(within.reach, 5)
             ),
             vec![
@@ -1059,6 +1085,7 @@ pub fn count_live_matches(
         dates,
         visible,
         reach,
+        lab_role: None,
     };
     let everything = Within {
         cutoff: i64::MAX,
@@ -1130,6 +1157,20 @@ pub fn search_at(
     relaxed: bool,
     reach: &Reach,
 ) -> Vec<Vec<MessageHit>> {
+    search_at_with_role(conn, session, wanted, limits, cutoff, relaxed, reach, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn search_at_with_role(
+    conn: &Connection,
+    session: &str,
+    wanted: &Query,
+    limits: &[usize],
+    cutoff: i64,
+    relaxed: bool,
+    reach: &Reach,
+    lab_role: Option<LabRole>,
+) -> Vec<Vec<MessageHit>> {
     let Query {
         text: query,
         probes,
@@ -1146,6 +1187,7 @@ pub fn search_at(
         dates,
         visible,
         reach,
+        lab_role,
     };
     // A search at `limit` reads up to three times that many rows per query.
     let fetch = |limit: usize| limit * 3;

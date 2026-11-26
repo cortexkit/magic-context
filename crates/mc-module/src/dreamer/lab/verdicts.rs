@@ -6,15 +6,32 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub(super) type Verdicts = BTreeMap<i64, Value>;
+pub(super) type Verdicts = BTreeMap<i64, Recorded>;
+
+#[derive(Clone)]
+pub(super) struct Recorded {
+    value: Value,
+    repeated_once: bool,
+}
+
+pub(super) struct Submission {
+    pub reply: String,
+    pub challenges: BTreeMap<i64, Challenge>,
+}
+
+pub(super) enum Challenge {
+    Evidence,
+    Reminder,
+}
 
 pub(super) fn submit(
     out: &Path,
     ids: &[i64],
     current: &mut Verdicts,
     input: Value,
+    confirm_record_removals: bool,
     active: impl Fn(i64) -> Result<bool, String>,
-) -> Result<String, String> {
+) -> Result<Submission, String> {
     let list = input
         .as_object()
         .filter(|object| object.len() == 1)
@@ -23,25 +40,58 @@ pub(super) fn submit(
         .filter(|list| !list.is_empty())
         .ok_or("submit needs a non-empty verdicts array")?;
     let mut next = current.clone();
+    let mut challenges = BTreeMap::new();
     let mut problems = Vec::new();
     for (index, item) in list.iter().enumerate() {
         let checked = serde_json::from_value::<Entry>(item.clone())
             .map_err(|e| e.to_string())
             .and_then(|entry| {
-                let target = entry.into;
-                let id = entry.check(ids)?;
-                if let Some(target) = target {
+                if item.get("reasoning").is_some_and(Value::is_null) {
+                    return Err("reasoning must be a string".into());
+                }
+                if let Some(confirmed) = item.get("confirmed") {
+                    if !confirm_record_removals {
+                        return Err(
+                            "confirmed is only accepted with confirm_record_removals".into()
+                        );
+                    }
+                    if confirmed.is_null() {
+                        return Err("confirmed must be a boolean".into());
+                    }
+                }
+                entry.check(ids)?;
+                if let Some(target) = entry.into {
                     if !active(target)? {
                         return Err(format!(
                             "into id {target} is not an active memory of this project"
                         ));
                     }
                 }
-                Ok(id)
+                Ok(entry)
             });
         match checked {
-            Ok(id) => {
-                next.insert(id, item.clone());
+            Ok(entry) => {
+                let id = entry.id;
+                let (record, challenge) = if confirm_record_removals {
+                    record_removal(current.get(&id), item.clone(), &entry)
+                } else {
+                    (
+                        Recorded {
+                            value: item.clone(),
+                            repeated_once: false,
+                        },
+                        None,
+                    )
+                };
+                next.insert(id, record);
+                match challenge {
+                    Some(challenge) => {
+                        challenges.insert(id, challenge);
+                    }
+                    None => {
+                        challenges.remove(&id);
+                    }
+                }
             }
             Err(error) => problems.push(format!(
                 "verdicts[{index}] (id {}): {error}",
@@ -77,13 +127,54 @@ pub(super) fn submit(
         reply.push_str(&problems.join("; "));
         reply.push_str(". Send only the refused verdicts again.");
     }
-    Ok(reply)
+    Ok(Submission { reply, challenges })
+}
+
+fn record_removal(
+    previous: Option<&Recorded>,
+    mut value: Value,
+    entry: &Entry,
+) -> (Recorded, Option<Challenge>) {
+    let previous_state = previous.and_then(|entry| entry.value["confirmation"].as_str());
+    let same = previous.is_some_and(|entry| {
+        ["verdict", "proof", "into", "new_text"]
+            .into_iter()
+            .all(|field| entry.value[field] == value[field])
+    });
+    let (state, repeated_once, challenge) = match previous_state {
+        Some(_) if !same => (Some("changed"), false, None),
+        Some("unconfirmed") if entry.confirmed == Some(true) => (Some("confirmed"), false, None),
+        Some("unconfirmed") if previous.is_some_and(|record| record.repeated_once) => {
+            (Some("repeated"), false, None)
+        }
+        Some("unconfirmed") => (Some("unconfirmed"), true, Some(Challenge::Reminder)),
+        Some(state) => (Some(state), false, None),
+        None if entry.record_removal() => (Some("unconfirmed"), false, Some(Challenge::Evidence)),
+        None => (None, false, None),
+    };
+    // The flag is a request to confirm, not proof that a challenge occurred.
+    let fields = value.as_object_mut().expect("verdict parsed as an object");
+    fields.remove("confirmed");
+    if let Some(state) = state {
+        fields.insert("confirmation".into(), json!(state));
+    }
+    (
+        Recorded {
+            value,
+            repeated_once,
+        },
+        challenge,
+    )
 }
 
 pub(super) fn missing(ids: &[i64], current: &Verdicts) -> Vec<i64> {
     ids.iter()
         .copied()
-        .filter(|id| !current.contains_key(id))
+        .filter(|id| {
+            current
+                .get(id)
+                .is_none_or(|record| record.value["confirmation"] == "unconfirmed")
+        })
         .collect()
 }
 
@@ -92,7 +183,7 @@ pub(super) fn write(out: &Path, ids: &[i64], current: &Verdicts) -> Result<(), S
         out,
         "verdicts.json",
         &ids.iter()
-            .filter_map(|id| current.get(id))
+            .filter_map(|id| current.get(id).map(|record| &record.value))
             .collect::<Vec<_>>(),
     )
 }
@@ -130,15 +221,16 @@ struct Entry {
     new_text: Option<String>,
     #[serde(rename = "life")]
     _life: Life,
-    #[serde(rename = "proof")]
-    _proof: Proof,
+    proof: Proof,
     #[serde(rename = "evidence")]
     _evidence: Vec<Evidence>,
     note: String,
+    reasoning: Option<String>,
+    confirmed: Option<bool>,
 }
 
 impl Entry {
-    fn check(self, ids: &[i64]) -> Result<i64, String> {
+    fn check(&self, ids: &[i64]) -> Result<(), String> {
         if !ids.contains(&self.id) {
             return Err(format!("unknown memory id {}", self.id));
         }
@@ -168,7 +260,30 @@ impl Entry {
         if self.note.contains(['\n', '\r']) {
             return Err("note must be one line".into());
         }
-        Ok(self.id)
+        if !matches!(self.verdict, Verdict::Keep)
+            && self
+                .reasoning
+                .as_deref()
+                .is_none_or(|s| s.trim().is_empty())
+        {
+            return Err("reasoning must not be blank except for keep".into());
+        }
+        if self
+            .reasoning
+            .as_ref()
+            .is_some_and(|s| s.chars().count() > 1_200)
+        {
+            return Err("reasoning must be at most 1,200 characters".into());
+        }
+        Ok(())
+    }
+
+    fn record_removal(&self) -> bool {
+        matches!(self.proof, Proof::Record)
+            && matches!(
+                self.verdict,
+                Verdict::Retire | Verdict::Merge | Verdict::End
+            )
     }
 }
 
@@ -221,8 +336,8 @@ enum Kind {
     Doc,
 }
 
-pub(super) fn schema() -> Value {
-    json!({
+pub(super) fn schema(confirm_record_removals: bool) -> Value {
+    let mut schema = json!({
         "type":"object", "additionalProperties":false, "required":["verdicts"],
         "properties":{"verdicts":{"type":"array","minItems":1,"items":{
             "type":"object","additionalProperties":false,
@@ -241,8 +356,15 @@ pub(super) fn schema() -> Value {
                         "ref":{"type":"string"},"quote":{"type":"string"}
                     }
                 }},
-                "note":{"type":"string"}
+                "note":{"type":"string"},
+                "reasoning":{"type":"string","maxLength":1200,"description":"What you checked, what you found, and what would make this verdict wrong."}
             }
         }}}
-    })
+    });
+    if confirm_record_removals {
+        schema["properties"]["verdicts"]["items"]["properties"]["confirmed"] = json!({
+            "type":"boolean", "description":"Set to true when resending a removal after the tool asks for confirmation."
+        });
+    }
+    schema
 }

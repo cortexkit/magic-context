@@ -1,8 +1,11 @@
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+
+use crate::search::lab::{Origin, Timeline};
 
 pub(super) fn open(path: &Path) -> Result<Connection, String> {
     let path = path.to_str().ok_or("store path must be UTF-8")?;
@@ -31,10 +34,16 @@ pub(super) fn open(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<String, String> {
+pub(super) struct Memories {
+    pub text: String,
+    pub origins: BTreeMap<i64, Origin>,
+}
+
+pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<Memories, String> {
     let mut memory = conn
         .prepare(
-            "SELECT category, created_at, source_type, importance, verified_at, content
+            "SELECT category, created_at, source_type, importance, verified_at, content,
+                    source_session_id, source_ordinals_json
            FROM memories WHERE id = ?1 AND level = 'project' AND owner_id = ?2",
         )
         .map_err(|e| format!("reading frozen memories: {e}"))?;
@@ -42,6 +51,8 @@ pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<
         "SELECT DISTINCT file_path FROM memory_verifications WHERE memory_id = ?1 ORDER BY file_path",
     ).map_err(|e| format!("reading frozen file links: {e}"))?;
     let mut text = String::new();
+    let mut timelines = HashMap::new();
+    let mut origins = BTreeMap::new();
     for &id in ids {
         let row = memory
             .query_row(params![id, project], |row| {
@@ -52,13 +63,16 @@ pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, Option<i64>>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .optional()
             .map_err(|e| format!("reading memory {id}: {e}"))?;
-        let (category, created, writer, importance, confirmed, content) = row.ok_or_else(|| {
-            format!("the frozen store contains no memory {id} of project {project:?}")
-        })?;
+        let (category, created, writer, importance, confirmed, content, session, ordinals) = row
+            .ok_or_else(|| {
+                format!("the frozen store contains no memory {id} of project {project:?}")
+            })?;
         let files = links
             .query_map([id], |row| row.get::<_, String>(0))
             .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -68,13 +82,34 @@ pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<
             Some(writer) => writer,
             None => "unknown",
         };
-        writeln!(text, "### Memory {id}\nCategory: {category}\nCreated: {}\nWriter: {writer}\nImportance: {}\nLast confirmed: {}\nLinked files: {}\n\n{content}\n",
+        writeln!(text, "### Memory {id}\nCategory: {category}\nCreated: {}\nWriter: {writer}\nImportance: {}\nLast confirmed: {}\nLinked files: {}",
             date(created), importance.map_or_else(|| "unset".into(), |n| n.to_string()),
             confirmed.map_or_else(|| "none".into(), date),
             if files.is_empty() { "none".into() } else { files.join(", ") },
         ).expect("a string is writable");
+        if let Some(session) = session {
+            let timeline = match timelines.entry(session) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let timeline = Timeline::load(conn, project, entry.key())?;
+                    entry.insert(timeline)
+                }
+            };
+            let spans = ordinals
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<Vec<(i64, i64)>>(json).ok())
+                .unwrap_or_default();
+            if let Some(origin) = timeline
+                .as_ref()
+                .and_then(|timeline| timeline.origin(&spans, created))
+            {
+                writeln!(text, "origin: {}", origin.label()).expect("a string is writable");
+                origins.insert(id, origin);
+            }
+        }
+        writeln!(text, "\n{content}\n").expect("a string is writable");
     }
-    Ok(text)
+    Ok(Memories { text, origins })
 }
 
 fn date(ms: i64) -> String {

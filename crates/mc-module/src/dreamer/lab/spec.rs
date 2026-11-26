@@ -20,6 +20,10 @@ pub(super) struct Spec {
     pub persona_dir: PathBuf,
     pub context_files: Vec<ContextFile>,
     pub tools: BTreeSet<Tool>,
+    #[serde(default)]
+    pub confirm_record_removals: bool,
+    #[serde(default = "rerank_by_default")]
+    pub rerank: bool,
     pub route: Option<Route>,
     /// The most model steps the session takes. A spec leaves it out to run
     /// with no step limit: a session cut at a count has read for nothing,
@@ -36,6 +40,10 @@ fn no_step_limit() -> u64 {
     100_000
 }
 
+fn rerank_by_default() -> bool {
+    true
+}
+
 /// The longest a spec may ask for. It ends a session that hangs; it is not
 /// meant to end one that is working.
 fn default_deadline_minutes() -> u64 {
@@ -50,6 +58,7 @@ pub(super) enum Tool {
     GitRead,
     MemorySearch,
     HistorySearch,
+    HistoryRead,
     Submit,
 }
 
