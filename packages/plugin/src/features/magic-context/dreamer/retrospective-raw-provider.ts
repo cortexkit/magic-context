@@ -272,8 +272,9 @@ function admitRetrospectiveCohorts(
             return {
                 kept,
                 budgetTruncated: tooManyTokens,
-                // If earlier cohorts used some of the budget, retry the whole
-                // group in a fresh window rather than declaring it too large.
+                // If earlier cohorts used some of the prompt budget, the group is
+                // not declared too large: the next run tries it again with the
+                // whole budget.
                 ...(kept.length === 0 ? { oversized: { ts, rows: cohort } } : {}),
             };
         }
