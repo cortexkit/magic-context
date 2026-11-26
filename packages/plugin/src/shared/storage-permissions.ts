@@ -35,6 +35,7 @@ let enforcePrivateStoragePermissions = true;
 const STORAGE_PERMISSIONS_POLICY_VERSION = 1;
 const STORAGE_PERMISSIONS_MARKER = `.storage-permissions-v${STORAGE_PERMISSIONS_POLICY_VERSION}`;
 const STORAGE_PERMISSIONS_MARKER_BYTES = Buffer.from(`${STORAGE_PERMISSIONS_POLICY_VERSION}\n`);
+const STORAGE_PERMISSIONS_MARKER_MAX_AGE_MS = 24 * 60 * 60_000;
 const LEGACY_FENCE_TEMP_MIN_AGE_MS = 10 * 60_000;
 
 /**
@@ -273,11 +274,15 @@ function readStoragePermissionCertificate(marker: string): Stats | undefined {
     const fd = openSync(marker, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
         const stat = fstatSync(fd);
+        // File times can have fractions of a millisecond. Use the precision of Date.now().
+        const age = Date.now() - Math.floor(stat.mtimeMs);
         if (
             !stat.isFile() ||
             (stat.mode & 0o7777) !== 0o600 ||
             stat.uid !== process.getuid?.() ||
-            stat.size !== STORAGE_PERMISSIONS_MARKER_BYTES.length
+            stat.size !== STORAGE_PERMISSIONS_MARKER_BYTES.length ||
+            age < 0 ||
+            age >= STORAGE_PERMISSIONS_MARKER_MAX_AGE_MS
         ) {
             return undefined;
         }
@@ -313,13 +318,12 @@ export function tightenStorageTreeSync(
             rmSync(marker, { force: true });
             return true;
         } catch {
-            failures++;
             return false;
         }
     };
     if (!shouldEnforcePrivateStoragePermissions()) {
         storagePermissionRoots.add(root);
-        removeMarker();
+        if (!removeMarker()) failures++;
         return { tightened, failures };
     }
     let rootStat: Stats;
@@ -331,17 +335,14 @@ export function tightenStorageTreeSync(
     }
     storagePermissionRoots.add(root);
     let certificate: Stats | undefined;
+    let discardMarker = false;
     try {
         certificate = readStoragePermissionCertificate(marker);
-        if (!certificate && !removeMarker()) return { tightened, failures };
+        discardMarker = certificate === undefined;
     } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT") {
-            if (code !== "ELOOP") failures++;
-            if (!removeMarker()) return { tightened, failures };
-        }
+        discardMarker = (error as NodeJS.ErrnoException).code !== "ENOENT";
     }
-    let repairAllowed: boolean | undefined;
+    let markerRemoved: boolean | undefined;
     const fenceDirectory = join(root, "lkg-recovery-fences");
     const visit = (entryPath: string, recursive = true, optional = false, stat?: Stats): void => {
         try {
@@ -355,6 +356,8 @@ export function tightenStorageTreeSync(
             return;
         }
         if (stat.isSymbolicLink()) return;
+        // A mode change must not turn an invalid marker into a certificate.
+        if (entryPath === marker && !stat.isDirectory()) return;
         if (!certificate && dirname(entryPath) === fenceDirectory) {
             const name = basename(entryPath);
             const legacyTemp = stat.isFile() && /^.+\.json\..+\.tmp$/.test(name);
@@ -397,9 +400,8 @@ export function tightenStorageTreeSync(
         const mode = stat.isDirectory() ? 0o700 : 0o600;
         if ((stat.mode & 0o077) !== 0 || (stat.mode & 0o777) !== mode) {
             if (certificate) {
-                // A peer must not trust the certificate after this mode changes.
-                repairAllowed ??= removeMarker();
-                if (!repairAllowed) return;
+                // Invalidate before the mode change so a peer can see that the tree changed.
+                markerRemoved ??= removeMarker();
             }
             try {
                 chmodSync(entryPath, mode);
@@ -430,28 +432,34 @@ export function tightenStorageTreeSync(
         // A loose entry here shows that the tree changed after certification.
         // A process with a working directory in the tree keeps its access
         // through the root's mode, so this call tightens all entries, not the next start.
-        if (repairAllowed === true) visit(root);
-        else if (repairAllowed === undefined) {
-            if (failures > 0) removeMarker();
-            else {
-                // A peer can remove the certificate during the mode checks.
-                try {
-                    const current = lstatSync(marker);
-                    if (
-                        current.dev !== certificate.dev ||
-                        current.ino !== certificate.ino ||
-                        current.ctimeMs !== certificate.ctimeMs
-                    ) {
-                        visit(root);
-                    }
-                } catch (error) {
-                    if ((error as NodeJS.ErrnoException).code === "ENOENT") visit(root);
-                    else failures++;
-                }
+        if (markerRemoved !== undefined) {
+            certificate = undefined;
+            visit(root);
+            if (!markerRemoved && !removeMarker()) failures++;
+        } else if (failures > 0) {
+            if (!removeMarker()) failures++;
+        } else {
+            // A peer can remove the certificate during the mode checks.
+            let markerChanged: boolean;
+            try {
+                const current = lstatSync(marker);
+                markerChanged =
+                    current.dev !== certificate.dev ||
+                    current.ino !== certificate.ino ||
+                    current.ctimeMs !== certificate.ctimeMs;
+            } catch (error) {
+                markerChanged = true;
+                discardMarker = (error as NodeJS.ErrnoException).code !== "ENOENT";
+            }
+            if (markerChanged) {
+                certificate = undefined;
+                visit(root);
+                if (discardMarker && !removeMarker()) failures++;
             }
         }
     } else {
         visit(root, true, false, rootStat);
+        if (discardMarker && !removeMarker()) failures++;
         if (failures === 0 && !keptLegacyTemp) {
             try {
                 writeStorageFileSync(marker, STORAGE_PERMISSIONS_MARKER_BYTES, {
