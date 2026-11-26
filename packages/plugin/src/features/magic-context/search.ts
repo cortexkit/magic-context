@@ -820,6 +820,7 @@ async function getSemanticScores(args: {
      *  same query twice in parallel. */
     queryEmbedding: Float32Array | null;
     queryModelId?: string | null;
+    queryGeneration?: number;
     workspace?: SearchWorkspaceContext;
     backfillMemoryEmbeddings?: boolean;
 }): Promise<Map<number, number>> {
@@ -834,6 +835,7 @@ async function getSemanticScores(args: {
         return semanticScores;
     }
 
+    const expectedEmbedding = { modelId: args.queryModelId, generation: args.queryGeneration };
     if (!args.workspace?.isWorkspaced) {
         const cachedEmbeddings = getProjectEmbeddings(args.db, args.projectPath, args.queryModelId);
         const embeddings =
@@ -844,11 +846,12 @@ async function getSemanticScores(args: {
                       projectIdentity: args.projectPath,
                       memories: args.memories,
                       existingEmbeddings: cachedEmbeddings,
+                      expectedEmbedding,
                   });
 
         for (const memory of args.memories) {
             const memoryEmbedding = embeddings.get(memory.id);
-            if (!memoryEmbedding) {
+            if (!memoryEmbedding || memoryEmbedding.modelId !== args.queryModelId) {
                 continue;
             }
 
@@ -881,6 +884,7 @@ async function getSemanticScores(args: {
             projectIdentity: args.projectPath,
             memories: ownMemories,
             existingEmbeddings: ownEmbeddings,
+            expectedEmbedding,
         });
     }
 
@@ -1053,6 +1057,7 @@ async function searchMemories(args: {
      *  searchGitCommitsAsync — never embed twice for one query. */
     queryEmbedding: Float32Array | null;
     queryModelId?: string | null;
+    queryGeneration?: number;
     workspace?: SearchWorkspaceContext;
     visibleMemoryIds?: Set<number> | null;
     dateRange: InclusiveDateRange | null;
@@ -1104,6 +1109,7 @@ async function searchMemories(args: {
         backfillMemoryEmbeddings: args.backfillMemoryEmbeddings,
         queryEmbedding: args.queryEmbedding,
         queryModelId: args.queryModelId,
+        queryGeneration: args.queryGeneration,
         workspace: args.workspace,
     });
 
@@ -2555,6 +2561,7 @@ export async function unifiedSearch(
                   queryEmbedding,
                   queryModelId:
                       embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
+                  queryGeneration: queryContract?.generation ?? embeddingSnapshot?.generation,
                   workspace,
                   visibleMemoryIds: options.visibleMemoryIds,
                   backfillMemoryEmbeddings: options.backfillMemoryEmbeddings,

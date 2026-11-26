@@ -22,10 +22,18 @@ export async function ensureMemoryEmbeddings(args: {
     projectIdentity: string;
     memories: Memory[];
     existingEmbeddings: Map<number, StoredMemoryEmbedding>;
+    expectedEmbedding?: { modelId: string; generation?: number };
 }): Promise<Map<number, StoredMemoryEmbedding>> {
     if (isEmbeddingHostBusy()) return args.existingEmbeddings;
     const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
-    if (!snapshot?.enabled) {
+    const expected = args.expectedEmbedding;
+    // The cache belongs to the query's model, which may no longer be active.
+    if (
+        !snapshot?.enabled ||
+        (expected &&
+            (snapshot.modelId !== expected.modelId ||
+                (expected.generation !== undefined && snapshot.generation !== expected.generation)))
+    ) {
         return args.existingEmbeddings;
     }
 
@@ -58,7 +66,13 @@ export async function ensureMemoryEmbeddings(args: {
             args.projectIdentity,
             { maxItemsPerCall: SEARCH_BACKFILL_REQUEST_SIZE },
         );
-        if (!result) {
+        const currentSnapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
+        if (
+            !result ||
+            result.modelId !== snapshot.modelId ||
+            result.generation !== snapshot.generation ||
+            currentSnapshot?.generation !== snapshot.generation
+        ) {
             return args.existingEmbeddings;
         }
 
@@ -93,11 +107,6 @@ export async function ensureMemoryEmbeddings(args: {
                 }
             })
             .immediate();
-
-        const currentSnapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
-        if (!currentSnapshot || currentSnapshot.generation !== result.generation) {
-            return args.existingEmbeddings;
-        }
 
         if (capped && (cursor !== undefined || result.vectors.size < missingMemories.length)) {
             const nextCursor =
