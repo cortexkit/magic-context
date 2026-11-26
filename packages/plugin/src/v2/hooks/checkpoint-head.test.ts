@@ -15,6 +15,7 @@ import * as transformModule from "../../hooks/magic-context/transform";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import released from "../fold/__fixtures__/released-owner-rebound.json";
 import { type FoldIdentity, FoldOwner } from "../fold/owner";
 import { CHECKPOINT_NOTE } from "../fold/summary";
 import * as readerModule from "../store-reader";
@@ -392,6 +393,43 @@ test("a new legacy checkpoint cannot inherit a reverted checkpoint's head at the
         expect(await pass()).toBe(recovered);
         const lines = logs.mock.calls.map((args) => args.map(String).join(" "));
         expect(lines.filter((line) => line.includes("HARD reason=boot_recovery"))).toHaveLength(1);
+    } finally {
+        logs.mockRestore();
+        await f.close();
+    }
+});
+
+test("upgrading after the released owner served a reverted head recovers on the next context pass", async () => {
+    const f = await fixture({ stored: CHECKPOINT_NOTE, head: false });
+    const logs = spyOn(logger, "sessionLog");
+    try {
+        await f.storage.set("fold/v1/s", released.a);
+        const first = f.draft();
+        await f.hooks.get("context")!(first);
+        expect(JSON.stringify(first.messages)).toContain(released.a.head);
+
+        f.source.exec("DELETE FROM session_message WHERE id = 'cut'");
+        f.source
+            .prepare(
+                "INSERT INTO session_message VALUES ('replacement','s','compaction',2,300,300,?)",
+            )
+            .run(JSON.stringify({ status: "completed", summary: CHECKPOINT_NOTE, mode: "local" }));
+        // The released owner already answered and observed the replacement.
+        await f.storage.set("fold/v1/s", released.rebound);
+        await f.restart();
+        const pass = async () => {
+            const draft = f.draft();
+            draft.messages = [structuredClone(released.rebound.rendered)];
+            await f.hooks.get("context")!(draft);
+            return JSON.stringify(draft.messages);
+        };
+        const recovered = await pass();
+        expect(recovered).not.toContain(released.a.head);
+        expect(recovered).toContain("unarchived source");
+        expect(await pass()).toBe(recovered);
+        expect(
+            logs.mock.calls.filter((args) => args[1] === "HARD reason=boot_recovery"),
+        ).toHaveLength(1);
     } finally {
         logs.mockRestore();
         await f.close();

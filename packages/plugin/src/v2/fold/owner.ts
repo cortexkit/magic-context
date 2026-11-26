@@ -187,6 +187,14 @@ export class FoldOwner {
 }
 
 function ownsCheckpoint(state: FoldIdentity, id: string): boolean {
+    // Older builds appended a different running ID when its sequence matched.
+    // They could then carry the old head into boot recovery under the new ID.
+    // Recovery here never writes a head, and supply records at most one ID.
+    if (
+        (state.reason === "boot_recovery" && state.head !== undefined) ||
+        (state.answered?.length ?? 0) > 1
+    )
+        return false;
     return state.rendered
         ? state.rendered.id === id
         : state.answered?.length === 1 && state.answered[0] === id;

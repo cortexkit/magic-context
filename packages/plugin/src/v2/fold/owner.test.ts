@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import released from "./__fixtures__/released-owner-rebound.json";
 import * as ownerModule from "./owner";
 import { FoldOwner, foldDigest } from "./owner";
 import { CHECKPOINT_NOTE } from "./summary";
@@ -328,4 +329,31 @@ test("a note checkpoint recovers rather than reusing an ambiguous or foreign hea
         expect(await observe(f.owner, "B", hard)).toEqual(recovered);
         expect(hard).toEqual(["boot_recovery"]);
     }
+});
+
+// Captured from the released owner after answering the original checkpoint
+// (and optionally observing it), then answering and observing its replacement
+// at the same sequence.
+test.each([
+    released.rebound,
+    released.multiAnswer,
+])("a released note record already rendered under the replacement ID recovers once (%#)", async (record) => {
+    const f = fixture();
+    expect(record.head).toBe(released.a.head);
+    await f.storage.set("fold/v1/s", record);
+    const hard: string[] = [];
+    const observe = (owner: FoldOwner) =>
+        owner.observe({
+            sessionID: "s",
+            cutSeq: record.cutSeq,
+            summary: record.submitted,
+            rendered: record.rendered,
+            onHard: (reason) => hard.push(reason),
+        });
+    const recovered = await observe(f.owner);
+    expect(recovered.head).toBeUndefined();
+    expect(recovered.answered).toBeUndefined();
+    expect(recovered.rendered?.id).toBe(record.rendered.id);
+    expect(await observe(new FoldOwner(f.storage))).toEqual(recovered);
+    expect(hard).toEqual(["boot_recovery"]);
 });

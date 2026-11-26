@@ -1,0 +1,67 @@
+{
+    "a": {
+        "watermark": 1,
+        "cutSeq": 2,
+        "submitted": "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.",
+        "submittedSha": "6e675050fc4bc2c1aa5e53111d80c462ad62dd0d4eb8121216939ede26c3cba5",
+        "head": "<session-history>summary</session-history>",
+        "answered": [
+            "cut"
+        ],
+        "rendered": {
+            "id": "cut",
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<conversation-checkpoint>\n<summary>\nMagic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.\n</summary>\n<recent-context>RAW-HOST-TRANSCRIPT</recent-context>\n</conversation-checkpoint>"
+                }
+            ]
+        },
+        "renderedSha": "29242a43e8adf88b43d30099d33e558726089f8aa2d982b2199716af2624d705",
+        "renderedSummary": "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model."
+    },
+    "rebound": {
+        "watermark": 2,
+        "submitted": "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.",
+        "submittedSha": "6e675050fc4bc2c1aa5e53111d80c462ad62dd0d4eb8121216939ede26c3cba5",
+        "head": "<session-history>summary</session-history>",
+        "reason": "boot_recovery",
+        "cutSeq": 2,
+        "rendered": {
+            "id": "replacement",
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<conversation-checkpoint>\n<summary>\nMagic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.\n</summary>\n<recent-context>RAW-HOST-TRANSCRIPT</recent-context>\n</conversation-checkpoint>"
+                }
+            ]
+        },
+        "renderedSha": "e702d69211cd69bb3c6ccdc064cfb452daeaaf769ef0ae891b2f2c194184d974",
+        "renderedSummary": "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model."
+    },
+    "multiAnswer": {
+        "watermark": 1,
+        "cutSeq": 2,
+        "submitted": "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.",
+        "submittedSha": "6e675050fc4bc2c1aa5e53111d80c462ad62dd0d4eb8121216939ede26c3cba5",
+        "head": "<session-history>summary</session-history>",
+        "answered": [
+            "cut",
+            "replacement"
+        ],
+        "rendered": {
+            "id": "replacement",
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<conversation-checkpoint>\n<summary>\nMagic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model.\n</summary>\n<recent-context>RAW-HOST-TRANSCRIPT</recent-context>\n</conversation-checkpoint>"
+                }
+            ]
+        },
+        "renderedSha": "e702d69211cd69bb3c6ccdc064cfb452daeaaf769ef0ae891b2f2c194184d974",
+        "renderedSummary": "Magic Context added a compaction marker here to keep this OpenCode session fast. Your history is unchanged: Magic Context still keeps it and sends it to the model."
+    }
+}
