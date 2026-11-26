@@ -2068,6 +2068,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn opencode_probe_dir_rejects_filesystem_root_home() {
+        let (_root, temp, _home) = probe_dir_fixture();
+        let fs_root = temp.ancestors().last().unwrap().to_path_buf();
+        assert_eq!(
+            super::opencode_probe_dir_from(None, Some(fs_root), &temp, None),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_probe_dir_rejects_filesystem_root_storage_override() {
+        let (_root, temp, home) = probe_dir_fixture();
+        let fs_root = temp.ancestors().last().unwrap().to_path_buf();
+        assert_eq!(
+            super::opencode_probe_dir_from(Some(fs_root), Some(home.clone()), &temp, None),
+            Some(home)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn opencode_probe_dir_checks_real_path_after_storage_creation() {
