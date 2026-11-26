@@ -302,6 +302,32 @@ async fn scripted_lab_records_incremental_verdicts_and_request_without_store_wri
 }
 
 #[tokio::test]
+async fn a_lab_session_runs_without_our_step_and_output_limits() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec.as_object_mut().unwrap().remove("step_cap");
+    let client = fixture
+        .run_with(
+            spec,
+            Ends::LabTools(vec![submit(&[verdict(2, "one"), verdict(7, "two")])]),
+            // The model allows 64,000 tokens per reply and has a 200,000 window.
+            |client| client.max_output = Some(64_000),
+        )
+        .await;
+    assert_eq!(fixture.output("run.json")["ended"], "complete");
+    let sends = client.sends.lock().unwrap();
+    let (_, sent) = &sends[0];
+    // No step limit: the plan carries a number no session reaches.
+    assert_eq!(sent.runner_params["stop_when"]["max_steps"], 100_000);
+    // Per reply, a quarter of the model's window (the share every session
+    // keeps for output), not the 32,000 tokens scheduled maintenance asks for.
+    assert_eq!(
+        sent.runner_params["generation"]["max_output_tokens"],
+        50_000
+    );
+}
+
+#[tokio::test]
 async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
     use sha2::{Digest, Sha256};
 

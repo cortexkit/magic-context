@@ -21,14 +21,25 @@ pub(super) struct Spec {
     pub context_files: Vec<ContextFile>,
     pub tools: BTreeSet<Tool>,
     pub route: Option<Route>,
+    /// The most model steps the session takes. A spec leaves it out to run
+    /// with no step limit: a session cut at a count has read for nothing,
+    /// and a test must show what a session costs when it finishes.
+    #[serde(default = "no_step_limit")]
     pub step_cap: u64,
     #[serde(default = "default_deadline_minutes")]
     pub deadline_minutes: u64,
     pub out_dir: PathBuf,
 }
 
+/// The runner's plan needs a number, so this is one no session reaches.
+fn no_step_limit() -> u64 {
+    100_000
+}
+
+/// The longest a spec may ask for. It ends a session that hangs; it is not
+/// meant to end one that is working.
 fn default_deadline_minutes() -> u64 {
-    60
+    240
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

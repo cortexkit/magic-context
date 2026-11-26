@@ -100,6 +100,9 @@ pub(crate) struct Client {
     pub(crate) lab_tool_results: Mutex<Vec<serde_json::Value>>,
     pub(crate) lab_result: Option<RunResult>,
     pub(crate) lab_verdicts_path: Option<std::path::PathBuf>,
+    /// The most output tokens the selected model allows per reply, when a
+    /// test needs one other than the default 32,000.
+    pub(crate) max_output: Option<u64>,
     pub(crate) lab_verdicts_after: Mutex<Vec<serde_json::Value>>,
     pub(crate) lab_select_delay: Option<Duration>,
 }
@@ -136,6 +139,7 @@ impl Client {
             lab_tool_results: Mutex::default(),
             lab_result: None,
             lab_verdicts_path: None,
+            max_output: None,
             lab_verdicts_after: Mutex::default(),
             lab_select_delay: None,
         }
@@ -434,7 +438,7 @@ impl Router for Client {
             reference,
             runner,
             200_000,
-            32_000,
+            self.max_output.unwrap_or(32_000),
             u64::MAX,
             "test",
         ))

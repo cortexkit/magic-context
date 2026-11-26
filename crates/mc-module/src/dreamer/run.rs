@@ -336,8 +336,17 @@ async fn run_inner<C: RunnerClient + Router>(
             counter: Counter::for_model(Some(&answer.route.route_key())),
             context_window: answer.context_window,
         };
+        // A lab session is a test, so no limit of ours may shape its result:
+        // it may write as much per reply as its model allows. (A first pass
+        // over 349 memories once ended on the maintenance limit while still
+        // thinking.) Scheduled tasks keep the maintenance limit.
+        let output_ceiling = if lab.is_some() {
+            u64::MAX
+        } else {
+            DREAM_OUTPUT_TOKENS
+        };
         let output_tokens = window
-            .output_tokens(DREAM_OUTPUT_TOKENS)
+            .output_tokens(output_ceiling)
             .min(answer.max_output_tokens);
         let model = routing::model_of(&answer);
         let first_child = Child {
