@@ -134,6 +134,12 @@ esac
             "lsof": '''#!/bin/sh
 if [ "$2" = '-Fpcn' ]; then
     [ -f "$FAKE_STOPPED" ] || exit 2
+    [ -z "${FAKE_LSOF_CALLS:-}" ] || echo call >> "$FAKE_LSOF_CALLS"
+    if [ "${FAKE_CONTEXT_READER:-}" = 1 ]; then
+        for path do
+            case "$path" in */context.db*) printf 'p5151\\ncdashboard\\nn%s\\n' "$path"; exit 0;; esac
+        done
+    fi
     if [ "${FAKE_HOLDER:-}" = 1 ]; then
         for path do
             case "$path" in *.lock) printf 'p4242\\ncoffline-reader\\nn%s\\n' "$path"; exit 0;; esac
@@ -297,6 +303,30 @@ printf '0000000100000000 T _main\\n'
                 self.assertFalse((self.store / "sessions.db").exists())
                 self.assertEqual((self.bin / "ck-mc").read_bytes(), original)
         self.assertIn(f"started mode3.db ck-mc 0.1.0 ({OLD})", Path(self.env["FAKE_LIFECYCLE"]).read_text())
+
+    def test_a_reader_of_context_db_does_not_block_the_rename(self):
+        # The dashboard app keeps context.db open while the module is stopped.
+        # Only the session store is renamed, so only its holders matter.
+        old = self.legacy_store()
+        self.env["FAKE_CONTEXT_READER"] = "1"
+        run = self.place()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse(old.exists())
+        self.assertTrue((self.store / "sessions.db").exists())
+
+    def test_a_foreign_holder_of_the_session_store_fails_after_a_few_polls(self):
+        # With the module's own process gone, waiting a full timeout for
+        # another program only keeps the module down for longer.
+        old = self.legacy_store()
+        Path(f"{old}.lock").touch()
+        calls = self.store.parent / "lsof-calls"
+        self.env["FAKE_HOLDER"] = "1"
+        self.env["FAKE_LSOF_CALLS"] = str(calls)
+        run = self.place()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("offline-reader", run.stderr)
+        self.assertEqual(len(calls.read_text().splitlines()), 5)
+        self.assertTrue(old.exists())
 
     def test_failed_or_unknown_post_stop_provenance_does_not_block_a_verified_stop(self):
         for status, message in (("failed", "command failed"), ("unknown", "returned an unrecognized reply"),

@@ -415,10 +415,13 @@ for module in modules:
 else:
     sys.exit("missing magic-context module entry")' <<< "$data" || return 3
 }
+# Only the session store is renamed, so only its files must have no holder.
+# context.db stays where it is and has legitimate readers while the module is
+# stopped (the dashboard app, a plugin host), which must not block placement.
 stores_are_closed() {
     local path suffix output status=0
     local paths=()
-    for path in "$context_path" "$previous_store" "$current_store"; do
+    for path in "$previous_store" "$current_store"; do
         for suffix in '' -wal -shm .lock; do
             if present "$path$suffix"; then paths+=("$path$suffix"); fi
         done
@@ -435,13 +438,22 @@ start_original() {
     ck module start magic-context || echo "place-ck-mc: could not start the original magic-context; run ck module start magic-context" >&2
 }
 wait_stopped() {
-    local before=$1 detail holders
+    local before=$1 detail holders foreign_polls=0
     for _ in $(seq 1 60); do
         detail=
         if [[ -n "$before" ]] && ! process_is_gone "$before"; then
             detail="cannot confirm magic-context PID $before exited"
         fi
-        if ! holders=$(stores_are_closed); then detail="${detail:+$detail; }$holders"; fi
+        if ! holders=$(stores_are_closed); then
+            # Once the module itself has exited, whoever still holds the store
+            # is another program, and waiting longer only keeps the module
+            # down. Give it a few polls to let go, then give up.
+            if [[ -z "$detail" ]] && ((++foreign_polls >= 5)); then
+                echo "$holders"
+                return 1
+            fi
+            detail="${detail:+$detail; }$holders"
+        fi
         [[ -n "$detail" ]] || return 0
         sleep "$poll_seconds"
     done
