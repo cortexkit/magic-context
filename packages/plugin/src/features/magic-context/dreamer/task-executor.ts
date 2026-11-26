@@ -1594,6 +1594,13 @@ async function runRetrospectiveTask(
         RETROSPECTIVE_OVERLAP_USER_LINES,
         { usableInputTokens, recencyCutoffMs },
     );
+    ctx.onRetrospectiveScan?.({
+        watermarkMs,
+        maxScannedTs: scan.maxScannedTs,
+        usableInputTokens,
+        recencyCutoffMs,
+        budgetTruncated: scan.budgetTruncated,
+    });
     const clearedTaskStateJson = activeOverflow
         ? writeRetrospectiveOverflowState(taskState.root, null)
         : undefined;
