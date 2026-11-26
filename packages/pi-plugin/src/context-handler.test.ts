@@ -669,7 +669,7 @@ describe("Pi project binding retry", () => {
 
 			expect(notify).toHaveBeenCalledTimes(1);
 			expect(notify.mock.calls[0]?.[0]).toContain(
-				"magic-context doctor merge-identities --from '/workspace/old folder' --to git:new --apply",
+				"npx @cortexkit/magic-context@latest doctor merge-identities --from '/workspace/old folder' --to git:new --apply",
 			);
 			expect(db.prepare("SELECT project_path FROM memories").all()).toEqual([
 				{ project_path: from },

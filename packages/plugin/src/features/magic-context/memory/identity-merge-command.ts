@@ -1,3 +1,5 @@
+export const IDENTITY_MERGE_COMMAND = "npx @cortexkit/magic-context@latest doctor merge-identities";
+
 /** Shell arguments in notices must be safe to paste even when a folder contains spaces or quotes. */
 function shellArg(value: string): string {
     if (/^[\w.:/-]+$/.test(value)) return value;
@@ -7,5 +9,5 @@ function shellArg(value: string): string {
 }
 
 export function identityMergeCommand(from: string, to?: string): string {
-    return `magic-context doctor merge-identities --from ${shellArg(from)} --to ${to ? shellArg(to) : '"DESTINATION_IDENTITY"'} --apply`;
+    return `${IDENTITY_MERGE_COMMAND} --from ${shellArg(from)} --to ${to ? shellArg(to) : '"DESTINATION_IDENTITY"'} --apply`;
 }

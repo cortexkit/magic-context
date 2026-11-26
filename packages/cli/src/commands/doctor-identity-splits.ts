@@ -2,7 +2,10 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { identityMergeCommand } from "@magic-context/core/features/magic-context/memory/identity-merge-command";
+import {
+    IDENTITY_MERGE_COMMAND,
+    identityMergeCommand,
+} from "@magic-context/core/features/magic-context/memory/identity-merge-command";
 import { directoryFallback } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
     projectDirectoryKey,
@@ -257,7 +260,7 @@ export function formatIdentitySplits(splits: IdentitySplit[]): string[] {
               ]
             : [
                   `Project identity split: ${split.directory} (read-only; no merge performed)`,
-                  "  Review with doctor merge-identities before choosing which identity to keep.",
+                  `  Review with ${IDENTITY_MERGE_COMMAND} before choosing which identity to keep.`,
                   ...identityLines(split),
               ];
     });
