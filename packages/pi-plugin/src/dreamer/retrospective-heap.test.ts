@@ -190,9 +190,11 @@ test("Pi retrospective input is byte-identical to whole-file reads under caps", 
 			),
 		readUserMessagesSince: (_id: string, since: number, cap: number) => {
 			const eligible = all.filter((m) => m.ts > since);
+			const firstOmitted = eligible[cap];
 			return {
 				messages: eligible.slice(0, cap),
 				truncated: eligible.length > cap,
+				...(firstOmitted ? { firstOmittedTs: firstOmitted.ts } : {}),
 			};
 		},
 		readUserMessagesBefore: (_id: string, before: number, count: number) =>

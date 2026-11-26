@@ -269,7 +269,7 @@ describe("OpenCodeRetrospectiveRawProvider", () => {
             insertMessage(opencodeDb, {
                 id: `m${i}`,
                 ts: 100 + i,
-                role: "user",
+                role: i === 2 ? "assistant" : "user",
                 parts: [{ type: "text", text: `msg ${i}` }],
             });
         }
@@ -280,6 +280,7 @@ describe("OpenCodeRetrospectiveRawProvider", () => {
         // cap 2 < 3 rows → truncated (the SQL saw a 3rd row past the limit).
         const capped = provider.readUserMessagesSince("s1", 0, 2);
         expect(capped.truncated).toBe(true);
+        expect(capped.firstOmittedTs).toBe(102);
         expect(capped.messages).toHaveLength(2);
         // oldest-first: kept the 2 OLDEST.
         expect(capped.messages.map((m) => m.text)).toEqual(["msg 0", "msg 1"]);
