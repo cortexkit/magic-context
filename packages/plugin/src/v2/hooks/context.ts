@@ -10,6 +10,7 @@ import {
     pluginConfigReader,
 } from "../../config/live-run-config";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
+import { clearRecompStaging } from "../../features/magic-context/compartment-storage";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
 import {
     userObservationCollectionEnabled,
@@ -592,6 +593,7 @@ export function checkHistoryBoundary(
             sessionId: sessionID,
             isInHostStore: (messageId) =>
                 storeHasSession ? reader.sequenceForId(sessionID, messageId) !== undefined : null,
+            onRetire: () => clearRecompStaging(db, sessionID),
         });
     } catch (error) {
         sessionLog(sessionID, "history boundary check failed; continuing without repair", error);
