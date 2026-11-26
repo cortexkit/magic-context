@@ -7,7 +7,7 @@
 #       --dists <prebuilt checkout> --context-fence <N> --store-fence <M> \
 #       [--first '<command>' ...] [--then '<command>' ...] [--dry-run]
 #
-# --store-fence is the version of mode3.db, the store the mode-3 ck-mc keeps;
+# --store-fence is the version of mode3.db, the store ck-mc keeps for runner-hosted sessions;
 # the old module's store.db is cloned for a rollback and otherwise left alone.
 # Each --first command runs before anything is touched; a failure stops the
 # script with nothing changed. Each --then command runs after ck-mc is placed.
@@ -71,7 +71,7 @@ holders() { lsof "$DATA/context.db" "$DATA/context.db-wal" "$DATA/store.db" "$DA
 # runs with the hosts and ck-mc stopped, so nothing changes it underneath.
 ro_uri() { if [ -e "$1-wal" ]; then echo "file:$1?mode=ro"; else echo "file:$1?immutable=1"; fi; }
 context_version() { sqlite3 "$(ro_uri "$DATA/context.db")" 'SELECT MAX(version) FROM schema_migrations'; }
-# The old module's store. The mode-3 ck-mc keeps its own state in mode3.db
+# The old module's store. ck-mc keeps runner-hosted session state in mode3.db
 # instead and leaves store.db as it was, so store.db is only cloned for a
 # rollback and logged.
 store_versions() { [ -f "$DATA/store.db" ] || { echo "absent"; return; }; sqlite3 "$(ro_uri "$DATA/store.db")" 'SELECT namespace||":"||MAX(version) FROM cortexkit_schema_version GROUP BY namespace' | tr '\n' ' '; }
@@ -202,7 +202,7 @@ say "placing ck-mc $SHA (its first open creates or migrates mode3.db to $STORE_F
 # replaces it regardless. Give placement's version and health waits headroom.
 ck module start magic-context || true
 # Placement runs the target commit's own script: it is the one that knows how
-# the staged build reports its store versions (the mode-3 build reports
+# the staged build reports its store versions (the build for runner-hosted sessions reports
 # mode3.db where older builds reported store.db).
 (cd "$DISTS" && PLACE_CK_MC_POLL_SECONDS=5 bash scripts/place-ck-mc.sh --source-ref "$SHA" "$STAGED")
 rc=$?
