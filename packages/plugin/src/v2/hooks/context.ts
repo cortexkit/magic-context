@@ -17,10 +17,12 @@ import {
 } from "../../features/magic-context/dreamer/task-config";
 import { formatUnsupportedDreamTasks } from "../../features/magic-context/dreamer/task-registry";
 import {
+    createFailClosedController,
     type FailClosedReason,
     formatFailClosedBlockingMessage,
     formatFailClosedBlockingSummary,
     isFailClosedBlockingError,
+    shouldBypassFailClosedBlock,
 } from "../../features/magic-context/fail-closed-block";
 import {
     resolveProjectIdentityForSession,
@@ -39,8 +41,12 @@ import {
     getOrCreateSessionMeta,
     isDatabasePersisted,
     markSessionCleanupPending,
-    type openDatabase,
 } from "../../features/magic-context/storage";
+import {
+    getSchemaFenceRejection,
+    openDatabase,
+    openDatabaseAsync,
+} from "../../features/magic-context/storage-db";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import { clearSession } from "../../features/magic-context/storage-meta-session";
 import { clearCachedM0 } from "../../features/magic-context/storage-meta-shared";
@@ -1094,6 +1100,16 @@ export async function registerContext(context: V2Context) {
             log(`[magic-context] v2 storage unavailable: ${message}`);
         },
     });
+    const failClosed = createFailClosedController();
+    const failClosedBlockingEnabled = !compactionOff && config.fail_closed_blocking !== false;
+    const tryReopenStorage = async (): Promise<boolean> => {
+        // The v2 gate returns its cached handle without checking its schema.
+        const reopened = await openDatabaseAsync({ busyTimeoutMs: 0 });
+        return reopened !== null && reopened === storage.current();
+    };
+    // A fence discovered by the wrapper has already skipped the transform.
+    // Only try to recover before a later pass starts, never on that same draft.
+    const wrapperStorageGuard = { failClosed, failClosedBlockingEnabled };
     // Let slow healthy storage finish before fixing the tool list for this host.
     // Discovery yields to HTTP while setup waits, with a bounded degraded fallback.
     let db: ReturnType<typeof openDatabase> | undefined = await probeV2StorageAtBoot(storage);
@@ -1156,6 +1172,15 @@ export async function registerContext(context: V2Context) {
         if (storageNoticeBySession.get(sessionID) === message) return;
         storageNoticeBySession.set(sessionID, message);
         storeStorageNotice(sessionID, message, "refusal");
+    };
+    const refuseUnavailableStorage = async (sessionID: string, reason: FailClosedReason) => {
+        noticeStorageRefusal(sessionID, reason);
+        await refuseBeforeProvider(
+            context.session,
+            sessionID,
+            "storage-unavailable",
+            formatFailClosedBlockingMessage(reason),
+        );
     };
     // Rust mode reaches the `ck-mc` module over the same subc client the OpenCode 1
     // lane builds. Building it is inert until a pass actually calls the module, so
@@ -1565,7 +1590,7 @@ export async function registerContext(context: V2Context) {
      */
     const latestLkgResponseIds = new BoundedSessionMap<string | undefined>(1000);
     const recordUsage = async (
-        draft: Pick<SessionContext, "sessionID" | "model">,
+        draft: Pick<SessionContext, "sessionID" | "model"> & Partial<Pick<SessionContext, "agent">>,
         passStarting = false,
     ): Promise<boolean> => {
         let unsafe = false;
@@ -1703,7 +1728,12 @@ export async function registerContext(context: V2Context) {
                 reader.close();
             }
         } catch (error) {
-            reportPreProviderRefusal(draft.sessionID, error);
+            if (
+                storage.current() ||
+                !storage.reason() ||
+                (failClosedBlockingEnabled && !shouldBypassFailClosedBlock({ agent: draft.agent }))
+            )
+                reportPreProviderRefusal(draft.sessionID, error);
             unsafe = true;
         }
         return unsafe;
@@ -2838,6 +2868,13 @@ export async function registerContext(context: V2Context) {
             if (replayHead) applyCheckpointHead(draft, replayHead);
         };
         try {
+            const storageExempt = () => shouldBypassFailClosedBlock({ agent: draft.agent });
+            if (failClosed.isArmed())
+                await failClosed.enforce({
+                    blockingEnabled: failClosedBlockingEnabled,
+                    exempt: storageExempt(),
+                    tryReopen: tryReopenStorage,
+                });
             // Check writer admission before best-effort setup writers can each spend
             // their own busy timeout. No transform callback runs in this transaction.
             if (!compactionOff && admissionDb)
@@ -2845,6 +2882,15 @@ export async function registerContext(context: V2Context) {
                     beforeRetry: async (error) => {
                         const input = await buildReplayInput();
                         if (!input) return;
+                        // This replay can return without entering the wrapper,
+                        // so it checks the fence before adopting saved bytes.
+                        if (failClosedBlockingEnabled && !storageExempt() && !openDatabase()) {
+                            const fence = getSchemaFenceRejection();
+                            if (fence) {
+                                failClosed.arm({ kind: "schema_fence", ...fence });
+                                await failClosed.enforce({ blockingEnabled: true, exempt: false });
+                            }
+                        }
                         const { mapped } = input;
                         if (
                             tryMessagesTransformLkgReplay({
@@ -2885,13 +2931,8 @@ export async function registerContext(context: V2Context) {
             if ((await recordUsage(draft, true)) && !compactionOff) {
                 const storageReason = storage.current() ? null : storage.reason();
                 if (storageReason) {
-                    noticeStorageRefusal(draft.sessionID, storageReason);
-                    await refuseBeforeProvider(
-                        context.session,
-                        draft.sessionID,
-                        "storage-unavailable",
-                        formatFailClosedBlockingMessage(storageReason),
-                    );
+                    if (failClosedBlockingEnabled && !storageExempt())
+                        await refuseUnavailableStorage(draft.sessionID, storageReason);
                     return "skipped";
                 }
                 await refuseBeforeProvider(context.session, draft.sessionID, "usage-unavailable");
@@ -3281,6 +3322,7 @@ export async function registerContext(context: V2Context) {
                 }
             }
             await createMessagesTransformHandler({
+                ...wrapperStorageGuard,
                 magicContext: { "experimental.chat.messages.transform": transform },
                 compactionOff,
                 // This hook changes the request after the wrapper (the
@@ -3412,6 +3454,10 @@ export async function registerContext(context: V2Context) {
         } catch (error) {
             if (error instanceof V2LkgAdmissionReplay) return "managed";
             if (error instanceof V2ContextRefusal) throw error;
+            if (!compactionOff && isFailClosedBlockingError(error)) {
+                await refuseUnavailableStorage(draft.sessionID, error.reason);
+                return "skipped";
+            }
             if (
                 !compactionOff &&
                 (isTransientSqliteError(error) || error instanceof StorageBusyRefusalError)
@@ -3424,6 +3470,7 @@ export async function registerContext(context: V2Context) {
                         if (!input) throw new StorageBusyRefusalError(error, "v2-context");
                         const { mapped } = input;
                         await createMessagesTransformHandler({
+                            ...wrapperStorageGuard,
                             recordServed: false,
                             replayFits,
                             onLkgReplay: restoreLkgSystem,
@@ -3444,6 +3491,10 @@ export async function registerContext(context: V2Context) {
                         adoptReplay(input.draft);
                         return "managed";
                     } catch (replayError) {
+                        if (isFailClosedBlockingError(replayError)) {
+                            await refuseUnavailableStorage(draft.sessionID, replayError.reason);
+                            return "skipped";
+                        }
                         if (!(replayError instanceof StorageBusyRefusalError)) throw replayError;
                     }
                 }

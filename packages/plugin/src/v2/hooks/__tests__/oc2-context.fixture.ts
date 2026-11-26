@@ -81,6 +81,7 @@ export async function oc2ContextFixture(
         /** Further plugin settings, merged over the fixture's own. */
         configOverrides = {} as Record<string, unknown>,
         listModels = undefined as V2Context["model"]["list"] | undefined,
+        mockStorageBoot = true,
         eventStream = (_options: { signal: AbortSignal }): AsyncIterable<unknown> =>
             (async function* () {})(),
     } = {},
@@ -139,7 +140,9 @@ export async function oc2ContextFixture(
     const load = spyOn(configLoader, "loadPluginConfigDetailed").mockReturnValue({
         config,
     } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
-    const probe = spyOn(storageGate, "probeV2StorageAtBoot").mockResolvedValue(db);
+    const probe = mockStorageBoot
+        ? spyOn(storageGate, "probeV2StorageAtBoot").mockResolvedValue(db)
+        : undefined;
     const logs = spyOn(logger, "sessionLog");
     const storage = new Map<string, unknown>();
     let hooks = new Map<string, (draft: SessionContext) => Promise<void>>();
@@ -662,7 +665,7 @@ export async function oc2ContextFixture(
         async cleanup() {
             await duties?.dispose();
             logs.mockRestore();
-            probe.mockRestore();
+            probe?.mockRestore();
             load.mockRestore();
             clock.mockRestore();
             _resetDreamTimerForTests();
