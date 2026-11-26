@@ -218,7 +218,17 @@ export interface HarnessOptions {
 export interface Harness {
 	db: ReturnType<typeof createTestDb>;
 	lines: string[];
-	pass: (tokens: number) => Promise<unknown[]>;
+	/**
+	 * Serve one pass at a provider reading of `tokens` (what message_end stored).
+	 * `live` is Pi's live figure (the reading plus Pi's estimate of the
+	 * messages after the reply that reported it; `tokens` by default).
+	 * `reportedBy` gives that usage to the assistant message with this id, so
+	 * the branch shows which reply reported the reading.
+	 */
+	pass: (
+		tokens: number,
+		options?: { live?: number; reportedBy?: string },
+	) => Promise<unknown[]>;
 	/** Change the host's system prompt from the next pass on. */
 	setSystemPrompt: (prompt: string) => void;
 	/** Serve a longer version of the session (more steps) from the next pass on. */
@@ -281,8 +291,24 @@ export function createHarness(options: HarnessOptions): Harness {
 		setSession(next) {
 			session = next;
 		},
-		async pass(tokens) {
+		async pass(tokens, passOptions = {}) {
 			const messages = session.messages();
+			const live = passOptions.live ?? tokens;
+			if (passOptions.reportedBy !== undefined) {
+				const reply = messages[session.ids.indexOf(passOptions.reportedBy)] as
+					| { role?: string; usage?: Record<string, unknown> }
+					| undefined;
+				if (reply?.role !== "assistant")
+					throw new Error(
+						`${passOptions.reportedBy} is not an assistant message`,
+					);
+				reply.usage = {
+					...reply.usage,
+					input: tokens,
+					totalTokens: tokens + 20,
+					output: 20,
+				};
+			}
 			recordPiLiveModel(sessionId, `${model.provider}/${model.id}`);
 			updateSessionMeta(db, sessionId, {
 				lastResponseTime: Date.now(),
@@ -295,8 +321,8 @@ export function createHarness(options: HarnessOptions): Harness {
 				model: { ...model, contextWindow: WINDOW },
 				getSystemPrompt: () => systemPrompt,
 				getContextUsage: () => ({
-					tokens,
-					percent: (tokens / WINDOW) * 100,
+					tokens: live,
+					percent: (live / WINDOW) * 100,
 					contextWindow: WINDOW,
 				}),
 			} as never);

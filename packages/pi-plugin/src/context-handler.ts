@@ -361,6 +361,13 @@ import {
 	trackPiDropLeaf,
 } from "./drop-branches-pi";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
+import {
+	clearPiLatchedReading,
+	type PiProviderReading,
+	piProviderReadingIdentity,
+	piReadingRepeatsLatch,
+	recordPiLatchedReading,
+} from "./emergency-latch-reading-pi";
 import { hasPiFallbackMessageTags } from "./fallback-tag-probes-pi";
 import {
 	applyPiHeuristicCleanup,
@@ -6135,8 +6142,33 @@ export function registerPiContextHandler(
 			// side turn leaves it alone.
 			if (!ctxReduceCallable && !budget.sideTurn)
 				clearPiChannel1State(sessionId);
+			// The provider's own reading this pass rests on (what the last reply
+			// reported, before Pi's estimate of the later messages is added) and
+			// the reply that reported it; see emergency-latch-reading-pi.ts.
+			const emergencyProviderReading: PiProviderReading = {
+				tokens: Math.max(0, sessionMetaForUsage.lastInputTokens),
+				identity: piProviderReadingIdentity(branchEntries),
+			};
 			const pipelineArgs: RunPipelineArgs = {
+				emergencyProviderReading,
 				emergencyServedCount: (calibration, recovery) => {
+					// After an emergency batch, our count waits for a provider reading
+					// that differs from the one that batch was planned on; until then
+					// the planner infers the fixed part from the usage reading alone, so
+					// a reading that does not respond to what we send cannot drop each
+					// new result on every pass.
+					const unchanged = piReadingRepeatsLatch(
+						sessionId,
+						getEmergencyInputSample(options.db, sessionId),
+						emergencyProviderReading,
+					);
+					if (unchanged) {
+						sessionLog(
+							sessionId,
+							`emergency served count set aside: the provider reading is still the one the last emergency batch was planned on (${unchanged}); the fixed part is inferred from the reading alone`,
+						);
+						return undefined;
+					}
 					const counted = countPiLastServedRequest({
 						sessionId,
 						envelope: readPiLkgFitEnvelope(
@@ -9279,10 +9311,16 @@ interface RunPipelineArgs {
 	/** ceiling = contextLimit × executeThreshold% for the tiered emergency drop. */
 	emergencyCeilingTokens?: number;
 	/**
+	 * The provider's reading this pass rests on, recorded beside the episode
+	 * latch when the pass sets it (see emergency-latch-reading-pi.ts).
+	 */
+	emergencyProviderReading?: PiProviderReading;
+	/**
 	 * Our own count of the last request this session served, for the emergency
 	 * planner (see countPiLastServedRequest), in the units of the calibration
 	 * the planner prices its tags with on this pass. Undefined when there is no
-	 * count; the reason is logged.
+	 * count (or it is set aside while the provider reading is unchanged since
+	 * the episode's batch); the reason is logged.
 	 */
 	emergencyServedCount?: (
 		calibration: {
@@ -12459,6 +12497,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.sessionId,
 			args.contextUsage.inputTokens,
 		);
+		recordPiLatchedReading(
+			args.sessionId,
+			args.contextUsage.inputTokens,
+			args.emergencyProviderReading,
+		);
 	}
 	if (toolReclaimApplicationOpportunity) {
 		advanceToolReclaimWatermarkByDistance(
@@ -13752,6 +13795,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });
 	clearPiLiveUsageClassification(sessionId);
 	clearPiLkgSessionState(sessionId);
+	clearPiLatchedReading(sessionId);
 	clearPiServedArraySession(sessionId);
 	activeContextHandlerSessions.delete(sessionId);
 	clearAutoSearchForPiSession(sessionId);

@@ -229,6 +229,92 @@ describe("Pi emergency drop: the fixed part is capped by our count of the last r
 		expect(planLine(h.lines)?.line).toContain("floor from our count");
 	});
 
+	it("pi: a provider reading that keeps its value stays latched while Pi's live figure grows, even when a new reply reports it each time: no count, no new batch", async () => {
+		const sessionId = "pi-860-latch-same-value";
+		const session = buildSession(20);
+		const h = createHarness({ sessionId, session });
+		open.push(h);
+		await h.pass(4_000);
+		const reading = 2 * localRequestTokens(session);
+		h.lines.length = 0;
+		await h.pass(reading, { reportedBy: "a-19" });
+		expect(planLine(h.lines)?.line).toContain("floor from our count");
+		const firstBatch = droppedCalls(h.statuses());
+		expect(firstBatch.length).toBeGreaterThan(0);
+		// Each step adds a result; a new reply reports the same value, and Pi's
+		// live figure adds its estimate of the messages after that reply.
+		for (const [steps, trailing] of [
+			[21, 4_000],
+			[22, 8_000],
+			[23, 12_000],
+		] as const) {
+			h.setSession(buildSession(steps));
+			h.lines.length = 0;
+			await h.pass(reading, {
+				live: reading + trailing,
+				reportedBy: `a-${steps - 1}`,
+			});
+			const plan = planLine(h.lines)?.line ?? "";
+			console.log(`LATCH_SAME_VALUE steps=${steps} plan=${plan}`);
+			// The fixed part inferred from the reading alone is above the ceiling.
+			expect(plan).toContain("already exceeds ceiling");
+			expect(plan).not.toContain("floor from our count");
+			expect(h.lines.join("\n")).toContain(
+				`emergency served count set aside: the provider reading is still the one the last emergency batch was planned on (the same value (${reading}))`,
+			);
+			expect(droppedCalls(h.statuses())).toEqual(firstBatch);
+		}
+	});
+
+	it("pi: a new reply with another value releases the latch: the count is used again", async () => {
+		const sessionId = "pi-860-latch-new-value";
+		const session = buildSession(20);
+		const h = createHarness({ sessionId, session });
+		open.push(h);
+		await h.pass(4_000);
+		const reading = 2 * localRequestTokens(session);
+		await h.pass(reading, { reportedBy: "a-19" });
+		expect(droppedCalls(h.statuses()).length).toBeGreaterThan(0);
+		h.setSession(buildSession(21));
+		h.lines.length = 0;
+		await h.pass(reading + 3_000, { reportedBy: "a-20" });
+		// The count reaches the planner: the fixed part is no longer the
+		// reading's (above the ceiling); the one new result is below the
+		// minimum reclaim.
+		expect(h.lines.join("\n")).toContain("emergency served count: ≈");
+		expect(planLine(h.lines)?.line).not.toContain("already exceeds ceiling");
+		expect(h.lines.join("\n")).not.toContain(
+			"emergency served count set aside",
+		);
+	});
+
+	it("pi: the same reply read again stays latched even when the stored value and Pi's live figure moved", async () => {
+		const sessionId = "pi-860-latch-same-reply";
+		const session = buildSession(20);
+		const h = createHarness({ sessionId, session });
+		open.push(h);
+		await h.pass(4_000);
+		const reading = 2 * localRequestTokens(session);
+		await h.pass(reading, { reportedBy: "a-19" });
+		const firstBatch = droppedCalls(h.statuses());
+		expect(firstBatch.length).toBeGreaterThan(0);
+		// A new result arrives without a reply that reports usage: a-19 is still
+		// the newest reply with a reading.
+		h.setSession(buildSession(21));
+		h.lines.length = 0;
+		await h.pass(reading + 1_500, {
+			live: reading + 6_000,
+			reportedBy: "a-19",
+		});
+		const plan = planLine(h.lines)?.line ?? "";
+		expect(plan).toContain("already exceeds ceiling");
+		expect(plan).not.toContain("floor from our count");
+		expect(h.lines.join("\n")).toContain(
+			"emergency served count set aside: the provider reading is still the one the last emergency batch was planned on (the same reply (a-19))",
+		);
+		expect(droppedCalls(h.statuses())).toEqual(firstBatch);
+	});
+
 	it("our count of the saved request minus our count of its active tags matches an independent count of its untagged content", async () => {
 		const sessionId = "pi-860-count-agrees";
 		const session = buildSession(20);
