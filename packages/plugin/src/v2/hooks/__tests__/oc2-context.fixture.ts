@@ -444,6 +444,17 @@ export async function oc2ContextFixture(
             storeCheckpoint(draft.result.summary, windowRows);
         },
         /**
+         * The host asks for a checkpoint summary while no checkpoint row is
+         * running, as OpenCode 2.3.1+ does when it prepares a compaction in the
+         * background after a high-usage reply. Nothing is stored and nothing
+         * is cut; the hook's answer is returned.
+         */
+        async prepareCompaction() {
+            const draft = structuredClone(lastDraft ?? inputDraft());
+            await hooks.get("compaction")!(draft);
+            return draft.result;
+        },
+        /**
          * The host folds with a summary its own model wrote, as it does when the
          * compaction hook leaves the result unset (Magic Context's compaction
          * off). The hook is asked first, as the host asks it, and must decline.

@@ -960,7 +960,16 @@ test("OC2 fold system identity: real system change after compaction causes exact
     }
 });
 
-test("render review: first compaction before context initializes durable storage", async () => {
+// A compaction request that arrives before any context pass has no running
+// checkpoint row to answer, so it stores no history head: the first context
+// pass renders one, once. Any other executed fold on that pass would be a
+// corrective rebuild caused by a mismatched system identity.
+const firstRenders = (logs: string[]) =>
+    logs.filter((line) => /HARD.*reason=first_render executed=true/.test(line));
+const correctiveHards = (logs: string[]) =>
+    logs.filter((line) => /HARD.*executed=true/.test(line) && !/reason=first_render/.test(line));
+
+test("render review: first compaction before any context pass renders once on the next pass", async () => {
     const f = await fixture(4910, foldFeaturesOff);
     try {
         expect(f.meta().systemPromptHash ?? "").toBe("");
@@ -972,7 +981,8 @@ test("render review: first compaction before context initializes durable storage
             `FIRST_FOLD ${JSON.stringify({ systemHash: f.meta().systemPromptHash, cachedHash: f.meta().cachedM0SystemHash, logs: first.logs })}`,
         );
         expect(replay.bytes).toBe(first.bytes);
-        expect(first.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(correctiveHards(first.logs)).toEqual([]);
+        expect(firstRenders(first.logs)).toHaveLength(1);
         expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
     } finally {
         await f.cleanup();
@@ -990,19 +1000,22 @@ test("cold fold adopts the initialized MD5 system identity without a corrective 
         const replay = await f.pass();
         expect(replay.bytes).toBe(first.bytes);
         expect(
-            [...first.logs, ...replay.logs].filter((line) =>
-                /HARD.*executed=true|HARD reason=boot_recovery/.test(line),
+            [...first.logs, ...replay.logs].filter(
+                (line) =>
+                    correctiveHards([line]).length > 0 || /HARD reason=boot_recovery/.test(line),
             ),
         ).toEqual([]);
+        expect(firstRenders(first.logs)).toHaveLength(1);
+        expect(firstRenders(replay.logs)).toEqual([]);
     } finally {
         await f.cleanup();
     }
 });
-test("render review: absent system identity after storage probe needs no corrective HARD", async () => {
+test("render review: absent system identity after a repeated cold compaction needs no corrective HARD", async () => {
     const f = await fixture(4913, foldFeaturesOff);
     try {
-        // The first compaction starts opening durable storage but rejects its own request.
-        // A retry can then render before any system hook has run.
+        // A first compaction request (its outcome is not asserted) and a retry
+        // both run before any system hook has run.
         await f.fold(true).catch(() => undefined);
         expect(f.meta().systemPromptHash ?? "").toBe("");
         await f.fold(true);
@@ -1010,7 +1023,8 @@ test("render review: absent system identity after storage probe needs no correct
         const first = await f.pass();
         const replay = await f.pass();
         expect(f.meta().cachedM0SystemHash).toBe(f.meta().systemPromptHash);
-        expect(first.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(correctiveHards(first.logs)).toEqual([]);
+        expect(firstRenders(first.logs)).toHaveLength(1);
         expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
         expect(replay.bytes).toBe(first.bytes);
     } finally {

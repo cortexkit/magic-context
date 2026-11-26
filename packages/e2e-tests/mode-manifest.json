@@ -107,6 +107,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/rowless-compaction-hook.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real host compaction requests with no running checkpoint row, held by barrier plugins before and after Magic Context: 2.3.1+ background preparation after a high-usage reply, 2.0.22/2.1.0 provider compaction mode, and the ordinary automatic checkpoint on every version (on 2.3.1+ the host may record the row while the hooks run). The stored session row is byte-identical across the call, both history head messages stay as served across the call and the completed checkpoint, a queued drop waits for a real rebuild or lands on the force ride, a restart replays, and a restart that changes the system prompt folds the summary from m[1] into m[0] exactly once with every later message sent once. PID lsof proves throwaway-store containment.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/native-fold-provenance.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

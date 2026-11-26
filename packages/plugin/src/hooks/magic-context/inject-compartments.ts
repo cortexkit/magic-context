@@ -2609,7 +2609,30 @@ function resolveMuralForM0(
     return resolveMuralWire(options.db, projectPath, modelKey, true, budgetTokens, mode);
 }
 
-export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
+/** A baseline rendered by `materializeM0` with `{ persist: false }`: nothing was stored. */
+export interface RenderedM0Head {
+    m0Bytes: Buffer;
+    m0Text: string;
+    snapshotMarkers: M0SnapshotMarkers;
+    renderedMemoryIds: number[];
+}
+
+export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result;
+/**
+ * Render the baseline exactly as a fold would, but keep nothing: no cached pair
+ * or markers, no memory manifest, no baseline boundary, no mural manifest, and
+ * no change to `options.state`. Only the reads a fold makes happen. For a caller
+ * that must answer with the head a fold would produce while no fold is due.
+ */
+export function materializeM0(
+    options: M0M1RenderOptions,
+    render: { persist: false },
+): RenderedM0Head;
+export function materializeM0(
+    options: M0M1RenderOptions,
+    render?: { persist: false },
+): MaterializeM0Result | RenderedM0Head {
+    const persist = render?.persist !== false;
     const projectPath = options.projectPath;
     const projectDirectory = options.projectDirectory ?? projectPath ?? "";
     let snapshotMarkers: M0SnapshotMarkers;
@@ -2716,7 +2739,13 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         options.memoryEnabled === false
             ? undefined
             : (options.mural ??
-              resolveMuralForM0(options, projectPath, snapshotMarkers.modelKey, memoryBudget));
+              resolveMuralForM0(
+                  options,
+                  projectPath,
+                  snapshotMarkers.modelKey,
+                  memoryBudget,
+                  persist ? "persist" : "read-only",
+              ));
     let decayPressureMultiplier = 1;
     let m0Text = renderM0({
         projectDocs: docs.renderedBlock,
@@ -2763,6 +2792,8 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     snapshotMarkers.muralHash = frozenMuralHash;
     snapshotMarkers.materializedAt = foldMaterializedAt;
     const renderedMemoryIds = trimmed.renderOrder.map((m) => m.id);
+    // Everything above only reads; everything below writes.
+    if (!persist) return { m0Bytes, m0Text, snapshotMarkers, renderedMemoryIds };
     options.beforePhase3ForTest?.();
 
     const steps = new WriteTransactionSteps();

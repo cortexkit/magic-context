@@ -48,7 +48,7 @@ import {
     openDatabaseAsync,
 } from "../../features/magic-context/storage-db";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
-import { clearSession } from "../../features/magic-context/storage-meta-session";
+import { clearSession, readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { clearCachedM0 } from "../../features/magic-context/storage-meta-shared";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
@@ -57,6 +57,7 @@ import {
     recordToolDefinitionSet,
 } from "../../features/magic-context/tool-definition-tokens";
 import { stageOpenCodeV2TransformDecision } from "../../features/magic-context/transform-decision-log";
+import type { SessionMeta } from "../../features/magic-context/types";
 import {
     type HiddenCompletionExecutor,
     HiddenCompletionRefusal,
@@ -194,7 +195,12 @@ import {
     nativeRowSequence,
 } from "../fold/native-replay";
 import { controlKey, effortPart, rememberedControlKey } from "../fold/native-replay-v3";
-import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
+import {
+    boundToCheckpoint,
+    FoldOwner,
+    foldDigest,
+    stripCheckpointRecentContext,
+} from "../fold/owner";
 import { hasUnsummarizedBlocks } from "../fold/partial-boundary";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
@@ -2015,18 +2021,17 @@ export async function registerContext(context: V2Context) {
             }
         }
     })();
-    const materialize = (draft: SessionContext) => {
-        db = storage.require();
-        const state = getOrCreateSessionMeta(db, draft.sessionID);
+    /** The render options a fold of this compaction request's session uses. */
+    const m0RenderOptions = (draft: SessionContext, store: Database, state: SessionMeta) => {
         const modelKey = `${draft.model.providerID}/${draft.model.id}`;
         const contextLimit =
             resolveContextLimit(draft.model.providerID, draft.model.id, {
-                db,
+                db: store,
                 sessionID: draft.sessionID,
             }) ||
             draft.model.limit?.context ||
             (state.lastObservedModelKey === modelKey ? state.lastUsageContextLimit : undefined);
-        return materializeM0({
+        return {
             ...createM0RenderOptions(
                 {
                     ...createV2TransformFeatureDeps(
@@ -2042,7 +2047,7 @@ export async function registerContext(context: V2Context) {
                 contextLimit,
                 resolveProjectIdentityForSession(directory, config.allow_home_project),
             ),
-            db,
+            db: store,
             sessionId: draft.sessionID,
             state,
             projectDirectory: directory,
@@ -2060,14 +2065,39 @@ export async function registerContext(context: V2Context) {
                     draft.sessionID,
                 ),
                 toolDefinitionsHash: toolDefinitionsHashes.get(draft.sessionID),
-                modelKey: `${draft.model.providerID}/${draft.model.id}`,
+                modelKey,
                 // materializeM0 does not read cacheExpired, and no fold decision
                 // does: this fold always renders fresh bytes and keys its markers
                 // from the system and model hashes.
                 cacheExpired: false,
                 lastResponseTime: state.lastResponseTime,
             },
-        }).m0Text;
+        };
+    };
+    const materialize = (draft: SessionContext) => {
+        db = storage.require();
+        const state = getOrCreateSessionMeta(db, draft.sessionID);
+        return materializeM0(m0RenderOptions(draft, db, state)).m0Text;
+    };
+    /**
+     * The history head a compaction request with no running checkpoint row
+     * stands for, rendered without keeping anything. OpenCode asks for a summary
+     * without a row when it prepares a compaction in the background after a
+     * high-usage reply (2.3.1 and later, on by default), for its automatic
+     * checkpoints on several versions, and on older hosts for a model in
+     * provider compaction mode. Nothing is cut at that moment and the host may
+     * never install the prepared summary, but the next context pass serves
+     * whatever baseline is stored. Storing this render would change the
+     * provider's cached prefix on a pass that believes it replays it unchanged,
+     * without landing queued reductions or the thinking handling a real fold
+     * gets. So this renders without a single write: the session's metadata is
+     * read, not created (creating it could also use up the attempts to learn
+     * whether the session is a subagent), and no stored column changes.
+     */
+    const renderUnkeptBaseline = (draft: SessionContext) => {
+        const store = storage.require();
+        const state = readSessionMeta(store, draft.sessionID);
+        return materializeM0(m0RenderOptions(draft, store, state), { persist: false }).m0Text;
     };
     await context.session.hook("compaction", async (draft) => {
         // A hidden child is compacted by the host like any session once its own
@@ -2127,7 +2157,12 @@ export async function registerContext(context: V2Context) {
                   : "module";
             if (nativeFoldReplay) {
                 try {
-                    const state = getOrCreateSessionMeta(storage.require(), draft.sessionID);
+                    // A request with no running checkpoint row only reads the session's
+                    // metadata: creating it could use up the attempts to learn whether
+                    // the session is a subagent before its first context pass.
+                    const state = running
+                        ? getOrCreateSessionMeta(storage.require(), draft.sessionID)
+                        : readSessionMeta(storage.require(), draft.sessionID);
                     const staged =
                         manual && moduleBaseline == null
                             ? stageManualBaseline(storage.require(), draft.sessionID, () =>
@@ -2239,14 +2274,24 @@ export async function registerContext(context: V2Context) {
                 // Kept lazy for the TypeScript lane: materializing writes cache state and
                 // must only happen when the fold identity is actually new.
                 materialize: () => {
-                    const summary = moduleBaseline ?? materialize(draft);
+                    const summary =
+                        moduleBaseline ??
+                        (running ? materialize(draft) : renderUnkeptBaseline(draft));
                     return hasFoldSummary(summary) ? summary : RAW_HISTORY_ACCOUNT;
                 },
                 // The host stores the note; the owner keeps the head it stands for,
                 // which the checkpoint carrier serves and measures in its place.
                 checkpointText: CHECKPOINT_NOTE,
                 checkpointID: running?.id,
+                // A request with no running row cuts nothing, so a record already
+                // standing for a stored checkpoint stays: replacing it would stop
+                // the next pass from serving that checkpoint as it was served.
+                keepBound: running === undefined,
             });
+            // A kept record may hold text other than the note; the host still
+            // gets the note for a request that cuts nothing.
+            const answer =
+                running === undefined && boundToCheckpoint(fold) ? CHECKPOINT_NOTE : fold.submitted;
             // One line per request with the baseline it was answered from. The
             // host's rate and ours are separate facts, and only reading both
             // explains a session's checkpoint cadence.
@@ -2261,7 +2306,7 @@ export async function registerContext(context: V2Context) {
             // metadata. That version stores the transcript; the context hook
             // removes it only when the shared transform permits a cache rewrite.
             // A checkpoint request still over the model limit is refused before egress.
-            draft.result = { summary: fold.submitted, metadata: { keepID: undefined } };
+            draft.result = { summary: answer, metadata: { keepID: undefined } };
         } catch (cause) {
             await refuseBeforeProvider(context.session, draft.sessionID, "compaction-fold", cause);
             throw new V2ContextRefusal("Magic Context could not preserve the host checkpoint.", {
