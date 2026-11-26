@@ -1052,6 +1052,10 @@ fn tool_path(tool: &ToolPart) -> Option<String> {
     })
 }
 
+const READ_LINE_LIMIT: u64 = 2_000;
+// Stay below the hosts' read caps: about 50 KB, or 25,000 tokens in Claude Code.
+const READ_WHOLE_RESULT_MAX_BYTES: u64 = 30_000;
+
 fn read_lines(tool: &ToolPart) -> Option<(u64, u64)> {
     let number = |key| {
         let Some(value) = tool.input.get(key) else {
@@ -1062,14 +1066,21 @@ fn read_lines(tool: &ToolPart) -> Option<(u64, u64)> {
     let start = number("startLine")?.or(number("offset")?).unwrap_or(1);
     let end = match (number("endLine")?, number("limit")?) {
         (Some(end), _) => end,
-        (None, limit) => start.checked_add(limit.unwrap_or(2_000) - 1)?,
+        (None, limit) => start.checked_add(limit.unwrap_or(READ_LINE_LIMIT) - 1)?,
     };
     (start <= end).then_some((start, end))
 }
 
-/// Older plain-text reads go whole if a visible later read covers their lines.
+#[derive(Default)]
+struct ReadCoverage {
+    requests: BTreeSet<(u64, u64)>,
+    whole: BTreeMap<u64, u64>,
+}
+
+/// A visible repeat or an untruncated read of a covering range can replace an
+/// older plain-text read. The compact transcript supplies sizes, not text.
 pub fn superseded_reads(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
-    let mut paths: BTreeMap<String, BTreeMap<u64, u64>> = BTreeMap::new();
+    let mut paths: BTreeMap<String, ReadCoverage> = BTreeMap::new();
     let mut parts = Vec::new();
     for (entry, part, tool) in tool_parts(context).rev() {
         if tool.status != ToolStatus::Completed
@@ -1085,26 +1096,37 @@ pub fn superseded_reads(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey,
         let (Some(path), Some((start, end))) = (tool_path(tool), read_lines(tool)) else {
             continue;
         };
-        let ranges = paths.entry(path).or_default();
+        let coverage = paths.entry(path).or_default();
         // Keep only maximal ranges. Their ends strictly increase with their
         // starts, so the last start <= this start is the only one to check.
-        if ranges
+        let covered_by_whole = coverage
+            .whole
             .range(..=start)
             .next_back()
-            .is_some_and(|(_, &last_end)| last_end >= end)
+            .is_some_and(|(_, &last_end)| last_end >= end);
+        if (covered_by_whole || coverage.requests.contains(&(start, end))) && !in_tail(part, cutoff)
         {
-            if !in_tail(part, cutoff) {
-                parts.push(((entry.mid.clone(), part.id.clone()), Shape::Whole));
-            }
-        } else {
-            while let Some((&later_start, _)) = ranges
+            // A read this lane removes cannot stand in for another. In
+            // particular, its exact retry may not have returned it whole.
+            parts.push(((entry.mid.clone(), part.id.clone()), Shape::Whole));
+            continue;
+        }
+        coverage.requests.insert((start, end));
+        if !covered_by_whole
+            && end - start < READ_LINE_LIMIT
+            && tool
+                .output_bytes
+                .is_some_and(|bytes| bytes > 0 && bytes < READ_WHOLE_RESULT_MAX_BYTES)
+        {
+            while let Some((&later_start, _)) = coverage
+                .whole
                 .range(start..)
                 .next()
                 .filter(|&(_, &later_end)| later_end <= end)
             {
-                ranges.remove(&later_start);
+                coverage.whole.remove(&later_start);
             }
-            ranges.insert(start, end);
+            coverage.whole.insert(start, end);
         }
     }
     parts

@@ -95,6 +95,92 @@ fn assert_read_pair(old_input: Value, later_input: Value, remove: bool) {
     );
 }
 
+fn compact_read(ordinal: u64, mid: &str, input: Value, output_bytes: Option<u64>) -> Entry {
+    let mut entry = call(ordinal, mid, "read", ToolStatus::Completed, input);
+    let PartBody::Tool(tool) = &mut entry.parts[0].body else {
+        unreachable!()
+    };
+    tool.output = None;
+    tool.output_bytes = output_bytes;
+    entry
+}
+
+fn assert_wider_read_with_size(size: Option<u64>, end: u64, remove: bool) {
+    assert_pair(
+        old(
+            "read",
+            ToolStatus::Completed,
+            json!({"path":"f", "startLine":200, "endLine":250}),
+        ),
+        compact_read(
+            4,
+            "later",
+            json!({"path":"f", "startLine":1, "endLine":end}),
+            size,
+        ),
+        remove,
+    );
+}
+
+#[test]
+fn cleanup_ride_wider_read_at_or_above_the_byte_cap_cannot_replace_a_narrower_read() {
+    for bytes in [30_000, 30_001] {
+        assert_wider_read_with_size(Some(bytes), 500, false);
+    }
+}
+
+#[test]
+fn cleanup_ride_wider_read_below_the_byte_cap_can_replace_a_narrower_read() {
+    assert_wider_read_with_size(Some(29_999), 2_000, true);
+}
+
+#[test]
+fn cleanup_ride_wider_request_over_2000_lines_cannot_replace_a_narrower_read() {
+    assert_wider_read_with_size(Some(10), 2_001, false);
+}
+
+#[test]
+fn cleanup_ride_exact_repeats_do_not_need_a_size_or_line_limit() {
+    let input = json!({"path":"f", "startLine":1, "endLine":5_000});
+    for (older, newer) in [
+        (Some(0), Some(40_000)),
+        (Some(40_000), None),
+        (None, Some(0)),
+    ] {
+        assert_pair(
+            compact_read(3, "old", input.clone(), older),
+            compact_read(4, "later", input.clone(), newer),
+            true,
+        );
+    }
+}
+
+#[test]
+fn cleanup_ride_wider_read_with_unknown_or_zero_bytes_cannot_replace_a_narrower_read() {
+    for size in [None, Some(0)] {
+        assert_wider_read_with_size(size, 500, false);
+    }
+}
+
+#[test]
+fn cleanup_ride_a_removable_whole_read_cannot_be_a_wider_witness() {
+    let wider = json!({"path":"f", "startLine":1, "endLine":500});
+    let (mut session, _, settings) = transcript(
+        old(
+            "read",
+            ToolStatus::Completed,
+            json!({"path":"f", "startLine":200, "endLine":250}),
+        ),
+        compact_read(4, "later", wider.clone(), Some(10_000)),
+    );
+    session
+        .index
+        .extend([compact_read(7, "repeat", wider, Some(40_000))]);
+    let view = with_independent_work(&mut session, &settings);
+    assert!(view.edits.iter().any(|edit| edit.op == whole_drop("later")));
+    assert_old_result(&view, false);
+}
+
 #[test]
 fn cleanup_ride_removes_an_identical_earlier_read() {
     assert_read_pair(
