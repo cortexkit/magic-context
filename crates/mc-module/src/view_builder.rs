@@ -336,6 +336,43 @@ pub(crate) fn next_view_cached(
     retire: impl Fn(&EditOp) -> bool,
     validation: &mut ValidationCache,
 ) -> Result<Option<View>, ViewRefusal> {
+    next_view_with_riders(
+        previous,
+        entries,
+        new_ops,
+        policy,
+        retire,
+        validation,
+        RideDrops::default(),
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RideDrops<'a> {
+    pub parts: &'a [crate::lanes::PartKey],
+    pub prefix_changes: bool,
+}
+
+fn part_edit_target(op: &EditOp) -> Option<(&str, &str)> {
+    match op {
+        EditOp::Drop {
+            mid,
+            part: Some(part),
+        }
+        | EditOp::Replace { mid, part, .. } => Some((mid.as_str(), part.as_str())),
+        _ => None,
+    }
+}
+
+pub(crate) fn next_view_with_riders(
+    previous: Option<&View>,
+    entries: &[Entry],
+    new_ops: Vec<EditOp>,
+    policy: ViewPolicy<'_>,
+    retire: impl Fn(&EditOp) -> bool,
+    validation: &mut ValidationCache,
+    riders: RideDrops<'_>,
+) -> Result<Option<View>, ViewRefusal> {
     let _timing = crate::notice_cost_timing::span("view.next");
     let ViewPolicy {
         rules,
@@ -387,17 +424,7 @@ pub(crate) fn next_view_cached(
     }
     // A part that new edits change loses its earlier edits: a drop of a
     // part an earlier view only trimmed replaces the trimming.
-    let newly_edited: HashSet<(&str, &str)> = new_ops
-        .iter()
-        .filter_map(|op| match op {
-            EditOp::Drop {
-                mid,
-                part: Some(part),
-            }
-            | EditOp::Replace { mid, part, .. } => Some((mid.as_str(), part.as_str())),
-            _ => None,
-        })
-        .collect();
+    let newly_edited: HashSet<(&str, &str)> = new_ops.iter().filter_map(part_edit_target).collect();
     let replaced = |edit: &Edit| match &edit.op {
         EditOp::Insert { message, .. } => {
             new_inserts.contains(message.id.as_str()) && !new_ops.contains(&edit.op)
@@ -440,8 +467,41 @@ pub(crate) fn next_view_cached(
         previous.built_through.is_some() != built_through.is_some()
             || previous.new_signed != new_signed
     });
-    if !force && !added && !dropped_some && !replaced_in_place && !policy_changed {
+    let ordinary_view = force || added || dropped_some || replaced_in_place || policy_changed;
+    // Decide whether the ordinary view changes first, after pruning stale
+    // edits and comparing the head. Optional drops cannot pay for a rewrite.
+    if !ordinary_view && (!riders.prefix_changes || riders.parts.is_empty()) {
         return Ok(None);
+    }
+    if !riders.parts.is_empty() {
+        let drops: Vec<_> = riders
+            .parts
+            .iter()
+            .filter(|(mid, _)| {
+                !new_cut.is_some_and(|cut| ordinal_of(mid).is_some_and(|ordinal| ordinal <= cut))
+            })
+            .collect();
+        if drops.is_empty() && !ordinary_view {
+            return Ok(None);
+        }
+        // Replacing a carried trimming edit with a whole drop follows the
+        // same rule as ordinary edits. Earlier lanes already had first pick.
+        let targets: HashSet<_> = drops
+            .iter()
+            .map(|(mid, part)| (mid.as_str(), part.as_str()))
+            .collect();
+        edits.retain(|edit| {
+            !part_edit_target(&edit.op).is_some_and(|target| targets.contains(&target))
+        });
+        edits.extend(drops.into_iter().map(|(mid, part)| {
+            Edit::new(
+                version,
+                EditOp::Drop {
+                    mid: mid.clone(),
+                    part: Some(part.clone()),
+                },
+            )
+        }));
     }
     let floor = signed_floor
         .as_deref()

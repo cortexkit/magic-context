@@ -983,7 +983,7 @@ fn in_tail(part: &Part, cutoff: Option<u64>) -> bool {
 /// Tool parts that cleanup lanes may consider, oldest first.
 fn tool_parts<'a>(
     context: &'a Context,
-) -> impl Iterator<Item = (&'a Entry, &'a Part, &'a ToolPart)> + 'a {
+) -> impl DoubleEndedIterator<Item = (&'a Entry, &'a Part, &'a ToolPart)> + 'a {
     context
         .index
         .entries()
@@ -1038,6 +1038,134 @@ pub fn duplicate_lookups(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey
         .filter(|(key, tag, _, part)| newest[key] != *tag && !in_tail(part, cutoff))
         .map(|(_, _, entry, part)| ((entry.mid.clone(), part.id.clone()), Shape::Whole))
         .collect()
+}
+
+fn tool_path(tool: &ToolPart) -> Option<String> {
+    ["filePath", "file_path", "path"].iter().find_map(|key| {
+        tool.input
+            .get(key)
+            .and_then(|value| match value {
+                Value::String(path) => Some(path),
+                _ => None,
+            })
+            .filter(|path| !path.is_empty())
+    })
+}
+
+const READ_LINE_LIMIT: u64 = 2_000;
+// Stay below the hosts' read caps: about 50 KB, or 25,000 tokens in Claude Code.
+const READ_WHOLE_RESULT_MAX_BYTES: u64 = 30_000;
+
+fn read_lines(tool: &ToolPart) -> Option<(u64, u64)> {
+    let number = |key| {
+        let Some(value) = tool.input.get(key) else {
+            return Some(None);
+        };
+        value.as_u64().filter(|&n| n > 0).map(Some)
+    };
+    let start = number("startLine")?.or(number("offset")?).unwrap_or(1);
+    let end = match (number("endLine")?, number("limit")?) {
+        (Some(end), _) => end,
+        (None, limit) => start.checked_add(limit.unwrap_or(READ_LINE_LIMIT) - 1)?,
+    };
+    (start <= end).then_some((start, end))
+}
+
+#[derive(Default)]
+struct ReadCoverage {
+    requests: BTreeSet<(u64, u64)>,
+    whole: BTreeMap<u64, u64>,
+}
+
+/// A visible repeat or an untruncated read of a covering range can replace an
+/// older plain-text read. The compact transcript supplies sizes, not text.
+pub fn superseded_reads(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
+    let mut paths: BTreeMap<String, ReadCoverage> = BTreeMap::new();
+    let mut parts = Vec::new();
+    for (entry, part, tool) in tool_parts(context).rev() {
+        if tool.status != ToolStatus::Completed
+            || normalize_tool_name(&tool.name) != "read"
+            || context.edited.covers(&entry.mid, &part.id)
+            || tool
+                .attachments()
+                .iter()
+                .any(|attachment| matches!(attachment.item, AttachmentItem::File(_)))
+        {
+            continue;
+        }
+        let (Some(path), Some((start, end))) = (tool_path(tool), read_lines(tool)) else {
+            continue;
+        };
+        let coverage = paths.entry(path).or_default();
+        // Keep only maximal ranges. Their ends strictly increase with their
+        // starts, so the last start <= this start is the only one to check.
+        let covered_by_whole = coverage
+            .whole
+            .range(..=start)
+            .next_back()
+            .is_some_and(|(_, &last_end)| last_end >= end);
+        if (covered_by_whole || coverage.requests.contains(&(start, end))) && !in_tail(part, cutoff)
+        {
+            // A read this lane removes cannot stand in for another. In
+            // particular, its exact retry may not have returned it whole.
+            parts.push(((entry.mid.clone(), part.id.clone()), Shape::Whole));
+            continue;
+        }
+        coverage.requests.insert((start, end));
+        if !covered_by_whole
+            && end - start < READ_LINE_LIMIT
+            && tool
+                .output_bytes
+                .is_some_and(|bytes| bytes > 0 && bytes < READ_WHOLE_RESULT_MAX_BYTES)
+        {
+            while let Some((&later_start, _)) = coverage
+                .whole
+                .range(start..)
+                .next()
+                .filter(|&(_, &later_end)| later_end <= end)
+            {
+                coverage.whole.remove(&later_start);
+            }
+            coverage.whole.insert(start, end);
+        }
+    }
+    parts
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum RetryTarget {
+    Path(String),
+    Lookup(cortexkit_role_compaction::Digest),
+}
+
+/// Only a runner-reported error followed by a completed call of the same
+/// tool on the same target counts as a successful retry.
+pub fn retried_failures(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
+    let mut successes = BTreeSet::new();
+    let mut parts = Vec::new();
+    for (entry, part, tool) in tool_parts(context).rev() {
+        if !matches!(tool.status, ToolStatus::Completed | ToolStatus::Error)
+            || context.edited.covers(&entry.mid, &part.id)
+        {
+            continue;
+        }
+        let name = normalize_tool_name(&tool.name);
+        let target = match name.as_str() {
+            "read" | "edit" | "write" => tool_path(tool).map(RetryTarget::Path),
+            name if DEDUP_TOOLS.contains(&name) => {
+                Some(RetryTarget::Lookup(tool.input.canonical_digest()))
+            }
+            _ => None,
+        };
+        let Some(target) = target else { continue };
+        let key = (name, target);
+        if tool.status == ToolStatus::Completed {
+            successes.insert(key);
+        } else if !in_tail(part, cutoff) && successes.contains(&key) {
+            parts.push(((entry.mid.clone(), part.id.clone()), Shape::Whole));
+        }
+    }
+    parts
 }
 
 /// Injected text: numbered text parts outside the protected tail that hold a
@@ -1419,15 +1547,7 @@ pub fn superseded_edits(
         if in_tail(part, cutoff) || context.edited.covers(&entry.mid, &part.id) {
             continue;
         }
-        let Some(path) = ["filePath", "file_path", "path"].iter().find_map(|key| {
-            tool.input
-                .get(key)
-                .and_then(|value| match value {
-                    Value::String(path) => Some(path),
-                    _ => None,
-                })
-                .filter(|path| !path.is_empty())
-        }) else {
+        let Some(path) = tool_path(tool) else {
             continue;
         };
         if seen_files.insert(path) {
