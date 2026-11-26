@@ -112,9 +112,11 @@ export class PiRetrospectiveRawProvider implements RetrospectiveRawProvider {
 			false,
 			sinceMs,
 		);
+		const firstOmitted = messages[limit];
 		return {
 			messages: messages.slice(0, limit),
 			truncated: messages.length > limit,
+			...(firstOmitted ? { firstOmittedTs: firstOmitted.ts } : {}),
 		};
 	}
 

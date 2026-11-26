@@ -85,7 +85,12 @@ export class V2RetrospectiveRawProvider implements RetrospectiveRawProvider {
         const rows = this.read(sessionId, sinceMs, cap + 1);
         // Keep empty rows until the shared scan computes its frontier. Dropping
         // them here could lose the timestamp of a saturated read's last row.
-        return { messages: rows.slice(0, cap), truncated: rows.length > cap };
+        const firstOmitted = rows[cap];
+        return {
+            messages: rows.slice(0, cap),
+            truncated: rows.length > cap,
+            ...(firstOmitted ? { firstOmittedTs: firstOmitted.ts } : {}),
+        };
     }
 
     readUserMessagesBefore(

@@ -1,11 +1,12 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
     producerInputTokenLimit,
     producerWindowFailureReason,
 } from "../../../hooks/magic-context/producer-window-guard";
 import { estimateTokens } from "../../../hooks/magic-context/read-session-formatting";
+import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { runMigrations } from "../migrations";
@@ -133,7 +134,11 @@ class ScriptedProvider implements RetrospectiveRawProvider {
         const eligible = (this.rowsBySession.get(sessionId) ?? [])
             .filter((r) => r.ts > sinceMs)
             .sort((a, b) => a.ts - b.ts);
-        return { messages: eligible.slice(0, limit), truncated: eligible.length > limit };
+        return {
+            messages: eligible.slice(0, limit),
+            truncated: eligible.length > limit,
+            firstOmittedTs: eligible[limit]?.ts,
+        };
     }
     readOldestMessageTimesSince(
         sessionIds: readonly string[],
@@ -168,6 +173,162 @@ describe("readRetrospectiveScanWindow", () => {
             .map((message) => `${message.ordinal}: ${message.text}`);
         return `${FRICTION_GATE_SYSTEM_PROMPT}\n${buildFrictionGatePrompt({ userLines })}`;
     };
+
+    test("a prompt-budget tie waits for the entire next timestamp cohort", async () => {
+        const earlier = u("s", 101, "earlier " + "payload ".repeat(300));
+        const peers = [
+            u("s", 102, "peer-one " + "payload ".repeat(300)),
+            u("s", 102, "peer-two " + "payload ".repeat(300)),
+        ];
+        const usableInputTokens = 1_100;
+        const provider = new ScriptedProvider(["s"], new Map([["s", [earlier, ...peers]]]));
+        const opts = { usableInputTokens };
+        const first = await readRetrospectiveScanWindow(provider, "proj", 100, 0, opts);
+        expect(first.budgetTruncated).toBe(true);
+        expect(first.messages).toEqual([earlier]);
+        expect(first.maxScannedTs).toBe(101);
+        const next = await readRetrospectiveScanWindow(
+            provider,
+            "proj",
+            first.maxScannedTs,
+            0,
+            opts,
+        );
+        expect(next.messages).toEqual(peers);
+        expect(next.maxScannedTs).toBe(102);
+    });
+
+    test("the per-session lookahead commits a complete cohort that fills its cap", async () => {
+        const cohort = [u("s", 101, "one"), u("s", 101, "two")];
+        const tail = u("s", 102, "tail");
+        const provider = new ScriptedProvider(["s"], new Map([["s", [...cohort, tail]]]));
+        const opts = { capPerSession: 2 };
+        const first = await readRetrospectiveScanWindow(provider, "proj", 100, 0, opts);
+        expect(first.maxScannedTs).toBe(101);
+        expect(first.messages).toEqual(cohort);
+        const next = await readRetrospectiveScanWindow(
+            provider,
+            "proj",
+            first.maxScannedTs,
+            0,
+            opts,
+        );
+        expect(next.messages).toEqual([tail]);
+        expect(next.maxScannedTs).toBe(102);
+    });
+
+    test("a tie with an excluded session waits until both sessions fit", async () => {
+        const earlier = u("first", 101, "earlier");
+        const peers = [u("inside", 102, "inside"), u("outside", 102, "outside")];
+        const provider = new ScriptedProvider(
+            ["first", "inside", "outside"],
+            new Map([
+                ["first", [earlier]],
+                ["inside", [peers[0]!]],
+                ["outside", [peers[1]!]],
+            ]),
+        );
+        const opts = { maxSessionsPerRun: 2 };
+        const first = await readRetrospectiveScanWindow(provider, "proj", 100, 0, opts);
+        expect(first.messages).toEqual([earlier]);
+        expect(first.maxScannedTs).toBe(101);
+        const next = await readRetrospectiveScanWindow(
+            provider,
+            "proj",
+            first.maxScannedTs,
+            0,
+            opts,
+        );
+        expect(next.messages).toEqual(peers);
+        expect(next.maxScannedTs).toBe(102);
+    });
+
+    test("skips an oversized first timestamp cohort without prompting any of its rows", async () => {
+        const rows = [
+            u("root", 101, "one"),
+            u("root", 101, "two"),
+            u("root", 101, "three"),
+            u("root", 102, "tail"),
+        ];
+        const provider = new ScriptedProvider(["root"], new Map([["root", rows]]));
+        const opts = { capPerSession: 2 };
+        const log = spyOn(logger, "log").mockImplementation(() => {});
+        try {
+            const first = await readRetrospectiveScanWindow(provider, "proj", 100, 0, opts);
+            expect(first.messages).toEqual([]);
+            expect(first.maxScannedTs).toBe(101);
+            expect(log.mock.calls).toEqual([
+                [expect.stringContaining("sessionIds=root timestamp=101 skippedAtLeast=3")],
+            ]);
+            const next = await readRetrospectiveScanWindow(
+                provider,
+                "proj",
+                first.maxScannedTs,
+                0,
+                opts,
+            );
+            expect(next.messages).toEqual([rows[3]!]);
+            expect(next.maxScannedTs).toBe(102);
+        } finally {
+            log.mockRestore();
+        }
+    });
+
+    test.each([
+        "count",
+        "budget",
+    ] as const)("logs the exact count when the first whole timestamp cannot fit the %s cap", async (limit) => {
+        const peers = [
+            u("root", 101, `one ${"payload ".repeat(300)}`),
+            u("root", 101, `two ${"payload ".repeat(300)}`),
+        ];
+        const tail = u("root", 102, "tail");
+        const provider = new ScriptedProvider(["root"], new Map([["root", [...peers, tail]]]));
+        const opts = limit === "count" ? { maxMessagesPerRun: 1 } : { usableInputTokens: 750 };
+        const log = spyOn(logger, "log").mockImplementation(() => {});
+        try {
+            const first = await readRetrospectiveScanWindow(provider, "proj", 100, 0, opts);
+            expect(first.messages).toEqual([]);
+            expect(first.maxScannedTs).toBe(101);
+            expect(log.mock.calls).toEqual([
+                [expect.stringContaining("sessionIds=root timestamp=101 skipped=2")],
+            ]);
+            const next = await readRetrospectiveScanWindow(
+                provider,
+                "proj",
+                first.maxScannedTs,
+                0,
+                opts,
+            );
+            expect(next.messages).toEqual([tail]);
+            expect(next.maxScannedTs).toBe(102);
+        } finally {
+            log.mockRestore();
+        }
+    });
+
+    test("skips a first timestamp cohort that alone spans too many sessions", async () => {
+        const provider = new ScriptedProvider(
+            ["s1", "s2"],
+            new Map([
+                ["s1", [u("s1", 101, "visible peer")]],
+                ["s2", [u("s2", 101, "excluded peer"), u("s2", 102, "tail")]],
+            ]),
+        );
+        const log = spyOn(logger, "log").mockImplementation(() => {});
+        try {
+            const result = await readRetrospectiveScanWindow(provider, "proj", 100, 0, {
+                maxSessionsPerRun: 1,
+            });
+            expect(result.messages).toEqual([]);
+            expect(result.maxScannedTs).toBe(101);
+            expect(log.mock.calls).toEqual([
+                [expect.stringContaining("sessionIds=s1,s2 timestamp=101 skippedAtLeast=2")],
+            ]);
+        } finally {
+            log.mockRestore();
+        }
+    });
 
     test("clamps an oversized genuine user line head+tail before prompt assembly", async () => {
         const head = "HEAD-FRICTION ";
@@ -301,6 +462,23 @@ describe("readRetrospectiveScanWindow", () => {
         expect(onlyAncient.maxScannedTs).toBe(cutoff - 1);
     });
 
+    test("the 30-day cutoff cannot hold a 25-day-old watermark and passes it on day 31", async () => {
+        const day = 24 * 60 * 60 * 1000;
+        const watermark = 40 * day;
+        const row = u("s", watermark + 1, "earliest later user line");
+        const provider = new ScriptedProvider(["s"], new Map([["s", [row]]]));
+        const active = await readRetrospectiveScanWindow(provider, "proj", watermark, 0, {
+            recencyCutoffMs: watermark + (25 - 30) * day,
+        });
+        expect(active.messages).toEqual([row]);
+        expect(active.maxScannedTs).toBe(watermark + 1);
+        const expired = await readRetrospectiveScanWindow(provider, "proj", watermark, 0, {
+            recencyCutoffMs: watermark + (31 - 30) * day,
+        });
+        expect(expired.messages).toEqual([]);
+        expect(expired.maxScannedTs).toBe(watermark + day - 1);
+    });
+
     test("merges since + overlap; maxScannedTs comes ONLY from the since portion", async () => {
         const rows = new Map([
             [
@@ -368,11 +546,11 @@ describe("readRetrospectiveScanWindow", () => {
         expect(win2.maxScannedTs).toBe(160);
     });
 
-    test("same-ms group split by the global cap: watermark clamps below it so the sibling is not lost", async () => {
+    test("the global cap defers the whole same-ms group so no sibling is lost or repeated", async () => {
         // Two sessions, each individually UNsaturated (so saturatedFrontier stays
         // +Inf), but the GLOBAL cap of 3 splits a same-ms (130) pair: a3 kept, b3
-        // dropped. A ts-only watermark of 130 would skip b3 forever; the clamp
-        // must stop the watermark BELOW 130 so b3 is re-read next run.
+        // dropped. A ts-only watermark of 130 would skip b3 forever, so leave the
+        // whole timestamp out of this prompt and read it in the next run.
         const rows = new Map([
             ["s1", [u("s1", 110, "a1"), u("s1", 120, "a2"), u("s1", 130, "a3")]],
             ["s2", [u("s2", 130, "b3")]],
@@ -383,12 +561,10 @@ describe("readRetrospectiveScanWindow", () => {
             maxMessagesPerRun: 3,
             capPerSession: 100,
         });
-        // kept = oldest 3 = a1,a2,a3 (b3 dropped by the global cap).
-        expect(win.messages.map((m) => m.text).sort()).toEqual(["a1", "a2", "a3"]);
-        // watermark clamped to 129 (just below the split ts) — NOT 130.
-        expect(win.maxScannedTs).toBe(129);
+        expect(win.messages.map((m) => m.text).sort()).toEqual(["a1", "a2"]);
+        expect(win.maxScannedTs).toBe(120);
 
-        // Next run re-reads a3 (idempotence dedups) AND the previously-dropped b3.
+        // The next run reads both siblings as new without re-reading a1 or a2.
         const win2 = await readRetrospectiveScanWindow(provider, "proj", win.maxScannedTs, 0, {
             maxMessagesPerRun: 3,
             capPerSession: 100,
@@ -397,9 +573,9 @@ describe("readRetrospectiveScanWindow", () => {
         expect(win2.maxScannedTs).toBe(130);
     });
 
-    test("backlog: a per-session-saturated batch caps the watermark at its frontier", async () => {
+    test("a per-session-saturated read advances through the last complete timestamp", async () => {
         // capPerSession 2: the session returns its OLDEST 2 but holds newer
-        // unseen rows. The watermark must not pass the last-kept ts.
+        // unseen rows. The next row's later timestamp proves the kept group is complete.
         const rows = new Map([
             ["s1", [u("s1", 110, "a1"), u("s1", 120, "a2"), u("s1", 130, "a3")]],
         ]);
@@ -410,8 +586,7 @@ describe("readRetrospectiveScanWindow", () => {
             capPerSession: 2,
         });
         expect(win.messages.map((m) => m.text)).toEqual(["a1", "a2"]);
-        // saturated (got exactly 2) → frontier = lastKept(120) − 1 = 119.
-        expect(win.maxScannedTs).toBe(119);
+        expect(win.maxScannedTs).toBe(120);
     });
 
     test("saturation uses the explicit `truncated` signal, not messages.length", async () => {
@@ -434,6 +609,43 @@ describe("readRetrospectiveScanWindow", () => {
         });
         // frontier = lastKept(130) − 1 = 129 even though only 1 row < cap 5.
         expect(win.maxScannedTs).toBe(129);
+        expect(win.messages).toEqual([]);
+    });
+
+    test("an unknown unread boundary blocks new work and leaves it for retry", async () => {
+        const provider: RetrospectiveRawProvider = {
+            listProjectSessions: () => [{ sessionId: "empty" }, { sessionId: "visible" }],
+            readUserMessagesSince: (id) =>
+                id === "empty"
+                    ? { messages: [], truncated: true }
+                    : {
+                          messages: [u("visible", 110, "cannot pass the unknown boundary")],
+                          truncated: false,
+                      },
+            readUserMessagesBefore: () => [],
+        };
+        const result = await readRetrospectiveScanWindow(provider, "proj", 100, 0);
+        expect(result.messages).toEqual([]);
+        expect(result.maxScannedTs).toBe(100);
+    });
+
+    test("an excluded legacy session's update time is not its oldest pending timestamp", async () => {
+        const provider: RetrospectiveRawProvider = {
+            listProjectSessions: () => [
+                { sessionId: "s1", updatedAt: 101 },
+                { sessionId: "excluded", updatedAt: 101 },
+            ],
+            readUserMessagesSince: () => ({
+                messages: [u("s1", 101, "not safe to send")],
+                truncated: false,
+            }),
+            readUserMessagesBefore: () => [],
+        };
+        const result = await readRetrospectiveScanWindow(provider, "proj", 100, 0, {
+            maxSessionsPerRun: 1,
+        });
+        expect(result.messages).toEqual([]);
+        expect(result.maxScannedTs).toBe(100);
     });
 
     test("advances past observed assistant-only activity when no user message remains", async () => {
@@ -498,8 +710,8 @@ describe("readRetrospectiveScanWindow", () => {
             capPerSession: 10,
             maxSessionsPerRun: 1,
         });
-        expect(win.messages.map((m) => m.text)).toEqual(["older backlog", "tail"]);
-        expect(win.maxScannedTs).toBe(119);
+        expect(win.messages.map((m) => m.text)).toEqual(["older backlog"]);
+        expect(win.maxScannedTs).toBe(115);
 
         const win2 = await readRetrospectiveScanWindow(provider, "proj", win.maxScannedTs, 0, {
             maxMessagesPerRun: 100,

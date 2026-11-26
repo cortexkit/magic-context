@@ -2556,6 +2556,86 @@ describe("createDreamTaskExecutor — compress-cues", () => {
 });
 
 describe("createDreamTaskExecutor — retrospective", () => {
+    test("persists the newest sent cohort and never hands its rows back as new work", async () => {
+        db = freshDb();
+        const project = "/repo/retrospective-saturated-cohort";
+        const start = Date.now() - 1000;
+        const config = {
+            task: "retrospective",
+            schedule: "0 5 * * *",
+            timeoutMinutes: 20,
+        } as const;
+        writeTaskScheduleState(db, {
+            projectPath: project,
+            task: config.task,
+            nextDueAt: null,
+            lastRunAt: null,
+            schedule: config.schedule,
+            lastStatus: null,
+            lastError: null,
+            retryCount: 0,
+            retrospectiveWatermarkMs: start,
+        });
+        const rows = Array.from({ length: 81 }, (_, ordinal) => ({
+            sessionId: "root",
+            ordinal,
+            role: "user" as const,
+            text: `new-row-${ordinal};`,
+            followsAssistantReply: true,
+            ts: start + (ordinal < 80 ? 1 : 2),
+        }));
+        const prompted: string[][] = [];
+        const executor = createDreamTaskExecutor({
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            client: {
+                session: {
+                    list: async () => ({ data: [{ id: "parent", title: "ordinary session" }] }),
+                    create: async () => ({ data: { id: "retro-child" } }),
+                    prompt: async (request: { body?: { parts?: Array<{ text: string }> } }) => {
+                        prompted.push(request.body?.parts?.[0]?.text.match(/new-row-\d+;/g) ?? []);
+                        return {};
+                    },
+                    messages: async () => ({ data: assistantMessages("n") }),
+                    delete: async () => ({}),
+                },
+            } as never,
+            retrospectiveRawProvider: {
+                listProjectSessions: () => [{ sessionId: "root", updatedAt: start + 2 }],
+                readOldestMessageTimesSince: (_ids, since) => {
+                    const first = rows.find(({ ts }) => ts > since);
+                    return first ? new Map([["root", first.ts]]) : new Map();
+                },
+                readUserMessagesSince: (_id, since, cap) => {
+                    const pending = rows.filter(({ ts }) => ts > since);
+                    return {
+                        messages: pending.slice(0, cap),
+                        truncated: pending.length > cap,
+                        firstOmittedTs: pending[cap]?.ts,
+                    };
+                },
+                readUserMessagesBefore: () => [],
+            },
+        });
+        const run = () =>
+            runManualDream({
+                db: db!,
+                projectIdentity: project,
+                tasks: [config],
+                executor,
+                task: config.task,
+            });
+        expect((await run()).ran).toEqual([config.task]);
+        expect(getTaskScheduleState(db, project, config.task)?.retrospectiveWatermarkMs).toBe(
+            start + 1,
+        );
+        expect((await run()).ran).toEqual([config.task]);
+        expect(getTaskScheduleState(db, project, config.task)?.retrospectiveWatermarkMs).toBe(
+            start + 2,
+        );
+        expect(prompted).toEqual([rows.slice(0, 80).map(({ text }) => text), ["new-row-80;"]]);
+    });
+
     test("logs the retrospective scan frontier and the watermark read back after scheduling", async () => {
         db = freshDb();
         const project = "/repo/retrospective-watermark-log";

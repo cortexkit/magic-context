@@ -86,6 +86,7 @@ test("OC2 retrospective reads native oldest-first bounded user history, not stal
         ]);
         const page = provider.readUserMessagesSince("root", 0, 2);
         expect(page.truncated).toBe(true);
+        expect(page.firstOmittedTs).toBe(300);
         expect(
             page.messages.map((row) => [
                 row.ts,
@@ -111,7 +112,7 @@ test("OC2 retrospective reads native oldest-first bounded user history, not stal
         const window = await readRetrospectiveScanWindow(provider, "project", 0, 0, {
             capPerSession: 2,
         });
-        expect(window.maxScannedTs).toBe(199);
+        expect(window.maxScannedTs).toBe(200);
         expect(JSON.stringify(window)).not.toMatch(
             /PRIVATE|SECRET|STALE|SYNTHETIC_PART|IGNORED_PART/,
         );

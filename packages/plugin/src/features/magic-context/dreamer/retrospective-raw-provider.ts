@@ -7,6 +7,7 @@ import {
     estimateTokens,
     hasMeaningfulUserText,
 } from "../../../hooks/magic-context/read-session-formatting";
+import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { openOpenCodeDb } from "./open-opencode-db";
@@ -56,6 +57,8 @@ export interface RetrospectiveRawMessage {
 export interface RetrospectiveSinceRead {
     messages: RetrospectiveRawMessage[];
     truncated: boolean;
+    /** Timestamp of the first raw row beyond the per-session cap, before normalization. */
+    firstOmittedTs?: number;
 }
 
 export interface RetrospectiveRawProvider {
@@ -243,6 +246,55 @@ function retrospectiveGatePromptTokens(messages: readonly RetrospectiveRawMessag
     return estimateTokens(retrospectiveGatePrompt(messages));
 }
 
+function admitRetrospectiveCohorts(
+    rows: RetrospectiveRawMessage[],
+    firstUnreadTs: number,
+    maxMessages: number,
+    promptInputLimitTokens: number | undefined,
+): {
+    kept: RetrospectiveRawMessage[];
+    budgetTruncated: boolean;
+    oversized?: { ts: number; rows: RetrospectiveRawMessage[] };
+} {
+    const kept: RetrospectiveRawMessage[] = [];
+    let start = 0;
+    for (let first = rows[start]; first && first.ts < firstUnreadTs; first = rows[start]) {
+        const ts = first.ts;
+        let end = start + 1;
+        while (end < rows.length && rows[end]?.ts === ts) end += 1;
+        const cohort = rows.slice(start, end);
+        const tooManyRows = end > maxMessages;
+        const tooManyTokens =
+            !tooManyRows &&
+            promptInputLimitTokens !== undefined &&
+            retrospectiveGatePromptTokens([...kept, ...cohort]) > promptInputLimitTokens;
+        if (tooManyRows || tooManyTokens) {
+            return {
+                kept,
+                budgetTruncated: tooManyTokens,
+                // If earlier cohorts used some of the budget, retry the whole
+                // group in a fresh window rather than declaring it too large.
+                ...(kept.length === 0 ? { oversized: { ts, rows: cohort } } : {}),
+            };
+        }
+        kept.push(...cohort);
+        start = end;
+    }
+    return { kept, budgetTruncated: false };
+}
+
+function logSkippedRetrospectiveCohort(
+    sessionIds: Iterable<string>,
+    ts: number,
+    count: number,
+    lowerBound: boolean,
+): void {
+    const sessions = [...new Set(sessionIds)].join(",");
+    log(
+        `[dreamer] retrospective: oversized timestamp cohort sessionIds=${sessions} timestamp=${ts} ${lowerBound ? "skippedAtLeast" : "skipped"}=${count}`,
+    );
+}
+
 export async function readRetrospectiveScanWindow(
     provider: RetrospectiveRawProvider,
     projectIdentity: string,
@@ -322,69 +374,87 @@ export async function readRetrospectiveScanWindow(
             );
         }
 
-        // A TRUNCATED session read hit its per-session cap with more rows
-        // available. Its last timestamp remains a safe exclusive frontier even
-        // after text clamping because clamping never changes source identity.
-        let saturatedFrontier = Number.POSITIVE_INFINITY;
-        for (const read of sinceReads) {
-            const lastKept = read.truncated ? read.messages[read.messages.length - 1] : undefined;
-            if (lastKept) saturatedFrontier = Math.min(saturatedFrontier, lastKept.ts - 1);
-        }
-
         const allSince = sinceReads
             .flatMap((read) => read.messages)
-            .filter((message) => message.ts >= recencyCutoffMs)
+            .filter((message) => message.ts > scanSinceMs)
             .map(clampRetrospectiveMessage)
             .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
-        const countCandidates = allSince.slice(0, maxMessages);
-        const countDropped = allSince.slice(maxMessages);
 
-        // Admission is an oldest-first prefix. Rebuilding the exact gate prompt
-        // at each boundary accounts for labels and static instructions while the
-        // 240-message count cap keeps this bounded. Once one row does not fit,
-        // every newer row waits behind the same durable source frontier.
-        const keptSince: RetrospectiveRawMessage[] = [];
-        let budgetDropped: RetrospectiveRawMessage[] = [];
-        if (promptInputLimitTokens === undefined) {
-            keptSince.push(...countCandidates);
-        } else {
-            for (let index = 0; index < countCandidates.length; index += 1) {
-                const row = countCandidates[index];
-                if (!row) continue;
-                const candidate = [...keptSince, row];
-                if (retrospectiveGatePromptTokens(candidate) <= promptInputLimitTokens) {
-                    keptSince.push(row);
-                    continue;
-                }
-                budgetDropped = countCandidates.slice(index);
-                break;
+        let unknownBoundary = !!firstExcludedSession && firstExcludedPendingTs === undefined;
+        let firstUnreadTs = firstExcludedPendingTs ?? Number.POSITIVE_INFINITY;
+        const oversizedSessions = new Map<string, number>();
+        for (const [index, read] of sinceReads.entries()) {
+            if (!read.truncated) continue;
+            // Without a reported first omitted timestamp, the final kept timestamp
+            // is the earliest possible omission and is not safe to send itself.
+            const unreadTs = read.firstOmittedTs ?? read.messages.at(-1)?.ts;
+            if (unreadTs === undefined) {
+                unknownBoundary = true;
+                continue;
+            }
+            firstUnreadTs = Math.min(firstUnreadTs, unreadTs);
+            const sessionId = sessionsToRead[index]?.sessionId;
+            if (
+                sessionId !== undefined &&
+                read.firstOmittedTs !== undefined &&
+                read.firstOmittedTs === oldestBySession?.get(sessionId)
+            ) {
+                oversizedSessions.set(sessionId, read.firstOmittedTs);
             }
         }
-        const droppedSince = [...budgetDropped, ...countDropped];
 
-        // The watermark records the newest processed timestamp; the configured
-        // recency cutoff also expires older messages even when none are selected.
-        // If every selected session has no pending user messages, advance past
-        // observed assistant/tool activity so idle sessions do not keep reopening
-        // the gate. The frontier below still protects sessions not yet scanned.
+        // Read and prompt limits may split a timestamp, but a timestamp-only
+        // watermark cannot. Admit only complete cohorts before the first unread row.
+        const {
+            kept: keptSince,
+            budgetTruncated,
+            oversized,
+        } = admitRetrospectiveCohorts(
+            allSince,
+            unknownBoundary ? scanSinceMs : firstUnreadTs,
+            maxMessages,
+            promptInputLimitTokens,
+        );
+        const lastKept = keptSince.at(-1);
         let maxScannedTs = scanSinceMs;
-        if (oldestBySession && sinceReads.every((read) => read.messages.length === 0)) {
-            for (const { session } of eligibleSessions) {
-                maxScannedTs = Math.max(maxScannedTs, session.updatedAt ?? scanSinceMs);
+        if (!unknownBoundary) {
+            if (oversized) {
+                maxScannedTs = oversized.ts;
+                logSkippedRetrospectiveCohort(
+                    oversized.rows.map(({ sessionId }) => sessionId),
+                    maxScannedTs,
+                    oversized.rows.length,
+                    false,
+                );
+            } else if (lastKept) {
+                maxScannedTs = lastKept.ts;
+            } else if (Number.isFinite(firstUnreadTs)) {
+                const blockedSessions = sessions.filter(
+                    ({ session }) => oldestBySession?.get(session.sessionId) === firstUnreadTs,
+                );
+                const hitSessionReadCap = blockedSessions.some(
+                    ({ session }) => oversizedSessions.get(session.sessionId) === firstUnreadTs,
+                );
+                if (hitSessionReadCap || blockedSessions.length > sessionLimit) {
+                    // A session already overflowed on that one timestamp, or the
+                    // group spans too many sessions. Unseen rows prevent an exact count.
+                    maxScannedTs = firstUnreadTs;
+                    logSkippedRetrospectiveCohort(
+                        blockedSessions.map(({ session }) => session.sessionId),
+                        maxScannedTs,
+                        Math.max(blockedSessions.length, hitSessionReadCap ? capPerSession + 1 : 0),
+                        true,
+                    );
+                } else {
+                    maxScannedTs = Math.max(scanSinceMs, firstUnreadTs - 1);
+                }
+            } else if (oldestBySession && allSince.length === 0) {
+                // Without pending user rows, pass observed assistant-only activity.
+                for (const { session } of eligibleSessions) {
+                    maxScannedTs = Math.max(maxScannedTs, session.updatedAt ?? scanSinceMs);
+                }
             }
         }
-        for (const row of keptSince) {
-            if (row.ts > maxScannedTs) maxScannedTs = row.ts;
-        }
-        let frontier = saturatedFrontier;
-        const firstDropped = droppedSince[0];
-        if (firstDropped) frontier = Math.min(frontier, firstDropped.ts - 1);
-        if (typeof firstExcludedPendingTs === "number") {
-            frontier = Math.min(frontier, firstExcludedPendingTs - 1);
-        } else if (typeof firstExcludedSession?.updatedAt === "number") {
-            frontier = Math.min(frontier, firstExcludedSession.updatedAt - 1);
-        }
-        maxScannedTs = Math.max(scanSinceMs, Math.min(maxScannedTs, frontier));
 
         const keptSessionIds = new Set(keptSince.map((message) => message.sessionId));
         const overlapSessions = sessionsToRead.filter((session) =>
@@ -404,7 +474,7 @@ export async function readRetrospectiveScanWindow(
                 : [];
 
         const seen = new Set<string>();
-        const merged: RetrospectiveRawMessage[] = [];
+        const merged = [...keptSince];
         const appendUnique = (row: RetrospectiveRawMessage): boolean => {
             const key = `${row.sessionId}\u0000${row.ts}\u0000${row.role}\u0000${row.toolName ?? ""}`;
             if (seen.has(key)) return false;
@@ -412,13 +482,11 @@ export async function readRetrospectiveScanWindow(
             merged.push(row);
             return true;
         };
-        for (const row of keptSince) appendUnique(row);
-
         // Overlap is context only. Admit each row only if it leaves the same exact
         // child request below budget; dropping overlap never changes the frontier.
         const overlapRows = overlapBatches
             .flat()
-            .filter((message) => message.ts >= recencyCutoffMs)
+            .filter((message) => message.ts >= recencyCutoffMs && message.ts <= watermarkMs)
             .map(clampRetrospectiveMessage)
             .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
         for (const row of overlapRows) {
@@ -444,7 +512,7 @@ export async function readRetrospectiveScanWindow(
             maxScannedTs,
             promptTokens,
             ...(promptInputLimitTokens === undefined ? {} : { promptInputLimitTokens }),
-            budgetTruncated: budgetDropped.length > 0,
+            budgetTruncated,
         };
     } finally {
         provider.dispose?.();
@@ -493,7 +561,12 @@ function readOpenCodeMessagesSince(
         .all(sessionId, sinceMs, limit + 1);
     const truncated = rows.length > limit;
     const kept = truncated ? rows.slice(0, limit) : rows;
-    return { messages: normalizeOpenCodeRows(db, sessionId, kept), truncated };
+    const firstOmitted = rows[limit];
+    return {
+        messages: normalizeOpenCodeRows(db, sessionId, kept),
+        truncated,
+        ...(firstOmitted ? { firstOmittedTs: firstOmitted.time_created } : {}),
+    };
 }
 
 function readOpenCodeOldestMessageTimesSince(
