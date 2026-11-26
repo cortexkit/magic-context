@@ -81,7 +81,7 @@ impl Fixture {
     fn run(&self) -> Result<Moved, String> {
         move_in(
             ContextDb::open(&self.dir.join("context.db")).unwrap(),
-            &Store::open(&self.dir.join("mode3.db")).unwrap(),
+            &Store::open(&self.dir.join("sessions.db")).unwrap(),
             &Settings::default().into(),
             &self.request,
         )

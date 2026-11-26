@@ -59,7 +59,7 @@ async fn handed(label: &str) -> Handed {
     ];
     setup.newest = client.entries.lock().unwrap().last().map(cursor);
     let dir = scratch(label);
-    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.join("sessions.db")).unwrap());
     session.set_store(Some(Arc::clone(&store)));
     session
         .setup(&client, &settings, &route, &setup, Features::NONE)
@@ -255,7 +255,7 @@ fn strip_policy_members(path: &std::path::Path) {
 #[tokio::test]
 async fn restart_a_view_saved_without_its_policy_members_is_rebuilt_not_offered_again() {
     let mut handed = handed("old-encoder").await;
-    strip_policy_members(&handed.dir.join("mode3.db"));
+    strip_policy_members(&handed.dir.join("sessions.db"));
     let loaded = handed.store.load(&handed.route.session).unwrap();
     assert!(!loaded.unconfirmed[0].view.verify());
     let before = handed.offered().len();

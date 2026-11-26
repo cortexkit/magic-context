@@ -64,7 +64,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let module = Module::new(Client, Settings::default(), None, Some(store));
         let key = SessionRef::new("runner", "mock", "head");
         let model = ModelRef::new("test", "model");

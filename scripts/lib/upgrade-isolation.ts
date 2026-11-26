@@ -30,7 +30,7 @@ export function isolatedEnvironment(root: string, storage: string): NodeJS.Proce
         "MC_E2E_PLUGIN_ENTRY",
         "MC_E2E_PI_PLUGIN_ROOT",
         "MAGIC_CONTEXT_DB",
-        "MAGIC_CONTEXT_MODE3_STORE",
+        "MAGIC_CONTEXT_SESSIONS_STORE",
     ])
         delete env[key];
     for (const key of [

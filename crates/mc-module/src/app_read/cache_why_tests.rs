@@ -132,7 +132,7 @@ fn views_name_one_to_a_hundred_distinct_versions_and_exclude_the_producers_form(
 #[test]
 fn a_version_older_than_memory_holds_is_read_from_the_store() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let now = now_ms();
     let records: Vec<Value> = (1..=300).map(|v| record(v, now - 1_000 + v)).collect();
     let mut replica = from_store(&store, records.clone());
@@ -153,7 +153,7 @@ fn a_version_older_than_memory_holds_is_read_from_the_store() {
 #[test]
 fn a_record_past_retention_is_missing_and_a_younger_one_is_served() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let store = crate::store::Store::open(&path).unwrap();
     let now = now_ms();
     let expired = record(1, now - 31 * DAY_MS);

@@ -101,7 +101,7 @@ fn spawn(
         .env("XDG_DATA_HOME", data_home)
         .env("HOME", root.join("config"))
         .env_remove("MAGIC_CONTEXT_DB")
-        .env_remove("MAGIC_CONTEXT_MODE3_STORE")
+        .env_remove("MAGIC_CONTEXT_SESSIONS_STORE")
         .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
         .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
         .env_remove("MAGIC_CONTEXT_CONFIG_PATH")

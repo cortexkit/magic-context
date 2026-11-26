@@ -488,7 +488,7 @@ async fn a_repeated_setup_over_an_unchanged_transcript_rewrites_no_search_rows()
 #[test]
 fn a_version_three_store_with_one_undecodable_row_still_opens() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(

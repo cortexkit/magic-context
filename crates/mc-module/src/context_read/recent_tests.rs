@@ -246,7 +246,7 @@ impl Fixture {
                 .unwrap();
             }
         });
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         for key in saved {
             store
                 .save(

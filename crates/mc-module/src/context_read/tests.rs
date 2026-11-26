@@ -95,7 +95,7 @@ impl Fixture {
         });
         drop(db);
         // The session's Setup recorded Entorhinal's workspace "1" for it.
-        let store = dir.path().join("mode3.db");
+        let store = dir.path().join("sessions.db");
         drop(crate::store::Store::open(&store).unwrap());
         rusqlite::Connection::open(&store)
             .unwrap()
@@ -434,7 +434,7 @@ async fn context_read_held_mode3_head_uses_its_live_project_and_persisted_condit
     let db = ContextDb::open(path).unwrap();
     db.with_connection(|conn| conn.execute_batch("INSERT INTO session_meta(session_id,harness) VALUES('held','opencode2'); INSERT INTO compartments(session_id,harness,sequence,start_message,end_message,title,content,p1,p2,p3,p4,importance,created_at) VALUES('held','opencode2',0,1,10,'Held summary','flat','held fact','short','anchor','tiny',50,0);").unwrap());
     let key = SessionRef::new("runner", "opencode2", "held");
-    let store = Store::open(&fixture._dir.path().join("mode3.db")).unwrap();
+    let store = Store::open(&fixture._dir.path().join("sessions.db")).unwrap();
     let setup = SetupRequest::new(
         crate::catalog::Preset::Worker.as_str(),
         ModelRef::new("anthropic", "claude-opus-5-5"),
@@ -525,7 +525,7 @@ async fn context_read_held_mode3_head_uses_its_live_project_and_persisted_condit
 #[ignore = "release-profile read-transaction hold measurement"]
 fn context_read_werni_sized_read_holds_stay_under_250_ms() {
     let mut fixture = Fixture::new();
-    let store_path = fixture._dir.path().join("mode3.db");
+    let store_path = fixture._dir.path().join("sessions.db");
     let store = crate::store::Store::open(&store_path).unwrap();
     store
         .save(

@@ -124,7 +124,7 @@ fn record(
 /// The session's saved state and the history text it refers to, as the
 /// store holds them.
 fn stored(dir: &std::path::Path) -> Value {
-    let conn = rusqlite::Connection::open(dir.join("mode3.db")).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("sessions.db")).unwrap();
     let state: String = conn
         .query_row("SELECT state FROM sessions WHERE session='s1'", [], |row| {
             row.get(0)
@@ -144,7 +144,7 @@ fn stored(dir: &std::path::Path) -> Value {
 #[test]
 fn head_bytes_match_the_build_before_summary_attribution_was_shared() {
     let dir = scratch("head-bytes");
-    let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.join("sessions.db")).unwrap();
     let (mut session, settings) = head(&dir);
     let mut states = vec![record(
         "first render",

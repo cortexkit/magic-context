@@ -156,7 +156,7 @@ fn historian_failure_fields_round_trip_and_legacy_saved_state_keeps_its_history(
     };
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let store = Store::open(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
     let session = key();
@@ -213,7 +213,7 @@ fn historian_failure_fields_round_trip_and_legacy_saved_state_keeps_its_history(
 #[tokio::test]
 async fn historian_failure_defaults_apply_to_a_legacy_meta_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let mut snapshot = fixture();
     snapshot.meta["historian_failure_count"] = json!(3);
     snapshot.meta["historian_last_error"] = json!("summary timed out");
@@ -647,7 +647,7 @@ async fn a_watch_follows_sessions_ck_mc_does_not_hold_yet() {
 async fn published_replica_survives_restart_and_does_not_take_the_session_store_lock() {
     let dir = tempfile::tempdir().unwrap();
     let store =
-        std::sync::Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+        std::sync::Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
     let reader = AppRead::new(Some(store.path.clone()), None);
     save_fixture(&store, &fixture(), None);
     reader.publish(fixture());
@@ -1097,7 +1097,7 @@ async fn app_optional_nulls_match_omitted_fields_and_search_refuses_identity_ali
 #[tokio::test]
 async fn archive_message_identity_survives_cut_restart_and_revert() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     save_fixture(&store, &fixture(), None);
     let mut cut = fixture();
     cut.base = 4;
@@ -1151,7 +1151,7 @@ async fn archive_message_identity_survives_cut_restart_and_revert() {
 #[tokio::test]
 async fn cold_session_records_preserve_runner_identity_and_unready_reads_are_transient() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     store
         .save(&key(), &crate::store::Durable::default())
         .unwrap();
@@ -1258,7 +1258,7 @@ fn legacy_json(snapshot: &Snapshot) -> Value {
 #[tokio::test]
 async fn schema_four_app_read_snapshots_migrate_without_changing_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mode3.db");
+    let path = dir.path().join("sessions.db");
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("PRAGMA user_version=4; CREATE TABLE app_read_snapshots(runner TEXT,harness TEXT,session TEXT,snapshot TEXT,PRIMARY KEY(runner,harness,session)); CREATE TABLE app_read_decisions(runner TEXT,harness TEXT,session TEXT,decisions TEXT,PRIMARY KEY(runner,harness,session));").unwrap();
     let mut snapshot = fixture();

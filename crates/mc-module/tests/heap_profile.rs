@@ -339,7 +339,7 @@ fn choose_heads(corpus: &Path, tail: Option<u64>, clock: u64) -> Vec<Head0> {
     let mode3 = Connection::open_with_flags(
         format!(
             "file:{}?mode=ro&immutable=1",
-            corpus.join("mode3.db").display()
+            corpus.join("sessions.db").display()
         ),
         flags,
     )
@@ -554,7 +554,7 @@ fn fixture(corpus: &Path, heads: Vec<Head0>, root: &str) -> Fixture {
         println!("HEAP_FIXTURE rows {}", json!(projects));
     });
     let db = Arc::new(db);
-    let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = Store::open(&dir.path().join("sessions.db")).unwrap();
     let settings = Settings::default();
     let runner = Runner::default();
     let mut routes = Vec::new();
@@ -799,7 +799,7 @@ fn heap_profile() {
         fixture.runner.clone(),
         Settings::default(),
         Some(ContextDb::open(&fixture.dir.path().join("context.db")).unwrap()),
-        Some(Store::open(&fixture.dir.path().join("mode3.db")).unwrap()),
+        Some(Store::open(&fixture.dir.path().join("sessions.db")).unwrap()),
     );
     let mut last = step("module_new", &start, Value::Null);
     runtime.block_on(async {

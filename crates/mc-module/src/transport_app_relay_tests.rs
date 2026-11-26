@@ -54,7 +54,7 @@ async fn bound_caller(handler: &Handler, request: RouteBindRequest) -> AppCaller
 fn handler(fixture: &Fixture) -> Handler {
     fixture.add_summary();
     let db = ContextDb::open(&fixture.dir.path().join("context.db")).unwrap();
-    let store = Store::open(&fixture.dir.path().join("mode3.db")).unwrap();
+    let store = Store::open(&fixture.dir.path().join("sessions.db")).unwrap();
     let handler = Handler::new(Module::new(
         SubcRunnerClient::new(
             fixture.dir.path().join("unused-relay-socket"),

@@ -46,7 +46,7 @@ impl Fixture {
         replica.snapshots.clear();
         replica.store = Some(
             Connection::open_with_flags(
-                self.dir.path().join("mode3.db"),
+                self.dir.path().join("sessions.db"),
                 OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .unwrap(),
@@ -83,7 +83,7 @@ impl Fixture {
         drop(
             crate::context_db::ContextDb::create_for_tests(&dir.path().join("context.db")).unwrap(),
         );
-        let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
         let sessions = [
             (head(), "head", PROJECT, T + 9_000_000),
             (worker(), "worker", PROJECT, T + 8_000_000),
@@ -131,7 +131,7 @@ impl Fixture {
             }
         }
         drop(store);
-        let mode3 = Connection::open(dir.path().join("mode3.db")).unwrap();
+        let mode3 = Connection::open(dir.path().join("sessions.db")).unwrap();
         for (key, _, project, _) in &sessions {
             mode3
                 .execute(

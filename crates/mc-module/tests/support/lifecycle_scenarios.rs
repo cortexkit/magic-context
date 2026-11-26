@@ -1,7 +1,7 @@
 use super::*;
 
 fn saved(dir: &std::path::Path) -> Value {
-    let text: String = rusqlite::Connection::open(dir.join("mode3.db"))
+    let text: String = rusqlite::Connection::open(dir.join("sessions.db"))
         .unwrap()
         .query_row(
             "SELECT state FROM sessions WHERE session = 's1'",
@@ -158,7 +158,7 @@ async fn lifecycle_an_unchanged_job_retries_a_failed_state_save() {
     runner
         .play(&[user("Review the module."), read_file(50), read_file(50)])
         .await;
-    let conn = rusqlite::Connection::open(dir.join("mode3.db")).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("sessions.db")).unwrap();
     conn.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL, 'save unavailable'); END;").unwrap();
     runner
         .provider()
@@ -224,8 +224,8 @@ fn lifecycle_move_never_fences_a_failed_state_save() {
     let dir = scratch("move-save-failed");
     let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_summary(&dir, "s1", 1, (1, "m1"), (2, "m2"), "History");
-    let store = Store::open(&dir.join("mode3.db")).unwrap();
-    rusqlite::Connection::open(dir.join("mode3.db"))
+    let store = Store::open(&dir.join("sessions.db")).unwrap();
+    rusqlite::Connection::open(dir.join("sessions.db"))
         .unwrap()
         .execute("DROP TABLE sessions", [])
         .unwrap();
@@ -263,7 +263,7 @@ fn lifecycle_move_refuses_unrenderable_memories_and_profile_without_writes() {
         insert_summary(&dir, "s1", 1, (1, "m1"), (2, "m2"), "History");
         db.with_connection(|conn| conn.execute_batch(fault))
             .unwrap();
-        let store = Store::open(&dir.join("mode3.db")).unwrap();
+        let store = Store::open(&dir.join("sessions.db")).unwrap();
         let result = mc_module::move_in::move_in(
             db,
             &store,
@@ -287,7 +287,7 @@ fn lifecycle_move_refuses_incompatible_message_ordinals() {
     let dir = scratch("move-ordinals");
     let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_summary(&dir, "s1", 1, (1, "m1"), (2, "m2"), "History");
-    let store = Store::open(&dir.join("mode3.db")).unwrap();
+    let store = Store::open(&dir.join("sessions.db")).unwrap();
     let mut request = move_request(&dir);
     request.newest.ordinal = 4;
     let result = mc_module::move_in::move_in(db, &store, &Settings::default().into(), &request);
@@ -316,7 +316,7 @@ fn lifecycle_move_converts_the_plugins_numbers_across_a_compaction() {
         .unwrap()
         .execute("UPDATE compartments SET harness = 'opencode'", [])
         .unwrap();
-    let store = Store::open(&dir.join("mode3.db")).unwrap();
+    let store = Store::open(&dir.join("sessions.db")).unwrap();
     let mut request = move_request(&dir);
     request.session = SessionRef::new("mock-runner", "opencode", "s1");
     request.newest = cortexkit_role_compaction::read::Cursor::new(4, "m6", "d");

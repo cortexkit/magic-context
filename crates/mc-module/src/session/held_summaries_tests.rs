@@ -73,7 +73,7 @@ fn only_summaries_newer_than_the_baseline_stay_in_memory() {
     assert!(shown(&session, head::M1_ID).contains("Summary 4: Newer work on the reader."));
 
     // A restart restores the baseline, and holds only what it needs.
-    let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.join("sessions.db")).unwrap();
     store.save(&session.key, &session.durable()).unwrap();
     let (mut restored, _, _, _, _) = fixture();
     restored.db = session.db.clone();
@@ -275,7 +275,7 @@ fn a_restore_keeps_one_copy_of_the_head_text() {
     assert!(!Arc::ptr_eq(&before, &current));
     assert!(Arc::ptr_eq(&before.m0, &current.m0));
 
-    let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.join("sessions.db")).unwrap();
     store.save(&session.key, &session.durable()).unwrap();
     let (mut restored, _, _, _, _) = fixture();
     restored.db = session.db.clone();
@@ -306,7 +306,7 @@ fn a_fold_reads_3700_summaries_back() {
     let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     session.db = Some(Arc::new(db));
     session.features.summarizer = true;
-    let store = crate::store::Store::open(&dir.join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.join("sessions.db")).unwrap();
     let saved: Vec<crate::app_read::IndexRow> = (1..=SUMMARIES * 2)
         .map(|n| crate::app_read::IndexRow {
             mid: format!("m{n}"),

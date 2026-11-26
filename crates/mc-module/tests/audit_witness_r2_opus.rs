@@ -188,7 +188,10 @@ impl InProcess {
                 } else {
                     ContextDb::create_for_tests(&db_path).unwrap()
                 };
-                (Some(db), Some(Store::open(&dir.join("mode3.db")).unwrap()))
+                (
+                    Some(db),
+                    Some(Store::open(&dir.join("sessions.db")).unwrap()),
+                )
             }
             None => (None, None),
         };

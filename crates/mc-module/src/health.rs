@@ -7,7 +7,7 @@ use crate::config::SettingsSource;
 
 pub(crate) struct Health {
     pub(crate) context_open: bool,
-    pub(crate) mode3_open: bool,
+    pub(crate) sessions_open: bool,
     pub(crate) session_count: usize,
     pub(crate) dreamer_enabled: bool,
     pub(crate) bus_connected: bool,
@@ -22,8 +22,8 @@ impl Health {
         if !self.context_open {
             reasons.push("context.db was not opened".into());
         }
-        if !self.mode3_open {
-            reasons.push("mode3.db was not opened".into());
+        if !self.sessions_open {
+            reasons.push("sessions.db was not opened".into());
         }
         #[cfg(feature = "managed-settings")]
         if self.settings_source == SettingsSource::Defaults {
@@ -33,17 +33,17 @@ impl Health {
         // Store constructors check or set the exact schema versions before
         // returning a handle. The schema cannot change while ck-mc serves it.
         let metrics = json!({
-            "headline": ["session_count", "bus_connected", "context_db_schema_version", "mode3_db_schema_version", "dreamer_enabled", "settings_source"],
+            "headline": ["session_count", "bus_connected", "context_db_schema_version", "sessions_db_schema_version", "dreamer_enabled", "settings_source"],
             "session_count": self.session_count,
             "bus_connected": self.bus_connected,
             "context_db_schema_version": self.context_open.then_some(crate::context_db::SCHEMA_VERSION),
-            "mode3_db_schema_version": self.mode3_open.then_some(crate::store::SCHEMA_VERSION),
+            "sessions_db_schema_version": self.sessions_open.then_some(crate::store::SCHEMA_VERSION),
             "dreamer_enabled": self.dreamer_enabled,
             "settings_source": self.settings_source.as_str(),
             "store": {
-                "opened": self.context_open && self.mode3_open,
+                "opened": self.context_open && self.sessions_open,
                 "context_db_schema_version": self.context_open.then_some(crate::context_db::SCHEMA_VERSION),
-                "mode3_db_schema_version": self.mode3_open.then_some(crate::store::SCHEMA_VERSION),
+                "sessions_db_schema_version": self.sessions_open.then_some(crate::store::SCHEMA_VERSION),
             },
             "sessions": {"count": self.session_count},
             "dreamer": {"enabled": self.dreamer_enabled},

@@ -568,7 +568,7 @@ async fn wrapup_drains_capped_runs_past_quota_to_anchored_target_without_rebuild
 async fn wrapup_target_answer_and_progress_survive_restart_and_revert_cancels_target() {
     let (mut session, client, settings) = ready();
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
     session.set_store(Some(store.clone()));
     let r = schedule(&mut session, &client, &settings, 2).await;
     let saved = store.load(&session.key).unwrap();

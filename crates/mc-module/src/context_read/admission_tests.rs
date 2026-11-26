@@ -135,7 +135,7 @@ async fn context_read_refuses_other_targets_versions_and_scopes() {
 async fn context_recent_is_refused_for_a_held_session_before_any_worker_starts() {
     use crate::agent_data::journal::{Cut, Moving, MovingState};
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let key = cortexkit_role_compaction::read::SessionRef::new("runner", "opencode2", "held");
     store.save(&key, &crate::store::Durable::default()).unwrap();
     let journal = crate::agent_data::Journal::in_memory();
@@ -177,7 +177,7 @@ async fn context_recent_is_refused_for_a_held_session_before_any_worker_starts()
 #[tokio::test]
 async fn context_recent_starts_no_worker_for_a_caller_other_than_colliculus() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let key = cortexkit_role_compaction::read::SessionRef::new("runner", "opencode2", "saved");
     store.save(&key, &crate::store::Durable::default()).unwrap();
     let module = crate::module::Module::new(

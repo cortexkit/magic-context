@@ -286,7 +286,7 @@ async fn werni_sized_writes_stay_within_budget() {
     let mut measurements = Measurements::default();
     let db = ContextDb::open(&dir.join("context.db")).unwrap();
     let recorder = db.lock_recorder();
-    let store = Store::open(&dir.join("mode3.db")).unwrap();
+    let store = Store::open(&dir.join("sessions.db")).unwrap();
     let moved = move_in(
         db,
         &store,

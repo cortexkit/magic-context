@@ -188,7 +188,7 @@ async fn app_read_summary_reduce_publication_and_all_six_methods() {
             [range[0].as_u64().unwrap() as usize..range[1].as_u64().unwrap() as usize],
         "appneedle"
     );
-    let conn = rusqlite::Connection::open(dir.path().join("mode3.db")).unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("sessions.db")).unwrap();
     let state: String = conn
         .query_row(
             "SELECT state FROM sessions WHERE session=?1",

@@ -286,7 +286,7 @@ async fn move_floor_a_moved_session_never_publishes_a_view_without_a_cut() {
 #[tokio::test]
 async fn move_floor_survives_a_restart() {
     let moved = moved("restart", true);
-    let store = Arc::new(crate::store::Store::open(&moved.dir.0.join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&moved.dir.0.join("sessions.db")).unwrap());
     store
         .save(&moved.route.session, &moved.session.durable())
         .unwrap();

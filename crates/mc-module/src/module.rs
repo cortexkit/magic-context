@@ -407,7 +407,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     pub(crate) fn health(&self, bus_connected: bool) -> subc_client_rs::HealthReport {
         crate::health::Health {
             context_open: self.inner.db.is_some(),
-            mode3_open: self.inner.store.is_some(),
+            sessions_open: self.inner.store.is_some(),
             session_count: self.inner.setup_count.load(Ordering::Relaxed),
             dreamer_enabled: self.inner.dreamer_enabled.load(Ordering::Relaxed),
             bus_connected,

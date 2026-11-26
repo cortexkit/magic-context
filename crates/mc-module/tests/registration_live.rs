@@ -311,7 +311,10 @@ fn fenced_module_env(scratch: &Path) -> BTreeMap<String, PathBuf> {
     let stores = scratch.join("magic-context");
     fs::create_dir_all(&stores).unwrap();
     env.insert("MAGIC_CONTEXT_DB".into(), stores.join("context.db"));
-    env.insert("MAGIC_CONTEXT_MODE3_STORE".into(), stores.join("mode3.db"));
+    env.insert(
+        "MAGIC_CONTEXT_SESSIONS_STORE".into(),
+        stores.join("sessions.db"),
+    );
     env.insert("MAGIC_CONTEXT_STORAGE_DIR".into(), stores.clone());
     env.insert("MAGIC_CONTEXT_TEST_DATA_DIR".into(), stores.clone());
     env.insert(

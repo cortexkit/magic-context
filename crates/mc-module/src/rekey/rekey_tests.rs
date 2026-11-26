@@ -151,7 +151,7 @@ fn rekey_preserves_every_table_and_restores_session_state() {
     use std::sync::Arc;
 
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("mode3.db");
+    let path = root.path().join("sessions.db");
     let context_path = root.path().join("context.db");
     let db = Arc::new(ContextDb::create_for_tests(&context_path).unwrap());
     let store = Store::open(&path).unwrap();
@@ -356,7 +356,7 @@ fn rekey_preserves_every_table_and_restores_session_state() {
 #[test]
 fn rekey_refuses_unfinished_historian_attempts_without_changing_either_dump() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("mode3.db");
+    let path = root.path().join("sessions.db");
     let context = root.path().join("context.db");
     basic_fixture(&path);
     drop(crate::context_db::ContextDb::create_for_tests(&context).unwrap());
@@ -412,7 +412,7 @@ fn rekey_refuses_unfinished_historian_attempts_without_changing_either_dump() {
 #[test]
 fn rekey_table_list_equals_current_store_schema() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("mode3.db");
+    let path = root.path().join("sessions.db");
     basic_fixture(&path);
     let connection = Connection::open(path).unwrap();
     assert_eq!(session_tables(&connection).unwrap(), TABLES);
@@ -421,7 +421,7 @@ fn rekey_table_list_equals_current_store_schema() {
 #[test]
 fn rekey_discovers_future_session_tables_and_quotes_their_names() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("mode3.db");
+    let path = root.path().join("sessions.db");
     basic_fixture(&path);
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TABLE \"future\"\"table\" (runner TEXT,harness TEXT,session TEXT,value BLOB); INSERT INTO \"future\"\"table\" VALUES ('thalamus-pi','pi','head-one',X'ABCD');").unwrap();
@@ -448,7 +448,7 @@ fn rekey_refusals_preserve_the_full_dump() {
         "schema_new",
     ] {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("mode3.db");
+        let path = root.path().join("sessions.db");
         basic_fixture(&path);
         let mut request = request();
         let expected = match reason {
@@ -494,7 +494,7 @@ fn rekey_refusals_preserve_the_full_dump() {
 #[test]
 fn rekey_a_late_update_error_rolls_back_every_session_and_table() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("mode3.db");
+    let path = root.path().join("sessions.db");
     basic_fixture(&path);
     Connection::open(&path).unwrap().execute_batch(
         "CREATE TRIGGER forbid_second_rekey BEFORE UPDATE ON sessions WHEN OLD.session='head-two' BEGIN SELECT RAISE(ABORT, 'blocked second rekey'); END;"
@@ -509,7 +509,7 @@ fn rekey_a_late_update_error_rolls_back_every_session_and_table() {
 #[test]
 fn rekey_shared_store_leases_refuse_offline_rekey_but_allow_two_stores() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("mode3.db");
+    let path = root.path().join("sessions.db");
     basic_fixture(&path);
     let first = Store::open(&path).unwrap();
     let second = Store::open(&path).unwrap();
@@ -534,7 +534,7 @@ fn rekey_shared_store_leases_refuse_offline_rekey_but_allow_two_stores() {
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            std::fs::metadata(root.path().join("mode3.db.lock"))
+            std::fs::metadata(root.path().join("sessions.db.lock"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -547,7 +547,7 @@ fn rekey_shared_store_leases_refuse_offline_rekey_but_allow_two_stores() {
 #[test]
 fn rekey_injected_open_file_check_refuses_without_changing_the_dump() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("mode3.db");
+    let path = root.path().join("sessions.db");
     basic_fixture(&path);
     let before = dump(&path);
     let error = super::rekey_with_check(
@@ -569,7 +569,7 @@ fn rekey_injected_open_file_check_refuses_without_changing_the_dump() {
 fn rekey_refuses_agent_data_journal_entries_before_rewriting_any_session() {
     for target_entry in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("mode3.db");
+        let path = root.path().join("sessions.db");
         basic_fixture(&path);
         let request = request();
         let runner = if target_entry {
@@ -598,7 +598,7 @@ fn rekey_refuses_agent_data_journal_entries_before_rewriting_any_session() {
 #[test]
 fn rekey_refuses_mode3_move_records_before_rewriting_any_session() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("mode3.db");
+    let path = root.path().join("sessions.db");
     basic_fixture(&path);
     let context_path = path.with_file_name("context.db");
     Connection::open(&context_path).unwrap().execute_batch(

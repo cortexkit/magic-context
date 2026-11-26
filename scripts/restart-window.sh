@@ -7,7 +7,7 @@
 #       --dists <prebuilt checkout> --context-fence <N> --store-fence <M> \
 #       [--first '<command>' ...] [--then '<command>' ...] [--dry-run]
 #
-# --store-fence is the version of mode3.db, the store the mode-3 ck-mc keeps;
+# --store-fence is the version of sessions.db, the module's session store;
 # the old module's store.db is cloned for a rollback and otherwise left alone.
 # Each --first command runs before anything is touched; a failure stops the
 # script with nothing changed. Each --then command runs after ck-mc is placed.
@@ -22,7 +22,7 @@
 # Order matters. ck-mc is stopped first, so nothing holds either store. context.db
 # is migrated by the new plugin code before the new ck-mc starts, because ck-mc
 # reads tables the newer context.db migrations create. The new ck-mc then migrates
-# store.db on its first open during placement.
+# sessions.db on its first open during placement.
 #
 # On a failure before any migration commits, both stores are restored from the
 # clone taken at the start and the old ck-mc is restarted; it is then safe to start
@@ -34,6 +34,7 @@ umask 077
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="${MAGIC_CONTEXT_STORAGE_DIR:-$HOME/.local/share/cortexkit/magic-context}"
+PREVIOUS_SESSION_STORE=mode3.db
 SHA="" STAGED="" DISTS="" CONTEXT_FENCE="" STORE_FENCE="" DRY_RUN=0
 # Other modules' steps that must run while the hosts are still closed. FIRST
 # steps run before anything here is touched (a launch hold), THEN steps after
@@ -65,17 +66,30 @@ SENTINELS=(com.cortexkit.magic-context.cache-bust-sentinel com.cortexkit.magic-c
 say() { echo "[$(date -u +%T)] $*"; }
 notify() { echo; echo "==> $1"; }
 status() { [ "$DRY_RUN" -eq 1 ] || echo "$1 $(date -u +%FT%TZ) $BK" > "$STATUS"; }
-holders() { lsof "$DATA/context.db" "$DATA/context.db-wal" "$DATA/store.db" "$DATA/store.db-wal" "$DATA/mode3.db" "$DATA/mode3.db-wal" 2>/dev/null | awk 'NR>1{print $1"/"$2}' | sort -u; }
+holders() {
+    local db suffix paths=()
+    for db in context.db store.db sessions.db "$PREVIOUS_SESSION_STORE"; do
+        for suffix in '' -wal -shm; do
+            if [ -e "$DATA/$db$suffix" ]; then paths+=("$DATA/$db$suffix"); fi
+        done
+    done
+    lsof "${paths[@]}" 2>/dev/null | awk 'NR>1{print $1"/"$2}' | sort -u
+}
 # A read-only open of a cleanly closed WAL database (no -wal file) fails with
 # SQLITE_CANTOPEN, so such a file is opened immutable instead. Every reader here
 # runs with the hosts and ck-mc stopped, so nothing changes it underneath.
 ro_uri() { if [ -e "$1-wal" ]; then echo "file:$1?mode=ro"; else echo "file:$1?immutable=1"; fi; }
 context_version() { sqlite3 "$(ro_uri "$DATA/context.db")" 'SELECT MAX(version) FROM schema_migrations'; }
-# The old module's store. The mode-3 ck-mc keeps its own state in mode3.db
+# The old module's store. ck-mc keeps its session state in sessions.db
 # instead and leaves store.db as it was, so store.db is only cloned for a
 # rollback and logged.
 store_versions() { [ -f "$DATA/store.db" ] || { echo "absent"; return; }; sqlite3 "$(ro_uri "$DATA/store.db")" 'SELECT namespace||":"||MAX(version) FROM cortexkit_schema_version GROUP BY namespace' | tr '\n' ' '; }
-mode3_version() { [ -f "$DATA/mode3.db" ] || { echo "absent"; return; }; sqlite3 "$(ro_uri "$DATA/mode3.db")" 'PRAGMA user_version'; }
+sessions_version() {
+    local path="$DATA/sessions.db"
+    [ -f "$path" ] || path="$DATA/$PREVIOUS_SESSION_STORE"
+    [ -f "$path" ] || { echo "absent"; return; }
+    sqlite3 "$(ro_uri "$path")" 'PRAGMA user_version'
+}
 sentinels_back() {
     for s in "${SENTINELS[@]}"; do
         launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$s.plist" 2>/dev/null || true
@@ -119,8 +133,10 @@ sig=$(codesign -d --verbose=2 "$STAGED" 2>&1)
 ver=$("$STAGED" --version 2>/dev/null)
 [[ "$ver" == *"$SHA"* ]] || { echo "staged ck-mc --version does not report $SHA" >&2; exit 2; }
 fences=$("$STAGED" --print-fences 2>/dev/null)
-[ "$fences" = "context.db=$CONTEXT_FENCE mode3.db=$STORE_FENCE" ] \
-    || { echo "staged ck-mc opens '$fences', not context.db=$CONTEXT_FENCE mode3.db=$STORE_FENCE" >&2; exit 2; }
+[ "$fences" = "context.db=$CONTEXT_FENCE sessions.db=$STORE_FENCE" ] \
+    || { echo "staged ck-mc opens '$fences', not context.db=$CONTEXT_FENCE sessions.db=$STORE_FENCE" >&2; exit 2; }
+[ ! -e "$DATA/$PREVIOUS_SESSION_STORE" ] || [ ! -e "$DATA/sessions.db" ] \
+    || { echo "both $DATA/$PREVIOUS_SESSION_STORE and $DATA/sessions.db exist; determine which holds the session state before placing" >&2; exit 2; }
 command -v bun >/dev/null || { echo "bun not on PATH" >&2; exit 2; }
 
 others=$(holders | grep -v '^ck-mc/' || true)
@@ -131,8 +147,9 @@ if [ -n "$others" ]; then
     [ "$DRY_RUN" -eq 1 ] || exit 2
 fi
 [ -n "$(context_version)" ] || { echo "cannot read the context.db schema version" >&2; exit 2; }
-say "preflight ok: context.db $(context_version) -> $CONTEXT_FENCE, mode3.db $(mode3_version) -> $STORE_FENCE, store.db $(store_versions)(kept), ck-mc $SHA, ${#FIRST[@]} step(s) first, ${#THEN[@]} after placement"
+say "preflight ok: context.db $(context_version) -> $CONTEXT_FENCE, sessions.db $(sessions_version) -> $STORE_FENCE, store.db $(store_versions)(kept), ck-mc $SHA, ${#FIRST[@]} step(s) first, ${#THEN[@]} after placement"
 if [ "$DRY_RUN" -eq 1 ]; then
+    if [ -e "$DATA/$PREVIOUS_SESSION_STORE" ]; then say "placement would rename $PREVIOUS_SESSION_STORE to sessions.db"; fi
     for step in ${FIRST[@]+"${FIRST[@]}"}; do say "would first run: $step"; done
     for step in ${THEN[@]+"${THEN[@]}"}; do say "would then run: $step"; done
     notify "Dry run: preflight passed. Nothing changed."
@@ -155,14 +172,14 @@ ck module stop magic-context || true
 for _ in $(seq 1 60); do [ -z "$(holders)" ] && break; sleep 1; done
 [ -z "$(holders)" ] || restore_and_fail "a store is still held after stopping ck-mc: $(holders | tr '\n' ' ')"
 
-say "schema before: context=$(context_version) mode3=$(mode3_version) store=$(store_versions)"
+say "schema before: context=$(context_version) sessions=$(sessions_version) store=$(store_versions)"
 sqlite3 "$DATA/context.db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || restore_and_fail "context.db checkpoint"
-for db in store.db mode3.db; do
+for db in store.db sessions.db "$PREVIOUS_SESSION_STORE"; do
     [ -f "$DATA/$db" ] || continue
     sqlite3 "$DATA/$db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || restore_and_fail "$db checkpoint"
 done
 mkdir -p "$BK/pre"
-for db in context.db store.db mode3.db; do
+for db in context.db store.db sessions.db "$PREVIOUS_SESSION_STORE"; do
     [ -f "$DATA/$db" ] || continue
     cp -c "$DATA/$db" "$BK/pre/" || restore_and_fail "pre-window clone of $db"
 done
@@ -197,19 +214,20 @@ done
 (cd "$REPO" && bun -e "await import('./packages/plugin/dist/index.js'); await import('./packages/pi-plugin/dist/index.js'); console.log('dists load ok')") \
     || post_fail "the swapped dists do not load"
 
-say "placing ck-mc $SHA (its first open creates or migrates mode3.db to $STORE_FENCE)"
+say "placing ck-mc $SHA (its first open creates or migrates sessions.db to $STORE_FENCE)"
 # The old ck-mc refuses the migrated context.db and may not start; placement
 # replaces it regardless. Give placement's version and health waits headroom.
 ck module start magic-context || true
 # Placement runs the target commit's own script: it is the one that knows how
-# the staged build reports its store versions (the mode-3 build reports
-# mode3.db where older builds reported store.db).
+# the staged build reports its store versions and can switch the filename while
+# the module is stopped.
 (cd "$DISTS" && PLACE_CK_MC_POLL_SECONDS=5 bash scripts/place-ck-mc.sh --source-ref "$SHA" "$STAGED")
 rc=$?
 [ "$rc" -eq 0 ] || post_fail "ck-mc placement exited $rc"
-got=$(mode3_version)
-[ "$got" = "$STORE_FENCE" ] || post_fail "mode3.db is at $got after placement, expected $STORE_FENCE"
-say "schema after: context=$(context_version) mode3=$got store=$(store_versions)"
+[ -f "$DATA/sessions.db" ] || post_fail "sessions.db is missing after placement"
+got=$(sessions_version)
+[ "$got" = "$STORE_FENCE" ] || post_fail "sessions.db is at $got after placement, expected $STORE_FENCE"
+say "schema after: context=$(context_version) sessions=$got store=$(store_versions)"
 
 for step in ${THEN[@]+"${THEN[@]}"}; do
     say "running: $step"

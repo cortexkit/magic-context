@@ -28,7 +28,7 @@ fn command(root: &Path) -> Command {
         .env("XDG_DATA_HOME", root)
         .env("XDG_CONFIG_HOME", root)
         .env("MAGIC_CONTEXT_DB", root.join("must-not-open-context.db"))
-        .env("MAGIC_CONTEXT_MODE3_STORE", root.join("mode3.db"))
+        .env("MAGIC_CONTEXT_SESSIONS_STORE", root.join("sessions.db"))
         .arg("rekey-runner");
     #[cfg(target_os = "linux")]
     for pid in rekey_proc::unrelated_unreadable_pids() {
@@ -55,7 +55,7 @@ fn run(root: &Path, extra: &[&str]) -> Output {
 }
 
 fn fixture(root: &Path) {
-    let store = Store::open(&root.join("mode3.db")).unwrap();
+    let store = Store::open(&root.join("sessions.db")).unwrap();
     store
         .save(&SessionRef::new("old", "pi", "s"), &Durable::default())
         .unwrap();
@@ -104,7 +104,7 @@ fn rekey_cli_refuses_a_session_a_move_holds_with_its_code_and_cut() {
             assert!(output.stdout.is_empty());
         }
     }
-    let store = Store::open(&root.path().join("mode3.db")).unwrap();
+    let store = Store::open(&root.path().join("sessions.db")).unwrap();
     assert!(store.load(&SessionRef::new("old", "pi", "s")).is_some());
     assert!(store.load(&SessionRef::new("new", "pi", "s")).is_none());
     assert!(!root.path().join("must-not-open-context.db").exists());
@@ -127,7 +127,7 @@ fn rekey_cli_dry_run_and_write_need_no_context_database() {
         assert_eq!(summary["rows_per_table"]["sessions"], 1);
         assert_eq!(summary["dry_run"], dry);
         assert!(!root.path().join("must-not-open-context.db").exists());
-        let store = Store::open(&root.path().join("mode3.db")).unwrap();
+        let store = Store::open(&root.path().join("sessions.db")).unwrap();
         assert_eq!(
             store.load(&SessionRef::new("old", "pi", "s")).is_some(),
             dry
@@ -148,7 +148,7 @@ fn rekey_cli_help_says_stop_ck_mc_and_never_opens_a_store() {
     assert!(String::from_utf8(output.stdout)
         .unwrap()
         .contains("ck-mc must be stopped"));
-    assert!(!root.path().join("mode3.db").exists());
+    assert!(!root.path().join("sessions.db").exists());
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn rekey_cli_fails_closed_without_lsof() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("process_check_failed"));
-    let store = Store::open(&root.path().join("mode3.db")).unwrap();
+    let store = Store::open(&root.path().join("sessions.db")).unwrap();
     assert!(store.load(&SessionRef::new("old", "pi", "s")).is_some());
     assert!(store.load(&SessionRef::new("new", "pi", "s")).is_none());
 }
@@ -222,7 +222,7 @@ fn helper(root: &Path, name: &str) -> Holder {
         .args(["--exact", name, "--ignored", "--nocapture"])
         .env_clear()
         .env("HOME", root)
-        .env("REKEY_TEST_STORE", root.join("mode3.db"))
+        .env("REKEY_TEST_STORE", root.join("sessions.db"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -335,7 +335,7 @@ fn rekey_cli_unreadable_process_requires_explicit_ignore_pid() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let store = Store::open(&root.path().join("mode3.db")).unwrap();
+    let store = Store::open(&root.path().join("sessions.db")).unwrap();
     assert!(store.load(&SessionRef::new("old", "pi", "s")).is_none());
     assert!(store.load(&SessionRef::new("new", "pi", "s")).is_some());
 }

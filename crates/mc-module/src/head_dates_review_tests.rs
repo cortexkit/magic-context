@@ -34,7 +34,7 @@ fn timed_head(dir: &std::path::Path) -> (Session, Settings) {
         .index
         .extend((1..=60).map(|n| written(n, &format!("m{n}"), time_of(n))));
     session.store = Some(Arc::new(
-        crate::store::Store::open(&dir.join("mode3.db")).unwrap(),
+        crate::store::Store::open(&dir.join("sessions.db")).unwrap(),
     ));
     (session, settings)
 }

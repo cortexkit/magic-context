@@ -280,7 +280,7 @@ impl RunnerClient for HostClient {
         if let Some(dir) = self.snapshot_store.lock().unwrap().clone() {
             let snapshot = dir.join(format!("store-at-{}.db", request.view.version));
             let _ = std::fs::remove_file(&snapshot);
-            rusqlite::Connection::open(dir.join("mode3.db"))
+            rusqlite::Connection::open(dir.join("sessions.db"))
                 .unwrap()
                 .execute("VACUUM INTO ?1", [snapshot.to_string_lossy()])
                 .unwrap();
@@ -426,7 +426,10 @@ impl InProcess {
                 } else {
                     ContextDb::create_for_tests(&db_path).unwrap()
                 };
-                (Some(db), Some(Store::open(&dir.join("mode3.db")).unwrap()))
+                (
+                    Some(db),
+                    Some(Store::open(&dir.join("sessions.db")).unwrap()),
+                )
             }
             None => (None, None),
         };
@@ -2778,7 +2781,7 @@ async fn a_crash_right_after_handing_over_a_view_keeps_its_cut_and_baseline() {
     let crashed = scratch("crash-after-view-restore");
     std::fs::copy(
         dir.join(format!("store-at-{handed}.db")),
-        crashed.join("mode3.db"),
+        crashed.join("sessions.db"),
     )
     .unwrap();
     // A crash keeps the write-ahead log; a main-file copy would lose committed summaries.
@@ -4246,7 +4249,7 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
     let open = || {
         (
             ContextDb::open(&dir.join("context.db")).unwrap(),
-            Store::open(&dir.join("mode3.db")).unwrap(),
+            Store::open(&dir.join("sessions.db")).unwrap(),
         )
     };
     let (db, store) = open();
@@ -4372,7 +4375,7 @@ fn a_session_that_changes_harness_moves_every_row_to_the_runners_harness() {
     let open = || {
         (
             ContextDb::open(&dir.join("context.db")).unwrap(),
-            Store::open(&dir.join("mode3.db")).unwrap(),
+            Store::open(&dir.join("sessions.db")).unwrap(),
         )
     };
     let (db, store) = open();

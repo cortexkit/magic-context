@@ -253,7 +253,7 @@ impl Machine {
         db: &std::path::Path,
         context: ContextDb,
     ) -> Module<Mover> {
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let journal = Arc::new(Journal::load(journal_file::path(db)));
         Module::with_journal(
             Mover(Arc::clone(shared)),
@@ -951,7 +951,7 @@ async fn activate_rechecks_the_staged_bytes_and_the_rows_here() {
 /// Hold `mode3.db`'s write lock, as another writer would, so the store's
 /// zero busy timeout refuses its next write.
 fn hold_store(machine: &Machine) -> Connection {
-    let conn = Connection::open(machine.dir.path().join("mode3.db")).unwrap();
+    let conn = Connection::open(machine.dir.path().join("sessions.db")).unwrap();
     conn.execute_batch("BEGIN IMMEDIATE").unwrap();
     conn
 }
@@ -985,7 +985,11 @@ async fn an_install_cut_short_is_finished_by_a_repeat_and_never_aborted() {
     let lock = hold_store(&b);
     let refused = b.op("activate", CUT, &["s1"]).await.unwrap_err();
     assert_eq!(code(&refused), "unavailable");
-    assert!(refused.message.contains("mode3.db"), "{}", refused.message);
+    assert!(
+        refused.message.contains("sessions.db"),
+        "{}",
+        refused.message
+    );
     assert_eq!(b.moving("s1"), Some((CUT.into(), MovingState::Activating)));
     assert_eq!(b.status(CUT).await, "imported");
     assert_eq!(b.gate("s1"), Err(SESSION_MOVING));

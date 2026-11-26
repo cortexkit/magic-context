@@ -37,7 +37,7 @@ impl ProcFixture {
     ) -> Result<(), String> {
         scan_proc_at(
             self.root.path(),
-            &[PathBuf::from("/store/mode3.db")],
+            &[PathBuf::from("/store/sessions.db")],
             &ignore.iter().copied().collect(),
             read_link,
         )
@@ -85,7 +85,7 @@ fn rekey_proc_readable_holder_wins_over_incomplete_scan_and_ignore_pid() {
                 if reads.get() == 1 {
                     denied(fd)
                 } else {
-                    Ok(PathBuf::from("/store/mode3.db"))
+                    Ok(PathBuf::from("/store/sessions.db"))
                 }
             })
             .unwrap_err();
@@ -110,7 +110,7 @@ fn rekey_proc_ignored_pid_with_mixed_descriptor_access_still_refuses() {
             if reads.get() == 1 {
                 denied(fd)
             } else {
-                Ok(PathBuf::from("/store/mode3.db"))
+                Ok(PathBuf::from("/store/sessions.db"))
             }
         })
         .unwrap_err();

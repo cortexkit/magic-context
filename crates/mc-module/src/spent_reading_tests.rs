@@ -293,7 +293,7 @@ async fn spent_the_reading_stays_spent_across_a_restart() {
             assert!(session.unconfirmed.is_empty());
         }
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
         store.save(session.key(), &session.durable()).unwrap();
         let saved = store.load(session.key()).expect("the saved state");
 

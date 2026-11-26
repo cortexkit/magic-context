@@ -30,7 +30,7 @@ fn timed_head(dir: &std::path::Path, written_at: impl Fn(u64) -> u64) -> (Sessio
         entry
     }));
     session.store = Some(Arc::new(
-        crate::store::Store::open(&dir.join("mode3.db")).unwrap(),
+        crate::store::Store::open(&dir.join("sessions.db")).unwrap(),
     ));
     (session, settings)
 }

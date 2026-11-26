@@ -142,7 +142,7 @@ mod release_tests {
     #[test]
     fn app_read_a_released_session_is_evicted_and_read_again_from_its_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
         let snapshot = super::super::tests::fixture();
         super::super::tests::save_fixture(&store, &snapshot, None);
         let key = snapshot.key.clone();

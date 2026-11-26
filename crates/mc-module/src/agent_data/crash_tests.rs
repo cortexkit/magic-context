@@ -40,7 +40,7 @@ impl Machine {
             Mover(Arc::clone(&shared)),
             Settings::default(),
             Some(ContextDb::open(&db).unwrap()),
-            Some(Store::open(&dir.path().join("mode3.db")).unwrap()),
+            Some(Store::open(&dir.path().join("sessions.db")).unwrap()),
             journal,
             agent_data,
         );
@@ -478,7 +478,11 @@ async fn an_activate_stopped_between_its_two_refs_finishes_both_before_it_succee
                 );
                 let refused = refused.unwrap_err();
                 assert_eq!(code(&refused), "unavailable");
-                assert!(refused.message.contains("mode3.db"), "{}", refused.message);
+                assert!(
+                    refused.message.contains("sessions.db"),
+                    "{}",
+                    refused.message
+                );
                 // A repeat while the store is still busy does not succeed.
                 let again = b.op("activate", CUT, &BOTH).await.unwrap_err();
                 assert_eq!(code(&again), "unavailable", "{stop:?}");

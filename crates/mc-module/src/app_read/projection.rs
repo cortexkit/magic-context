@@ -839,7 +839,7 @@ mod tests {
     #[tokio::test]
     async fn app_read_refreshes_changed_rows_in_the_saved_snapshot_after_a_minute() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+        let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
         let app = crate::app_read::AppRead::new(Some(store.path.clone()), None);
         let mut session = session();
         session.index_ready = true;
@@ -879,7 +879,7 @@ mod tests {
     #[tokio::test]
     async fn app_read_dirty_checkpoint_writes_only_changed_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mode3.db");
+        let path = dir.path().join("sessions.db");
         let store = Arc::new(crate::store::Store::open(&path).unwrap());
         let app = crate::app_read::AppRead::new(Some(path.clone()), None);
         let mut session = session();
@@ -965,7 +965,7 @@ mod tests {
     #[tokio::test]
     async fn app_read_cut_and_revert_delete_checkpoint_rows_before_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mode3.db");
+        let path = dir.path().join("sessions.db");
         let store = Arc::new(crate::store::Store::open(&path).unwrap());
         let app = crate::app_read::AppRead::new(Some(path.clone()), None);
         let mut session = session();
@@ -1028,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn offering_a_view_inserts_its_decision_row_and_confirming_it_updates_only_that_row() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mode3.db");
+        let path = dir.path().join("sessions.db");
         let store = Arc::new(crate::store::Store::open(&path).unwrap());
         let app = crate::app_read::AppRead::new(Some(path.clone()), None);
         let mut session = session();

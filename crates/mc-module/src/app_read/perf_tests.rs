@@ -38,7 +38,7 @@ fn entry(ordinal: u64) -> Entry {
 #[ignore = "large synthetic session app-read cost measurement"]
 async fn app_read_seed_cost() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(crate::store::Store::open(&dir.path().join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.path().join("sessions.db")).unwrap());
     let app = crate::app_read::AppRead::new(Some(store.path.clone()), None);
     let route = Route {
         session: SessionRef::new("runner", "seed", "cost"),

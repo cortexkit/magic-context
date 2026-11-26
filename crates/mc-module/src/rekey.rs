@@ -13,10 +13,10 @@ mod process_check;
 
 pub const HELP: &str = "Usage: ck-mc rekey-runner --from <module> --to <module> --harness <h> --session <id> [--session <id> ...] [--dry-run] [--ignore-pid <pid> ...]
 
-Re-key existing sessions in mode3.db without migrating either database.
+Re-key existing sessions in sessions.db without migrating either database.
 ck-mc must be stopped, with automatic restarts disabled: this command refuses a
 store held open by another process.
-Linux checks /proc for open files; macOS requires lsof. MAGIC_CONTEXT_MODE3_STORE
+Linux checks /proc for open files; macOS requires lsof. MAGIC_CONTEXT_SESSIONS_STORE
 overrides the store path, as for move-in. context.db (MAGIC_CONTEXT_DB) is checked read-only:
 summary_in_flight means historian stage attempts must finish before re-keying.
 Move records in context.db or agent-data/journal.json also prevent re-keying.

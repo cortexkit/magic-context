@@ -294,7 +294,7 @@ try {
     const binary = join(repo, "target/release/ck-mc");
     const moduleDir = copyContext(upgraded, "module-startup");
     const fences = run("candidate-ck-mc-fences", [binary, "--print-fences"]).trim();
-    if (fences !== "context.db=105 mode3.db=5")
+    if (fences !== "context.db=105 sessions.db=5")
         throw new Error(`Unexpected ck-mc fences: ${fences}`);
     const startup = run("ck-mc-private-startup", [
         process.execPath,
@@ -347,5 +347,5 @@ process.exitCode = findings.length ? 1 : 0;
 console.log(
     findings.length
         ? `REHEARSAL_FAIL findings=${findings.length}\n${findings.join("\n")}`
-        : "REHEARSAL_PASS context=105 mode3=5 first_pass_hosts=3 database_doctor=clean",
+        : "REHEARSAL_PASS context=105 sessions=5 first_pass_hosts=3 database_doctor=clean",
 );

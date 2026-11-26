@@ -11,7 +11,7 @@ use cortexkit_role_compaction::ride::RideCause;
 async fn quiet_worker_retries_its_last_failed_checkpoint_without_a_new_job() {
     let f = Fixture::new("worker", false).await;
     f.drain_quiet_prerequisites().await;
-    let db = rusqlite::Connection::open(f._dir.path().join("mode3.db")).unwrap();
+    let db = rusqlite::Connection::open(f._dir.path().join("sessions.db")).unwrap();
     db.execute_batch("CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL, 'checkpoint test failure'); END;").unwrap();
     let reply = f
         .module

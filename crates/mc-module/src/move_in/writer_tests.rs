@@ -260,7 +260,7 @@ fn every_move_write_transaction_has_bounded_work_and_releases_the_lock() {
     let _guard = observe(&db, &path, Clock::Stop, 1);
     move_in(
         db,
-        &Store::open(&dir.path().join("mode3.db")).unwrap(),
+        &Store::open(&dir.path().join("sessions.db")).unwrap(),
         &crate::pass::Settings::default().into(),
         &request(2_000),
     )

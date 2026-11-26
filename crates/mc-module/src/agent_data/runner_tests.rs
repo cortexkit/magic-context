@@ -280,7 +280,7 @@ impl Machine {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("context.db");
         let context = ContextDb::create_for_tests(&db).unwrap();
-        let store = Store::open(&dir.path().join("mode3.db")).unwrap();
+        let store = Store::open(&dir.path().join("sessions.db")).unwrap();
         let journal = Arc::new(Journal::load(journal_file::path(&db)));
         let offered = Arc::new(Mutex::new(Vec::new()));
         let client = Client {

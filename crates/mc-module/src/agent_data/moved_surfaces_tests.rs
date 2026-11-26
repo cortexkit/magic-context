@@ -17,7 +17,7 @@ impl Machine {
     /// project and its preset. A restart reads the project's
     /// sessions from it.
     fn served_before(&self, session: &str) {
-        let conn = Connection::open(self.dir.path().join("mode3.db")).unwrap();
+        let conn = Connection::open(self.dir.path().join("sessions.db")).unwrap();
         conn.execute(
             "INSERT INTO memory_contexts (runner, harness, session, context) VALUES (?1, ?2, ?3, ?4)",
             params![RUNNER, HARNESS, session, json!({"project_id": PROJECT}).to_string()],

@@ -85,7 +85,7 @@ async fn quiet_review_a_freed_session_keeps_the_bound_on_an_immediate_retry() {
     let (mut session, client, settings) = refusal_fixture();
     // A store, so the apps' decisions are saved and the session can be freed.
     let dir = scratch("quiet-review-retry");
-    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.join("sessions.db")).unwrap());
     session.set_store(Some(Arc::clone(&store)));
     let app = crate::app_read::AppRead::new(Some(store.path.clone()), None);
     // The first view drops only the old outputs; the model's drops come later.
@@ -222,7 +222,7 @@ async fn large_head(label: &str) -> LargeHead {
         tx.commit().unwrap();
     });
     session.db = Some(Arc::new(db));
-    let store = Arc::new(crate::store::Store::open(&dir.join("mode3.db")).unwrap());
+    let store = Arc::new(crate::store::Store::open(&dir.join("sessions.db")).unwrap());
     session.set_store(Some(Arc::clone(&store)));
     let app = crate::app_read::AppRead::new(Some(store.path.clone()), None);
     session.load_summaries();

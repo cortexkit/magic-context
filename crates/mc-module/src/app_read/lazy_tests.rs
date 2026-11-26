@@ -130,7 +130,7 @@ fn same_reads(left: &mut Replica, right: &mut Replica, key: &SessionRef) {
 #[test]
 fn app_read_lazy_startup_and_reload_match_eager_answers() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshot = saved(&store, "cold");
     let other = saved(&store, "untouched");
     let mut lazy = cold(&store);
@@ -166,7 +166,7 @@ fn app_read_lazy_startup_and_reload_match_eager_answers() {
 #[test]
 fn app_read_lazy_write_before_read_merges_the_saved_checkpoint_like_eager() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshot = saved(&store, "updated");
     for scenario in 0..4 {
         let mut lazy = cold(&store);
@@ -205,7 +205,7 @@ fn app_read_lazy_write_before_read_merges_the_saved_checkpoint_like_eager() {
 #[test]
 fn app_read_lazy_search_refuses_unloaded_cross_harness_collision() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshot = saved(&store, "collision");
     let mut other = snapshot.clone();
     other.key.harness = "pi".into();
@@ -231,7 +231,7 @@ fn app_read_lazy_search_refuses_unloaded_cross_harness_collision() {
 #[test]
 fn app_read_lazy_eviction_bounds_idle_payloads_and_pins_live_updates() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshots: Vec<_> = (0..12).map(|n| saved(&store, &format!("s{n}"))).collect();
     let mut lazy = cold(&store);
     lazy.update(delta(&snapshots[0]));
@@ -267,7 +267,7 @@ async fn stats(app: &AppRead) -> (usize, usize) {
 #[tokio::test]
 async fn app_read_lazy_two_first_reads_load_one_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshot = saved(&store, "concurrent");
     let app = AppRead::new(Some(store.path.clone()), Some(context_path(&store)));
     let p = json!({"session":snapshot.key,"message_ids":["m1","m2"]});
@@ -283,7 +283,7 @@ async fn app_read_lazy_two_first_reads_load_one_checkpoint() {
 #[tokio::test]
 async fn app_read_lazy_load_racing_update_loses_no_saved_or_new_rows() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshot = saved(&store, "race");
     let mut eager = eager(&store);
     let app = AppRead::new(Some(store.path.clone()), Some(context_path(&store)));
@@ -320,7 +320,7 @@ async fn app_read_lazy_load_racing_update_loses_no_saved_or_new_rows() {
 fn app_read_lazy_active_head_keeps_view_and_as_of_identical() {
     use cortexkit_role_compaction::view::{Edit, View};
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshot = saved(&store, "head");
     let mut lazy = cold(&store);
     let mut eager = eager(&store);
@@ -365,7 +365,7 @@ fn app_read_lazy_active_head_keeps_view_and_as_of_identical() {
 #[test]
 fn app_read_lazy_failed_load_retains_updates_until_checkpoint_can_be_read() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshot = saved(&store, "retry");
     let conn = Connection::open(&store.path).unwrap();
     conn.execute(
@@ -392,7 +392,7 @@ fn app_read_lazy_failed_load_retains_updates_until_checkpoint_can_be_read() {
 #[test]
 fn app_read_lazy_oversized_checkpoint_reply_keeps_the_size_refusal() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let mut snapshot = saved(&store, "large");
     snapshot.meta = json!({"value":"large ".repeat(REPLY_BUDGET / 3)});
     store.save_app_snapshot(&snapshot).unwrap();
@@ -411,7 +411,7 @@ fn app_read_lazy_oversized_checkpoint_reply_keeps_the_size_refusal() {
 #[tokio::test]
 async fn app_read_lazy_hydration_does_not_emit_a_watch_change() {
     let dir = tempfile::tempdir().unwrap();
-    let store = crate::store::Store::open(&dir.path().join("mode3.db")).unwrap();
+    let store = crate::store::Store::open(&dir.path().join("sessions.db")).unwrap();
     let snapshot = saved(&store, "watched");
     let app = AppRead::new(Some(store.path.clone()), Some(context_path(&store)));
     let mut watch = app

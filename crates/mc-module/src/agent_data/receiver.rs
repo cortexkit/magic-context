@@ -760,7 +760,7 @@ async fn prepare_install<H: Host>(
         let session = key(one);
         let state = host.state_rows(&session).map_err(|error| {
             unavailable(format!(
-                "the mode3.db rows of session {} cannot be read for its undo image ({error}); send activate again",
+                "the sessions.db rows of session {} cannot be read for its undo image ({error}); send activate again",
                 label(&session)
             ))
         })?;
@@ -895,7 +895,7 @@ async fn release_one<H: Host>(
     host.reset(&session, cut);
     host.clear_state(&session).map_err(|error| {
         unavailable(format!(
-            "mode3.db could not clear the rows of session {} ({error}); its install is done, send activate again to finish the move",
+            "sessions.db could not clear the rows of session {} ({error}); its install is done, send activate again to finish the move",
             label(&session)
         ))
     })?;
@@ -917,7 +917,7 @@ async fn release_one<H: Host>(
     crash::point("activate facts released").await;
     tracing::info!(
         cut = %cut,
-        "ck-mc: session {} is installed by agent-data cut {cut}: its mode3.db rows are cleared and {released} waiting facts are retryable; it is served once the cut is recorded activated",
+        "ck-mc: session {} is installed by agent-data cut {cut}: its sessions.db rows are cleared and {released} waiting facts are retryable; it is served once the cut is recorded activated",
         label(&session)
     );
     Ok(())
