@@ -200,19 +200,6 @@ export function planEmergencyDrop(input: {
     /** True while the persisted pressure-episode latch is non-zero. */
     hasPriorDrop: boolean;
     /**
-     * Whether a request was refused as too large since the episode's batch:
-     * by the provider (overflow recovery armed) or by Magic Context's own
-     * check before sending. Absent when the caller does not track refusals.
-     *
-     * When the caller supplies it, a pass at 95% or more lifts the latch only
-     * on new evidence that the request is too large: a reading that differs
-     * from the one the batch was planned on (`priorInputSample`), or a
-     * refusal. A reading equal to that one means no provider response has
-     * arrived since; dropping again on it would take each newly arrived
-     * result on every pass while the reading stays stuck.
-     */
-    refusedSinceLastBatch?: boolean;
-    /**
      * True when another mutation already rewrites the cached prefix on this
      * pass. The selection then rides that rewrite for free, so the minimum
      * achievable reclaim does not apply.
@@ -253,15 +240,6 @@ export function planEmergencyDrop(input: {
     if (hasPriorDrop && !absoluteEmergency) {
         return noop(
             `pressure-episode-latched (prior sample ${priorInputSample}; awaiting exit or independent bust)`,
-        );
-    }
-    if (
-        hasPriorDrop &&
-        input.refusedSinceLastBatch === false &&
-        currentTotalInputTokens === priorInputSample
-    ) {
-        return noop(
-            `pressure-episode-latched (prior sample ${priorInputSample}: the reading has not been renewed since the last batch and no request was refused)`,
         );
     }
 
