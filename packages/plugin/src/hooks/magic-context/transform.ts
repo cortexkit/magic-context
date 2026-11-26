@@ -238,6 +238,7 @@ import { forceBandConfirmed, heuristicsAlreadyRanThisTurn } from "./routine-clea
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
+import { createServedRequestCounts } from "./served-request-count";
 import { takeSignedThinkingFitSnapshot } from "./signed-thinking-fit-snapshot";
 import {
     decideSignedThinkingHold,
@@ -878,6 +879,7 @@ export function createTransform(deps: TransformDeps) {
     // Called when a session is deleted, on both hosts.
     const clearSessionLogState = (sessionId: string): void => {
         prefixHoldLogTurnIds.delete(sessionId);
+        servedRequestCounts.forget(sessionId);
         clearDiagnosticLogState(sessionId);
         forgetHistoryBoundaryRecovery(sessionId);
     };
@@ -890,6 +892,9 @@ export function createTransform(deps: TransformDeps) {
     // The local count of the last served request, for the execute decision of
     // a session whose provider reports no usage (see local-wire-reading.ts).
     const localWireReadings = createLocalWireReadings();
+    // Our count of the last request each session served, for the emergency
+    // tool drop's fixed part (see served-request-count.ts).
+    const servedRequestCounts = createServedRequestCounts();
     const rustModeTransform =
         deps.transformMode === "rust" && deps.rustModeModuleClient
             ? createRustModeTransform(deps, {
@@ -956,6 +961,7 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         deps.onMessagesPassStarted?.(sessionId, messages);
+        servedRequestCounts.passStarted(sessionId);
         const dateRequest =
             systemDateRequestForOutput(deps.historyRefreshSessions, output) ??
             beginSystemDateRequest(
@@ -3967,6 +3973,8 @@ export function createTransform(deps: TransformDeps) {
             protectedCutoff,
             protectedCount: protectionWindow.status.protectedCount,
             emergencyCeilingTokens,
+            servedCountTokens: (calibration) =>
+                servedRequestCounts.tokens(sessionId, localReadingModelKey, calibration),
             pendingCompartmentInjection,
             prefixTrimSourceOrder,
             coveredHostInstructions,
@@ -5115,6 +5123,21 @@ export function createTransform(deps: TransformDeps) {
                     systemPromptHash: sessionMeta.systemPromptHash,
                 }),
             );
+        // Keep our count of the request this pass served for the next pass's
+        // emergency drop: the count this pass already made, or else the copy
+        // just saved, counted only if the next pass's planner runs. A pass that
+        // saved no copy (capture not eligible) offers no saved copy, because
+        // the tracker would still hold an older request.
+        afterCapture(sessionId, "served request count", () =>
+            servedRequestCounts.record(sessionId, {
+                modelKey: localReadingModelKey,
+                components: finalWireEstimate?.pressureComponents,
+                saved: passOutcome.captureEligible
+                    ? finalWireUsage.savedRequest(sessionId)
+                    : undefined,
+                hostAddedTokens: recoveryHostAddedTokens,
+            }),
+        );
         afterCapture(sessionId, "pass permission report", () =>
             deps.onPassPermission?.(sessionId, postTransformResult.prefixMutationPermitted),
         );

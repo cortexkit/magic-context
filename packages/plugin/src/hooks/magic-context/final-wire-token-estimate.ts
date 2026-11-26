@@ -313,6 +313,13 @@ export interface FinalWireTokenEstimateInput {
  * same route/envelope and complete prefix survive, followed by its own reply.
  * No durable session aggregate or another route's usage can stand in for this.
  */
+/** A saved copy of the last request served, counted only if someone asks. */
+export interface SavedServedRequest {
+    count():
+        | { modelKey: string; components: { system: number; tools: number; prose: number } }
+        | undefined;
+}
+
 export function createFinalWireUsageTracker() {
     const fallbackLogged = new Set<string>();
     const served = new Map<
@@ -359,6 +366,56 @@ export function createFinalWireUsageTracker() {
         ]);
     };
     return {
+        /**
+         * The request this tracker last saved for the session (see `capture`),
+         * with a way to count it on demand. The count is in raw local units,
+         * like `pressureComponents`, and is made at most once. Rows keep only
+         * their id, role and parts, so thinking that is priced from a reply's
+         * usage counts as zero here. Undefined when no copy is saved.
+         */
+        savedRequest(sessionId: string): SavedServedRequest | undefined {
+            const saved = served.get(sessionId);
+            if (!saved) return undefined;
+            let counted: ReturnType<SavedServedRequest["count"]> | null = null;
+            return {
+                count() {
+                    if (counted !== null) return counted;
+                    counted = undefined;
+                    try {
+                        const [providerID, modelID, agentName, , systemPromptTokens] = JSON.parse(
+                            saved.envelope,
+                        ) as [string, string, string | undefined, string, number];
+                        const messages = saved.prefix.map((text) => {
+                            const row = JSON.parse(text) as {
+                                id: string;
+                                role: string;
+                                parts: unknown[];
+                            };
+                            return {
+                                info: { id: row.id, role: row.role },
+                                parts: row.parts,
+                            } as unknown as MessageLike;
+                        });
+                        const estimate = estimateFinalWireInputTokens({
+                            messages,
+                            systemPromptTokens,
+                            providerID,
+                            modelID,
+                            agentName,
+                            sessionId,
+                        });
+                        if (estimate.pressureComponents)
+                            counted = {
+                                modelKey: `${providerID}/${modelID}`,
+                                components: estimate.pressureComponents,
+                            };
+                    } catch {
+                        counted = undefined;
+                    }
+                    return counted;
+                },
+            };
+        },
         estimate(
             sessionId: string,
             request: FinalWireTokenEstimateInput,
@@ -575,6 +632,13 @@ export interface FinalWireTokenEstimate {
      * pressure reading: for an unseeded model it doubles the whole request.
      */
     pressureTokens?: number;
+    /**
+     * The local counts `pressureTokens` is made from, before any ratio is
+     * applied: system prompt, tool definitions plus tool calls and results,
+     * and prose. A caller that must compare the whole request with tag counts
+     * made under a different calibration applies its own ratios to these.
+     */
+    pressureComponents?: { system: number; tools: number; prose: number };
     completeness?: "complete" | "partial";
     componentsComplete?: boolean;
 }
@@ -696,14 +760,12 @@ export function estimateFinalWireInputTokens(
     };
     const tokens = providerMass(rawComponents, calibration, true);
     const pressureToolDefinitions = measuredToolDefinitions ?? borrowedToolDefinitions ?? 0;
-    const pressureTokens = providerMass(
-        {
-            system: rawComponents.system,
-            tools: pressureToolDefinitions + messageTokens.toolCall,
-            prose: rawComponents.prose,
-        },
-        calibration,
-    );
+    const pressureComponents = {
+        system: rawComponents.system,
+        tools: pressureToolDefinitions + messageTokens.toolCall,
+        prose: rawComponents.prose,
+    };
+    const pressureTokens = providerMass(pressureComponents, calibration);
     const complete =
         Number.isFinite(tokens) &&
         tokens > 0 &&
@@ -761,6 +823,7 @@ export function estimateFinalWireInputTokens(
         rawTokens: rawComponents.system + rawComponents.tools + rawComponents.prose,
         rawComponents,
         pressureTokens,
+        pressureComponents,
         completeness: complete ? "complete" : "partial",
         componentsComplete:
             toolDefinitions !== undefined && input.messages.every(hasCountableParts),

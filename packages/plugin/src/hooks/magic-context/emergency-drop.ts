@@ -600,3 +600,80 @@ export function emergencyServedMassRemovedSince(
     }
     return removed;
 }
+
+/** The request a pass serves, split into what tool drops can and cannot remove. */
+export interface EmergencyRequestMeasure {
+    /**
+     * What no tool drop can remove: system prompt, tool definitions, text a
+     * host adds after the transform, and every served part no active tag owns
+     * (the history head, untagged parts, reasoning that stays, placeholders and
+     * skeletons of tags already dropped).
+     */
+    fixedTokens: number;
+    /** Served parts that an active tag owns. */
+    tagTokens: number;
+    /** `fixedTokens + tagTokens`. */
+    totalTokens: number;
+    /** The system prompt and tool definitions inside `fixedTokens`, for logs. */
+    systemTokens: number;
+    toolDefinitionTokens: number;
+}
+
+/**
+ * Count a served request in one walk, split into the parts active tags own and
+ * everything else. No product path calls this: it is the independent witness
+ * tests use to check that our count of a whole request, minus our count of its
+ * active tags, describes the rest of the request.
+ *
+ * Every count uses `calibration`, so the two sums are in one unit. Each part
+ * lands in exactly one of them: a part an active tag owns in `tagTokens`, any
+ * other part in `fixedTokens`. `removedThisPass` names parts to leave out of
+ * both; `countedPart` maps a part to what the request carries in its place.
+ * `systemPromptTokens` and `toolDefinitionTokens` are raw local counts;
+ * `hostAddedTokens` is already in calibrated units.
+ */
+export function measureEmergencyRequest(input: {
+    messages: readonly MessageLike[];
+    activeTagParts: ReadonlySet<unknown>;
+    removedThisPass?: (part: unknown) => boolean;
+    countedPart?: (part: unknown) => unknown;
+    systemPromptTokens: number;
+    toolDefinitionTokens: number;
+    hostAddedTokens?: number;
+    calibration: { systemRatio: number; toolsRatio: number; proseRatio: number };
+}): EmergencyRequestMeasure {
+    const { calibration } = input;
+    const calibrated = (counted: { conversation: number; toolCall: number }) =>
+        counted.conversation * calibration.proseRatio + counted.toolCall * calibration.toolsRatio;
+    let untagged = 0;
+    let tagTokens = 0;
+    for (const message of input.messages) {
+        const owned: unknown[] = [];
+        const other: unknown[] = [];
+        for (const part of message.parts) {
+            if (input.removedThisPass?.(part)) continue;
+            if (input.activeTagParts.has(part)) owned.push(part);
+            else other.push(input.countedPart ? input.countedPart(part) : part);
+        }
+        // Counted per message, because opaque thinking is priced once per
+        // message from the message's own usage.
+        if (owned.length > 0)
+            tagTokens += calibrated(estimateMessageTokens({ ...message, parts: owned }));
+        if (other.length > 0)
+            untagged += calibrated(estimateMessageTokens({ ...message, parts: other }));
+    }
+    const systemTokens = Math.max(0, input.systemPromptTokens) * calibration.systemRatio;
+    const toolDefinitionTokens = Math.max(0, input.toolDefinitionTokens) * calibration.toolsRatio;
+    const hostAdded =
+        input.hostAddedTokens !== undefined && Number.isFinite(input.hostAddedTokens)
+            ? Math.max(0, input.hostAddedTokens)
+            : 0;
+    const fixedTokens = systemTokens + toolDefinitionTokens + hostAdded + untagged;
+    return {
+        fixedTokens,
+        tagTokens,
+        totalTokens: fixedTokens + tagTokens,
+        systemTokens,
+        toolDefinitionTokens,
+    };
+}

@@ -1,5 +1,5 @@
 import { protectedToolTagNumbers } from "../../features/magic-context/reclaim-protection";
-import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
+import { sessionEmergencyCalibration } from "../../features/magic-context/session-decision-calibration";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
     getActiveTagsBySession,
@@ -15,6 +15,7 @@ import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
 import { applyPersistedToolDrop, hasSmallToolInput } from "./apply-operations";
 import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanup";
+import type { DecisionCalibration } from "./decision-calibration";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import {
     type EmergencyDropTag,
@@ -98,6 +99,13 @@ export function applyHeuristicCleanup(
              * the reading never measured them, so they do not lower the floor.
              */
             sinceReading?: ReadonlySet<number>;
+            /**
+             * Our count of the last request served, priced with the
+             * calibration given (the one the tags are measured with). Caps the
+             * size the planner infers the fixed part from; see
+             * `servedCountTokens` on `planEmergencyDrop`.
+             */
+            servedCountTokens?: (calibration: DecisionCalibration) => number | undefined;
         };
         /**
          * Whether ordinary deduplication, injection stripping, and caveman
@@ -168,7 +176,10 @@ export function applyHeuristicCleanup(
                 .slice(0, 20)
                 .map((tag) => tag.tagNumber),
         );
-        const calibration = sessionDecisionCalibration(db, sessionId);
+        // The session's frozen calibration, read back for proxy routes too (see
+        // `sessionEmergencyCalibration`). The tags and our count of the whole
+        // request are both priced with it, so the planner subtracts like from like.
+        const calibration = sessionEmergencyCalibration(db, sessionId);
         const activeTags = tags
             .filter((t) => t.status === "active")
             .map((tag) => {
@@ -205,6 +216,7 @@ export function applyHeuristicCleanup(
             protectedCutoff: config.protectedCutoff,
             currentTotalInputTokens: emergency.currentTotalInputTokens,
             removedThisPassTokens,
+            servedCountTokens: emergency.servedCountTokens?.(calibration),
             ceilingTokens: emergency.ceilingTokens,
             usagePercentage: emergency.usagePercentage,
             priorInputSample,

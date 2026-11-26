@@ -42,7 +42,10 @@ function finitePositive(value: unknown): value is number {
     return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-function parseFrozenCalibration(value: unknown): FrozenSessionDecisionCalibration | null {
+function parseFrozenCalibration(
+    value: unknown,
+    acceptModelId = false,
+): FrozenSessionDecisionCalibration | null {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
     const candidate = value as Partial<FrozenSessionDecisionCalibration>;
     if (
@@ -53,7 +56,9 @@ function parseFrozenCalibration(value: unknown): FrozenSessionDecisionCalibratio
         !finitePositive(candidate.systemRatio) ||
         !finitePositive(candidate.toolsRatio) ||
         !finitePositive(candidate.proseRatio) ||
-        (candidate.source !== "seed" && candidate.source !== "family-fallback")
+        (candidate.source !== "seed" &&
+            candidate.source !== "family-fallback" &&
+            !(acceptModelId && candidate.source === "model-id"))
     ) {
         return null;
     }
@@ -80,11 +85,14 @@ function parseStateRoot(raw: string | null | undefined): Record<string, unknown>
     }
 }
 
-function parseNamespace(root: Record<string, unknown>): CalibrationStateNamespace {
+function parseNamespace(
+    root: Record<string, unknown>,
+    acceptModelId = false,
+): CalibrationStateNamespace {
     const value = root[CALIBRATION_STATE_KEY];
     if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
     const namespace = value as Record<string, unknown>;
-    const active = parseFrozenCalibration(namespace.active);
+    const active = parseFrozenCalibration(namespace.active, acceptModelId);
     return {
         active: active ?? undefined,
         hygieneUnitsVersion:
@@ -210,6 +218,30 @@ export function sessionDecisionCalibration(
         }
     }
     return thawCalibration(candidate);
+}
+
+/**
+ * The session's frozen calibration as the emergency tool drop measures with it,
+ * read without changing session state.
+ *
+ * It differs from `sessionDecisionCalibration` in one way: it also reads back a
+ * calibration saved with the `model-id` source (a proxy or relay route whose
+ * model is recognised only by its model id). The shared reader rejects that
+ * source, so every caller that reads the saved calibration gets the neutral
+ * 1:1 ratios for it. Only a caller allowed to adopt a calibration gets the
+ * model's own ratios back, and on OpenCode that caller only saves it and does
+ * not use the value. Changing the shared reader would move the thresholds of
+ * every lane on those routes, on passes far below the force band. The
+ * emergency drop measures the fixed part of the request and the tags it may
+ * drop with one object from here, so both sides of its arithmetic use the
+ * same ratios.
+ */
+export function sessionEmergencyCalibration(db: Database, sessionId: string): DecisionCalibration {
+    const row = readSessionRow(db, sessionId);
+    const namespace = parseNamespace(parseStateRoot(row?.deferred_execute_state), true);
+    return namespace.active
+        ? thawCalibration(namespace.active)
+        : resolveDecisionCalibration(undefined, undefined);
 }
 
 /** Return the durable hygiene unit version without changing session state. */
