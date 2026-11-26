@@ -2,9 +2,10 @@
 # Nothing under .cortexkit/ may be tracked except the allowed folders and files.
 #
 # The fleet layout keeps internal material (design notes, investigations, tool state)
-# under .cortexkit/, ignored by git, and tracks only release-notes/, skills/, rules/, WORKER.md and the top-level project
-# settings files (<module>.jsonc, which the daemon reads) there. The check lists every tracked file under .cortexkit/ and fails on
-# any that is outside that list.
+# under .cortexkit/, ignored by git. Only these are tracked there: release-notes/,
+# skills/, rules/, WORKER.md, and the top-level project settings files
+# (<module>.jsonc, which the daemon reads). The check lists every tracked file under
+# .cortexkit/ and fails on any other.
 #
 # It does not ask git which tracked files are ignored (`git ls-files -ci`): a stray `!`
 # line in any .gitignore un-ignores a private file, which is then tracked, not ignored,
