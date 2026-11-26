@@ -230,20 +230,31 @@ fn write_config_atomic(
         Some(root) => format!("project-{}", project_hash(root)),
         None => "user".to_string(),
     };
-    // Hold the lock of this config's backup set from before the read of the
-    // current config until after the replace. Two saves that overlap could
-    // otherwise both copy the same old version, and the version between them
-    // would have no copy.
+    // Lock the backup set first. A symlink can change its target, but the
+    // backup set stays the same.
     let scope_mutex = in_process_scope_lock(&backup_dir, &backup_scope);
     let _in_process = scope_mutex
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
+    let lock_start = std::time::Instant::now();
     let _cross_process = lock_backup_scope(&backup_dir, &backup_scope, CONFIG_LOCK_WAIT)?;
     let parent = path
         .parent()
         .ok_or_else(|| "Config path has no parent directory".to_string())?;
     ensure_private_config_directory(parent)
         .map_err(|e| format!("Failed to create directory: {e}"))?;
+    // Different backup sets can name one target. Hold its lock across the read,
+    // copy and replace so the second save copies what the first save wrote.
+    let target_scope = config_target_lock_scope(path, parent)?;
+    let target_mutex = in_process_scope_lock(&backup_dir, &target_scope);
+    let _target_in_process = target_mutex
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _target_cross_process = lock_backup_scope(
+        &backup_dir,
+        &target_scope,
+        CONFIG_LOCK_WAIT.saturating_sub(lock_start.elapsed()),
+    )?;
     // A user config always ends owner-only, including when replacing a formerly
     // permissive file. Project config retains its prior mode when one exists.
     #[cfg(unix)]
@@ -271,15 +282,22 @@ fn write_config_atomic(
     }
     // Make the copy before the rename replaces the file. If there is no copy,
     // do not save.
-    if let Err(e) = back_up_current_config(path, logical_path, &backup_dir, &backup_scope) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(e);
-    }
+    let obsolete = match back_up_current_config(path, logical_path, &backup_dir, &backup_scope) {
+        Ok(obsolete) => obsolete,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
+    };
 
     replace_with_temp(&temp_path, path).map_err(|e| {
         let _ = std::fs::remove_file(&temp_path);
         format!("Failed to replace config atomically: {e}")
-    })
+    })?;
+    for copy in obsolete {
+        let _ = std::fs::remove_file(copy);
+    }
+    Ok(())
 }
 
 /// The file a config path finally names, following any chain of symlinks.
@@ -305,18 +323,39 @@ fn resolve_symlinked_config(path: &Path) -> Result<PathBuf, String> {
     Err("Config path has too many levels of symlinks".to_string())
 }
 
+fn config_target_lock_scope(path: &Path, parent: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let target = path
+        .canonicalize()
+        .or_else(|error| {
+            if error.kind() != ErrorKind::NotFound {
+                return Err(error);
+            }
+            // The key must stay the same after the first save.
+            let name = path.file_name().ok_or(error)?;
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            parent.canonicalize().map(|parent| parent.join(name))
+        })
+        .map_err(|e| format!("Invalid config target for locking: {e}"))?;
+    let digest = Sha256::digest(target.as_os_str().as_encoded_bytes());
+    Ok(format!("target-{digest:x}"))
+}
+
 /// The longest time that a save waits for a different dashboard process to end
 /// its save of the same config.
 const CONFIG_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The lock file of one backup set: `.<scope>.lock` in the backup folder.
+/// Lock files for targets and backup sets stay in the backup folder.
 fn backup_scope_lock_path(backup_dir: &Path, scope: &str) -> PathBuf {
     backup_dir.join(format!(".{scope}.lock"))
 }
 
-/// One mutex for each backup set in this process. The file lock alone does not
-/// serialize threads on platforms that have no `flock`, and saves of different
-/// configs do not wait for each other.
+/// The in-process mutex is necessary on platforms without `flock`.
 fn in_process_scope_lock(backup_dir: &Path, scope: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -333,10 +372,8 @@ fn in_process_scope_lock(backup_dir: &Path, scope: &str) -> std::sync::Arc<std::
     )
 }
 
-/// Take the exclusive lock of one backup set, so that a save in a different
-/// dashboard process waits. The lock stays until the returned file closes.
-/// If the lock is not free in `wait`, the save is refused, as when no copy can
-/// be made.
+/// The lock stays until this file closes. Refuse the save if a different
+/// process does not release the lock in `wait`.
 #[cfg(unix)]
 fn lock_backup_scope(
     backup_dir: &Path,
@@ -461,21 +498,19 @@ fn project_hash(canonical_project: &Path) -> String {
     digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
-/// Copy the current config at `path` into the backup folder, then remove the
-/// oldest copies of the same config. The copy names come from `logical_path`,
-/// the config path before symlinks resolve. If there is no config, there is
-/// no copy.
+/// Keep all copies unless the replace is complete. A first save does not make a
+/// copy or remove older copies.
 fn back_up_current_config(
     path: &Path,
     logical_path: &Path,
     backup_dir: &Path,
     scope: &str,
-) -> Result<(), String> {
+) -> Result<Vec<PathBuf>, String> {
     let Some(current) = read_current_config_no_follow(path).map_err(|e| {
         format!("Refusing to save config: cannot read the current config for a backup copy: {e}")
     })?
     else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     #[cfg(test)]
     run_after_backup_read_hook(path);
@@ -497,14 +532,28 @@ fn back_up_current_config(
         .map(|ext| format!(".{ext}"))
         .unwrap_or_default();
     let prefix = format!("{stem}.{scope}.");
-    write_backup_copy(backup_dir, &prefix, &suffix, &current).map_err(|e| {
+    let refuse = |e| {
         format!(
             "Refusing to save config: cannot write the backup copy in {}: {e}",
             backup_dir.display()
         )
-    })?;
-    prune_config_backups(backup_dir, &prefix, &suffix);
-    Ok(())
+    };
+    let copies = ordered_config_backups(backup_dir, &prefix, &suffix).map_err(refuse)?;
+    // Use a sequence number because the clock can move back. Use the UTC
+    // timestamp only for display.
+    let sequence = copies
+        .last()
+        .map_or(0, |(sequence, _)| *sequence)
+        .checked_add(1)
+        .ok_or_else(|| refuse(std::io::Error::other("backup sequence exhausted")))?;
+    write_backup_copy(backup_dir, &prefix, &suffix, sequence, &current).map_err(refuse)?;
+
+    let excess = copies.len().saturating_sub(CONFIG_BACKUP_LIMIT - 1);
+    Ok(copies
+        .into_iter()
+        .take(excess)
+        .map(|(_, name)| backup_dir.join(name))
+        .collect())
 }
 
 /// A test can stop a save after it reads the current config, to make two saves
@@ -583,19 +632,18 @@ fn ensure_private_backup_directory(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Write one copy as `<stem>.<scope>.<UTC timestamp>-<NN><suffix>`. The
-/// timestamp width does not change, so name order is time order. The counter and
-/// `create_new` make sure that two saves at the same time do not write to the
-/// same copy.
 fn write_backup_copy(
     backup_dir: &Path,
     prefix: &str,
     suffix: &str,
+    sequence: u64,
     content: &[u8],
 ) -> std::io::Result<()> {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
     for attempt in 0..100u8 {
-        let copy_path = backup_dir.join(format!("{prefix}{stamp}-{attempt:02}{suffix}"));
+        let copy_path = backup_dir.join(format!(
+            "{prefix}s{sequence:020}.{stamp}-{attempt:02}{suffix}"
+        ));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -626,32 +674,45 @@ fn write_backup_copy(
     Err(std::io::Error::other("no unique backup copy name"))
 }
 
-/// Remove all but the newest copies of one config. Only regular files with
-/// this config's prefix, suffix and timestamp shape go, so copies of other
-/// configs stay. A failure here does not stop the save: the copy of the
-/// current file is on disk, and the next save tries again.
-fn prune_config_backups(backup_dir: &Path, prefix: &str, suffix: &str) {
-    let Ok(entries) = std::fs::read_dir(backup_dir) else {
-        return;
-    };
-    let mut copies: Vec<String> = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-        .filter(|name| {
-            name.strip_prefix(prefix)
-                .and_then(|rest| rest.strip_suffix(suffix))
-                .is_some_and(is_backup_stamp)
-        })
-        .collect();
-    if copies.len() <= CONFIG_BACKUP_LIMIT {
-        return;
+fn ordered_config_backups(
+    backup_dir: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> std::io::Result<Vec<(u64, String)>> {
+    let mut copies = Vec::new();
+    for entry in std::fs::read_dir(backup_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((name, sequence)) = name.to_str().and_then(|name| {
+            let id = name.strip_prefix(prefix)?.strip_suffix(suffix)?;
+            Some((name, backup_sequence(id)?))
+        }) else {
+            continue;
+        };
+        if entry.file_type()?.is_file() {
+            copies.push((sequence, name.to_string()));
+        }
     }
-    copies.sort();
-    let excess = copies.len() - CONFIG_BACKUP_LIMIT;
-    for name in &copies[..excess] {
-        let _ = std::fs::remove_file(backup_dir.join(name));
+    copies.sort_unstable();
+    Ok(copies)
+}
+
+fn backup_sequence(id: &str) -> Option<u64> {
+    // Legacy copies have sequence 0 and sort by name before sequenced copies.
+    if is_backup_stamp(id) {
+        return Some(0);
     }
+    let (sequence, stamp) = id.strip_prefix('s')?.split_once('.')?;
+    if sequence.len() != 20 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !is_backup_stamp(stamp) {
+        return None;
+    }
+    sequence
+        .parse::<u64>()
+        .ok()
+        .filter(|sequence| *sequence != 0)
 }
 
 /// Agrees with `YYYYMMDDTHHMMSS.NNNNNNNNNZ-NN`, the shape that `write_backup_copy` writes.
