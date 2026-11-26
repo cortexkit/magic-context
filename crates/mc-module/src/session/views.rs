@@ -565,21 +565,19 @@ impl Session {
             .filter(|key| !wanted.iter().any(|(earlier, _)| earlier == key))
             .collect();
         wanted.extend(injected);
-        // In the force band the emergency lane owns tool reclaim, so the age
-        // sweep of tool outputs and both supersession lanes (spent
-        // control-plane calls, superseded edits) stand down there, as in the
-        // TypeScript transform (`toolReclaimAdmitted`). Duplicate lookups,
-        // injection strips, reasoning clearing and the sweep of old notices
-        // are routine cleanup there and keep running.
-        let tool_reclaim = !pass::in_force_band(&self.pressure(), settings);
-        if tool_reclaim {
-            wanted.extend(lanes::superseded_edits(
-                &context,
-                cutoff,
-                self.reclaim_bookmark,
-            ));
-            wanted.extend(lanes::spent_control_plane(&context, cutoff));
-        }
+        // These tool-reclaim lanes (superseded edits, spent control-plane
+        // calls, and the tool part of the age sweep below) run in the force
+        // band too. The emergency lane can't always reclaim there (a fixed
+        // part above the ceiling, a spent episode), and these lanes are then
+        // all that keeps the request shrinking. Whether they should stand
+        // down in the band, as the TypeScript transform's tool-reclaim
+        // admission does, is an open design question.
+        wanted.extend(lanes::superseded_edits(
+            &context,
+            cutoff,
+            self.reclaim_bookmark,
+        ));
+        wanted.extend(lanes::spent_control_plane(&context, cutoff));
         wanted.extend(lanes::duplicate_lookups(&context, cutoff));
         // An unmarked notice may carry the person's words. Without notice_keep,
         // sweeping notices could drop them, so neither select nor bookmark them.
@@ -588,14 +586,9 @@ impl Session {
         } else {
             0
         };
-        let tool_reclaim_bookmark = if tool_reclaim {
-            self.reclaim_bookmark
-        } else {
-            0
-        };
         wanted.extend(lanes::age_sweep(
             &context,
-            tool_reclaim_bookmark,
+            self.reclaim_bookmark,
             notice_reclaim_bookmark,
             cutoff,
         ));
