@@ -7,30 +7,78 @@
 use super::*;
 use cortexkit_role_compaction::ride::RideCause;
 
+fn fail_durable_checkpoint(f: &Fixture) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open(f._dir.path().join("sessions.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL, 'checkpoint test failure'); END;").unwrap();
+    db
+}
+
+async fn stamp(f: &Fixture, tag: &str) {
+    let reply = f
+        .module
+        .tool(&f.route, "ctx_reduce", json!({"drop":tag}))
+        .await
+        .unwrap();
+    assert!(reply.contains("1 tag stamped"));
+}
+
 #[tokio::test(start_paused = true)]
 async fn quiet_worker_retries_its_last_failed_checkpoint_without_a_new_job() {
     let f = Fixture::new("worker", false).await;
     f.drain_quiet_prerequisites().await;
-    let db = rusqlite::Connection::open(f._dir.path().join("sessions.db")).unwrap();
-    db.execute_batch("CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL, 'checkpoint test failure'); END;").unwrap();
-    let reply = f
-        .module
-        .tool(&f.route, "ctx_reduce", json!({"drop":"2"}))
-        .await
-        .unwrap();
-    assert!(reply.contains("1 tag stamped"));
-    settle().await;
+    let db = fail_durable_checkpoint(&f);
+    stamp(&f, "2").await;
+    // Flush the app snapshot while durable writes still fail. Otherwise its
+    // timer could enqueue an app job that saves the queued stamp before the
+    // quiet timer fires.
+    f.module.flush_app_snapshots().await;
+    let worker = f.running_worker().unwrap();
     let store = f.module.inner.store.as_ref().unwrap();
     assert!(
         store.load(f.key()).unwrap().queued.is_empty(),
         "the injected write failed"
     );
     db.execute_batch("DROP TRIGGER fail_checkpoint").unwrap();
-    wait_past_quiet_deadline(QUIET_AFTER).await;
+    wait_for_worker_exit(&worker, QUIET_AFTER).await;
     assert_eq!(
         store.load(f.key()).unwrap().queued,
         [("b".into(), "p".into())].into()
     );
+    assert!(
+        f.quiet(),
+        "the checkpoint retried and the live worker was released"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_worker_is_released_after_its_app_checkpoint_retries_the_save() {
+    let f = Fixture::new("worker", false).await;
+    f.drain_quiet_prerequisites().await;
+    // Make the app snapshot fresh without starting any new search work. The
+    // next stamp changes a row, but saves the snapshot on its timer instead
+    // of inline because a snapshot was just saved.
+    stamp(&f, "3").await;
+    f.module.flush_app_snapshots().await;
+    let db = fail_durable_checkpoint(&f);
+    stamp(&f, "2").await;
+    f.module.idle_foreground(f.key()).await.unwrap();
+    let worker = f.running_worker().unwrap();
+    let store = f.module.inner.store.as_ref().unwrap();
+    assert_eq!(
+        store.load(f.key()).unwrap().queued,
+        [("c".into(), "p".into())].into()
+    );
+    db.execute_batch("DROP TRIGGER fail_checkpoint").unwrap();
+
+    // Only the minute-delayed app job can have retried this early. It also
+    // moves the worker's quiet deadline, so the save alone proves no release.
+    wait_past_quiet_deadline(Duration::from_secs(60)).await;
+    assert_eq!(
+        store.load(f.key()).unwrap().queued,
+        [("b".into(), "p".into()), ("c".into(), "p".into())].into()
+    );
+    assert!(!f.quiet(), "the app job restarted the quiet period");
+    wait_for_worker_exit(&worker, QUIET_AFTER).await;
     assert!(
         f.quiet(),
         "the checkpoint retried and the live worker was released"
@@ -119,8 +167,9 @@ async fn quiet_review_an_over_limit_ride_after_a_free_gets_the_view_a_kept_sessi
             .await
             .unwrap();
     }
-    for f in all {
-        f.wait_quiet_time().await;
+    kept.wait_quiet_time().await;
+    for f in [&fast, &freed] {
+        f.wait_for_quiet().await;
     }
     assert!(!kept.quiet(), "a session with a run in flight was freed");
     assert!(fast.quiet() && freed.quiet(), "the sessions went quiet");
@@ -167,8 +216,7 @@ async fn quiet_review_an_over_limit_ride_after_a_free_gets_the_view_a_kept_sessi
 #[tokio::test(start_paused = true)]
 async fn quiet_review_a_worker_whose_next_run_started_waits_its_whole_quiet_time() {
     let f = Fixture::new("worker", false).await;
-    f.drain_quiet_prerequisites().await;
-    wait_past_quiet_deadline(QUIET_AFTER).await;
+    f.wait_for_quiet().await;
     assert!(f.quiet(), "the worker went quiet without a run-end event");
 
     // The hook uses the state kept when the worker went quiet to answer
@@ -240,22 +288,20 @@ async fn quiet_review_a_tools_only_session_lets_its_worker_go_when_quiet() {
         .module
         .tool(&route, "ctx_reduce", json!({"drop": "1"}))
         .await;
-    let running = || {
-        matches!(
-            f.module.inner.workers.lock().unwrap().get(&route.session),
-            Some(Slot::Running(_))
-        )
+    let worker = match f.module.inner.workers.lock().unwrap().get(&route.session) {
+        Some(Slot::Running(worker)) => worker.clone(),
+        _ => panic!("the tool call did not start a worker"),
     };
-    assert!(running(), "the tool call started a worker");
-    tokio::time::advance(Duration::from_secs(61)).await;
-    settle().await;
-    for _ in 0..3 {
-        tokio::time::advance(QUIET_AFTER).await;
-        settle().await;
-    }
+    f.module.flush_app_snapshots().await;
+    wait_for_worker_exit(&worker, QUIET_AFTER).await;
     assert!(
-        !running(),
-        "a session that only called tools keeps its worker after three quiet times"
+        !f.module
+            .inner
+            .workers
+            .lock()
+            .unwrap()
+            .contains_key(&route.session),
+        "a session that only called tools kept its worker slot"
     );
 }
 
@@ -275,12 +321,10 @@ async fn quiet_review_a_session_whose_last_read_failed_is_freed_when_quiet() {
     notice.newest = f.client().entries.lock().unwrap().last().map(cursor);
     assert_eq!(f.module.notice(f.key(), notice), Ok(NoticeAnswer::Received));
     f.module.idle_foreground(f.key()).await.unwrap();
-    for _ in 0..3 {
-        f.wait_quiet_time().await;
-    }
+    f.wait_for_quiet().await;
     assert!(
         f.quiet(),
-        "a session whose last read failed is held after three quiet times"
+        "a session whose last read failed stays in memory"
     );
 }
 
@@ -292,9 +336,8 @@ async fn quiet_review_a_session_whose_last_read_failed_is_freed_when_quiet() {
 async fn quiet_review_setup_after_a_free_reads_the_transcript_as_often_as_a_kept_session() {
     let kept = Fixture::new("worker", true).await;
     let freed = Fixture::new("worker", false).await;
-    for f in [&kept, &freed] {
-        f.wait_quiet_time().await;
-    }
+    kept.wait_quiet_time().await;
+    freed.wait_for_quiet().await;
     assert!(!kept.quiet(), "a session with a run in flight was freed");
     assert!(freed.quiet(), "the session went quiet");
     let mut reads = Vec::new();

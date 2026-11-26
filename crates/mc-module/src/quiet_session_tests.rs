@@ -206,6 +206,13 @@ impl Fixture {
         )
     }
 
+    fn running_worker(&self) -> Option<mpsc::UnboundedSender<Job>> {
+        match self.module.inner.workers.lock().unwrap().get(self.key()) {
+            Some(Slot::Running(worker)) => Some(worker.clone()),
+            _ => None,
+        }
+    }
+
     /// Notice `seq`, stamped `seq + 1`, reporting the runner's applied view
     /// and `tokens` as the newest prompt size, with `entry` new if given.
     async fn notice(&self, seq: u64, entry: Option<Entry>, tokens: Option<u64>) {
@@ -252,22 +259,31 @@ impl Fixture {
         self.notice(seq + 1, None, Some(10_000)).await;
     }
 
-    /// Let the search index catch up and the app checkpoint's timer run,
-    /// then the session's quiet time pass.
-    async fn wait_quiet_time(&self) {
-        self.module.search_idle(self.key()).await.unwrap();
-        tokio::time::advance(Duration::from_secs(61)).await;
-        settle().await;
-        tokio::time::advance(QUIET_AFTER).await;
-        settle().await;
-    }
-
     /// Finish the search and app checkpoint work before measuring a quiet
     /// period, so neither can delay freeing or reset its timer.
-    async fn drain_quiet_prerequisites(&self) {
-        self.notice(1, None, None).await;
+    async fn drain_quiet_work(&self) {
         self.module.search_idle(self.key()).await.unwrap();
         self.module.flush_app_snapshots().await;
+    }
+
+    async fn drain_quiet_prerequisites(&self) {
+        self.notice(1, None, None).await;
+        self.drain_quiet_work().await;
+    }
+
+    /// Wait for release without sending the worker a job that restarts its
+    /// quiet timer. Draining search may already have let it stop.
+    async fn wait_for_quiet(&self) {
+        self.drain_quiet_work().await;
+        if let Some(worker) = self.running_worker() {
+            wait_for_worker_exit(&worker, QUIET_AFTER).await;
+        }
+    }
+
+    /// Exercise a quiet deadline even when the session is expected to stay.
+    async fn wait_quiet_time(&self) {
+        self.drain_quiet_work().await;
+        wait_past_quiet_deadline(QUIET_AFTER).await;
     }
 
     /// What the apps read of the session, without the times each answer
@@ -323,6 +339,14 @@ async fn wait_past_quiet_deadline(quiet_for: Duration) {
     .unwrap_err();
 }
 
+/// The worker drops its receiver after giving up its slot. A timeout bounds
+/// the wait but is not evidence that the worker has stopped.
+async fn wait_for_worker_exit(worker: &mpsc::UnboundedSender<Job>, quiet_for: Duration) {
+    tokio::time::timeout(quiet_for + Duration::from_secs(1), worker.closed())
+        .await
+        .expect("the worker did not exit by its quiet deadline");
+}
+
 /// Remove every member that holds a wall-clock time (`*_ms`): two modules
 /// handle the same job a few milliseconds apart.
 fn timeless(value: &mut Value) {
@@ -344,9 +368,8 @@ async fn quiet_a_freed_session_answers_its_next_jobs_as_one_never_freed() {
         f.drop_tag(2, 1, 70_000).await;
     }
     let before = freed.app_reads().await;
-    for f in [&kept, &freed] {
-        f.wait_quiet_time().await;
-    }
+    kept.wait_quiet_time().await;
+    freed.wait_for_quiet().await;
     assert!(!kept.quiet(), "a session with a run in flight was freed");
     assert!(
         freed.quiet(),
@@ -399,7 +422,7 @@ async fn quiet_expiry_forgets_only_the_retired_sessions_setup_and_checkout() {
     }
     let count = || f.module.health(false).metrics.unwrap()["session_count"].clone();
     assert_eq!(count(), 2);
-    f.wait_quiet_time().await;
+    f.wait_for_quiet().await;
     assert!(f.quiet());
     let inner = &f.module.inner;
     Module::<Client>::expire_quiet(inner, tokio::time::Instant::now() + QUIET_CARRY_TTL);
@@ -431,7 +454,7 @@ async fn quiet_an_expired_carry_restores_the_same_view_bytes_on_setup() {
         f.drop_tag(2, 1, 70_000).await;
     }
     let saved = expired.saved();
-    expired.wait_quiet_time().await;
+    expired.wait_for_quiet().await;
     assert!(expired.quiet());
     expired.module.spawn_quiet_carry_sweep();
     settle().await;
@@ -484,8 +507,7 @@ async fn quiet_a_busy_session_is_never_freed() {
     assert!(!f.quiet(), "a session with a run in flight was freed");
 
     drop(in_flight);
-    tokio::time::advance(QUIET_AFTER).await;
-    settle().await;
+    wait_for_worker_exit(&f.running_worker().unwrap(), QUIET_AFTER).await;
     assert!(
         f.quiet(),
         "a session with nothing in flight stays in memory"
@@ -496,20 +518,18 @@ async fn quiet_a_busy_session_is_never_freed() {
 async fn quiet_a_notice_sent_as_the_quiet_time_ends_runs_once_on_the_worker() {
     let f = Fixture::new("worker", false).await;
     f.notice(1, Some(text(5, "e")), None).await;
-    tokio::time::advance(Duration::from_secs(61)).await;
-    settle().await;
+    f.drain_quiet_work().await;
     // The quiet time ends with a notice queued: a worker runs it, the one
     // that was waiting or one started again.
     tokio::time::advance(QUIET_AFTER).await;
     f.notice(2, Some(text(6, "f")), None).await;
-    settle().await;
     assert!(!f.quiet(), "the notice's worker freed the session");
     let states = f.app_reads().await.pop().unwrap();
     assert_eq!(states["messages"][5]["message_id"], "f", "{states}");
 
     // A job that arrives while the worker frees its session stays with that
     // worker, which reads the session again before running it.
-    f.wait_quiet_time().await;
+    f.wait_for_quiet().await;
     let Some(Slot::Quiet(quiet)) = f.module.inner.workers.lock().unwrap().remove(f.key()) else {
         panic!("the session went quiet");
     };
@@ -553,9 +573,8 @@ async fn quiet_a_notice_sent_as_the_quiet_time_ends_runs_once_on_the_worker() {
     assert!(f.quiet());
 }
 
-/// The runner reports that the session's run ended, then a minute passes
-/// after the session's last job; whether the session is quiet then.
-async fn quiet_a_minute_after_the_run_ended(f: &Fixture) -> bool {
+/// Leave the worker idle after the runner reports the session's run ended.
+async fn report_run_end(f: &Fixture) {
     f.drain_quiet_prerequisites().await;
     // A job that starts the worker again if the paused clock freed the
     // session while the search index was waited for. A `pre_user` answered
@@ -578,17 +597,14 @@ async fn quiet_a_minute_after_the_run_ended(f: &Fixture) -> bool {
     );
     // Wait for the worker to handle the queued run-end job before measuring.
     f.module.idle_foreground(f.key()).await.unwrap();
-    wait_past_quiet_deadline(QUIET_AFTER_RUN_END).await;
-    f.quiet()
 }
 
 #[tokio::test(start_paused = true)]
 async fn quiet_a_worker_session_is_freed_a_minute_after_its_run_ended() {
     let f = Fixture::new("worker", false).await;
-    assert!(
-        quiet_a_minute_after_the_run_ended(&f).await,
-        "a worker whose run ended stays in memory"
-    );
+    report_run_end(&f).await;
+    wait_for_worker_exit(&f.running_worker().unwrap(), QUIET_AFTER_RUN_END).await;
+    assert!(f.quiet(), "a worker whose run ended stays in memory");
     // Its next notice is taken as from the Setup it had.
     f.notice(2, Some(text(5, "e")), None).await;
     assert!(!f.quiet());
@@ -602,10 +618,9 @@ mod quiet_worker_review_tests;
 #[tokio::test(start_paused = true)]
 async fn quiet_a_head_session_waits_its_whole_quiet_time_after_its_run_ended() {
     let f = Fixture::new("head", false).await;
-    assert!(
-        !quiet_a_minute_after_the_run_ended(&f).await,
-        "a head was freed before its quiet time"
-    );
+    report_run_end(&f).await;
+    wait_past_quiet_deadline(QUIET_AFTER_RUN_END).await;
+    assert!(!f.quiet(), "a head was freed before its quiet time");
 }
 
 /// A `pre_user` answered from a freed session's carry is followed by the
@@ -617,7 +632,7 @@ async fn quiet_a_head_session_waits_its_whole_quiet_time_after_its_run_ended() {
 #[tokio::test(start_paused = true)]
 async fn quiet_a_pre_user_answered_while_freed_resumes_the_session_at_once() {
     let f = Fixture::new("worker", false).await;
-    f.wait_quiet_time().await;
+    f.wait_for_quiet().await;
     assert!(f.quiet(), "the session went quiet");
     let reads = *f.client().reads.lock().unwrap();
     f.module
