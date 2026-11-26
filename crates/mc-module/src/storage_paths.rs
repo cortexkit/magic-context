@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 use cortexkit_paths::{EnvSource, SystemEnv};
 
+pub(crate) const MODULE_DIR: &str = "magic-context";
+pub(crate) const CONTEXT_DB: &str = "context.db";
+pub(crate) const SESSION_DB: &str = "mode3.db";
+
 pub fn context_db_path() -> Result<PathBuf, String> {
     resolve_context_db_path(&SystemEnv, std::env::home_dir)
 }
@@ -14,7 +18,7 @@ pub fn store_path(context_db: &Path) -> PathBuf {
 
 fn resolve_store_path(env: &impl EnvSource, context_db: &Path) -> PathBuf {
     path_var(env, "MAGIC_CONTEXT_MODE3_STORE")
-        .unwrap_or_else(|| context_db.with_file_name("mode3.db"))
+        .unwrap_or_else(|| context_db.with_file_name(SESSION_DB))
 }
 
 fn path_var(env: &impl EnvSource, name: &str) -> Option<PathBuf> {
@@ -41,17 +45,18 @@ fn resolve_context_db_path(
         // A per-test XDG home wins over the shared test root, as it does in the host.
         let home = trimmed_var(env, "XDG_DATA_HOME").unwrap_or(test_data);
         return Ok(Path::new(&home)
-            .join("cortexkit/magic-context")
-            .join("context.db"));
+            .join("cortexkit")
+            .join(MODULE_DIR)
+            .join(CONTEXT_DB));
     }
     if let Some(explicit) = trimmed_var(env, "MAGIC_CONTEXT_STORAGE_DIR") {
-        return Ok(Path::new(&explicit).join("context.db"));
+        return Ok(Path::new(&explicit).join(CONTEXT_DB));
     }
 
     let old = legacy_default_context_db_path(env, os_home);
     match cortexkit_paths::with_env(env).cortexkit_data_dir() {
         Ok(root) => {
-            let path = root.join("magic-context").join("context.db");
+            let path = root.join(MODULE_DIR).join(CONTEXT_DB);
             if old != path && !env.path_exists(&path) && env.path_exists(&old) {
                 tracing::warn!(
                     "ck-mc: context.db exists at the previous path {}, but not at the resolved path {}; move the store or set MAGIC_CONTEXT_STORAGE_DIR to its directory",
@@ -99,7 +104,7 @@ fn legacy_default_context_db_path(
                 .join(".local/share/cortexkit")
         }
     };
-    root.join("magic-context").join("context.db")
+    root.join(MODULE_DIR).join(CONTEXT_DB)
 }
 
 #[cfg(test)]

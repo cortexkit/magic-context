@@ -66,6 +66,8 @@ pub mod context_read;
 pub mod count;
 pub mod decay;
 pub(crate) mod docs_proposals;
+#[cfg(unix)]
+pub mod doctor;
 pub(crate) mod dreamer;
 pub mod embedding;
 /// Following Entorhinal's change markers over the bus.

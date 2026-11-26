@@ -53,6 +53,9 @@ pub mod epochs;
 #[cfg(feature = "memory-replica")]
 pub(crate) mod health;
 
+#[cfg(any(unix, feature = "memory-replica"))]
+pub(crate) const OUTBOX_BACKLOG: &str = "('pending', 'sending', 'too_large', 'unaddressable')";
+
 const ROUTINE_SKIPS_KEY: &str = "replica_routine_skips";
 pub mod hub;
 pub mod live;
