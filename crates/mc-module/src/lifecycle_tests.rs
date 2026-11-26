@@ -9,6 +9,9 @@ use cortexkit_role_llm_runner::send::SendReply;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+#[path = "cache_sentinel_log_tests.rs"]
+mod cache_sentinel_log_tests;
+
 #[path = "pass_decision_tests.rs"]
 mod pass_decision_tests;
 
@@ -2217,10 +2220,10 @@ async fn lifecycle_setup_counts_what_it_read() {
     assert_eq!(read.read_back(), "failed");
 }
 
-/// THALAMUS's `length-refusal-v1` samples from Agent Runner: once a provider
-/// refuses a request for its length, the runner ends the run `error` with
-/// `provider_code: context_overflow` and rides `over_limit` at once, with the
-/// provider's own count (01) or none when the provider states none (02). Both
+/// Thalamus's `length-refusal-v1` samples: once a provider refuses a request
+/// for its length, the runner ends the run `error` with `provider_code:
+/// context_overflow` and asks ck-mc for a new view (`compaction.ride`, cause
+/// `over_limit`). It sends the provider's own count (01) or none (02). Both
 /// rides decode through ck-mc's own types and get a smaller view back, and
 /// the run status decodes as an ordinary run error.
 #[test]
