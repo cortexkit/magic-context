@@ -17,7 +17,6 @@ import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { resetHostMediaForTests } from "../fold/host-media";
-import { unavailableAttachmentNote } from "../fold/restore";
 import { registerContext } from "./context";
 import { clonePreservingInstances } from "./payload";
 import * as storageGate from "./storage-gate";
@@ -55,8 +54,9 @@ function hostDraft(): SessionContext {
 // the request is handed to the host. OpenCode 2.3 cannot prepare a request holding that
 // part. The saved copy must never be replayed (the replay fit check cannot size the flat
 // part, so it declines the copy), and the pass that runs instead must hand the host the
-// restore's note, never the flat part, with the same bytes on every later request.
-test("a saved replay holding a flat media part is declined, and the pass serves the note with the same bytes next time", async () => {
+// image rebuilt in the host's own asset class, never the flat part, with the same bytes
+// on every later request.
+test("a saved replay holding a flat media part is declined, and the pass serves the rebuilt image with the same bytes next time", async () => {
     const { dir } = createTestTempDir("mc-v2-lkg-flat-media-");
     const oldDataHome = process.env.XDG_DATA_HOME;
     const oldDb = process.env.OPENCODE_DB;
@@ -166,14 +166,17 @@ test("a saved replay holding a flat media part is declined, and the pass serves 
         expect(diagnostics.filter((line) => line === "lkg_replay_declined")).toHaveLength(2);
         expect(diagnostics.some((line) => line.endsWith("lkg_replay_served"))).toBe(false);
         expect(callbacks, diagnostics.join("\n")).toBe(3);
-        // Each pass hands the host the restore's note in place of the flat part.
-        const note = unavailableAttachmentNote("pixel.png", "image/png");
-        expect(replay.messages[0]?.content).toEqual([
-            { type: "text", text: "what is in this image?" },
-            { type: "text", text: note },
-        ]);
+        // Each pass hands the host the image rebuilt in the host's own asset class: the
+        // same bytes the host's own draft carries, never the flat part.
+        const part = replay.messages[0]?.content[1];
+        expect(part?.media).toBeInstanceOf(Media.Asset);
+        expect(Object.keys(part ?? {})).toEqual(["type", "media", "filename"]);
+        expect(JSON.stringify(replay.messages[0]?.content)).toBe(
+            JSON.stringify(hostDraft().messages[0]?.content),
+        );
         expect(() => Message.make(replay.messages[0] as never)).not.toThrow();
         expect(JSON.stringify(again.messages)).toBe(JSON.stringify(replay.messages));
+        expect(diagnostics.some((line) => line.includes("rebuilt a media part"))).toBe(true);
         // The saved copy is the transform's output, taken before the request is handed to
         // the host, so it still holds the flat part.
         expect(getSlot(SESSION)?.jsonPrefix).toContain('"mediaType":"image/png","data"');

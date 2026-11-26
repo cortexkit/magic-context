@@ -10,10 +10,9 @@ import { getEmptyImageParts } from "../../hooks/magic-context/strip-content";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
-import { hostMediaAsset } from "../fold/host-media";
+import { hostMediaAsset, hostMediaFromEncoded } from "../fold/host-media";
 import type { SupersessionRow } from "../fold/instruction-supersession";
 import { nativeRowID } from "../fold/native-replay";
-import { unavailableAttachmentNote } from "../fold/restore";
 import { isToolError, toolErrorText, toolStateContent } from "../tool-result";
 import { stripCopiedTagNotation } from "./copied-tag-notation";
 import type { SessionContext, V2Message } from "./types";
@@ -39,32 +38,61 @@ function rejectContentPart(message: MessageLike, part: Part, reason: string): vo
     else log(text);
 }
 
-/** Session, message and part positions whose media replacement has been logged. */
-const mediaReplacementLogged = new Set<string>();
+/** Session, message and part positions whose media repair has been logged. */
+const mediaRepairLogged = new Set<string>();
 
 /**
- * The note that stands in for a media part holding no host asset. It depends only on the
- * part, so every request that still carries such a part gets the same bytes and the
- * prompt cache keeps the corrected prefix. Logged once per part.
+ * The note sent in place of a media part for which no host asset can be built. The part
+ * may come from the current turn as well as from restored history, so the wording says
+ * only that the attachment could not be passed on. It depends only on the part, so every
+ * request that still carries such a part gets the same bytes and the prompt cache keeps
+ * the corrected prefix.
  */
-function mediaWithoutHostAsset(message: MessageLike, partIndex: number, part: Part): Part {
+export function unpassableAttachmentNote(name: string | undefined, mediaType: string): string {
+    return `[Attachment ${name ? `"${name}" ` : ""}(${mediaType}) could not be passed to the model]`;
+}
+
+/**
+ * A media part holding no host asset instance, made acceptable to the host. Rebuilt in the
+ * host's own asset class when possible: the JSON form of an asset (`{ source, ... }`, what
+ * `Media.Asset.toJSON` emits, for example after the Rust module echoes a message) through
+ * the host's codec, or the flat `{ mediaType, data }` shape an older build's restore
+ * produced. Only when no asset can be built does it become a note. Logged once per part.
+ */
+function repairMediaPart(message: MessageLike, partIndex: number, part: Part): Part {
     const media = isRecord(part.media) ? part.media : undefined;
     const source = isRecord(media?.source) ? media.source : undefined;
     const mediaType = [part.mediaType, media?.mediaType, source?.mediaType].find(
         (value): value is string => typeof value === "string",
     );
-    const name = typeof part.filename === "string" ? part.filename : undefined;
+    let asset: object | string = "the part has neither an encoded asset nor inline data";
+    if (media && source) asset = hostMediaFromEncoded(media);
+    else if (part.media === undefined && typeof part.data === "string" && mediaType)
+        asset = hostMediaAsset(part.data, mediaType);
     const sessionID = typeof message.info.sessionID === "string" ? message.info.sessionID : "";
     const key = JSON.stringify([sessionID, message.info.id ?? null, partIndex]);
-    if (!mediaReplacementLogged.has(key)) {
-        mediaReplacementLogged.add(key);
-        const text = `v2 context replaced a media part that has no host asset by a note: message=${String(message.info.id ?? "<head>")} part=${partIndex} mediaType=${mediaType ?? "unknown"} fields=${Object.keys(part).join(",")}`;
+    if (!mediaRepairLogged.has(key)) {
+        mediaRepairLogged.add(key);
+        const where = `message=${String(message.info.id ?? "<head>")} part=${partIndex} mediaType=${mediaType ?? "unknown"} fields=${Object.keys(part).join(",")}`;
+        const text =
+            typeof asset === "string"
+                ? `v2 context replaced a media part that has no host asset by a note: ${where} reason=${JSON.stringify(asset)}`
+                : `v2 context rebuilt a media part that had no host asset instance: ${where}`;
         if (sessionID) sessionLog(sessionID, text);
         else log(text);
     }
+    if (typeof asset !== "string") {
+        // The JSON form keeps every key in place; only `media` gets the host's instance.
+        if (media) return { ...part, media: asset };
+        // The flat shape gets the key order of the host's own rendering of an attachment:
+        // type, media, then the part's other keys (filename, metadata).
+        const { type: _type, mediaType: _mediaType, data: _data, ...rest } = part;
+        return { type: "media", media: asset, ...rest };
+    }
+    const name = typeof part.filename === "string" ? part.filename : undefined;
     return {
         type: "text",
-        text: unavailableAttachmentNote(name, mediaType ?? "unknown media type"),
+        text: unpassableAttachmentNote(name, mediaType ?? "unknown media type"),
         ...(part.cache === undefined ? {} : { cache: part.cache }),
     };
 }
@@ -615,14 +643,14 @@ export function adaptPayload(
                         const projected = original ?? clean;
                         // The last check before the host gets the request: every request,
                         // from a managed pass or a replay of a saved one, passes here. A media
-                        // part must hold the host's own asset instance. One that does not (the
-                        // flat `{ mediaType, data }` shape an older build's restore produced,
-                        // or a plain copy of an asset) makes the host fail the request before
-                        // any provider call, on every later turn too. It is replaced by the
-                        // same note a restore uses for an attachment it cannot rebuild, so the
-                        // session keeps working.
+                        // part must hold the host's own asset instance; one that does not
+                        // makes the host fail the request before any provider call, on every
+                        // later turn too. Such a part (the JSON form of an asset, as the Rust
+                        // module echoes it, or the flat `{ mediaType, data }` shape an older
+                        // build's restore produced) is rebuilt in the host's class, and only
+                        // becomes a note when that is impossible.
                         if (projected.type === "media" && !isHostInstance(projected.media)) {
-                            content.push(mediaWithoutHostAsset(message, partIndex, projected));
+                            content.push(repairMediaPart(message, partIndex, projected));
                             continue;
                         }
                         if (imageOmissions.get(message.info.id ?? "")?.has(partIndex))

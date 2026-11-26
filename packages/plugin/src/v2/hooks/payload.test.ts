@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it, spyOn } from "bun:test";
+import { Media } from "@opencode/ai/media";
 import { Message, ToolResultValue } from "@opencode/ai/schema/messages";
 import { estimateMessageTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
@@ -13,9 +14,9 @@ import {
 } from "../../hooks/magic-context/tool-drop-target";
 import * as logger from "../../shared/logger";
 import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
-import { restoreRow, unavailableAttachmentNote } from "../fold/restore";
+import { restoreRow } from "../fold/restore";
 import type { StoreRow } from "../store-reader";
-import { adaptPayload } from "./payload";
+import { adaptPayload, unpassableAttachmentNote } from "./payload";
 import { rawMessages } from "./store";
 import type { SessionContext, V2Message } from "./types";
 
@@ -700,10 +701,12 @@ describe("adaptPayload", () => {
     });
 
     // Every supported OpenCode 2 host needs its own asset instance in a media part. A part
-    // without one (the flat `{ mediaType, data }` shape an older build restored, possibly
-    // replayed from a saved request) makes OpenCode 2.3 fail the request before any
-    // provider call, on every later turn. commit() is the last step before the host gets
-    // the request, so it replaces such a part with the restore's note.
+    // without one makes the host fail the request before any provider call, on every later
+    // turn. Such parts reach commit(), the last step before the host gets the request, as the
+    // JSON form of an asset (the Rust module echoes messages as JSON, so the image the user
+    // attached this turn arrives like that) or as the flat `{ mediaType, data }` shape an
+    // older build restored. commit() rebuilds them in the host's own class, and only sends a
+    // note when no asset can be built.
     describe("#given a media part that holds no host asset instance", () => {
         class HostAsset {
             constructor(
@@ -711,57 +714,119 @@ describe("adaptPayload", () => {
                 readonly mediaType: string,
             ) {}
         }
+        const PNG =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
         const flat = () => ({
             type: "media",
             mediaType: "image/png",
-            data: "iVBORw0KGgo=",
+            data: PNG,
             filename: "pixel.png",
         });
-        const commitWith = (part: Record<string, unknown>) => {
+        const commitWith = (part: Record<string, unknown>, id = "msg-user") => {
             const context = draft([
-                { id: "msg-user", role: "user", content: [{ type: "text", text: "look" }] },
+                { id, role: "user", content: [{ type: "text", text: "look" }] },
             ]);
             const payload = adaptPayload(context);
             payload.messages[0].parts.push(part);
             payload.commit();
             return context;
         };
-
-        it("#then commit() sends the restore's note in its place, the same bytes every time, logged once", () => {
-            const warnings: string[] = [];
+        const logged = (body: () => void) => {
+            const lines: string[] = [];
             const logSpy = spyOn(logger, "sessionLog").mockImplementation((_session, message) => {
-                warnings.push(message);
+                lines.push(message);
             });
-            let first: SessionContext | undefined;
-            let second: SessionContext | undefined;
             try {
-                first = commitWith(flat());
-                second = commitWith(flat());
+                body();
             } finally {
                 logSpy.mockRestore();
             }
-            expect(first!.messages[0]?.content).toEqual([
-                { type: "text", text: "look" },
-                { type: "text", text: unavailableAttachmentNote("pixel.png", "image/png") },
-            ]);
-            expect(JSON.stringify(second!.messages)).toBe(JSON.stringify(first!.messages));
-            const replaced = warnings.filter((line) => line.includes("no host asset"));
-            expect(replaced).toHaveLength(1);
-            expect(replaced[0]).toContain("part=1 mediaType=image/png");
-            expect(() => Message.make(first!.messages[0])).not.toThrow();
+            return lines;
+        };
+
+        it("#then a JSON round trip of a real host asset comes back as a host instance with the same bytes", () => {
+            resetHostMediaForTests();
+            const original = Message.make({
+                id: "msg-json",
+                role: "user",
+                content: [
+                    { type: "text", text: "what is in this image?" },
+                    { type: "media", media: Media.base64(PNG, "image/png"), filename: "pixel.png" },
+                ],
+            }) as unknown as V2Message;
+            const before = JSON.stringify(original.content);
+            const context = draft([original]);
+            // The context hook learns the host's classes from the draft it is handed.
+            rememberHostMedia(context.messages);
+            const payload = adaptPayload(context);
+            // What the Rust module hands back: the same message, echoed as JSON.
+            payload.messages[0].parts = JSON.parse(JSON.stringify(payload.messages[0].parts));
+            let lines: string[] = [];
+            try {
+                lines = logged(() => payload.commit());
+            } finally {
+                resetHostMediaForTests();
+            }
+            const part = context.messages[0]?.content[1];
+            expect(part?.media).toBeInstanceOf(Media.Asset);
+            expect(() => Message.make(context.messages[0])).not.toThrow();
+            expect(JSON.stringify(context.messages[0]?.content)).toBe(before);
+            expect(lines.filter((line) => line.includes("rebuilt a media part"))).toHaveLength(1);
         });
 
-        it("#then a plain-object copy of an asset that matches no host part gets the note too, keeping its cache hint", () => {
-            const context = commitWith({
+        it("#then the flat shape is rebuilt the same way once a host message class is known", () => {
+            resetHostMediaForTests();
+            rememberHostMedia([
+                Message.make({ role: "user", content: [{ type: "text", text: "seed schema" }] }),
+            ]);
+            let context: SessionContext | undefined;
+            try {
+                context = commitWith(flat(), "msg-flat-rebuilt");
+            } finally {
+                resetHostMediaForTests();
+            }
+            const part = context!.messages[0]?.content[1];
+            expect(part?.media).toBeInstanceOf(Media.Asset);
+            expect(part?.media).toEqual(Media.base64(PNG, "image/png"));
+            expect(Object.keys(part ?? {})).toEqual(["type", "media", "filename"]);
+            expect(() => Message.make(context!.messages[0])).not.toThrow();
+        });
+
+        it("#then with no host class or schema known, both shapes become the note, the same bytes twice, logged once", () => {
+            resetHostMediaForTests();
+            const encoded = () => ({
                 type: "media",
                 media: { source: { type: "base64", data: "AAAA", mediaType: "image/jpeg" } },
                 cache: { type: "ephemeral" },
             });
-            expect(context.messages[0]?.content[1]).toEqual({
+            let first: SessionContext | undefined;
+            let second: SessionContext | undefined;
+            let json: SessionContext | undefined;
+            let jsonAgain: SessionContext | undefined;
+            const lines = logged(() => {
+                first = commitWith(flat(), "msg-flat-note");
+                second = commitWith(flat(), "msg-flat-note");
+                json = commitWith(encoded(), "msg-json-note");
+                jsonAgain = commitWith(encoded(), "msg-json-note");
+            });
+            expect(first!.messages[0]?.content).toEqual([
+                { type: "text", text: "look" },
+                { type: "text", text: unpassableAttachmentNote("pixel.png", "image/png") },
+            ]);
+            expect(unpassableAttachmentNote("pixel.png", "image/png")).toBe(
+                '[Attachment "pixel.png" (image/png) could not be passed to the model]',
+            );
+            expect(JSON.stringify(second!.messages)).toBe(JSON.stringify(first!.messages));
+            expect(json!.messages[0]?.content[1]).toEqual({
                 type: "text",
-                text: unavailableAttachmentNote(undefined, "image/jpeg"),
+                text: unpassableAttachmentNote(undefined, "image/jpeg"),
                 cache: { type: "ephemeral" },
             });
+            expect(JSON.stringify(jsonAgain!.messages)).toBe(JSON.stringify(json!.messages));
+            const replaced = lines.filter((line) => line.includes("by a note"));
+            expect(replaced).toHaveLength(2);
+            expect(replaced[0]).toContain("message=msg-flat-note part=1 mediaType=image/png");
+            expect(() => Message.make(first!.messages[0])).not.toThrow();
         });
 
         it("#then a part holding the host's asset, and every request without one, keep their exact bytes", () => {
