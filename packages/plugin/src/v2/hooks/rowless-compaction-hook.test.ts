@@ -292,7 +292,8 @@ test("a compaction request with no running checkpoint row spends no attempt to c
 // A completed checkpoint whose record the fallback wrote while its row was
 // running is served as the carrier of earlier history. A later request that
 // cuts nothing must not replace that record, or the next pass stops serving the
-// checkpoint and sends the synthetic head message in its place.
+// checkpoint and sends Magic Context's own first history message (m[0]) in its
+// place.
 test("a compaction request with no running checkpoint row leaves the record of a stored checkpoint in place", async () => {
     const f = await oc2ContextFixture(69886, options);
     const supply = spyOn(NativeFoldReplay.prototype, "supply").mockResolvedValue(false);
