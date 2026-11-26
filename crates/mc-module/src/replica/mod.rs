@@ -53,9 +53,6 @@ pub mod epochs;
 #[cfg(feature = "memory-replica")]
 pub(crate) mod health;
 
-#[cfg(any(unix, feature = "memory-replica"))]
-pub(crate) const OUTBOX_BACKLOG: &str = "('pending', 'sending', 'too_large', 'unaddressable')";
-
 const ROUTINE_SKIPS_KEY: &str = "replica_routine_skips";
 pub mod hub;
 pub mod live;
@@ -65,6 +62,25 @@ pub mod schema;
 pub mod seal;
 pub mod snapshot;
 pub mod wire;
+
+/// Unplaced legacy project rows have paths in place of addresses. A change
+/// already encoded for sending has its address in the saved envelope.
+#[cfg(any(unix, feature = "memory-replica"))]
+pub(crate) fn local_only_outbox_count(conn: &Connection, states: &str) -> rusqlite::Result<u64> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT m.owner_id FROM replica_outbox o JOIN memories m ON m.id = o.local_id
+          WHERE o.state IN {states} AND o.kind = 'memory' AND o.frozen IS NULL AND m.level = 'project'"
+    ))?;
+    let mut rows = stmt.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let owner: String = row.get(0)?;
+        if wire::subject("memory", Some("project"), &owner).is_err() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
 
 #[cfg(test)]
 mod capture_tests;

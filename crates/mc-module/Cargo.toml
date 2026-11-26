@@ -112,7 +112,7 @@ async-trait = "0.1"
 zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
-cortexkit-doctor = "=0.2.0"
+cortexkit-doctor = "=0.3.0"
 # `time`: the monotonic clock a dreamer run reads its role lease's acting
 # window on (`dreamer::lease::monotonic_ms`).
 nix = { version = "0.31.3", features = ["dir", "fs", "time", "user"] }
@@ -123,8 +123,8 @@ windows-sys = { version = "=0.61.2", default-features = false, features = ["Win3
 [dev-dependencies]
 # The log manifest test names the doctor crate's types on every platform; the
 # module itself links the crate on Unix only, where `ck-mc doctor` exists.
-cortexkit-doctor = "=0.2.0"
-cortexkit-log-manifest = "=0.2.0"
+cortexkit-doctor = "=0.3.0"
+cortexkit-log-manifest = "=0.3.0"
 cortexkit-role-tool-provider-conformance = "=0.15.18"
 rusqlite = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["test-util"] }
@@ -149,7 +149,7 @@ subc-transport = { workspace = true }
 cortexkit-test-support = "=0.1.14"
 
 [target.'cfg(unix)'.dev-dependencies]
-cortexkit-doctor-conformance = "=0.2.0"
+cortexkit-doctor-conformance = "=0.3.0"
 
 [[bin]]
 name = "ck-mc"

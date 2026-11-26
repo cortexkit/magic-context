@@ -8,7 +8,6 @@ use nix::dir::Dir;
 use nix::errno::Errno;
 use nix::fcntl::{open, openat, AtFlags, OFlag};
 use nix::sys::stat::{fchmod, fstat, fstatat, FileStat, Mode, SFlag};
-use nix::unistd::geteuid;
 
 use crate::storage_paths::{CONTEXT_DB, MODULE_DIR, SESSION_DB};
 
@@ -16,6 +15,7 @@ const BACKUPS: &str = "backups";
 const SPECIMENS: &str = "specimens";
 const LOGS: &str = "logs";
 const DB_NAMES: [&str; 2] = [CONTEXT_DB, SESSION_DB];
+pub(super) const SIDECARS: [&str; 3] = ["wal", "shm", "journal"];
 const CHILD_FLAGS: OFlag = OFlag::O_RDONLY
     .union(OFlag::O_CLOEXEC)
     .union(OFlag::O_NOFOLLOW)
@@ -29,10 +29,8 @@ pub(super) struct DataDir {
 
 impl DataDir {
     pub(super) fn open(home: &Path) -> Result<Option<Self>, Errno> {
-        // `ck doctor` starts this program with the data home in XDG_DATA_HOME.
-        // That folder is trusted as given (on macOS its real path can go
-        // through /var). Below it, open every named component without
-        // following links.
+        // Trust the supplied XDG_DATA_HOME, including aliases such as macOS's
+        // /var symlink to /private/var. Never follow links beneath that home.
         let home = match fs::canonicalize(home) {
             Ok(home) => home,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -52,19 +50,31 @@ impl DataDir {
         }))
     }
 
-    pub(super) fn has_sidecar(&self, db: &str) -> bool {
-        ["-wal", "-shm"].into_iter().any(|suffix| {
-            let name = sidecar(db, suffix);
-            // An unexpected type or lookup error is not proof of an absent sidecar.
-            !matches!(stat(&self.fd, &name), Err(Errno::ENOENT))
-        })
+    pub(super) fn sidecars(&self, db: &str) -> Sidecars {
+        let mut result = Sidecars::default();
+        for suffix in SIDECARS {
+            match stat(&self.fd, &sidecar(db, suffix)) {
+                Ok(_) => result.present.push(suffix),
+                Err(Errno::ENOENT) => (),
+                Err(_) => result.lookup_failed += 1,
+            }
+        }
+        result
     }
 
-    pub(super) fn permissions(&self, stop: impl Fn() -> bool) -> PermissionScan {
+    pub(super) fn permissions(
+        &self,
+        uid: nix::libc::uid_t,
+        stop: impl Fn() -> bool,
+    ) -> PermissionScan {
         let mut result = PermissionScan::default();
         result.walk = walk(&self.fd, &permission_targets(), stop, |entry| {
             if entry.private_candidate() && entry.stat.st_mode & 0o044 != 0 {
-                result.count += 1;
+                match entry.protection(uid) {
+                    Some(Protection::OtherOwner) => result.other_owner += 1,
+                    Some(Protection::MultipleLinks) => result.multiple_links += 1,
+                    None => result.fixable += 1,
+                }
                 if result.first.is_none() {
                     result.first = Some(entry.path.to_owned());
                 }
@@ -87,8 +97,7 @@ impl DataDir {
         result
     }
 
-    pub(super) fn tighten(&self, stop: impl Fn() -> bool) -> Changes {
-        let uid = geteuid().as_raw();
+    pub(super) fn tighten(&self, uid: nix::libc::uid_t, stop: impl Fn() -> bool) -> Changes {
         let mut result = Changes::default();
         result.walk = walk(&self.fd, &permission_targets(), stop, |entry| {
             if entry.kind() == SFlag::S_IFLNK {
@@ -97,7 +106,7 @@ impl DataDir {
                     result.first_link = Some(entry.path.to_owned());
                 }
             }
-            if !entry.private_candidate() || entry.stat.st_uid != uid || shared_inode(&entry.stat) {
+            if !entry.private_candidate() || entry.protection(uid).is_some() {
                 result.skipped += 1;
                 return;
             }
@@ -107,10 +116,10 @@ impl DataDir {
             match entry.tighten(uid) {
                 Ok(true) => result.changed += 1,
                 Ok(false) => result.skipped += 1,
-                Err(_) => result.failed += 1,
+                Err(ChangeError::Open) => result.open_failed += 1,
+                Err(ChangeError::Mode) => result.mode_failed += 1,
             }
         });
-        result.failed += result.walk.errors;
         result
     }
 }
@@ -161,14 +170,17 @@ fn shared_inode(stat: &FileStat) -> bool {
     kind(stat) == SFlag::S_IFREG && stat.st_nlink != 1
 }
 
-fn sidecar(db: &str, suffix: &str) -> OsString {
-    format!("{db}{suffix}").into()
+pub(super) fn sidecar(db: &str, suffix: &str) -> OsString {
+    format!("{db}-{suffix}").into()
 }
 
 fn permission_targets() -> Vec<(OsString, bool)> {
     DB_NAMES
         .into_iter()
-        .flat_map(|db| ["", "-wal", "-shm"].map(|suffix| (sidecar(db, suffix), false)))
+        .flat_map(|db| {
+            std::iter::once((db.into(), false))
+                .chain(SIDECARS.map(|suffix| (sidecar(db, suffix), false)))
+        })
         .chain([BACKUPS, LOGS].map(|name| (name.into(), true)))
         .collect()
 }
@@ -177,7 +189,21 @@ fn permission_targets() -> Vec<(OsString, bool)> {
 pub(super) struct PermissionScan {
     pub(super) walk: Walk,
     pub(super) first: Option<PathBuf>,
-    pub(super) count: u64,
+    pub(super) fixable: u64,
+    pub(super) other_owner: u64,
+    pub(super) multiple_links: u64,
+}
+
+#[derive(Default)]
+pub(super) struct Sidecars {
+    pub(super) present: Vec<&'static str>,
+    pub(super) lookup_failed: u64,
+}
+
+impl Sidecars {
+    pub(super) fn clear(&self) -> bool {
+        self.present.is_empty() && self.lookup_failed == 0
+    }
 }
 
 #[derive(Default)]
@@ -192,7 +218,8 @@ pub(super) struct Changes {
     pub(super) walk: Walk,
     pub(super) changed: u64,
     pub(super) skipped: u64,
-    pub(super) failed: u64,
+    pub(super) open_failed: u64,
+    pub(super) mode_failed: u64,
     pub(super) links: u64,
     pub(super) first_link: Option<PathBuf>,
 }
@@ -200,8 +227,18 @@ pub(super) struct Changes {
 #[derive(Default)]
 pub(super) struct Walk {
     pub(super) examined: u64,
-    pub(super) incomplete: bool,
-    errors: u64,
+    pub(super) timed_out: bool,
+    pub(super) open_failed: u64,
+    pub(super) list_failed: u64,
+}
+
+enum ChangeError {
+    Open,
+    Mode,
+}
+enum Protection {
+    OtherOwner,
+    MultipleLinks,
 }
 
 struct Entry<'a> {
@@ -221,23 +258,38 @@ impl Entry<'_> {
         self.type_allowed && matches!(self.kind(), SFlag::S_IFDIR | SFlag::S_IFREG)
     }
 
-    fn tighten(&self, uid: nix::libc::uid_t) -> Result<bool, Errno> {
+    fn protection(&self, uid: nix::libc::uid_t) -> Option<Protection> {
+        if self.stat.st_uid != uid {
+            Some(Protection::OtherOwner)
+        } else if shared_inode(&self.stat) {
+            Some(Protection::MultipleLinks)
+        } else {
+            None
+        }
+    }
+
+    fn tighten(&self, uid: nix::libc::uid_t) -> Result<bool, ChangeError> {
         let flags = if self.kind() == SFlag::S_IFDIR {
             CHILD_FLAGS | OFlag::O_DIRECTORY
         } else {
             CHILD_FLAGS
         };
-        let fd = openat(self.parent, self.name, flags, Mode::empty())?;
-        let current = fstat(&fd)?;
+        let fd =
+            openat(self.parent, self.name, flags, Mode::empty()).map_err(|_| ChangeError::Open)?;
+        let current = fstat(&fd).map_err(|_| ChangeError::Open)?;
         if !same_entry(&self.stat, &current)
             || current.st_uid != uid
             || shared_inode(&current)
-            || !same_entry(&current, &stat(self.parent, self.name)?)
+            || !same_entry(
+                &current,
+                &stat(self.parent, self.name).map_err(|_| ChangeError::Open)?,
+            )
             || current.st_mode & 0o077 == 0
         {
             return Ok(false);
         }
-        fchmod(&fd, Mode::from_bits_truncate(current.st_mode & 0o700))?;
+        fchmod(&fd, Mode::from_bits_truncate(current.st_mode & !0o077))
+            .map_err(|_| ChangeError::Mode)?;
         Ok(true)
     }
 }
@@ -270,18 +322,18 @@ struct Walker<S, V> {
 
 impl<S: Fn() -> bool, V: FnMut(Entry<'_>)> Walker<S, V> {
     fn stop(&mut self) -> bool {
-        self.result.incomplete |= (self.stop)();
-        self.result.incomplete
+        self.result.timed_out |= (self.stop)();
+        self.result.timed_out
     }
 
-    /// A named root must have the expected type. Inside a tree, visit both
-    /// regular files and directories, but never descend into a link.
+    /// Report every entry to the visitor, including links and roots of the
+    /// wrong type. Descend only into a real directory in a directory target.
     fn entry(&mut self, parent: &OwnedFd, name: &OsStr, path: &Path, tree: Option<bool>) {
         let status = match stat(parent, name) {
             Ok(status) => status,
             Err(Errno::ENOENT) => return,
             Err(_) => {
-                self.result.errors += 1;
+                self.result.open_failed += 1;
                 return;
             }
         };
@@ -299,20 +351,21 @@ impl<S: Fn() -> bool, V: FnMut(Entry<'_>)> Walker<S, V> {
             match child_dir(parent, name) {
                 Ok(Some(fd)) => self.children(&fd, path),
                 Ok(None) => (),
-                Err(_) => self.result.errors += 1,
+                Err(_) => self.result.open_failed += 1,
             }
         }
     }
 
     fn children(&mut self, fd: &OwnedFd, path: &Path) {
-        // Keep the directory descriptor separate from the read cursor, so a
-        // rename or link swap cannot redirect a child's path lookup.
+        // Dir::from_fd takes ownership; duplicate the fd so child lookups
+        // can still use the original. If the same user moves a directory
+        // mid-walk, its fd still names it and any mode changes only tighten it.
         let cursor = fd
             .try_clone()
             .map_err(|_| Errno::EIO)
             .and_then(Dir::from_fd);
         let Ok(cursor) = cursor else {
-            self.result.errors += 1;
+            self.result.list_failed += 1;
             return;
         };
         let mut entries = cursor.into_iter();
@@ -321,7 +374,7 @@ impl<S: Fn() -> bool, V: FnMut(Entry<'_>)> Walker<S, V> {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
-                    self.result.errors += 1;
+                    self.result.list_failed += 1;
                     break;
                 }
             };
