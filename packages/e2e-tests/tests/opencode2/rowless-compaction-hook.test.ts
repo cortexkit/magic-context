@@ -18,14 +18,16 @@ import {
 
 // OpenCode can call the compaction hook while no checkpoint row is running.
 // From 2.3.1 it prepares a compaction in the background after a reply that
-// reports high usage (on by default); 2.0.22 and 2.1.0 do it at the next turn's
-// admission for a model in provider compaction mode. Nothing is cut when the
-// background call runs, so the next ordinary request is a defer pass that must
-// replay the two history head messages (m[0] and m[1]) byte for byte, and a
-// queued drop must wait for a real rebuild. Before the fix the hook stored a
-// newly rendered head (the summary served in m[1] moved into m[0]) and the
-// next defer pass sent it, rewriting the provider's cached prefix with the
-// drop still queued.
+// reports high usage (on by default). Its automatic checkpoints, on every
+// tested version, ask the hook before any row exists too, and so do 2.0.22 and
+// 2.1.0 for a model in provider compaction mode. Nothing is cut when the hook
+// runs, and the stored history head must stay what the session last sent: the
+// two head messages (m[0] and m[1]) replay byte for byte on every later pass
+// that has no rebuild of its own, and a queued drop waits for a rebuild that
+// pays for a rewrite (a later real fold, or the force band under pressure).
+// Before the fix the hook stored a newly rendered head (the summary served in
+// m[1] moved into m[0]) and the next pass sent it, rewriting the provider's
+// cached prefix while it logged a cache hit.
 //
 // Two plugins registered before and after Magic Context hold the hook call
 // until this test has read the stored session row, so the comparison brackets
@@ -64,7 +66,17 @@ function barrierPlugin(root: string, label: "before" | "after", observer: string
     return dir;
 }
 
-test(`a compaction request with no running checkpoint row keeps the served history head (OpenCode ${hostVersion})`, async () => {
+/**
+ * background: 2.3.1+ with every host compaction setting at its default; a
+ * reply at 45% of the window makes the host prepare a compaction while nothing
+ * is due. provider: 2.0.22/2.1.0 with the model in provider compaction mode.
+ * auto: the runner's ordinary automatic compaction. In those two a reply just
+ * past the host's compaction threshold makes it ask the hook, store a completed
+ * automatic checkpoint and send the next turn under pressure.
+ */
+type Arm = "background" | "provider" | "auto";
+
+async function scenario(arm: Arm) {
     const fixture = isolation();
     const contextPath = join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db");
     const sourcePath = join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!);
@@ -122,17 +134,11 @@ test(`a compaction request with no running checkpoint row keeps the served histo
         prePlugin: barrierPlugin(fixture.root, "before", observerURL),
         probePlugin: barrierPlugin(fixture.root, "after", observerURL),
         modelOutputLimit: 1024,
-        // 2.3.1+: every host compaction setting at its default, so the host
-        // prepares a compaction in the background after a high-usage reply.
-        // Older hosts: a model in provider compaction mode near its window.
-        ...(backgroundHost
-            ? { modelContextLimit: 100_000, compactionConfig: {} }
-            : {
-                  // The historian's /ctx-wrapup publishes nothing on a 16k window,
-                  // so this arm uses the same window and scales the pressure.
-                  modelContextLimit: 100_000,
-                  modelCompaction: { mode: "provider" },
-              }),
+        // The historian's /ctx-wrapup publishes nothing on a 16k window, so every
+        // arm uses a 100k window and scales the pressure to it.
+        modelContextLimit: 100_000,
+        ...(arm === "background" ? { compactionConfig: {} } : {}),
+        ...(arm === "provider" ? { modelCompaction: { mode: "provider" } } : {}),
         magicContextConfig: {
             cache_ttl: "never",
             execute_threshold_percentage: 65,
@@ -168,6 +174,9 @@ test(`a compaction request with no running checkpoint row keeps the served histo
     let client = connect();
     const historian = (body: unknown) => /Messages (\d+)-(\d+):/.test(JSON.stringify(body));
     const served: Array<{ turn: string; input: string[] }> = [];
+    // Set to a path prefix to keep each request, the session's log lines and
+    // their digests for comparing two builds.
+    const dump = process.env.MC_E2E_ROWLESS_DUMP && `${process.env.MC_E2E_ROWLESS_DUMP}-${arm}`;
     try {
         await waitForPluginActive(client, fixture.cwd);
         const session = await client.session.create({
@@ -282,7 +291,7 @@ test(`a compaction request with no running checkpoint row keeps the served histo
 
         // The reply to this request reports high usage. It still carries the
         // served heads.
-        reply(backgroundHost ? 45_000 : 99_500);
+        reply(arm === "background" ? 45_000 : 99_500);
         const high = await turn("HIGH: continue");
         reply(100);
         expect(heads(high)).toEqual(heads(held));
@@ -306,11 +315,22 @@ test(`a compaction request with no running checkpoint row keeps the served histo
                 expect([marker, text.split(marker).length - 1]).toEqual([marker, 0]);
         };
         const snapshotPair = () => {
+            console.log(
+                `${arm} hook snapshots: ${JSON.stringify(snapshots.map(({ row: _row, ...rest }) => rest))} legacyAnswer=${sessionLog().some((line) => line.includes("v2 compaction hook: fired"))}`,
+            );
             expect(snapshots.map((entry) => entry.label)).toEqual(["before", "after"]);
             const [before, after] = snapshots as [Snapshot, Snapshot];
-            // No checkpoint row while the hook ran, and no provider request
-            // between the two snapshots.
-            expect([before.checkpoints, after.checkpoints]).toEqual([0, 0]);
+            // No checkpoint row before the hook ran, and no provider request
+            // between the two snapshots. From 2.3.1 an automatic checkpoint
+            // records its start while the hooks run, so the row can appear
+            // between the two snapshots and Magic Context may then answer it as
+            // a running checkpoint (the hold before it makes that likely);
+            // either way the stored row must not change. Older hosts record the
+            // row only after the hooks return.
+            expect(before.checkpoints).toBe(0);
+            expect([0, ...(arm === "auto" && backgroundHost ? [1] : [])]).toContain(
+                after.checkpoints,
+            );
             expect(after.requests).toBe(before.requests);
             expect(after.summary).toBe(CHECKPOINT_NOTE);
             // The stored session row is byte-identical across the call.
@@ -322,7 +342,7 @@ test(`a compaction request with no running checkpoint row keeps the served histo
         };
 
         let last: string[];
-        if (backgroundHost) {
+        if (arm === "background") {
             // The host prepares a compaction in the background after that reply.
             const waitUntil = Date.now() + 30000;
             while (!snapshots.some((entry) => entry.label === "after")) {
@@ -350,8 +370,9 @@ test(`a compaction request with no running checkpoint row keeps the served histo
             expectEachOnce(low2);
             last = low2;
         } else {
-            // The host asks for the checkpoint at the next turn's admission, then
-            // stores it and sends that turn under pressure.
+            // The host asks for the checkpoint before any row exists (2.3.1+ may
+            // already have asked after the high reply), stores it, and sends the
+            // next turn under pressure.
             const logged = sessionLog().length;
             const pressure = await turn("PRESSURE: continue");
             snapshotPair();
@@ -419,17 +440,17 @@ test(`a compaction request with no running checkpoint row keeps the served histo
         const after = await turn("AFTER: continue");
         expect(after.slice(0, rebuilt.length)).toEqual(rebuilt);
     } finally {
-        if (process.env.MC_E2E_ROWLESS_DUMP) {
+        if (dump) {
             writeFileSync(
-                `${process.env.MC_E2E_ROWLESS_DUMP}.log`,
+                `${dump}.log`,
                 readPluginLog(fixture.env)
                     .split("\n")
                     .filter((line) => sessionID && line.includes(`[${sessionID}]`))
                     .join("\n"),
             );
-            writeFileSync(`${process.env.MC_E2E_ROWLESS_DUMP}.inputs.json`, JSON.stringify(served));
+            writeFileSync(`${dump}.inputs.json`, JSON.stringify(served));
             writeFileSync(
-                process.env.MC_E2E_ROWLESS_DUMP,
+                dump,
                 JSON.stringify(
                     served.map(({ turn, input }) => ({
                         turn,
@@ -447,4 +468,19 @@ test(`a compaction request with no running checkpoint row keeps the served histo
         observer.stop(true);
         await host.stop();
     }
-}, 300000);
+}
+
+(backgroundHost ? test : test.skip)(
+    `a background compaction request with no running checkpoint row keeps the served history head (OpenCode ${hostVersion})`,
+    () => scenario("background"),
+    300000,
+);
+
+(backgroundHost ? test.skip : test)(
+    `a provider-mode compaction request with no running checkpoint row keeps the served history head (OpenCode ${hostVersion})`,
+    () => scenario("provider"),
+    300000,
+);
+
+test(`an automatic checkpoint keeps the served history head (OpenCode ${hostVersion})`, () =>
+    scenario("auto"), 300000);
