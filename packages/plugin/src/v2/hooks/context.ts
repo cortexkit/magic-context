@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled, isSmartNoteSurfaceAvailable } from "../../config/agent-disable";
@@ -615,6 +616,21 @@ export async function cacheV2SessionDirectory(
     }
 }
 
+interface V2ContextPass {
+    sessionID: SessionContext["sessionID"];
+    refused: boolean;
+}
+
+const contextPass = new AsyncLocalStorage<V2ContextPass>();
+
+function withV2ContextPass<T>(
+    sessionID: SessionContext["sessionID"],
+    run: (pass: V2ContextPass) => Promise<T>,
+): Promise<T> {
+    const pass = { sessionID, refused: false };
+    return withSqliteTransformPass(() => contextPass.run(pass, () => run(pass)));
+}
+
 /**
  * Every pre-provider refusal on OpenCode 2 ends the turn with `session.interrupt`, which
  * the host records as a bare `outcome: "interrupted"` row: no error text reaches the
@@ -628,6 +644,8 @@ function refuseBeforeProvider(
     arm: string,
     cause?: unknown,
 ): Promise<void> {
+    const pass = contextPass.getStore();
+    if (pass?.sessionID === sessionID) pass.refused = true;
     const detail =
         cause instanceof Error
             ? `${cause.name}: ${cause.message}`
@@ -3569,7 +3587,7 @@ export async function registerContext(context: V2Context) {
         throw new V2ContextRefusal("Magic Context refused an oversized host checkpoint.");
     };
     await context.session.hook("context", (draft) =>
-        withSqliteTransformPass(async () => {
+        withV2ContextPass(draft.sessionID, async (pass) => {
             hostFoldIdle?.active(draft.sessionID);
             // A hidden maintenance run (summary or dreamer) never asks a `/btw`
             // side question, so it prepares no replay, and it must not replace
@@ -3582,6 +3600,12 @@ export async function registerContext(context: V2Context) {
             let outcome: Awaited<ReturnType<typeof runManagedContext>>;
             try {
                 outcome = await runManagedContext(draft);
+                // A handler can interrupt and still return normally. Do not
+                // admit or save that draft after the refusal.
+                if (pass.refused) {
+                    returned = true;
+                    return;
+                }
                 if (!compactionOff) await refuseOversizedCheckpoint(draft);
                 if (
                     !deletedSessions.has(draft.sessionID) &&
@@ -3625,10 +3649,14 @@ export async function registerContext(context: V2Context) {
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here
             // so side questions reuse the exact history handed back to the host.
-            // An interrupted turn can return normally without serving a request.
             if (compactionOff)
                 sessionLog(draft.sessionID, "generate replay capture skipped: compaction-disabled");
-            else if (outcome === "managed" && !hiddenChild && !deletedSessions.has(draft.sessionID))
+            else if (
+                !pass.refused &&
+                outcome === "managed" &&
+                !hiddenChild &&
+                !deletedSessions.has(draft.sessionID)
+            )
                 generateReplay.capture(draft, anchor);
         }),
     );
