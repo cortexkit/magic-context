@@ -5,9 +5,17 @@ import {
     type CopySessionStateForCloneResult,
     copySessionStateForClone,
 } from "../features/magic-context/storage-clone";
+import { validateStoredCompartments } from "../hooks/magic-context/compartment-runner-validation";
+import { nonNarrativeStoredGapRanges } from "../hooks/magic-context/stored-compartment-gaps";
 import { sessionLog } from "../shared/logger";
 import type { Database } from "../shared/sqlite";
-import { RAW_MESSAGE_TYPES, type V2ForkOrigin, type V2RowStamp } from "./store-reader";
+import { readV2MessageRange } from "./hooks/store";
+import {
+    RAW_MESSAGE_TYPES,
+    type V2ForkOrigin,
+    type V2RowStamp,
+    type V2StoreReader,
+} from "./store-reader";
 
 /**
  * Fork inheritance for OpenCode 2.
@@ -108,6 +116,9 @@ interface ForkCompartmentProof {
     sessionId: string;
     sequenceForId(id: string): number | undefined;
     matchingBodies(): ReadonlyMap<string, string>;
+    acceptedGaps(
+        source: readonly CloneCompartmentBoundary[],
+    ): Array<{ start: number; end: number }>;
 }
 
 function selectForkCompartments(
@@ -122,10 +133,12 @@ function selectForkCompartments(
     const provePrefix = () => {
         const matching = proof.matchingBodies();
         let length = 0;
-        // Verify the current parent and fork, not what the historian originally
-        // read. Neither store can detect a parent edit made before both copies
-        // acquired the same new bytes. Missing or extra counted rows, mismatched
-        // stamps, and differences in body bytes invalidate position here.
+        // Compare the current parent and fork. An edit to the parent after the
+        // summary was written but before forking can leave both rows with the
+        // same new text; neither store records what the historian read.
+        // Keep the ordinal, preceding-anchor and boundary checks even where
+        // the other guards imply them: they detect extra counted rows, make
+        // stale-anchor proof explicit, and distinguish the fork-point rejection.
         for (const [position, id] of map.parentOrdinals) {
             if (ordinal(id) !== position || matching.get(id) !== forkId(id)) break;
             length = position;
@@ -134,6 +147,7 @@ function selectForkCompartments(
     };
     let stopped = false;
     let lastEnd = 0;
+    let acceptedGaps: ReturnType<ForkCompartmentProof["acceptedGaps"]> | undefined;
     for (const [i, row] of source.entries()) {
         const { sequence, startMessage, endMessage, startMessageId, endMessageId } = row;
         const start = ordinal(startMessageId);
@@ -161,11 +175,18 @@ function selectForkCompartments(
                 endMessage < startMessage
             ) {
                 reason = "invalid message range";
-            } else if (startMessage !== lastEnd + 1) {
-                reason =
-                    startMessage <= lastEnd
-                        ? "range overlaps the inherited prefix"
-                        : "gap before range";
+            } else if (startMessage <= lastEnd) {
+                reason = "range overlaps the inherited prefix";
+            } else if (
+                startMessage > lastEnd + 1 &&
+                validateStoredCompartments(
+                    // The existing prefix already passed. Present only its end
+                    // and the candidate to the historian's own gap validator.
+                    lastEnd > 0 ? [{ startMessage: 1, endMessage: lastEnd }, row] : [row],
+                    (acceptedGaps ??= proof.acceptedGaps(source)),
+                ) !== null
+            ) {
+                reason = "gap before range";
             } else if (
                 (start !== undefined && start !== startMessage) ||
                 (end !== undefined && end !== endMessage)
@@ -174,9 +195,7 @@ function selectForkCompartments(
             } else if (
                 // A stale id needs a witness in today's projection: a live
                 // abutting anchor on that side, or the beginning of history.
-                (start === undefined &&
-                    previous &&
-                    ordinal(previous.endMessageId) !== startMessage - 1) ||
+                (start === undefined && previous && ordinal(previous.endMessageId) !== lastEnd) ||
                 (end === undefined &&
                     (!next ||
                         next.startMessage !== endMessage + 1 ||
@@ -189,8 +208,8 @@ function selectForkCompartments(
             ) {
                 reason = "parent and fork raw prefixes do not match in order and body";
             } else {
-                // Block indices are safe to keep only after the same byte check
-                // has proved both boundary messages, including all their parts.
+                // The copier preserves block indices. The byte proof above
+                // includes every part of both messages those indices address.
                 rows.set(sequence, {
                     sequence,
                     startMessage,
@@ -213,14 +232,42 @@ function selectForkCompartments(
     // here even when the summary describes only part of the message.
     const keepRaw = new Set<string>();
     if (stopped) {
-        const changes = new Int32Array(map.parentOrdinals.size + 2);
-        for (const row of source) {
-            if (rows.has(row.sequence)) continue;
-            const start = Math.max(1, row.startMessage);
-            const end = Math.min(map.parentOrdinals.size, row.endMessage);
-            if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) continue;
+        const count = map.parentOrdinals.size;
+        const changes = new Int32Array(count + 2);
+        const markCovered = (from: number, to: number) => {
+            const start = Math.max(1, from);
+            const end = Math.min(count, to);
+            if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) return;
             changes[start] = (changes[start] ?? 0) + 1;
             changes[end + 1] = (changes[end + 1] ?? 0) - 1;
+        };
+        const parentPositions = new Map(
+            [...map.parentOrdinals].map(([position, id]) => [id, position]),
+        );
+        const liveOrdinal = (id: string) => {
+            const position = parentPositions.get(id);
+            if (position !== undefined) return position;
+            return (proof.sequenceForId(id) ?? -1) > map.throughSeq ? count + 1 : undefined;
+        };
+        const live = source.map((row) => ({
+            start: liveOrdinal(row.startMessageId),
+            end: liveOrdinal(row.endMessageId),
+        }));
+        for (const [index, row] of source.entries()) {
+            if (rows.has(row.sequence)) continue;
+            markCovered(row.startMessage, row.endMessage);
+            // The parent can render using its live IDs instead of saved
+            // ordinals. Also retain anything covered by that reading, with
+            // the same neighboring endpoint fallback for a missing ID.
+            const { start, end } = live[index] ?? {};
+            if (start === undefined && end === undefined) continue;
+            const previousEnd = live[index - 1]?.end;
+            const nextStart = live[index + 1]?.start;
+            const from =
+                start ??
+                (previousEnd !== undefined ? previousEnd + 1 : index === 0 ? 1 : undefined);
+            const to = end ?? (nextStart !== undefined ? nextStart - 1 : undefined);
+            if (from !== undefined && to !== undefined) markCovered(from, to);
         }
         let covering = 0;
         for (const [position, id] of map.parentOrdinals) {
@@ -309,7 +356,7 @@ export type V2ForkSeedOutcome =
     | { kind: "destination-not-empty"; parentSessionID: string };
 
 /** What the seed reads from the OpenCode 2 store. */
-export interface V2ForkStore {
+export interface V2ForkStore extends Pick<V2StoreReader, "messagePage"> {
     forkOrigin(sessionID: string): V2ForkOrigin | null;
     sessionExists(sessionID: string): boolean;
     sequenceForId(sessionID: string, id: string): number | undefined;
@@ -421,6 +468,15 @@ export function seedV2ForkFromParent(args: {
                 sequenceForId: (id) => store.sequenceForId(parentSessionID, id),
                 matchingBodies: () =>
                     store.matchingForkBodies(parentSessionID, sessionId, throughSeq),
+                acceptedGaps: (source) =>
+                    nonNarrativeStoredGapRanges(db, parentSessionID, source, (start, end) =>
+                        readV2MessageRange(
+                            store,
+                            parentSessionID,
+                            start,
+                            Math.min(end, idMap.parentOrdinals.size),
+                        ),
+                    ),
             },
             toolOwners,
         ),

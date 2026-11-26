@@ -8,17 +8,10 @@ import type { V2Message } from "./types";
  * Every notice Magic Context stores in an OpenCode 2 conversation about its own
  * storage starts with this text. The notices are for the user: none of them may
  * reach the model, and the conversation keeps them across restarts, so they are
- * recognized by this fixed prefix and a stored record that Magic Context sent
- * the synthetic. A reminted fork repair notice instead needs the native
- * synthetic row and exact text.
+ * recognized by this fixed prefix together with the host's own record that the
+ * message is a synthetic one Magic Context sent, never by process memory.
  */
 export const STORAGE_NOTICE_PREFIX = "[Magic Context storage notice] ";
-
-export const FORK_HISTORY_NOTICE = `${STORAGE_NOTICE_PREFIX}This fork is missing saved history summaries. Run /ctx-recomp without a range in this fork to rebuild them from its raw history.`;
-
-export function isForkHistoryNoticeMessage(message: V2Message): boolean {
-    return hasStorageNoticeShape(message) && message.content[0]?.text === FORK_HISTORY_NOTICE;
-}
 
 /** The notice stored when a turn is refused because the context database is unavailable. */
 export function formatStorageRefusalNotice(reason: FailClosedReason): string {
@@ -50,8 +43,9 @@ export function hasStorageNoticeShape(message: V2Message): boolean {
 
 /**
  * Remove stored storage notices from a request draft in place. A message counts
- * only when it has the notice shape and `isAdmittedSynthetic` confirms its
- * host-side provenance. A user who types the same text keeps their message.
+ * only when it has the notice shape and `isAdmittedSynthetic` confirms, from the
+ * host's durable plugin storage, that Magic Context sent it as a synthetic; a
+ * user who types the same text keeps their message. Returns how many were removed.
  */
 export async function dropStorageNotices(
     messages: V2Message[],

@@ -44,10 +44,7 @@ import {
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
 import { insertPrimerCandidates } from "../../features/magic-context/storage-primers";
 import { getLatestHistorianInvocationId } from "../../features/magic-context/storage-subagent-invocations";
-import {
-    readCoordinateRebaseNotice,
-    recoverUnresolvedCompartments,
-} from "../../features/magic-context/store-generation-rebase";
+import { recoverUnresolvedCompartments } from "../../features/magic-context/store-generation-rebase";
 import { insertUserMemoryCandidates } from "../../features/magic-context/user-memory/storage-user-memory";
 import { normalizeSDKResponse } from "../../shared";
 import { describeError } from "../../shared/error-message";
@@ -124,7 +121,6 @@ import {
     hasRawSessionMessageById,
     prepareRawSessionOrdinals,
     readRawSessionMessageOrdinalById,
-    readRawSessionMessageRange,
     readSessionChunk,
     resolveHistorianChunkStart,
 } from "./read-session-chunk";
@@ -134,14 +130,11 @@ import {
     withReadOnlySessionDb,
 } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
-import {
-    areRustHistorianSyntheticParts,
-    dropRawSessionOrdinalCheckpoints,
-    isStrictGapHealingMessage,
-    RawOrdinalsNotReady,
-} from "./read-session-raw";
+import { dropRawSessionOrdinalCheckpoints, RawOrdinalsNotReady } from "./read-session-raw";
 import { sendStatusNotification } from "./send-session-notification";
-import { notifyStoredHistoryGap } from "./stored-history-notice";
+import { nonNarrativeStoredGapRanges } from "./stored-compartment-gaps";
+
+export { nonNarrativeStoredGapRanges } from "./stored-compartment-gaps";
 
 const inconsistentProducerWindows = new Set<string>();
 function logInconsistentProducerWindowOnce(
@@ -161,35 +154,6 @@ function logInconsistentProducerWindowOnce(
 /** Suppress repeated historian failure notifications — at most once per 60 seconds per session */
 const HISTORIAN_ALERT_COOLDOWN_MS = 60 * 1000;
 
-export function nonNarrativeStoredGapRanges(
-    db: HiddenCompartmentRunnerDeps["db"],
-    sessionId: string,
-    compartments: ReadonlyArray<{ startMessage: number; endMessage: number }>,
-): Array<{ start: number; end: number }> {
-    const rebasedToV2 = readCoordinateRebaseNotice(db, sessionId)?.generation === "v2";
-    const safeRanges: Array<{ start: number; end: number }> = [];
-    for (let index = 0; index < compartments.length; index += 1) {
-        const previous = compartments[index - 1];
-        const current = compartments[index];
-        if (!current) continue;
-        const start = previous ? previous.endMessage + 1 : 1;
-        const end = current.startMessage - 1;
-        if (end < start) continue;
-        const messages = readRawSessionMessageRange(sessionId, start, end);
-        const ordinals = new Set(messages.map((message) => message.ordinal));
-        const complete =
-            ordinals.size === end - start + 1 &&
-            messages.every(
-                (message) =>
-                    message.ordinal >= start &&
-                    message.ordinal <= end &&
-                    (areRustHistorianSyntheticParts(message.parts) ||
-                        (index > 0 && rebasedToV2 && isStrictGapHealingMessage(message))),
-            );
-        if (complete) safeRanges.push({ start, end });
-    }
-    return safeRanges;
-}
 const lastHistorianAlertBySession = new Map<string, number>();
 const loggedStoredValidationFailures = new Map<string, Set<string>>();
 
@@ -513,16 +477,15 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             existingValidationError &&
             storedCompartmentFailureBackingOff(db, sessionId, existingValidationError)
         ) {
-            // Don't restart the historian for the same bad rows. The host can
-            // still schedule the fork history notice if the earlier attempt did not.
+            // The same stored rows already failed this check recently. Nothing
+            // but a rebuild changes them, so re-running now would only repeat
+            // the failure and its notice.
             if (unresolvedInvolved) {
                 sessionLog(
                     sessionId,
                     `historian no-op: stored compartments still invalid ("${existingValidationError}"); backing off`,
                 );
             }
-            if (!unresolvedInvolved)
-                await notifyStoredHistoryGap(directory, sessionId, existingValidationError);
             telemetry.status = "noop";
             telemetry.failureReason = `existing-validation backoff: ${existingValidationError}`;
             return;
@@ -559,11 +522,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             const failCount = incrementHistorianFailure(db, sessionId, existingValidationError);
             telemetry.failureReason = `existing-validation: ${existingValidationError}`;
             retainDrainReservationForRetryThrottle = true;
-            if (await notifyStoredHistoryGap(directory, sessionId, existingValidationError)) {
-                // The host owns this repair hint; the usual notice promises a retry
-                // and can replace the specific instruction with a generic warning.
-                issueNotified = true;
-            } else if (unresolvedInvolved) {
+            if (unresolvedInvolved) {
                 // Record the failure time like any other permanent historian
                 // failure, which is also what the backoff above measures from.
                 await notifyCountedFailure(failCount, buildStoredCompartmentsInvalidNotice());

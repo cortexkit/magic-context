@@ -14,6 +14,11 @@ export const USER_FACING_FAILURES = {
             "History compression is paused because this session's saved summaries no longer line up with its messages.",
         action: "Run /ctx-recomp to rebuild them.",
     },
+    fork_history_gap: {
+        code: "MC-H09",
+        sentence: "This fork's saved history has a gap.",
+        action: "Run /ctx-recomp to rebuild its history.",
+    },
     history_boundary_unresolved: {
         code: "MC-H04",
         sentence:

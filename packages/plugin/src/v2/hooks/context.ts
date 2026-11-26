@@ -244,7 +244,7 @@ import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { registerV2DreamScheduleTimer } from "./dream-timer";
 import { startDreamTrigger } from "./dream-trigger";
 import { createV2EmbeddingScope } from "./embedding-lifecycle";
-import { registerForkHistoryNotice } from "./fork-history-notice";
+import { readForkHistoryGap } from "./fork-history-status";
 import { generateReplayAnchor, V2GenerateReplay } from "./generate";
 import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
@@ -264,7 +264,6 @@ import {
     formatStorageRecoveryNotice,
     formatStorageRefusalNotice,
     hasStorageNoticeShape,
-    isForkHistoryNoticeMessage,
     STORAGE_NOTICE_PREFIX,
 } from "./storage-notice";
 import {
@@ -1271,7 +1270,6 @@ export async function registerContext(context: V2Context) {
     const messageTimesCache = new V2MessageTimesCache();
     const openStoreReader = () =>
         readerPool.open(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
-    const forkHistoryNotice = registerForkHistoryNotice(context, openStoreReader);
     const createHiddenExecutor = async (database: NonNullable<typeof db>) => {
         await cleanupLegacyOnce(database);
         return createV2HiddenCompletionExecutor(
@@ -1922,7 +1920,6 @@ export async function registerContext(context: V2Context) {
                             continue;
                         }
                         if (event.type === "session.deleted") {
-                            forkHistoryNotice.forget(sessionID);
                             overflowRecovery.forget(sessionID);
                             hostFoldIdle?.active(sessionID);
                             clearLkgMeasuredRequest(sessionID);
@@ -2716,14 +2713,12 @@ export async function registerContext(context: V2Context) {
             }
             return stored;
         };
-        // A storage warning sent to an idle session may start a turn of its
-        // own. A fork repair hint steers only an active user pass; even if it
-        // is newest on a later draft, drop it without interrupting the user.
+        // Storing a notice in an idle OpenCode 2 session starts a turn of its own.
+        // Such a turn has nothing for the model to answer, so it ends here.
         const newest = draft.messages.at(-1);
         if (
             newest &&
             hasStorageNoticeShape(newest) &&
-            !isForkHistoryNoticeMessage(newest) &&
             (await isMagicContextSynthetic(newest.id as string))
         ) {
             await refuseBeforeProvider(context.session, draft.sessionID, "storage-notice-turn");
@@ -3700,8 +3695,6 @@ export async function registerContext(context: V2Context) {
             // side question, so it prepares no replay, and it must not replace
             // the replay saved for the person's own session.
             const hiddenChild = hiddenChildHook.owns(draft.sessionID);
-            const newest = draft.messages.at(-1);
-            const newestUser = newest?.role === "user" ? newest.id : undefined;
             const anchor =
                 compactionOff || hiddenChild ? undefined : generateReplayAnchor(draft.messages);
             beginServedRequest(draft.sessionID);
@@ -3765,10 +3758,8 @@ export async function registerContext(context: V2Context) {
                 outcome === "managed" &&
                 !hiddenChild &&
                 !deletedSessions.has(draft.sessionID)
-            ) {
+            )
                 generateReplay.capture(draft, anchor);
-                await forkHistoryNotice.deliverFromUserPass(draft.sessionID, newestUser);
-            }
         }),
     );
     await context.session.hook("generate", async (draft) => {
@@ -3813,6 +3804,8 @@ export async function registerContext(context: V2Context) {
             : lateHiddenExecutor,
         compactionMarkerStrategy: v2CompactionMarkerStrategy,
         prepareHistorySession,
+        readForkHistoryGap: (database, sessionID) =>
+            readForkHistoryGap(database, openStoreReader, sessionID),
         readSessionDirectory: async (sessionID) => {
             try {
                 return (await context.session.get({ sessionID })).location?.directory ?? null;
@@ -3956,7 +3949,6 @@ export async function registerContext(context: V2Context) {
     );
     return {
         async dispose() {
-            forkHistoryNotice.dispose();
             if (hiddenChildSweepTimer) clearInterval(hiddenChildSweepTimer);
             await hiddenChildSweep.dispose();
             messageTimesCache.clear();

@@ -12,19 +12,8 @@ interface AdmissionMemo {
 }
 
 const memos = new WeakMap<Storage, AdmissionMemo>();
-const copiedNoticeChecks = new WeakMap<Storage, (sessionID: string, id: string) => boolean>();
 const MAX_SESSIONS = 64;
 const MAX_IDS = 50_000;
-
-export function registerCopiedNoticeAdmission(
-    storage: Storage,
-    check: (sessionID: string, id: string) => boolean,
-): () => void {
-    copiedNoticeChecks.set(storage, check);
-    return () => {
-        if (copiedNoticeChecks.get(storage) === check) copiedNoticeChecks.delete(storage);
-    };
-}
 
 function admissionSession(key: string): string | undefined {
     if (!key.startsWith("synthetic/")) return undefined;
@@ -113,8 +102,7 @@ export async function admittedSynthetic(
         // needs no retry: the answer is still current, just no longer worth keeping.
         if (memos.get(storage) !== memo || memo.revision !== revision) continue;
         const admitted =
-            (record !== null && typeof record === "object" && "id" in record && record.id === id) ||
-            (/_\d+$/.test(id) && copiedNoticeChecks.get(storage)?.(sessionID, id) === true);
+            record !== null && typeof record === "object" && "id" in record && record.id === id;
         if (memo.sessions.get(sessionID) !== session) return admitted;
         if (session.size >= MAX_IDS) session.delete(session.keys().next().value!);
         session.set(id, admitted);

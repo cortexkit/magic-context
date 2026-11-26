@@ -1,21 +1,28 @@
 import { expect, test } from "bun:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { copySessionStateForClone } from "../../../plugin/src/features/magic-context/storage-clone";
 import { validateStoredCompartments } from "../../../plugin/src/hooks/magic-context/compartment-runner-validation";
 import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-session-formatting";
+import type { StatusDetail } from "../../../plugin/src/shared/rpc-types";
+import {
+	type RpcPortFileRecord,
+	rpcPortDir,
+} from "../../../plugin/src/shared/rpc-utils";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import {
+	renderUserStatusSummary,
+	statusSummaryFromDetail,
+} from "../../../plugin/src/shared/status-summary";
 import {
 	buildForkIdMap,
 	forkCloneFilter,
 } from "../../../plugin/src/v2/fork-inheritance";
-import { FORK_HISTORY_NOTICE } from "../../../plugin/src/v2/hooks/storage-notice";
 import {
 	RAW_MESSAGE_TYPES,
 	type V2RowStamp,
-	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
 import {
 	inspectOpenFiles,
@@ -40,9 +47,6 @@ const MARKERS = [
 	"JULIET",
 ];
 const MISSING_RAW = ["Original-BRAVO", "Original-DELTA"];
-const NOTICE_QUESTION = "The first user pass after a pending repair notice.";
-const QUEUED_QUESTION =
-	"The next user message is queued behind the notice step.";
 
 interface Summary {
 	sequence: number;
@@ -84,8 +88,9 @@ async function until<T>(read: () => T | undefined, label: string): Promise<T> {
 test.each([
 	"healthy and stale fork bytes",
 	"straddling summary keeps copied raw messages",
+	"rejected live coverage restores raw messages beyond stored ordinals",
 	"damaged parent fork keeps an uncut tail",
-	"fork notice is sent from a user pass and survives either crash boundary",
+	"fork repair is shown until rebuild without changing the wire",
 ] as const)("OpenCode 2: %s", async (scenario) => {
 	const fixture = isolation(createE2ETempDir("mc-issue-968-"));
 	const source = join(
@@ -125,11 +130,6 @@ test.each([
 					data: string;
 				}[],
 		);
-	const notices = (sessionID: string) =>
-		rawRows(sessionID).filter(
-			({ type, data }) =>
-				type === "synthetic" && JSON.parse(data).text === FORK_HISTORY_NOTICE,
-		);
 	const historianRuns = (sessionID: string) =>
 		usingDb(
 			context,
@@ -144,45 +144,11 @@ test.each([
 		);
 	let host: Awaited<ReturnType<typeof spawnOpencode2>> | undefined;
 	let repairing = false;
-	let noticeSession = "";
-	let followOnHeld = false;
-	const releaseFollowOn = Promise.withResolvers<void>();
-	const observer = scenario.includes("notice is sent")
-		? Bun.serve({
-				hostname: "127.0.0.1",
-				port: 0,
-				async fetch(request) {
-					if (
-						new URL(request.url).searchParams.get("session") ===
-							noticeSession &&
-						!followOnHeld
-					) {
-						followOnHeld = true;
-						await releaseFollowOn.promise;
-					}
-					return new Response("ok");
-				},
-			})
-		: undefined;
-	const probe = observer && join(fixture.root, "queue-behind-fork-notice");
-	if (probe) {
-		mkdirSync(probe);
-		writeFileSync(
-			join(probe, "server.js"),
-			`export default { id: 'queue-behind-fork-notice', async setup(context) {
-			await context.session.hook('context', async draft => {
-				const question = draft.messages.findIndex(m => m.content.some(p => typeof p.text === 'string' && p.text.includes(${JSON.stringify(NOTICE_QUESTION)})));
-				if (question < 0 || !draft.messages.slice(question + 1).some(m => m.role === 'assistant')) return;
-				await (await fetch(${JSON.stringify(`http://127.0.0.1:${observer?.port}/?session=`)} + draft.sessionID)).text();
-			});
-		}};`,
-		);
-	}
+	let socket: WebSocket | undefined;
 
 	async function start() {
 		const server = await spawnOpencode2({
 			existingIsolation: fixture,
-			...(probe ? { probePlugin: probe } : {}),
 			modelContextLimit: WINDOW,
 			modelOutputLimit: 1024,
 			compactionAuto: false,
@@ -215,14 +181,7 @@ test.each([
 			},
 		});
 		await waitForPluginActive(client, server.cwd);
-		if (probe)
-			await waitForPluginActive(client, server.cwd, "queue-behind-fork-notice");
 		return client;
-	}
-
-	async function stop() {
-		await required(host).stop();
-		host = undefined;
 	}
 
 	function audit() {
@@ -243,7 +202,7 @@ test.each([
 	}
 
 	try {
-		let client = await start();
+		const client = await start();
 		const captures = () => required(host).mock.requests();
 		const historicalRequests = () =>
 			captures().filter(({ body }) => body.model === HISTORIAN);
@@ -473,6 +432,32 @@ test.each([
 			expect(summaries(unproven).at(-1)?.startMessage).toBe(3);
 			return;
 		}
+		if (
+			scenario ===
+			"rejected live coverage restores raw messages beyond stored ordinals"
+		) {
+			usingDb(
+				context,
+				(db) =>
+					db
+						.prepare(
+							"DELETE FROM compartments WHERE session_id = ? AND sequence > 1",
+						)
+						.run(parent),
+				false,
+			);
+			setAnchor(1, "end", required(parentRows[4]).id);
+			markDropped(parent, 5);
+			markDropped(parent, 7);
+			const sessionID = await fork();
+			const input = seen(
+				await turn(sessionID, "The rejected live range stays raw."),
+			);
+			expect(summaries(sessionID).map(({ sequence }) => sequence)).toEqual([0]);
+			expect(input).toContain("Original-CHARLIE");
+			expect(input).not.toContain("Original-DELTA");
+			return;
+		}
 
 		// Pre-seed the compartments as an older plugin left them, with a gap in
 		// the middle. A seed on the next turn must not silently recopy this fork.
@@ -514,129 +499,162 @@ test.each([
 			expect(input).not.toContain("Original-BRAVO");
 			return;
 		}
-		const noNotice = await seedBroken();
-		const noticeKey = `%:fork-history-notice/${broken}`;
-		const pendingValue = () =>
-			usingDb(
-				source,
-				(db) =>
-					db.prepare("SELECT value FROM kv WHERE key LIKE ?").get(noticeKey) as
-						| { value: string }
-						| undefined,
-			)?.value;
-		const calls = captures().length;
-		expect(await wrap(broken)).toEqual({
-			status: "failed",
-			failure_reason: "existing-validation: gap before message 5 (expected 3)",
-		});
-		const pending = required(pendingValue());
-		expect(JSON.parse(pending)).toMatchObject({ id: expect.any(String) });
-		expect(notices(broken)).toHaveLength(0);
-		expect(captures()).toHaveLength(calls);
-		const beforeRestart = summaries(parent);
-		audit();
-		await stop();
-
-		client = await start();
-		audit();
-		const controlRequest = await turn(noNotice, NOTICE_QUESTION);
-		noticeSession = broken;
-		const beforeSend = captures().length;
-		await client.session.prompt({ sessionID: broken, text: NOTICE_QUESTION });
-		await until(
-			() => (followOnHeld ? true : undefined),
-			"the host's notice follow-on step",
-		);
-		const first = required(captures()[beforeSend]);
-		expect(required(first.rawBody)).toBe(required(controlRequest.rawBody));
-		expect(seen(first)).not.toContain(FORK_HISTORY_NOTICE);
-		const queued = await client.session.prompt({
-			sessionID: broken,
-			text: QUEUED_QUESTION,
-			delivery: "queue",
-		});
-		expect(queued.delivery).toBe("queue");
-		releaseFollowOn.resolve();
-		await client.session.wait(
-			{ sessionID: broken },
-			{ signal: AbortSignal.timeout(20_000) },
-		);
-		const afterSend = captures().slice(beforeSend);
-		expect(afterSend).toHaveLength(3);
-		expect(seen(required(afterSend[2]))).toContain(QUEUED_QUESTION);
-		expect(
-			afterSend.every(
-				(request) => !required(request.rawBody).includes(FORK_HISTORY_NOTICE),
-			),
-		).toBe(true);
-		const notice = await until(
-			() => notices(broken)[0],
-			"notice sent from the live user pass",
-		);
-		expect(notice.id).toBe(JSON.parse(pending).id);
-		const user = rawRows(broken).find(
-			({ type, data }) =>
-				type === "user" && JSON.parse(data).text === NOTICE_QUESTION,
-		);
-		expect(notice.seq).toBeGreaterThan(required(user).seq);
-		const replies = rawRows(broken).filter(
-			({ type, seq }) => type === "assistant" && seq > required(user).seq,
-		);
-		expect(replies).toHaveLength(3);
-		const reader = new V2StoreReader(source);
-		try {
-			expect(
-				replies.map(({ id }) =>
-					reader.messageById(broken, id)?.data.content?.map(({ text }) => text),
-				),
-			).toEqual([["ordinary reply"], ["ordinary reply"], ["ordinary reply"]]);
-		} finally {
-			reader.close();
-		}
-		expect(
-			replies.every(({ data }) => JSON.parse(data).finish === "stop"),
-		).toBe(true);
-		const extra = required(afterSend[1]);
-		console.log("fork notice follow-on stored a second reply", {
-			requestBytes: required(extra.rawBody).length,
-			estimatedInput: estimateTokens(required(extra.rawBody)),
-			reportedUsage: JSON.parse(required(replies[1]).data).tokens,
-		});
-		audit();
-		await stop();
-		// Restore the durable snapshot of a process that died after projection
-		// and before clearing the pending record: keep the real projected row.
-		usingDb(
-			source,
-			(db) =>
+		const control = await seedBroken();
+		const server = required(host);
+		const discovery = await until(() => {
+			const directory = rpcPortDir(
+				required(fixture.env.MAGIC_CONTEXT_STORAGE_DIR),
+				fixture.cwd,
+			);
+			if (!existsSync(directory)) return undefined;
+			const file = readdirSync(directory).find((name) =>
+				/^port-.*\.json$/.test(name),
+			);
+			return file
+				? (JSON.parse(
+						readFileSync(join(directory, file), "utf8"),
+					) as RpcPortFileRecord)
+				: undefined;
+		}, "local status RPC");
+		const rpc = async (
+			method: "status-detail" | "sidebar-snapshot" | "recomp",
+			sessionID = broken,
+		) => {
+			const response = await fetch(
+				`http://127.0.0.1:${discovery.port}/rpc/${method}`,
+				{
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${discovery.token}`,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({
+						sessionId: sessionID,
+						directory: fixture.cwd,
+					}),
+				},
+			);
+			expect(response.ok).toBe(true);
+			return (await response.json()) as StatusDetail;
+		};
+		const allRows = () =>
+			usingDb(source, (db) =>
 				db
-					.prepare("UPDATE kv SET value = ? WHERE key LIKE ?")
-					.run(pending, noticeKey),
-			false,
+					.prepare(
+						"SELECT * FROM session_message WHERE session_id = ? ORDER BY seq",
+					)
+					.all(broken),
+			);
+		const before = allRows();
+		const calls = captures().length;
+		expect((await rpc("sidebar-snapshot")).forkHistoryGap).toBe(true);
+		const warning = "This fork's saved history has a gap.";
+		const frames: {
+			type: string;
+			notification?: {
+				id: number;
+				payload?: { message?: string; action?: string };
+			};
+		}[] = [];
+		// Bun accepts upgrade headers; the DOM constructor in this package's
+		// TypeScript environment only declares the subprotocol argument.
+		const BunWebSocket = WebSocket as unknown as new (
+			url: string,
+			options: { headers: Record<string, string> },
+		) => WebSocket;
+		socket = new BunWebSocket(`ws://127.0.0.1:${discovery.port}/ws`, {
+			headers: { Authorization: `Bearer ${discovery.token}` },
+		});
+		const hello = () =>
+			required(socket).send(
+				JSON.stringify({
+					type: "hello",
+					token: discovery.token,
+					protocol: 2,
+					sessionId: broken,
+				}),
+			);
+		socket.addEventListener("message", ({ data }) =>
+			frames.push(JSON.parse(String(data))),
 		);
-		client = await start();
-		audit();
-		expect((await wrap(broken)).failure_reason).toContain(
-			"gap before message 5 (expected 3)",
+		socket.addEventListener("open", hello, { once: true });
+		await until(
+			() => frames.find((frame) => frame.type === "hello-ack"),
+			"attached terminal notification sink",
 		);
-		const afterRestart = await turn(broken, "After reopening the broken fork.");
-		expect(seen(afterRestart)).not.toContain(FORK_HISTORY_NOTICE);
-		expect(notices(broken).map(({ id }) => id)).toEqual([notice.id]);
-		expect(JSON.parse(required(pendingValue()))).toBe("delivered");
-		expect(historicalRequests()).toHaveLength(0);
-		const descendant = (await client.session.fork({ sessionID: broken })).id;
-		expect(notices(descendant)).toHaveLength(1);
-		expect(notices(descendant)[0]?.id).not.toBe(notice.id);
-		expect(
-			seen(await turn(descendant, "A fork of the session with a notice.")),
-		).not.toContain(FORK_HISTORY_NOTICE);
-
-		repairing = true;
 		await client.session.command({
 			sessionID: broken,
-			name: "ctx-recomp",
+			name: "ctx-status",
 			text: "",
 		});
+		await until(
+			() =>
+				frames.find(
+					({ notification }) =>
+						notification?.payload?.action === "show-status-dialog",
+				),
+			"terminal status command",
+		);
+		const detail = await rpc("status-detail");
+		expect(detail.forkHistoryGap).toBe(true);
+		expect(
+			renderUserStatusSummary(statusSummaryFromDetail(detail), "plain"),
+		).toContain(warning);
+		const forkToasts = () =>
+			frames.filter(({ notification }) =>
+				notification?.payload?.message?.includes(warning),
+			);
+		await until(() => (forkToasts().length ? true : undefined), "repair toast");
+		await rpc("sidebar-snapshot");
+		await rpc("status-detail");
+		hello();
+		await until(
+			() =>
+				frames.filter(({ type }) => type === "hello-ack").length >= 2
+					? true
+					: undefined,
+			"notification ordering fence",
+		);
+		expect(forkToasts()).toHaveLength(1);
+		expect(
+			server
+				.pluginLog()
+				.split("\n")
+				.filter(
+					(line) =>
+						line.includes(broken) &&
+						line.includes("/ctx-recomp repairs this fork"),
+				),
+		).toHaveLength(1);
+		expect(allRows()).toEqual(before);
+		expect(captures()).toHaveLength(calls);
+		// This used to arm a synthetic notice even if the user never opened status.
+		expect((await wrap(broken)).failure_reason).toContain(
+			"gap before message 5",
+		);
+		expect((await wrap(control)).failure_reason).toContain(
+			"gap before message 5",
+		);
+		expect(allRows()).toEqual(before);
+		expect(captures()).toHaveLength(calls);
+
+		const question = "A displayed history gap must not change this request.";
+		const controlRequest = await turn(control, question);
+		const displayedRequest = await turn(broken, question);
+		expect(required(displayedRequest.rawBody)).toBe(
+			required(controlRequest.rawBody),
+		);
+		expect(
+			rawRows(broken)
+				.slice(-2)
+				.map(({ type }) => type),
+		).toEqual(["user", "assistant"]);
+		expect(seen(displayedRequest)).not.toContain(warning);
+
+		const parentBefore = summaries(parent);
+		repairing = true;
+		// The dialog invokes the same rebuild RPC after terminal confirmation.
+		await rpc("recomp");
 		const rebuilt = await until(() => {
 			const rows = summaries(broken);
 			return rows.some(({ title }) => title === "RebuiltEntireHistory")
@@ -646,15 +664,17 @@ test.each([
 		expect(validateStoredCompartments(rebuilt)).toBeNull();
 		const repairRequest = JSON.stringify(historicalRequests()[0]?.body);
 		for (const marker of MISSING_RAW) expect(repairRequest).toContain(marker);
-		expect(repairRequest).not.toContain(FORK_HISTORY_NOTICE);
+		expect(repairRequest).not.toContain(warning);
+		expect((await rpc("sidebar-snapshot")).forkHistoryGap).not.toBe(true);
+		const repairedDetail = await rpc("status-detail");
+		expect(repairedDetail.forkHistoryGap).not.toBe(true);
+		expect(
+			renderUserStatusSummary(statusSummaryFromDetail(repairedDetail), "plain"),
+		).not.toContain(warning);
 		const after = seen(await turn(broken, "After rebuilding the fork."));
 		expect(after).toContain("RebuiltEntireHistory");
 		expect(after).not.toContain("FixtureSummary");
-		expect(notices(broken)).toHaveLength(1);
-		expect(
-			captures().some(({ rawBody }) => rawBody?.includes(FORK_HISTORY_NOTICE)),
-		).toBe(false);
-		expect(summaries(parent)).toEqual(beforeRestart);
+		expect(summaries(parent)).toEqual(parentBefore);
 	} catch (error) {
 		console.error(
 			host?.stderr().slice(-3_000),
@@ -667,9 +687,8 @@ test.each([
 		);
 		throw error;
 	} finally {
-		releaseFollowOn.resolve();
+		socket?.close();
 		await host?.stop();
-		observer?.stop(true);
 		cleanupE2ETempDir(fixture.root);
 	}
 }, 120_000);

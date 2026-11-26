@@ -74,6 +74,8 @@ function createStore(
         replacedCopyAt?: number;
         omitIdle?: boolean;
         partBody?: "same" | "changed";
+        copyThrough?: number;
+        syntheticAt?: number;
     } = {},
 ) {
     const dir = createTestTempDirFromPath(join(tmpdir(), "mc-fork-inheritance-"));
@@ -99,11 +101,12 @@ function createStore(
         "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, '{}')",
     );
     for (const row of PARENT_ROWS) {
-        insert.run(parentId(row.seq), PARENT, row.type, row.seq, row.seq * 100, row.seq * 100);
+        const type = options.syntheticAt === row.seq ? "synthetic" : row.type;
+        insert.run(parentId(row.seq), PARENT, type, row.seq, row.seq * 100, row.seq * 100);
         // The host copies settled rows through the boundary with the same seq,
         // type and timestamps.
         if (
-            row.seq <= BOUNDARY_SEQ &&
+            row.seq <= (options.copyThrough ?? BOUNDARY_SEQ) &&
             (options.copyAll || row.copied !== false) &&
             !(options.omitIdle && row.type === "idle")
         )
@@ -112,7 +115,7 @@ function createStore(
                     ? "msg_fork_native_replacement"
                     : forkId(row.seq),
                 FORK,
-                row.type,
+                type,
                 row.seq,
                 row.seq * 100,
                 row.seq * 100,
@@ -301,6 +304,115 @@ describe("forkBoundarySeq", () => {
 });
 
 describe("seedV2ForkFromParent", () => {
+    it.each([
+        false,
+        true,
+    ])("crosses a parent-accepted gap only if the gap bytes match (edited=%s)", (edited) => {
+        const { reader } = createStore({
+            copyAll: true,
+            copyThrough: 9,
+            syntheticAt: 4,
+            changedBodyAt: edited ? 4 : undefined,
+            boundary: JSON.stringify({ type: "through", messageID: parentId(9) }),
+        });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [4, parentId(5)], [6, parentId(7)]);
+        insertCompartment(db, PARENT, 2, [7, parentId(8)], [8, parentId(9)]);
+        db.prepare(
+            "INSERT INTO session_meta (session_id, harness, coordinate_rebase_notice) VALUES (?, 'opencode2', ?)",
+        ).run(PARENT, JSON.stringify({ generation: "v2" }));
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual((edited ? [0] : [0, 1, 2]).map((sequence) => ({ sequence })));
+    });
+
+    it("restores removals covered by live IDs beyond a rejected stored range", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [4, parentId(6)]);
+        insertTag(db, PARENT, `${parentId(6)}:p0`, 1, "dropped");
+        insertTag(db, PARENT, `${parentId(7)}:p0`, 2, "dropped");
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(db, "SELECT message_id FROM tags WHERE session_id = ? AND status = 'dropped'"),
+        ).toEqual([{ message_id: `${forkId(7)}:p0` }]);
+    });
+
+    it("does not restart inheritance after an inverted range even if the next range fits", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 2, [3, parentId(4)], [5, parentId(6)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual([{ sequence: 0 }]);
+    });
+
+    it("excludes call-keyed replay when its owner was covered by a rejected summary", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [8, parentId(9)]);
+        insertTag(db, PARENT, "call_covered", 1, "active", "tool", parentId(5));
+        insertTag(db, PARENT, "call_safe", 2, "active", "tool", parentId(2));
+        db.prepare(
+            "UPDATE session_meta SET processed_image_stripped_ids = ? WHERE session_id = ?",
+        ).run(JSON.stringify(["call_covered", "call_safe"]), PARENT);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT processed_image_stripped_ids FROM session_meta WHERE session_id = ?",
+            ),
+        ).toEqual([{ processed_image_stripped_ids: JSON.stringify(["call_safe"]) }]);
+    });
+
+    it.each([
+        ["missing next anchor", {}, "old-next-start"],
+        ["next anchor body differs", { changedBodyAt: 7 }, parentId(7)],
+    ] as const)("does not prove a stale end when the %s", (_name, options, nextStart) => {
+        const { reader } = createStore({ copyAll: true, ...options });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [5, "old-end"]);
+        insertCompartment(db, PARENT, 2, [6, nextStart], [7, parentId(8)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual([{ sequence: 0 }]);
+    });
+
+    it("rejects an unresolved rebase even though its current rows and anchors match", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, parentId(4)], [5, parentId(6)]);
+        db.prepare(
+            "UPDATE compartments SET rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 1",
+        ).run(PARENT);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(
+            forkRows(
+                db,
+                "SELECT sequence FROM compartments WHERE session_id = ? ORDER BY sequence",
+            ),
+        ).toEqual([{ sequence: 0 }]);
+    });
+
     const inherited = (db: Database) =>
         forkRows(
             db,
@@ -664,6 +776,7 @@ describe("seedV2ForkFromParent", () => {
             sequenceForId: (session: string, id: string) => reader.sequenceForId(session, id),
             matchingForkBodies: (parent: string, fork: string, through: number) =>
                 reader.matchingForkBodies(parent, fork, through),
+            messagePage: reader.messagePage.bind(reader),
             rowStampsThrough: (session: string, through: number) => {
                 const rows = reader.rowStampsThrough(session, through);
                 if (session === FORK && !sessionHasMagicContextState(db, FORK)) {

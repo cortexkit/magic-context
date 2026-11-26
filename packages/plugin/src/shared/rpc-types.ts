@@ -64,6 +64,8 @@ export interface SidebarSnapshot {
     lastTransformError: string | null;
     /** Durable history-compression failure count used to select the stable summary warning. */
     historianFailureCount?: number;
+    /** The current saved history of this OpenCode 2 fork needs a rebuild. */
+    forkHistoryGap?: boolean;
     lastDreamerRunAt: number | null;
     projectIdentity: string | null;
     compartmentTokens: number;

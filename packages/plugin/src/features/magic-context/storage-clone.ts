@@ -54,7 +54,7 @@ export interface CloneSessionStateFilter {
     ) => ReadonlyMap<number, CloneCompartmentRow>;
     includeTag(tag: CloneTagRow): boolean;
     includeMessageId(messageId: string): boolean;
-    /** An inherited note may still point at a message whose removal isn't safe to replay. */
+    /** Filter saved content-removal decisions independently of copied message and note IDs. */
     includeReplayMessageId?: (messageId: string) => boolean;
     /** Map a source message/content id into the destination session. */
     mapMessageId?: (messageId: string) => string;
