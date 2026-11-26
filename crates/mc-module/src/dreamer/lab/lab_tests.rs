@@ -1737,7 +1737,7 @@ async fn lab_review_validation_times_out_while_blocking_work_is_still_stalled() 
 }
 
 #[tokio::test]
-async fn lab_review_second_start_reports_active_output_before_reserving() {
+async fn lab_starts_side_by_side_but_refuses_to_share_an_output_folder() {
     let fixture = Fixture::new();
     let registry = Arc::new(Registry::default());
     let mut spec = fixture.spec_value();
@@ -1745,19 +1745,35 @@ async fn lab_review_second_start_reports_active_output_before_reserving() {
     let first = Start::load(&fixture.spec, &fixture.live, registry.clone())
         .await
         .unwrap();
-    let second = fixture.root.join("second");
-    spec["out_dir"] = json!(second);
+    let second_out = fixture.root.join("second");
+    spec["out_dir"] = json!(second_out);
     fs::write(&fixture.spec, serde_json::to_vec(&spec).unwrap()).unwrap();
+    let second = Start::load(&fixture.spec, &fixture.live, registry.clone())
+        .await
+        .expect("a different output folder can start while the first run is active");
+    assert_eq!(first.out_dir(), fixture.out);
+    assert_eq!(second.out_dir(), second_out);
+    for start in [&first, &second] {
+        assert_eq!(
+            fs::read(start.out_dir().join("verdicts.json")).unwrap(),
+            b"[]\n"
+        );
+    }
+    drop(first);
+
     let error = Start::load(&fixture.spec, &fixture.live, registry.clone())
         .await
         .err()
-        .unwrap();
-    assert!(error.contains(fixture.out.to_str().unwrap()), "{error}");
-    assert!(!second.exists());
-    drop(first);
-    assert!(Start::load(&fixture.spec, &fixture.live, registry)
+        .expect("an active output folder cannot be reused");
+    assert!(error.contains("already using out_dir"), "{error}");
+    assert!(error.contains(second_out.to_str().unwrap()), "{error}");
+
+    drop(second);
+    let error = Start::load(&fixture.spec, &fixture.live, registry)
         .await
-        .is_ok());
+        .err()
+        .expect("a previous run's artifacts cannot be overwritten");
+    assert_eq!(error, "out_dir must be empty");
 }
 
 fn lab_account_result(usage: Option<RunUsage>) -> cortexkit_role_llm_runner::run::RunResult {

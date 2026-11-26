@@ -12,7 +12,7 @@ mod spec;
 mod tests;
 mod verdicts;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -56,7 +56,7 @@ const READER_NAMES: [&str; 9] = [
 #[derive(Default)]
 pub(crate) struct Registry {
     children: Mutex<HashMap<String, (Child, Arc<Lab>)>>,
-    active: Mutex<Option<PathBuf>>,
+    active_outputs: Mutex<HashSet<PathBuf>>,
 }
 
 impl Registry {
@@ -76,34 +76,27 @@ impl Registry {
         Registered(self, id)
     }
 
-    fn ensure_idle(&self) -> Result<(), String> {
-        match self.active.lock().expect("active lab").as_ref() {
-            Some(folder) => Err(format!(
-                "a dreamer lab is already active: {}",
-                folder.display()
-            )),
-            None => Ok(()),
-        }
-    }
-
     fn reserve(self: &Arc<Self>, folder: &Path) -> Result<Permit, String> {
-        let mut active = self.active.lock().expect("active lab");
-        if let Some(folder) = active.as_ref() {
+        let mut active_outputs = self.active_outputs.lock().expect("active lab outputs");
+        if !active_outputs.insert(folder.to_owned()) {
             return Err(format!(
-                "a dreamer lab is already active: {}",
+                "a dreamer lab is already using out_dir: {}",
                 folder.display()
             ));
         }
-        *active = Some(folder.to_owned());
-        Ok(Permit(self.clone()))
+        Ok(Permit(self.clone(), folder.to_owned()))
     }
 }
 
-struct Permit(Arc<Registry>);
+struct Permit(Arc<Registry>, PathBuf);
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        self.0.active.lock().expect("active lab").take();
+        self.0
+            .active_outputs
+            .lock()
+            .expect("active lab outputs")
+            .remove(&self.1);
     }
 }
 
@@ -145,7 +138,6 @@ impl Start {
         live: &Path,
         registry: Arc<Registry>,
     ) -> Result<Self, String> {
-        registry.ensure_idle()?;
         let (path, live) = (path.to_owned(), live.to_owned());
         let runtime = tokio::runtime::Handle::current();
         validate_with_limit(Duration::from_secs(15), move |deadline| {
