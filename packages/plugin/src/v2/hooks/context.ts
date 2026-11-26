@@ -255,7 +255,7 @@ import { V2OverflowRecovery } from "./overflow-recovery";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { RestoredRowCache } from "./restore-rows";
-import { pruneCommittedRevertMessages } from "./revert-message-state";
+import { V2RevertMessageCleanup } from "./revert-message-state";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
 import { hasRequiredSessionAPI, OPENCODE2_SESSION_API_NOTICE } from "./session-api-gate";
@@ -1273,6 +1273,7 @@ export async function registerContext(context: V2Context) {
     const messageTimesCache = new V2MessageTimesCache();
     const openStoreReader = () =>
         readerPool.open(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
+    const revertMessageCleanup = new V2RevertMessageCleanup(openStoreReader);
     const createHiddenExecutor = async (database: NonNullable<typeof db>) => {
         await cleanupLegacyOnce(database);
         return createV2HiddenCompletionExecutor(
@@ -1839,7 +1840,13 @@ export async function registerContext(context: V2Context) {
                     if (usageController.signal.aborted) break;
                     const event = value as {
                         type?: string;
-                        data?: { sessionID?: string; assistantMessageID?: string; error?: unknown };
+                        data?: {
+                            sessionID?: string;
+                            assistantMessageID?: string;
+                            error?: unknown;
+                            revert?: { messageID?: unknown };
+                            to?: string;
+                        };
                     };
                     try {
                         hiddenModelActivity.observe(event);
@@ -1866,6 +1873,18 @@ export async function registerContext(context: V2Context) {
                                 reader.close();
                             }
                         });
+                        if (event.type === "session.revert.staged" && db) {
+                            revertMessageCleanup.captureStageProof(
+                                sessionID,
+                                event.data.revert?.messageID,
+                            );
+                        }
+                        if (
+                            event.type === "session.revert.cleared" ||
+                            event.type === "session.deleted"
+                        ) {
+                            revertMessageCleanup.discardStageProof(sessionID);
+                        }
                         if (event.type === "session.revert.committed") {
                             dropServedRecord(sessionID, "host_edit");
                             if (db) {
@@ -1875,19 +1894,14 @@ export async function registerContext(context: V2Context) {
                                 withoutSqliteTransformPass(() => {
                                     scheduleClearAndReindex(indexDb, sessionID, pagedRead);
                                     try {
-                                        const reader = openStoreReader();
-                                        try {
-                                            if (
-                                                pruneCommittedRevertMessages(
-                                                    indexDb,
-                                                    reader,
-                                                    sessionID,
-                                                ).size
+                                        if (
+                                            revertMessageCleanup.pruneOnCommit(
+                                                indexDb,
+                                                sessionID,
+                                                event.data?.to,
                                             )
-                                                tagger.cleanup(sessionID);
-                                        } finally {
-                                            reader.close();
-                                        }
+                                        )
+                                            tagger.cleanup(sessionID);
                                     } catch (error) {
                                         sessionLog(
                                             sessionID,
@@ -2035,6 +2049,9 @@ export async function registerContext(context: V2Context) {
             } catch (error) {
                 if (!usageController.signal.aborted)
                     log("[magic-context] v2 usage subscription failed", error);
+            } finally {
+                // A disconnected stream may miss a cleared or replaced stage.
+                revertMessageCleanup.discardAllStageProofs();
             }
             if (usageController.signal.aborted) break;
             // Only a stable subscription resets the backoff: a stream that ends

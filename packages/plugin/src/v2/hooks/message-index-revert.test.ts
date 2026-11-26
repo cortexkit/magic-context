@@ -1,4 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import {
+    appendCompartments,
+    getCompartments,
+} from "../../features/magic-context/compartment-storage";
 import { getLastIndexedOrdinal } from "../../features/magic-context/message-index";
 import {
     __resetMessageIndexAsyncForTests,
@@ -22,6 +26,7 @@ import {
     setPersistedReasoningWatermark,
     setStrippedPlaceholderIds,
 } from "../../features/magic-context/storage-meta-persisted";
+import { makeToolCompositeKey } from "../../features/magic-context/tagger";
 import {
     freezeTemporalDecisions,
     getTemporalDecisions,
@@ -29,10 +34,18 @@ import {
 import { getServedRecordForTest } from "../../hooks/magic-context/served-check";
 import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
 import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
+import { openTestDb } from "../../shared/test-db";
 import { createCtxReduceTools } from "../../tools/ctx-reduce/tools";
-import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
+import { restoreRow } from "../fold/restore";
+import { seedV2ForkFromParent } from "../fork-inheritance";
+import { V2StoreReader } from "../store-reader";
+import { type Oc2ContextFixture, oc2ContextFixture } from "./__tests__/oc2-context.fixture";
+import { HEAD_IDS } from "./payload";
 
-type Event = { type: string; data: { sessionID: string } };
+type Event = {
+    type: string;
+    data: { sessionID: string; to?: string; revert?: { messageID: string } };
+};
 
 function eventBus() {
     const queue: Array<{ event: Event; handled: () => void }> = [];
@@ -219,8 +232,15 @@ test("a committed OpenCode 2 revert removes only state owned by absent stored me
         expect(getTagsBySession(db, session)).toEqual(before);
         expect(getStrippedPlaceholderIds(db, session)).toEqual(new Set([kept, removed]));
 
+        await events.emit({
+            type: "session.revert.staged",
+            data: { sessionID: session, revert: { messageID: removed } },
+        });
         fixture.revertBefore(removed);
-        await events.emit({ type: "session.revert.committed", data: { sessionID: session } });
+        await events.emit({
+            type: "session.revert.committed",
+            data: { sessionID: session, to: removed },
+        });
         const after = getTagsBySession(db, session);
         expect(owners(after)).toContain(kept);
         expect(owners(after)).not.toContain(removed);
@@ -256,5 +276,389 @@ test("a committed OpenCode 2 revert removes only state owned by absent stored me
         expect(getPendingOps(db, session)).toEqual(pendingBefore);
     } finally {
         await fixture.cleanup();
+    }
+});
+
+function stageEvent(sessionID: string, messageID: string): Event {
+    return { type: "session.revert.staged", data: { sessionID, revert: { messageID } } };
+}
+
+function commitEvent(sessionID: string, to: string): Event {
+    return { type: "session.revert.committed", data: { sessionID, to } };
+}
+
+function seedReplay(f: Oc2ContextFixture, owners: readonly string[]) {
+    const { db, session } = f;
+    for (const [index, id] of owners.entries()) {
+        db.prepare(
+            "INSERT INTO tags (session_id, message_id, type, status, byte_size, tag_number) VALUES (?, ?, 'message', 'dropped', 10, ?)",
+        ).run(session, `${id}:p0`, index + 1);
+        appendNoteNudgeAnchor(db, session, id, `note:${id}`);
+        appendAutoSearchHintDecision(db, session, {
+            messageId: id,
+            decision: "no-hint",
+            reason: "empty",
+        });
+    }
+    setStrippedPlaceholderIds(db, session, new Set(owners));
+    freezeTemporalDecisions(db, session, new Map(owners.map((id) => [id, ""])));
+    setPersistedNoteNudgeTrigger(db, session, owners[0]);
+    setPersistedReasoningWatermark(db, session, 1);
+}
+
+function replayState(f: Oc2ContextFixture, excluding?: string) {
+    const { db, session } = f;
+    return {
+        tags: getTagsBySession(db, session).filter(
+            (tag) =>
+                excluding === undefined ||
+                (tag.type === "tool"
+                    ? tag.toolOwnerMessageId
+                    : contentTagOwnerMessageId(tag.messageId)) !== excluding,
+        ),
+        stripped: [...getStrippedPlaceholderIds(db, session)].filter((id) => id !== excluding),
+        anchors: getNoteNudgeAnchors(db, session).filter(
+            (anchor) => anchor.messageId !== excluding,
+        ),
+        search: getAutoSearchHintDecisions(db, session).filter(
+            (decision) => decision.messageId !== excluding,
+        ),
+        temporal: [...getTemporalDecisions(db, session)].filter(([id]) => id !== excluding),
+        trigger: getPersistedNoteNudge(db, session),
+        watermark: getPersistedReasoningWatermark(db, session),
+    };
+}
+
+async function revertFixture(seed: number) {
+    const bus = eventBus();
+    const f = await oc2ContextFixture(seed, {
+        temporal: false,
+        instructions: false,
+        eventStream: bus.stream,
+    });
+    const read = () => new V2StoreReader(process.env.OPENCODE_DB!);
+    const cutoff = f.rows.at(-2)!.id;
+    return {
+        f,
+        bus,
+        cutoff,
+        read,
+        stage: (id = cutoff) => bus.emit(stageEvent(f.session, id)),
+        clear: () => bus.emit({ type: "session.revert.cleared", data: { sessionID: f.session } }),
+        commit: (to = cutoff) => bus.emit(commitEvent(f.session, to)),
+    };
+}
+
+test("revert proof preserves absent plugin-owned replay state and legacy tool owner forms", async () => {
+    const { f, cutoff, read, stage, commit } = await revertFixture(990);
+    const store = read();
+    try {
+        const retained = f.rows[0]!.id;
+        const notice = "plugin-only-storage-notice";
+        const composite = makeToolCompositeKey(retained, "call-composite");
+        const synthetic = [...HEAD_IDS, notice, composite];
+        seedReplay(f, [retained, ...synthetic, cutoff]);
+        for (const [index, owner] of [null, "", composite].entries()) {
+            f.db
+                .prepare(
+                    "INSERT INTO tags (session_id, message_id, type, status, byte_size, tag_number, tool_owner_message_id) VALUES (?, ?, 'tool', 'dropped', 10, ?, ?)",
+                )
+                .run(f.session, index === 0 ? cutoff : `call-legacy-${index}`, 20 + index, owner);
+        }
+        expect(synthetic.map((id) => store.sequenceForId(f.session, id))).toEqual([
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+        ]);
+        const retainedState = replayState(f, cutoff);
+        await stage();
+        f.revertBefore(cutoff);
+        await commit();
+        expect(replayState(f)).toEqual(retainedState);
+    } finally {
+        store.close();
+        await f.cleanup();
+    }
+});
+
+test.each([
+    ["no stage", "no staged proof"],
+    ["wrong cutoff", "commit cutoff differs from staged cutoff"],
+    ["cleared stage", "no staged proof"],
+    ["empty view", "retained predecessor is not visible at commit"],
+    ["busy at stage", "host store read failed at stage"],
+    ["busy at commit", "host store read failed at commit"],
+    ["late stage", "stage did not prove a bounded suffix and retained predecessor"],
+])("revert proof leaves all state alone: %s", async (scenario, reason) => {
+    const { f, cutoff, stage, clear, commit } = await revertFixture(991);
+    const retained = f.rows[0]!.id;
+    const failRead = async (operation: () => Promise<void>) => {
+        const spy = spyOn(V2StoreReader.prototype, "hostIdentity").mockImplementation(() => {
+            throw new Error("SQLITE_BUSY: host store unavailable");
+        });
+        try {
+            await operation();
+        } finally {
+            spy.mockRestore();
+        }
+    };
+    try {
+        seedReplay(f, [retained, cutoff]);
+        const before = replayState(f);
+        if (scenario === "busy at stage") await failRead(() => stage());
+        else if (scenario !== "no stage" && scenario !== "late stage") await stage();
+        if (scenario === "cleared stage") await clear();
+        f.revertBefore(cutoff);
+        if (scenario === "late stage") await stage();
+        if (scenario === "empty view")
+            f.raw.prepare("DELETE FROM session_message WHERE session_id = ?").run(f.session);
+        if (scenario === "busy at commit") await failRead(() => commit());
+        else await commit(scenario === "wrong cutoff" ? retained : cutoff);
+        expect(replayState(f)).toEqual(before);
+        expect(
+            f
+                .sessionLogs()
+                .filter((line) => line.includes("committed revert tag cleanup skipped:")),
+        ).toEqual([expect.stringContaining(reason)]);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test.each([
+    false,
+    true,
+])("revert proof uses only the latest stage (clear between stages: %s)", async (clearBetween) => {
+    const { f, cutoff, stage, clear, commit } = await revertFixture(992);
+    try {
+        const earlier = f.rows[1]!.id;
+        seedReplay(f, [f.rows[0]!.id, earlier, cutoff]);
+        const retainedState = replayState(f, cutoff);
+        await stage(earlier);
+        if (clearBetween) await clear();
+        await stage();
+        f.revertBefore(cutoff);
+        await commit();
+        expect(replayState(f)).toEqual(retainedState);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test.each([
+    "converted history",
+    "host checkpoint",
+    "child in another project",
+])("revert proof keeps earlier state after %s", async (scenario) => {
+    const { f, cutoff, read, stage, commit } = await revertFixture(993);
+    const store = read();
+    try {
+        const earlier = f.rows[0]!.id;
+        const owners = [earlier];
+        let target = cutoff;
+        if (scenario === "converted history") {
+            const legacy = "msg-retained-only-in-v1";
+            f.raw.exec(
+                "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL)",
+            );
+            f.raw
+                .prepare("INSERT INTO message VALUES (?, ?, ?)")
+                .run(
+                    legacy,
+                    f.session,
+                    JSON.stringify({ role: "user", id: legacy, sessionID: f.session }),
+                );
+            getOrCreateSessionMeta(f.db, f.session);
+            f.db
+                .prepare(
+                    "UPDATE session_meta SET coordinate_generation = 'v2' WHERE session_id = ?",
+                )
+                .run(f.session);
+            expect(store.sequenceForId(f.session, legacy)).toBeUndefined();
+            owners.push(legacy);
+        } else if (scenario === "host checkpoint") {
+            const checkpoint = f.providerFold();
+            expect(store.sequenceForId(f.session, checkpoint)).toBeDefined();
+            const earlierRow = store.messageById(f.session, earlier)!;
+            expect(
+                restoreRow(earlierRow, { providerID: "openai", id: "gpt-4.1" }).map(({ id }) => id),
+            ).toContain(earlier);
+            owners.push(checkpoint);
+            f.user("Unrelated turn after the host checkpoint", 1_000);
+            target = f.rows.at(-1)!.id;
+        } else {
+            f.raw
+                .prepare("INSERT INTO session_v2(id, directory) VALUES (?, ?)")
+                .run("parent", "/other/project");
+            f.raw
+                .prepare("UPDATE session_v2 SET parent_id = ?, directory = ? WHERE id = ?")
+                .run("parent", "/other/project", f.session);
+            expect(store.isSubagent(f.session)).toBe(true);
+        }
+        expect(store.sequenceForId(f.session, earlier)).toBeDefined();
+        seedReplay(f, [...owners, target]);
+        const retainedState = replayState(f, target);
+        await stage(target);
+        f.revertBefore(target);
+        await commit(target);
+        expect(replayState(f)).toEqual(retainedState);
+    } finally {
+        store.close();
+        await f.cleanup();
+    }
+});
+
+test("revert proof keeps the tag of a staged suffix row that still exists after commit", async () => {
+    const { f, cutoff, stage, commit } = await revertFixture(994);
+    try {
+        const removed = f.rows.at(-1)!.id;
+        seedReplay(f, [f.rows[0]!.id, cutoff, removed]);
+        const retainedState = replayState(f, removed);
+        await stage();
+        f.raw
+            .prepare("DELETE FROM session_message WHERE session_id = ? AND id = ?")
+            .run(f.session, removed);
+        await commit();
+        expect(replayState(f)).toEqual(retainedState);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("revert proof keeps a fork's inherited history tags and replay state", async () => {
+    const { f, cutoff, read, stage, commit } = await revertFixture(995);
+    const store = read();
+    try {
+        const parent = "parent-with-summaries";
+        const row = f.rows[0]!;
+        const copiedId = `${f.session}_${row.seq}`;
+        f.raw.prepare("UPDATE session_message SET id = ? WHERE id = ?").run(copiedId, row.id);
+        row.id = copiedId;
+        const parentMessage = "parent-assistant";
+        const installed = f.raw
+            .prepare(
+                "INSERT INTO session_v2(id,directory) SELECT ?,directory FROM session_v2 WHERE id=?",
+            )
+            .run(parent, f.session);
+        expect(installed.changes).toBe(1);
+        f.raw
+            .prepare("UPDATE session_v2 SET fork_session_id=?,fork_boundary=? WHERE id=?")
+            .run(parent, JSON.stringify({ type: "through", messageID: parentMessage }), f.session);
+        f.raw
+            .prepare(
+                "INSERT INTO session_message(id,session_id,type,seq,time_created,time_updated,data) SELECT ?,?,type,seq,time_created,time_updated,data FROM session_message WHERE id=?",
+            )
+            .run(parentMessage, parent, row.id);
+        appendCompartments(f.db, parent, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: parentMessage,
+                endMessageId: parentMessage,
+                title: "Parent summary",
+                content: "Inherited history",
+            },
+        ]);
+        f.db
+            .prepare(
+                "INSERT INTO tags (session_id,message_id,type,status,byte_size,tag_number) VALUES (?,?,'message','dropped',10,10)",
+            )
+            .run(parent, `${parentMessage}:p0`);
+        setStrippedPlaceholderIds(f.db, parent, new Set([parentMessage]));
+        freezeTemporalDecisions(f.db, parent, new Map([[parentMessage, ""]]));
+        expect(seedV2ForkFromParent({ db: f.db, store, sessionId: f.session }).kind).toBe("seeded");
+        expect(getCompartments(f.db, f.session).map(({ endMessageId }) => endMessageId)).toEqual([
+            row.id,
+        ]);
+        expect(store.sequenceForId(f.session, parentMessage)).toBeUndefined();
+        expect(store.sequenceForId(f.session, row.id)).toBe(row.seq);
+        expect(getTagsBySession(f.db, f.session)).toEqual([
+            expect.objectContaining({ messageId: `${row.id}:p0`, status: "dropped" }),
+        ]);
+        expect(replayState(f).stripped).toEqual([row.id]);
+        expect(replayState(f).temporal).toEqual([[row.id, ""]]);
+        appendNoteNudgeAnchor(f.db, f.session, row.id, "fork note");
+        appendAutoSearchHintDecision(f.db, f.session, {
+            messageId: row.id,
+            decision: "no-hint",
+            reason: "empty",
+        });
+        const inherited = replayState(f);
+        f.db
+            .prepare(
+                "INSERT INTO tags (session_id,message_id,type,status,byte_size,tag_number) VALUES (?,?,'message','dropped',10,11)",
+            )
+            .run(f.session, `${cutoff}:p0`);
+        await stage();
+        f.revertBefore(cutoff);
+        await commit();
+        expect(replayState(f)).toEqual(inherited);
+        expect(getCompartments(f.db, f.session)).toHaveLength(1);
+    } finally {
+        store.close();
+        await f.cleanup();
+    }
+});
+
+test("revert proof survives a location's reader seeing a different host database", async () => {
+    const { f, cutoff, stage, commit } = await revertFixture(996);
+    const sourcePath = process.env.OPENCODE_DB!;
+    const otherPath = `${sourcePath}.other`;
+    const other = openTestDb(otherPath);
+    try {
+        const kept = f.rows[0]!.id;
+        seedReplay(f, [kept, cutoff]);
+        const before = replayState(f);
+        other.exec(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY); CREATE TABLE session_message (id TEXT, session_id TEXT, seq INTEGER)",
+        );
+        other.prepare("INSERT INTO session_v2 VALUES (?)").run(f.session);
+        await stage();
+        f.revertBefore(cutoff);
+        process.env.OPENCODE_DB = otherPath;
+        await commit();
+        expect(replayState(f)).toEqual(before);
+        expect(f.sessionLogs().some((line) => line.includes("host database changed"))).toBe(true);
+    } finally {
+        process.env.OPENCODE_DB = sourcePath;
+        other.close();
+        await f.cleanup();
+    }
+});
+
+test.each([
+    "first row",
+    "over the row limit",
+])("revert proof refuses an unprovable suffix: %s", async (scenario) => {
+    const { f, cutoff, stage, commit } = await revertFixture(997);
+    try {
+        const first = f.rows[0]!.id;
+        const target = scenario === "first row" ? first : cutoff;
+        if (scenario === "over the row limit") {
+            f.raw
+                .prepare(`WITH RECURSIVE extra(n) AS (VALUES(101) UNION ALL SELECT n+1 FROM extra WHERE n<10100)
+                INSERT INTO session_message (id,session_id,type,seq,time_created,data)
+                SELECT 'after-cutoff-'||n,?,'user',n,0,'{}' FROM extra`)
+                .run(f.session);
+        }
+        seedReplay(f, [first, cutoff]);
+        const before = replayState(f);
+        await stage(target);
+        f.revertBefore(target);
+        await commit(target);
+        expect(replayState(f)).toEqual(before);
+        expect(
+            f
+                .sessionLogs()
+                .filter((line) => line.includes("committed revert tag cleanup skipped:")),
+        ).toEqual([
+            expect.stringContaining(
+                "stage did not prove a bounded suffix and retained predecessor",
+            ),
+        ]);
+    } finally {
+        await f.cleanup();
     }
 });

@@ -146,6 +146,11 @@ export interface V2MessageOrdinalEntry extends V2MessageOrdinalAnchor {
 }
 
 /** Where an OpenCode 2 fork was cut from its parent (`session_v2.fork_boundary`). */
+export interface V2RevertSuffix {
+    predecessor: { id: string; seq: number };
+    messageIDs: string[];
+}
+
 export interface V2ForkOrigin {
     parentSessionID: string;
     /** `before`: rows strictly before the message were copied; `through`: up to and including it. */
@@ -1287,6 +1292,48 @@ export class V2StoreReader {
         } catch {
             return null;
         }
+    }
+
+    /** Read the cutoff and suffix with one retained row to prove the view after commit. */
+    revertSuffix(sessionID: string, cutoff: string, limit: number): V2RevertSuffix | undefined {
+        const rows = this.prepare(
+            `WITH target AS (SELECT seq FROM session_message WHERE session_id = ? AND id = ?),
+                  preceding AS (SELECT MAX(seq) AS seq FROM session_message
+                                 WHERE session_id = ? AND seq < (SELECT seq FROM target))
+             SELECT id, seq FROM session_message
+             WHERE session_id = ? AND seq >= (SELECT seq FROM preceding)
+             ORDER BY seq ASC LIMIT ?`,
+        ).all(sessionID, cutoff, sessionID, sessionID, limit + 2) as Array<{
+            id: string;
+            seq: number;
+        }>;
+        const [predecessor, boundary] = rows;
+        if (!predecessor || boundary?.id !== cutoff || rows.length > limit + 1) return undefined;
+        return { predecessor, messageIDs: rows.slice(1).map(({ id }) => id) };
+    }
+
+    /** Check the retained row and missing suffix in one SQLite read snapshot. */
+    removedRevertMessages(sessionID: string, suffix: V2RevertSuffix): Set<string> | undefined {
+        const { predecessor, messageIDs } = suffix;
+        const result = this.prepare(
+            `SELECT CASE WHEN EXISTS (SELECT 1 FROM session_v2 WHERE id = ?)
+                          AND EXISTS (SELECT 1 FROM session_message
+                                      WHERE session_id = ? AND id = ? AND seq = ?)
+                         THEN (SELECT json_group_array(value) FROM json_each(?) AS staged
+                               WHERE NOT EXISTS (SELECT 1 FROM session_message AS retained
+                                                 WHERE retained.session_id = ? AND retained.id = staged.value))
+                    END AS missing`,
+        ).get(
+            sessionID,
+            sessionID,
+            predecessor.id,
+            predecessor.seq,
+            JSON.stringify(messageIDs),
+            sessionID,
+        ) as { missing: string | null };
+        return result.missing === null
+            ? undefined
+            : new Set(JSON.parse(result.missing) as string[]);
     }
 
     /** Whether the host still has a session row for this id. */
