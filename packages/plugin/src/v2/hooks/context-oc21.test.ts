@@ -255,7 +255,7 @@ test("keeps a project change off the OpenCode 2 wire and transcript while showin
                 before,
             );
 
-            const command = `npx @cortexkit/magic-context@latest doctor merge-identities --from ${from} --to ${to} --apply`;
+            const guidance = `Review the merge first:\nnpx @cortexkit/magic-context@latest doctor merge-identities --from ${from} --to ${to}\nIt shows what would move. Add --apply to move them.`;
             const detail = buildStatusDetail(f.db, "s", f.directory);
             const status = buildStatusViewFor(checkLocalStatusSource(detail), { version: "test" });
             const warnings = status.warnings.filter(({ text }) =>
@@ -264,14 +264,14 @@ test("keeps a project change off the OpenCode 2 wire and transcript while showin
             if (mode === "left memories") {
                 expect(warnings).toEqual([
                     {
-                        text: `1 memory stayed under this session's previous project. Nothing was moved.\nTo move them here, close all Magic Context hosts and run: ${command}`,
+                        text: `1 memory stayed under this session's previous project. Nothing was moved.\n${guidance}`,
                         tone: "warning",
                     },
                 ]);
                 expect(toasts).toHaveLength(1);
-                expect(toasts[0]).toContain(command);
-                expect(sidebarText(detail)).toContain(command);
-                expect(statusText(detail)).toContain(command);
+                expect(toasts[0]).toContain(guidance);
+                expect(sidebarText(detail)).toContain(guidance);
+                expect(statusText(detail)).toContain(guidance);
             } else {
                 expect(warnings).toEqual([]);
                 expect(toasts).toEqual([]);

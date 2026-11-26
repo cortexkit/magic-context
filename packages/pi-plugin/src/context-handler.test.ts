@@ -644,10 +644,12 @@ describe("Pi project binding retry", () => {
 		}
 	});
 
-	it("notifies once per old folder key without moving memories", () => {
+	it("notifies once per old folder key without moving memories", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-pi-binding-left-behind";
 		const notify = mock((_message: string) => {});
+		const logger = await import("@magic-context/core/shared/logger");
+		const log = spyOn(logger, "sessionLog");
 		const oldDir = "/workspace/old folder";
 		const from = `dir:${createHash("md5").update(oldDir).digest("hex").slice(0, 12)}`;
 		const observe = (identity: string, directory: string) =>
@@ -669,11 +671,40 @@ describe("Pi project binding retry", () => {
 
 			expect(notify).toHaveBeenCalledTimes(1);
 			expect(notify.mock.calls[0]?.[0]).toContain(
-				"npx @cortexkit/magic-context@latest doctor merge-identities --from '/workspace/old folder' --to git:new --apply",
+				"npx @cortexkit/magic-context@latest doctor merge-identities --from '/workspace/old folder' --to git:new\nIt shows what would move. Add --apply to move them.",
 			);
+			expect(
+				log.mock.calls.find(([, line]) => line.includes("notice="))?.[1],
+			).toContain(`notice=${JSON.stringify(notify.mock.calls[0]?.[0])}`);
 			expect(db.prepare("SELECT project_path FROM memories").all()).toEqual([
 				{ project_path: from },
 			]);
+		} finally {
+			log.mockRestore();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("points to doctor when it cannot offer a repository merge command", () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-binding-doctor-guidance";
+		const notify = mock((_message: string) => {});
+		try {
+			db.prepare(
+				"INSERT INTO memories(project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('git:old', 'fact', 'keep me', 'hash', 1, 1, 1, 1)",
+			).run();
+			recordSessionProjectIdentity(db, sessionId, "git:old");
+			contextHandlerInternals.updateSessionProjectTracking(
+				sessionId,
+				"git:new",
+				db,
+				"/workspace/new",
+				notify,
+			);
+			expect(notify.mock.calls[0]?.[0]).toEndWith(
+				"Run `npx @cortexkit/magic-context@latest doctor` to see how these memories can be merged.",
+			);
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);

@@ -4,6 +4,7 @@ import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
     IDENTITY_MERGE_COMMAND,
+    IDENTITY_MERGE_PREVIEW_HINT,
     identityMergeCommand,
 } from "@magic-context/core/features/magic-context/memory/identity-merge-command";
 import { directoryFallback } from "@magic-context/core/features/magic-context/memory/project-identity";
@@ -375,8 +376,10 @@ function formatStrandedDirectoryMemories(
         return [
             `Memories left under folder key ${identity}: ${memories} ${memories === 1 ? "memory" : "memories"}; last used ${when}. No session is currently recorded for this key.`,
             target
-                ? `  To move them to the session's current project, close all Magic Context hosts and run: ${identityMergeCommand(from, target)}`
-                : `  The destination can't be determined. If you choose one, close all Magic Context hosts and replace DESTINATION_IDENTITY in: ${identityMergeCommand(from)}`,
+                ? "  Review a merge into the session's current project:"
+                : "  The destination can't be determined. If you choose one, replace DESTINATION_IDENTITY in:",
+            `  ${identityMergeCommand(from, target)}`,
+            `  ${IDENTITY_MERGE_PREVIEW_HINT}`,
         ];
     });
 }

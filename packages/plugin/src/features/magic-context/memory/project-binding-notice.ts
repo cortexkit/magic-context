@@ -3,7 +3,7 @@ import { getHarness, type HarnessId } from "../../../shared/harness";
 import { sessionLog } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { recordSessionProjectIdentity } from "../session-project-storage";
-import { identityMergeCommand } from "./identity-merge-command";
+import { IDENTITY_MERGE_PREVIEW_HINT, identityMergeCommand } from "./identity-merge-command";
 import { directoryFallback } from "./project-identity";
 import { getMemoryCount } from "./storage-memory";
 
@@ -66,12 +66,12 @@ export function observeSessionProjectBinding(
     const location = oldDirectory ? `the old folder (${oldDirectory})` : `the old project (${old})`;
     let guidance: string;
     if (old.startsWith("dir:") && /^(dir|git):/.test(identity)) {
-        guidance = `To move them here, close all Magic Context hosts and run: ${identityMergeCommand(oldDirectory ?? old, identity)}`;
+        guidance = `Review the merge first:\n${identityMergeCommand(oldDirectory ?? old, identity)}\n${IDENTITY_MERGE_PREVIEW_HINT}`;
     } else if (old.startsWith("git:") && identity.startsWith("dir:")) {
         guidance = "A repository's memories cannot be merged into a folder project.";
     } else {
         guidance =
-            "Doctor cannot safely offer a merge command without verifying the project directories.";
+            "Run `npx @cortexkit/magic-context@latest doctor` to see how these memories can be merged.";
     }
     const count = `${memories} ${memories === 1 ? "memory" : "memories"}`;
     observation.warning = `${count} stayed under this session's previous project. Nothing was moved.\n${guidance}`;

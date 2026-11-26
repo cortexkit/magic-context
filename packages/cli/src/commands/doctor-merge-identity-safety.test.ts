@@ -676,12 +676,12 @@ describe("doctor merge-identities safety rules", () => {
             );
             const sourceArg = `'${source}'`;
             expect(lines).toContain(
-                `npx @cortexkit/magic-context@latest doctor merge-identities --from ${sourceArg} --to ${target.identity} --apply`,
+                `npx @cortexkit/magic-context@latest doctor merge-identities --from ${sourceArg} --to ${target.identity}\n  It shows what would move. Add --apply to move them.`,
             );
             expect(lines).toContain(`folder key ${unknown}: 2 memories`);
             expect(lines).toContain("The destination can't be determined.");
             expect(lines).toContain(
-                `npx @cortexkit/magic-context@latest doctor merge-identities --from ${unknown} --to "DESTINATION_IDENTITY" --apply`,
+                `npx @cortexkit/magic-context@latest doctor merge-identities --from ${unknown} --to "DESTINATION_IDENTITY"\n  It shows what would move. Add --apply to move them.`,
             );
             expect(lines).not.toContain(stillBound);
             expect(fileHash(storagePath)).toBe(before);
@@ -700,7 +700,7 @@ describe("doctor merge-identities safety rules", () => {
             }
             const stale = diagnoseIdentitySplits().join("\n");
             expect(stale).toContain(
-                `npx @cortexkit/magic-context@latest doctor merge-identities --from ${sourceArg} --to "DESTINATION_IDENTITY" --apply`,
+                `npx @cortexkit/magic-context@latest doctor merge-identities --from ${sourceArg} --to "DESTINATION_IDENTITY"\n  It shows what would move. Add --apply to move them.`,
             );
             expect(stale).not.toContain(`--to ${target.identity}`);
         } finally {
