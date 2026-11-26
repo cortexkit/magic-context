@@ -40,7 +40,9 @@ expect_red() {
 }
 mkdir -p .cortexkit/internal-docs/investigations
 printf 'local document, deliberately not tracked\n' > .cortexkit/internal-docs/investigations/local.md
-for path in .cortexkit/release-notes/v1.0.0.md .cortexkit/skills/example.md .cortexkit/rules/example.md docs/architecture/example.md docs/explainers/example.html docs/logo.png docs/logo-cropped.png docs/dist-chunk-lifecycle.md docs/migration-version-lanes.md; do
+# The last two .cortexkit paths are a project settings file, which the daemon reads and
+# repositories track on purpose, and the worker guidance file.
+for path in .cortexkit/release-notes/v1.0.0.md .cortexkit/skills/example.md .cortexkit/rules/example.md .cortexkit/prefrontal.jsonc .cortexkit/WORKER.md docs/architecture/example.md docs/explainers/example.html docs/logo.png docs/logo-cropped.png docs/dist-chunk-lifecycle.md docs/migration-version-lanes.md; do
   plant "$path"
 done
 bash scripts/check-cortexkit-layout.sh
@@ -48,7 +50,19 @@ bash scripts/check-docs-layout.sh
 checks=$((checks + 1))
 expect_red .cortexkit/internal-docs/investigations/planted.md check-cortexkit-layout.sh 'tracked files under .cortexkit/'
 expect_red .cortexkit/alfonso/reviews/planted.md check-cortexkit-layout.sh 'tracked files under .cortexkit/'
-expect_red .cortexkit/config.jsonc check-cortexkit-layout.sh 'tracked files under .cortexkit/'
+expect_red .cortexkit/notes.md check-cortexkit-layout.sh 'tracked files under .cortexkit/'
+# Only a settings file directly under .cortexkit/ is allowed, not one in a subfolder.
+expect_red .cortexkit/alfonso/config.jsonc check-cortexkit-layout.sh 'tracked files under .cortexkit/'
+# A stray `!` line un-ignores a private file. It is then tracked and not ignored, so a
+# check that only asks git for tracked files that are ignored would pass it.
+cp .gitignore .gitignore.before-unignore
+printf '\n!/.cortexkit/unignored-notes.md\n' >> .gitignore
+if git check-ignore -q --no-index .cortexkit/unignored-notes.md; then
+  printf 'FAIL: the fixture did not un-ignore its planted file\n' >&2; exit 1
+fi
+expect_red .cortexkit/unignored-notes.md check-cortexkit-layout.sh 'tracked files under .cortexkit/'
+cp .gitignore.before-unignore .gitignore
+rm .gitignore.before-unignore
 for folder in reports designs evidence specs investigations audits reviews research plans private protected-tokens; do
   expect_red "docs/$folder/planted.md" check-docs-layout.sh 'FAIL: docs public-only guard'
 done
