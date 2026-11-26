@@ -186,13 +186,23 @@ const responses = {
   get_smart_notes: [],
   get_subagent_totals_by_subagent: [],
 };
-const preload = (theme: string) => `(() => {
+const preload = (theme: string, delayedPage = false) => `(() => {
   try { localStorage.setItem('magic-context-dashboard.theme', ${JSON.stringify(theme)}); } catch {}
   window.__TAURI_INTERNALS__ = {
     transformCallback: () => 1, unregisterCallback: () => {},
     invoke: async (cmd, args) => {
       if (cmd === 'plugin:updater|check') return null;
       if (cmd.startsWith('plugin:')) return null;
+      if (${delayedPage} && cmd === 'list_sessions_paged') {
+        const offset = args.filter.offset;
+        (window.__listPageOffsets ??= []).push(offset);
+        const rows = ${JSON.stringify(sessionRows)};
+        if (offset === 0) return { rows, total: 4, has_more: true, conditions: [] };
+        if (offset === 2) {
+          await new Promise(resolve => { window.__releaseNextPage = resolve; });
+        }
+        return { rows: [{ ...rows[0], session_id: 'extra-' + offset }], total: 4, has_more: offset < 3, conditions: [] };
+      }
       if (cmd === 'get_subagent_invocations') return ${JSON.stringify(historianRows)}[args.sessionId] || [];
       if (cmd === 'get_session_detail') return ${JSON.stringify(sessionDetail(false))}.session_id === args.sessionId
         ? ${JSON.stringify(sessionDetail(false))}
@@ -419,6 +429,48 @@ try {
     }
     await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: preloadId.identifier }, browserSession);
   }
+  const pagingPreload = await send<{ identifier: string }>("Page.addScriptToEvaluateOnNewDocument", {
+    source: preload("light", true),
+  }, browserSession);
+  await send("Page.navigate", { url: `http://127.0.0.1:${port}/` }, browserSession);
+  await waitFor(".project-card");
+  await evalPage("document.querySelector('.project-card').click()");
+  await waitFor(".project-detail-body .scroll-area button.card");
+  await evalPage(`new Promise((resolve, reject) => {
+    const interval = setInterval(() => {
+      if (!window.__releaseNextPage) return;
+      clearInterval(interval);
+      clearTimeout(timeout);
+      resolve();
+    }, 20);
+    const timeout = setTimeout(() => { clearInterval(interval); reject(new Error('next page was not requested')); }, 5000);
+  })`);
+  await evalPage(`(() => {
+    document.querySelector('.project-detail-body .scroll-area button.card').click();
+    if (!document.querySelector('.tab-pill')) throw new Error('session did not open');
+    document.querySelector('.nav-item[title="Workspaces"]').click();
+    if (document.querySelector('.project-detail-body')) throw new Error('session view did not unmount');
+    window.__pagingLongTasks = [];
+    new PerformanceObserver(list => window.__pagingLongTasks.push(...list.getEntries())).observe({ type: 'longtask' });
+  })()`);
+  await settle();
+  await send("Performance.enable", {}, browserSession);
+  const before = await send<{ metrics: { name: string; value: number }[] }>("Performance.getMetrics", {}, browserSession);
+  await evalPage("window.__releaseNextPage()");
+  const idleMs = Number(process.env.SESSION_PAGE_PAGING_IDLE_MS ?? 250);
+  await Bun.sleep(idleMs);
+  const after = await send<typeof before>("Performance.getMetrics", {}, browserSession);
+  const delta = (name: string) => {
+    const value = (sample: typeof before) => sample.metrics.find(metric => metric.name === name)!.value;
+    return value(after) - value(before);
+  };
+  const result = await evalPage<{ offsets: number[]; longTasks: number; longTaskMs: number }>(`({
+    offsets: window.__listPageOffsets, longTasks: window.__pagingLongTasks.length,
+    longTaskMs: window.__pagingLongTasks.reduce((sum, entry) => sum + entry.duration, 0),
+  })`);
+  console.log(`session pagination after navigation (${idleMs} ms): ${JSON.stringify({ ...result, layouts: delta("LayoutCount"), layoutMs: delta("LayoutDuration") * 1000 })}`);
+  if (result.offsets.join(",") !== "0,2") throw new Error("session pagination continued after unmount");
+  await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: pagingPreload.identifier }, browserSession);
 } finally {
   socket?.close();
   chrome.kill();

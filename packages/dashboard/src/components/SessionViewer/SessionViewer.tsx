@@ -283,8 +283,10 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
     [],
   );
   let sessionRequestId = 0;
-  let loadMoreSentinel: HTMLDivElement | undefined;
-  let loadMoreObserver: IntersectionObserver | undefined;
+  onCleanup(() => {
+    // A page already in flight must not update this viewer after navigation.
+    sessionRequestId += 1;
+  });
 
   createEffect(() => {
     const filter = sessionFilter();
@@ -330,7 +332,7 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
   });
 
   const loadMoreSessions = () => {
-    if (!hasMore() || loadingMore() || sessionsLoading()) return;
+    if (selectedSession() || !hasMore() || loadingMore() || sessionsLoading()) return;
     const filter = sessionFilter();
     const key = sessionFilterKey(filter);
     const requestId = sessionRequestId;
@@ -360,17 +362,49 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
   // observer event, so the trigger asks again after each page while visible.
   const loadMoreTrigger = new LoadMoreTrigger(loadMoreSessions);
 
-  onMount(() => {
-    loadMoreObserver = new IntersectionObserver(
-      (entries) => {
-        loadMoreTrigger.onVisibilityChange(entries.some((entry) => entry.isIntersecting));
-      },
-      { rootMargin: "200px" },
+  const SessionPageSentinel = () => {
+    let sentinel!: HTMLDivElement;
+    onMount(() => {
+      let observing = true;
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (observing) {
+            loadMoreTrigger.onVisibilityChange(entries.some((entry) => entry.isIntersecting));
+          }
+        },
+        { rootMargin: "200px" },
+      );
+      observer.observe(sentinel);
+      onCleanup(() => {
+        observing = false;
+        observer.disconnect();
+        // A detached sentinel may never report that it left the viewport.
+        loadMoreTrigger.onVisibilityChange(false);
+      });
+    });
+    return (
+      <div
+        ref={sentinel}
+        style={{
+          "font-size": "11px",
+          color: "var(--text-muted)",
+          "text-align": "center",
+          padding: "8px",
+        }}
+        data-page={sessionPage()}
+        data-total={totalSessions()}
+      >
+        <Show
+          when={loadingMore()}
+          fallback={
+            <Show when={!hasMore() && filteredSessions().length > 0}>No more sessions</Show>
+          }
+        >
+          Loading more...
+        </Show>
+      </div>
     );
-    if (loadMoreSentinel) loadMoreObserver.observe(loadMoreSentinel);
-  });
-
-  onCleanup(() => loadMoreObserver?.disconnect());
+  };
 
   const detailKey = createMemo(() => selectedSession());
   const [sessionDetail, { refetch: refetchSessionDetail }] = createResource(
@@ -865,29 +899,7 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
                   );
                 }}
               </For>
-              <div
-                ref={(el) => {
-                  loadMoreSentinel = el;
-                  loadMoreObserver?.observe(el);
-                }}
-                style={{
-                  "font-size": "11px",
-                  color: "var(--text-muted)",
-                  "text-align": "center",
-                  padding: "8px",
-                }}
-                data-page={sessionPage()}
-                data-total={totalSessions()}
-              >
-                <Show
-                  when={loadingMore()}
-                  fallback={
-                    <Show when={!hasMore() && filteredSessions().length > 0}>No more sessions</Show>
-                  }
-                >
-                  Loading more...
-                </Show>
-              </div>
+              <SessionPageSentinel />
             </div>
           </Show>
         </div>
