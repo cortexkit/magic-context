@@ -309,7 +309,9 @@ export interface OpenCode2SpawnOptions {
 	modelInputLimit?: number;
 	/** Use the supplied Magic Context config without the e2e mock defaults/pins. */
 	preserveMagicContextDefaults?: boolean;
-	/** Service registration can precede API readiness on newer hosts. Default off. */
+	/** A host can announce its address before its API answers; the first call
+	 * then gets a 503. Spawn retries that for up to 30 seconds before it checks
+	 * plugins. Pass false only to observe that startup window itself. */
 	waitForTransport?: boolean;
 	/**
 	 * Register a second mock model and pin the historian to it, so a scenario can
@@ -613,7 +615,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
                 baseUrl: ready.url,
                 headers: { authorization: `Basic ${btoa(`opencode:${ready.password}`)}` },
             });
-            await awaitOpenCode2Transport(options.waitForTransport ?? false,
+            await awaitOpenCode2Transport(options.waitForTransport ?? true,
                 (signal) => readinessClient.plugin.list({ location: { directory: fixture.cwd } }, { signal }), {
                     log: (line) => { stderr += `${line}\n`; console.error(line); },
                 });
