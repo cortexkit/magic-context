@@ -641,9 +641,8 @@ fn emergency_measured_the_retry_without_the_cut_plans_with_its_own_head() {
 
 /// [`partial`] with an old 3,000-token reasoning block in the message of
 /// the oldest result and a newest one-token block that stays, so that a
-/// zero reasoning budget clears the old one, and with the age sweep's
-/// bookmark at tag 6, so the sweep takes the five oldest results.
-fn with_reasoning_and_sweep(old: u64) -> (Session, Settings) {
+/// zero reasoning budget clears the old one.
+fn with_old_reasoning(old: u64) -> (Session, Settings) {
     let (mut session, mut settings) = sized(old, 4_000, 6_000, 39_000);
     settings.keep_reasoning_tokens = 0;
     let reasoning = |id: &str, bytes: u64| -> Part {
@@ -660,7 +659,6 @@ fn with_reasoning_and_sweep(old: u64) -> (Session, Settings) {
     entries[newest].parts.push(reasoning("new-thinking", 4));
     session.index = Index::default();
     session.index.extend_counted(entries, Some("family"));
-    session.reclaim_bookmark = 6;
     (session, settings)
 }
 
@@ -697,34 +695,60 @@ fn serving(session: &Session) -> u64 {
 }
 
 #[test]
-fn emergency_measured_reasoning_and_swept_output_on_the_same_pass_are_out_of_the_size() {
+fn emergency_measured_reasoning_cleared_on_the_same_pass_is_out_of_the_size() {
     let logs = crate::test_log::capture();
-    let (mut session, settings) = with_reasoning_and_sweep(33);
+    let (mut session, settings) = with_old_reasoning(33);
     let view = build(&mut session, &settings).expect("the pass clears and drops");
-    // The sweep takes results 2 to 6 and the old reasoning goes: 30,001
-    // tokens of transcript stay (the newest reasoning is one token), a
-    // 40,001-token request. 24,226 must go: 25 more results, 7 to 31.
+    // The old reasoning goes: 35,001 tokens of transcript stay (the newest
+    // reasoning is one token), a 45,001-token request. 29,226 must go: 30
+    // results. Counting the cleared 3,000 too would take every one.
     assert_eq!(taken(Some(&view)), force(2..=31, NEWEST));
     assert!(view.edits.iter().any(|edit| matches!(&edit.op,
         EditOp::Drop { mid, part: Some(part) } if mid == "tool-2" && part == "old-thinking")));
-    assert_eq!(planned(&logs.text()), (40_001, Some(15_775), 25));
+    assert_eq!(planned(&logs.text()), (45_001, Some(15_775), 30));
+}
+
+#[test]
+fn emergency_measured_tool_reclaim_lanes_stand_down_in_the_force_band() {
+    // Two writes of one file (the older is superseded) and the age sweep's
+    // bookmark at tag 6. Below the band the sweep and the edit marker land;
+    // in the band only the emergency lane reclaims tools, so it plans from
+    // the whole 45,000 tokens with nothing swept before it.
+    for (reading, in_band) in [(20_000, false), (39_000, true)] {
+        let logs = crate::test_log::capture();
+        let (mut session, settings) = sized(33, 4_000, 6_000, reading);
+        let mut entries = entries(33);
+        for tag in [2, 3] {
+            let input = serde_json::json!({"filePath":"src/a.rs","content":"x".repeat(400)});
+            entries[tag as usize - 1] = call(tag, "write", input, 100, 900);
+        }
+        session.index = Index::default();
+        session.index.extend_counted(entries, Some("family"));
+        session.reclaim_bookmark = 6;
+        let view = build(&mut session, &settings).expect("a pass with work");
+        let marker = view.edits.iter().any(|edit| {
+            matches!(&edit.op,
+            EditOp::Replace { field, .. } if field.starts_with("input."))
+        });
+        assert_eq!(marker, !in_band, "reading {reading}");
+        if in_band {
+            assert_eq!(planned(&logs.text()).0, 45_000);
+        } else {
+            // The sweep takes results 4 to 6 (the writes are reclaimed as
+            // superseded or swept) and no emergency plan runs.
+            assert!(taken(Some(&view)).iter().all(|(tag, _)| *tag <= 6));
+            assert!(!logs.text().contains("emergency drop planned"));
+        }
+    }
 }
 
 #[test]
 fn emergency_measured_another_lanes_part_is_never_credited_at_its_original_size() {
-    // A force pass: the five results the sweep takes are no candidates, so
-    // the lane takes 25 more, as for queued drops.
-    let (mut session, settings) = partial();
-    session.reclaim_bookmark = 6;
-    assert_eq!(
-        taken(build(&mut session, &settings).as_ref()),
-        force(2..=31, NEWEST)
-    );
-    // A ride: the swept results free nothing more when the lane takes them
-    // whole. The 47,000 count less the 5,000 swept is 42,000, so 26,225 must
-    // go: 27 results after them, 7 to 33. Crediting them at 1,000 each
-    // would stop at 28.
-    let (mut session, settings) = partial();
+    // A ride below the force band, where the age sweep runs: the swept
+    // results free nothing more when the lane takes them whole. The 47,000
+    // count less the 5,000 swept is 42,000, so 26,225 must go: 27 results
+    // after them, 7 to 33. Crediting them at 1,000 each would stop at 28.
+    let (mut session, settings) = sized(33, 4_000, 6_000, 20_000);
     session.reclaim_bookmark = 6;
     let view = session.ride(&settings, &over_limit(&session, Some(47_000)));
     assert_eq!(taken(view.as_ref()), whole(2..=33));
@@ -733,7 +757,8 @@ fn emergency_measured_another_lanes_part_is_never_credited_at_its_original_size(
 #[test]
 fn emergency_measured_a_refused_request_takes_what_another_lane_leaves_whole() {
     // A fixed part of 41,000 and twenty 1,250-token results whose calls
-    // keep a 1,000-byte command (250 tokens). The sweep takes the results
+    // keep a 1,000-byte command (250 tokens). The reading is below the
+    // force band, where the age sweep runs. The sweep takes the results
     // of tags 2 to 18 and keeps their calls; 4,335 or so tokens of calls stay
     // behind, and the three tail results hold 3,750. The request fits the
     // 45,000-token window only if those calls go too.
@@ -752,7 +777,7 @@ fn emergency_measured_a_refused_request_takes_what_another_lane_leaves_whole() {
 /// 250 tokens, and a 100-token closing message. The age sweep's bookmark is
 /// at tag 18, outside the three-call protected tail.
 fn fixture_with(fixed: u64) -> (Session, Settings) {
-    let (mut session, settings) = sized(0, fixed - 2_000, 2_000, 39_000);
+    let (mut session, settings) = sized(0, fixed - 2_000, 2_000, 20_000);
     let mut entries = vec![counted(1, "task", 1_000)];
     for tag in 2..=21 {
         let mut part: Part = serde_json::from_value(serde_json::json!({
@@ -851,13 +876,13 @@ fn emergency_measured_the_served_request_matches_the_plan_on_every_kind_of_pass(
         (
             "notice clearing reasoning",
             true,
-            with_reasoning_and_sweep(33),
+            with_old_reasoning(33),
             notice,
         ),
         (
             "notice clearing reasoning",
             false,
-            with_reasoning_and_sweep(3),
+            with_old_reasoning(3),
             notice,
         ),
     ];
