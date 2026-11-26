@@ -3050,6 +3050,10 @@ fn may_have_arrived(outcome_unknown: bool, never_forwarded: Option<bool>) -> boo
 mod lifecycle_tests;
 
 #[cfg(test)]
+#[path = "step_liveness_reader_tests.rs"]
+mod step_liveness_reader_tests;
+
+#[cfg(test)]
 #[path = "transport_slow_answer_tests.rs"]
 mod slow_answer_tests;
 

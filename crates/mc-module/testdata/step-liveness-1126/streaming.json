@@ -1,0 +1,1 @@
+{"result":{"state":"active","usage":{"steps":0,"unreported_steps":0,"by_model":[]},"step":{"step_id":1,"started_at_ms":1795726990958,"attempt":1,"attempt_started_at_ms":1795726991024,"phase":"streaming","last_event_at_ms":1795726991086,"idle_deadline_ms":1795727291086,"content_deadline_ms":1795728791086,"last_content_at_ms":1795726991085}}}
