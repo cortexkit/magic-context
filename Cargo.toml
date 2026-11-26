@@ -27,7 +27,7 @@ warm-commands = [
 cortexkit-store = "=0.2.4"
 cortexkit-store-types = "=0.2.2"
 cortexkit-lease = "=0.1.2"
-cortexkit-log = { version = "=0.3.5", features = ["store-paths"] }
+cortexkit-log = { version = "=0.3.7", features = ["store-paths"] }
 cortexkit-tokens = "0.2"
 
 # Published subc wire/SDK crates use crates.io.
