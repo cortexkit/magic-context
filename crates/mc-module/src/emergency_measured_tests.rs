@@ -1248,3 +1248,96 @@ fn emergency_measured_a_count_of_zero_plans_as_no_count_without_a_reading() {
         assert_eq!(plans[1], plans[0], "exact counts {exact_counts}");
     }
 }
+
+/// Conditions stamped `stamp` in the epoch the stamped tests use.
+fn stamped(session: &Session, stamp: u64) -> Conditions {
+    let mut conditions = session.conditions.clone();
+    conditions.statement_epoch = Some("epoch".into());
+    conditions.statement_seq = Some(stamp);
+    conditions
+}
+
+/// [`partial`] after a notice stamped `stamp` that stored exact counts of
+/// 4,000 and 6,000.
+async fn counted_at(stamp: u64) -> (Session, Settings, Client) {
+    let client = Client::default();
+    *client.entries.lock().unwrap() = entries(33);
+    let (mut session, settings) = partial();
+    session.statement_epoch = Some("epoch".into());
+    session.surface_tokens = (None, None);
+    // Below the force band, so the notice itself plans no batch.
+    session.conditions.last_prompt_tokens = Some(20_000);
+    let mut request = notice(&session, 1, entries(33).last().map(cursor));
+    request.conditions = stamped(&session, stamp);
+    request.conditions.system_tokens = exact(4_000);
+    request.conditions.tools_tokens = exact(6_000);
+    session.notice(&client, &settings, request).await;
+    assert_eq!(session.surface_tokens, (exact(4_000), exact(6_000)));
+    (session, settings, client)
+}
+
+#[tokio::test]
+async fn emergency_measured_a_change_ride_with_the_counts_stamp_leaves_them_fresh() {
+    // A ride reporting a surface change with the stamp of the notice that
+    // stored the counts states the same runner state, which that notice
+    // already counted: in both delivery orders the counts stay in use, and
+    // a 47,000-token count less the 15,775 target takes 32.
+    for late in [false, true] {
+        let (mut session, settings, _) = counted_at(2).await;
+        if late {
+            let cache =
+                RideRequest::new(vec![RideCause::CacheExpired], 1_000, stamped(&session, 4));
+            session.ride(&settings, &cache);
+        }
+        let change = RideRequest::new(vec![RideCause::SurfaceChange], 1_000, stamped(&session, 2));
+        session.ride(&settings, &change);
+        let refused = RideRequest::new(vec![RideCause::OverLimit], 1_000, stamped(&session, 5))
+            .with_request_tokens(47_000);
+        let view = session.ride(&settings, &refused);
+        assert_eq!(taken(view.as_ref()), whole(2..=33), "late {late}");
+    }
+}
+
+#[tokio::test]
+async fn emergency_measured_a_setup_makes_the_counts_stale_until_a_notice() {
+    let (mut session, settings, client) = counted_at(2).await;
+    let (_, _, route, mut request, _) = fixture();
+    request.model = session.conditions.model.clone();
+    request.context_window = 60_000;
+    request.output_reserve = 15_000;
+    let request = request.with_statement_order("epoch-2", 1, true).unwrap();
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &request, features)
+        .await;
+    // The same model, but nothing says the surfaces are the ones counted.
+    assert_eq!(session.emergency_measured(&[], &[], None), None);
+
+    let mut fresh = notice(&session, 2, entries(33).last().map(cursor));
+    fresh.conditions.statement_epoch = Some("epoch-2".into());
+    fresh.conditions.statement_seq = Some(2);
+    fresh.conditions.system_tokens = exact(4_000);
+    fresh.conditions.tools_tokens = exact(6_000);
+    session.notice(&client, &settings, fresh).await;
+    let measured = session
+        .emergency_measured(&[], &[], None)
+        .expect("fresh counts");
+    assert_eq!(
+        (measured.system_tokens, measured.tools_tokens),
+        (4_000, 6_000)
+    );
+}
+
+#[tokio::test]
+async fn emergency_measured_a_late_rides_count_is_not_planned_from() {
+    // The counts and the held conditions come from the notice stamped 3; a
+    // refused request stamped 2 arrives after it. Its 60,000-token count
+    // was taken under older runner state, so the plan treats it as absent:
+    // the refusal puts the request at the 45,000 window, 30 results. Taken
+    // as a count it would plan 60,000 and take all 36.
+    let (mut session, settings, _) = counted_at(3).await;
+    let refused = RideRequest::new(vec![RideCause::OverLimit], 1_000, stamped(&session, 2))
+        .with_request_tokens(60_000);
+    let view = session.ride(&settings, &refused);
+    assert_eq!(taken(view.as_ref()), whole(2..=31));
+}

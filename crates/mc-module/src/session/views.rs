@@ -44,15 +44,19 @@ impl Session {
         self.take_conditions("ride", standing, &ride.conditions);
         // Rides carry no surface counts (compaction contract W4.11), so the
         // held ones describe what was sent before a change a ride reports,
-        // until a notice brings fresh ones. A ride built after the notice
-        // they came from says so even when it arrives after a newer
-        // statement.
+        // until a notice brings fresh ones. Statement order decides whether
+        // the change came after them, whatever order the statements arrive
+        // in: a ride with the stamp of the notice that stored them states
+        // that same runner state, which the notice already counted. Without
+        // both stamps nothing proves the order, and the counts go.
         if ride.has(RideCause::SurfaceChange) || ride.has(RideCause::ModelChange) {
-            let after_counts = match standing {
-                Standing::Current => true,
-                Standing::Older { stamp, .. } => self
-                    .surface_counts_stamp
-                    .is_none_or(|counted| stamp > counted),
+            let ride_stamp = match standing {
+                Standing::Current => ride.conditions.statement_seq,
+                Standing::Older { stamp, .. } => Some(stamp),
+            };
+            let after_counts = match (ride_stamp, self.surface_counts_stamp) {
+                (Some(ride), Some(counted)) => ride > counted,
+                _ => true,
             };
             if after_counts {
                 self.surface_counts_stale = true;
@@ -104,6 +108,10 @@ impl Session {
             };
             lanes::OverLimit {
                 count,
+                // Only the measured plan reads these two; the inferred plan
+                // keeps its arithmetic and takes the count whatever the view
+                // or the ride's age.
+                //
                 // The count describes ck-mc's newest view only when the
                 // runner applies that very view, checksum included, as
                 // settling a view requires.
@@ -112,6 +120,9 @@ impl Session {
                     (None, None) => true,
                     _ => false,
                 },
+                // A ride older than the conditions ck-mc holds counted the
+                // request under runner state that has since moved on.
+                late: matches!(standing, Standing::Older { .. }),
             }
         });
         // Only a cause that changes the request's bytes before the
@@ -313,6 +324,7 @@ impl Session {
             Some(over) if !over.newest_view => lanes::MeasuredRequest::OlderView,
             Some(lanes::OverLimit {
                 count: lanes::RideCount::Stated(count),
+                late: false,
                 ..
             }) => lanes::MeasuredRequest::Counted { count, change },
             Some(_) => lanes::MeasuredRequest::Refused { change },

@@ -1664,8 +1664,13 @@ pub struct OverLimit {
     pub count: RideCount,
     /// The refused request was built under ck-mc's newest view, the one
     /// this pass builds on. Otherwise neither its count nor its refusal
-    /// describes the request this pass will serve.
+    /// describes the request this pass will serve. Read by the measured plan
+    /// only.
     pub newest_view: bool,
+    /// The ride is older than the conditions ck-mc holds, so a count it
+    /// states was taken under runner state that has since changed. The
+    /// measured plan treats it as no count; the inferred plan takes it.
+    pub late: bool,
 }
 
 /// What the runner said about a refused request's size. A stated count and

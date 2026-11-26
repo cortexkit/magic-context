@@ -612,7 +612,11 @@ impl Session {
         // taken in arrival order again.
         self.statement_seq = request.statement_seq;
         self.statement_epoch = request.statement_epoch.clone();
-        // The surface counts' stamp belongs to the replaced numbering.
+        // Setup can follow a restore that brings back other system text or
+        // tool definitions under the same model, and nothing in it says the
+        // counted ones are still sent: the counts wait for the next notice.
+        // Their stamp belongs to the replaced numbering.
+        self.surface_counts_stale = true;
         self.surface_counts_stamp = None;
         self.statement_late = false;
         // Setup is the runner's statement afresh: a floor a refusal showed
