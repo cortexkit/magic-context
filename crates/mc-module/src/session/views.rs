@@ -43,10 +43,20 @@ impl Session {
         let was_stale = self.reading_stale;
         self.take_conditions("ride", standing, &ride.conditions);
         // Rides carry no surface counts (compaction contract W4.11), so the
-        // held ones describe the surfaces before this change until a notice
-        // brings fresh ones.
-        if standing == Standing::Current && ride.has(RideCause::SurfaceChange) {
-            self.surface_counts_stale = true;
+        // held ones describe what was sent before a change a ride reports,
+        // until a notice brings fresh ones. A ride built after the notice
+        // they came from says so even when it arrives after a newer
+        // statement.
+        if ride.has(RideCause::SurfaceChange) || ride.has(RideCause::ModelChange) {
+            let after_counts = match standing {
+                Standing::Current => true,
+                Standing::Older { stamp, .. } => self
+                    .surface_counts_stamp
+                    .is_none_or(|counted| stamp > counted),
+            };
+            if after_counts {
+                self.surface_counts_stale = true;
+            }
         }
         let stated = StatedView::of(standing, ride.applied_view.as_ref());
         self.take_signed_floor();
@@ -92,8 +102,14 @@ impl Session {
             };
             lanes::OverLimit {
                 count,
-                newest_view: ride.applied_view.as_ref().map(|view| view.version)
-                    == self.latest.as_ref().map(|view| view.version),
+                // The count describes ck-mc's newest view only when the
+                // runner applies that very view, checksum included, as
+                // settling a view requires.
+                newest_view: match (ride.applied_view.as_ref(), self.latest.as_ref()) {
+                    (Some(applied), Some(view)) => same(applied, view),
+                    (None, None) => true,
+                    _ => false,
+                },
             }
         });
         // Only a cause that changes the request's bytes before the
@@ -221,8 +237,11 @@ impl Session {
     /// total served costs counts overlapping removals once and charges the new
     /// head instead of treating summarized text as fixed provider overhead.
     /// A head-only refresh deliberately gets no credit, keeping the history
-    /// accounting change confined to passes that move the cut. Routine cleanup
-    /// is excluded because the emergency selector plans before it.
+    /// accounting change confined to passes that move the cut. What the other
+    /// lanes remove on the same pass (the age sweep, supersession, reasoning
+    /// clearing) is deliberately left out: this credit serves only the plan
+    /// that infers the fixed part from the reading, which has always sized
+    /// the request as if that work had not landed.
     pub(super) fn emergency_removed_tokens(
         &self,
         history: &[EditOp],
@@ -264,19 +283,19 @@ impl Session {
 
     /// What ck-mc measures about the request this pass will serve, for the
     /// emergency lane. `ops` are the edits of every lane planned before the
-    /// emergency lane on this pass, and `covered` the parts they change.
-    /// `None` when the fixed part can't be measured: a surface count is
-    /// absent or not exact, or a ride has reported a surface change since the
-    /// counts were taken. The lane then infers the fixed part from the
-    /// reading.
+    /// emergency lane on this pass. `None` when the fixed part can't be
+    /// measured: a surface count is absent or not exact, was taken for
+    /// another model, or a ride has reported a change to the surfaces or the
+    /// model since. The lane then infers the fixed part from the reading.
     pub(super) fn emergency_measured(
         &self,
         history: &[EditOp],
         ops: &[EditOp],
-        covered: &[lanes::PartKey],
         over_limit: Option<lanes::OverLimit>,
     ) -> Option<lanes::Measured> {
-        if self.surface_counts_stale {
+        if self.surface_counts_stale
+            || self.surface_counts_model.as_ref() != Some(&self.conditions.model)
+        {
             return None;
         }
         let (Some(system), Some(tools)) = self.surface_tokens else {
@@ -290,10 +309,11 @@ impl Session {
         let request = match over_limit {
             None => lanes::MeasuredRequest::Served,
             Some(over) if !over.newest_view => lanes::MeasuredRequest::OlderView,
+            // A stated count of zero says nothing about the request.
             Some(lanes::OverLimit {
                 count: lanes::RideCount::Stated(count),
                 ..
-            }) => lanes::MeasuredRequest::Counted { count, change },
+            }) if count > 0 => lanes::MeasuredRequest::Counted { count, change },
             Some(_) => lanes::MeasuredRequest::Refused { change },
         };
         Some(lanes::Measured {
@@ -306,10 +326,7 @@ impl Session {
                 .filter(|notes| notes.exact)
                 .map(|notes| notes.count),
             transcript_tokens: served.parts.values().sum(),
-            others: covered
-                .iter()
-                .map(|key| (key.clone(), served.parts.get(key).copied().unwrap_or(0)))
-                .collect(),
+            parts: served.parts,
             request,
         })
     }
@@ -611,7 +628,7 @@ impl Session {
                 over_limit: over_limit.is_some(),
                 priced,
                 removed_tokens,
-                measured: self.emergency_measured(history, &ops, &covered, over_limit),
+                measured: self.emergency_measured(history, &ops, over_limit),
             };
             // Measured, the request is already priced after every lane
             // planned so far, so on a force pass none of their parts is a
@@ -631,6 +648,7 @@ impl Session {
                 &emergency_context,
                 cutoff,
                 &emergency,
+                self.counter(),
                 |entry, part| {
                     if self.failed_parts.is_empty() && keep.is_none() {
                         return false;
@@ -640,6 +658,9 @@ impl Session {
                 },
             );
             if let Some(plan) = plan {
+                // `selected` counts the parts the plan chose, not edits the
+                // runner applies: a chosen part another lane already removes
+                // on this pass adds no edit of its own.
                 tracing::info!(
                     session = %self.key.session,
                     fixed_tokens = plan.fixed_tokens,
@@ -650,6 +671,7 @@ impl Session {
                     target_tokens = %plan
                         .target_tokens
                         .map_or_else(|| "none".to_owned(), |target| target.to_string()),
+                    stop = %plan.stop,
                     selected = selected.len(),
                     "ck-mc: session: emergency drop planned"
                 );

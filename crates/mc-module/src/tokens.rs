@@ -13,6 +13,7 @@
 
 use cortexkit_role_compaction::part::{AttachmentItem, FileMedia, Part, PartBody, ToolPart};
 use cortexkit_role_compaction::tokens::PartTokens;
+use serde_json::Value;
 
 /// What an image costs, whatever its size.
 pub const IMAGE_TOKENS: u64 = 1_000;
@@ -72,6 +73,80 @@ pub fn tool_result(part: &Part, tool: &ToolPart) -> u64 {
         Some(PartTokens::Tool(counted)) => counted.output,
         _ => bytes(tool.output_bytes.unwrap_or(0)) + attachments(tool) + rides(tool),
     }
+}
+
+/// What a tool part's call costs: its name and arguments, without the result.
+fn tool_call(part: &Part, tool: &ToolPart) -> u64 {
+    match part.tokens {
+        Some(PartTokens::Tool(counted)) => counted.input,
+        _ => bytes(tool.name.len() as u64 + tool.input.as_str().len() as u64),
+    }
+}
+
+/// What a part costs once a view's replacements of its fields (`edits`, as
+/// field and value, in view order) render, as the compaction contract
+/// renders them. `count` prices the text a replacement puts in.
+///
+/// - `text` renders in place of a text or file part.
+/// - A tool's `output` takes the place of the whole result text, and the
+///   delivered rides go with it. Its attachments stay unless an
+///   `attachments` replacement names the ones kept; with only that
+///   replacement, the output stays and the others go.
+/// - `input.<key>` replaces one argument of the call, which is priced again
+///   with the replacement in place.
+pub fn edited_part(part: &Part, edits: &[(&str, &Value)], count: impl Fn(&str) -> u64) -> u64 {
+    let last = |name: &str| {
+        edits
+            .iter()
+            .rev()
+            .find(|(field, _)| *field == name)
+            .map(|(_, value)| *value)
+    };
+    let PartBody::Tool(tool) = &part.body else {
+        return match last("text") {
+            Some(text) => count(text.as_str().unwrap_or("")),
+            None => self::part(part),
+        };
+    };
+    let mut cost = self::part(part);
+    let kept_ids = last("attachments").and_then(Value::as_array);
+    let every_attachment = attachments(tool);
+    let kept_attachments = match kept_ids {
+        Some(ids) => tool
+            .attachments()
+            .iter()
+            .filter(|item| ids.iter().any(|id| id.as_str() == Some(&item.id)))
+            .map(|item| attachment(&item.item))
+            .sum(),
+        None => every_attachment,
+    };
+    let result = tool_result(part, tool);
+    match last("output") {
+        Some(text) => {
+            cost =
+                cost.saturating_sub(result) + count(text.as_str().unwrap_or("")) + kept_attachments;
+        }
+        None if kept_ids.is_some() => {
+            cost = cost.saturating_sub((every_attachment - kept_attachments).min(result));
+        }
+        None => {}
+    }
+    let arguments: Vec<(&str, &Value)> = edits
+        .iter()
+        .filter_map(|(field, value)| Some((field.strip_prefix("input.")?, *value)))
+        .collect();
+    if !arguments.is_empty() {
+        let mut input = tool.input.parse();
+        if let Value::Object(fields) = &mut input {
+            for (key, value) in arguments {
+                fields.insert(key.to_owned(), value.clone());
+            }
+        }
+        cost = cost.saturating_sub(tool_call(part, tool))
+            + count(&tool.name)
+            + count(&input.to_string());
+    }
+    cost
 }
 
 /// A tool part's output alone. When it is estimated, attachments are left

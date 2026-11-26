@@ -45,6 +45,8 @@ impl Session {
             notes: Default::default(),
             surface_tokens: (None, None),
             surface_counts_stale: false,
+            surface_counts_stamp: None,
+            surface_counts_model: None,
             threshold: (
                 crate::pass::Settings::default().execute_threshold_percentage,
                 "default",
@@ -610,6 +612,8 @@ impl Session {
         // taken in arrival order again.
         self.statement_seq = request.statement_seq;
         self.statement_epoch = request.statement_epoch.clone();
+        // The surface counts' stamp belongs to the replaced numbering.
+        self.surface_counts_stamp = None;
         self.statement_late = false;
         // Setup is the runner's statement afresh: a floor a refusal showed
         // it contradicting is taken again if this Setup names it.

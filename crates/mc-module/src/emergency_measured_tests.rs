@@ -69,6 +69,7 @@ fn sized(old: u64, system: u64, tools: u64, reading: u64) -> (Session, Settings)
     session.conditions.output_reserve = 15_000;
     session.conditions.last_prompt_tokens = Some(reading);
     session.surface_tokens = (exact(system), exact(tools));
+    session.surface_counts_model = Some(session.conditions.model.clone());
     session.index.extend_counted(entries(old), Some("family"));
     session.index_ready = true;
     (session, settings)
@@ -344,12 +345,15 @@ fn emergency_measured_an_unmeasured_fixed_part_keeps_the_inferred_plan() {
         assert_eq!(taken(view.as_ref()), force(2..=29, NEWEST), "{label}");
 
         // Old notes of 1,000 and pending ones of 6,000 add 5,000 to the
-        // inferred fixed part and to the request: 29 results.
+        // inferred fixed part and to the request: 28,925 to free. A recent
+        // result's call stays, so it frees its 1,000 less the placeholder
+        // that replaces it: the sixteen older results and fourteen recent
+        // ones, 30 results.
         let (mut session, settings) = start();
         session.notes.notice(exact(1_000), Some("family"));
         session.notes.notice(exact(6_000), Some("family"));
         let view = pass(&mut session, &settings);
-        assert_eq!(taken(view.as_ref()), force(2..=30, NEWEST), "{label}");
+        assert_eq!(taken(view.as_ref()), force(2..=31, NEWEST), "{label}");
 
         // The count, less the queued 5,000, leaves a 12,000 inferred fixed
         // part: a target of 17,175, 24,825 to free.
@@ -478,7 +482,7 @@ fn emergency_measured_the_plan_is_logged_with_its_sources() {
     assert_eq!(taken(view.as_ref()), force(2..=31, NEWEST));
     assert!(
         logs.text().contains(
-            "ck-mc: session: emergency drop planned session=s1 fixed_tokens=10000 fixed_from=measured size_tokens=45000 size_from=measured ceiling_tokens=29250 target_tokens=15775 selected=30"
+            "ck-mc: session: emergency drop planned session=s1 fixed_tokens=10000 fixed_from=measured size_tokens=45000 size_from=measured ceiling_tokens=29250 target_tokens=15775 stop=selected selected=30"
         ),
         "{}",
         logs.text()
@@ -491,7 +495,7 @@ fn emergency_measured_the_plan_is_logged_with_its_sources() {
     assert_eq!(taken(view.as_ref()), force(2..=29, NEWEST));
     assert!(
         logs.text().contains(
-            "ck-mc: session: emergency drop planned session=s1 fixed_tokens=4000 fixed_from=inferred size_tokens=39000 size_from=reading ceiling_tokens=29250 target_tokens=11575 selected=28"
+            "ck-mc: session: emergency drop planned session=s1 fixed_tokens=4000 fixed_from=inferred size_tokens=39000 size_from=reading ceiling_tokens=29250 target_tokens=11575 stop=selected selected=28"
         ),
         "{}",
         logs.text()
@@ -883,5 +887,276 @@ fn emergency_measured_the_served_request_matches_the_plan_on_every_kind_of_pass(
     }
     for dir in dirs {
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// A tool call of `arguments` tokens with a result of `output` tokens, in
+/// its own assistant message.
+fn call(tag: u64, name: &str, input: serde_json::Value, arguments: u64, output: u64) -> Entry {
+    let mut part: Part = serde_json::from_value(serde_json::json!({
+        "id":"p", "kind":"tool", "call_id":format!("c{tag}"), "name":name,
+        "input":input, "status":"completed", "output":"done",
+        "output_bytes":4 * output, "digest":""
+    }))
+    .unwrap();
+    part.tag = Some(tag);
+    part.tokens = Some(PartTokens::tool(arguments, output));
+    Entry::new(tag, format!("tool-{tag}"), Role::Assistant, tag, vec![part])
+}
+
+/// The request the session serves now, with a fixed part of `fixed`.
+fn served_with(session: &Session, fixed: u64) -> u64 {
+    let (parts, head) =
+        session.served_costs(session.latest.iter().flat_map(|v| &v.edits).map(|e| &e.op));
+    fixed + head + parts.values().sum::<u64>()
+}
+
+#[test]
+fn emergency_measured_counts_taken_for_another_model_fall_back_to_the_inferred_plan() {
+    // The held counts put the fixed part at 43,100, past the usable window
+    // less 2,000; the new model's tokenizer counts less. With or without the
+    // ride naming the model change, the counts were taken for the previous
+    // model, so the inferred plan runs: 75,000 less the 35,000 transcript is
+    // a 40,000 fixed part, a target of 41,500 on the usable window and
+    // 33,500 to free, all 33 old results and two from the tail.
+    for causes in [
+        vec![RideCause::ModelChange, RideCause::OverLimit],
+        vec![RideCause::OverLimit],
+    ] {
+        let logs = crate::test_log::capture();
+        let (mut session, settings) = sized(33, 37_100, 6_000, 39_000);
+        let mut conditions = session.conditions.clone();
+        conditions.model = ModelRef::new("other", "model-after-switch");
+        conditions.last_prompt_tokens = Some(20_000);
+        let ride = RideRequest::new(causes.clone(), 1_000, conditions).with_request_tokens(75_000);
+        let view = session.ride(&settings, &ride);
+        assert_eq!(taken(view.as_ref()), whole(2..=36), "{causes:?}");
+        assert!(
+            logs.text().contains("fixed_from=inferred"),
+            "{causes:?}: {}",
+            logs.text()
+        );
+    }
+}
+
+#[tokio::test]
+async fn emergency_measured_a_late_surface_change_ride_still_makes_the_counts_stale() {
+    // `late` is the stamp of a surface-change ride that arrives after a
+    // newer ride without a change: built after the notice that stored the
+    // counts (stamp 2), it makes them stale; built before it, it doesn't.
+    for (late, stale) in [(3, true), (1, false)] {
+        let client = Client::default();
+        *client.entries.lock().unwrap() = entries(33);
+        let (mut session, settings) = partial();
+        session.statement_epoch = Some("epoch".into());
+        session.surface_tokens = (None, None);
+        session.conditions.last_prompt_tokens = Some(20_000);
+        let stamped = |session: &Session, stamp: u64| {
+            let mut conditions = session.conditions.clone();
+            conditions.statement_epoch = Some("epoch".into());
+            conditions.statement_seq = Some(stamp);
+            conditions
+        };
+        let mut request = notice(&session, 1, entries(33).last().map(cursor));
+        request.conditions = stamped(&session, 2);
+        request.conditions.system_tokens = exact(4_000);
+        request.conditions.tools_tokens = exact(6_000);
+        session.notice(&client, &settings, request).await;
+        assert_eq!(session.surface_tokens, (exact(4_000), exact(6_000)));
+        let ride = |session: &Session, causes, stamp| {
+            RideRequest::new(causes, 1_000, stamped(session, stamp))
+        };
+        let cache = ride(&session, vec![RideCause::CacheExpired], 4);
+        session.ride(&settings, &cache);
+        let change = ride(&session, vec![RideCause::SurfaceChange], late);
+        session.ride(&settings, &change);
+        let refused = ride(&session, vec![RideCause::OverLimit], 5).with_request_tokens(47_000);
+        let view = session.ride(&settings, &refused);
+        // Stale, the inferred plan takes 30 (a 12,000 fixed part); measured,
+        // 47,000 less the 15,775 target takes 32.
+        let expected = if stale { whole(2..=31) } else { whole(2..=33) };
+        assert_eq!(taken(view.as_ref()), expected, "late stamp {late}");
+    }
+}
+
+#[test]
+fn emergency_measured_an_edit_markers_call_is_priced_at_its_shortened_arguments() {
+    let (mut session, _) = partial();
+    let content = "pub fn greet(name: &str) -> String { format!(\"Hello, {name}!\") }\n".repeat(96);
+    let input = serde_json::json!({"filePath":"src/fixture.rs","content":content});
+    let counter = session.counter();
+    let arguments = counter.count(&input.to_string());
+    let mut entries = entries(33);
+    entries[1] = call(2, "write", input.clone(), arguments, 100);
+    session.index = Index::default();
+    session.index.extend_counted(entries, Some("family"));
+    let marker = lanes::edit_marker("content", &input["content"]).unwrap();
+    let digest = session.index.entries()[1].parts[0].digest.clone();
+    let replace = |field: &str, value: serde_json::Value| EditOp::Replace {
+        mid: "tool-2".into(),
+        part: "p".into(),
+        field: field.into(),
+        value,
+        expect: digest.clone(),
+    };
+    let ops = [
+        replace("output", serde_json::json!(lanes::placeholder(2))),
+        replace("input.content", serde_json::json!(marker)),
+    ];
+    let (parts, _) = session.served_costs(ops.iter());
+    let mut shortened = input;
+    shortened["content"] = serde_json::json!(marker);
+    // The call as rendered: its name and the arguments with the marker in
+    // place of the content, and the placeholder for its result.
+    let expected = counter.count("write")
+        + counter.count(&shortened.to_string())
+        + counter.count(&lanes::placeholder(2));
+    assert!(arguments > 2_000, "the call costs {arguments}");
+    assert_eq!(parts[&("tool-2".into(), "p".into())], expected);
+}
+
+#[test]
+fn emergency_measured_only_signed_reasoning_under_the_signed_floor_is_free() {
+    let (mut session, _) = partial();
+    let reasoning = |id: &str, signed: bool| -> Part {
+        let mut part: Part = serde_json::from_value(serde_json::json!({
+            "id":id, "kind":"reasoning", "text_bytes":9_600, "digest":""
+        }))
+        .unwrap();
+        if signed {
+            part.seal = cortexkit_role_compaction::part::Seal::Signed;
+        }
+        part
+    };
+    let mut entries = entries(33);
+    entries[1].parts.push(reasoning("unsigned", false));
+    entries[1].parts.push(reasoning("signed", true));
+    session.index = Index::default();
+    session.index.extend_counted(entries, Some("family"));
+    session.signed_floor = Some("tool-2".into());
+    let (parts, _) = session.served_costs([]);
+    // The runner strips only the signed block at its floor.
+    assert_eq!(parts[&("tool-2".into(), "unsigned".into())], 2_400);
+    assert_eq!(parts[&("tool-2".into(), "signed".into())], 0);
+}
+
+#[test]
+fn emergency_measured_attachments_a_replaced_output_keeps_are_priced() {
+    use cortexkit_role_compaction::part::{Attachment, AttachmentItem, FileMedia};
+
+    let (mut session, _) = partial();
+    let mut entries = entries(33);
+    let PartBody::Tool(tool) = &mut entries[1].parts[0].body else {
+        unreachable!()
+    };
+    tool.set_attachments(vec![
+        Attachment::new(
+            "screenshot",
+            AttachmentItem::File(FileMedia::inline("image/png", Some(300))),
+        ),
+        Attachment::new(
+            "report",
+            AttachmentItem::File(FileMedia::inline("application/pdf", Some(8_000))),
+        ),
+    ]);
+    entries[1].parts[0].tokens = None;
+    session.index = Index::default();
+    session.index.extend_counted(entries, Some("family"));
+    let part = session.index.entries()[1].parts[0].clone();
+    let replace = |field: &str, value: serde_json::Value| EditOp::Replace {
+        mid: "tool-2".into(),
+        part: "p".into(),
+        field: field.into(),
+        value,
+        expect: part.digest.clone(),
+    };
+    let output = replace("output", serde_json::json!(lanes::placeholder(2)));
+    let keep_report = replace("attachments", serde_json::json!(["report"]));
+    let PartBody::Tool(tool) = &part.body else {
+        unreachable!()
+    };
+    let call = crate::tokens::part(&part) - crate::tokens::tool_result(&part, tool);
+    let placeholder = session.counter().count(&lanes::placeholder(2));
+    let key = ("tool-2".to_owned(), "p".to_owned());
+    // The kept 8,000-byte report renders after the placeholder: 2,000 tokens.
+    let (parts, _) = session.served_costs([&output, &keep_report]);
+    assert_eq!(parts[&key], call + placeholder + 2_000);
+    // An output replaced alone keeps every attachment, the image's 1,000
+    // included.
+    let (parts, _) = session.served_costs([&output]);
+    assert_eq!(parts[&key], call + placeholder + 3_000);
+}
+
+#[test]
+fn emergency_measured_a_count_under_a_view_with_another_checksum_is_older() {
+    for (same_checksum, expected) in [(false, whole(2..=31)), (true, whole(2..=37))] {
+        let (mut session, settings) = partial();
+        session.version = 1;
+        session.latest = Some(View::seal(1, Vec::new()));
+        let mut ride = over_limit(&session, Some(60_000));
+        if !same_checksum {
+            // The same version, built through another message.
+            let other = View::seal_with_policy(1, Vec::new(), Some("tool-34".into()), None);
+            assert_ne!(other.checksum, session.latest.as_ref().unwrap().checksum);
+            ride.applied_view = Some(other.applied());
+        }
+        // Another view's count says nothing about this one: the measured
+        // 45,000 takes 30. ck-mc's own view's 60,000 takes everything.
+        let view = session.ride(&settings, &ride);
+        assert_eq!(
+            taken(view.as_ref()),
+            expected,
+            "same checksum {same_checksum}"
+        );
+    }
+}
+
+#[test]
+fn emergency_measured_a_stated_count_of_zero_is_no_count() {
+    // 28 old results: the measured sum is 40,000. Without a count the
+    // refusal puts the request at the 45,000 window: 29,225 to free, every
+    // result. A count of zero planned as a count would stop at 40,000 and 25.
+    let (mut session, settings) = sized(28, 4_000, 6_000, 39_000);
+    let view = session.ride(&settings, &over_limit(&session, Some(0)));
+    assert_eq!(taken(view.as_ref()), whole(2..=32));
+}
+
+#[test]
+fn emergency_measured_a_kept_call_is_credited_only_for_its_result() {
+    // A 41,000-token fixed part, a 1,100-token read and a final shell call
+    // with 3,500 tokens of arguments and a 1,000-token result: 46,700 in
+    // all, as the runner counts it. The final call keeps its call when it
+    // goes, so it frees only its result; the read must go too for the
+    // request to fit 45,000. Credited at 4,500, the call alone would seem
+    // enough and 45,706 would stay.
+    for measured in [true, false] {
+        let (mut session, settings) = sized(0, 35_000, 6_000, 39_000);
+        if !measured {
+            session.surface_tokens = (None, None);
+        }
+        let task = counted(1, "task", 100);
+        session.index = Index::default();
+        session.index.extend_counted(
+            [
+                task,
+                call(2, "read", serde_json::json!({"filePath":"README.md"}), 0, 1_100),
+                call(
+                    3,
+                    "bash",
+                    serde_json::json!({"command":"printf '%s' ".to_owned() + &"word ".repeat(3_500)}),
+                    3_500,
+                    1_000,
+                ),
+            ],
+            Some("family"),
+        );
+        let view = session.ride(&settings, &over_limit(&session, Some(46_700)));
+        assert_eq!(
+            taken(view.as_ref()),
+            [(2, "whole"), (3, "result")],
+            "measured {measured}"
+        );
+        let served = served_with(&session, 41_000);
+        assert!(served <= USABLE, "measured {measured}: {served}");
     }
 }

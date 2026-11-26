@@ -635,52 +635,27 @@ impl Session {
         }
         let mut costs = BTreeMap::new();
         let signed_floor = self.signed_floor();
+        let counter = self.counter();
         for entry in self.index.entries() {
             for part in &entry.parts {
                 let key = (entry.mid.clone(), part.id.clone());
-                let mut cost = tokens::part(part);
-                if let Some(edits) = replacements.get(&key) {
-                    let replaces_output = edits.iter().any(|(field, _)| *field == "output");
-                    for (field, value) in edits {
-                        let text = value.as_str().unwrap_or("");
-                        match (*field, &part.body) {
-                            ("output", PartBody::Tool(tool)) => {
-                                cost = cost.saturating_sub(tokens::tool_result(part, tool))
-                                    + self.counter().count(text);
-                            }
-                            ("text", _) => cost = self.counter().count(text),
-                            _ => {}
-                        }
-                    }
-                    // Replacing the output already removes the entire result,
-                    // attachments included. An attachment-only replay instead
-                    // keeps the output, so subtract only media no longer sent.
-                    if let PartBody::Tool(tool) = &part.body {
-                        if let Some(kept) = edits
-                            .iter()
-                            .rev()
-                            .find(|(field, _)| *field == "attachments" && !replaces_output)
-                            .and_then(|(_, value)| value.as_array())
-                        {
-                            let removed: u64 = tool
-                                .attachments()
-                                .iter()
-                                .filter(|a| !kept.iter().any(|id| id.as_str() == Some(&a.id)))
-                                .map(|a| tokens::attachment(&a.item))
-                                .sum();
-                            cost =
-                                cost.saturating_sub(removed.min(tokens::tool_result(part, tool)));
-                        }
-                    }
-                }
-                if cut.is_some_and(|cut| entry.ordinal <= cut)
+                let cost = match replacements.get(&key) {
+                    Some(edits) => tokens::edited_part(part, edits, |text| counter.count(text)),
+                    None => tokens::part(part),
+                };
+                // The runner leaves out signed reasoning at or before its
+                // signed floor; unsigned reasoning there is still sent.
+                let stripped = matches!(part.body, PartBody::Reasoning { .. })
+                    && lanes::stripped_by_floor(signed_floor, entry, part);
+                let cost = if cut.is_some_and(|cut| entry.ordinal <= cut)
                     || messages.contains(entry.mid.as_str())
                     || drops.contains(&key)
-                    || (signed_floor.is_some_and(|floor| entry.ordinal <= floor)
-                        && matches!(part.body, PartBody::Reasoning { .. }))
+                    || stripped
                 {
-                    cost = 0;
-                }
+                    0
+                } else {
+                    cost
+                };
                 costs.insert(key, cost);
             }
         }
