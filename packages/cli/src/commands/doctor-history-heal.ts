@@ -205,7 +205,7 @@ function pendingContextProposal(s: HealSession): unknown {
 function authorizeSession(db: Database, host: Database, s: HealSession): AuthorizedSession {
     if (hasMode3MoveRecord(db, s.id) && !s.refusals.some((r) => r.code === "already_moved"))
         throw new Error(
-            `already_moved: ${s.title}; standalone history heal must not change a mode-3 session`,
+            `already_moved: ${s.title}; standalone history heal must not change a session that moved to CortexKit`,
         );
     const observed = { context: fingerprint(db, s), host: fingerprint(host, s, true) };
     const contextDone = observed.context === s.after.context,

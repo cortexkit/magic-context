@@ -1279,7 +1279,7 @@ async fn lifecycle_a_refused_provider_does_no_work_until_the_next_setup() {
 
 #[tokio::test]
 async fn lifecycle_restored_state_ahead_of_context_db_moves_the_cut_back() {
-    // A backup can pair a fresh mode3.db with an older context.db. Here the
+    // A backup can pair a fresh sessions.db with an older context.db. Here the
     // saved state cuts through message d, behind a summary context.db no
     // longer has.
     let (mut session, client, route, mut request, settings) = fixture();

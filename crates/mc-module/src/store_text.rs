@@ -1,4 +1,4 @@
-//! Large immutable history strings live once in mode3.db, not in every
+//! Large immutable history strings live once in sessions.db, not in every
 //! current/rollback/pending-view JSON record. Normal wire serialization stays
 //! byte-identical; only Store's scoped encoder emits references.
 

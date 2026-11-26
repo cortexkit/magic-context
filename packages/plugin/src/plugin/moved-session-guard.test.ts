@@ -76,7 +76,9 @@ test("the shared gate refuses a moved session in every hook and fails its transf
             messages: [{ info: { id: "m1", sessionID: session, role: "user" }, parts: [] }],
         } as never);
 
-    await expect(transformFor(MOVED)).rejects.toThrow(MOVED_SESSION_MESSAGE);
+    await expect(transformFor(MOVED)).rejects.toThrow(
+        "Magic Context: this session now runs under CortexKit, and Magic Context manages it there, not through this plugin. Open it there. This plugin will not read or change it.",
+    );
     await hooks["chat.message"]!({ sessionID: MOVED } as never, {} as never);
     await hooks["experimental.chat.system.transform"]!({ sessionID: MOVED } as never, {
         system: [],

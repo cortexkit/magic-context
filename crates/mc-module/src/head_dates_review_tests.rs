@@ -25,7 +25,7 @@ fn written(n: u64, mid: &str, at: u64) -> Entry {
 }
 
 /// [`super::head_bytes_tests::head`] with sixty messages written every
-/// eight hours from `DAY0`, and a `mode3.db` that keeps the times of the
+/// eight hours from `DAY0`, and a `sessions.db` that keeps the times of the
 /// messages the index lets go.
 fn timed_head(dir: &std::path::Path) -> (Session, Settings) {
     let (mut session, settings) = super::head_bytes_tests::head(dir);

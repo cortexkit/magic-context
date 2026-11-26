@@ -1,4 +1,4 @@
-//! The offline CLI must work with only mode3.db and reject legacy openers.
+//! The offline CLI must work with only sessions.db and reject legacy openers.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::io::{BufRead, BufReader};

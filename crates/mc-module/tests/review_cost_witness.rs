@@ -1,6 +1,6 @@
 //! Regression tests for properties ck-mc kept before its per-notice cost
 //! work moved message search indexing to a background thread, stored large
-//! history text by content digest in the version-4 `mode3.db`, and made
+//! history text by content digest in the version-4 `sessions.db`, and made
 //! writable opens of `context.db` switch it to WAL.
 //!
 //! Each test states one such property. They drive the public `Module` API

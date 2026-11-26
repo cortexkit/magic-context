@@ -3,7 +3,7 @@ name = "mc-mock-runner"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Reference llm-runner for the mode-3 contract draft, with mock model providers, used to test a compaction provider end to end."
+description = "Reference llm-runner with mock model providers, used to test a compaction provider end to end."
 
 [dependencies]
 cortexkit-role-compaction = { workspace = true }

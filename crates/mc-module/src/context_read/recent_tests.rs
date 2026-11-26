@@ -223,7 +223,7 @@ pub(super) struct Fixture {
 
 impl Fixture {
     /// A module over a fresh context.db, where `session` has three
-    /// summaries (messages 1-2, 3-4 and 5-6), and a fresh mode3.db, where
+    /// summaries (messages 1-2, 3-4 and 5-6), and a fresh sessions.db, where
     /// each of `saved` has saved state.
     pub fn new(session: &str, saved: &[SessionRef]) -> Self {
         let dir = tempfile::tempdir().unwrap();

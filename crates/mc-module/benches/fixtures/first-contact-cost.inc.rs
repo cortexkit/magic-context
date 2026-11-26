@@ -213,7 +213,7 @@ fn contact(size: usize) -> Value {
     let load = String::from_utf8(load.stdout).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let context_path = dir.path().join("context.db");
-    let store_path = dir.path().join("mode3.db");
+    let store_path = dir.path().join("sessions.db");
     let archive = size - 49;
     let cut = archive - 1;
     let key = SessionRef::new("thalamus-opencode2", "opencode2", "first-contact");
@@ -323,7 +323,7 @@ fn contact(size: usize) -> Value {
         .env("XDG_CONFIG_HOME", dir.path())
         .env("XDG_DATA_HOME", dir.path())
         .env("MAGIC_CONTEXT_DB", &cli_context)
-        .env("MAGIC_CONTEXT_MODE3_STORE", dir.path().join("mode3-cli.db"))
+        .env("MAGIC_CONTEXT_SESSIONS_STORE", dir.path().join("sessions-cli.db"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -466,7 +466,7 @@ fn contact(size: usize) -> Value {
         if io_trace {
             eprintln!("FIRST_CONTACT_SETUP_END");
         }
-        let mode3_wal = file_bytes(&dir.path().join("mode3.db-wal"));
+        let sessions_wal = file_bytes(&dir.path().join("sessions.db-wal"));
         let db_after = file_bytes(&store_path);
         let (reads,reconciliation) = {
             let mut state = client.0.lock().unwrap();
@@ -494,7 +494,7 @@ fn contact(size: usize) -> Value {
             "move_in":move_sample,"move_in_cli":cli_sample,"write_transactions":locks.holds_us.len(),"lock_holds_us":locks.holds_us,
             "view_build":build_sample,"view_check":check_sample,"view_bytes":view_bytes,"view_edits":moved.view.edits.len(),
             "setup":setup_sample,"setup_reads":reads,"reconciliation_boundary_us":reconciliation,
-            "mode3_setup_wal_bytes":mode3_wal,"mode3_main_growth_bytes":db_after.saturating_sub(db_before),
+            "sessions_setup_wal_bytes":sessions_wal,"sessions_main_growth_bytes":db_after.saturating_sub(db_before),
             "notice":notice_sample})
     })
 }

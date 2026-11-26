@@ -1,7 +1,7 @@
 //! The person's commands on memories, observations, the dreamer and notes,
 //! through the module's real command entry point (`commands.preview` and
 //! `commands.run` from Occipital), on a `context.db` at the module's schema
-//! and a `mode3.db` that keeps their answers.
+//! and a `sessions.db` that keeps their answers.
 
 use super::*;
 use crate::context_db::ContextDb;
@@ -33,7 +33,7 @@ fn caller() -> Value {
     json!({"app": "desktop", "admission": "operator_app"})
 }
 
-/// A module with `context.db` and `mode3.db` in a folder of its own, and one
+/// A module with `context.db` and `sessions.db` in a folder of its own, and one
 /// session of [`PROJECT`] set up, so the app reads (and these commands) know
 /// the project.
 struct Owner {

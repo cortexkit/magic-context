@@ -15,7 +15,7 @@ export interface ResolveTransformModeArgs {
 }
 
 export const TRANSFORM_MODE_DEPRECATION_WARNING =
-    "transform_mode is no longer used; Magic Context runs its TypeScript transform. Mode 3 sessions are served by the CortexKit bridge.";
+    "transform_mode is no longer used; Magic Context runs its TypeScript transform. Sessions that moved to CortexKit are managed there.";
 
 /** Config keys that used to select the Rust transform. They are still accepted, but ignored. */
 export const DEPRECATED_TRANSFORM_KEYS = ["transform_mode", "rust_pipeline"] as const;

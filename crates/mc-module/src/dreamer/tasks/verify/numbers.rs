@@ -19,7 +19,7 @@
 //!   next to a word that names a release (`since 0.49`, `the 0.50 line`,
 //!   `0.49's`, `Opus 5.5`);
 //! - references: after `#` or `§`, after a word that numbers things
-//!   (`Mode 3`, `row 12`, `step 2`), and line numbers (`task.rs:12`);
+//!   (`phase 3`, `row 12`, `step 2`), and line numbers (`task.rs:12`);
 //! - hexadecimal hashes and ids (`7fca5ac695`);
 //! - digits inside a code name or a path (`u64`, `MC-D12`, `m[0]`,
 //!   `crates/v2/x.rs`), and digits joined to letters that are not a unit
@@ -59,7 +59,7 @@ pub(crate) struct Quantity {
 }
 
 /// Words after which a number names an item rather than counting anything:
-/// `Mode 3`, `row 12`, `step 2`.
+/// `phase 3`, `row 12`, `step 2`.
 const LABELS: &[&str] = &[
     "attempt",
     "batch",

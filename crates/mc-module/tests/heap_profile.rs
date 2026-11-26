@@ -2,7 +2,7 @@
 //! site, measured on a copy of real stores.
 //!
 //! Opt-in, local and slow: it reads a read-only copy of `context.db` and
-//! `mode3.db`, copies the chosen sessions' summaries, project memories and
+//! `sessions.db`, copies the chosen sessions' summaries, project memories and
 //! message-index marks into a fresh store pair under the temp directory,
 //! seeds each session's saved state the way a session that was already
 //! running has it (a first view that cuts through its newest summary), and
@@ -14,7 +14,7 @@
 //! the runner side holds almost nothing and the heap is ck-mc's own.
 //!
 //! ```text
-//! MC_HEAP_CORPUS=<dir with context.db and mode3.db> \
+//! MC_HEAP_CORPUS=<dir with context.db and sessions.db> \
 //! MC_HEAP_OUT=<dir for dhat-heap.json and the report> \
 //! nice -n 19 cargo test -p mc-module --release --features heap-profile \
 //!     --test heap_profile -- --ignored --nocapture
@@ -22,7 +22,7 @@
 //!
 //! `MC_HEAP_SESSIONS` names a file with one `runner harness session` per
 //! line; without it the profile sets up the `MC_HEAP_TOP` heads (default 24)
-//! with the most summaries among the sessions `mode3.db` holds. Each
+//! with the most summaries among the sessions `sessions.db` holds. Each
 //! transcript runs past its newest summary as far as the session's
 //! app-replica header last counted; `MC_HEAP_TAIL` sets one length for all.
 //!
@@ -330,13 +330,13 @@ fn copy_rows(
 }
 
 /// The sessions to set up: those `MC_HEAP_SESSIONS` lists, or the
-/// `MC_HEAP_TOP` heads with the most summaries among those `mode3.db`
+/// `MC_HEAP_TOP` heads with the most summaries among those `sessions.db`
 /// keeps state for. Each with the preset, model and window its saved state
 /// names, and as many entries after its newest summary as its app-replica
 /// header last counted (or `tail`, when given).
 fn choose_heads(corpus: &Path, tail: Option<u64>, clock: u64) -> Vec<Head0> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let mode3 = Connection::open_with_flags(
+    let sessions = Connection::open_with_flags(
         format!(
             "file:{}?mode=ro&immutable=1",
             corpus.join("sessions.db").display()
@@ -352,7 +352,7 @@ fn choose_heads(corpus: &Path, tail: Option<u64>, clock: u64) -> Vec<Head0> {
         flags,
     )
     .unwrap();
-    let mut states: Vec<(SessionRef, Value)> = mode3
+    let mut states: Vec<(SessionRef, Value)> = sessions
         .prepare("SELECT runner, harness, session, state FROM sessions")
         .unwrap()
         .query_map([], |row| {
@@ -446,7 +446,7 @@ fn choose_heads(corpus: &Path, tail: Option<u64>, clock: u64) -> Vec<Head0> {
             for (ordinal, id) in &ids {
                 by_id.entry(id.clone()).or_insert(*ordinal);
             }
-            let newest = mode3
+            let newest = sessions
                 .query_row(
                     "SELECT json_extract(header, '$.newest') FROM app_read_headers WHERE runner = ?1 AND harness = ?2 AND session = ?3",
                     params![key.runner, key.harness, key.session],

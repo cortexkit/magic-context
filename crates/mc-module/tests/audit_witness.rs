@@ -1,4 +1,4 @@
-//! Regression tests for four defects found before mode 3 went live:
+//! Regression tests for four defects found before the module went live:
 //! - the age sweep dropped outputs in the protected tail;
 //! - on a `ctx_keep` pass, other lanes dropped parts the model chose to keep;
 //! - a history head kept as shown, after a read it needs failed, still

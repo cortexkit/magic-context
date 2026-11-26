@@ -1,6 +1,6 @@
 //! The receiver side of a move on real modules: `diverged`, `import`,
 //! `activate` and the receiver's `abort`. Two modules, each with its own
-//! `context.db`, `mode3.db` and journal in a temporary folder, stand for
+//! `context.db`, `sessions.db` and journal in a temporary folder, stand for
 //! two machines. They share stand-ins for Entorhinal and Engram's session
 //! door, so a session prepared and exported on one is read and installed
 //! on the other.
@@ -948,7 +948,7 @@ async fn activate_rechecks_the_staged_bytes_and_the_rows_here() {
     assert_eq!(b.fingerprint("s1"), a.fingerprint("s1"));
 }
 
-/// Hold `mode3.db`'s write lock, as another writer would, so the store's
+/// Hold `sessions.db`'s write lock, as another writer would, so the store's
 /// zero busy timeout refuses its next write.
 fn hold_store(machine: &Machine) -> Connection {
     let conn = Connection::open(machine.dir.path().join("sessions.db")).unwrap();
@@ -956,7 +956,7 @@ fn hold_store(machine: &Machine) -> Connection {
     conn
 }
 
-/// An install that fails after it was recorded, here at the `mode3.db`
+/// An install that fails after it was recorded, here at the `sessions.db`
 /// clear, leaves the session being installed and gated, with no receipt;
 /// the abort is refused. A repeat of `activate` finishes it, and a repeat
 /// after that returns the receipt.
@@ -1101,7 +1101,7 @@ async fn a_restart_finishes_an_install_the_last_run_started() {
     assert_eq!(b.gate("s1"), Ok(()));
     assert_eq!(facts(&b.conn(), "pub-s1"), [waiting(0), applied(1)]);
     assert_eq!(b.op("activate", CUT, &["s1"]).await.unwrap(), json!({}));
-    // A later turn's mode3.db rows survive the next start.
+    // A later turn's sessions.db rows survive the next start.
     b.module
         .inner
         .store

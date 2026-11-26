@@ -1,6 +1,6 @@
 //! A view ck-mc handed to the runner and saved as unconfirmed is offered
 //! again after a restart. The runner checks the offered view's checksum, so
-//! what ck-mc loads from `mode3.db` must be the view exactly as it was
+//! what ck-mc loads from `sessions.db` must be the view exactly as it was
 //! sealed, including the policy members (`built_through`, `new_signed`) a
 //! runner that declares `view_anchor` receives.
 

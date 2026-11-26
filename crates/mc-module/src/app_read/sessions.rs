@@ -3,7 +3,7 @@
 //!
 //! A project is known once a session of it has been set up with the
 //! module. A session's project is its memory context's `project_id`, kept in
-//! `mode3.db` for every session that has one, and the route's project for a
+//! `sessions.db` for every session that has one, and the route's project for a
 //! session set up in this process. The context table has no index by
 //! project, so it is read once when the replica starts (one row per
 //! session, like the session list itself), and Setup keeps it current.

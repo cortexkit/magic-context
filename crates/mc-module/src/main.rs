@@ -373,7 +373,7 @@ fn tag_floor() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err(MISSING_STORE.into());
     }
     // ContextDb startup writes to the shared store. Move preparation needs
-    // this read without module startup or opening mode3.db.
+    // this read without module startup or opening sessions.db.
     let conn =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;

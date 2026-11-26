@@ -11,7 +11,7 @@
 //! another shape. Such a row is kept as the JSON it was read as
 //! ([`Row::Json`]) and renders as that JSON.
 //!
-//! In `mode3.db` a row is saved in a compact binary form ([`Row::encode`]):
+//! In `sessions.db` a row is saved in a compact binary form ([`Row::encode`]):
 //! no field names, integers as variable-length varints (LEB128: seven bits
 //! a byte, low bits first, the top bit set on every byte but the last),
 //! strings length-prefixed.
@@ -460,7 +460,7 @@ impl Row {
         }
     }
 
-    /// The row's compact binary form for `mode3.db`.
+    /// The row's compact binary form for `sessions.db`.
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {

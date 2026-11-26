@@ -436,7 +436,7 @@ enum Stop {
 
 /// A two-ref `activate` stopped after both installs are done and the first
 /// ref's step 6 has run, before the second's: once by a crash, once by a
-/// busy `mode3.db`. Until both refs are finished nothing answers success,
+/// busy `sessions.db`. Until both refs are finished nothing answers success,
 /// and the restart or the next repeat finishes them. Meanwhile the second
 /// ref's facts stay reserved: a second turn of another session of the
 /// project takes the first ref's fact and none of the second's, and the
@@ -547,7 +547,7 @@ async fn an_activate_stopped_between_its_two_refs_finishes_both_before_it_succee
 }
 
 /// After a move is activated, an ordinary turn of the session writes its
-/// state in `mode3.db` and changes its rows. A restart keeps both: the cut
+/// state in `sessions.db` and changes its rows. A restart keeps both: the cut
 /// is finished, so no install step runs again.
 #[tokio::test]
 async fn a_restart_after_an_activated_move_keeps_what_the_next_turn_wrote() {

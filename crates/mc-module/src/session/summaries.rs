@@ -62,7 +62,7 @@ impl Session {
         }
     }
 
-    /// `mode3.db` and `context.db` are backed up separately, and a restore
+    /// `sessions.db` and `context.db` are backed up separately, and a restore
     /// can pair this store with an older `context.db` (a night whose
     /// `context.db` capture failed keeps the previous one). Restored state
     /// may then cut, or show in `m[0]`, summaries `context.db` no longer

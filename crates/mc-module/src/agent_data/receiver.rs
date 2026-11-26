@@ -34,7 +34,7 @@
 //!    ([`crate::move_batches`]): short transactions that each advance a
 //!    saved cursor.
 //! 6. Per ref, once every install is done: drop what this process keeps for
-//!    the session, clear what `mode3.db` holds for it, and make the facts
+//!    the session, clear what `sessions.db` holds for it, and make the facts
 //!    the cut holds reserved in its own publications `retryable`.
 //! 7. Record every ref activated with its new baseline, and the receipt, in
 //!    one journal write.
@@ -681,7 +681,7 @@ pub(crate) async fn activate<H: Host>(
     for one in &record.imported {
         install_one(&db, cut, record, one).await?;
     }
-    // 6. Per ref: what this process and mode3.db keep for the session, and
+    // 6. Per ref: what this process and sessions.db keep for the session, and
     // the facts the cut holds reserved in its own publications.
     for one in &record.imported {
         release_one(host, &db, cut, one).await?;
@@ -879,7 +879,7 @@ async fn install_one(db: &Path, cut: &str, record: &Cut, one: &Prepared) -> Resu
 }
 
 /// Step 6 for one ref. Each part is safe to repeat: the session is still
-/// gated, so nothing has written its `mode3.db` rows since, and the facts
+/// gated, so nothing has written its `sessions.db` rows since, and the facts
 /// a second turn of another session took after an earlier pass are under
 /// that turn's key, not the cut's.
 async fn release_one<H: Host>(
@@ -889,7 +889,7 @@ async fn release_one<H: Host>(
     one: &Prepared,
 ) -> Result<(), ErrorBody> {
     let session = key(one);
-    // First, so no worker of the session writes mode3.db after it is
+    // First, so no worker of the session writes sessions.db after it is
     // cleared. Context reads prefer a cached project to the installed
     // project link, so a stale one would serve the old project.
     host.reset(&session, cut);

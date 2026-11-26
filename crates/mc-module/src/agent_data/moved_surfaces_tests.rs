@@ -12,7 +12,7 @@ fn occipital() -> subc_protocol::Principal {
 }
 
 impl Machine {
-    /// What `mode3.db` keeps of a primary session (preset `head`, one a
+    /// What `sessions.db` keeps of a primary session (preset `head`, one a
     /// person works in) of [`PROJECT`] that this machine served: its
     /// project and its preset. A restart reads the project's
     /// sessions from it.

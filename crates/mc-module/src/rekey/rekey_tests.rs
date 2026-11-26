@@ -327,7 +327,7 @@ fn rekey_preserves_every_table_and_restores_session_state() {
         assert!(session.has_memory_context());
         assert_eq!(session.durable(), before);
         // Confirmed views and the highest tag belong to the runner and shared
-        // context, not to a second copy inside mode3.db. The pending view and
+        // context, not to a second copy inside sessions.db. The pending view and
         // its checksum must still restore verbatim for the runner to settle.
         assert_eq!(
             serde_json::to_value(&session.durable().unconfirmed).unwrap()[0]["view"],
@@ -596,7 +596,7 @@ fn rekey_refuses_agent_data_journal_entries_before_rewriting_any_session() {
 }
 
 #[test]
-fn rekey_refuses_mode3_move_records_before_rewriting_any_session() {
+fn rekey_refuses_old_move_records_before_rewriting_any_session() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("sessions.db");
     basic_fixture(&path);
@@ -608,7 +608,7 @@ fn rekey_refuses_mode3_move_records_before_rewriting_any_session() {
     let before = dump(&path);
     let context_before = dump(&context_path);
     let error = rekey_runner(&path, &request()).unwrap_err();
-    assert!(error.contains("mode3_move:pi:head-two"), "{error}");
+    assert!(error.contains("pi/head-two has a recorded move"), "{error}");
     assert!(error.contains("context.db"), "{error}");
     assert_eq!(dump(&path), before);
     assert_eq!(dump(&context_path), context_before);

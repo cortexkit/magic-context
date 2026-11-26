@@ -1,4 +1,4 @@
-//! mode3.db version 7: each view decision in its own `view_decisions` row,
+//! sessions.db version 7: each view decision in its own `view_decisions` row,
 //! moved there from version 6's per-session lists, and deleted once it has
 //! been kept for the retention period.
 

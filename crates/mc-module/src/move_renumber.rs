@@ -56,8 +56,8 @@
 //! The list then holds every journal entry of the branch with its kind, and
 //! each skipped or folded entry belongs to the message the plugin put it in.
 //!
-//! The rewrite and a record of it (`mode3_renumber:<harness>:<session>`,
-//! carrying the numbering's checksum) commit in one transaction. A move
+//! The rewrite and its marker, which carries the numbering's checksum,
+//! commit in one transaction. A move
 //! retried after a later step failed finds the record and doesn't shift the
 //! numbers twice; a retry with a different transcript refuses
 //! (`renumber_conflict`).
@@ -67,7 +67,7 @@
 //! and the standalone plugin's own
 //! runtime state (session metadata, replay and render caches, its runner
 //! admission log). The move's fence retires the plugin on the session, and
-//! nothing in mode 3 reads them.
+//! the module does not read them.
 
 use std::collections::{HashMap, HashSet};
 

@@ -228,7 +228,7 @@ pub(crate) fn session_tables(connection: &Connection) -> rusqlite::Result<Vec<St
     Ok(result)
 }
 
-/// The newest mode3.db schema this build can read and write. Version 6 adds
+/// The newest sessions.db schema this build can read and write. Version 6 adds
 /// `owner_command_answers`, the stored answers of commands a person runs on
 /// memories, notes and the dreamer rather than on one session. Version 7
 /// keeps each view decision in its own `view_decisions` row, replacing the
@@ -1535,7 +1535,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unversioned_mode3_store_is_adopted_without_losing_rows() {
+    fn an_unversioned_session_store_is_adopted_without_losing_rows() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("sessions.db");
         let connection = Connection::open(&path).unwrap();

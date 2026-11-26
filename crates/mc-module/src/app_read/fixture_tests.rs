@@ -131,9 +131,9 @@ impl Fixture {
             }
         }
         drop(store);
-        let mode3 = Connection::open(dir.path().join("sessions.db")).unwrap();
+        let store_conn = Connection::open(dir.path().join("sessions.db")).unwrap();
         for (key, _, project, _) in &sessions {
-            mode3
+            store_conn
                 .execute(
                     "INSERT INTO memory_contexts (runner, harness, session, context) VALUES (?1, ?2, ?3, ?4)",
                     params![key.runner, key.harness, key.session, json!({"project_id": project}).to_string()],

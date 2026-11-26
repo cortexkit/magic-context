@@ -29,7 +29,7 @@ fn main() -> Result<(), String> {
     let started = Instant::now();
     let result = move_in(
         db,
-        &Store::open(&dir.path().join("mode3.db"))?,
+        &Store::open(&dir.path().join("sessions.db"))?,
         &mc_module::pass::Settings::default().into(),
         &fixture::request(2_000),
     );

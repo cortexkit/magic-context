@@ -1,4 +1,4 @@
-//! Offline changes to the runner namespace of existing mode3.db sessions.
+//! Offline changes to the runner namespace of existing sessions.db sessions.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -179,7 +179,8 @@ fn refuse_context_dependencies(context_path: &Path, request: &Request) -> Result
                 .map_err(|error| format!("context_check_failed: {error}"))?;
             if exists {
                 return Err(format!(
-                    "move_record_exists: {key} in {}",
+                    "move_record_exists: {}/{session} has a recorded move in {}",
+                    request.harness,
                     context_path.display()
                 ));
             }

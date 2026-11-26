@@ -424,7 +424,7 @@ fn context_read_plugin_project_identity_is_not_a_configuration_directory() {
 }
 
 #[tokio::test]
-async fn context_read_held_mode3_head_uses_its_live_project_and_persisted_conditions() {
+async fn context_read_held_runner_head_uses_its_live_project_and_persisted_conditions() {
     use crate::store::{Durable, Store};
     use crate::transport::SubcRunnerClient;
     use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
@@ -468,7 +468,7 @@ async fn context_read_held_mode3_head_uses_its_live_project_and_persisted_condit
         Some(db),
         Some(store),
     );
-    // Held in mode3.db but not set up since this module started: its project
+    // Held in sessions.db but not set up since this module started: its project
     // is unknown, so memories answer "try later" rather than an empty list.
     let mut p = params();
     p["session"] = json!({"harness":"opencode2","session":"held"});

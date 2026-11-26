@@ -293,7 +293,7 @@ impl Fixture {
         reads
     }
 
-    /// The state saved to `mode3.db`, without wall-clock times: those of
+    /// The state saved to `sessions.db`, without wall-clock times: those of
     /// `*_ms` members, and the time each part's tag was stamped.
     fn saved(&self) -> Value {
         let store = self.module.inner.store.as_ref().unwrap();

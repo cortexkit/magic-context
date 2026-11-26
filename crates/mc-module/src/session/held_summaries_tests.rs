@@ -293,7 +293,7 @@ fn a_restore_keeps_one_copy_of_the_head_text() {
 /// `context.db`, about as many as the largest head measured holds, with
 /// tiers of the measured average sizes, and to find the days of their
 /// headings: the first half of the messages' times from the times saved in
-/// `mode3.db`, the rest from the message search index. It prints the times;
+/// `sessions.db`, the rest from the message search index. It prints the times;
 /// run it with `--release --ignored --nocapture` for numbers worth
 /// comparing.
 #[test]
