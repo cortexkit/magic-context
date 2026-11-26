@@ -70,10 +70,10 @@ mod test_program {
             id: "files.not_private".parse().unwrap(),
         };
         let results = conformance::run(&mut adapter);
-        assert_eq!(results.len(), 8);
+        assert_eq!(results.len(), 10);
         for rule in results {
             println!("{}: {:?}", rule.name, rule.outcome);
-            if rule.name == "fix.module_running" {
+            if matches!(rule.name, "fix.module_running" | "fix.full_recheck") {
                 assert!(matches!(rule.outcome, Outcome::Skipped { .. }));
             } else {
                 assert_eq!(rule.outcome, Outcome::Passed, "{}", rule.name);

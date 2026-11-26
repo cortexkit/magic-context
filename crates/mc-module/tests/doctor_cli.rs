@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use cortexkit_doctor::{runner, CheckOutput};
+use cortexkit_doctor::{runner, CheckOutput, FixResult, Mode};
 use mc_module::{context_db::ContextDb, store::Store};
 use nix::fcntl::{Flock, FlockArg};
 use rusqlite::Connection;
@@ -45,7 +45,11 @@ impl Homes {
     }
 
     fn check(&self) -> CheckOutput {
-        runner::check(PROGRAM, &self.options()).unwrap()
+        self.check_mode(Mode::Quick)
+    }
+
+    fn check_mode(&self, mode: Mode) -> CheckOutput {
+        runner::check(PROGRAM, mode, &self.options()).unwrap()
     }
 
     fn command(&self) -> Command {
@@ -115,6 +119,10 @@ fn live_wal_and_shm_are_unchanged_and_an_exclusive_session_lock_does_not_block_c
     assert!(h.data.join("context.db-shm").is_file());
     let before = snapshot(h.root.path());
     let findings = h.check();
+    assert_eq!(
+        serde_json::to_value(&findings).unwrap(),
+        serde_json::to_value(h.check_mode(Mode::Full)).unwrap()
+    );
     assert!(findings
         .findings()
         .iter()
@@ -233,4 +241,127 @@ fn sparse_twelve_gigabyte_store_with_thirty_thousand_files_is_quick() {
         "doctor check took {elapsed:?}"
     );
     assert!(findings.findings().is_empty(), "{findings:?}");
+}
+
+#[test]
+fn an_immutable_check_reads_the_ledger_without_creating_or_changing_files() {
+    let h = Homes::new();
+    drop(ContextDb::create_for_tests(&h.context()).unwrap());
+    let conn = Connection::open(h.context()).unwrap();
+    conn.execute(
+        "INSERT INTO schema_migrations(version, description, applied_at) VALUES (?1, 'future', 0)",
+        [mc_module::context_db::SCHEMA_VERSION + 1],
+    )
+    .unwrap();
+    drop(conn);
+    let before = snapshot(h.root.path());
+    let findings = h.check();
+    assert_eq!(
+        snapshot(h.root.path()),
+        before,
+        "an immutable check changed the scratch home"
+    );
+    assert!(
+        findings
+            .findings()
+            .iter()
+            .any(|f| f.id().as_str() == "store.context.too_new"),
+        "the test must exercise the SQLite query, not merely the header read"
+    );
+}
+
+#[test]
+fn doctor_requires_absolute_xdg_data_home_and_never_falls_back_to_home() {
+    let h = Homes::new();
+    let home = h.root.path().join("home");
+    let fallback = home.join(".local/share/cortexkit/magic-context");
+    fs::create_dir_all(&fallback).unwrap();
+    fs::write(fallback.join("context.db"), b"outside XDG").unwrap();
+    let before = snapshot(h.root.path());
+    for data_home in [None, Some(""), Some("relative-data")] {
+        let mut command = h.command();
+        command.env("HOME", &home).env_remove("XDG_DATA_HOME");
+        if let Some(value) = data_home {
+            command.env("XDG_DATA_HOME", value);
+        }
+        let output = command
+            .args(["doctor", "check", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{data_home:?}");
+        assert!(output.stdout.is_empty(), "{data_home:?}");
+    }
+    let findings = h.check();
+    assert!(findings.findings().is_empty());
+    assert_eq!(snapshot(h.root.path()), before);
+}
+
+#[test]
+fn a_live_session_wal_warns_that_the_header_version_may_be_stale() {
+    let h = Homes::new();
+    let path = h.data.join("sessions.db");
+    drop(Store::open(&path).unwrap());
+    let writer = Connection::open(&path).unwrap();
+    let new_version = mc_module::store::SCHEMA_VERSION + 1;
+    writer
+        .pragma_update(None, "user_version", new_version)
+        .unwrap();
+    let findings = h.check();
+    let items = findings.findings();
+    assert!(
+        !items
+            .iter()
+            .any(|f| f.id().as_str() == "store.sessions.too_new"),
+        "only the checkpointed version is visible in the main-file header"
+    );
+    let in_use = items
+        .iter()
+        .find(|f| f.id().as_str() == "store.in_use")
+        .unwrap();
+    assert!(in_use.summary().contains("may be older"));
+    let evidence = serde_json::to_value(in_use.evidence()).unwrap();
+    assert!(evidence
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["name"] == "sessions_version_may_be_stale" && e["value"] == true));
+    drop(writer);
+    assert!(h
+        .check()
+        .findings()
+        .iter()
+        .any(|f| f.id().as_str() == "store.sessions.too_new"));
+}
+
+#[test]
+fn full_mode_offers_the_same_permissions_fix_and_accepts_the_full_fix_flag() {
+    let h = Homes::new();
+    let log_dir = h.data.join("logs");
+    fs::DirBuilder::new().mode(0o700).create(&log_dir).unwrap();
+    let log = log_dir.join("readable.log");
+    File::create(&log).unwrap();
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+    let before = snapshot(h.root.path());
+    let full = h.check_mode(Mode::Full);
+    assert_eq!(
+        serde_json::to_value(&full).unwrap(),
+        serde_json::to_value(h.check()).unwrap()
+    );
+    let finding = &full.findings()[0];
+    let plan = finding.fix().plan().unwrap();
+    let stale = format!("sha256:{}", "0".repeat(64));
+    assert_ne!(stale, plan.digest());
+    // A stale digest is refused before the helper asks the person to confirm.
+    let outcome = runner::fix(
+        PROGRAM,
+        finding.id(),
+        &stale,
+        plan.timeout_ms(),
+        Mode::Full,
+        &h.options(),
+    )
+    .unwrap();
+    assert_eq!(outcome.result(), FixResult::Refused);
+    assert_eq!(outcome.code(), Some("plan_changed"));
+    assert_eq!(snapshot(h.root.path()), before);
 }

@@ -4,7 +4,6 @@ use std::sync::{Mutex, PoisonError};
 
 use tokio::time::Instant;
 
-use super::OUTBOX_BACKLOG;
 use crate::context_db::ContextDb;
 
 /// The replica loop samples the store at its existing wakeups. Only one
@@ -75,6 +74,7 @@ impl Health {
 }
 
 fn read_store(conn: &mut rusqlite::Connection) -> rusqlite::Result<Store> {
+    const OUTBOX_BACKLOG: &str = "('pending', 'sending', 'too_large', 'unaddressable')";
     // Older versions recorded these two kinds of harmless skips as refusals.
     // Do not count them as refusals while they age out of the table.
     let mut store = conn.query_row(
@@ -96,20 +96,7 @@ fn read_store(conn: &mut rusqlite::Connection) -> rusqlite::Result<Store> {
             },
         }),
     )?;
-    // Unplaced legacy rows kept a project path instead of a project id.
-    // Use the publisher's address check, and leave already-frozen changes
-    // alone: they have an address fixed independently of the current row.
-    let mut stmt = conn.prepare(&format!(
-        "SELECT m.owner_id FROM replica_outbox o JOIN memories m ON m.id = o.local_id
-          WHERE o.state IN {OUTBOX_BACKLOG} AND o.kind = 'memory' AND o.frozen IS NULL AND m.level = 'project'"
-    ))?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let owner: String = row.get(0)?;
-        if super::wire::subject("memory", Some("project"), &owner).is_err() {
-            store.local_only_count += 1;
-        }
-    }
+    store.local_only_count = super::local_only_outbox_count(conn, OUTBOX_BACKLOG)?;
     store.unsent_count -= store.local_only_count;
     Ok(store)
 }
