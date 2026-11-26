@@ -87,8 +87,9 @@ impl Session {
             Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
         }
         let over_limit = ride.has(RideCause::OverLimit).then(|| {
-            // A stated count of zero says nothing about the request, so it
-            // is planned as no count on both paths.
+            // A stated count of zero says nothing about the request, so
+            // both the measured and the inferred emergency plan treat it as
+            // no count.
             let count = match ride.request_tokens.filter(|&count| count > 0) {
                 Some(count) => lanes::RideCount::Stated(count),
                 None => {

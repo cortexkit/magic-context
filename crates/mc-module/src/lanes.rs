@@ -1776,8 +1776,10 @@ pub struct EmergencyPlan {
     /// fixed part is above the ceiling), `target` (too little above the
     /// target to be worth a drop), `minimum` (what the candidates free is
     /// below the minimum), or `selected`: the selection ran to the end. It
-    /// can still be empty when no candidate was left, on a pass another
-    /// lane already rewrites or a refused request planned to the window.
+    /// can be empty when no candidate was left. The minimum doesn't apply
+    /// when another lane's edits already rewrite the prompt on this rebuild,
+    /// or when a refused request is planned against the usable window, so
+    /// those plans can end here with nothing selected.
     pub stop: &'static str,
 }
 
