@@ -1,6 +1,7 @@
 import {
     type Dirent,
     existsSync,
+    lstatSync,
     readdirSync,
     readFileSync,
     rmdirSync,
@@ -206,6 +207,13 @@ export const BOOT_SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 function ensureSecureStorageDir(dir: string): void {
     ensureStorageDirectorySync(dir);
+    if (
+        process.platform !== "win32" &&
+        shouldEnforcePrivateStoragePermissions() &&
+        !lstatSync(resolve(dir)).isDirectory()
+    ) {
+        throw new Error("Private storage directory is not a real directory");
+    }
 }
 
 function tightenStorageTree(dbPath: string): void {

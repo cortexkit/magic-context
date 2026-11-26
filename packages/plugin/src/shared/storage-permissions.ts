@@ -5,17 +5,18 @@
  * applying POSIX modes. The default preserves the historical owner-only policy.
  */
 import { randomBytes } from "node:crypto";
-import type { WriteStream } from "node:fs";
+import type { Stats, WriteStream } from "node:fs";
 import {
     chmodSync,
     closeSync,
+    constants,
     createWriteStream,
+    fstatSync,
     fsyncSync,
     lstatSync,
     mkdirSync,
     openSync,
     readdirSync,
-    readFileSync,
     readlinkSync,
     readSync,
     renameSync,
@@ -28,10 +29,12 @@ import {
 import type { FileHandle } from "node:fs/promises";
 import { open as openAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { isPidAlive } from "./rpc-utils";
 
 let enforcePrivateStoragePermissions = true;
 const STORAGE_PERMISSIONS_POLICY_VERSION = 1;
 const STORAGE_PERMISSIONS_MARKER = `.storage-permissions-v${STORAGE_PERMISSIONS_POLICY_VERSION}`;
+const STORAGE_PERMISSIONS_MARKER_BYTES = Buffer.from(`${STORAGE_PERMISSIONS_POLICY_VERSION}\n`);
 const LEGACY_FENCE_TEMP_MIN_AGE_MS = 10 * 60_000;
 
 /**
@@ -255,41 +258,77 @@ export async function createStorageFileHandleAsync(
     return openAsync(filePath, flags, privateMode ? 0o600 : undefined);
 }
 
+function readStoragePermissionCertificate(marker: string): Stats | undefined {
+    const fd = openSync(marker, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+        const stat = fstatSync(fd);
+        if (
+            !stat.isFile() ||
+            (stat.mode & 0o7777) !== 0o600 ||
+            stat.uid !== process.getuid?.() ||
+            stat.size !== STORAGE_PERMISSIONS_MARKER_BYTES.length
+        ) {
+            return undefined;
+        }
+        // Read one more byte in case the file grew after fstat.
+        const buffer = Buffer.alloc(STORAGE_PERMISSIONS_MARKER_BYTES.length + 1);
+        const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+        if (
+            bytesRead === STORAGE_PERMISSIONS_MARKER_BYTES.length &&
+            buffer.subarray(0, bytesRead).equals(STORAGE_PERMISSIONS_MARKER_BYTES)
+        ) {
+            return stat;
+        }
+    } finally {
+        closeSync(fd);
+    }
+}
+
 /** Tighten existing entries during storage startup; symlinks are never followed. */
 export function tightenStorageTreeSync(
-    root: string,
-    dbPath = join(root, "context.db"),
+    directory: string,
+    dbPath = join(directory, "context.db"),
 ): { tightened: number; failures: number } {
     if (process.platform === "win32") {
         return { tightened: 0, failures: 0 };
     }
-    storagePermissionRoots.add(resolve(root));
+    const root = resolve(directory);
     const marker = join(root, STORAGE_PERMISSIONS_MARKER);
     let tightened = 0;
     let failures = 0;
     let keptLegacyTemp = false;
-    const removeMarker = (): void => {
+    const removeMarker = (): boolean => {
         try {
             rmSync(marker, { force: true });
+            return true;
         } catch {
             failures++;
+            return false;
         }
     };
     if (!shouldEnforcePrivateStoragePermissions()) {
+        storagePermissionRoots.add(root);
         removeMarker();
         return { tightened, failures };
     }
-    let certified = false;
     try {
-        const stat = lstatSync(marker);
-        certified =
-            stat.isFile() &&
-            (stat.mode & 0o7777) === 0o600 &&
-            readFileSync(marker, "utf8") === `${STORAGE_PERMISSIONS_POLICY_VERSION}\n`;
-        if (!certified) removeMarker();
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures++;
+        if (!lstatSync(root).isDirectory()) return { tightened, failures: 1 };
+    } catch {
+        return { tightened, failures: 1 };
     }
+    storagePermissionRoots.add(root);
+    let certificate: Stats | undefined;
+    try {
+        certificate = readStoragePermissionCertificate(marker);
+        if (!certificate && !removeMarker()) return { tightened, failures };
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") {
+            if (code !== "ELOOP") failures++;
+            if (!removeMarker()) return { tightened, failures };
+        }
+    }
+    let repairAllowed: boolean | undefined;
     const fenceDirectory = join(root, "lkg-recovery-fences");
     const visit = (entryPath: string, recursive = true, optional = false): void => {
         let stat: ReturnType<typeof lstatSync>;
@@ -299,21 +338,31 @@ export function tightenStorageTreeSync(
             if (!optional || (error as NodeJS.ErrnoException).code !== "ENOENT") failures++;
             return;
         }
+        if (entryPath === root && !stat.isDirectory()) {
+            failures++;
+            return;
+        }
         if (stat.isSymbolicLink()) return;
-        if (!certified && dirname(entryPath) === fenceDirectory) {
+        if (!certificate && dirname(entryPath) === fenceDirectory) {
             const name = basename(entryPath);
-            // A legacy publisher can use a recent temp file.
             const legacyTemp = stat.isFile() && /^.+\.json\..+\.tmp$/.test(name);
-            if (legacyTemp && Date.now() - stat.mtimeMs <= LEGACY_FENCE_TEMP_MIN_AGE_MS) {
-                // A certified start does not sweep, so do not certify until a later pass removes it.
-                keptLegacyTemp = true;
-            } else if (legacyTemp) {
-                try {
-                    rmSync(entryPath, { force: true });
-                } catch {
-                    failures++;
+            if (legacyTemp) {
+                const publisherPid = /^.+\.json\.([1-9]\d*)\.[a-f0-9]{24}\.tmp$/.exec(name)?.[1];
+                // The legacy writer puts its PID in the name. Age does not prove that it stopped.
+                if (
+                    Date.now() - stat.mtimeMs <= LEGACY_FENCE_TEMP_MIN_AGE_MS ||
+                    (publisherPid && isPidAlive(Number(publisherPid)) !== "dead")
+                ) {
+                    // The certificate can prevent a check of these files at the next start.
+                    keptLegacyTemp = true;
+                } else {
+                    try {
+                        rmSync(entryPath, { force: true });
+                    } catch {
+                        failures++;
+                    }
+                    return;
                 }
-                return;
             }
             if (stat.isDirectory() && name.endsWith(".json.locks")) {
                 try {
@@ -335,6 +384,11 @@ export function tightenStorageTreeSync(
         }
         const mode = stat.isDirectory() ? 0o700 : 0o600;
         if ((stat.mode & 0o077) !== 0 || (stat.mode & 0o777) !== mode) {
+            if (certificate) {
+                // A peer must not trust the certificate after this mode changes.
+                repairAllowed ??= removeMarker();
+                if (!repairAllowed) return;
+            }
             try {
                 chmodSync(entryPath, mode);
                 tightened++;
@@ -352,7 +406,7 @@ export function tightenStorageTreeSync(
         }
         for (const entry of entries) visit(join(entryPath, entry));
     };
-    if (certified) {
+    if (certificate) {
         visit(root, false);
         visit(dbPath, false, true);
         visit(`${dbPath}-wal`, false, true);
@@ -364,13 +418,31 @@ export function tightenStorageTreeSync(
         // A loose entry here shows that the tree changed after certification.
         // A process with a working directory in the tree keeps its access
         // through the root's mode, so this call tightens all entries, not the next start.
-        if (tightened > 0) visit(root);
-        if (tightened > 0 || failures > 0) removeMarker();
+        if (repairAllowed === true) visit(root);
+        else if (repairAllowed === undefined) {
+            if (failures > 0) removeMarker();
+            else {
+                // A peer can remove the certificate during the mode checks.
+                try {
+                    const current = lstatSync(marker);
+                    if (
+                        current.dev !== certificate.dev ||
+                        current.ino !== certificate.ino ||
+                        current.ctimeMs !== certificate.ctimeMs
+                    ) {
+                        visit(root);
+                    }
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code === "ENOENT") visit(root);
+                    else failures++;
+                }
+            }
+        }
     } else {
         visit(root);
         if (failures === 0 && !keptLegacyTemp) {
             try {
-                writeStorageFileSync(marker, `${STORAGE_PERMISSIONS_POLICY_VERSION}\n`, {
+                writeStorageFileSync(marker, STORAGE_PERMISSIONS_MARKER_BYTES, {
                     flag: "wx",
                 });
             } catch (error) {

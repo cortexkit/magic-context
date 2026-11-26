@@ -61,16 +61,16 @@ const pause = new Int32Array(new SharedArrayBuffer(4));
  * Unique names mean reclaiming a dead ticket cannot unlink a successor's lock.
  */
 export function withStorageFileMutex<T>(directory: string, work: () => T, timeoutMs = 1000): T {
-    ensurePrivateStorageDirectorySync(directory);
+    const deadline = performance.now() + timeoutMs;
     const name = `${process.pid}-${randomUUID()}.lock`;
     const ownPath = join(directory, name);
     const birth = processBirth(process.pid);
     const ticket: Ticket = { choosing: true, number: 0, birth, checksum: "" };
     const encodedTicket = () =>
         JSON.stringify({ ...ticket, checksum: ticketChecksum(name, ticket) });
-    const deadline = performance.now() + timeoutMs;
     for (;;) {
         try {
+            ensurePrivateStorageDirectorySync(directory);
             writeStorageFileSync(ownPath, encodedTicket(), { flag: "wx", forcePrivate: true });
             break;
         } catch (error) {
@@ -78,7 +78,6 @@ export function withStorageFileMutex<T>(directory: string, work: () => T, timeou
             // ticket creation. No ticket exists yet, so retry until the deadline.
             if ((error as NodeJS.ErrnoException).code !== "ENOENT" || performance.now() >= deadline)
                 throw error;
-            ensurePrivateStorageDirectorySync(directory);
         }
     }
     const peers = (): [string, Ticket | null][] => {
