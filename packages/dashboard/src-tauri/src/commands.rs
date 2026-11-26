@@ -919,11 +919,22 @@ fn opencode_probe_command(bin: &str, args: &[&str], cwd: &Path) -> tokio::proces
 
 /// Working directory for OpenCode probes: the Magic Context data folder,
 /// created owner-only when it is missing.
-fn opencode_probe_dir() -> PathBuf {
-    opencode_probe_dir_from(log_parser::resolve_storage_dir(), dirs::home_dir())
+fn opencode_probe_dir() -> Option<PathBuf> {
+    let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+    opencode_probe_dir_from(
+        log_parser::resolve_storage_dir(),
+        dirs::home_dir(),
+        &std::env::temp_dir(),
+        appdir.as_deref(),
+    )
 }
 
-fn opencode_probe_dir_from(storage: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+fn opencode_probe_dir_from(
+    storage: Option<PathBuf>,
+    home: Option<PathBuf>,
+    temp: &Path,
+    _appdir: Option<&Path>,
+) -> Option<PathBuf> {
     match storage {
         // A relative folder would resolve under the launch directory again.
         Some(dir) if !dir.is_absolute() => eprintln!(
@@ -931,7 +942,7 @@ fn opencode_probe_dir_from(storage: Option<PathBuf>, home: Option<PathBuf>) -> P
             dir.display()
         ),
         Some(dir) => match config::ensure_private_config_directory(&dir) {
-            Ok(()) => return dir,
+            Ok(()) => return Some(dir),
             Err(err) => eprintln!(
                 "WARN: cannot create {} for the OpenCode probe ({err}); using the home folder",
                 dir.display()
@@ -942,7 +953,7 @@ fn opencode_probe_dir_from(storage: Option<PathBuf>, home: Option<PathBuf>) -> P
         ),
     }
     // Never fall back to the process directory: that is the location #964 removes.
-    home.unwrap_or_else(std::env::temp_dir)
+    Some(home.unwrap_or_else(|| temp.to_path_buf()))
 }
 
 #[cfg(any(windows, test))]
@@ -977,7 +988,7 @@ async fn resolve_via_where(_tool: &str) -> Option<String> {
 }
 
 async fn opencode_cli_available() -> bool {
-    let cwd = opencode_probe_dir();
+    let cwd = opencode_probe_dir().unwrap_or_else(std::env::temp_dir);
     for bin in opencode_cli_candidates() {
         if run_bounded_command(opencode_probe_command(&bin, &["--version"], &cwd))
             .await
@@ -1140,8 +1151,21 @@ async fn probe_opencode_models(
 }
 
 async fn discover_opencode_models() -> Result<OpencodeCatalog, String> {
+    discover_opencode_models_with(opencode_probe_dir(), discover_opencode_models_in).await
+}
+
+async fn discover_opencode_models_with<F>(
+    cwd: Option<PathBuf>,
+    probe: impl FnOnce(PathBuf) -> F,
+) -> Result<OpencodeCatalog, String>
+where
+    F: std::future::Future<Output = Result<OpencodeCatalog, String>>,
+{
+    probe(cwd.unwrap_or_else(std::env::temp_dir)).await
+}
+
+async fn discover_opencode_models_in(cwd: PathBuf) -> Result<OpencodeCatalog, String> {
     let candidates = opencode_cli_candidates();
-    let cwd = opencode_probe_dir();
     let mut failure = None;
 
     // Use `opencode models` with provider loading, NOT `--pure`. `--pure` skips all
@@ -1903,11 +1927,12 @@ mod tests {
 
     #[test]
     fn opencode_probe_dir_creates_private_storage_dir() {
-        let mut env = crate::test_env::EnvGuard::new();
-        let root = tempfile::tempdir().unwrap();
-        let storage = root.path().join("missing").join("magic-context");
-        env.set("MAGIC_CONTEXT_STORAGE_DIR", &storage);
-        assert_eq!(super::opencode_probe_dir(), storage);
+        let (_root, temp, home) = probe_dir_fixture();
+        let storage = home.join(".local/share/cortexkit/magic-context");
+        assert_eq!(
+            super::opencode_probe_dir_from(Some(storage.clone()), Some(home), &temp, None),
+            Some(storage.clone())
+        );
         assert!(storage.is_dir());
         #[cfg(unix)]
         {
@@ -1919,32 +1944,126 @@ mod tests {
 
     #[test]
     fn opencode_probe_dir_falls_back_to_home_not_process_dir() {
-        let root = tempfile::tempdir().unwrap();
+        let (root, temp, home) = probe_dir_fixture();
         let blocker = root.path().join("file");
         std::fs::write(&blocker, b"not a directory").unwrap();
-        let home = root.path().join("home");
         assert_eq!(
-            super::opencode_probe_dir_from(Some(blocker.join("magic-context")), Some(home.clone())),
-            home
+            super::opencode_probe_dir_from(
+                Some(blocker.join("magic-context")),
+                Some(home.clone()),
+                &temp,
+                None,
+            ),
+            Some(home.clone())
         );
         assert_eq!(
-            super::opencode_probe_dir_from(None, Some(home.clone())),
-            home
+            super::opencode_probe_dir_from(None, Some(home.clone()), &temp, None),
+            Some(home)
         );
-        let fallback = super::opencode_probe_dir_from(None, None);
-        assert_eq!(fallback, std::env::temp_dir());
-        assert_ne!(Some(fallback), std::env::current_dir().ok());
+    }
+
+    fn probe_dir_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let real_root = root.path().canonicalize().unwrap();
+        let temp = real_root.join("temp");
+        let home = real_root.join("home");
+        std::fs::create_dir(&temp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        (root, temp, home)
+    }
+
+    #[test]
+    fn opencode_probe_dir_is_none_without_storage_or_home() {
+        let (_root, temp, _home) = probe_dir_fixture();
+        assert_eq!(
+            super::opencode_probe_dir_from(None, None, &temp, None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_discovery_skips_probe_without_safe_folder() {
+        let called = std::cell::Cell::new(false);
+        let result = super::discover_opencode_models_with(None, |_| {
+            called.set(true);
+            std::future::ready(Ok(super::OpencodeCatalog::default()))
+        })
+        .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Couldn't load models from OpenCode: no safe working folder. Set MAGIC_CONTEXT_STORAGE_DIR to a folder outside the system temp folder and the AppImage mount."
+        );
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn opencode_probe_dir_rejects_temp_storage_overrides() {
+        let (_root, temp, home) = probe_dir_fixture();
+        for storage in [temp.clone(), temp.join("magic-context")] {
+            assert_eq!(
+                super::opencode_probe_dir_from(Some(storage), Some(home.clone()), &temp, None),
+                Some(home.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_probe_dir_rejects_appdir_storage_override() {
+        let (root, temp, home) = probe_dir_fixture();
+        let appdir = root.path().canonicalize().unwrap().join("appimage");
+        std::fs::create_dir(&appdir).unwrap();
+        for storage in [appdir.clone(), appdir.join("magic-context")] {
+            assert_eq!(
+                super::opencode_probe_dir_from(
+                    Some(storage),
+                    Some(home.clone()),
+                    &temp,
+                    Some(&appdir)
+                ),
+                Some(home.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_probe_dir_rejects_unsafe_home_fallback() {
+        let (_root, temp, home) = probe_dir_fixture();
+        let appdir = home.join("appimage");
+        std::fs::create_dir(&appdir).unwrap();
+        for unsafe_home in [temp.clone(), appdir.clone()] {
+            assert_eq!(
+                super::opencode_probe_dir_from(None, Some(unsafe_home), &temp, Some(&appdir)),
+                None
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_probe_dir_checks_real_path_after_storage_creation() {
+        let (_root, temp, home) = probe_dir_fixture();
+        let link = home.join("link");
+        std::os::unix::fs::symlink(&temp, &link).unwrap();
+        assert_eq!(
+            super::opencode_probe_dir_from(
+                Some(link.join("magic-context")),
+                Some(home.clone()),
+                &temp,
+                None
+            ),
+            Some(home)
+        );
     }
 
     #[test]
     fn opencode_probe_dir_rejects_relative_storage_dir() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().join("home");
+        let (_root, temp, home) = probe_dir_fixture();
         let relative =
             std::path::PathBuf::from(format!("mc-probe-relative-{}", std::process::id()));
         assert_eq!(
-            super::opencode_probe_dir_from(Some(relative.clone()), Some(home.clone())),
-            home
+            super::opencode_probe_dir_from(Some(relative.clone()), Some(home.clone()), &temp, None),
+            Some(home)
         );
         assert!(!relative.exists(), "a relative folder must not be created");
     }
