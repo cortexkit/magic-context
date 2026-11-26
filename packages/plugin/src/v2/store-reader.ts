@@ -782,9 +782,11 @@ export class V2StoreReader {
         }
     }
 
-    /** Native user activity on root sessions; internal runs and holders must never become
-     * retrospective input. Activity is read from the source, not project-binding
-     * times or optional activity keys in Magic Context's store. */
+    /** When the user was last active in each top-level session. The nightly task
+     * that learns from recent user sessions picks them by this, so Magic Context's
+     * own background runs and their holder sessions are left out. The time comes
+     * from the host's messages, not from project-binding times or optional
+     * activity keys in Magic Context's store. */
     rootSessionActivity(sessionIDs: readonly string[]): Map<string, number> {
         const roots = new Map<string, number>();
         for (let offset = 0; offset < sessionIDs.length; offset += 500) {
