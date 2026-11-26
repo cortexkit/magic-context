@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import {
     appendCompartments,
     getCompartments,
@@ -31,6 +31,7 @@ import {
     freezeTemporalDecisions,
     getTemporalDecisions,
 } from "../../features/magic-context/temporal-decisions";
+import * as rustModeTransform from "../../hooks/magic-context/rust-mode-transform";
 import { getServedRecordForTest } from "../../hooks/magic-context/served-check";
 import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
 import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
@@ -44,13 +45,22 @@ import { HEAD_IDS } from "./payload";
 
 type Event = {
     type: string;
-    data: { sessionID: string; to?: string; revert?: { messageID: string } };
+    data: { sessionID: string; to?: string; revert?: { messageID: unknown } };
 };
 
 function eventBus() {
     const queue: Array<{ event: Event; handled: () => void }> = [];
     let wake: (() => void) | undefined;
+    let endRequested = false;
+    let subscriptions = 0;
     return {
+        get subscriptions() {
+            return subscriptions;
+        },
+        end() {
+            endRequested = true;
+            wake?.();
+        },
         emit(event: Event) {
             return new Promise<void>((handled) => {
                 queue.push({ event, handled });
@@ -58,7 +68,12 @@ function eventBus() {
             });
         },
         async *stream({ signal }: { signal: AbortSignal }) {
+            subscriptions++;
             while (!signal.aborted) {
+                if (endRequested) {
+                    endRequested = false;
+                    return;
+                }
                 const next = queue.shift();
                 if (next) {
                     yield next.event;
@@ -279,7 +294,7 @@ test("a committed OpenCode 2 revert removes only state owned by absent stored me
     }
 });
 
-function stageEvent(sessionID: string, messageID: string): Event {
+function stageEvent(sessionID: string, messageID: unknown): Event {
     return { type: "session.revert.staged", data: { sessionID, revert: { messageID } } };
 }
 
@@ -287,8 +302,8 @@ function commitEvent(sessionID: string, to: string): Event {
     return { type: "session.revert.committed", data: { sessionID, to } };
 }
 
-function seedReplay(f: Oc2ContextFixture, owners: readonly string[]) {
-    const { db, session } = f;
+function seedReplay(f: Oc2ContextFixture, owners: readonly string[], session = f.session) {
+    const { db } = f;
     for (const [index, id] of owners.entries()) {
         db.prepare(
             "INSERT INTO tags (session_id, message_id, type, status, byte_size, tag_number) VALUES (?, ?, 'message', 'dropped', 10, ?)",
@@ -306,24 +321,26 @@ function seedReplay(f: Oc2ContextFixture, owners: readonly string[]) {
     setPersistedReasoningWatermark(db, session, 1);
 }
 
-function replayState(f: Oc2ContextFixture, excluding?: string) {
-    const { db, session } = f;
+function replayState(
+    f: Oc2ContextFixture,
+    excluding?: string | ReadonlySet<string>,
+    session = f.session,
+) {
+    const { db } = f;
+    const keep = (id: string | null) =>
+        id === null || (typeof excluding === "string" ? id !== excluding : !excluding?.has(id));
     return {
-        tags: getTagsBySession(db, session).filter(
-            (tag) =>
-                excluding === undefined ||
-                (tag.type === "tool"
+        tags: getTagsBySession(db, session).filter((tag) =>
+            keep(
+                tag.type === "tool"
                     ? tag.toolOwnerMessageId
-                    : contentTagOwnerMessageId(tag.messageId)) !== excluding,
+                    : contentTagOwnerMessageId(tag.messageId),
+            ),
         ),
-        stripped: [...getStrippedPlaceholderIds(db, session)].filter((id) => id !== excluding),
-        anchors: getNoteNudgeAnchors(db, session).filter(
-            (anchor) => anchor.messageId !== excluding,
-        ),
-        search: getAutoSearchHintDecisions(db, session).filter(
-            (decision) => decision.messageId !== excluding,
-        ),
-        temporal: [...getTemporalDecisions(db, session)].filter(([id]) => id !== excluding),
+        stripped: [...getStrippedPlaceholderIds(db, session)].filter(keep),
+        anchors: getNoteNudgeAnchors(db, session).filter(({ messageId }) => keep(messageId)),
+        search: getAutoSearchHintDecisions(db, session).filter(({ messageId }) => keep(messageId)),
+        temporal: [...getTemporalDecisions(db, session)].filter(([id]) => keep(id)),
         trigger: getPersistedNoteNudge(db, session),
         watermark: getPersistedReasoningWatermark(db, session),
     };
@@ -660,5 +677,232 @@ test.each([
         ]);
     } finally {
         await f.cleanup();
+    }
+});
+
+function addStoredSession(f: Oc2ContextFixture, session: string, ids: readonly string[]): void {
+    f.raw
+        .prepare(
+            "INSERT INTO session_v2(id, directory) SELECT ?, directory FROM session_v2 WHERE id = ?",
+        )
+        .run(session, f.session);
+    const insert = f.raw.prepare(
+        "INSERT INTO session_message (id, session_id, type, seq, time_created, data) VALUES (?, ?, 'user', ?, 0, '{}')",
+    );
+    for (const [seq, id] of ids.entries()) insert.run(id, session, seq);
+}
+
+function deleteStoredSuffix(f: Oc2ContextFixture, session: string, cutoff: string): void {
+    f.raw
+        .prepare(`DELETE FROM session_message WHERE session_id = ? AND seq >= (
+        SELECT seq FROM session_message WHERE session_id = ? AND id = ?
+    )`)
+        .run(session, session, cutoff);
+}
+
+function cleanupSkips(f: Oc2ContextFixture, session = f.session): string[] {
+    return f
+        .sessionLogs()
+        .filter((line) => line.includes(`${session} committed revert tag cleanup skipped:`));
+}
+
+test("committed revert matches tag owners exactly across prefix and suffix collisions", async () => {
+    const { f, bus } = await revertFixture(998);
+    const session = "owner-collision-session";
+    const cutoff = "x1";
+    const owners = ["x", "x10", "x1-", "px1", "1", cutoff];
+    try {
+        addStoredSession(f, session, owners);
+        seedReplay(f, owners, session);
+        const insert =
+            f.db.prepare(`INSERT INTO tags (session_id,message_id,type,status,byte_size,tag_number,tool_owner_message_id)
+            VALUES (?,?,?,'dropped',10,?,?)`);
+        for (const [index, owner] of owners.entries()) {
+            insert.run(session, `${owner}:file0`, "file", 100 + index, null);
+            insert.run(session, `call-of-${owner}`, "tool", 200 + index, owner);
+        }
+        insert.run(session, `${cutoff}:p0:p1`, "message", 300, null);
+        insert.run(session, `${cutoff}:mc-text-v1:0a:0b:o0`, "message", 301, null);
+        const retained = replayState(f, cutoff, session);
+        expect(retained.tags).toHaveLength(16);
+        await bus.emit(stageEvent(session, cutoff));
+        deleteStoredSuffix(f, session, cutoff);
+        await bus.emit(commitEvent(session, cutoff));
+        expect(replayState(f, undefined, session)).toEqual(retained);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("interleaved committed reverts keep a separate proof per session", async () => {
+    const { f, bus, cutoff, stage, commit } = await revertFixture(999);
+    const other = "interleaved-session";
+    try {
+        const kept = f.rows[0]!.id;
+        addStoredSession(f, other, ["other-prefix", "other-cutoff"]);
+        seedReplay(f, [kept, cutoff]);
+        seedReplay(f, ["other-prefix", "other-cutoff"], other);
+        const before = replayState(f);
+        const after = replayState(f, cutoff);
+        const otherAfter = replayState(f, "other-cutoff", other);
+        await stage();
+        await bus.emit(stageEvent(other, "other-cutoff"));
+        deleteStoredSuffix(f, other, "other-cutoff");
+        await bus.emit(commitEvent(other, "other-cutoff"));
+        expect(replayState(f, undefined, other)).toEqual(otherAfter);
+        expect(replayState(f)).toEqual(before);
+        f.revertBefore(cutoff);
+        await commit();
+        expect(replayState(f)).toEqual(after);
+        expect(replayState(f, undefined, other)).toEqual(otherAfter);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("ending the host event stream discards staged revert proofs", async () => {
+    const { f, bus, cutoff, stage, commit } = await revertFixture(1000);
+    try {
+        const earlier = f.rows.at(-3)!.id;
+        seedReplay(f, [f.rows[0]!.id, earlier, cutoff]);
+        const before = replayState(f);
+        const afterProvenRevert = replayState(f, earlier);
+        await stage();
+        expect(bus.subscriptions).toBe(1);
+        bus.end();
+        f.revertBefore(cutoff);
+        await commit();
+        expect(bus.subscriptions).toBe(2);
+        expect(replayState(f)).toEqual(before);
+        expect(cleanupSkips(f)).toEqual([expect.stringContaining("no staged proof")]);
+
+        await stage(earlier);
+        f.revertBefore(earlier);
+        await commit(earlier);
+        expect(replayState(f)).toEqual(afterProvenRevert);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("committed revert requires the retained predecessor at its staged sequence", async () => {
+    const { f, cutoff, stage, commit } = await revertFixture(1001);
+    try {
+        const predecessor = f.rows.at(-3)!;
+        seedReplay(f, [f.rows[0]!.id, predecessor.id, cutoff]);
+        const before = replayState(f);
+        await stage();
+        f.revertBefore(cutoff);
+        f.raw
+            .prepare("UPDATE session_message SET seq = ? WHERE session_id = ? AND id = ?")
+            .run(-1, f.session, predecessor.id);
+        await commit();
+        expect(replayState(f)).toEqual(before);
+        expect(cleanupSkips(f)).toEqual([
+            expect.stringContaining("retained predecessor is not visible at commit"),
+        ]);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+for (const suffix of [10_000, 10_001]) {
+    test(`committed revert ${suffix === 10_000 ? "accepts" : "refuses"} a suffix of exactly ${suffix} rows`, async () => {
+        const { f, bus } = await revertFixture(1002);
+        const session = "suffix-limit-session";
+        const cutoff = "limit-row-1";
+        const last = `limit-row-${suffix}`;
+        try {
+            addStoredSession(f, session, ["limit-row-0"]);
+            // Row 0 is the retained predecessor, not part of the suffix limit.
+            f.raw
+                .prepare(`WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<?)
+                INSERT INTO session_message (id,session_id,type,seq,time_created,data)
+                SELECT 'limit-row-' || n,?,'user',n,0,'{}' FROM rows`)
+                .run(suffix, session);
+            seedReplay(f, ["limit-row-0", cutoff, last], session);
+            const before = replayState(f, undefined, session);
+            const retained = replayState(f, new Set([cutoff, last]), session);
+            await bus.emit(stageEvent(session, cutoff));
+            deleteStoredSuffix(f, session, cutoff);
+            await bus.emit(commitEvent(session, cutoff));
+            expect(replayState(f, undefined, session)).toEqual(
+                suffix === 10_000 ? retained : before,
+            );
+            expect(cleanupSkips(f, session)).toEqual(
+                suffix === 10_000
+                    ? []
+                    : [expect.stringContaining("stage did not prove a bounded suffix")],
+            );
+        } finally {
+            await f.cleanup();
+        }
+    });
+}
+
+test("a malformed restage discards the earlier valid revert proof", async () => {
+    const { f, bus, cutoff, stage, commit } = await revertFixture(1003);
+    try {
+        seedReplay(f, [f.rows[0]!.id, cutoff]);
+        const before = replayState(f);
+        await stage();
+        await bus.emit(stageEvent(f.session, 42));
+        f.revertBefore(cutoff);
+        await commit();
+        expect(replayState(f)).toEqual(before);
+        expect(cleanupSkips(f)).toEqual([expect.stringContaining("no staged proof")]);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("a committed revert logs one skip when the staged rows are all still stored", async () => {
+    const { f, cutoff, stage, commit } = await revertFixture(1004);
+    try {
+        seedReplay(f, [f.rows[0]!.id, cutoff]);
+        const before = replayState(f);
+        await stage();
+        await commit();
+        expect(replayState(f)).toEqual(before);
+        expect(cleanupSkips(f)).toEqual([expect.stringContaining("all staged rows still exist")]);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("pruning a committed OpenCode 2 revert invalidates the Rust wire for that session", async () => {
+    const bus = eventBus();
+    const run = mock(async () => {});
+    const invalidateWireState = mock((_sessionID: string) => {});
+    const createAdapter = rustModeTransform.createRustModeTransform;
+    const rust = spyOn(rustModeTransform, "createRustModeTransform").mockImplementation(
+        (deps, options) => ({
+            ...createAdapter(deps, options),
+            run,
+            invalidateWireState,
+        }),
+    );
+    let f: Oc2ContextFixture | undefined;
+    try {
+        f = await oc2ContextFixture(1005, {
+            temporal: false,
+            instructions: false,
+            configOverrides: { transform_mode: "rust", subc: { connection_file: "/dev/null" } },
+            eventStream: bus.stream,
+        });
+        await f.pass();
+        expect(run).toHaveBeenCalledTimes(1);
+        const cutoff = f.rows.at(-2)!.id;
+        seedReplay(f, [f.rows[0]!.id, cutoff]);
+        const retained = replayState(f, cutoff);
+        await bus.emit(stageEvent(f.session, cutoff));
+        expect(invalidateWireState).not.toHaveBeenCalled();
+        f.revertBefore(cutoff);
+        await bus.emit(commitEvent(f.session, cutoff));
+        expect(replayState(f)).toEqual(retained);
+        expect(invalidateWireState.mock.calls).toEqual([[f.session]]);
+    } finally {
+        rust.mockRestore();
+        await f?.cleanup();
     }
 });

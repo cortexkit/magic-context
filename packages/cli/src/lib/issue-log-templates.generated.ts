@@ -1504,6 +1504,7 @@ const TEMPLATE_DATA = [
 "[magic-context] not binding a project identity for this directory",
 "cannot roll back notice: no server URL for session.message.delete",
 "channel2 terminal-run intent clear failed; leaving lease to heal:",
+"committed revert tag cleanup skipped: all staged rows still exist",
 "compaction-off render changed the head: stripping signed thinking",
 "historian publish stage: stage=parse status=started elapsed=0.0ms",
 "Oh My Pi spawned session (agent kind sub): recorded as a subagent",

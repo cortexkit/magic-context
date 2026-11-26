@@ -91,7 +91,7 @@ export class V2RevertMessageCleanup {
             return noteSkippedCleanup("host store read failed at commit");
         }
         if (!removed) return noteSkippedCleanup("retained predecessor is not visible at commit");
-        if (!removed.size) return false;
+        if (!removed.size) return noteSkippedCleanup("all staged rows still exist");
         pruneMessages(db, sessionID, removed);
         return true;
     }

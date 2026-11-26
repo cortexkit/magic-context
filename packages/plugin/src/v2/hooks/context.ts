@@ -1900,8 +1900,10 @@ export async function registerContext(context: V2Context) {
                                                 sessionID,
                                                 event.data?.to,
                                             )
-                                        )
+                                        ) {
                                             tagger.cleanup(sessionID);
+                                            transform?.invalidateRustWireState(sessionID);
+                                        }
                                     } catch (error) {
                                         sessionLog(
                                             sessionID,
