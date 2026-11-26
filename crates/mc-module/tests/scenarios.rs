@@ -688,6 +688,22 @@ fn user(text: &str) -> Step {
     Step::User { text: text.into() }
 }
 
+/// A file name no earlier read in this test used. The filler reads below
+/// stand for an agent reading one file after another: under the same name
+/// the older results would be removed as repeated reads, and the pressure
+/// the tests build with them would be gone. The names are upper case so they
+/// never match a file a test reads on purpose.
+fn next_file() -> String {
+    thread_local! {
+        static NEXT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    let n = NEXT.with(|next| next.replace(next.get() + 1));
+    match char::from_digit(n, 36) {
+        Some(c) => format!("{}.rs", c.to_ascii_uppercase()),
+        None => format!("F{n}.rs"),
+    }
+}
+
 /// A step that reads a file: some reasoning, a sentence (one tag), and a
 /// `read` call whose result is about 7,000 tokens (one tag). Four such
 /// results take a session past its execute threshold.
@@ -697,7 +713,7 @@ fn read_file(reasoning: u64) -> Step {
         text: Some("Reading the next file.".into()),
         tools: vec![ToolCall::ok(
             "read",
-            json!({"path": "a.rs"}),
+            json!({"path": next_file()}),
             "x".repeat(28_000),
         )],
         output_tokens: 20,
