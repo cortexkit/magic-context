@@ -1911,7 +1911,7 @@ export async function runDoctor(
             "Compaction check: file-based; the running server's resolved config may differ — `opencode debug config` is authoritative",
         );
 
-        // Check before the legacy fixer can turn off auto-compaction and hide the finding.
+        // Check before the conflict fixes below can turn off auto-compaction and hide the finding.
         checkOpenCodeBackgroundCompaction(
             cwd,
             activeInstallation.version,

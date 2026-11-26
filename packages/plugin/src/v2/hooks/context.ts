@@ -2294,8 +2294,13 @@ export async function registerContext(context: V2Context) {
                 running === undefined && boundToCheckpoint(fold) ? CHECKPOINT_NOTE : fold.submitted;
             // One line per request with the baseline it was answered from. The
             // host's rate and ours are separate facts, and only reading both
-            // explains a session's checkpoint cadence.
-            sessionLog(draft.sessionID, `v2 compaction hook: fired answered=true source=${source}`);
+            // explains a session's checkpoint cadence. `row=none` marks a request
+            // the host made before it recorded a checkpoint row (a prepared or
+            // automatic compaction): that request cuts nothing and stores nothing.
+            sessionLog(
+                draft.sessionID,
+                `v2 compaction hook: fired answered=true source=${source} row=${running ? "running" : "none"}`,
+            );
             // OpenCode 2.1+ otherwise appends raw stored history as recent-context.
             // restoreAfterCheckpoint restores every row after the frozen history
             // baseline through the host cut, so no unsummarized messages
