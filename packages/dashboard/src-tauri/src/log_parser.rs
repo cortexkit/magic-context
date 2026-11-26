@@ -1134,7 +1134,10 @@ mod tests {
         LogTailCache, LogTailWork, Regex,
     };
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    // Only the macOS and Windows temp-folder tests build a `Path` directly.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    use std::path::Path;
+    use std::path::PathBuf;
 
     fn golden_fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(
