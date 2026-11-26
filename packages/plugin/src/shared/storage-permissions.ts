@@ -311,8 +311,10 @@ export function tightenStorageTreeSync(
         removeMarker();
         return { tightened, failures };
     }
+    let rootStat: Stats;
     try {
-        if (!lstatSync(root).isDirectory()) return { tightened, failures: 1 };
+        rootStat = lstatSync(root);
+        if (!rootStat.isDirectory()) return { tightened, failures: 1 };
     } catch {
         return { tightened, failures: 1 };
     }
@@ -330,10 +332,9 @@ export function tightenStorageTreeSync(
     }
     let repairAllowed: boolean | undefined;
     const fenceDirectory = join(root, "lkg-recovery-fences");
-    const visit = (entryPath: string, recursive = true, optional = false): void => {
-        let stat: ReturnType<typeof lstatSync>;
+    const visit = (entryPath: string, recursive = true, optional = false, stat?: Stats): void => {
         try {
-            stat = lstatSync(entryPath);
+            stat ??= lstatSync(entryPath);
         } catch (error) {
             if (!optional || (error as NodeJS.ErrnoException).code !== "ENOENT") failures++;
             return;
@@ -407,7 +408,7 @@ export function tightenStorageTreeSync(
         for (const entry of entries) visit(join(entryPath, entry));
     };
     if (certificate) {
-        visit(root, false);
+        visit(root, false, false, rootStat);
         visit(dbPath, false, true);
         visit(`${dbPath}-wal`, false, true);
         visit(`${dbPath}-shm`, false, true);
@@ -439,7 +440,7 @@ export function tightenStorageTreeSync(
             }
         }
     } else {
-        visit(root);
+        visit(root, true, false, rootStat);
         if (failures === 0 && !keptLegacyTemp) {
             try {
                 writeStorageFileSync(marker, STORAGE_PERMISSIONS_MARKER_BYTES, {
