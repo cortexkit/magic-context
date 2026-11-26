@@ -5,6 +5,7 @@ import {
     getMessageIndexQueueHeapStats,
 } from "../../features/magic-context/message-index-async";
 import { searchMessageHistory } from "../../features/magic-context/search";
+import { getServedRecordForTest } from "../../hooks/magic-context/served-check";
 import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
@@ -107,5 +108,36 @@ test("OpenCode 2 revert clears the indexed suffix before indexing an appended me
         await fixture.cleanup();
         __resetMessageIndexAsyncForTests();
         setBootQuietPeriodForTests(null);
+    }
+});
+
+test("committing an OpenCode 2 revert ends the previous served comparison", async () => {
+    const events = eventBus();
+    const fixture = await oc2ContextFixture(988, {
+        temporal: false,
+        instructions: false,
+        eventStream: events.stream,
+    });
+    try {
+        await fixture.pass();
+        const record = getServedRecordForTest(fixture.session);
+        expect(record).toBeDefined();
+        await events.emit({ type: "session.revert.started", data: { sessionID: fixture.session } });
+        expect(getServedRecordForTest(fixture.session)).toEqual(record);
+
+        fixture.revertBefore(fixture.rows[3]!.id);
+        await events.emit({
+            type: "session.revert.committed",
+            data: { sessionID: fixture.session },
+        });
+        expect(getServedRecordForTest(fixture.session)).toBeUndefined();
+        fixture.user("Replacement after the committed revert", 1000);
+        const next = await fixture.pass();
+        expect(next.logs.join("\n")).not.toContain(
+            "a pass without rebuild permission changed served messages",
+        );
+        expect(getServedRecordForTest(fixture.session)).toBeDefined();
+    } finally {
+        await fixture.cleanup();
     }
 });

@@ -1863,13 +1863,16 @@ export async function registerContext(context: V2Context) {
                                 reader.close();
                             }
                         });
-                        if (db && event.type === "session.revert.committed") {
-                            // A committed revert deletes raw rows, invalidating both
-                            // indexed ordinals and the cached append count/anchor.
-                            const indexDb = db;
-                            withoutSqliteTransformPass(() =>
-                                scheduleClearAndReindex(indexDb, sessionID, pagedRead),
-                            );
+                        if (event.type === "session.revert.committed") {
+                            dropServedRecord(sessionID, "host_edit");
+                            if (db) {
+                                // Rebuild the search index after the host deletes stored rows;
+                                // its saved position for appending may now point past the end.
+                                const indexDb = db;
+                                withoutSqliteTransformPass(() =>
+                                    scheduleClearAndReindex(indexDb, sessionID, pagedRead),
+                                );
+                            }
                         }
                         if (
                             event.type === "session.execution.started" ||
