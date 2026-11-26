@@ -52,7 +52,12 @@ export interface CloneSessionStateFilter {
     selectCompartments?: (
         source: readonly CloneCompartmentBoundary[],
     ) => ReadonlyMap<number, CloneCompartmentRow>;
-    /** Copied gaps accepted only because of the parent's OpenCode 1→2 conversion record. */
+    /**
+     * Gaps between the copied summaries that the parent may have only because
+     * it was converted from OpenCode 1 (see `inheritedGaps` on
+     * `CoordinateRebaseNotice`). The fork records them, so its own summarizer
+     * accepts exactly these gaps and no others.
+     */
     inheritedCoordinateGaps?: () => readonly { start: number; end: number }[];
     includeTag(tag: CloneTagRow): boolean;
     includeMessageId(messageId: string): boolean;

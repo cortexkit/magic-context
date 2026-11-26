@@ -10,7 +10,11 @@ import {
     type RawMessage,
 } from "./read-session-raw";
 
-/** @param onConversionGap Called for an accepted gap that needed the OpenCode 1→2 conversion record. */
+/**
+ * @param onConversionGap Called for each accepted gap that is allowed only
+ *   because the session was converted from OpenCode 1, or inherited the gap
+ *   from such a session (`CoordinateRebaseNotice`).
+ */
 export function nonNarrativeStoredGapRanges(
     db: Database,
     sessionId: string,

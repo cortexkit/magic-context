@@ -13,7 +13,12 @@ const toasted = new Set<string>();
 const isGap = (error: string | null) => error?.startsWith("gap before message ") === true;
 const diagnoses = new WeakMap<Database, BoundedSessionMap<{ key: string; gap: boolean }>>();
 
-/** Display only. Cache by saved ranges, conversion record and host suffix identity. */
+/**
+ * Display only. The answer is cached until one of its inputs changes: the
+ * saved summary ranges, the session's conversion notice
+ * (`coordinate_rebase_notice`), or the host's message count and newest id
+ * (which a revert changes).
+ */
 export function readForkHistoryGap(
     db: Database,
     openReader: () => V2StoreReader,
@@ -28,8 +33,9 @@ export function readForkHistoryGap(
         endMessage: number;
         rebaseStatus: string;
     }[];
-    // The historian can still repair an unresolved row itself. Only diagnose
-    // a missing range, and don't open the host store for ordinary histories.
+    // A summary marked unresolved may still be repaired by the next summary
+    // run. Only diagnose a missing range, and don't open the host store for
+    // ordinary histories.
     if (
         !isGap(validateStoredCompartments(rows)) ||
         rows.some(({ rebaseStatus }) => rebaseStatus === "unresolved")
@@ -79,8 +85,9 @@ export function readForkHistoryGap(
     }
     if (!toasted.has(sessionID) && isTuiConnected(sessionID)) {
         toasted.add(sessionID);
-        // The status line is authoritative. Don't replay a toast on reconnect
-        // after the user may already have repaired the gap.
+        // /ctx-status and the sidebar show the gap for as long as it exists.
+        // The toast is sent once and not queued for a terminal that connects
+        // later: by then the user may already have repaired the gap.
         pushNotification(
             "toast",
             { message: renderUserFacingFailure("fork_history_gap", "plain"), variant: "warning" },

@@ -86,7 +86,14 @@ export interface CoordinateRebaseNotice {
      * of sessions stamped by an older build from running again.
      */
     neighbourRecoveryAt: number | null;
-    /** Gaps copied under the OpenCode 1→2 conversion rule. An empty list permits none. */
+    /**
+     * Set only on a fork. Summaries must normally follow each other without a
+     * gap. A session converted from OpenCode 1 is allowed gaps, because the
+     * conversion renumbered its messages; this notice is what records that
+     * conversion. A fork was never converted itself, so it lists the gaps it
+     * copied from such a parent, and only those are allowed. An empty list
+     * allows none.
+     */
     inheritedGaps?: InheritedCoordinateGap[];
 }
 
