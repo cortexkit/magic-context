@@ -1906,6 +1906,8 @@ interface RunPostTransformPhaseArgs {
      * is none or it was made for another model. See served-request-count.ts.
      */
     servedCountTokens?: (calibration: DecisionCalibration) => number | undefined;
+    /** Overflow recovery is armed for this session (see `recoveryArmed` in heuristic cleanup). */
+    emergencyRecoveryArmed?: boolean;
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
     /** Save host-order IDs before tag replay or tool pruning can remove the message that marks the prefix-trimming boundary. */
     prefixTrimSourceOrder?: PrefixTrimSourceOrder;
@@ -3730,6 +3732,7 @@ export async function runPostTransformPhase(
                                   servedBeforePass: servedBeforeRemovals,
                                   sinceReading: tagsNewerThanReading,
                                   servedCountTokens: args.servedCountTokens,
+                                  recoveryArmed: args.emergencyRecoveryArmed,
                               }
                             : undefined,
                     routine: routineCleanupApplied,

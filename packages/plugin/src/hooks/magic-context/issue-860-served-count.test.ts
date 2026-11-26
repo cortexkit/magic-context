@@ -30,6 +30,7 @@ import {
 } from "../../features/magic-context/storage";
 import {
     addProcessedImageStrippedIds,
+    recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
     setEmergencyDropSample,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -52,6 +53,7 @@ import * as emergencyDrop from "./emergency-drop";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import { createTransform } from "./transform";
+import { recordUsageRefusal } from "./transform-context-state";
 
 const PROVIDER = "litellm";
 const MODEL = "proxy-model";
@@ -455,6 +457,9 @@ function plannerSpy(serve: "current" | "release") {
 function expectExtendsRelease(calls: readonly PlannerCall[]) {
     for (const { current, release } of calls) {
         differentialCases++;
+        // The one allowed shortfall: a batch withheld because the reading
+        // has not been renewed since the episode's batch and nothing was refused.
+        if (current.reason.includes("has not been renewed since the last batch")) continue;
         if (release.shouldDrop) {
             expect(current.shouldDrop).toBe(true);
             expect(current.tagNumbers.slice(0, release.tagNumbers.length)).toEqual(
@@ -835,6 +840,85 @@ describe("issue 860: the reviewed regressions, compared with the release", () =>
         expect(current.refused).toBe(release.refused);
         console.log(
             `ISSUE860 prefix-bound 96%: release removed=${release.removed.length} size=${release.size}; current removed=${current.removed.length} size=${current.size}`,
+        );
+    }, 120_000);
+});
+
+describe("issue 860: a reading stuck at 134% of a request that fits", () => {
+    /**
+     * One provider reading, 60,138 tokens (133.6% of the usable 45,000), that
+     * never changes while each step adds a result of about 4,340 tokens. The
+     * request itself is about 61% of the window.
+     */
+    async function stuck(serve: string, refusal?: "own" | "provider") {
+        measureToolDefinitions(4_344);
+        const session = openSession(`ses-860-stuck-${serve}-${refusal ?? "none"}`, {
+            tail: 18,
+            reading: 4_500,
+            systemPromptTokens: 1_800,
+            bashTokens: 1_350,
+            systemPromptHash: "system-prompt-v1",
+        });
+        expect((await runPass(session)).error).toBeUndefined();
+        setReading(session, 60_138);
+        const passes = [await runPass(session)];
+        for (let step = 2; step <= 4; step++) {
+            appendBashStep(session, 4_340);
+            if (step === 3 && refusal === "own") recordUsageRefusal(session.db, session.sessionId);
+            if (step === 3 && refusal === "provider")
+                recordOverflowDetected(
+                    session.db,
+                    session.sessionId,
+                    60_000,
+                    `${PROVIDER}/${MODEL}`,
+                    "provider_overflow",
+                    "unknown",
+                    64_000,
+                );
+            passes.push(await runPass(session));
+        }
+        for (const pass of passes) expect(pass.error).toBeUndefined();
+        const batches = passes.map((pass) =>
+            Number(/emergency tiered drop: tiered drop: (\d+) tags/.exec(pass.log)?.[1] ?? 0),
+        );
+        return { session, passes, batches };
+    }
+
+    test("one batch on the first pass, then none while the reading is not renewed", async () => {
+        const { current, release } = await againstRelease((serve) => stuck(serve));
+        expect(current.batches[0]).toBeGreaterThan(0);
+        expect(current.batches.slice(1)).toEqual([0, 0, 0]);
+        for (const pass of current.passes.slice(1))
+            expect(pass.log).toContain("has not been renewed since the last batch");
+        // Nothing before each appended step changes on steps 2 to 4.
+        for (let step = 1; step < current.passes.length; step++) {
+            const previous = current.passes[step - 1]!.output.messages;
+            const kept = previous.length - 1;
+            expect(JSON.stringify(current.passes[step]!.output.messages.slice(0, kept))).toBe(
+                JSON.stringify(previous.slice(0, kept)),
+            );
+        }
+        console.log(
+            `ISSUE860 stuck: release batches=${release.batches.join(",")} current batches=${current.batches.join(",")}`,
+        );
+    }, 120_000);
+
+    test("Magic Context's own refusal after the batch lifts the latch once", async () => {
+        const { current } = await againstRelease((serve) => stuck(serve, "own"));
+        expect(current.batches[0]).toBeGreaterThan(0);
+        expect(current.batches[1]).toBe(0);
+        expect(current.batches[2]).toBeGreaterThan(0);
+        expect(current.batches[3]).toBe(0);
+        console.log(`ISSUE860 stuck + own refusal: current batches=${current.batches.join(",")}`);
+    }, 120_000);
+
+    test("a provider refusal after the batch lifts the latch", async () => {
+        const { current } = await againstRelease((serve) => stuck(serve, "provider"));
+        expect(current.batches[0]).toBeGreaterThan(0);
+        expect(current.batches[1]).toBe(0);
+        expect(current.batches[2]).toBeGreaterThan(0);
+        console.log(
+            `ISSUE860 stuck + provider refusal: current batches=${current.batches.join(",")}`,
         );
     }, 120_000);
 });
