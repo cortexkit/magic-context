@@ -1,5 +1,6 @@
 import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
+import { observeSessionProjectBinding } from "../../features/magic-context/memory/project-binding-notice";
 import {
     resolveProjectIdentityForSession,
     takeDubiousOwnershipProjectIdentityWarning,
@@ -15,10 +16,7 @@ import type { Scheduler } from "../../features/magic-context/scheduler";
 import { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
-import {
-    hasRecordedSessionProjectIdentity,
-    recordSessionProjectIdentity,
-} from "../../features/magic-context/session-project-storage";
+import { hasRecordedSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     type ContextDatabase,
     deriveTagLoadFloor,
@@ -551,6 +549,7 @@ export interface TransformDeps {
     hostProtectedTailBoundary?: typeof resolveOpenCodeProtectedTailBoundary;
     hostModelFallback?: typeof findLastAssistantModelFromOpenCodeDb;
     hostRefusalNotice?: HostRefusalNotice;
+    hostProjectBindingNotice?: (sessionId: string, text: string) => void;
     hostRefuse?: typeof abortSessionFailClosed;
     tagger: Tagger;
     /**
@@ -2654,7 +2653,26 @@ export function createTransform(deps: TransformDeps) {
             sessionDirectoryResolvedFromHost &&
             recordedSessionProjectIdentity.get(sessionId) !== sessionIdentityForBinding
         ) {
-            recordSessionProjectIdentity(db, sessionId, sessionIdentityForBinding);
+            observeSessionProjectBinding(
+                db,
+                sessionId,
+                sessionIdentityForBinding,
+                sessionDirectory,
+                (notice) => {
+                    if (deps.hostProjectBindingNotice)
+                        deps.hostProjectBindingNotice(sessionId, notice);
+                    else {
+                        void withoutSqliteTransformPass(() =>
+                            sendStatusNotification(
+                                deps.client,
+                                sessionId,
+                                `## Project memory warning\n\n${notice}`,
+                                notificationParams,
+                            ),
+                        );
+                    }
+                },
+            );
             recordedSessionProjectIdentity.set(sessionId, sessionIdentityForBinding);
         }
 

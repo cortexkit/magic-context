@@ -9,7 +9,7 @@ import {
     formatStorageRefusalNotice,
     STORAGE_NOTICE_PREFIX,
 } from "./storage-notice";
-import { hostServesRowById } from "./store";
+import { hostServesRowById, rawMessagePage } from "./store";
 import type { V2Message } from "./types";
 
 const refusal = formatStorageRefusalNotice({
@@ -114,5 +114,20 @@ describe("stored storage notice rows", () => {
         expect(restoreRow(other, { providerID: "p", id: "m" })).toHaveLength(1);
         const typed = row("user", refusal);
         expect(restoreRow(typed, { providerID: "p", id: "m" })).toHaveLength(1);
+    });
+
+    it("keeps a stored project notice out of the raw history sent to the historian", async () => {
+        const notice = `${STORAGE_NOTICE_PREFIX}This session changed projects. 1 memory stayed with the old project.`;
+        const stored = row("synthetic", notice);
+        const later = { ...row("user", "next question"), seq: 2 };
+        const history = rawMessagePage([stored, later], 0);
+
+        expect(history.map(({ ordinal }) => ordinal)).toEqual([1, 2]);
+        expect(JSON.stringify(history)).not.toContain(notice);
+        expect(JSON.stringify(history)).toContain("next question");
+        expect(restoreRow(stored, { providerID: "p", id: "m" })).toEqual([]);
+        const draft = [user("msg_n1", notice), user("msg_typed", notice)];
+        expect(await dropStorageNotices(draft, isAdmitted)).toBe(1);
+        expect(draft).toEqual([user("msg_typed", notice)]);
     });
 });

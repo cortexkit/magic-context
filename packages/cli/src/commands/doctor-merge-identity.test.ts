@@ -167,7 +167,16 @@ describe("offline identity command", () => {
         execFileSync("git", ["init", "-q", directory], { windowsHide: true });
         execFileSync(
             "git",
-            ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "first"],
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "first",
+            ],
             { cwd: directory, windowsHide: true },
         );
         const key = `dir:${createHash("md5").update(directory).digest("hex").slice(0, 12)}`;
@@ -177,7 +186,13 @@ describe("offline identity command", () => {
         const before = fileHash(path);
         expect(
             runMergeIdentityCli([
-                "--db", path, "--from", directory, "--to", "git:target", "--force",
+                "--db",
+                path,
+                "--from",
+                directory,
+                "--to",
+                "git:target",
+                "--force",
             ]),
         ).toBe(0);
         expect(fileHash(path)).toBe(before);

@@ -627,7 +627,7 @@ describe("Pi project binding retry", () => {
 			expect(changeLogs()).toHaveLength(1);
 			expect(changeLogs()[0]).toEqual([
 				sessionId,
-				"project binding changed harness=pi cwd=/workspace/new old=git:old new=git:new",
+				"project binding changed harness=pi cwd=/workspace/new old=git:old new=git:new memories=0",
 			]);
 
 			contextHandlerInternals.updateSessionProjectTracking(
@@ -639,6 +639,42 @@ describe("Pi project binding retry", () => {
 			expect(changeLogs()).toHaveLength(1);
 		} finally {
 			log.mockRestore();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("notifies once per old folder key without moving memories", () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-binding-left-behind";
+		const notify = mock((_message: string) => {});
+		const oldDir = "/workspace/old folder";
+		const from = `dir:${createHash("md5").update(oldDir).digest("hex").slice(0, 12)}`;
+		const observe = (identity: string, directory: string) =>
+			contextHandlerInternals.updateSessionProjectTracking(
+				sessionId,
+				identity,
+				db,
+				directory,
+				notify,
+			);
+		try {
+			db.prepare(
+				"INSERT INTO memories(project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES (?, 'fact', 'keep me', 'hash', 1, 1, 1, 1)",
+			).run(from);
+			observe(from, oldDir);
+			observe("git:new", "/workspace/new");
+			observe(from, oldDir);
+			observe("git:new", "/workspace/new");
+
+			expect(notify).toHaveBeenCalledTimes(1);
+			expect(notify.mock.calls[0]?.[0]).toContain(
+				"magic-context doctor merge-identities --from '/workspace/old folder' --to git:new --apply",
+			);
+			expect(db.prepare("SELECT project_path FROM memories").all()).toEqual([
+				{ project_path: from },
+			]);
+		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
 		}

@@ -2395,6 +2395,14 @@ export async function registerContext(context: V2Context) {
             tagger,
             ...createV2ThresholdDeps(config),
             contextUsageMap: usage,
+            hostProjectBindingNotice: (sessionID, message) => {
+                pushNotification("toast", { message, variant: "warning" }, sessionID);
+                storeStorageNotice(
+                    sessionID,
+                    `${STORAGE_NOTICE_PREFIX}${message}`,
+                    "project binding",
+                );
+            },
             hostInputEstimate: (sessionID) => checkpointInputEstimates.get(sessionID),
             onPassPermission: (sessionID, permission) => {
                 checkpointPassPermissions.set(sessionID, permission);

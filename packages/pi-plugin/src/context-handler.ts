@@ -43,6 +43,7 @@ import {
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import { isFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
+import { observeSessionProjectBinding } from "@magic-context/core/features/magic-context/memory/project-binding-notice";
 import {
 	isUsableProjectIdentity,
 	resolveProjectIdentityForSession,
@@ -75,7 +76,6 @@ import {
 	sessionDecisionCalibration,
 	transitionSessionHygieneUnits,
 } from "@magic-context/core/features/magic-context/session-decision-calibration";
-import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
 	adoptPiFallbackMessageTag,
 	adoptPiFallbackToolOwnerTag,
@@ -1501,6 +1501,7 @@ function updateSessionProjectTracking(
 	projectIdentity: string | undefined,
 	db?: ContextDatabase,
 	observedCwd?: string,
+	notify?: (text: string) => void,
 ): void {
 	if (!projectIdentity) return;
 	const prev = lastSeenProjectIdentityBySession.get(sessionId);
@@ -1518,18 +1519,14 @@ function updateSessionProjectTracking(
 		persistedProjectIdentityBySession.get(sessionId) !== projectIdentity
 	) {
 		try {
-			const change = recordSessionProjectIdentity(
+			observeSessionProjectBinding(
 				db,
 				sessionId,
 				projectIdentity,
+				observedCwd ?? "",
+				notify,
 			);
 			persistedProjectIdentityBySession.set(sessionId, projectIdentity);
-			if (change) {
-				sessionLog(
-					sessionId,
-					`project binding changed harness=${getHarness()} cwd=${observedCwd ?? "unknown"} old=${change.previousProjectPath ?? "none"} new=${change.projectPath}`,
-				);
-			}
 		} catch (error) {
 			const now = Date.now();
 			const lastLoggedAt =
@@ -5105,6 +5102,7 @@ export function registerPiContextHandler(
 				projectIdentity,
 				options.db,
 				projectDirectory,
+				ctx.hasUI ? (text) => ctx.ui.notify(text, "warning") : undefined,
 			);
 			const lkgInputIdByRef = new Map<unknown, string>();
 			for (const input of lkgPassSnapshot.inputs)

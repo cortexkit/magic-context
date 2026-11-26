@@ -14,6 +14,7 @@ import {
     type V2StoreReader,
 } from "../store-reader";
 import { toolStateContent } from "../tool-result";
+import { isStorageNoticeText } from "./storage-notice";
 
 const rawMessageTypes = new Set<MessageType>(RAW_MESSAGE_TYPES);
 const isRawRow = (row: StoreRow) => rawMessageTypes.has(row.type);
@@ -81,6 +82,8 @@ function projectRawMessages(
                       })
                     : [{ type: "text", text: row.data.text ?? "" }],
         };
+        // Preserve its ordinal, but never pass a user-only notice to a raw-history consumer.
+        if (row.type === "synthetic" && isStorageNoticeText(row.data.text)) message.parts = [];
         // Keep host provenance available to coordinate repair without changing the
         // enumerable RawMessage shape shared with the v1 differential fixtures.
         Object.defineProperty(message, "storeType", { value: row.type, enumerable: false });

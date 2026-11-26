@@ -23,9 +23,10 @@ import {
     runMigrations,
 } from "@magic-context/core/features/magic-context/storage";
 import { countIdentityRows } from "@magic-context/core/features/magic-context/storage-identity-merge";
+import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
-import { formatIdentitySplits } from "./doctor-identity-splits";
+import { diagnoseIdentitySplits, formatIdentitySplits } from "./doctor-identity-splits";
 import { runMergeIdentityCli } from "./doctor-merge-identity";
 
 // Every path here lives under one throwaway root; no live store, config, or cache is read.
@@ -627,6 +628,107 @@ describe("doctor merge-identities on a removed worktree's leftover folder", () =
 });
 
 describe("doctor merge-identities safety rules", () => {
+    it("doctor lists abandoned folder keys and only offers an exact destination from matching move history", () => {
+        const store = newStore();
+        try {
+            const source = liveDirectory("before move");
+            const target = newRepository("after-move");
+            const unknown = md5Identity(liveDirectory("missing move history"));
+            const stillBound = md5Identity(liveDirectory("still bound"));
+            const from = md5Identity(source);
+            seedRows(store, from, { memories: 1 });
+            seedRows(store, unknown, { memories: 2 });
+            seedRows(store, stillBound, { memories: 1, sessions: 1 });
+            store.db
+                .prepare("INSERT INTO session_projects VALUES ('moved', 'opencode2', ?, 10)")
+                .run(target.identity);
+            store.host.exec(`CREATE TABLE session_v2(id TEXT, directory TEXT);
+                CREATE TABLE event(aggregate_id TEXT, seq INTEGER, type TEXT, data TEXT)`);
+            store.host.prepare("INSERT INTO session_v2 VALUES ('moved', ?)").run(target.directory);
+            const record = store.host.prepare("INSERT INTO event VALUES ('moved', ?, ?, ?)");
+            record.run(
+                0,
+                "session.created.1",
+                JSON.stringify({ sessionID: "moved", location: { directory: source } }),
+            );
+            record.run(
+                3,
+                "session.moved.1",
+                JSON.stringify({ sessionID: "moved", location: { directory: target.directory } }),
+            );
+
+            const storageDir = getMagicContextStorageDir();
+            const storagePath = join(storageDir, "context.db");
+            const hostDirectory = join(ISOLATED_ENV.XDG_DATA_HOME, "opencode");
+            const hostPath = join(hostDirectory, "opencode.db");
+            mkdirSync(storageDir, { recursive: true });
+            mkdirSync(hostDirectory, { recursive: true });
+            store.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+            store.host.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+            copyFileSync(store.dbPath, storagePath);
+            copyFileSync(join(store.storageDir, "host.db"), hostPath);
+            const before = fileHash(storagePath);
+            const hostBefore = fileHash(hostPath);
+            const lines = diagnoseIdentitySplits().join("\n");
+
+            expect(lines).toContain(
+                `folder key ${from}: 1 memory; last used 1970-01-01T00:00:00.001Z`,
+            );
+            const sourceArg = `'${source}'`;
+            expect(lines).toContain(
+                `doctor merge-identities --from ${sourceArg} --to ${target.identity} --apply`,
+            );
+            expect(lines).toContain(`folder key ${unknown}: 2 memories`);
+            expect(lines).toContain("The destination can't be determined.");
+            expect(lines).toContain(`--from ${unknown} --to "DESTINATION_IDENTITY" --apply`);
+            expect(lines).not.toContain(stillBound);
+            expect(fileHash(storagePath)).toBe(before);
+            expect(fileHash(hostPath)).toBe(hostBefore);
+
+            // The recorded binding can lag the host's location until the session's next turn.
+            const copied = new Database(storagePath);
+            try {
+                copied
+                    .prepare(
+                        "UPDATE session_projects SET project_path = ? WHERE session_id = 'moved'",
+                    )
+                    .run(gitIdentity("stale-binding"));
+            } finally {
+                copied.close();
+            }
+            const stale = diagnoseIdentitySplits().join("\n");
+            expect(stale).toContain(`--from ${sourceArg} --to "DESTINATION_IDENTITY" --apply`);
+            expect(stale).not.toContain(`--to ${target.identity}`);
+        } finally {
+            closeStore(store);
+        }
+    });
+
+    it("previews and explicitly merges memories using a folder path as the source", () => {
+        const store = newStore();
+        try {
+            const source = liveDirectory("old folder");
+            const target = newRepository("new-repo");
+            const from = md5Identity(source);
+            seedRows(store, from, { memories: 1 });
+            bindSession(store, "moved-session", target.directory, target.identity);
+            const args = ["--db", store.dbPath, "--from", source, "--to", target.identity];
+            const output = captureLog();
+
+            expect(runMergeIdentityCli(args, noHolderDeps)).toBe(0);
+            expect(output()).toContain(`Identity merge preview: ${from} → ${target.identity}`);
+            expect(countIdentityRows(store.db, from)).toBeGreaterThan(0);
+
+            expect(runMergeIdentityCli([...args, "--apply"], noHolderDeps)).toBe(0);
+            expect(store.db.prepare("SELECT project_path FROM memories").all()).toEqual([
+                { project_path: target.identity },
+            ]);
+            expect(readRememberedGitIdentity(source, store.storageDir)).toBeUndefined();
+        } finally {
+            closeStore(store);
+        }
+    });
+
     it("never treats a repository-wide git identity as a source in an explicit merge", () => {
         const store = newStore();
         const repository = gitIdentity("rule-1-explicit");
