@@ -758,8 +758,8 @@ mod thalamus_not_delivered {
     }
 }
 
-/// Thalamus's samples from the change that answers a
-/// run-starting send as soon as it is stored: `pending` with the run's id,
+/// Thalamus's samples for a run-starting send that is answered as soon as
+/// it is stored: `pending` with the run's id,
 /// before the prompt reaches the host (`send-answers-early-v1`,
 /// `send-unknown-v2`, `send-not-delivered-v2`), kept byte for byte with their
 /// sums. Such a `pending` is neither delivery nor a run already under way: the
