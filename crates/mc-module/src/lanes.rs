@@ -267,17 +267,57 @@ pub enum Shape {
     StripInjection,
 }
 
+/// The facts about the whole index that deciding how a part drops needs:
+/// the newest tool tags, the protected tool results, and the messages the
+/// transcript starts and ends on. Computed once for a batch of parts, since
+/// each takes a walk over the index.
+pub(crate) struct DropFacts<'a> {
+    recent: Vec<u64>,
+    protected: BTreeSet<PartKey>,
+    newest_mid: Option<&'a str>,
+    first_mid: Option<&'a str>,
+}
+
+impl<'a> DropFacts<'a> {
+    pub(crate) fn new(context: &Context<'a>) -> Self {
+        Self::with_protected(
+            context,
+            protected_tool_parts(context.index, context.protected_tools),
+        )
+    }
+
+    /// For a caller that already holds the protected set.
+    pub(crate) fn with_protected(context: &Context<'a>, protected: BTreeSet<PartKey>) -> Self {
+        let index = context.index;
+        Self {
+            recent: index.newest_tool_tags(RECENT_TOOL_WINDOW),
+            protected,
+            newest_mid: transcript_end_mid(index),
+            first_mid: index.entries().first().map(|entry| entry.mid.as_str()),
+        }
+    }
+}
+
 /// The edits that drop `parts`, and which of them those edits cover. A part
 /// requested twice keeps the shape of its first request. A part already
 /// changed by the latest view counts as covered and gets no new edit. A part
 /// that cannot go yet (a running tool call, a protected result) is left out
 /// of both, so a queued drop of it waits.
 pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, Vec<PartKey>) {
+    drop_ops_with(context, &DropFacts::new(context), parts)
+}
+
+/// [`drop_ops`] with the index facts already computed.
+pub(crate) fn drop_ops_with(
+    context: &Context,
+    facts: &DropFacts,
+    parts: &[(PartKey, Shape)],
+) -> (Vec<EditOp>, Vec<PartKey>) {
     let index = context.index;
-    let recent = index.newest_tool_tags(RECENT_TOOL_WINDOW);
-    let protected = protected_tool_parts(index, context.protected_tools);
-    let newest_mid = transcript_end_mid(index);
-    let first_mid = index.entries().first().map(|entry| entry.mid.as_str());
+    let recent = &facts.recent;
+    let protected = &facts.protected;
+    let newest_mid = facts.newest_mid;
+    let first_mid = facts.first_mid;
     let mut shapes: BTreeMap<&PartKey, Shape> = BTreeMap::new();
     for (key, shape) in parts {
         shapes.entry(key).or_insert(*shape);
@@ -589,8 +629,17 @@ pub fn edit_marker(name: &str, value: &Value) -> Option<String> {
 
 /// The newest results of each configured protected tool, plus all calls to
 /// person-facing tools. Their inputs can be the agent's only reply text.
+#[cfg(test)]
+thread_local! {
+    // How many times this thread walked the index for its protected tool
+    // results, so a test can check a plan does it once.
+    pub(crate) static PROTECTED_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub fn protected_tool_parts(index: &Index, counts: &BTreeMap<String, u64>) -> BTreeSet<PartKey> {
     let _timing = crate::notice_cost_timing::span("lanes.protected_tool_parts");
+    #[cfg(test)]
+    PROTECTED_WALKS.with(|walks| walks.set(walks.get() + 1));
     let mut left: BTreeMap<String, u64> = counts.clone();
     let mut protected = BTreeSet::new();
     for entry in index.entries().iter().rev() {
@@ -1822,13 +1871,18 @@ pub fn emergency_drop(
 /// transcript, saves only its result less the placeholder.
 pub(crate) fn drop_saving(
     context: &Context,
+    facts: &DropFacts,
     entry: &Entry,
     part: &Part,
     shape: Shape,
     before: u64,
     count: impl Fn(&str) -> u64,
 ) -> u64 {
-    let (ops, _) = drop_ops(context, &[((entry.mid.clone(), part.id.clone()), shape)]);
+    let (ops, _) = drop_ops_with(
+        context,
+        facts,
+        &[((entry.mid.clone(), part.id.clone()), shape)],
+    );
     let mut edits = Vec::new();
     for op in &ops {
         match op {
@@ -1950,6 +2004,9 @@ pub(crate) fn emergency_drop_planned(
                 && (emergency.over_limit || !in_tail(part, cutoff))
         })
         .collect();
+    // Pricing each candidate's drop needs the same facts about the index;
+    // they are taken once for the plan, not once per candidate.
+    let facts = DropFacts::with_protected(context, protected);
     let shape = if emergency.over_limit {
         Shape::Whole
     } else {
@@ -1975,7 +2032,7 @@ pub(crate) fn emergency_drop_planned(
                 .and_then(|measured| measured.parts.get(&key))
                 .copied()
                 .unwrap_or_else(|| tokens::part(part));
-            reclaimed += drop_saving(context, entry, part, shape, before, |text| {
+            reclaimed += drop_saving(context, &facts, entry, part, shape, before, |text| {
                 counter.count(text)
             });
             selected.push((key, shape));

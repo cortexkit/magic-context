@@ -1192,3 +1192,35 @@ fn emergency_measured_the_sweep_still_reclaims_when_the_lane_cannot() {
         );
     }
 }
+
+/// A plan visiting many candidates walks the index for the protected tool
+/// results once, not once per candidate.
+#[test]
+fn emergency_measured_a_plan_walks_the_index_for_protected_results_once() {
+    let (session, settings) = partial();
+    let edited = session.edited(None);
+    let (context, usable, cutoff) = Session::lane_context(
+        &session.index,
+        &edited,
+        &settings,
+        &session.conditions,
+        session.features.keep_first_message,
+        session.signed_floor(),
+    );
+    let emergency = lanes::Emergency {
+        prompt_tokens: 39_000,
+        request_tokens: Some(60_000),
+        notes: Default::default(),
+        ceiling_tokens: usable * 65 / 100,
+        usable_tokens: usable,
+        over_limit: true,
+        priced: false,
+        removed_tokens: 0,
+        measured: None,
+    };
+    let before = lanes::PROTECTED_WALKS.with(|walks| walks.get());
+    let selected = lanes::emergency_drop_excluding(&context, cutoff, &emergency, |_, _| false);
+    let walks = lanes::PROTECTED_WALKS.with(|walks| walks.get()) - before;
+    assert_eq!(selected.len(), 36, "every result is a candidate");
+    assert_eq!(walks, 1);
+}
