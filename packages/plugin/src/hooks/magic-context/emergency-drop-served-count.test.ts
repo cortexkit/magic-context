@@ -121,8 +121,13 @@ describe("emergency planner with our count of the last request served", () => {
         let cases = 0;
         let extended = 0;
         let turnedSkipIntoDrop = 0;
+        let latchedRepeats = 0;
         for (let seed = 1; seed <= 20_000; seed++) {
             const input = generatedInput(seed);
+            // Latch states with the reading equal to the latch's sample, as
+            // the latch stores it (rounded), as well as unequal ones.
+            if (input.hasPriorDrop && rng(seed ^ 0x1a7c)() < 0.5)
+                input.priorInputSample = Math.max(0, Math.round(input.currentTotalInputTokens));
             const release = releasePlanEmergencyDrop(input);
             const servedCountTokens = countFor(input, seed);
             const plan = planEmergencyDrop({ ...input, servedCountTokens });
@@ -139,6 +144,15 @@ describe("emergency planner with our count of the last request served", () => {
             if (servedCountTokens >= input.currentTotalInputTokens) {
                 expect({ seed, plan }).toEqual({ seed, plan: release });
             }
+            // A pass that repeats the reading the episode's batch was planned
+            // on sets the count aside: the release's plan exactly.
+            if (
+                input.hasPriorDrop &&
+                Math.max(0, Math.round(input.currentTotalInputTokens)) === input.priorInputSample
+            ) {
+                latchedRepeats++;
+                expect({ seed, plan }).toEqual({ seed, plan: release });
+            }
             if (plan.tagNumbers.length > release.tagNumbers.length) extended++;
             if (plan.shouldDrop && !release.shouldDrop) turnedSkipIntoDrop++;
         }
@@ -146,6 +160,66 @@ describe("emergency planner with our count of the last request served", () => {
         // The generated set must exercise the change, not only the identity.
         expect(extended).toBeGreaterThan(500);
         expect(turnedSkipIntoDrop).toBeGreaterThan(200);
+        expect(latchedRepeats).toBeGreaterThan(1_000);
+    });
+
+    // Worked inputs from the design review: W=45,000, reduction point 29,250,
+    // a reading at 96% that equals the latch's sample, nothing removed this pass.
+    const latchedAt96 = (floorTags: EmergencyDropTag[]): PlannerInput => ({
+        tags: floorTags.filter((tag) => tag.type === "tool"),
+        floorTags,
+        maxTag: floorTags.length,
+        protectedCutoff: null,
+        usagePercentage: 96,
+        currentTotalInputTokens: 43_200,
+        ceilingTokens: 29_250,
+        priorInputSample: 43_200,
+        hasPriorDrop: true,
+    });
+    const tag = (
+        tagNumber: number,
+        type: "message" | "tool",
+        tokens: number,
+        sinceReading = false,
+    ): EmergencyDropTag => ({
+        tagNumber,
+        type,
+        status: "active",
+        toolName: type === "tool" ? "bash" : null,
+        byteSize: 0,
+        inputByteSize: 0,
+        reasoningByteSize: 0,
+        servedTokens: tokens,
+        reclaimableTokens: type === "tool" ? tokens : 0,
+        sinceReading,
+    });
+
+    it("worked input: 30,000 old tags, an 8,000-token newer candidate, reading equal to the latch: the candidate is dropped, as by the release", () => {
+        const input = latchedAt96([tag(1, "message", 30_000), tag(2, "tool", 8_000, true)]);
+        const release = releasePlanEmergencyDrop(input);
+        expect(release.tagNumbers).toEqual([2]);
+        for (const servedCountTokens of [undefined, 12_000, 35_000, 60_000])
+            expect(planEmergencyDrop({ ...input, servedCountTokens })).toEqual(release);
+    });
+
+    it("worked input: a 5,000-token tail after the batch and a new 35,000-token result, reading unchanged: the result is dropped, as by the release", () => {
+        const input = latchedAt96([tag(1, "message", 5_000), tag(2, "tool", 35_000, true)]);
+        const release = releasePlanEmergencyDrop(input);
+        expect(release.reason).toContain("counted in the reading");
+        expect(release.tagNumbers).toEqual([2]);
+        for (const servedCountTokens of [undefined, 12_000, 35_000, 60_000])
+            expect(planEmergencyDrop({ ...input, servedCountTokens })).toEqual(release);
+    });
+
+    it("after a batch, a reading that changed uses the count again", () => {
+        const input = {
+            ...latchedAt96([tag(1, "message", 30_000), tag(2, "tool", 8_000, true)]),
+            currentTotalInputTokens: 43_900,
+            usagePercentage: 97.6,
+        };
+        const plan = planEmergencyDrop({ ...input, servedCountTokens: 36_000 });
+        expect(plan.reason).toContain("floor from our count ≈36000");
+        expect(plan.reclaimTokens).toBeGreaterThan(releasePlanEmergencyDrop(input).reclaimTokens);
     });
 
     it("a count that is not a positive finite number is no count", () => {

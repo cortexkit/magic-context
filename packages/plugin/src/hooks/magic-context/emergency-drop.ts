@@ -278,7 +278,18 @@ export function planEmergencyDrop(input: {
     // The size the fixed part is inferred from: the reading, or our own count
     // of the same request when that is smaller (see `servedCountTokens`). The
     // size the planner works against (`served`) stays the reading's.
-    const servedCount = input.servedCountTokens;
+    //
+    // After an emergency batch in this pressure episode, the count is set
+    // aside while the reading is still the one that batch was planned on (the
+    // latch stores it rounded): the release's arithmetic runs unchanged. At
+    // 95% or more the latch does not hold, and with the count a reading stuck
+    // high would drop each newly arrived result on every pass; the release
+    // did not, because its inflated fixed part made it skip. In that one
+    // state the plan is exactly the release's, so it never withholds a batch
+    // the release would take.
+    const readingRepeatsLatch =
+        hasPriorDrop && Math.max(0, Math.round(currentTotalInputTokens)) === priorInputSample;
+    const servedCount = readingRepeatsLatch ? undefined : input.servedCountTokens;
     const floorBase =
         servedCount !== undefined && Number.isFinite(servedCount) && servedCount > 0
             ? Math.min(currentTotalInputTokens, servedCount)
