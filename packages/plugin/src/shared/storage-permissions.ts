@@ -49,7 +49,18 @@ function invalidateStoragePermissionMarkers(directory: string): void {
     // A directory that is not in a known root continues to the file system
     // root, because a marker that stays can keep the approval of a loose tree.
     for (let current = resolve(directory); ; current = dirname(current)) {
-        rmSync(join(current, STORAGE_PERMISSIONS_MARKER), { force: true });
+        const marker = join(current, STORAGE_PERMISSIONS_MARKER);
+        try {
+            rmSync(marker, { force: true });
+        } catch (error) {
+            // A read-only mount can reject an unlink even if the marker is absent.
+            if (
+                (error as NodeJS.ErrnoException).code !== "EROFS" ||
+                lstatSync(marker, { throwIfNoEntry: false })
+            ) {
+                throw error;
+            }
+        }
         if (storagePermissionRoots.has(current) || dirname(current) === current) return;
     }
 }
