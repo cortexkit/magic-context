@@ -54,11 +54,10 @@ function invalidateStoragePermissionMarkers(directory: string): void {
         try {
             rmSync(marker, { force: true });
         } catch (error) {
+            const stat = lstatSync(marker, { throwIfNoEntry: false });
+            // Only a regular file can be a certificate.
             // A read-only mount can reject an unlink even if the marker is absent.
-            if (
-                (error as NodeJS.ErrnoException).code !== "EROFS" ||
-                lstatSync(marker, { throwIfNoEntry: false })
-            ) {
+            if (stat?.isFile() || (!stat && (error as NodeJS.ErrnoException).code !== "EROFS")) {
                 throw error;
             }
         }
@@ -342,6 +341,7 @@ export function tightenStorageTreeSync(
     } catch (error) {
         discardMarker = (error as NodeJS.ErrnoException).code !== "ENOENT";
     }
+    // undefined: no loose entry. false: loose entry, marker stays. true: marker removed.
     let markerRemoved: boolean | undefined;
     const fenceDirectory = join(root, "lkg-recovery-fences");
     const visit = (entryPath: string, recursive = true, optional = false, stat?: Stats): void => {
@@ -429,9 +429,8 @@ export function tightenStorageTreeSync(
         visit(join(root, "models"), true, true);
         // The Rust logger does not use the storage helpers.
         visit(join(root, "logs"), true, true);
-        // A loose entry here shows that the tree changed after certification.
-        // A process with a working directory in the tree keeps its access
-        // through the root's mode, so this call tightens all entries, not the next start.
+        // A loose entry shows the tree changed after certification. The root's mode does not
+        // stop a process with a working directory in the tree. Walk the full tree at this start.
         if (markerRemoved !== undefined) {
             certificate = undefined;
             visit(root);
