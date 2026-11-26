@@ -17,10 +17,105 @@ export interface RunnerEvidence {
 }
 
 export function parseRunnerDecision(line: string, session: string): RunnerDecision | null {
+    return parseRunnerLogLine(line, session)?.decision ?? null;
+}
+
+export function parseRunnerLogLine(line: string, sessionFilter?: string): { at: number; session: string; decision: RunnerDecision | null } | null {
+    const match = /ck-mc: session(?: (\S+))?: (.*)$/.exec(line);
+    if (!match) return null;
+    const [, legacySession, body] = match;
     const at = Date.parse(line.match(/(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/)?.[1] ?? "");
-    const match = line.match(/ck-mc: session (\S+): (.*)$/);
-    if (!Number.isFinite(at) || match?.[1] !== session) return null;
-    const body = match[2]!;
+    if (!Number.isFinite(at)) return null;
+    if (legacySession) return sessionFilter !== undefined && sessionFilter !== legacySession
+        ? null : { at, session: legacySession, decision: parseLegacyDecision(at, body!, line) };
+
+    const event = splitRunnerEvent(body!);
+    const session = event?.fields.get("session");
+    if (!event || !session || (sessionFilter !== undefined && sessionFilter !== session)) return null;
+    return { at, session, decision: parseStructuredDecision(at, event.message, event.fields, line) };
+}
+
+function splitRunnerEvent(body: string): { message: string; fields: Map<string, string> } | null {
+    const start = body.search(/ [a-z_][\w.]*=/);
+    if (start < 0) return null;
+    const suffix = body.slice(start).trimEnd();
+    // Consume complete field tokens so a space or `key=value` inside a quoted
+    // value is not mistaken for a new field. The log writer uses JSON escapes.
+    const token = / ([a-z_][\w.]*)=("(?:[^"\\]|\\.)*"|[^ "\s]+)/gy;
+    const fields = new Map<string, string>();
+    let end = 0;
+    for (const match of suffix.matchAll(token)) {
+        end += match[0].length;
+        const value = match[2]!;
+        try {
+            fields.set(match[1]!, value.startsWith('"') ? JSON.parse(value) : value);
+        } catch {
+            return null;
+        }
+    }
+    return end === suffix.length ? { message: body.slice(0, start), fields } : null;
+}
+
+function viewAcceptedAt(at: number, note: string): number {
+    // If the apply answer was lost, a later notice confirms the view only
+    // after the request that first carried it. Credit that request from the
+    // handover time, not from the time printed at the start of the log line.
+    const handedOver = Date.parse(/; handed over at (\S+)$/.exec(note)?.[1] ?? "");
+    return Number.isFinite(handedOver) ? handedOver : at;
+}
+
+function parseStructuredDecision(at: number, message: string, fields: Map<string, string>, line: string): RunnerDecision | null {
+    const field = (key: string) => fields.get(key) ?? "unlogged";
+    const versionText = field("view_version");
+    const version = /^\d+$/.test(versionText) ? Number(versionText) : undefined;
+    const withVersion = (kind: RunnerDecision["kind"], detail: string, view = version): RunnerDecision | null =>
+        view === undefined ? null : { at, kind, version: view, detail, line };
+    switch (message) {
+        case "setup":
+            if (!fields.get("harness") || !fields.get("preset")) return null;
+            return { at, kind: "setup", line, detail: `setup (${field("harness")}, preset ${field("preset")}, model ${field("provider")}/${field("model")}, child harness ${field("child_harness")}, window ${field("window_tokens")}, reserve ${field("reserve_tokens")}, applied view ${field("applied_view")}, statement epoch ${field("statement_epoch")}, stamp ${field("statement_stamp")})` };
+        case "view accepted": {
+            const cut = field("cut");
+            const through = cut === "no cut" ? "none" : /^cut through (.+)$/.exec(cut)?.[1] ?? "unlogged";
+            const decision = withVersion("view", `view=${versionText} edits=${field("edit_count")} cut=${through}`);
+            return decision && { ...decision, at: viewAcceptedAt(at, field("note")) };
+        }
+        case "runner refused a view":
+        case "runner refused a view at a step boundary":
+            return withVersion("view_refused", `runner refused view ${versionText}${message.endsWith("at a step boundary") ? " at a step boundary" : ""}: ${field("refusal")}`);
+        case "unknown answer to a view":
+            return withVersion("view_unknown", `unknown answer to view ${versionText}: ${field("answer")}`);
+        case "runner refused a view offered again":
+            return withVersion("view_reoffer_failed", `runner refused view ${versionText} offered again: ${field("refusal")} (${field("policy_members")})`);
+        case "unknown answer to a view offered again":
+            return withVersion("view_reoffer_failed", `unknown answer to view ${versionText} offered again: ${field("answer")}`);
+        case "rebuilding a view instead of offering it again":
+            return withVersion("view_reoffer_failed", `view ${versionText} ${field("reason")}; rebuilding instead of offering it again`);
+        case "runner operation failed": {
+            const operation = field("operation");
+            const reoffered = /^offering view (\d+) again$/.exec(operation);
+            return reoffered ? withVersion("view_reoffer_failed", `${operation} failed: ${field("error")}`, Number(reoffered[1])) : null;
+        }
+        case "ignoring a prompt reading from a stale view; waiting for a reading under the current view":
+            return { at, kind: "stale_reading", line, detail: `ignoring a prompt of ${field("prompt_tokens")} tokens: reading from view ${versionText}, newest applied ${field("applied_view")}${fields.get("accepted_note") ?? ""}; waiting for a reading under the current view` };
+        // The request carries both the causes and the size. A later line saying
+        // the view did not change is not a second ride.
+        case "the runner requested a ride":
+            return { at, kind: "ride", line, detail: `ride ${field("causes")}, request ${field("request_tokens")} tokens, last prompt ${field("last_prompt_tokens")}, applied view ${field("applied_view")}` };
+        case "signed floor moved; the runner strips signed reasoning at or before it":
+            return { at, kind: "signed_floor", line, detail: `signed floor moved to ${field("signed_floor")} (${field("floor_ordinal")}) from ${field("previous_floor")}; the runner strips signed reasoning at or before it` };
+        case "summary started over a message range":
+            return { at, kind: "summary_start", detail: `summary started over messages ${field("first_ordinal")}..${field("last_ordinal")} (~${field("requested_tokens")} tokens)` };
+        case "published summaries":
+            return { at, kind: "summary_publish", detail: `${field("summary_count")} summaries published, through message ${field("through_ordinal")}` };
+        case "no summary started":
+            return { at, kind: "no_summary", detail: `no summary at ${field("usage_pct")}% (threshold ${field("threshold_pct")}%): ${field("reason")}` };
+        default:
+            return null;
+    }
+}
+
+function parseLegacyDecision(at: number, body: string, line: string): RunnerDecision | null {
     // Setup is a handshake, not proof that the provider's cached prefix changed.
     if (body.startsWith("setup (")) return { at, kind: "setup", detail: body, line };
     // Old shape: b99525c82a, crates/mc-module/src/session.rs:3040.
@@ -29,13 +124,8 @@ export function parseRunnerDecision(line: string, session: string): RunnerDecisi
     const edits = /^view \d+ accepted \((\d+) edits/.exec(body)?.[1];
     // A note may follow the closing parenthesis, so the cut is not end-anchored.
     const cut = /^view \d+ accepted \(\d+ edits, cut through ([^)]+)\)/.exec(body)?.[1];
-    // When ck-mc's apply call lost its answer, the view's acceptance is logged
-    // only once a later notice confirms it, after the request that first carried
-    // it. That line names when the view was handed over, and the view counts from
-    // then, so a rewrite on that request is credited to it.
-    const handedOver = Date.parse(/; handed over at (\S+)$/.exec(body)?.[1] ?? "");
     if (view) return {
-        at: Number.isFinite(handedOver) ? handedOver : at, kind: "view", version: Number(view[1]), line,
+        at: viewAcceptedAt(at, body), kind: "view", version: Number(view[1]), line,
         detail: `view=${view[1]} edits=${edits ?? "unlogged"} cut=${cut ?? (body.includes(", no cut") ? "none" : "unlogged")}`,
     };
     const reoffer = /^(?:runner refused view|unknown answer to view) (\d+) offered again:/.exec(body) ??
