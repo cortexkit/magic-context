@@ -8301,37 +8301,64 @@ pub fn get_compartments(
     if let Some(opencode_db_path) = resolve_opencode_db_path() {
         if let Ok((oc_conn, resolved)) = open_opencode_sessions(&opencode_db_path) {
             if let Some(generation) = resolved.owner(session_id) {
-                let message_table = match generation {
-                    OpenCodeStoreGeneration::V1 => "message",
-                    OpenCodeStoreGeneration::V2 => "session_message",
-                };
-                let timestamp_sql =
-                    format!("SELECT time_created FROM {message_table} WHERE id = ?1");
-                for comp in compartments.iter_mut() {
-                    if let Some(ref start_id) = comp.start_message_id {
-                        if let Ok(ts) =
-                            oc_conn.query_row(&timestamp_sql, rusqlite::params![start_id], |row| {
-                                row.get::<_, Option<i64>>(0)
-                            })
-                        {
-                            comp.start_time = ts;
-                        }
-                    }
-                    if let Some(ref end_id) = comp.end_message_id {
-                        if let Ok(ts) =
-                            oc_conn.query_row(&timestamp_sql, rusqlite::params![end_id], |row| {
-                                row.get::<_, Option<i64>>(0)
-                            })
-                        {
-                            comp.end_time = ts;
-                        }
-                    }
-                }
+                fill_opencode_compartment_times(&oc_conn, generation, &mut compartments);
             }
         }
     }
 
     Ok(compartments)
+}
+
+fn fill_opencode_compartment_times(
+    conn: &Connection,
+    generation: OpenCodeStoreGeneration,
+    compartments: &mut [Compartment],
+) {
+    let boundary_ids: HashSet<&str> = compartments
+        .iter()
+        .flat_map(|comp| {
+            [
+                comp.start_message_id.as_deref(),
+                comp.end_message_id.as_deref(),
+            ]
+        })
+        .flatten()
+        .collect();
+    if boundary_ids.is_empty() {
+        return;
+    }
+    let message_table = match generation {
+        OpenCodeStoreGeneration::V1 => "message",
+        OpenCodeStoreGeneration::V2 => "session_message",
+    };
+    // Pass the entire boundary set in one parameter so long sessions do not hit
+    // SQLite's bind-variable limit. The message ID index handles the lookups.
+    let sql = format!(
+        "SELECT id, time_created FROM {message_table}
+         WHERE id IN (SELECT value FROM json_each(?1))"
+    );
+    let Ok(ids_json) = serde_json::to_string(&boundary_ids) else {
+        return;
+    };
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([ids_json], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }) else {
+        return;
+    };
+    let times: HashMap<_, _> = rows.flatten().collect();
+    for comp in compartments {
+        comp.start_time = comp
+            .start_message_id
+            .as_ref()
+            .and_then(|id| times.get(id).copied());
+        comp.end_time = comp
+            .end_message_id
+            .as_ref()
+            .and_then(|id| times.get(id).copied());
+    }
 }
 
 pub fn get_session_facts(
@@ -10855,6 +10882,94 @@ mod clean_pi_title_tests {
     fn unknown_html_comment_is_passed_through_after_strip() {
         let text = "<!-- some other note --> real intent";
         assert_eq!(clean_pi_title(None, text), "real intent");
+    }
+}
+
+#[cfg(test)]
+mod compartment_time_tests {
+    use super::*;
+    use rusqlite::ffi;
+    use std::cell::Cell;
+    use std::ffi::{c_int, c_uint, c_void};
+
+    fn compartment(start: Option<&str>, end: Option<&str>) -> Compartment {
+        Compartment {
+            id: 1,
+            session_id: "s".into(),
+            sequence: 1,
+            start_message: 1,
+            end_message: 2,
+            start_message_id: start.map(str::to_owned),
+            end_message_id: end.map(str::to_owned),
+            title: String::new(),
+            content: String::new(),
+            created_at: 0,
+            start_time: None,
+            end_time: None,
+            importance: 50,
+            episode_type: None,
+            p1: None,
+            p2: None,
+            p3: None,
+            p4: None,
+            legacy: 0,
+        }
+    }
+
+    unsafe extern "C" fn count_statement(
+        _: c_uint,
+        state: *mut c_void,
+        _: *mut c_void,
+        _: *mut c_void,
+    ) -> c_int {
+        // The test keeps the counter alive for the lifetime of the connection.
+        let count = unsafe { &*state.cast::<Cell<usize>>() };
+        count.set(count.get() + 1);
+        0
+    }
+
+    #[test]
+    fn compartment_times_use_one_statement_for_both_boundaries() {
+        for (generation, table) in [
+            (OpenCodeStoreGeneration::V1, "message"),
+            (OpenCodeStoreGeneration::V2, "session_message"),
+        ] {
+            let count = Cell::new(0_usize);
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TABLE {table} (id TEXT PRIMARY KEY, time_created INTEGER);
+                 INSERT INTO {table} VALUES ('first', 100), ('last', 200), ('null-time', NULL);"
+            ))
+            .unwrap();
+            let mut compartments = [
+                compartment(Some("first"), Some("last")),
+                compartment(Some("last"), Some("missing")),
+                compartment(None, Some("null-time")),
+            ];
+
+            // SAFETY: SQLite calls the counter synchronously on this test's thread.
+            // The counter outlives the connection even if the helper panics.
+            unsafe {
+                let db = conn.handle();
+                assert_eq!(
+                    ffi::sqlite3_trace_v2(
+                        db,
+                        ffi::SQLITE_TRACE_STMT as c_uint,
+                        Some(count_statement),
+                        (&count as *const Cell<usize>).cast_mut().cast(),
+                    ),
+                    ffi::SQLITE_OK
+                );
+                fill_opencode_compartment_times(&conn, generation, &mut compartments);
+                ffi::sqlite3_trace_v2(db, 0, None, std::ptr::null_mut());
+            }
+
+            assert_eq!(
+                compartments.map(|comp| (comp.start_time, comp.end_time)),
+                [(Some(100), Some(200)), (Some(200), None), (None, None)]
+            );
+            assert_eq!(count.get(), 1, "{table} boundary timestamp statements");
+        }
     }
 }
 
