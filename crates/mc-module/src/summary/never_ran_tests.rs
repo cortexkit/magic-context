@@ -646,7 +646,7 @@ async fn never_ran_queued_send_can_finish_between_receipt_polls() {
     assert_eq!(client.sends.lock().unwrap().len(), 2);
 }
 
-/// THALAMUS's Agent Runner samples for a prompt it proved it never handed to
+/// Thalamus's samples for a prompt it proved it never handed to
 /// a host (`send-not-delivered-v1`), kept byte for byte with their sums.
 mod thalamus_not_delivered {
     use super::*;
@@ -758,7 +758,7 @@ mod thalamus_not_delivered {
     }
 }
 
-/// THALAMUS's Agent Runner samples from the change that answers a
+/// Thalamus's samples from the change that answers a
 /// run-starting send as soon as it is stored: `pending` with the run's id,
 /// before the prompt reaches the host (`send-answers-early-v1`,
 /// `send-unknown-v2`, `send-not-delivered-v2`), kept byte for byte with their

@@ -14,7 +14,7 @@
 //! A runner fetches each item of a plan itself, under the child's scope, and
 //! freezes what it fetched. Before that it checks the plan's composition:
 //! every provider the items name, with the tools each serves, in canonical
-//! order, and the composition's digest. The Agent Runner and Broca both refuse
+//! order, and the composition's digest. Thalamus and Broca both refuse
 //! a plan without them, and refuse one whose provider set differs from the
 //! items'. This module learns the reader's tools by fetching the same catalog
 //! first, under the same scope ([`reader_tools`] checks that answer).
@@ -287,7 +287,7 @@ pub fn plan(
     }))
 }
 
-/// The composition the Agent Runner and Broca check: providers sorted by name, each one's
+/// The composition Thalamus and Broca check: providers sorted by name, each one's
 /// tools sorted by name with their capabilities sorted, and no repeats.
 /// Magic Context is listed with no tools, since its item is text only.
 fn composition(tools: &[ReaderTool], provider: &str, module_id: &str) -> Result<Value, String> {
