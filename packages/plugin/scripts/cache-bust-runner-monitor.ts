@@ -16,7 +16,7 @@ import {
     type RunnerFeedRow,
     type RunnerMeterSource,
 } from "./cache-bust-runner-feed";
-import { parseRunnerDecision, type RunnerDecision } from "./cache-bust-runner-log";
+import { parseRunnerLogLine, type RunnerDecision } from "./cache-bust-runner-log";
 import {
     advanceRunnerWave,
     attributeRunnerWave,
@@ -77,13 +77,9 @@ export function loadRunnerHeads(
         if (clock() >= deadline) throw new Error("runner log scan exhausted its budget");
         for (const line of readFileSync(file, "utf8").split("\n")) {
             if (clock() >= deadline) throw new Error("runner log scan exhausted its budget");
-            const session = /ck-mc: session (\S+): /.exec(line)?.[1];
-            if (!session) continue;
-            const at = Date.parse(
-                line.match(/(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)/)?.[1] ?? "",
-            );
-            if (!Number.isFinite(at) || at < now - 7 * 24 * HOUR || at > now) continue;
-            const event = parseRunnerDecision(line, session);
+            const record = parseRunnerLogLine(line);
+            if (!record || record.at < now - 7 * 24 * HOUR || record.at > now) continue;
+            const { session, at, decision: event } = record;
             const fact: RunnerHeadFacts = facts.get(session) ?? {
                 harness: "unknown",
                 decisions: [],
