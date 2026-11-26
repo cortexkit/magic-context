@@ -1,11 +1,14 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { Media } from "@opencode/ai/media";
+import { Message } from "@opencode/ai/schema/messages";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
+import { estimateFinalWireInputTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import { saveLkgSlotToDb } from "../../hooks/magic-context/lkg-persist";
 import { captureLkgSlot } from "../../hooks/magic-context/lkg-replay";
 import { lkgReplayFits } from "../../hooks/magic-context/lkg-replay-fit";
@@ -15,12 +18,27 @@ import type { MessageLike } from "../../hooks/magic-context/transform-operations
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
+import { resetHostMediaForTests } from "../fold/host-media";
 import { registerContext } from "./context";
-import { adaptPayload } from "./payload";
+import { adaptPayload, clonePreservingInstances } from "./payload";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context } from "./types";
 
-test("v2 outer admission serves validated LKG before writer backoff", async () => {
+const png = Buffer.from(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63fccfc0500f000485018084a98c210000000049454e44ae426082",
+    "hex",
+);
+const pngBase64 = png.toString("base64");
+
+function hostMessage(input: Parameters<typeof Message.make>[0]) {
+    return Message.make(input) as unknown as SessionContext["messages"][number];
+}
+
+test.each([
+    ["v2 outer admission serves validated LKG before writer backoff", undefined],
+    ["v2 outer admission replays a saved base64 image before writer backoff", "base64"],
+    ["v2 outer admission replays a saved bytes image before writer backoff", "bytes"],
+] as const)("%s", async (_name, imageSource) => {
     const { dir } = createTestTempDir("mc-v2-lkg-admission-");
     const oldDataHome = process.env.XDG_DATA_HOME;
     const oldDb = process.env.OPENCODE_DB;
@@ -51,7 +69,7 @@ test("v2 outer admission serves validated LKG before writer backoff", async () =
     const fakeTransform = Object.assign(
         async (_input: unknown, output: { messages: MessageLike[] }) => {
             callbacks++;
-            const input = structuredClone(output.messages);
+            const input = clonePreservingInstances(output.messages);
             (output.messages[0].parts[0] as { text: string }).text = "saved managed prefix";
             captureLkgSlot({
                 sessionId: "ses-v2-lkg-order",
@@ -94,6 +112,7 @@ test("v2 outer admission serves validated LKG before writer backoff", async () =
     let duties: Awaited<ReturnType<typeof registerContext>>;
     let execSpy: ReturnType<typeof spyOn> | undefined;
     try {
+        resetHostMediaForTests();
         resetLkgSlotsForTest();
         duties = await registerContext(host);
         const input: SessionContext = {
@@ -105,9 +124,28 @@ test("v2 outer admission serves validated LKG before writer backoff", async () =
             tools: { read: { description: "read file", input: { type: "object" } } },
             messages: [{ id: "u1", role: "user", content: [{ type: "text", text: "hello" }] }],
         };
-        const first = structuredClone(input);
+        if (imageSource) {
+            const options = { info: { width: 1, height: 1 } };
+            const media =
+                imageSource === "base64"
+                    ? Media.base64(pngBase64, "image/png", options)
+                    : Media.bytes(new Uint8Array(png), "image/png", options);
+            input.messages = [
+                hostMessage({
+                    id: "u1",
+                    role: "user",
+                    content: [
+                        { type: "text", text: "hello" },
+                        { type: "media", media, filename: "pixel.png" },
+                        { type: "text", text: "what is in this image?" },
+                    ],
+                }),
+            ];
+        }
+        const first = clonePreservingInstances(input);
         await hook!(first);
-        expect(getSlot(input.sessionID)).toBeDefined();
+        const slot = getSlot(input.sessionID);
+        if (!slot) throw new Error("Fixture LKG was not captured");
         const activeDb = openDatabase();
         if (!activeDb) throw new Error("active throwaway store unavailable");
         updateSessionMeta(activeDb, input.sessionID, { systemPromptTokens: 100 });
@@ -129,13 +167,71 @@ test("v2 outer admission serves validated LKG before writer backoff", async () =
                 throw Object.assign(new Error("writer busy"), { code: "SQLITE_BUSY" });
             return exec(sql);
         });
-        const replay = structuredClone(input);
+        const replay = clonePreservingInstances(input);
+        const tail = imageSource
+            ? [
+                  hostMessage({
+                      id: "a1",
+                      role: "assistant",
+                      content: [{ type: "text", text: "A pixel." }],
+                  }),
+                  hostMessage({
+                      id: "u2",
+                      role: "user",
+                      content: [{ type: "text", text: "Describe its color." }],
+                  }),
+              ]
+            : [];
+        replay.messages.push(...tail);
+        const tailJson = JSON.stringify(tail);
+        const firstJson = JSON.stringify(first.messages);
         await hook!(replay);
         expect(attempts, JSON.stringify(diagnostics)).toBe(1);
-        expect(callbacks).toBe(1);
-        expect(replay.messages).toEqual(first.messages);
+        expect(callbacks, JSON.stringify(diagnostics)).toBe(1);
         expect(replay.system).toEqual(first.system);
         expect(interrupt).not.toHaveBeenCalled();
+        if (imageSource) {
+            expect(diagnostics.some((row) => String(row[1]).endsWith("lkg_replay_served"))).toBe(
+                true,
+            );
+            expect(JSON.stringify(replay.messages.slice(0, first.messages.length))).toBe(firstJson);
+            expect(JSON.stringify(replay.messages.slice(first.messages.length))).toBe(tailJson);
+            const originalImage = first.messages[0].content[1].media;
+            const replayedImage = replay.messages[0].content[1].media;
+            expect(replayedImage).toBeInstanceOf(Media.Asset);
+            expect(replayedImage).not.toBe(originalImage);
+            expect(JSON.stringify(replayedImage)).toBe(JSON.stringify(originalImage));
+            for (const message of replay.messages)
+                expect(() => Message.make(message as never)).not.toThrow();
+
+            const saved = JSON.parse(slot.jsonPrefix) as MessageLike[];
+            expect(saved[0].parts[1]).toMatchObject({
+                type: "media",
+                media: { source: { type: imageSource, mediaType: "image/png", data: pngBase64 } },
+            });
+            expect(saved[0].parts[1].media).not.toHaveProperty("mediaType");
+            const estimate = (messages: MessageLike[]) =>
+                estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: 100,
+                    toolDefinitionTokens: 100,
+                    providerID: "openai",
+                    modelID: "gpt-4.1",
+                });
+            const live = estimate(adaptPayload(first).messages);
+            expect(live.trusted).toBe(true);
+            expect(estimate(saved)).toMatchObject({
+                trusted: true,
+                tokens: live.tokens,
+                messageTokens: live.messageTokens,
+            });
+            // A MIME type alone does not make an image measurable.
+            saved[0].parts[1] = {
+                type: "media",
+                media: { source: { type: "base64", mediaType: "image/png", data: "" } },
+            };
+            expect(estimate(saved).trusted).toBe(false);
+        } else expect(replay.messages).toEqual(first.messages);
     } finally {
         execSpy?.mockRestore();
         await duties?.dispose();
@@ -145,6 +241,7 @@ test("v2 outer admission serves validated LKG before writer backoff", async () =
         load.mockRestore();
         closeDatabase();
         resetLkgSlotsForTest();
+        resetHostMediaForTests();
         resetCtxReduceRegisteredGloballyForTest();
         cleanupTestTempDir(dir);
         if (oldDataHome === undefined) delete process.env.XDG_DATA_HOME;

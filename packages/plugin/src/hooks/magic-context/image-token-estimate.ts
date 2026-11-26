@@ -64,16 +64,25 @@ function estimateImageTokensFromHeader(
     return IMAGE_FALLBACK_TOKENS;
 }
 
-/** Read the OpenCode 2 Media.Asset shape without cloning or encoding its bytes. */
+/** Read a live OpenCode 2 asset or the JSON form stored for replay. */
 function nativeMediaImage(part: Record<string, unknown>) {
     if (part.type !== "media" || !isRecord(part.media)) return undefined;
-    const { mediaType, source } = part.media;
+    const { mediaType: assetMediaType, source } = part.media;
+    // Media.Asset.toJSON omits the derived MIME type and encodes bytes as base64.
+    const encoded = assetMediaType === undefined;
+    const mediaType = encoded && isRecord(source) ? source.mediaType : assetMediaType;
     if (typeof mediaType !== "string" || !mediaType.startsWith("image/")) return undefined;
     let inline: string | Uint8Array | undefined;
     if (isRecord(source)) {
         const { type, data } = source;
-        if (type === "base64" && typeof data === "string" && data.length > 0) inline = data;
-        if (type === "bytes" && data instanceof Uint8Array && data.byteLength > 0) inline = data;
+        if (
+            (type === "base64" || (encoded && type === "bytes")) &&
+            typeof data === "string" &&
+            data.length > 0
+        )
+            inline = data;
+        if (!encoded && type === "bytes" && data instanceof Uint8Array && data.byteLength > 0)
+            inline = data;
     }
     return { mediaType, inline };
 }
