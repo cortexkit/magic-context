@@ -18,8 +18,8 @@ export function nativeCompactionContextLabel(snapshot: SidebarSnapshot): string 
 
 export function compactionOffSidebarRows(snapshot: SidebarSnapshot): CompactionOffSidebarRow[] {
     const rows: CompactionOffSidebarRow[] = [
-        { label: "Memories", value: String(snapshot.memoryCount) },
-        { label: "Notes", value: String(snapshot.sessionNoteCount) },
+        { label: "Memories", value: String(snapshot.memoryCount ?? "") },
+        { label: "Notes", value: String(snapshot.sessionNoteCount ?? "") },
     ];
     const archivedCount = snapshot.archivedCompartmentCount ?? 0;
     if (archivedCount > 0) {
