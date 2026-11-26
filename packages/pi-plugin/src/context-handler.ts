@@ -562,6 +562,7 @@ import {
 	getPiServedTagNumbers,
 	PiServedIdentityError,
 } from "./served-array-ledger";
+import { countPiLastServedRequest } from "./served-count-pi";
 import { reportPiSmallWindow } from "./small-window-pi";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import {
@@ -6135,6 +6136,32 @@ export function registerPiContextHandler(
 			if (!ctxReduceCallable && !budget.sideTurn)
 				clearPiChannel1State(sessionId);
 			const pipelineArgs: RunPipelineArgs = {
+				emergencyServedCount: (calibration, recovery) => {
+					const counted = countPiLastServedRequest({
+						sessionId,
+						envelope: readPiLkgFitEnvelope(
+							ctx,
+							pi,
+							resolvePiContextModelKey(ctx),
+							sessionDecisionCalibration(options.db, sessionId),
+							toolWireSchema,
+						),
+						calibration,
+						recovery,
+					});
+					if ("unavailable" in counted) {
+						sessionLog(
+							sessionId,
+							`emergency served count unavailable: ${counted.unavailable}; the fixed part is inferred from the reading alone`,
+						);
+						return undefined;
+					}
+					sessionLog(
+						sessionId,
+						`emergency served count: ≈${Math.round(counted.tokens)} for the last request served`,
+					);
+					return counted.tokens;
+				},
 				ctxReduceCallable,
 				servedCtxReduceCallable,
 				providerOverflowRecovery:
@@ -9251,6 +9278,20 @@ interface RunPipelineArgs {
 	compactionOff?: boolean;
 	/** ceiling = contextLimit × executeThreshold% for the tiered emergency drop. */
 	emergencyCeilingTokens?: number;
+	/**
+	 * Our own count of the last request this session served, for the emergency
+	 * planner (see countPiLastServedRequest), in the units of the calibration
+	 * the planner prices its tags with on this pass. Undefined when there is no
+	 * count; the reason is logged.
+	 */
+	emergencyServedCount?: (
+		calibration: {
+			systemRatio?: number;
+			toolsRatio: number;
+			proseRatio: number;
+		},
+		recovery: boolean,
+	) => number | undefined;
 	/** Memory-injection config — when omitted, no <session-history> injection runs. */
 	injection?: {
 		/** When false (config `memory.enabled=false`), project memories are NOT
@@ -11854,6 +11895,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 											: undefined,
 										servedBeforePass: emergencyServedBeforeDrain,
 										sinceReading: tagsNewerThanReading,
+										servedCountTokens: args.emergencyServedCount
+											? (calibration) =>
+													args.emergencyServedCount?.(
+														calibration,
+														providerOverflow,
+													)
+											: undefined,
 									}
 								: undefined,
 						caveman: args.isSubagent ? undefined : args.heuristics?.caveman,

@@ -93,7 +93,61 @@ export function estimatePiOverflowRecoveryInputTokens(
 	envelope: PiFitEnvelope | undefined,
 	options: { fitEnvelope?: boolean } = {},
 ): number | undefined {
+	return countPiRequestTokens(servedMessages, envelope, {
+		fitEnvelope: options.fitEnvelope ?? true,
+		activeToolsOnly: false,
+		serializedImages: true,
+	});
+}
+
+/**
+ * Our own count of a served Pi request (system prompt, tool definitions and
+ * messages) in the units the emergency planner prices tags in on the same
+ * pass: the tag calibration given, only the active tools (what the request
+ * carries), and images at the price the planner's tags use (the serialized
+ * size during provider-overflow recovery, the per-image cost otherwise).
+ * Undefined when the envelope cannot be sized or a message holds content the
+ * count does not know.
+ */
+export function countPiServedRequestTokens(
+	servedMessages: readonly unknown[],
+	envelope: PiFitEnvelope | undefined,
+	options: {
+		calibration: {
+			systemRatio?: number;
+			toolsRatio: number;
+			proseRatio: number;
+		};
+		recovery: boolean;
+	},
+): number | undefined {
+	return countPiRequestTokens(servedMessages, envelope, {
+		fitEnvelope: false,
+		activeToolsOnly: true,
+		serializedImages: options.recovery,
+		calibration: options.calibration,
+	});
+}
+
+function countPiRequestTokens(
+	servedMessages: readonly unknown[],
+	envelope: PiFitEnvelope | undefined,
+	options: {
+		fitEnvelope: boolean;
+		activeToolsOnly: boolean;
+		serializedImages: boolean;
+		calibration?: {
+			systemRatio?: number;
+			toolsRatio: number;
+			proseRatio: number;
+		};
+	},
+): number | undefined {
 	if (!envelope || !estimatePiOutgoingInputTokens([], envelope).trusted) return;
+	const toolDefinitionTokens = options.activeToolsOnly
+		? envelope.refusalToolDefinitionTokens
+		: envelope.toolDefinitionTokens;
+	if (toolDefinitionTokens === undefined) return;
 	// Images the model cannot take go out as a short note.
 	const messages = piMessagesWithWireImages(servedMessages, {
 		modelAcceptsImages: envelope.modelAcceptsImages !== false,
@@ -128,6 +182,7 @@ export function estimatePiOverflowRecoveryInputTokens(
 			const part = value as { type?: string; data?: string };
 			if (part.type === "image") {
 				if (typeof part.data !== "string") return;
+				if (!options.serializedImages) continue;
 				const delta = estimateTokens(JSON.stringify(part)) - PI_IMAGE_TOKENS;
 				if (message.role === "toolResult") raw.toolCall += delta;
 				else raw.conversation += delta;
@@ -139,14 +194,23 @@ export function estimatePiOverflowRecoveryInputTokens(
 				return;
 		}
 	}
+	const calibration =
+		options.calibration ??
+		envelope.calibration ??
+		calibrationForModelKey(envelope.modelKey);
 	return providerMass(
 		{
 			system: envelope.systemTokens,
-			tools: envelope.toolDefinitionTokens + raw.toolCall,
+			tools: toolDefinitionTokens + raw.toolCall,
 			prose: raw.conversation,
 		},
-		envelope.calibration ?? calibrationForModelKey(envelope.modelKey),
-		options.fitEnvelope ?? true,
+		{
+			...calibration,
+			// A recovery fit calibration carries one ratio for every part.
+			systemRatio: calibration.systemRatio ?? calibration.proseRatio,
+			seeded: (calibration as { seeded?: boolean }).seeded ?? true,
+		} as DecisionCalibration,
+		options.fitEnvelope,
 	);
 }
 
