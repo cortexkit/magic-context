@@ -2052,7 +2052,10 @@ export async function registerContext(context: V2Context) {
                 if (!usageController.signal.aborted)
                     log("[magic-context] v2 usage subscription failed", error);
             } finally {
-                // A disconnected stream may miss a cleared or replaced stage.
+                // While the stream was down, an event that cancelled or replaced a
+                // pending undo may have been missed, so the records taken when undos
+                // were first announced can describe the wrong messages. Drop them all:
+                // a later commit then finds no record and deletes nothing.
                 revertMessageCleanup.discardAllStageProofs();
             }
             if (usageController.signal.aborted) break;
