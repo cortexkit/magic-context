@@ -60,21 +60,6 @@ function baselineColumns(f: Fixture) {
     );
 }
 
-/** The baseline columns of a newly created metadata row: each column's declared default. */
-const emptyBaseline = (f: Fixture) => {
-    const defaults = new Map(
-        (
-            f.db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
-                name: string;
-                dflt_value: string | null;
-            }>
-        ).map((column) => [column.name, column.dflt_value ?? "NULL"]),
-    );
-    return Object.fromEntries(
-        Object.keys(baselineColumns(f)).map((key) => [key, defaults.get(key)]),
-    );
-};
-
 const pendingOps = (f: Fixture) =>
     (
         f.db
@@ -178,10 +163,9 @@ test("a compaction request before any context pass stores no baseline, and the f
         expect(storedRow(f)).toBeNull();
         const result = await f.prepareCompaction();
         expect(result?.summary).toBe(CHECKPOINT_NOTE);
-        // The hook may create the session's metadata row, but every baseline
-        // column keeps the value a new row starts with.
-        expect(storedRow(f)).not.toBeNull();
-        expect(baselineColumns(f)).toEqual(emptyBaseline(f));
+        // The call neither stores a baseline nor creates the session's
+        // metadata row; the first context pass does that.
+        expect(storedRow(f)).toBeNull();
         const first = await f.pass();
         expect(first.logs.some((line) => /first_render=true/.test(line))).toBe(true);
         expect(headText(first, 0)).toContain("Review history 0");
@@ -228,10 +212,113 @@ test("in Rust mode a compaction request with no running checkpoint row answers f
         const owned = await record(f);
         expect(owned?.head).toBe(moduleHead);
         expect(owned?.cutSeq).toBeUndefined();
-        expect(storedRow(f)).not.toBeNull();
-        expect(baselineColumns(f)).toEqual(emptyBaseline(f));
+        expect(storedRow(f)).toBeNull();
     } finally {
         await f.cleanup();
         served.mockRestore();
+    }
+}, 60000);
+
+test("a compaction request with no running checkpoint row writes nothing to the context database", async () => {
+    const { f } = await servedDeltaWithHeldDrop(66886);
+    try {
+        // Rows this connection has inserted, updated or deleted since it opened.
+        const changes = () =>
+            (f.db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+        const before = changes();
+        expect((await f.prepareCompaction())?.summary).toBe(CHECKPOINT_NOTE);
+        expect(changes()).toBe(before);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+// A render that stored its baseline and then wrote the previous one back would
+// leave the new baseline stored whenever the second write failed (or the
+// process stopped between the two), and the next pass would send it.
+test("a compaction request with no running checkpoint row cannot leave its render stored when a write fails", async () => {
+    const { f, waiting } = await servedDeltaWithHeldDrop(67886);
+    try {
+        const rowBefore = storedRow(f);
+        const materializedAt = rowBefore?.cached_m0_materialized_at;
+        expect(materializedAt).toMatch(/^\d+$/);
+        // Refuse only a write that puts the stored materialization time back.
+        f.db.exec(
+            `CREATE TEMP TRIGGER rowless_restore_fails BEFORE UPDATE OF cached_m0_materialized_at ON session_meta WHEN NEW.cached_m0_materialized_at IS ${materializedAt} AND OLD.cached_m0_materialized_at IS NOT ${materializedAt} BEGIN SELECT RAISE(ABORT, 'restore failed'); END`,
+        );
+        try {
+            expect((await f.prepareCompaction())?.summary).toBe(CHECKPOINT_NOTE);
+        } finally {
+            f.db.exec("DROP TRIGGER rowless_restore_fails");
+        }
+        expect(storedRow(f)).toEqual(rowBefore);
+        const after = await f.pass();
+        expect(after.bytes).toBe(waiting.bytes);
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+// OpenCode 2 can create a child session before its parent link is readable, so
+// the first lookups that classify a session as a subagent may fail; only five
+// attempts are made before a cool-down. A request that cuts nothing must not
+// spend them, or the session's first context pass treats a child as a primary.
+test("a compaction request with no running checkpoint row spends no attempt to classify the session", async () => {
+    const f = await oc2ContextFixture(68886, options);
+    try {
+        const { directory } = f.raw
+            .prepare("SELECT directory FROM session_v2 WHERE id = ?")
+            .get(f.session) as { directory: string };
+        // The host row that names the session's parent cannot be read yet.
+        f.raw.prepare("DELETE FROM session_v2 WHERE id = ?").run(f.session);
+        expect((await f.prepareCompaction())?.summary).toBe(CHECKPOINT_NOTE);
+        // A new message moves the watermark, so the second request renders afresh.
+        f.user("A later question while the parent link is still unreadable.", 1000);
+        expect((await f.prepareCompaction())?.summary).toBe(CHECKPOINT_NOTE);
+        const rowAfterRequests = storedRow(f);
+        // The parent link becomes readable: the session is a child session.
+        f.raw
+            .prepare("INSERT INTO session_v2(id, directory, parent_id) VALUES (?, ?, ?)")
+            .run(f.session, directory, "ses-parent");
+        await f.pass();
+        expect(storedRow(f)?.is_subagent).toBe("1");
+        // Neither request created the session's metadata row.
+        expect(rowAfterRequests).toBeNull();
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);
+
+// A completed checkpoint whose record the fallback wrote while its row was
+// running is served as the carrier of earlier history. A later request that
+// cuts nothing must not replace that record, or the next pass stops serving the
+// checkpoint and sends the synthetic head message in its place.
+test("a compaction request with no running checkpoint row leaves the record of a stored checkpoint in place", async () => {
+    const f = await oc2ContextFixture(69886, options);
+    const supply = spyOn(NativeFoldReplay.prototype, "supply").mockResolvedValue(false);
+    let restored = false;
+    try {
+        f.compartment(4);
+        await f.pass();
+        f.compartment(10);
+        await f.pass();
+        const id = await f.nativeFold(3, 3, "");
+        supply.mockRestore();
+        restored = true;
+        await f.pass();
+        const served = await f.pass();
+        // Setup: the stored checkpoint leads the request as the history carrier.
+        expect(served.draft.messages[0]?.id).toBe(id);
+        const owned = await record(f);
+        expect(owned?.cutSeq).toBeDefined();
+        expect((await f.prepareCompaction())?.summary).toBe(CHECKPOINT_NOTE);
+        const recordAfterRequest = await record(f);
+        const next = await f.pass();
+        expect(next.draft.messages[0]?.id).toBe(id);
+        expect(next.bytes).toBe(served.bytes);
+        expect(recordAfterRequest).toEqual(owned);
+    } finally {
+        if (!restored) supply.mockRestore();
+        await f.cleanup();
     }
 }, 60000);

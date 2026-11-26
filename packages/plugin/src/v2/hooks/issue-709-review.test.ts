@@ -969,7 +969,7 @@ const firstRenders = (logs: string[]) =>
 const correctiveHards = (logs: string[]) =>
     logs.filter((line) => /HARD.*executed=true/.test(line) && !/reason=first_render/.test(line));
 
-test("render review: first compaction before context initializes durable storage", async () => {
+test("render review: first compaction before any context pass renders once on the next pass", async () => {
     const f = await fixture(4910, foldFeaturesOff);
     try {
         expect(f.meta().systemPromptHash ?? "").toBe("");
@@ -1011,11 +1011,11 @@ test("cold fold adopts the initialized MD5 system identity without a corrective 
         await f.cleanup();
     }
 });
-test("render review: absent system identity after storage probe needs no corrective HARD", async () => {
+test("render review: absent system identity after a repeated cold compaction needs no corrective HARD", async () => {
     const f = await fixture(4913, foldFeaturesOff);
     try {
-        // The first compaction starts opening durable storage but rejects its own request.
-        // A retry can then render before any system hook has run.
+        // A first compaction request (its outcome is not asserted) and a retry
+        // both run before any system hook has run.
         await f.fold(true).catch(() => undefined);
         expect(f.meta().systemPromptHash ?? "").toBe("");
         await f.fold(true);

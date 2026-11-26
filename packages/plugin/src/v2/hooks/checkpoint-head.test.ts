@@ -310,11 +310,12 @@ test("compaction summary overrides the host keepID with an own undefined key", a
         const draft = f.draft();
         await f.hooks.get("compaction")!(draft);
         // The host stores the fixed note; Magic Context's own fold record keeps
-        // the history head the checkpoint stands for.
+        // the history head the checkpoint stands for. This request has no running
+        // checkpoint row, so the record the fixture bound to the stored
+        // checkpoint stays, and its head is the text it stored.
         expect(draft.result?.summary).toBe(CHECKPOINT_NOTE);
-        expect(((await f.storage.get("fold/v1/s")) as FoldIdentity).head).toContain(
-            "session-history",
-        );
+        const owned = (await f.storage.get("fold/v1/s")) as FoldIdentity;
+        expect(owned.head ?? owned.submitted).toContain("session-history");
         expect(Object.hasOwn(draft.result?.metadata ?? {}, "keepID")).toBe(true);
         expect({ keepID: "host-default", ...draft.result?.metadata }.keepID).toBeUndefined();
         expect(JSON.parse(JSON.stringify(draft.result)).metadata).toEqual({});

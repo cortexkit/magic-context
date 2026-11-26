@@ -482,5 +482,10 @@ async function scenario(arm: Arm) {
     300000,
 );
 
+// On 2.0.22 and 2.1.0 this guards the fix: the hook is asked before the row
+// exists. On 2.3.1+ the host usually records the row first once the plugin ahead
+// of Magic Context has held the call, so Magic Context answers it as a running
+// checkpoint and this arm passes with or without the fix there: on those hosts
+// it is a compatibility check, and the background arm is the guard.
 test(`an automatic checkpoint keeps the served history head (OpenCode ${hostVersion})`, () =>
     scenario("auto"), 300000);

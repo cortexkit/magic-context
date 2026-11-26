@@ -25,6 +25,10 @@ export interface FoldIdentity {
     reason?: "host_rerender" | "host_cut_before_watermark" | "boot_recovery";
 }
 
+/** Whether a fold record stands for a checkpoint the host stored or was running. */
+export const boundToCheckpoint = (record: FoldIdentity) =>
+    record.cutSeq !== undefined || record.rendered !== undefined || record.answered !== undefined;
+
 /** A host checkpoint has two identities: our submitted summary and its rendered wrapper.
  * GA provider compaction dispatches the hook before Started (mime-hxnftcv1.js:385/387);
  * the projector assigns seq from the later event (mime-26m96hf0.js:252-260).
@@ -59,6 +63,12 @@ export class FoldOwner {
         checkpointText?: string;
         /** The id of the host's running checkpoint row being answered, when it has one. */
         checkpointID?: string;
+        /**
+         * Leave a record that already stands for a host checkpoint in place and
+         * return it, for a request with no running checkpoint row: nothing is
+         * cut by that request, and the stored checkpoint still needs its record.
+         */
+        keepBound?: boolean;
     }): Promise<FoldIdentity> {
         return this.serial(args.sessionID, async () => {
             const previous = await this.read(args.sessionID);
@@ -76,6 +86,7 @@ export class FoldOwner {
                 }
                 return previous;
             }
+            if (args.keepBound && previous && boundToCheckpoint(previous)) return previous;
             const head = args.materialize();
             const submitted = args.checkpointText ?? head;
             const next: FoldIdentity = {
