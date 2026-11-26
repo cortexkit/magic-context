@@ -1275,6 +1275,33 @@ mod tests {
     }
 
     #[test]
+    fn save_keeps_recent_backups_when_the_clock_moves_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "v0");
+        std::fs::create_dir_all(&backups).unwrap();
+        for day in 1..=5 {
+            let name = format!("magic-context.user.299901{day:02}T000000.000000000Z-00.jsonc");
+            std::fs::write(backups.join(name), format!("old{day}")).unwrap();
+        }
+        let contents = || -> Vec<String> {
+            backup_copies(&backups)
+                .iter()
+                .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+                .collect()
+        };
+
+        write_config(&path, "v1").expect("save after clock rollback");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1");
+        assert_eq!(contents(), vec!["old2", "old3", "old4", "old5", "v0"]);
+
+        for version in 2..=6 {
+            write_config(&path, &format!("v{version}")).expect("save after clock rollback");
+        }
+        assert_eq!(contents(), vec!["v1", "v2", "v3", "v4", "v5"]);
+    }
+
+    #[test]
     fn copy_failure_refuses_the_save_and_leaves_the_config_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let (_env, backups) = isolated_data_home(dir.path());
@@ -1436,6 +1463,70 @@ mod tests {
             .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
             .collect();
         assert_eq!(contents, vec!["A".to_string(), first.to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_user_and_project_saves_back_up_each_replaced_version() {
+        use std::os::unix::fs::symlink;
+        use std::sync::{Arc, Barrier, Condvar, Mutex};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let project = dir.path().join("project");
+        let target = project.join(".cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "A").unwrap();
+        let target = target.canonicalize().unwrap();
+        let project_alias = dir.path().join("project-alias");
+        symlink(&project, &project_alias).unwrap();
+        let user = dir.path().join("user-config.jsonc");
+        symlink(project_alias.join(".cortexkit/magic-context.jsonc"), &user).unwrap();
+
+        let arrivals = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let hook_arrivals = Arc::clone(&arrivals);
+        let hook_path = target.clone();
+        let _hook = BackupReadHookGuard::set(Arc::new(move |read_path: &Path| {
+            if read_path.canonicalize().ok().as_deref() != Some(hook_path.as_path()) {
+                return;
+            }
+            let (count, ready) = &*hook_arrivals;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            ready.notify_all();
+            let _ = ready
+                .wait_timeout_while(count, Duration::from_secs(2), |count| *count < 2)
+                .unwrap();
+        }));
+
+        let start = Arc::new(Barrier::new(2));
+        let user_start = Arc::clone(&start);
+        let user_save = std::thread::spawn(move || {
+            user_start.wait();
+            write_config(&user, "B")
+        });
+        let project_save = std::thread::spawn(move || {
+            start.wait();
+            write_project_config(project.to_str().unwrap(), "C")
+        });
+        let user_saved = user_save.join();
+        let project_saved = project_save.join();
+        user_saved.unwrap().expect("user save");
+        project_saved.unwrap().expect("project save");
+
+        let last = std::fs::read_to_string(&target).unwrap();
+        let first = match last.as_str() {
+            "B" => "C",
+            "C" => "B",
+            _ => panic!("unexpected final config: {last}"),
+        };
+        let mut contents: Vec<String> = backup_copies(&backups)
+            .iter()
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, vec!["A", first]);
     }
 
     /// Open the lock file of a backup scope and lock it, as a save in a
