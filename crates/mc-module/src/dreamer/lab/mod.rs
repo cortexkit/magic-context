@@ -846,6 +846,7 @@ fn tool_definitions(spec: &Spec) -> Result<Vec<Value>, String> {
                 "from":{"type":"string","description":"Inclusive start date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
                 "to":{"type":"string","description":"Inclusive end date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
                 "limit":{"type":"integer","minimum":1,"maximum":3,"default":1,"description":"Multiply group sizes: 4 summaries, 4 person messages, 3 commits, and 4 agent messages if included."},
+                "order":{"type":"string","enum":["relevance","newest"],"default":"relevance","description":"Use newest to learn what was done most recently about the subject."},
                 "include_agent":{"type":"boolean","default":false}
             }}),
             true,
