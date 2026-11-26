@@ -18,6 +18,7 @@ import {
     type DreamTaskBacklog,
     type DreamTaskBacklogMap,
     type DreamTaskName,
+    MIN_POOL_TO_CLASSIFY,
 } from "./task-registry";
 
 /**
@@ -450,7 +451,10 @@ export function getDreamTaskBacklog(
         case "classify-memories": {
             const total = countLiveMemories(db, projectPath);
             return {
-                pending: countLiveMemories(db, projectPath, { unclassifiedOnly: true }),
+                pending:
+                    total >= MIN_POOL_TO_CLASSIFY
+                        ? countLiveMemories(db, projectPath, { unclassifiedOnly: true })
+                        : 0,
                 total,
             };
         }
@@ -659,9 +663,7 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             return countLiveMemories(db, project) > 0;
 
         case "classify-memories":
-            // Classification scores the live project memory pool directly. It has
-            // no file gate, watermark, or completeness prerequisites.
-            return countLiveMemories(db, project) > 0;
+            return countLiveMemories(db, project) >= MIN_POOL_TO_CLASSIFY;
 
         case "retrospective":
             // Cheap pre-gate: any project session updated since the CONTENT
