@@ -120,6 +120,8 @@ nix = { version = "0.31.3", features = ["fs", "time", "user"] }
 windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
+cortexkit-doctor = "=0.2.0"
+cortexkit-log-manifest = "=0.2.0"
 cortexkit-role-tool-provider-conformance = "=0.15.18"
 rusqlite = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["test-util"] }
