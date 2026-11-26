@@ -60,9 +60,13 @@ import {
     beginCurateCategoryRun,
     type CurateMemoryCategory,
     curateCategoryForMemoryCategory,
-    curateTaskStateAfterSuccess,
+    curateTaskStateAfterCategoryTurn,
 } from "./curate-category-rotation";
-import { takeCurateSafetyRefusalCount } from "./curate-memory-safety";
+import {
+    type CurateSafetyRefusalReason,
+    parseCurateSafetyRefusal,
+    takeCurateSafetyRefusalCount,
+} from "./curate-memory-safety";
 import {
     docsBaseHashes,
     docsChangeSet,
@@ -365,15 +369,15 @@ function validateCurateAssistantText(text: string): string {
 interface CurateMemoryOperationSummary {
     totalCalls: number;
     completedActions: string[];
+    refusals: CurateSafetyRefusalReason[][];
 }
 
-interface CurateValidatedOutput {
-    text: string | null;
-    memoryOperations: CurateMemoryOperationSummary;
+function emptyCurateMemoryOperations(): CurateMemoryOperationSummary {
+    return { totalCalls: 0, completedActions: [], refusals: [] };
 }
 
 export function inspectCurateMemoryOperations(messages: unknown): CurateMemoryOperationSummary {
-    const summary: CurateMemoryOperationSummary = { totalCalls: 0, completedActions: [] };
+    const summary = emptyCurateMemoryOperations();
     if (!Array.isArray(messages)) return summary;
 
     for (const message of messages) {
@@ -385,37 +389,100 @@ export function inspectCurateMemoryOperations(messages: unknown): CurateMemoryOp
             if (!isRecord(part) || part.type !== "tool") continue;
             const toolName = part.tool ?? part.name;
             if (toolName !== "ctx_memory") continue;
-            summary.totalCalls += 1;
-            if (!isRecord(part.state) || part.state.status !== "completed") continue;
-            const input = isRecord(part.state.input) ? part.state.input : null;
+            const state = isRecord(part.state) ? part.state : null;
+            const input = isRecord(state?.input) ? state.input : null;
             const action = input?.action;
-            const output = typeof part.state.output === "string" ? part.state.output : "";
+            const output =
+                state?.status === "completed" && typeof state.output === "string"
+                    ? state.output
+                    : null;
             if (
-                (output === "completed" &&
-                    (action === "merge" || action === "archive" || action === "update")) ||
+                output &&
+                (action === "get" || action === "list") &&
+                /^(?:Found \d+ (?:active )?memor(?:y|ies):|No active memories found\.$|id -?\d+: not found or not visible from this project)/.test(
+                    output,
+                )
+            )
+                continue;
+            summary.totalCalls += 1;
+            if (!output) continue;
+            if (
                 (action === "merge" && output.startsWith("Merged memories")) ||
                 (action === "archive" && output.startsWith("Archived memor")) ||
                 (action === "update" && output.startsWith("Updated memory"))
-            )
+            ) {
                 summary.completedActions.push(action);
+            } else {
+                const reasons = parseCurateSafetyRefusal(action, output);
+                if (reasons) summary.refusals.push(reasons);
+            }
         }
     }
 
     return summary;
 }
 
+function unrecognisedCurateOperations(operations: CurateMemoryOperationSummary): number {
+    return operations.totalCalls - operations.completedActions.length - operations.refusals.length;
+}
+
+function validateCurateOutput(
+    messages: unknown,
+    text: string | null,
+    transport: "hidden" | "child",
+): CurateMemoryOperationSummary {
+    const operations = inspectCurateMemoryOperations(messages);
+    if (text) validateCurateAssistantText(text);
+    // Applied changes are already in the store; don't run a fallback against a
+    // partly changed pool. Without applied changes, every mutation must be refused.
+    if (
+        operations.completedActions.length ||
+        (operations.refusals.length && !unrecognisedCurateOperations(operations))
+    )
+        return operations;
+
+    // Preserve the child-session empty-completion classification and the hidden
+    // carrier's missing-tool-result diagnostic, even when both lack prose.
+    if (!text && transport === "child") throw new Error("Dreamer returned no assistant output.");
+    if (operations.totalCalls > 0)
+        throw new Error("Curate returned no completed ctx_memory tool result.");
+    if (!text) throw new Error("Dreamer returned no assistant output.");
+    return operations;
+}
+
 function formatExpiredArchiveProgress(count: number): string {
     return `curate: archived ${count} expired ${count === 1 ? "memory" : "memories"}`;
 }
 
-function formatCurateMemoryOperations(actions: readonly string[]): string {
+function formatCurateMemoryOperations(operations: CurateMemoryOperationSummary): string | null {
+    const { completedActions: actions, refusals } = operations;
+    if (!actions.length && !refusals.length) return null;
     const actionCounts = new Map<string, number>();
     for (const action of actions) actionCounts.set(action, (actionCounts.get(action) ?? 0) + 1);
     const actionDetail = [...actionCounts]
         .map(([action, count]) => (count === 1 ? action : `${action} ×${count}`))
         .join(", ");
-    const noun = actions.length === 1 ? "operation" : "operations";
-    return `curate: ${actions.length} memory ${noun} applied${actionDetail ? ` (${actionDetail})` : ""}`;
+    const applied = actions.length
+        ? `${actions.length} memory ${actions.length === 1 ? "operation" : "operations"} applied (${actionDetail})`
+        : "no changes";
+    const detail = [`curate: ${applied}`];
+    if (refusals.length) {
+        const reasonCounts = new Map<CurateSafetyRefusalReason, number>();
+        for (const reasons of refusals) {
+            for (const reason of reasons)
+                reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+        }
+        const countedReasons = [...reasonCounts]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([reason, count]) => `${reason} ×${count}`)
+            .join(", ");
+        detail.push(
+            `${refusals.length} ${refusals.length === 1 ? "operation" : "operations"} refused (${countedReasons})`,
+        );
+    }
+    const unrecognised = unrecognisedCurateOperations(operations);
+    if (unrecognised) detail.push(`${unrecognised} with an unrecognised result`);
+    return detail.join("; ");
 }
 
 function requireDreamClient(client: PluginContext["client"] | undefined): PluginContext["client"] {
@@ -768,6 +835,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 : null;
         }
 
+        let curateCategory: CurateMemoryCategory | undefined;
         try {
             const skip = (reason: string): TaskExecOutcome => {
                 log(`[dreamer] ${config.task}: skipped (${reason})`);
@@ -1210,6 +1278,9 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 reportProgress,
                 leaseAcquisition,
                 moduleRoute,
+                onCurateCategory: (category) => {
+                    curateCategory = category;
+                },
             });
         } catch (error) {
             if (error instanceof DreamTokenBudgetExceeded) {
@@ -1232,7 +1303,17 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 failureDetail: formatDreamRunFailure(failure),
                 ...(retrospectiveOverflow
                     ? { schedulePatch: retrospectiveOverflow.schedulePatch }
-                    : {}),
+                    : curateCategory && !transient
+                      ? {
+                            schedulePatch: {
+                                taskStateJson: curateTaskStateAfterCategoryTurn(
+                                    db,
+                                    projectIdentity,
+                                    curateCategory,
+                                ),
+                            },
+                        }
+                      : {}),
             };
         } finally {
             deps.onProgress?.(null, config.task);
@@ -1961,6 +2042,7 @@ async function runAgenticTask(
         onBudgetUpdate: (state: { spent: number; finalizeFired: boolean }) => void;
         leaseAcquisition: LeaseAcquisition;
         moduleRoute?: DreamerModuleRoute;
+        onCurateCategory: (category: CurateMemoryCategory) => void;
     },
 ): Promise<TaskExecOutcome> {
     const { db, projectIdentity, holderId, leaseKey } = ctx;
@@ -2058,6 +2140,7 @@ async function runAgenticTask(
             );
             curateMemories = scope?.memories ?? [];
             curateCategory = scope?.category;
+            if (curateCategory) helpers.onCurateCategory(curateCategory);
             log(
                 `[dreamer] curate pool: category=${curateCategory ?? "none"} in_scope=${curateMemories.length} expired_archived=${expiredArchived}`,
             );
@@ -2114,9 +2197,9 @@ async function runAgenticTask(
             task === "curate"
                 ? curateChunks
                 : [{ memories: [] as CuratePromptMemory[], crossChunkCandidates: [] as string[] }];
-        const completedActions: string[] = [];
+        const curateOperations = emptyCurateMemoryOperations();
         let curateRefused = 0;
-        let run: { output: unknown[]; validated: string | CurateValidatedOutput } = {
+        let run: { output: unknown[]; validated: string | CurateMemoryOperationSummary } = {
             output: [],
             validated: "",
         };
@@ -2176,19 +2259,10 @@ async function runAgenticTask(
                         config.timeoutMinutes * 60 * 1000,
                     ),
                     signal: abortController.signal,
-                    parse: (text, completion): string | CurateValidatedOutput => {
+                    parse: (text, completion): string | CurateMemoryOperationSummary => {
                         if (task === "maintain-docs") parseDocsProposalOutput(text);
                         if (task !== "curate") return text;
-                        const memoryOperations = inspectCurateMemoryOperations(completion.messages);
-                        if (text) validateCurateAssistantText(text);
-                        if (
-                            memoryOperations.totalCalls > 0 &&
-                            memoryOperations.completedActions.length === 0
-                        )
-                            throw new Error("Curate returned no completed ctx_memory tool result.");
-                        if (!text && memoryOperations.completedActions.length === 0)
-                            throw new Error("Dreamer returned no assistant output.");
-                        return { text: text || null, memoryOperations };
+                        return validateCurateOutput(completion.messages, text, "hidden");
                     },
                 });
                 childSessionId = hidden.childSessionId;
@@ -2263,7 +2337,7 @@ async function runAgenticTask(
                                 preferResponseOnMissingData: true,
                             });
                         },
-                        validateOutput: (messages): string | CurateValidatedOutput => {
+                        validateOutput: (messages): string | CurateMemoryOperationSummary => {
                             const text = extractLatestAssistantText(messages);
                             if (task !== "curate") {
                                 if (!text) throw new Error("Dreamer returned no assistant output.");
@@ -2271,27 +2345,16 @@ async function runAgenticTask(
                                 return text;
                             }
 
-                            const memoryOperations = inspectCurateMemoryOperations(messages);
-                            if (text) validateCurateAssistantText(text);
-                            if (memoryOperations.completedActions.length > 0) {
-                                return { text, memoryOperations };
-                            }
-                            if (!text) throw new Error("Dreamer returned no assistant output.");
-                            if (memoryOperations.totalCalls > 0) {
-                                throw new Error(
-                                    "Curate returned no completed ctx_memory tool result.",
-                                );
-                            }
-                            return { text, memoryOperations };
+                            return validateCurateOutput(messages, text, "child");
                         },
                     },
                 );
                 promptSettled = true;
             }
-            if (task === "curate") {
-                completedActions.push(
-                    ...(run.validated as CurateValidatedOutput).memoryOperations.completedActions,
-                );
+            if (typeof run.validated !== "string") {
+                curateOperations.totalCalls += run.validated.totalCalls;
+                curateOperations.completedActions.push(...run.validated.completedActions);
+                curateOperations.refusals.push(...run.validated.refusals);
                 curateRefused += takeCurateSafetyRefusalCount(childSessionId ?? "");
             }
             if (childSessionId && !deps.hiddenCompletionExecutor) {
@@ -2307,18 +2370,14 @@ async function runAgenticTask(
                 childSessionId = null;
             }
         }
-        if (task === "curate")
-            run.validated = {
-                text: null,
-                memoryOperations: { totalCalls: completedActions.length, completedActions },
-            };
-
         if (leaseLost) throw new Error("Dream lease lost during task");
 
         if (curateRefused > 0) {
             helpers.reportProgress(curateRefused, curateRefused);
             log(`[dreamer] curate safety summary: refused=${curateRefused}`);
         }
+        const unrecognised = unrecognisedCurateOperations(curateOperations);
+        if (unrecognised > 0) log(`[dreamer] curate result summary: unrecognised=${unrecognised}`);
 
         recordInvocation("completed", run.output);
 
@@ -2349,8 +2408,6 @@ async function runAgenticTask(
             }
         }
 
-        const curateOutput =
-            task === "curate" ? (run.validated as CurateValidatedOutput) : undefined;
         const curateScopeProgress =
             task === "curate" && curateCategory && curateMemories
                 ? `curate: ${curateCategory} (${curateMemories.length})`
@@ -2358,10 +2415,10 @@ async function runAgenticTask(
         const progress = [
             curateScopeProgress,
             expiredArchived > 0 ? formatExpiredArchiveProgress(expiredArchived) : null,
-            curateOutput && curateOutput.memoryOperations.completedActions.length > 0
-                ? formatCurateMemoryOperations(curateOutput.memoryOperations.completedActions)
+            formatCurateMemoryOperations(curateOperations),
+            curateRefused > 0 && !curateOperations.refusals.length
+                ? `curate: refused ${curateRefused} unsafe mutation(s)`
                 : null,
-            curateRefused > 0 ? `curate: refused ${curateRefused} unsafe mutation(s)` : null,
         ]
             .filter((value): value is string => Boolean(value))
             .join("; ");
@@ -2392,7 +2449,7 @@ async function runAgenticTask(
             ...(curateCategory
                 ? {
                       schedulePatch: {
-                          taskStateJson: curateTaskStateAfterSuccess(
+                          taskStateJson: curateTaskStateAfterCategoryTurn(
                               db,
                               projectIdentity,
                               curateCategory,

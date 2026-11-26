@@ -2233,6 +2233,7 @@ const TEMPLATE_DATA = [
 "[auto-update-checker] \x01 config \x01 is shadowed by \x01\x021p,2p",
 "[auto-update-checker] Pending update applied: \x01",
 "[auto-update-checker] Update available (\x01): \x01 → \x01",
+"[dreamer] curate result summary: unrecognised=\x01",
 "[dreamer] refresh-primers failed (primer #\x01): \x01 \x01",
 "[dreamer] refresh-primers: refreshed=\x01 skipped=\x01",
 "[dreamer] user-memories: dismissed memory #\x01 — \x01",

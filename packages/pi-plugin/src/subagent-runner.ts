@@ -46,6 +46,7 @@ import {
 } from "@magic-context/core/shared/run-token-log";
 import type {
 	CompletedSubagentToolCall,
+	CurateMemoryToolCall,
 	SubagentProgressEvent,
 	SubagentRunner,
 	SubagentRunOptions,
@@ -2378,13 +2379,24 @@ export class PiSubagentRunner implements SubagentRunner {
 				});
 				if (settled) return;
 
-				const settleCompletedToolOnlyDreamer = (
+				const toolResults = (messages: unknown[]) => {
+					if (options.accountingTask === "curate")
+						return {
+							curateMemoryToolCalls: extractCurateMemoryToolCalls(messages),
+						};
+					const completedToolCalls = extractCompletedToolCalls(messages).filter(
+						(call) => call.name === "ctx_memory",
+					);
+					return completedToolCalls.length ? { completedToolCalls } : {};
+				};
+				const settleToolOnlyDreamer = (
 					messages: unknown[],
-					completedMemoryCalls: CompletedSubagentToolCall[],
+					results: ReturnType<typeof toolResults>,
 				): boolean => {
 					if (
 						!DREAMER_ACTION_AGENTS.has(options.agent) ||
-						completedMemoryCalls.length === 0
+						(!results.completedToolCalls?.length &&
+							!results.curateMemoryToolCalls?.length)
 					) {
 						return false;
 					}
@@ -2392,7 +2404,7 @@ export class PiSubagentRunner implements SubagentRunner {
 						ok: true,
 						assistantText: "",
 						toolCallCount: countToolCalls(messages),
-						completedToolCalls: completedMemoryCalls,
+						...results,
 						durationMs: Date.now() - startTime,
 						meta: { stderr: stderr.length > 0 ? stderr : undefined },
 					});
@@ -2406,22 +2418,13 @@ export class PiSubagentRunner implements SubagentRunner {
 				// into a fake subprocess failure.
 				if (sawAgentEnd) {
 					const outputMessages = agentEndMessages ?? accumulatedMessages;
-					const completedCalls = extractCompletedToolCalls(outputMessages);
-					const completedMemoryCalls = completedCalls.filter(
-						(call) => call.name === "ctx_memory",
-					);
+					const results = toolResults(outputMessages);
 					const trimmedAssistantText = finalAssistantText?.trim() ?? null;
 					if (
 						trimmedAssistantText === null ||
 						trimmedAssistantText.length === 0
 					) {
-						if (
-							settleCompletedToolOnlyDreamer(
-								outputMessages,
-								completedMemoryCalls,
-							)
-						)
-							return;
+						if (settleToolOnlyDreamer(outputMessages, results)) return;
 						const emptyAssistantReason =
 							trimmedAssistantText === null
 								? "pi agent_end did not include an assistant message"
@@ -2468,9 +2471,7 @@ export class PiSubagentRunner implements SubagentRunner {
 						// accumulated message_end stream. Counting toolCall content
 						// parts is event-name-independent (see countToolCalls).
 						toolCallCount: countToolCalls(outputMessages),
-						...(completedMemoryCalls.length > 0
-							? { completedToolCalls: completedMemoryCalls }
-							: {}),
+						...results,
 						durationMs: Date.now() - startTime,
 						meta: { stderr: stderr.length > 0 ? stderr : undefined },
 					});
@@ -2510,13 +2511,10 @@ export class PiSubagentRunner implements SubagentRunner {
 					return;
 				}
 
-				const completedMemoryCalls = extractCompletedToolCalls(
-					accumulatedMessages,
-				).filter((call) => call.name === "ctx_memory");
 				if (
-					settleCompletedToolOnlyDreamer(
+					settleToolOnlyDreamer(
 						accumulatedMessages,
-						completedMemoryCalls,
+						toolResults(accumulatedMessages),
 					)
 				)
 					return;
@@ -3024,14 +3022,10 @@ export function extractFinalAssistant(messages: unknown[]): {
 	return { text: null, stopReason: null, errorMessage: null };
 }
 
-/** Pair assistant invocations with non-error tool-result messages from Pi's transcript. */
-export function extractCompletedToolCalls(
+function extractToolInvocations(
 	messages: unknown[],
-): CompletedSubagentToolCall[] {
-	const invocations = new Map<
-		string,
-		{ name: string; arguments: Record<string, unknown> }
-	>();
+): Map<string, CompletedSubagentToolCall> {
+	const invocations = new Map<string, CompletedSubagentToolCall>();
 	for (const message of messages) {
 		if (typeof message !== "object" || message === null) continue;
 		const candidate = message as { role?: unknown; content?: unknown };
@@ -3060,7 +3054,14 @@ export function extractCompletedToolCalls(
 			invocations.set(id, { name, arguments: args });
 		}
 	}
+	return invocations;
+}
 
+/** Pair assistant invocations with non-error tool-result messages from Pi's transcript. */
+export function extractCompletedToolCalls(
+	messages: unknown[],
+): CompletedSubagentToolCall[] {
+	const invocations = extractToolInvocations(messages);
 	const completed: CompletedSubagentToolCall[] = [];
 	const seen = new Set<string>();
 	for (const message of messages) {
@@ -3090,6 +3091,55 @@ export function extractCompletedToolCalls(
 		completed.push(invocation);
 	}
 	return completed;
+}
+
+function extractCurateMemoryToolCalls(
+	messages: unknown[],
+): CurateMemoryToolCall[] {
+	const calls = new Map<string, CurateMemoryToolCall>();
+	for (const [id, call] of extractToolInvocations(messages)) {
+		if (call.name === "ctx_memory")
+			calls.set(id, {
+				id,
+				name: call.name,
+				arguments: call.arguments,
+				status: "pending",
+			});
+	}
+	for (const message of messages) {
+		if (typeof message !== "object" || message === null) continue;
+		const result = message as {
+			role?: unknown;
+			toolCallId?: unknown;
+			toolName?: unknown;
+			isError?: unknown;
+			content?: unknown;
+		};
+		if (
+			result.role !== "toolResult" ||
+			typeof result.toolCallId !== "string" ||
+			typeof result.isError !== "boolean"
+		)
+			continue;
+		const call = calls.get(result.toolCallId);
+		if (
+			call?.status !== "pending" ||
+			(typeof result.toolName === "string" && result.toolName !== call.name)
+		)
+			continue;
+		call.status = result.isError ? "error" : "completed";
+		if (Array.isArray(result.content)) {
+			const text = result.content
+				.flatMap((part) =>
+					part?.type === "text" && typeof part.text === "string"
+						? [part.text]
+						: [],
+				)
+				.join("\n");
+			if (text) call.output = text;
+		}
+	}
+	return [...calls.values()];
 }
 
 /**

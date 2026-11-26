@@ -7,11 +7,34 @@ const PROJECT_SCOPED_CATEGORIES: ReadonlySet<string> = new Set(V2_MEMORY_CATEGOR
 const USER_PROFILE_REFERENCE = /\buser(?:[\s_-]+)(?:profile|preferences?)\b|\bU\d+\b/i;
 
 export type CurateMutationVerdict = "archive" | "update";
-export type CurateSafetyRefusalReason =
-    | "missing-active-same-category-successor"
-    | "user-profile-is-not-project-memory"
-    | "directive-shaped-project-rule"
-    | "content-loss";
+const CURATE_SAFETY_REFUSAL_REASONS = [
+    "missing-active-same-category-successor",
+    "user-profile-is-not-project-memory",
+    "directive-shaped-project-rule",
+    "content-loss",
+] as const;
+export type CurateSafetyRefusalReason = (typeof CURATE_SAFETY_REFUSAL_REASONS)[number];
+
+const refusalReasons = new Set<string>(CURATE_SAFETY_REFUSAL_REASONS);
+
+/** Read the reason labels for one refused call. The `refused=` field counts memories across the child session, not operations in this result. */
+export function parseCurateSafetyRefusal(
+    action: unknown,
+    output: string,
+): CurateSafetyRefusalReason[] | null {
+    if (action !== "archive" && action !== "update") return null;
+    const refusal =
+        /^Skipped (archive|update) for memory \[ID: -?\d+(?:, -?\d+)*\]: curate safety refusal \(([a-z,-]+)\); refused=[1-9]\d*\.$/.exec(
+            output,
+        );
+    if (refusal?.[1] !== action || !refusal[2]) return null;
+    const reasons = [...new Set(refusal[2].split(","))];
+    return reasons.every((reason): reason is CurateSafetyRefusalReason =>
+        refusalReasons.has(reason),
+    )
+        ? reasons
+        : null;
+}
 
 export interface CurateSafetyRefusal {
     memoryId: number;

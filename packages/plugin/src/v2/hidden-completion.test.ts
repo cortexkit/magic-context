@@ -1806,6 +1806,34 @@ describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
         expect(inspectCurateMemoryOperations(toolLoopMessages({} as never, [row]))).toEqual({
             totalCalls: 1,
             completedActions: status === "completed" ? ["archive"] : [],
+            refusals: [],
+        });
+    });
+
+    test("counts a persisted safety refusal as a refused call, not an applied operation", () => {
+        const rows = new Rows();
+        const row = rows.append("child", "");
+        row.data.content = [
+            {
+                type: "tool",
+                id: "c1",
+                name: "ctx_memory",
+                state: {
+                    status: "completed",
+                    input: { action: "archive", ids: [1, 2] },
+                    content: [
+                        {
+                            type: "text",
+                            text: "Skipped archive for memory [ID: 1, 2]: curate safety refusal (directive-shaped-project-rule,user-profile-is-not-project-memory); refused=7.",
+                        },
+                    ],
+                },
+            },
+        ];
+        expect(inspectCurateMemoryOperations(toolLoopMessages({} as never, [row]))).toEqual({
+            totalCalls: 1,
+            completedActions: [],
+            refusals: [["directive-shaped-project-rule", "user-profile-is-not-project-memory"]],
         });
     });
 
@@ -1826,6 +1854,7 @@ describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
         expect(inspectCurateMemoryOperations(messages)).toEqual({
             totalCalls: 1,
             completedActions: ["archive"],
+            refusals: [],
         });
     });
 
@@ -1881,6 +1910,7 @@ describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
         expect(inspectCurateMemoryOperations(messages)).toEqual({
             totalCalls: 2,
             completedActions: [],
+            refusals: [],
         });
         const [refused] = messages as { parts: { state: { status: string } }[] }[];
         expect(refused?.parts[0]?.state.status).toBe("error");

@@ -2245,6 +2245,73 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		});
 	});
 
+	it("preserves Pi curate call IDs, text, errors and missing results without capturing other tools", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const resultPromise = runner.run({
+			...baseOptions,
+			agent: "dreamer",
+			accountingTask: "curate",
+		});
+		const calls = ["refused", "error", "pending", "read-other"].map((id) => ({
+			type: "toolCall",
+			id,
+			name: id === "read-other" ? "read" : "ctx_memory",
+			arguments: { action: "archive", ids: [1] },
+		}));
+		const refusal =
+			"Skipped archive for memory [ID: 1]: curate safety refusal (missing-active-same-category-successor); refused=1.";
+		const messages = [
+			{ role: "assistant", content: calls, stopReason: "toolUse" },
+			...[
+				{ id: "refused", name: "ctx_memory", text: refusal, isError: false },
+				{ id: "error", name: "ctx_memory", text: "tool failed", isError: true },
+				{
+					id: "read-other",
+					name: "read",
+					text: "file contents",
+					isError: false,
+				},
+			].map(({ id, name, text, isError }) => ({
+				role: "toolResult",
+				toolCallId: id,
+				toolName: name,
+				content: [{ type: "text", text }],
+				isError,
+			})),
+		];
+		for (const message of messages)
+			child.writeStdoutLine({ type: "message_end", message });
+		child.emitClose(0);
+		expect(await resultPromise).toMatchObject({
+			ok: true,
+			assistantText: "",
+			toolCallCount: 4,
+			curateMemoryToolCalls: [
+				{
+					id: "refused",
+					name: "ctx_memory",
+					arguments: calls[0]?.arguments,
+					status: "completed",
+					output: refusal,
+				},
+				{
+					id: "error",
+					name: "ctx_memory",
+					arguments: calls[1]?.arguments,
+					status: "error",
+					output: "tool failed",
+				},
+				{
+					id: "pending",
+					name: "ctx_memory",
+					arguments: calls[2]?.arguments,
+					status: "pending",
+				},
+			],
+		});
+	});
+
 	it("rejects a tool-only dreamer run when ctx_memory returned an error", async () => {
 		const child = createMockChild();
 		const { runner } = runnerWith(child);
