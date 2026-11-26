@@ -143,10 +143,10 @@ const ENTRIES: &[Entry] = &[
         reason: None,
     },
     Entry {
-        entry_id: "magic-context/mode3-store",
+        entry_id: "magic-context/sessions-store",
         class: Class::Portable,
         mechanism: Mechanism::WholeDb,
-        path: "mode3.db",
+        path: "sessions.db",
         writer_interaction: Some(WriterInteraction::BackupApiLive),
         exclude_tables: None,
         reason: None,
@@ -214,7 +214,7 @@ const ENTRIES: &[Entry] = &[
     excluded(
         "magic-context/module-store",
         "store.db",
-        "retired store of the earlier Magic Context module; no writer since the move to mode3.db",
+        "retired store of the earlier Magic Context module; no writer since the move to the dedicated session store",
     ),
     excluded(
         "magic-context/github-token",
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_declares_mode3_db_and_identity_pins_as_portable() {
+    fn catalog_declares_sessions_db_and_identity_pins_as_portable() {
         let entries = entries();
         // The retired store keeps its entry ID, so its older backups stay
         // restorable, but is no longer backed up.
@@ -414,14 +414,14 @@ mod tests {
             .expect("store.db must stay declared, as excluded");
         assert_eq!(store["entry_id"], "magic-context/module-store");
         assert_eq!(store["class"], "excluded");
-        let mode3 = entries
+        let sessions = entries
             .iter()
-            .find(|entry| entry["path"] == "mode3.db")
-            .expect("mode3.db must be declared");
-        assert_eq!(mode3["entry_id"], "magic-context/mode3-store");
-        assert_eq!(mode3["class"], "portable");
-        assert_eq!(mode3["mechanism"], "whole-db");
-        assert_eq!(mode3["writer_interaction"], "backup-api-live");
+            .find(|entry| entry["path"] == "sessions.db")
+            .expect("sessions.db must be declared");
+        assert_eq!(sessions["entry_id"], "magic-context/sessions-store");
+        assert_eq!(sessions["class"], "portable");
+        assert_eq!(sessions["mechanism"], "whole-db");
+        assert_eq!(sessions["writer_interaction"], "backup-api-live");
         let identities = entries
             .iter()
             .find(|entry| entry["path"] == PROJECT_IDENTITIES_DIR)

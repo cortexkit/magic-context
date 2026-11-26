@@ -14,10 +14,10 @@
       ]
     },
     {
-      "entry_id": "magic-context/mode3-store",
+      "entry_id": "magic-context/sessions-store",
       "class": "portable",
       "mechanism": "whole-db",
-      "path": "mode3.db",
+      "path": "sessions.db",
       "writer_interaction": "backup-api-live"
     },
     {
@@ -103,7 +103,7 @@
       "class": "excluded",
       "mechanism": "filetree",
       "path": "store.db",
-      "reason": "retired store of the earlier Magic Context module; no writer since the move to mode3.db"
+      "reason": "retired store of the earlier Magic Context module; no writer since the move to the dedicated session store"
     },
     {
       "entry_id": "magic-context/github-token",
