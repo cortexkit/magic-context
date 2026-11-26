@@ -1765,15 +1765,19 @@ pub struct EmergencyPlan {
     pub size_from: &'static str,
     /// The ceiling the target is set from: the execute ceiling, or the
     /// usable window for a refused request whose fixed part reaches the
-    /// execute ceiling. A plan that stops at `margin` sets neither.
+    /// execute ceiling. A plan that stops at `margin` never compared with a
+    /// ceiling (it compared the fixed part with the usable window less
+    /// 2,000) and reports the execute ceiling.
     pub ceiling_tokens: u64,
     /// `None` when the plan stopped before setting a target.
     pub target_tokens: Option<u64>,
     /// Where the plan ended: `margin` (a refused request whose fixed part
-    /// leaves less than 2,000 tokens of the usable window), `ceiling` (the
+    /// leaves 2,000 tokens of the usable window or less), `ceiling` (the
     /// fixed part is above the ceiling), `target` (too little above the
     /// target to be worth a drop), `minimum` (what the candidates free is
-    /// below the minimum), or `selected`.
+    /// below the minimum), or `selected`: the selection ran to the end. It
+    /// can still be empty when no candidate was left, on a pass another
+    /// lane already rewrites or a refused request planned to the window.
     pub stop: &'static str,
 }
 
@@ -1955,7 +1959,7 @@ pub(crate) fn emergency_drop_planned(
     let fit_target = emergency.over_limit && fixed >= ceiling;
     if emergency.over_limit {
         if fixed >= emergency.usable_tokens.saturating_sub(EMERGENCY_MIN_TOKENS) as f64 {
-            // Even dropping the whole indexed transcript would leave less
+            // Even dropping the whole indexed transcript would leave no more
             // than the safety margin for estimation error.
             return (Vec::new(), Some(plan));
         }
