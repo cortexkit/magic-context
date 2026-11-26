@@ -11,11 +11,14 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { executeContextRecomp, runCompartmentAgent } from "./compartment-runner";
+import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
+import { closeReadOnlySessionDb, withReadOnlySessionDb } from "./read-session-db";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 afterEach(() => {
+    closeReadOnlySessionDb();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -74,7 +77,8 @@ describe("historian timeout wiring", () => {
 
     it("passes historianTimeoutMs to recomp historian runs", async () => {
         useTempDataHome("magic-context-recomp-timeout-");
-        createOpenCodeDb("ses-recomp-timeout-wiring", [
+        const sessionId = "ses-recomp-timeout-wiring";
+        createOpenCodeDb(sessionId, [
             { id: "m-1", role: "user", text: "eligible one" },
             { id: "m-2", role: "assistant", text: "eligible two" },
             { id: "m-3", role: "user", text: "eligible three" },
@@ -96,10 +100,15 @@ describe("historian timeout wiring", () => {
         );
 
         try {
+            expect(
+                await withReadOnlySessionDb((reader) =>
+                    prewarmRawSessionOrdinalsForDb(reader, sessionId),
+                ),
+            ).toBe("warm");
             await executeContextRecomp({
                 client,
                 db,
-                sessionId: "ses-recomp-timeout-wiring",
+                sessionId,
                 historianChunkTokens: 10_000,
                 historianTimeoutMs: 456_789,
                 directory: "/tmp",

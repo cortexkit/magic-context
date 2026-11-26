@@ -74,7 +74,9 @@ import {
     hasRunnableCompartmentWindow,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
+import * as rawOrdinalWarmup from "./raw-ordinal-warmup";
 import { prepareRawSessionOrdinals, readRawSessionMessages } from "./read-session-chunk";
+import { closeReadOnlySessionDb, withReadOnlySessionDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { tagMessages } from "./tag-messages";
@@ -115,10 +117,20 @@ async function runCompartmentAgentWithLease(
     }
 }
 
+async function warmRecompFixtureOrdinals(sessionId: string): Promise<void> {
+    // Warm the same reader recomp uses without racing its command deadline.
+    expect(
+        await withReadOnlySessionDb((db) =>
+            rawOrdinalWarmup.prewarmRawSessionOrdinalsForDb(db, sessionId),
+        ),
+    ).toBe("warm");
+}
+
 afterEach(() => {
     clearProducerModelObservations();
     __ignoredNotificationTest.reset();
     __resetNotificationStateForTests();
+    closeReadOnlySessionDb();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -289,6 +301,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals("ses-recomp");
         const result = await executeContextRecomp({
             client,
             db,
@@ -315,6 +328,86 @@ describe("executeContextRecomp", () => {
         // (facts are a promoted-memory concern, and recomp must not re-emit
         // facts that could degrade curated memories).
         expect(getSessionFacts(db, "ses-recomp")).toHaveLength(0);
+    });
+
+    it("defers without rebuilding until the ordinal warm-up completes", async () => {
+        useTempDataHome("magic-recomp-ordinal-warmup-");
+        const sessionId = "ses-recomp-ordinal-warmup";
+        createOpenCodeDb(sessionId, [
+            { id: "m-1", role: "user", text: "eligible one" },
+            { id: "m-2", role: "assistant", text: "eligible two" },
+            { id: "m-3", role: "user", text: "protected 1" },
+            { id: "m-4", role: "user", text: "protected 2" },
+            { id: "m-5", role: "user", text: "protected 3" },
+            { id: "m-6", role: "user", text: "protected 4" },
+            { id: "m-7", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        const create = mock(async () => ({ data: { id: "ses-agent-ordinal-warmup" } }));
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/recomp-ordinal-warmup" } })),
+                create,
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: 1 } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: '<compartment start="1" end="2" title="Rebuilt history"><p1>Summary</p1></compartment>',
+                                },
+                            ],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+        const deps = await prepareProducerFixture({
+            client,
+            db,
+            sessionId,
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+            model: "test/fixture-historian",
+        });
+
+        const release = Promise.withResolvers<void>();
+        const prepare = rawOrdinalWarmup.prewarmRawSessionOrdinalsForDb;
+        const warming = release.promise.then(() =>
+            withReadOnlySessionDb((reader) => prepare(reader, sessionId)),
+        );
+        const warmup = spyOn(rawOrdinalWarmup, "prewarmRawSessionOrdinalsForDb").mockReturnValue(
+            warming,
+        );
+        try {
+            // Fire the command deadline while the worker's result is still held.
+            const result = await withImmediateTimeouts(() =>
+                executeContextRecompWithResultImpl(deps),
+            );
+            expect(warmup).toHaveBeenCalledWith(expect.anything(), sessionId);
+            expect(result).toEqual({
+                message:
+                    "## Magic Recomp — Deferred\n\nSession ordinals are warming in the background. Retry shortly; no history was rebuilt.",
+                published: false,
+            });
+            expect(create).not.toHaveBeenCalled();
+            expect(getCompartments(db, sessionId)).toHaveLength(0);
+        } finally {
+            warmup.mockRestore();
+            release.resolve();
+            expect(await warming).toBe("warm");
+        }
+
+        const rebuilt = await executeContextRecompWithResultImpl(deps);
+        expect(rebuilt.published).toBe(true);
+        expect(rebuilt.message).toContain("Rebuilt 1 compartment across 1 historian pass");
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(getCompartments(db, sessionId)).toEqual([
+            expect.objectContaining({ title: "Rebuilt history", startMessage: 1, endMessage: 2 }),
+        ]);
     });
 
     it("aborts after winning the recomp lease if a wrapup marker appeared meanwhile", async () => {
@@ -464,6 +557,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals("ses-recomp-fail");
         const result = await executeContextRecomp({
             client,
             db,
@@ -564,6 +658,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals("ses-recomp-retry");
         const result = await executeContextRecomp({
             client,
             db,
@@ -635,6 +730,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals(sessionId);
         const result = await executeContextRecomp({
             client,
             db,
@@ -691,6 +787,7 @@ describe("executeContextRecomp", () => {
         } as unknown as PluginContext["client"];
         const onPublished = mock(() => undefined);
 
+        await warmRecompFixtureOrdinals(sessionId);
         const result = await executeContextRecomp({
             client,
             db,
@@ -745,6 +842,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals(sessionId);
         const result = await executeContextRecomp({
             client,
             db,
@@ -837,6 +935,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals("ses-recomp-full-state");
         const result = await executeContextRecomp({
             client,
             db,
@@ -899,7 +998,7 @@ describe("executeContextRecomp", () => {
 
         let result = "";
         try {
-            expect(await prepareRawSessionOrdinals("ses-recomp-timeout")).toBe(true);
+            await warmRecompFixtureOrdinals("ses-recomp-timeout");
             result = await withImmediateTimeouts(async () => {
                 return executeContextRecomp({
                     client,
@@ -998,6 +1097,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals("ses-recomp-smaller");
         const result = await executeContextRecomp({
             client,
             db,
@@ -1079,6 +1179,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals("ses-recomp-no-smaller");
         const result = await executeContextRecomp({
             client,
             db,
@@ -1188,6 +1289,7 @@ describe("executeContextRecomp", () => {
             },
         } as unknown as PluginContext["client"];
 
+        await warmRecompFixtureOrdinals("ses-recomp-budget-reset");
         const result = await executeContextRecomp({
             client,
             db,
