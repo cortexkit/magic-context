@@ -78,7 +78,10 @@ beforeAll(async () => {
         },
     );
     credits = [];
-    withStepText = { run: await runIssue905Session({ seed: 905, steps: 136 }), credits };
+    withStepText = {
+        run: await runIssue905Session({ seed: 905, steps: 136, overheadVisible: true }),
+        credits,
+    };
 
     const originalRestore = restore.restoreRow;
     const restoreSpy = spyOn(restore, "restoreRow").mockImplementation((...args) => {
@@ -94,7 +97,7 @@ beforeAll(async () => {
     try {
         credits = [];
         toolStepsWithoutText = {
-            run: await runIssue905Session({ seed: 905, steps: 136 }),
+            run: await runIssue905Session({ seed: 905, steps: 136, overheadVisible: true }),
             credits,
         };
     } finally {

@@ -55,7 +55,9 @@ beforeAll(async () => {
     // Visible thinking: a third of the steps think heavily (above the hold's
     // 1,500 tokens); the agent reduces every read two steps after it, except
     // every ninth, and every grep output.
-    visible = await runIssue905Session({ seed: 905, steps: 136 });
+    // The system prompt and tool definitions are in the request Magic Context
+    // sees, at the size the provider counts them, as on a real host.
+    visible = await runIssue905Session({ seed: 905, steps: 136, overheadVisible: true });
     // The same agent with the thinking text omitted (only the signature is
     // stored, as with Anthropic's `display: "omitted"`); the host still
     // records each step's reasoning-token count.

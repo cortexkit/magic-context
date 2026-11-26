@@ -19,9 +19,11 @@ import * as configLoader from "../../../config";
 import { MagicContextConfigSchema } from "../../../config/schema/magic-context";
 import {
     closeDatabase,
+    getOrCreateSessionMeta,
     getTagsBySession,
     queuePendingOp,
 } from "../../../features/magic-context/storage";
+import { getMeasuredToolDefinitionTokens } from "../../../features/magic-context/tool-definition-tokens";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../../hooks/magic-context/ctx-reduce-availability";
 import { resolveDecisionCalibration } from "../../../hooks/magic-context/decision-calibration";
 import { resetLkgSlotsForTest } from "../../../hooks/magic-context/lkg-slot";
@@ -59,6 +61,17 @@ export interface Issue905Scenario {
     thinking?: "visible" | "omitted";
     /** Tokens the provider counts for the system prompt and tool definitions. */
     overheadTokens?: number;
+    /**
+     * true: the request's system prompt is long enough that Magic Context's
+     * own measurement of the system prompt and tool definitions comes to
+     * `overheadTokens`, the amount the provider counts for them, as on a real
+     * OpenCode 2 host, where the context hook sees both. false (the default):
+     * the system prompt is one line, and the provider counts `overheadTokens`
+     * that Magic Context never sees, as when a later plugin adds tools or the
+     * provider adds text of its own. The provider's count of every request is
+     * the same either way.
+     */
+    overheadVisible?: boolean;
     /** Steps between two ctx_reduce calls. */
     reduceEvery?: number;
     /** A read output the agent keeps active is every Nth read. */
@@ -168,6 +181,8 @@ export interface Issue905Run {
     session: string;
     /** Number of assistant steps whose reasoning was frozen, by step index. */
     rows: Array<{ id: string; step: number; thinkingTokens: number }>;
+    /** Magic Context's own measurement at the end of the run, in local tokens. */
+    envelope: { systemPromptTokens: number; toolDefinitionTokens: number | undefined };
 }
 
 type ToolCall = { id: string; name: string; input: Record<string, unknown>; output: string };
@@ -228,6 +243,51 @@ function fileOutput(random: () => number, tokens: number, tag: string): string {
 
 const PLACEHOLDER = /^\[dropped §\d+§\]$/;
 
+const SYSTEM_TEXT = "You are a careful code reviewer.";
+
+/** Deterministic prose of as close to `tokens` local tokens as word steps allow. */
+function paddingOf(tokens: number): string {
+    const textOf = (words: number) => {
+        const out: string[] = [];
+        for (let i = 0; i < words; i++) {
+            out.push(WORDS[(i * 7) % WORDS.length]!);
+            if (i % 14 === 13) out.push(".\n");
+        }
+        return out.join(" ");
+    };
+    let low = 0;
+    let high = Math.max(8, Math.ceil(tokens * 1.5));
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (estimateTokens(textOf(mid)) <= tokens) low = mid;
+        else high = mid - 1;
+    }
+    return textOf(low);
+}
+
+/**
+ * The system prompt blocks of a run whose overhead Magic Context sees: the
+ * one-line prompt and enough text that the system prompt (with what Magic
+ * Context adds to it) and the tool definitions come to `overheadTokens` at
+ * the model's ratios. What Magic Context measures for the one-line prompt is
+ * taken from a two-step run with the same settings.
+ */
+async function visibleOverheadSystem(scenario: Issue905Scenario): Promise<string[]> {
+    const { envelope } = await runIssue905Session({
+        ...scenario,
+        steps: 2,
+        overheadVisible: false,
+    });
+    if (envelope.systemPromptTokens <= 0 || envelope.toolDefinitionTokens === undefined)
+        throw new Error("the sizing run measured no system prompt or tool definitions");
+    const calibration = resolveDecisionCalibration("anthropic", ISSUE_905_MODEL);
+    const seen =
+        envelope.systemPromptTokens * calibration.systemRatio +
+        envelope.toolDefinitionTokens * calibration.toolsRatio;
+    const missing = (scenario.overheadTokens ?? 27_000) - seen;
+    return [SYSTEM_TEXT, paddingOf(Math.round(missing / calibration.systemRatio))];
+}
+
 export async function runIssue905Session(scenario: Issue905Scenario): Promise<Issue905Run> {
     const {
         seed,
@@ -245,7 +305,9 @@ export async function runIssue905Session(scenario: Issue905Scenario): Promise<Is
         taskTokens = 400,
         reportUsage = true,
         configOverrides = {},
+        overheadVisible = false,
     } = scenario;
+    const systemTexts = overheadVisible ? await visibleOverheadSystem(scenario) : [SYSTEM_TEXT];
     const random = rng(seed);
     setHarness("opencode2");
     const base = join(tmpdir(), "magic-context", "issue-905");
@@ -535,7 +597,7 @@ export async function runIssue905Session(scenario: Issue905Scenario): Promise<Is
                 sessionID: session,
                 model: { providerID: provider, id: ISSUE_905_MODEL, limit },
                 agent: "oracle",
-                system: [{ type: "text", text: "You are a careful code reviewer." }],
+                system: systemTexts.map((text) => ({ type: "text", text })),
                 tools: structuredClone(tools),
                 options: {},
                 messages: structuredClone(rows.flatMap(render)),
@@ -699,6 +761,25 @@ export async function runIssue905Session(scenario: Issue905Scenario): Promise<Is
             for (const tag of reduceTargets) queuePendingOp(db, session, tag, "drop", nowClock);
             nowClock += 5_000;
         }
+        const envelope = {
+            systemPromptTokens: getOrCreateSessionMeta(db, session).systemPromptTokens,
+            toolDefinitionTokens: getMeasuredToolDefinitionTokens(
+                provider,
+                ISSUE_905_MODEL,
+                "oracle",
+                session,
+            ),
+        };
+        if (overheadVisible) {
+            const seen =
+                envelope.systemPromptTokens * calibration.systemRatio +
+                (envelope.toolDefinitionTokens ?? 0) * calibration.toolsRatio;
+            // Sizing is by word steps, so a few tokens either way.
+            if (Math.abs(seen - overheadTokens) > overheadTokens * 0.005)
+                throw new Error(
+                    `visible overhead measured at ${Math.round(seen)}, not ${overheadTokens}`,
+                );
+        }
         return {
             passes,
             logs: allLogs,
@@ -706,6 +787,7 @@ export async function runIssue905Session(scenario: Issue905Scenario): Promise<Is
             reducedTags: reduced.size,
             keptReads: reads.filter((read) => read.keep).length,
             session,
+            envelope,
             rows: rows
                 .filter((row) => row.type === "assistant")
                 .map((row, index) => ({
