@@ -3,7 +3,7 @@
 //! A summary or dreamer run happens in a child session on a runner, and
 //! ck-mc follows it by reading the run's result until the run ends
 //! ([`crate::summary::run`]). Both runners publish an event when a run ends:
-//! Broca `event.broca.run.ended.v1`, THALAMUS's Agent Runner
+//! Broca `event.broca.run.ended.v1`, Thalamus
 //! `event.thalamus-harness.turn_ended.v1`. ck-mc reads both from its durable
 //! [`DURABLE`] ([`crate::bus`]). An event names the session in its
 //! `session_ref` header: the llm-runner `session_ref`, a hash of the runner,

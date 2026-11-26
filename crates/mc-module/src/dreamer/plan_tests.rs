@@ -195,7 +195,7 @@ mod choice {
     }
 }
 
-/// The shape Prefrontal core's worker plans use, which the Agent Runner and
+/// The shape Prefrontal core's worker plans use, which Thalamus and
 /// Broca check: items
 /// as written, providers and tools in canonical order, and a digest of the
 /// composition exactly as sent.
@@ -237,7 +237,7 @@ fn the_plan_has_the_shape_runners_admit() {
 }
 
 /// The composition names exactly the providers the items name, which the
-/// Agent Runner and Broca both require.
+/// Thalamus and Broca both require.
 #[test]
 fn the_composition_names_exactly_the_items_providers() {
     let plan = plan(&[reader("read", &[])], "aft", "magic-context", "system").unwrap();

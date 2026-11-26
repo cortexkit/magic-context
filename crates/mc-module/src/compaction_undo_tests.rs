@@ -1,4 +1,4 @@
-//! Agent Runner's `compaction-undo-v1` bodies (`testdata/compaction-undo-v1`,
+//! Thalamus's `compaction-undo-v1` bodies (`testdata/compaction-undo-v1`,
 //! whose README describes the session behind them), driven through
 //! `Session::notice`. When a view stops fitting the session's history, the
 //! runner drops it and names it refused. A session past its host's

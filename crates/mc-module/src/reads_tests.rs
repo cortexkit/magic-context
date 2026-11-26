@@ -165,7 +165,7 @@ async fn by_tags_error_on_second_of_three_requests_fails_the_read() {
     }
 }
 
-/// THALAMUS's `compaction-undo-v1` bodies from Agent Runner (an undo behind
+/// Thalamus's `compaction-undo-v1` bodies (an undo behind
 /// the cut, a stale window, and an apply_view refusal under a code this
 /// contract version doesn't name) decode through ck-mc's own types.
 #[test]

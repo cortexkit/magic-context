@@ -9,8 +9,8 @@ Both samples came from the read-only operator path in `script/broca-transcript.t
 | Fixture | Runner / harness | `session.read` parameters | Inclusive ordinals retained |
 | --- | --- | --- | --- |
 | `broca-head.json` | Broca (`broca`) / `broca` | `{ "from_ordinal": 309258, "limit": 80, "max_bytes": 4194304 }` | 309261–309306 |
-| `opencode2-head.json` | Agent Runner (`thalamus-harness`) / `opencode2` | `{ "from_ordinal": 161940, "limit": 80, "max_bytes": 4194304 }` | 162000–162019 |
-| `opencode2-head.json` | Agent Runner (`thalamus-harness`) / `opencode2` | `{ "from_ordinal": 162020, "limit": 80, "max_bytes": 4194304 }` | 162020–162091 |
+| `opencode2-head.json` | Thalamus (`thalamus-harness`) / `opencode2` | `{ "from_ordinal": 161940, "limit": 80, "max_bytes": 4194304 }` | 162000–162019 |
+| `opencode2-head.json` | Thalamus (`thalamus-harness`) / `opencode2` | `{ "from_ordinal": 162020, "limit": 80, "max_bytes": 4194304 }` | 162020–162091 |
 
 Each file wraps the native replies as `{ route: { runner, harness }, pages: [{ params, reply }] }`. Each page is a **slice**, not a complete `session.read` response: only the stated contiguous range of `reply.result.messages` is included. The cursor and head metadata still describe the original page and are not for paging these fixtures. The source session IDs are omitted from the wrapper.
 
