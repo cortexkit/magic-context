@@ -589,9 +589,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-log"
-version = "0.3.5"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c237e3dbd3b9bc5b7bd77e4899c660d8f5773192a0b98a35bab9f68307feffe"
+checksum = "8a57138f104249fb102f9844a24eeefe434bfb0665269028f4e207cea850f9be"
 dependencies = [
  "chrono",
  "cortexkit-lease",
