@@ -2176,13 +2176,8 @@ async function runAgenticTask(
         if (task === "maintain-docs" && hasCurrentDocsProposal(docsDir)) {
             const reason = "pending proposal matches current docs";
             helpers.recordRun("completed", null, { progress: reason });
-            return {
-                status: "completed",
-                detail: reason,
-                ...(changes
-                    ? { schedulePatch: { taskStateJson: JSON.stringify({ head: changes.head }) } }
-                    : {}),
-            };
+            // The existing proposal does not review the newer changes in this run.
+            return { status: "completed", detail: reason };
         }
         const curateChunks = curateMemories
             ? chunkCurateMemories(
