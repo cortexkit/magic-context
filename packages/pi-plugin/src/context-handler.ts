@@ -5720,6 +5720,7 @@ export function registerPiContextHandler(
 						),
 						calibration: () =>
 							sessionDecisionCalibration(options.db, sessionId),
+						wireSchema: toolWireSchema,
 					});
 				} catch (error) {
 					sessionLog(sessionId, "small window check failed:", error);
