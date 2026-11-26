@@ -115,6 +115,94 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         }
     });
 
+    it("repairs the root and files when the marker is a directory", () => {
+        const root = fixture();
+        const marker = join(root, markerName);
+        const loose = join(root, "loose.json");
+        fs.mkdirSync(marker, { mode: 0o700 });
+        fs.writeFileSync(join(marker, "keep"), "keep", { mode: 0o600 });
+        fs.writeFileSync(loose, "{}");
+        fs.chmodSync(loose, 0o644);
+        fs.chmodSync(root, 0o755);
+
+        tightenStorageTreeSync(root);
+
+        expect(fs.lstatSync(root).mode & 0o777).toBe(0o700);
+        expect(fs.lstatSync(loose).mode & 0o777).toBe(0o600);
+        expect(fs.readFileSync(join(marker, "keep"), "utf8")).toBe("keep");
+    });
+
+    const runningAsRoot = process.getuid?.() === 0;
+    if (runningAsRoot) console.warn("Skipping the non-searchable storage test as root.");
+    it.skipIf(runningAsRoot)("repairs a non-searchable root before walking its files", () => {
+        const root = fixture();
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        const loose = join(root, "loose.json");
+        fs.writeFileSync(loose, "{}");
+        fs.chmodSync(loose, 0o644);
+        fs.chmodSync(root, 0o600);
+        try {
+            tightenStorageTreeSync(root);
+
+            expect(fs.lstatSync(root).mode & 0o777).toBe(0o700);
+            expect(fs.lstatSync(loose).mode & 0o777).toBe(0o600);
+        } finally {
+            fs.chmodSync(root, 0o700);
+        }
+    });
+
+    it("repairs new files outside the startup paths after 24 hours", () => {
+        const root = fixture();
+        const marker = join(root, markerName);
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        const loose = join(root, "lkg-recovery-fences", "later.json");
+        fs.writeFileSync(loose, "{}");
+        fs.chmodSync(loose, 0o644);
+
+        const fresh = new Date(Date.now() - 23 * 60 * 60_000);
+        fs.utimesSync(marker, fresh, fresh);
+        for (let i = 0; i < 3; i++) {
+            expect(tightenStorageTreeSync(root).failures).toBe(0);
+            expect(fs.lstatSync(loose).mode & 0o777).toBe(0o644);
+        }
+        const expired = new Date(Date.now() - 25 * 60 * 60_000);
+        fs.utimesSync(marker, expired, expired);
+
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.lstatSync(loose).mode & 0o777).toBe(0o600);
+        expect(fs.lstatSync(marker).mtimeMs).toBeGreaterThan(fresh.getTime());
+    });
+
+    it("repairs a peer's loose git identity sidecar after the certificate expires", () => {
+        const root = fixture();
+        const directory = join(root, "project-identities");
+        fs.mkdirSync(directory, { mode: 0o700 });
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+
+        const sidecar = join(directory, `${"a".repeat(64)}.json`);
+        fs.writeFileSync(sidecar, JSON.stringify({ directory: root, identity: "git:abcdef0" }));
+        fs.chmodSync(sidecar, 0o644);
+        const expired = new Date(Date.now() - 25 * 60 * 60_000);
+        fs.utimesSync(join(root, markerName), expired, expired);
+
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.lstatSync(sidecar).mode & 0o777).toBe(0o600);
+    });
+
+    it("does not trust a certificate with a future modification time", () => {
+        const root = fixture();
+        const marker = join(root, markerName);
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        const loose = join(root, "lkg-recovery-fences", "later.json");
+        fs.writeFileSync(loose, "{}");
+        fs.chmodSync(loose, 0o644);
+        const future = new Date(Date.now() + 60_000);
+        fs.utimesSync(marker, future, future);
+
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.lstatSync(loose).mode & 0o777).toBe(0o600);
+    });
+
     it("does not certify a storage root that is a symbolic link", () => {
         const root = fixture();
         const alias = join(root, "alias");
