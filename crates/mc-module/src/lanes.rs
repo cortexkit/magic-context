@@ -1603,44 +1603,171 @@ pub struct Emergency {
     /// Content removed from the previous request by queued reductions and a
     /// changed history cut, net of the replacement head's cost.
     pub removed_tokens: u64,
+    /// What ck-mc measured itself about the request this pass will serve.
+    /// `None` when the fixed part can't be measured; the plan then infers
+    /// it from `prompt_tokens` and `request_tokens` as above.
+    pub measured: Option<Measured>,
 }
 
-/// The tiered emergency drop, from the force band on: tool outputs go,
-/// tier 3 first, oldest first within a tier, until the prompt is down to the
-/// fixed part plus 30% of the room up to the ceiling. The fixed part is what
-/// the prompt holds besides the transcript (system prompt, tools), measured as
-/// the reported prompt minus the transcript's estimate, adjusted for pending
-/// note growth. A ride's next-request estimate already includes that growth.
-pub fn emergency_drop(
-    context: &Context,
-    cutoff: Option<u64>,
-    emergency: &Emergency,
-    failed_parts: &BTreeSet<PartKey>,
-) -> Vec<(PartKey, Shape)> {
-    emergency_drop_excluding(context, cutoff, emergency, |entry, part| {
-        !failed_parts.is_empty() && failed_parts.contains(&(entry.mid.clone(), part.id.clone()))
-    })
+/// A request the runner says will not fit (`over_limit`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverLimit {
+    pub count: RideCount,
+    /// The refused request was built under ck-mc's newest view, the one
+    /// this pass builds on. Otherwise neither its count nor its refusal
+    /// describes the request this pass will serve.
+    pub newest_view: bool,
 }
 
-pub(crate) fn emergency_drop_excluding(
-    context: &Context,
-    cutoff: Option<u64>,
-    emergency: &Emergency,
-    excluded: impl Fn(&Entry, &Part) -> bool,
-) -> Vec<(PartKey, Shape)> {
-    if (emergency.prompt_tokens == 0 && emergency.request_tokens.unwrap_or(0) == 0)
-        || (!emergency.over_limit && emergency.ceiling_tokens == 0)
-    {
-        return Vec::new();
+/// What the runner said about a refused request's size. A stated count and
+/// its absence stay apart: only a count measures the request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RideCount {
+    /// The runner's exact count before sending, or the model provider's
+    /// count from its length refusal.
+    Stated(u64),
+    /// Neither was known. `floor`, the larger of the usable window and the
+    /// held reading, stands in for the count where the fixed part is inferred
+    /// from the reading.
+    Unstated { floor: u64 },
+}
+
+impl OverLimit {
+    /// The one figure the inferred plan takes: the count, or the floor.
+    pub fn request_tokens(self) -> u64 {
+        match self.count {
+            RideCount::Stated(count) => count,
+            RideCount::Unstated { floor } => floor,
+        }
     }
-    let transcript: u64 = context
-        .index
-        .entries()
-        .iter()
-        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
-        .filter(|(entry, part)| !context.edited.covers(&entry.mid, &part.id))
-        .map(|(_, part)| tokens::part(part))
-        .sum();
+}
+
+/// What ck-mc knows about the request a pass will serve: the parts of the
+/// prompt no tool drop can remove, and where the request's size comes from.
+///
+/// Units: the system, tool and notes counts are the runner's exact counts in
+/// the token family it names. The head, and transcript parts without a
+/// runner count, are ck-mc's own counts (the model's tokenizer when one is
+/// built, otherwise an estimate; 1,000 per image). A refused request's
+/// count can be the runner's or the model provider's. These agree only as
+/// far as the runner's family matches the provider's tokenizer, which is why
+/// the size never falls below ck-mc's own measure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Measured {
+    /// The runner's exact count of its own system text.
+    pub system_tokens: u64,
+    /// The runner's exact count of the tool definitions.
+    pub tools_tokens: u64,
+    /// The history head of the view this pass will serve.
+    pub head_tokens: u64,
+    /// The pending notes, when the runner counted them exactly. The runner
+    /// leaves them out of the system count for a provider that takes them
+    /// separately, as ck-mc does.
+    pub notes_tokens: Option<u64>,
+    /// The transcript the view this pass builds serves after every lane
+    /// planned before the emergency lane, each part priced at what stays of
+    /// it.
+    pub transcript_tokens: u64,
+    /// Each part of that transcript with what stays of it, from which a drop
+    /// on this pass saves.
+    pub parts: BTreeMap<PartKey, u64>,
+    pub request: MeasuredRequest,
+}
+
+/// Where the size of the request a pass will serve comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeasuredRequest {
+    /// No refused request: the fixed part plus the transcript this pass
+    /// serves.
+    Served,
+    /// A refused request with a count, built under the newest view: the
+    /// count plus `change`, the signed difference between what the view this
+    /// pass builds serves before the emergency lane (every earlier lane's
+    /// edits, this pass's history head and cut) and what ck-mc's newest view
+    /// serves. Removals make it negative, a larger head positive, a smaller
+    /// head negative. Never less than the fixed part plus the transcript,
+    /// since ck-mc may count the parts this pass removes higher than the
+    /// provider does.
+    Counted { count: u64, change: i64 },
+    /// A refused request without a count, built under the newest view: it
+    /// did not fit the usable window, so at least that plus `change`, and
+    /// never less than the fixed part plus the transcript.
+    Refused { change: i64 },
+    /// A refused request built under a view ck-mc has since replaced: only
+    /// the fixed part plus the transcript describes what this pass serves.
+    OlderView,
+}
+
+/// The sizes one emergency plan worked from, for its log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmergencyPlan {
+    pub fixed_tokens: u64,
+    /// `measured`, or `inferred` from the reading.
+    pub fixed_from: &'static str,
+    pub size_tokens: u64,
+    /// `measured` (the fixed part plus the transcript),
+    /// `measured_older_view`, `count`, `usable_window`, `reading` or
+    /// `ride_request` (a ride's count or floor in the inferred plan).
+    pub size_from: &'static str,
+    /// The ceiling the target is set from: the execute ceiling, or the
+    /// usable window for a refused request whose fixed part reaches the
+    /// execute ceiling. A plan that stops at `margin` sets neither.
+    pub ceiling_tokens: u64,
+    /// `None` when the plan stopped before setting a target.
+    pub target_tokens: Option<u64>,
+    /// Where the plan ended: `margin` (a refused request whose fixed part
+    /// leaves less than 2,000 tokens of the usable window), `ceiling` (the
+    /// fixed part is above the ceiling), `target` (too little above the
+    /// target to be worth a drop), `minimum` (what the candidates free is
+    /// below the minimum), or `selected`.
+    pub stop: &'static str,
+}
+
+/// A request's size and its fixed part, and where each came from.
+struct PlannedSize {
+    prompt: f64,
+    fixed: f64,
+    fixed_from: &'static str,
+    size_from: &'static str,
+}
+
+impl Measured {
+    fn size(&self, usable: u64) -> PlannedSize {
+        let fixed = self.system_tokens
+            + self.tools_tokens
+            + self.head_tokens
+            + self.notes_tokens.unwrap_or(0);
+        let served = fixed + self.transcript_tokens;
+        let at_least_served = |projected: u64, from| {
+            if projected >= served {
+                (projected, from)
+            } else {
+                (served, "measured")
+            }
+        };
+        let (size, size_from) = match self.request {
+            MeasuredRequest::Served => (served, "measured"),
+            MeasuredRequest::OlderView => (served, "measured_older_view"),
+            MeasuredRequest::Counted { count, change } => {
+                at_least_served(count.saturating_add_signed(change), "count")
+            }
+            MeasuredRequest::Refused { change } => {
+                at_least_served(usable.saturating_add_signed(change), "usable_window")
+            }
+        };
+        PlannedSize {
+            prompt: size as f64,
+            fixed: fixed as f64,
+            fixed_from: "measured",
+            size_from,
+        }
+    }
+}
+
+/// The plan when the fixed part can't be measured: the reported prompt,
+/// less this pass's removals, less the transcript, adjusted for pending note
+/// growth. A ride's request count replaces the reading only when larger.
+fn inferred_size(emergency: &Emergency, transcript: u64) -> PlannedSize {
     let account = |reported: u64| {
         // A reading too small to contain both the remaining transcript and
         // the measured removals cannot justify crediting all those removals.
@@ -1653,32 +1780,142 @@ pub(crate) fn emergency_drop_excluding(
     let (served, measured_fixed) = account(emergency.prompt_tokens);
     let mut fixed = emergency.notes.fixed_part(measured_fixed);
     let mut prompt = served + fixed - measured_fixed;
+    let mut size_from = "reading";
     if let Some(request) = emergency
         .request_tokens
         .filter(|&n| n as f64 > emergency.prompt_tokens as f64 + fixed - measured_fixed)
     {
         (prompt, fixed) = account(request);
+        size_from = "ride_request";
     }
+    PlannedSize {
+        prompt,
+        fixed,
+        fixed_from: "inferred",
+        size_from,
+    }
+}
+
+/// The tiered emergency drop, from the force band on: tool outputs go,
+/// tier 3 first, oldest first within a tier, until the prompt is down to the
+/// fixed part plus 30% of the room up to the ceiling. The fixed part is what
+/// the prompt holds besides the transcript: the system prompt, the tool
+/// definitions, the history head and pending notes. ck-mc measures it when
+/// the runner counts both surfaces exactly ([`Measured`]); otherwise it is
+/// inferred as the reported prompt minus the transcript's estimate, adjusted
+/// for pending note growth.
+pub fn emergency_drop(
+    context: &Context,
+    cutoff: Option<u64>,
+    emergency: &Emergency,
+    failed_parts: &BTreeSet<PartKey>,
+) -> Vec<(PartKey, Shape)> {
+    emergency_drop_excluding(context, cutoff, emergency, |entry, part| {
+        !failed_parts.is_empty() && failed_parts.contains(&(entry.mid.clone(), part.id.clone()))
+    })
+}
+
+/// What dropping `part` in `shape` saves from `before`, what it costs as
+/// the request stands: the edits [`drop_ops`] emits for it, priced as the
+/// runner renders them ([`tokens::edited_part`]; `count` prices the text
+/// they put in). A call the drop keeps, such as the one ending the
+/// transcript, saves only its result less the placeholder.
+pub(crate) fn drop_saving(
+    context: &Context,
+    entry: &Entry,
+    part: &Part,
+    shape: Shape,
+    before: u64,
+    count: impl Fn(&str) -> u64,
+) -> u64 {
+    let (ops, _) = drop_ops(context, &[((entry.mid.clone(), part.id.clone()), shape)]);
+    let mut edits = Vec::new();
+    for op in &ops {
+        match op {
+            EditOp::Drop { .. } => return before,
+            EditOp::Replace { field, value, .. } => edits.push((field.as_str(), value)),
+            _ => {}
+        }
+    }
+    if edits.is_empty() {
+        return 0;
+    }
+    before.saturating_sub(tokens::edited_part(part, &edits, count))
+}
+
+pub(crate) fn emergency_drop_excluding(
+    context: &Context,
+    cutoff: Option<u64>,
+    emergency: &Emergency,
+    excluded: impl Fn(&Entry, &Part) -> bool,
+) -> Vec<(PartKey, Shape)> {
+    let counter = crate::count::Counter::for_model(None);
+    emergency_drop_planned(context, cutoff, emergency, counter, excluded).0
+}
+
+/// [`emergency_drop_excluding`], with the sizes it planned from; `None` when
+/// there was nothing to plan from. `counter` prices the placeholders a drop
+/// leaves, as ck-mc counts the text it composes.
+pub(crate) fn emergency_drop_planned(
+    context: &Context,
+    cutoff: Option<u64>,
+    emergency: &Emergency,
+    counter: crate::count::Counter,
+    excluded: impl Fn(&Entry, &Part) -> bool,
+) -> (Vec<(PartKey, Shape)>, Option<EmergencyPlan>) {
+    if (emergency.prompt_tokens == 0 && emergency.request_tokens.unwrap_or(0) == 0)
+        || (!emergency.over_limit && emergency.ceiling_tokens == 0)
+    {
+        return (Vec::new(), None);
+    }
+    let sized = match &emergency.measured {
+        Some(measured) => measured.size(emergency.usable_tokens),
+        None => {
+            let transcript: u64 = context
+                .index
+                .entries()
+                .iter()
+                .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+                .filter(|(entry, part)| !context.edited.covers(&entry.mid, &part.id))
+                .map(|(_, part)| tokens::part(part))
+                .sum();
+            inferred_size(emergency, transcript)
+        }
+    };
+    let (prompt, fixed) = (sized.prompt, sized.fixed);
+    let mut plan = EmergencyPlan {
+        fixed_tokens: fixed.round() as u64,
+        fixed_from: sized.fixed_from,
+        size_tokens: prompt.round() as u64,
+        size_from: sized.size_from,
+        ceiling_tokens: emergency.ceiling_tokens,
+        target_tokens: None,
+        stop: "margin",
+    };
     let mut ceiling = emergency.ceiling_tokens as f64;
     let fit_target = emergency.over_limit && fixed >= ceiling;
     if emergency.over_limit {
         if fixed >= emergency.usable_tokens.saturating_sub(EMERGENCY_MIN_TOKENS) as f64 {
             // Even dropping the whole indexed transcript would leave less
             // than the safety margin for estimation error.
-            return Vec::new();
+            return (Vec::new(), Some(plan));
         }
         if fit_target {
             ceiling = emergency.usable_tokens as f64;
+            plan.ceiling_tokens = emergency.usable_tokens;
         }
     }
     if fixed > ceiling {
         // Dropping tool output cannot reach the target.
-        return Vec::new();
+        plan.stop = "ceiling";
+        return (Vec::new(), Some(plan));
     }
     let target = fixed + EMERGENCY_TARGET_FRACTION * (ceiling - fixed);
+    plan.target_tokens = Some(target.round() as u64);
     let reclaim = (prompt - target).round();
     if reclaim <= 0.0 || (!fit_target && reclaim <= EMERGENCY_MIN_TOKENS as f64) {
-        return Vec::new();
+        plan.stop = "target";
+        return (Vec::new(), Some(plan));
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
     // The tier reserve includes every output that could go, even in the
@@ -1728,21 +1965,31 @@ pub(crate) fn emergency_drop_excluding(
             if part.tag.is_some_and(|tag| reserved.contains(&tag)) {
                 continue;
             }
-            selected.push(((entry.mid.clone(), part.id.clone()), shape));
-            reclaimed += if emergency.over_limit {
-                tokens::part(part)
-            } else {
-                reclaimable_tokens(context, entry, part)
-            };
+            let key = (entry.mid.clone(), part.id.clone());
+            // Measured, a part another lane already reduces on this pass
+            // costs only what that lane leaves of it; the inferred plan counts
+            // every part as it stands in the index.
+            let before = emergency
+                .measured
+                .as_ref()
+                .and_then(|measured| measured.parts.get(&key))
+                .copied()
+                .unwrap_or_else(|| tokens::part(part));
+            reclaimed += drop_saving(context, entry, part, shape, before, |text| {
+                counter.count(text)
+            });
+            selected.push((key, shape));
             if reclaimed as f64 >= reclaim {
                 break 'tiers;
             }
         }
     }
     if !fit_target && !emergency.priced && reclaimed < EMERGENCY_MIN_TOKENS {
-        return Vec::new();
+        plan.stop = "minimum";
+        return (Vec::new(), Some(plan));
     }
-    selected
+    plan.stop = "selected";
+    (selected, Some(plan))
 }
 
 /// The last indexed `ctx_keep` call, which bounds the reach of its edit.
@@ -2026,6 +2273,7 @@ mod tests {
                 over_limit,
                 priced: true,
                 removed_tokens: 0,
+                measured: None,
             };
             let drops = emergency_drop(&ctx, None, &emergency, &BTreeSet::new());
             assert_eq!(
@@ -2300,6 +2548,7 @@ mod tests {
             over_limit: false,
             priced: true,
             removed_tokens: 0,
+            measured: None,
         };
         let forced = emergency_drop(&ctx, None, &emergency, &BTreeSet::new());
         assert_eq!(

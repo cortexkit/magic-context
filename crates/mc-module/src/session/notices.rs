@@ -77,6 +77,9 @@ impl Session {
                 notice.conditions.system_tokens,
                 notice.conditions.tools_tokens,
             );
+            self.surface_counts_stale = false;
+            self.surface_counts_stamp = notice.conditions.statement_seq;
+            self.surface_counts_model = Some(notice.conditions.model.clone());
         }
         let stated = StatedView::of(standing, notice.applied_view.as_ref());
         self.threshold = (

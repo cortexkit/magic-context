@@ -7,6 +7,18 @@ enum Sealed {
     RetryWithoutCut,
 }
 
+/// What [`Session::emergency_served`] finds the request costs.
+pub(super) struct EmergencyServed {
+    /// Each part as the new view would serve it.
+    pub(super) parts: std::collections::BTreeMap<lanes::PartKey, u64>,
+    /// The history head of the new view.
+    pub(super) head: u64,
+    /// Every part and the head, under the new view.
+    pub(super) total: i64,
+    /// The same under ck-mc's newest view.
+    pub(super) previous_total: i64,
+}
+
 impl Session {
     /// A ride: the runner is about to send a request whose bytes before the
     /// conversation change anyway, or that would not fit, or whose cache the
@@ -30,6 +42,22 @@ impl Session {
         let previous = reading_of(&self.conditions);
         let was_stale = self.reading_stale;
         self.take_conditions("ride", standing, &ride.conditions);
+        // Rides carry no surface counts (compaction contract W4.11), so the
+        // held ones describe what was sent before a change a ride reports,
+        // until a notice brings fresh ones. A ride built after the notice
+        // they came from says so even when it arrives after a newer
+        // statement.
+        if ride.has(RideCause::SurfaceChange) || ride.has(RideCause::ModelChange) {
+            let after_counts = match standing {
+                Standing::Current => true,
+                Standing::Older { stamp, .. } => self
+                    .surface_counts_stamp
+                    .is_none_or(|counted| stamp > counted),
+            };
+            if after_counts {
+                self.surface_counts_stale = true;
+            }
+        }
         let stated = StatedView::of(standing, ride.applied_view.as_ref());
         self.take_signed_floor();
         // A late ride's own reading was not taken, so it is not named as
@@ -55,18 +83,34 @@ impl Session {
             Standing::Older { .. } => self.judge_held_reading(was_stale, judged.as_ref()),
         }
         let over_limit = ride.has(RideCause::OverLimit).then(|| {
-            ride.request_tokens.unwrap_or_else(|| {
-                // The provider refused the request, so it exceeded the usable
-                // window even without a stated count. Keep any larger reading.
-                let floor = pass::usable_window(&self.conditions)
-                    .max(self.conditions.last_prompt_tokens.unwrap_or(0));
-                tracing::info!(
-                    session = %self.key.session,
-                    floor_tokens = %floor,
-                    "ck-mc: session: over_limit without request_tokens; using a request floor"
-                );
-                floor
-            })
+            let count = match ride.request_tokens {
+                Some(count) => lanes::RideCount::Stated(count),
+                None => {
+                    // The provider refused the request, so it exceeded the
+                    // usable window even without a stated count. Where the
+                    // fixed part is inferred from the reading, keep any
+                    // larger reading.
+                    let floor = pass::usable_window(&self.conditions)
+                        .max(self.conditions.last_prompt_tokens.unwrap_or(0));
+                    tracing::info!(
+                        session = %self.key.session,
+                        floor_tokens = %floor,
+                        "ck-mc: session: over_limit without request_tokens; using a request floor"
+                    );
+                    lanes::RideCount::Unstated { floor }
+                }
+            };
+            lanes::OverLimit {
+                count,
+                // The count describes ck-mc's newest view only when the
+                // runner applies that very view, checksum included, as
+                // settling a view requires.
+                newest_view: match (ride.applied_view.as_ref(), self.latest.as_ref()) {
+                    (Some(applied), Some(view)) => same(applied, view),
+                    (None, None) => true,
+                    _ => false,
+                },
+            }
         });
         // Only a cause that changes the request's bytes before the
         // conversation folds the head for free. A forgotten cache (expiry, a
@@ -193,8 +237,11 @@ impl Session {
     /// total served costs counts overlapping removals once and charges the new
     /// head instead of treating summarized text as fixed provider overhead.
     /// A head-only refresh deliberately gets no credit, keeping the history
-    /// accounting change confined to passes that move the cut. Routine cleanup
-    /// is excluded because the emergency selector plans before it.
+    /// accounting change confined to passes that move the cut. What the other
+    /// lanes remove on the same pass (the age sweep, supersession, reasoning
+    /// clearing) is deliberately left out: this credit serves only the plan
+    /// that infers the fixed part from the reading, which has always sized
+    /// the request as if that work had not landed.
     pub(super) fn emergency_removed_tokens(
         &self,
         history: &[EditOp],
@@ -234,6 +281,90 @@ impl Session {
             .saturating_sub(after.values().sum::<u64>() + new_head)
     }
 
+    /// What ck-mc measures about the request this pass will serve, for the
+    /// emergency lane. `ops` are the edits of every lane planned before the
+    /// emergency lane on this pass. `None` when the fixed part can't be
+    /// measured: a surface count is absent or not exact, was taken for
+    /// another model, or a ride has reported a change to the surfaces or the
+    /// model since. The lane then infers the fixed part from the reading.
+    pub(super) fn emergency_measured(
+        &self,
+        history: &[EditOp],
+        ops: &[EditOp],
+        over_limit: Option<lanes::OverLimit>,
+    ) -> Option<lanes::Measured> {
+        if self.surface_counts_stale
+            || self.surface_counts_model.as_ref() != Some(&self.conditions.model)
+        {
+            return None;
+        }
+        let (Some(system), Some(tools)) = self.surface_tokens else {
+            return None;
+        };
+        if !system.exact || !tools.exact {
+            return None;
+        }
+        let served = self.emergency_served(history, ops);
+        let change = served.total - served.previous_total;
+        let request = match over_limit {
+            None => lanes::MeasuredRequest::Served,
+            Some(over) if !over.newest_view => lanes::MeasuredRequest::OlderView,
+            // A stated count of zero says nothing about the request.
+            Some(lanes::OverLimit {
+                count: lanes::RideCount::Stated(count),
+                ..
+            }) if count > 0 => lanes::MeasuredRequest::Counted { count, change },
+            Some(_) => lanes::MeasuredRequest::Refused { change },
+        };
+        Some(lanes::Measured {
+            system_tokens: system.count,
+            tools_tokens: tools.count,
+            head_tokens: served.head,
+            notes_tokens: self
+                .notes
+                .pending
+                .filter(|notes| notes.exact)
+                .map(|notes| notes.count),
+            transcript_tokens: served.parts.values().sum(),
+            parts: served.parts,
+            request,
+        })
+    }
+
+    /// The request the view this pass builds would serve before the
+    /// emergency lane adds to it: ck-mc's newest view with this pass's
+    /// history head and cut and the edits `ops` of the lanes planned so far.
+    /// As the view builder does, it keeps a head message or cut of the
+    /// newest view unless this pass replaces it, or the session has no
+    /// summaries left and this pass doesn't render it. Each part is priced at
+    /// what stays of it, so a placeholder costs what the placeholder does.
+    pub(super) fn emergency_served(&self, history: &[EditOp], ops: &[EditOp]) -> EmergencyServed {
+        let previous = || self.latest.iter().flat_map(|v| &v.edits).map(|e| &e.op);
+        let retire = retired_history(self.summaries.is_empty(), history);
+        let renders = |id: &str| {
+            history
+                .iter()
+                .any(|op| matches!(op, EditOp::Insert { message, .. } if message.id == id))
+        };
+        let new_cut = history.iter().any(|op| matches!(op, EditOp::Cut { .. }));
+        let carried = previous().filter(|op| match op {
+            EditOp::Insert { message, .. } => !renders(&message.id) && !retire(op),
+            EditOp::Cut { .. } => !new_cut && !retire(op),
+            _ => true,
+        });
+        let (before, old_head) = self.served_costs(previous());
+        let (parts, head) = self.served_costs(carried.chain(history.iter()).chain(ops.iter()));
+        let total = |costs: &std::collections::BTreeMap<lanes::PartKey, u64>, head: u64| {
+            (costs.values().sum::<u64>() + head) as i64
+        };
+        EmergencyServed {
+            total: total(&parts, head),
+            previous_total: total(&before, old_head),
+            parts,
+            head,
+        }
+    }
+
     /// A pass with permission to rebuild: every lane adds the parts it wants
     /// gone, and one view carries them. `None` when no lane has work.
     ///
@@ -242,9 +373,9 @@ impl Session {
     /// on every pass.
     ///
     /// `over_limit` is set when the runner asked for a view because its next
-    /// request was refused for length, and carries the provider's stated count
-    /// or a lower bound from the usable window and last reading. The
-    /// emergency drop then runs whatever the usage, and the protections that
+    /// request was refused for length, and carries the stated count or its
+    /// absence, and whether the refused request used ck-mc's newest view.
+    /// The emergency drop then runs whatever the usage, and the protections that
     /// can yield do. `prefix_changes` is set on a ride whose request's bytes
     /// before the conversation change anyway, so the cache is lost whether or
     /// not a view follows.
@@ -254,7 +385,7 @@ impl Session {
     pub(super) fn build(
         &mut self,
         settings: &Settings,
-        over_limit: Option<u64>,
+        over_limit: Option<lanes::OverLimit>,
         prefix_changes: bool,
         keep: Option<&BTreeSet<lanes::PartKey>>,
     ) -> (Option<View>, u64) {
@@ -294,7 +425,7 @@ impl Session {
     pub(super) fn build_for(
         &mut self,
         settings: &Settings,
-        over_limit: Option<u64>,
+        over_limit: Option<lanes::OverLimit>,
         prefix_changes: bool,
         keep: Option<&BTreeSet<lanes::PartKey>>,
         flush: bool,
@@ -389,7 +520,7 @@ impl Session {
     fn build_lanes(
         &mut self,
         settings: &Settings,
-        over_limit: Option<u64>,
+        over_limit: Option<lanes::OverLimit>,
         prefix_changes: bool,
         history: &[EditOp],
         cut: Option<u64>,
@@ -434,12 +565,21 @@ impl Session {
             .filter(|key| !wanted.iter().any(|(earlier, _)| earlier == key))
             .collect();
         wanted.extend(injected);
-        wanted.extend(lanes::superseded_edits(
-            &context,
-            cutoff,
-            self.reclaim_bookmark,
-        ));
-        wanted.extend(lanes::spent_control_plane(&context, cutoff));
+        // In the force band the emergency lane owns tool reclaim, so the age
+        // sweep of tool outputs and both supersession lanes (spent
+        // control-plane calls, superseded edits) stand down there, as in the
+        // TypeScript transform (`toolReclaimAdmitted`). Duplicate lookups,
+        // injection strips, reasoning clearing and the sweep of old notices
+        // are routine cleanup there and keep running.
+        let tool_reclaim = !pass::in_force_band(&self.pressure(), settings);
+        if tool_reclaim {
+            wanted.extend(lanes::superseded_edits(
+                &context,
+                cutoff,
+                self.reclaim_bookmark,
+            ));
+            wanted.extend(lanes::spent_control_plane(&context, cutoff));
+        }
         wanted.extend(lanes::duplicate_lookups(&context, cutoff));
         // An unmarked notice may carry the person's words. Without notice_keep,
         // sweeping notices could drop them, so neither select nor bookmark them.
@@ -448,9 +588,14 @@ impl Session {
         } else {
             0
         };
+        let tool_reclaim_bookmark = if tool_reclaim {
+            self.reclaim_bookmark
+        } else {
+            0
+        };
         wanted.extend(lanes::age_sweep(
             &context,
-            self.reclaim_bookmark,
+            tool_reclaim_bookmark,
             notice_reclaim_bookmark,
             cutoff,
         ));
@@ -489,7 +634,7 @@ impl Session {
             let removed_tokens = self.emergency_removed_tokens(history, &queued_ops);
             let emergency = lanes::Emergency {
                 prompt_tokens: self.pressure().last_prompt_tokens.unwrap_or(0),
-                request_tokens: over_limit,
+                request_tokens: over_limit.map(lanes::OverLimit::request_tokens),
                 notes: self.notes.clone(),
                 ceiling_tokens: (usable as f64 * settings.execute_threshold_percentage / 100.0)
                     as u64,
@@ -497,16 +642,27 @@ impl Session {
                 over_limit: over_limit.is_some(),
                 priced,
                 removed_tokens,
+                measured: self.emergency_measured(history, &ops, over_limit),
             };
-            let emergency_edited = edited.including(&queued_covered);
+            // Measured, the request is already priced after every lane
+            // planned so far, so on a force pass none of their parts is a
+            // candidate again. A refused request may still take such a part
+            // whole, for what that lane leaves of it. The inferred plan, as
+            // before, leaves out only the queued drops.
+            let emergency_edited = if emergency.measured.is_some() && over_limit.is_none() {
+                edited.including(&covered)
+            } else {
+                edited.including(&queued_covered)
+            };
             let emergency_context = lanes::Context {
                 edited: &emergency_edited,
                 ..context
             };
-            let selected = lanes::emergency_drop_excluding(
+            let (selected, plan) = lanes::emergency_drop_planned(
                 &emergency_context,
                 cutoff,
                 &emergency,
+                self.counter(),
                 |entry, part| {
                     if self.failed_parts.is_empty() && keep.is_none() {
                         return false;
@@ -515,6 +671,25 @@ impl Session {
                     self.failed_parts.contains(&key) || kept(&key)
                 },
             );
+            if let Some(plan) = plan {
+                // `selected` counts the parts the plan chose, not edits the
+                // runner applies: a chosen part another lane already removes
+                // on this pass adds no edit of its own.
+                tracing::info!(
+                    session = %self.key.session,
+                    fixed_tokens = plan.fixed_tokens,
+                    fixed_from = %plan.fixed_from,
+                    size_tokens = plan.size_tokens,
+                    size_from = %plan.size_from,
+                    ceiling_tokens = plan.ceiling_tokens,
+                    target_tokens = %plan
+                        .target_tokens
+                        .map_or_else(|| "none".to_owned(), |target| target.to_string()),
+                    stop = %plan.stop,
+                    selected = selected.len(),
+                    "ck-mc: session: emergency drop planned"
+                );
+            }
             if !selected.is_empty() {
                 // An over-limit request drops calls whole, whatever shape an
                 // earlier lane asked for.

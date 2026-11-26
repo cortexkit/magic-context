@@ -90,6 +90,19 @@ pub struct Session {
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
         Option<cortexkit_role_compaction::tokens::SurfaceTokens>,
     ),
+    /// A ride reported a change to the system prompt, the tool definitions or
+    /// the model after `surface_tokens` were taken, so they describe what
+    /// was sent before it until a notice brings fresh counts. Held in memory,
+    /// as the counts are.
+    pub(crate) surface_counts_stale: bool,
+    /// The stamp of the notice `surface_tokens` came from (see
+    /// `statement_order`): a ride stamped after it that reports a change
+    /// makes them stale even when it arrives late. `None` when unstamped or
+    /// after a Setup, whose stamps start afresh.
+    pub(crate) surface_counts_stamp: Option<u64>,
+    /// The model the runner counted `surface_tokens` for. Another model's
+    /// tokenizer counts the same text differently.
+    pub(crate) surface_counts_model: Option<cortexkit_role_compaction::setup::ModelRef>,
     pub(crate) notes: crate::prompt_notes::Notes,
     index: Index,
     view_validation: crate::view_builder::ValidationCache,
