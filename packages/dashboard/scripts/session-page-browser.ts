@@ -46,7 +46,7 @@ const compartments = [
     end_time: Date.UTC(2026, 4, 1, 16, 48),
     importance: 72,
     episode_type: "research,decision",
-    p1: "Reviewed the project fixture and recorded the outcome.",
+    p1: "U: Review the project fixture.\nReviewed the project fixture and recorded the outcome.",
     p2: "Reviewed fixture.",
     p3: "Fixture review.",
     p4: "review",
@@ -208,7 +208,8 @@ const vite = Bun.spawn(["timeout", "240s", join(dashboard, "node_modules/.bin/vi
   stdout: "pipe",
   stderr: "inherit",
 });
-const chrome = Bun.spawn(["timeout", "240s", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-extensions", "--hide-scrollbars", "--remote-debugging-port=0", `--user-data-dir=${join(output, "chrome-profile")}`, "about:blank"], {
+const chromeBinary = process.env.SESSION_PAGE_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const chrome = Bun.spawn(["timeout", "240s", chromeBinary, "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-extensions", "--hide-scrollbars", "--remote-debugging-port=0", `--user-data-dir=${join(output, "chrome-profile")}`, "about:blank"], {
   stdout: "ignore",
   stderr: "pipe",
 });
@@ -287,8 +288,39 @@ try {
       })()`);
       await waitFor(".tab-pill");
       await waitFor(".section-header");
-      if (kind === "pi") await waitFor(".card-meta");
+      await waitFor("#compartment-1");
       await settle();
+      await evalPage(`(() => {
+        const first = document.querySelector('#compartment-1');
+        const second = document.querySelector('#compartment-2');
+        const body = (card) => card.querySelector('.expandable-content');
+        if (body(first)?.childElementCount || body(second)?.childElementCount) {
+          throw new Error('collapsed compartment mounted body elements');
+        }
+        first.click();
+        const lines = [...body(first).lastElementChild.children].map((line) => line.textContent);
+        const expected = ${JSON.stringify(compartments[0].p1.split("\n"))};
+        if (lines.length !== expected.length || lines.some((line, i) => line !== expected[i])) {
+          throw new Error('open compartment did not render its separate P1 lines');
+        }
+        [...body(first).querySelectorAll('button')].find((button) => button.textContent === 'P2').click();
+        if (body(first).lastElementChild.textContent !== ${JSON.stringify(compartments[0].p2)}) {
+          throw new Error('tier change did not render the selected body');
+        }
+        first.click();
+        if (body(first)?.childElementCount) throw new Error('closing a compartment retained its body');
+        first.click();
+        if (body(first).lastElementChild.textContent !== ${JSON.stringify(compartments[0].p2)}) {
+          throw new Error('reopening a compartment did not restore the selected tier');
+        }
+        [...body(first).querySelectorAll('button')].find((button) => button.textContent === 'P1').click();
+        second.click();
+        if (body(first)?.childElementCount || body(second).lastElementChild.textContent !== ${JSON.stringify(compartments[1].p1)}) {
+          throw new Error('switching cards did not replace the mounted body');
+        }
+        second.click();
+      })()`);
+      console.log(`${theme}/${kind}: collapsed compartment bodies are not mounted; open bodies and tier selection are preserved`);
       if (kind === "pi" && process.env.SESSION_PAGE_EXPECT_PI_DATES) {
         const visibleDate = await evalPage("[...document.querySelectorAll('.list-gap button.card')].some((card) => card.innerText.includes(' → '))");
         if (!visibleDate) throw new Error("Pi compartment date fixture was not rendered");

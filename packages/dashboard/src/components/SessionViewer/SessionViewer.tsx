@@ -1263,93 +1263,101 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
                         <div
                           class={`expandable-content ${expandedCompartment() === comp.id ? "expanded" : "collapsed"}`}
                         >
-                          {/* v2 tier selector — inspect each paraphrase tier
+                          <Show when={expandedCompartment() === comp.id}>
+                            {/* v2 tier selector — inspect each paraphrase tier
                               (P1 verbose → P4 anchor-only). Hidden for legacy
                               content-only rows. */}
-                          <Show when={hasTiers(comp)}>
-                            <div
-                              style={{
-                                display: "flex",
-                                gap: "4px",
-                                "margin-top": "10px",
-                                "align-items": "center",
-                              }}
-                            >
-                              <span
+                            <Show when={hasTiers(comp)}>
+                              <div
                                 style={{
-                                  "font-size": "11px",
-                                  color: "var(--text-muted)",
-                                  "margin-right": "4px",
+                                  display: "flex",
+                                  gap: "4px",
+                                  "margin-top": "10px",
+                                  "align-items": "center",
                                 }}
                               >
-                                tier:
-                              </span>
-                              <For each={TIER_KEYS}>
-                                {(tk) => {
-                                  const active = () => (compartmentTier()[comp.id] ?? "p1") === tk;
-                                  const empty = () => {
-                                    const v = comp[tk];
-                                    return !(typeof v === "string" && v.trim().length > 0);
-                                  };
+                                <span
+                                  style={{
+                                    "font-size": "11px",
+                                    color: "var(--text-muted)",
+                                    "margin-right": "4px",
+                                  }}
+                                >
+                                  tier:
+                                </span>
+                                <For each={TIER_KEYS}>
+                                  {(tk) => {
+                                    const active = () =>
+                                      (compartmentTier()[comp.id] ?? "p1") === tk;
+                                    const empty = () => {
+                                      const v = comp[tk];
+                                      return !(typeof v === "string" && v.trim().length > 0);
+                                    };
+                                    return (
+                                      <button
+                                        type="button"
+                                        class={`pill ${active() ? "blue" : "gray"}`}
+                                        style={{
+                                          cursor: "pointer",
+                                          border: "none",
+                                          opacity: empty() ? "0.45" : "1",
+                                        }}
+                                        title={
+                                          empty()
+                                            ? `${tk.toUpperCase()} is empty — falls back to a denser tier`
+                                            : `Show ${tk.toUpperCase()} tier`
+                                        }
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setCompartmentTier((prev) => ({
+                                            ...prev,
+                                            [comp.id]: tk,
+                                          }));
+                                        }}
+                                      >
+                                        {tk.toUpperCase()}
+                                      </button>
+                                    );
+                                  }}
+                                </For>
+                              </div>
+                            </Show>
+                            <div
+                              style={{
+                                "margin-top": "10px",
+                                padding: "10px",
+                                background: "var(--bg-base)",
+                                "border-radius": "var(--radius-md)",
+                                "font-size": "12px",
+                                "line-height": "1.6",
+                                "word-break": "break-word",
+                              }}
+                            >
+                              <Index
+                                each={tierBody(comp, compartmentTier()[comp.id] ?? "p1").split(
+                                  "\n",
+                                )}
+                              >
+                                {(line) => {
+                                  const isUser = () => line().startsWith("U:");
                                   return (
-                                    <button
-                                      type="button"
-                                      class={`pill ${active() ? "blue" : "gray"}`}
+                                    <div
                                       style={{
-                                        cursor: "pointer",
-                                        border: "none",
-                                        opacity: empty() ? "0.45" : "1",
-                                      }}
-                                      title={
-                                        empty()
-                                          ? `${tk.toUpperCase()} is empty — falls back to a denser tier`
-                                          : `Show ${tk.toUpperCase()} tier`
-                                      }
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setCompartmentTier((prev) => ({ ...prev, [comp.id]: tk }));
+                                        "font-weight": isUser() ? "600" : "normal",
+                                        color: isUser()
+                                          ? "var(--text-primary)"
+                                          : "var(--text-secondary)",
+                                        "margin-bottom": "2px",
+                                        "white-space": "pre-wrap",
                                       }}
                                     >
-                                      {tk.toUpperCase()}
-                                    </button>
+                                      {line()}
+                                    </div>
                                   );
                                 }}
-                              </For>
+                              </Index>
                             </div>
                           </Show>
-                          <div
-                            style={{
-                              "margin-top": "10px",
-                              padding: "10px",
-                              background: "var(--bg-base)",
-                              "border-radius": "var(--radius-md)",
-                              "font-size": "12px",
-                              "line-height": "1.6",
-                              "word-break": "break-word",
-                            }}
-                          >
-                            <Index
-                              each={tierBody(comp, compartmentTier()[comp.id] ?? "p1").split("\n")}
-                            >
-                              {(line) => {
-                                const isUser = () => line().startsWith("U:");
-                                return (
-                                  <div
-                                    style={{
-                                      "font-weight": isUser() ? "600" : "normal",
-                                      color: isUser()
-                                        ? "var(--text-primary)"
-                                        : "var(--text-secondary)",
-                                      "margin-bottom": "2px",
-                                      "white-space": "pre-wrap",
-                                    }}
-                                  >
-                                    {line()}
-                                  </div>
-                                );
-                              }}
-                            </Index>
-                          </div>
                         </div>
                       </button>
                     )}
