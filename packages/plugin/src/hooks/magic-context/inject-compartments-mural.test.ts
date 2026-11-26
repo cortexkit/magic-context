@@ -1,15 +1,21 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
     buildMagicContextSection,
     MEMORY_MURAL_BLOCK,
     MEMORY_MURAL_GUIDANCE,
 } from "../../agents/magic-context-prompt";
+import { insertMemory } from "../../features/magic-context/memory";
 import { runMigrations } from "../../features/magic-context/migrations";
+import {
+    computeCueContentHash,
+    setMuralCue,
+} from "../../features/magic-context/mural/storage-mural-cues";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta-session";
+import * as modelMetadata from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
@@ -65,6 +71,68 @@ function replaceCurrentManifest(db: Database, content = "current mural"): string
 }
 
 describe("m[0] mural image fold (on-demand render → wire)", () => {
+    it("renders newly known vision support on the next natural HARD, not on defer", () => {
+        const db = makeDb();
+        const vision = spyOn(modelMetadata, "modelSupportsVision").mockReturnValue(false);
+        try {
+            const content = "Keep each provider's model context and output limits separate.";
+            const memory = insertMemory(db, {
+                projectPath: PROJECT_ID,
+                category: "ARCHITECTURE",
+                content,
+                sourceSessionId: SESSION_ID,
+            });
+            setMuralCue(
+                db,
+                PROJECT_ID,
+                memory.id,
+                "Keep model limits separate.",
+                computeCueContentHash(content),
+            );
+
+            const state = getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State;
+            const pass = (systemHash: string) => {
+                const messages: MessageLike[] = [];
+                const result = injectM0M1({
+                    db,
+                    sessionId: SESSION_ID,
+                    state,
+                    messages,
+                    projectPath: PROJECT_ID,
+                    isCacheBustingPass: false,
+                    muralEnabled: true,
+                    memoryInjectionBudgetTokens: 1,
+                    hardSignals: {
+                        systemHash,
+                        modelKey: "openai/mock-model",
+                        cacheExpired: false,
+                        lastResponseTime: 0,
+                    },
+                });
+                return { messages, result };
+            };
+            const first = pass("same-system");
+            expect(first.result.m0RematerializedThisPass).toBe(true);
+            expect(imageUrl(first.messages)).toBeUndefined();
+
+            vision.mockClear();
+            vision.mockReturnValue(true);
+            const defer = pass("same-system");
+            expect(defer.result.m0RematerializedThisPass).toBe(false);
+            expect(defer.result.m0Bytes).toEqual(first.result.m0Bytes);
+            expect(imageUrl(defer.messages)).toBeUndefined();
+            expect(vision).not.toHaveBeenCalled();
+
+            const folded = pass("natural-system-change");
+            expect(folded.result.decision).toMatchObject({ value: true, reason: "system_hash" });
+            expect(imageUrl(folded.messages)).toStartWith("data:image/png;base64,");
+            expect(db.prepare("SELECT COUNT(*) AS n FROM mural_manifest").get()).toEqual({ n: 1 });
+        } finally {
+            vision.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
     it("keeps the Rust mural block byte-equal and the system prompt unchanged", () => {
         const rust = readFileSync(
             new URL("../../../../../crates/mc-module/src/m0_compose.rs", import.meta.url),

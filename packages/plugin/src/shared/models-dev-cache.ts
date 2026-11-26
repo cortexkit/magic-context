@@ -300,6 +300,7 @@ function setCachedModelMetadata(
               attachment?: unknown;
           }
         | undefined,
+    allowPartial: boolean,
 ): void {
     const contextLimit = model?.limit?.context;
     const inputLimit = model?.limit?.input;
@@ -313,18 +314,16 @@ function setCachedModelMetadata(
     // Validate the raw provider metadata before reservation. A legitimate 20K
     // context may resolve below MIN_SANE_LIMIT after carving output, but it must
     // still remain cached; the 50%/1024 usable floor protects the result.
-    if (rawLimit === undefined) return;
+    if (rawLimit === undefined && !allowPartial) return;
 
     const values = [model?.capabilities, model?.modalities, model?.input, model?.attachment];
-    const vision = values.some(
-        (value) =>
-            JSON.stringify(value ?? "")
-                .toLowerCase()
-                .includes("image") ||
-            JSON.stringify(value ?? "")
-                .toLowerCase()
-                .includes("vision"),
-    );
+    const vision =
+        allowPartial && values.every((value) => value == null)
+            ? undefined
+            : values.some((value) => {
+                  const capabilities = JSON.stringify(value ?? "").toLowerCase();
+                  return capabilities.includes("image") || capabilities.includes("vision");
+              });
     const value: CachedModelMetadata = {
         // Keep a sane raw fallback for old persisted-cache readers. Runtime
         // resolution below uses context/input/output so user overrides stay live.
@@ -347,6 +346,27 @@ function setCachedModelMetadata(
     }
 }
 
+function mergeUsageModelMetadata(updates: Map<string, CachedModelMetadata>): void {
+    loadPersistedApiCacheOnce();
+    const merged = new Map(apiCache);
+    for (const [key, incoming] of updates) {
+        const previous = merged.get(key);
+        const contextLimit = incoming.contextLimit ?? previous?.contextLimit;
+        const inputLimit = incoming.inputLimit ?? previous?.inputLimit;
+        const limit = contextLimit ?? inputLimit ?? previous?.limit;
+        if (limit === undefined) continue;
+        merged.set(key, {
+            limit,
+            contextLimit,
+            inputLimit,
+            outputLimit: incoming.outputLimit ?? previous?.outputLimit,
+            vision: incoming.vision ?? previous?.vision,
+        });
+        if (incoming.limit !== undefined) v2DraftModelLimits.delete(key);
+    }
+    apiCache = merged;
+}
+
 /**
  * Asynchronously refresh the API-layer cache from OpenCode's SDK.
  *
@@ -361,16 +381,18 @@ function setCachedModelMetadata(
  * a few times so the cache warms instead of leaving the session on the 128k
  * default until the next restart. A successful load (any providers) stops early.
  *
- * Safe to call concurrently; only overwrites the cache on success.
+ * A full catalog replaces the previous snapshot. When OpenCode 2 records
+ * usage, its update can add known models and fields, but missing rows and
+ * fields are not evidence that the host removed them.
  */
 export async function refreshModelLimitsFromApi(
     client: OpencodeClientLike,
-    options?: { retries?: number; retryDelayMs?: number },
+    options?: { retries?: number; retryDelayMs?: number; mode?: "merge" | "replace" },
 ): Promise<void> {
     const attempts = Math.max(1, (options?.retries ?? 0) + 1);
     const delayMs = options?.retryDelayMs ?? 1000;
     for (let attempt = 1; attempt <= attempts; attempt++) {
-        const ok = await refreshModelLimitsOnce(client);
+        const ok = await refreshModelLimitsOnce(client, options?.mode === "merge");
         if (ok) return;
         if (attempt < attempts) {
             await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -413,8 +435,8 @@ export function resetAuthRewarmLatchForTest(): void {
     authRewarmDone = false;
 }
 
-/** Single SDK fetch + cache rebuild. Returns true when providers were loaded. */
-async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boolean> {
+/** Single SDK fetch + cache update. Returns true when providers were loaded. */
+async function refreshModelLimitsOnce(client: OpencodeClientLike, merge = false): Promise<boolean> {
     try {
         const result = await client.config.providers();
         const data = (result as { data?: { providers?: Array<unknown> } }).data;
@@ -441,27 +463,32 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boole
             };
             if (!p?.id || !p.models || typeof p.models !== "object") continue;
             for (const [modelId, model] of Object.entries(p.models)) {
-                setCachedModelMetadata(map, `${p.id}/${modelId}`, model);
+                setCachedModelMetadata(map, `${p.id}/${modelId}`, model, merge);
             }
         }
 
         const previousSize = apiCache?.size ?? null;
-        apiCache = map;
-        v2DraftModelLimits.clear();
+        if (merge) {
+            mergeUsageModelMetadata(map);
+        } else {
+            apiCache = map;
+            v2DraftModelLimits.clear();
+        }
         apiLoadedAt = Date.now();
         // Persist the freshly-resolved (sane-filtered) limits so the next process
         // cold-starts with the real values instead of the 128k default.
         persistApiCache();
 
+        const size = apiCache?.size ?? 0;
         if (previousSize === null) {
             sessionLog(
                 "global",
-                `models-dev-cache: API layer loaded ${map.size} model metadata entries`,
+                `models-dev-cache: API layer loaded ${size} model metadata entries`,
             );
-        } else if (previousSize !== map.size) {
+        } else if (previousSize !== size) {
             sessionLog(
                 "global",
-                `models-dev-cache: API layer loaded ${map.size} model metadata entries (was ${previousSize})`,
+                `models-dev-cache: API layer loaded ${size} model metadata entries (was ${previousSize})`,
             );
         }
         return true;

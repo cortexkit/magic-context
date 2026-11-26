@@ -8,7 +8,11 @@ import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-conte
 import * as budgets from "../../hooks/magic-context/derive-budgets";
 import * as transformModule from "../../hooks/magic-context/transform";
 import { _resetDreamTimerForTests } from "../../plugin/dream-timer";
-import { getSdkContextLimit, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import {
+    getSdkContextLimit,
+    modelSupportsVision,
+    refreshModelLimitsFromApi,
+} from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { registerContext } from "./context";
@@ -51,6 +55,7 @@ function catalog() {
                 providerID: "openai",
                 name: "GPT-4.1",
                 limit: { context: currentLimit, output: 32_000 },
+                capabilities: { input: ["text", "image"] },
             },
         ],
     };
@@ -164,17 +169,21 @@ afterAll(async () => {
 test("re-reads the model catalog after a provider reload", async () => {
     const limit = () => getSdkContextLimit("openai", "gpt-4.1", undefined, { reservation: "none" });
     expect(limit()).toBe(1_000_000);
+    expect(modelSupportsVision("openai", "gpt-4.1")).toBe(true);
 
     await hook!(pass("u1"));
     const callsAfterFirstPass = listCalls;
     expect(callsAfterFirstPass).toBeGreaterThan(0);
     expect(limit()).toBe(1_000_000);
+    expect(modelSupportsVision("openai", "gpt-4.1")).toBe(true);
 
     currentLimit = 500_000;
     releaseEvent();
     await processed;
 
-    await hook!(pass("u2"));
+    const draft = pass("u2");
+    draft.model.limit = { context: 450_000, output: 20_000 };
+    await hook!(draft);
     expect(listCalls).toBe(callsAfterFirstPass + 1);
-    expect(limit()).toBe(500_000);
+    expect(limit()).toBe(450_000);
 });

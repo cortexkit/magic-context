@@ -3,7 +3,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { openTestDb } from "../../src/test-db";
-import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import {
+    inspectOpenFiles,
+    isolation,
+    spawnOpencode2,
+    waitForPluginActive,
+    waitForPluginLog,
+} from "../../src/opencode2-runner/spawn";
+import { cleanupE2ETempDir } from "../../src/temp-dir";
 
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
@@ -15,6 +22,70 @@ async function until(check: () => boolean, label: string): Promise<void> {
     }
     throw new Error(`timed out waiting for ${label}`);
 }
+
+test("the first real turn caches image input for a project-local model", async () => {
+    const fixture = isolation();
+    fixture.env.OPENCODE_DISABLE_MODELS_FETCH = "1";
+    const modelIDs = ["mock-model", "other-vision-model"];
+    let host: Awaited<ReturnType<typeof spawnOpencode2>> | undefined;
+    try {
+        host = await spawnOpencode2({
+            existingIsolation: fixture,
+            visionModel: true,
+            additionalModelIDs: modelIDs.slice(1),
+            modelContextLimit: 200_000,
+            modelInputLimit: 150_000,
+            modelOutputLimit: 8192,
+            compactionAuto: false,
+            magicContextConfig: {
+                historian: { disable: true },
+                dreamer: { disable: true },
+                mural: { enabled: true },
+                compaction: { enabled: false },
+            },
+        });
+        const client = OpenCode.make({ baseUrl: host.url,
+            headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
+        const session = await client.session.create({ location: { directory: fixture.cwd },
+            model: { providerID: "openai", id: "mock-model" } });
+        await waitForPluginActive(client, fixture.cwd);
+        const warm = "models-dev-cache: API layer loaded";
+        expect(await waitForPluginLog(fixture.env, warm, 15_000)).toContain(warm);
+
+        const cache = join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "model-context-limits-opencode2.json");
+        const models = () => {
+            const limits = JSON.parse(readFileSync(cache, "utf8"));
+            return Object.fromEntries(modelIDs.map((id) => [id, limits[`openai/${id}`]]));
+        };
+        const before = models();
+        expect(before).toEqual({ "mock-model": undefined, "other-vision-model": undefined });
+        const catalog = await client.model.list({ location: { directory: fixture.cwd } });
+        for (const id of modelIDs) {
+            const model = catalog.data.find((row) => row.providerID === "openai" && row.id === id);
+            expect(model?.capabilities.input).toContain("image");
+        }
+
+        await client.session.prompt({ sessionID: session.id, text: "First vision-model turn" });
+        await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
+        const usage = "v2 usage: inputTokens=";
+        expect(await waitForPluginLog(fixture.env, usage, 15_000)).toContain(usage);
+        expect(host.mock.requests().some(({ body }) => JSON.stringify(body).includes("First vision-model turn"))).toBe(true);
+
+        const pid = host.pid!;
+        const dbPaths = [...new Set(inspectOpenFiles(pid, fixture.root, fixture.env)
+            .filter((path) => /\.db(?:-wal|-shm)?$/.test(path)))].sort();
+        expect(dbPaths).toContain(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!));
+        expect(dbPaths).toContain(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        console.log(`lsof -p ${pid} (DB handles): ${JSON.stringify(dbPaths)}`);
+
+        const after = models();
+        console.log(`Project-local models in startup cache: ${Object.values(before).filter(Boolean).length}; after usage: ${JSON.stringify(after)}`);
+        const expected = { limit: 200_000, contextLimit: 200_000, inputLimit: 150_000, outputLimit: 8192, vision: true };
+        expect(after).toEqual({ "mock-model": expected, "other-vision-model": expected });
+    } finally {
+        try { await host?.stop(); } finally { cleanupE2ETempDir(fixture.root); }
+    }
+}, 180_000);
 
 test("a persisted project mural reaches the vision-capable host as Media on priced and cached passes", async () => {
     const fixture = isolation();

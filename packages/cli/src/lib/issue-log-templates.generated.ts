@@ -2245,6 +2245,7 @@ const TEMPLATE_DATA = [
 "[\x01] \x01: model not found, retrying with suggestion",
 "run \x01 left for the lease: this host is stopping",
 "skipping \x01 until \x01: provider said to retry later\x020m",
+"[mural] skipped: model \x01 does not accept images\x020m",
 "[dreamer] classify: stage=\x01 nothing to classify",
 "[\x01] primary (\x01/\x01) failed: \x01: \x01; trying \x01 fallback(s)\x021m,2m",
 "[historian] Dropped <facts> category \x01 (\x01 facts)",

@@ -250,7 +250,11 @@ import { generateReplayAnchor, V2GenerateReplay } from "./generate";
 import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
 import { type V2LkgCheckpointHead, type V2LkgHostInput, V2LkgSystemReplay } from "./lkg-system";
-import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
+import {
+    catalogProvidersPayload,
+    modelLimitCacheWarm,
+    warmModelLimitCacheFromCatalog,
+} from "./model-limit-cache";
 import { V2OverflowRecovery } from "./overflow-recovery";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
@@ -1669,32 +1673,43 @@ export async function registerContext(context: V2Context) {
                         catalogFailed = true;
                     }
                     if (!catalogFailed) {
-                        const providers = new Map<
-                            string,
-                            {
-                                id: string;
-                                models: Record<
-                                    string,
-                                    { limit: { context: number; input?: number; output?: number } }
-                                >;
-                            }
-                        >();
+                        const providers = new Map(
+                            catalogProvidersPayload(catalog).map((provider) => [
+                                provider.id,
+                                provider,
+                            ]),
+                        );
                         for (const model of catalogModels(catalog, draft.model)) {
                             rawLimits.set(`${model.providerID}/${model.id}`, model.limit);
                             const provider = providers.get(model.providerID) ?? {
                                 id: model.providerID,
                                 models: {},
                             };
-                            provider.models[model.id] = { limit: model.limit };
+                            // The host list supplies capabilities; the outgoing draft
+                            // supplies any more specific limits for the selected model.
+                            const row = provider.models[model.id];
+                            const catalogLimit = row?.limit;
+                            provider.models[model.id] = {
+                                ...row,
+                                limit: {
+                                    ...(catalogLimit && typeof catalogLimit === "object"
+                                        ? catalogLimit
+                                        : {}),
+                                    ...model.limit,
+                                },
+                            };
                             providers.set(model.providerID, provider);
                         }
-                        await refreshModelLimitsFromApi({
-                            config: {
-                                providers: async () => ({
-                                    data: { providers: [...providers.values()] },
-                                }),
+                        await refreshModelLimitsFromApi(
+                            {
+                                config: {
+                                    providers: async () => ({
+                                        data: { providers: [...providers.values()] },
+                                    }),
+                                },
                             },
-                        });
+                            { mode: "merge" },
+                        );
                         queriedModels.add(draftModelKey);
                     }
                 }

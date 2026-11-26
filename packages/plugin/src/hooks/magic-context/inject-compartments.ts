@@ -2606,7 +2606,15 @@ function resolveMuralForM0(
     mode: "persist" | "read-only" = "persist",
 ): MuralWireOptions | undefined {
     if (options.memoryEnabled === false || !options.muralEnabled) return undefined;
-    return resolveMuralWire(options.db, projectPath, modelKey, true, budgetTokens, mode);
+    return resolveMuralWire(
+        options.db,
+        projectPath,
+        modelKey,
+        true,
+        budgetTokens,
+        mode,
+        options.sessionId,
+    );
 }
 
 /** A baseline rendered by `materializeM0` with `{ persist: false }`: nothing was stored. */

@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
+import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { insertMemory, setMemoryClassification } from "../memory";
 import { runMigrations } from "../migrations";
@@ -106,6 +107,30 @@ test("mural cache cannot bypass the nonvision model gate", () => {
         });
         expect(resolveMuralWire(db, "git:cache", undefined, true, 1).dataUrl).toBeUndefined();
     } finally {
+        db.close();
+    }
+});
+
+test("logs the nonvision skip once per session and model only when the mural is enabled", () => {
+    const db = new Database(":memory:");
+    const logs = spyOn(logger, "sessionLog").mockImplementation(() => {});
+    try {
+        const resolve = (model: string, session: string, enabled = true) =>
+            resolveMuralWire(db, "git:cache", model, enabled, 1, "persist", session);
+        resolve("unknown/text", "s1", false);
+        expect(logs).not.toHaveBeenCalled();
+
+        resolve("unknown/text", "s1");
+        resolve("unknown/text", "s1");
+        resolve("unknown/other", "s1");
+        resolve("unknown/text", "s2");
+        expect(logs.mock.calls).toEqual([
+            ["s1", "[mural] skipped: model unknown/text does not accept images"],
+            ["s1", "[mural] skipped: model unknown/other does not accept images"],
+            ["s2", "[mural] skipped: model unknown/text does not accept images"],
+        ]);
+    } finally {
+        logs.mockRestore();
         db.close();
     }
 });

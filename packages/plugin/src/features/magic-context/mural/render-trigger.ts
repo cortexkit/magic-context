@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { piModelRefToCanonical } from "../../../shared/harness-provider-map";
-import { log } from "../../../shared/logger";
+import { log, sessionLog } from "../../../shared/logger";
 import { modelSupportsVision } from "../../../shared/models-dev-cache";
 import type { Database } from "../../../shared/sqlite";
 import { DEFAULT_MURAL_MEMORY_BUDGET } from "./mural-selection";
@@ -26,6 +26,8 @@ import { getMural, upsertMural } from "./storage-mural";
 export const DETERMINISTIC_MURAL_MODEL = "deterministic";
 export const MIN_MURAL_CUED_MEMORIES = 15;
 export const MIN_MURAL_COVERAGE = 0.5;
+
+const visionSkipsLogged = new Set<string>();
 
 // Resolve the pool on every refresh, but retain at most sixteen exact render inputs
 // per database. Weak ownership releases all PNGs when a database is discarded.
@@ -240,8 +242,8 @@ export function modelKeyAcceptsImages(modelKey: string | undefined): boolean {
  * the injected data-url only swaps on a natural fold (defer passes replay the
  * baked-in bytes), matching the existing inject-compartments cache rule.
  *
- * Returns `{ enabled: false }` (no image) when the feature is off, the model
- * can't take images, or the cue pool is empty.
+ * Returns no image when the feature is off, the model can't take images, or
+ * there are no mural cues to render.
  */
 export function resolveMuralWire(
     db: Database,
@@ -250,8 +252,17 @@ export function resolveMuralWire(
     enabled: boolean,
     budgetTokens: number = DEFAULT_MURAL_MEMORY_BUDGET,
     mode: "persist" | "read-only" = "persist",
+    sessionId?: string,
 ): MuralWireOptions {
-    if (!enabled || !projectIdentity || !modelKeyAcceptsImages(modelKey)) {
+    if (!enabled || !projectIdentity) return { enabled, supportsVision: false };
+    if (!modelKeyAcceptsImages(modelKey)) {
+        if (sessionId && modelKey) {
+            const key = JSON.stringify([sessionId, modelKey]);
+            if (!visionSkipsLogged.has(key)) {
+                visionSkipsLogged.add(key);
+                sessionLog(sessionId, `[mural] skipped: model ${modelKey} does not accept images`);
+            }
+        }
         return { enabled, supportsVision: false };
     }
     const result = ensureMuralRendered(db, projectIdentity, budgetTokens, mode);
