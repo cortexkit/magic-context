@@ -426,6 +426,8 @@ fn lock_backup_scope(
             Some(code) if code == libc::EWOULDBLOCK => {}
             _ => return Err(refuse(error)),
         }
+        #[cfg(test)]
+        tests::report_config_lock_contention();
         if std::time::Instant::now() >= deadline {
             return Err(refuse(std::io::Error::other(
                 "a different save of this config did not end in time",
@@ -506,14 +508,14 @@ fn back_up_current_config(
     backup_dir: &Path,
     scope: &str,
 ) -> Result<Vec<PathBuf>, String> {
-    let Some(current) = read_current_config_no_follow(path).map_err(|e| {
+    let current = read_current_config_no_follow(path).map_err(|e| {
         format!("Refusing to save config: cannot read the current config for a backup copy: {e}")
-    })?
-    else {
-        return Ok(Vec::new());
-    };
+    })?;
     #[cfg(test)]
     run_after_backup_read_hook(path);
+    let Some(current) = current else {
+        return Ok(Vec::new());
+    };
     ensure_private_backup_directory(backup_dir).map_err(|e| {
         format!(
             "Refusing to save config: cannot use the backup folder {}: {e}",
@@ -1308,6 +1310,24 @@ mod tests {
     }
 
     #[test]
+    fn config_backup_review_first_save_needs_no_backup_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = dir.path().join("config/cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(backups.parent().unwrap()).unwrap();
+        std::fs::write(&backups, "not a directory").unwrap();
+
+        write_config(&path, "first").expect("first save needs no backup");
+        let error = write_config(&path, "second").expect_err("overwrite requires a backup");
+        assert!(error.contains("backup"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        assert_eq!(
+            std::fs::read_to_string(&backups).unwrap(),
+            "not a directory"
+        );
+    }
+
+    #[test]
     fn sixth_save_drops_the_oldest_copy_only() {
         let dir = tempfile::tempdir().unwrap();
         let (_env, backups) = isolated_data_home(dir.path());
@@ -1360,6 +1380,48 @@ mod tests {
             write_config(&path, &format!("v{version}")).expect("save after clock rollback");
         }
         assert_eq!(contents(), vec!["v1", "v2", "v3", "v4", "v5"]);
+    }
+
+    #[test]
+    fn config_backup_review_pruning_keeps_new_copy_and_ignores_invalid_dates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "previous");
+        std::fs::create_dir_all(&backups).unwrap();
+        for day in 1..=5 {
+            let seq = day + 1;
+            let name =
+                format!("magic-context.user.s{seq:020}.299901{day:02}T000000.000000000Z-00.jsonc");
+            std::fs::write(backups.join(name), format!("future{day}")).unwrap();
+        }
+        let invalid = [
+            "magic-context.user.20230229T010203.000000000Z-00.jsonc",
+            "magic-context.user.s00000000000000000001.20240101T240000.000000000Z-00.jsonc",
+        ];
+        for name in invalid {
+            std::fs::write(backups.join(name), "not a backup").unwrap();
+        }
+
+        write_config(&path, "updated").expect("save and prune");
+
+        let names = backup_copies(&backups);
+        for name in invalid {
+            assert_eq!(
+                std::fs::read_to_string(backups.join(name)).unwrap(),
+                "not a backup",
+                "pruning touched {name}"
+            );
+        }
+        let contents: Vec<_> = names
+            .iter()
+            .filter(|name| !invalid.contains(&name.as_str()))
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(
+            contents,
+            ["future2", "future3", "future4", "future5", "previous"]
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "updated");
     }
 
     #[test]
@@ -1588,6 +1650,138 @@ mod tests {
             .collect();
         contents.sort();
         assert_eq!(contents, vec!["A", first]);
+    }
+
+    #[cfg(unix)]
+    pub(super) fn report_config_lock_contention() {
+        if let Some(path) = std::env::var_os("MC_TEST_CONFIG_SAVE_WAITING") {
+            std::fs::write(path, "").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_config_save_phase(paths: &[&Path], child: Option<&mut std::process::Child>) {
+        let mut child = child;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !paths.iter().any(|path| path.exists()) {
+            if let Some(child) = child.as_deref_mut() {
+                assert_eq!(
+                    child.try_wait().unwrap(),
+                    None,
+                    "save exited before {paths:?}"
+                );
+            }
+            assert!(std::time::Instant::now() < deadline, "missing {paths:?}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess for the parallel config save tests"]
+    fn config_save_child() {
+        let path = |key| PathBuf::from(std::env::var_os(key).unwrap());
+        let read_marker = path("MC_TEST_CONFIG_SAVE_READ");
+        let release = std::env::var_os("MC_TEST_CONFIG_SAVE_RELEASE").map(PathBuf::from);
+        let project_save = release.is_none();
+        let _hook = BackupReadHookGuard::set(std::sync::Arc::new(move |_| {
+            std::fs::write(&read_marker, "").unwrap();
+            if let Some(release) = &release {
+                wait_for_config_save_phase(&[release], None);
+            }
+        }));
+        let target = path("MC_TEST_CONFIG_SAVE_TARGET");
+        if project_save {
+            write_project_config(target.to_str().unwrap(), "second").expect("project save");
+        } else {
+            write_config(&target, "first").expect("user save");
+        }
+    }
+
+    #[cfg(unix)]
+    fn run_config_save_processes(initial: Option<&str>) {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("project");
+        let target = project.join(".cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        if let Some(initial) = initial {
+            std::fs::write(&target, initial).unwrap();
+        }
+        let alias = root.join("project-alias");
+        symlink(&project, &alias).unwrap();
+        let user = root.join("magic-context.jsonc");
+        symlink(alias.join(".cortexkit/magic-context.jsonc"), &user).unwrap();
+
+        let spawn = |id: &str, target: &Path, release: Option<&Path>| {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", "config::tests::config_save_child", "--ignored"])
+                .env(
+                    "MAGIC_CONTEXT_STORAGE_DIR",
+                    root.join(format!("{id}-store")),
+                )
+                .env("MC_TEST_CONFIG_SAVE_TARGET", target)
+                .env("MC_TEST_CONFIG_SAVE_READ", root.join(format!("{id}-read")))
+                .env(
+                    "MC_TEST_CONFIG_SAVE_WAITING",
+                    root.join(format!("{id}-waiting")),
+                )
+                .env_remove("MC_TEST_CONFIG_SAVE_RELEASE");
+            if let Some(release) = release {
+                command.env("MC_TEST_CONFIG_SAVE_RELEASE", release);
+            }
+            command.spawn().unwrap()
+        };
+
+        let release = root.join("release");
+        let mut first = spawn("first", &user, Some(&release));
+        wait_for_config_save_phase(&[&root.join("first-read")], Some(&mut first));
+        let first_backups = root.join("first-store/config-backups");
+        let first_created_backup_dir = first_backups.exists();
+        let mut second = spawn("second", &project, None);
+        let waiting = root.join("second-waiting");
+        wait_for_config_save_phase(&[&waiting, &root.join("second-read")], Some(&mut second));
+        std::fs::write(release, "").unwrap();
+        assert!(first.wait().unwrap().success(), "user save failed");
+        assert!(second.wait().unwrap().success(), "project save failed");
+
+        let copies = |folder: &Path| -> Vec<String> {
+            backup_copies(folder)
+                .into_iter()
+                .map(|name| std::fs::read_to_string(folder.join(name)).unwrap())
+                .collect()
+        };
+        assert!(
+            waiting.exists(),
+            "project save read before the user save replaced the config"
+        );
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "second");
+        assert_eq!(
+            copies(&first_backups),
+            initial.into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(copies(&root.join("second-store/config-backups")), ["first"]);
+        if initial.is_none() {
+            assert!(
+                !first_created_backup_dir,
+                "first save created the backup folder"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_backup_review_alias_saves_share_a_lock_across_stores() {
+        run_config_save_processes(Some("original"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_backup_review_concurrent_first_saves_back_up_the_first_writer() {
+        run_config_save_processes(None);
     }
 
     /// Open the lock file of a backup scope and lock it, as a save in a
