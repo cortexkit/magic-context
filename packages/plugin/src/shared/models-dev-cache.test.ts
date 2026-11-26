@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import {
     historianProducerReserve,
     producerInputTokenLimit,
 } from "../hooks/magic-context/producer-window-guard";
+import * as harnessState from "./harness";
 import {
     clearModelsDevCache,
     getModelsDevCacheState,
@@ -21,6 +22,7 @@ import {
     resetAuthRewarmLatchForTest,
     resolveLimit,
     setOutputReserveConfig,
+    useV2DraftModelLimits,
 } from "./models-dev-cache";
 import { createTestTempDirFromPath } from "./test-temp-dir";
 
@@ -167,6 +169,50 @@ describe("models-dev-cache (SDK-only)", () => {
             /* Ignore EBUSY on Windows */
         }
         clearModelsDevCache();
+    });
+
+    test("a draft fills only its own OpenCode 2 window until the next full catalog refresh", async () => {
+        const host = spyOn(harnessState, "getHarness").mockReturnValue("opencode2");
+        try {
+            await refreshModelLimitsFromApi(
+                makeClient([
+                    {
+                        id: "custom",
+                        models: {
+                            complete: { limit: { context: 80_000, input: 40_000, output: 8000 } },
+                            partial: { limit: { context: 80_000 } },
+                        },
+                    },
+                ]),
+            );
+            const window = (model: string) => getSdkContextLimit("custom", model);
+            expect(
+                useV2DraftModelLimits("custom", "complete", { context: 90_000, input: 50_000 }),
+            ).toBe(true);
+            expect(window("complete")).toBe(40_000);
+            expect(useV2DraftModelLimits("custom", "complete", { context: 30_000 })).toBe(false);
+            expect(window("complete")).toBe(40_000);
+
+            expect(
+                useV2DraftModelLimits("custom", "partial", { context: 80_000, input: 30_000 }),
+            ).toBe(true);
+            expect(window("partial")).toBe(30_000);
+            expect(window("partial:tag")).toBe(80_000);
+            expect(window("complete")).toBe(40_000);
+            for (const harness of ["pi", "opencode"] as const) {
+                host.mockReturnValue(harness);
+                expect(window("partial")).toBe(80_000);
+            }
+            host.mockReturnValue("opencode2");
+
+            await refreshModelLimitsFromApi(
+                makeClient([{ id: "custom", models: { partial: { limit: { context: 90_000 } } } }]),
+            );
+            expect(window("partial")).toBe(90_000);
+            expect(window("complete")).toBeUndefined();
+        } finally {
+            host.mockRestore();
+        }
     });
 
     test("honors the reporter's default output_reserve on the SDK geometry path", async () => {

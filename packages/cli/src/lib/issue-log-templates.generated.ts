@@ -1500,6 +1500,7 @@ const TEMPLATE_DATA = [
 "injected \x01 facts + \x01 memories into message[0] (no compartments yet)",
 "v2 fork inheritance: fork of \x01 already has state; not copied again\x020s",
 "Subagent temperature omitted for \x01: no host or models.dev metadata\x020m",
+"v2 model catalog lookup failed for \x01/\x01; using selected model limits\x020m,1m",
 "historian trigger eval: usage=\x01% (\x01 tokens) [\x01], checking trigger...",
 "[dreamer] domain lease busy (maintain-docs:\x01) — deferring \x01 task(s)",
 "[dreamer] domain lease busy (user-memories:\x01) — deferring \x01 task(s)",

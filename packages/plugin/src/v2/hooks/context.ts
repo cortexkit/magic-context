@@ -145,6 +145,7 @@ import {
     refreshModelLimitsFromApi,
     resolveLimit,
     setOutputReserveConfig,
+    useV2DraftModelLimits,
 } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import {
@@ -1593,34 +1594,52 @@ export async function registerContext(context: V2Context) {
                     });
                 const draftModelKey = `${draft.model.providerID}/${draft.model.id}`;
                 if (!queriedModels.has(draftModelKey)) {
-                    const catalog = await Promise.resolve(context.model.list());
-                    const providers = new Map<
-                        string,
-                        {
-                            id: string;
-                            models: Record<
-                                string,
-                                { limit: { context: number; input?: number; output?: number } }
-                            >;
-                        }
-                    >();
-                    for (const model of catalogModels(catalog, draft.model)) {
-                        rawLimits.set(`${model.providerID}/${model.id}`, model.limit);
-                        const provider = providers.get(model.providerID) ?? {
-                            id: model.providerID,
-                            models: {},
-                        };
-                        provider.models[model.id] = { limit: model.limit };
-                        providers.set(model.providerID, provider);
+                    let catalog: unknown;
+                    let catalogFailed = false;
+                    try {
+                        catalog = await Promise.resolve(context.model.list());
+                    } catch (error) {
+                        // The transform's fit guard, not just usage math, needs
+                        // the selected model's window. Retry the catalog next pass.
+                        if (
+                            !useV2DraftModelLimits(
+                                draft.model.providerID,
+                                draft.model.id,
+                                draft.model.limit,
+                            )
+                        )
+                            throw error;
+                        catalogFailed = true;
                     }
-                    await refreshModelLimitsFromApi({
-                        config: {
-                            providers: async () => ({
-                                data: { providers: [...providers.values()] },
-                            }),
-                        },
-                    });
-                    queriedModels.add(draftModelKey);
+                    if (!catalogFailed) {
+                        const providers = new Map<
+                            string,
+                            {
+                                id: string;
+                                models: Record<
+                                    string,
+                                    { limit: { context: number; input?: number; output?: number } }
+                                >;
+                            }
+                        >();
+                        for (const model of catalogModels(catalog, draft.model)) {
+                            rawLimits.set(`${model.providerID}/${model.id}`, model.limit);
+                            const provider = providers.get(model.providerID) ?? {
+                                id: model.providerID,
+                                models: {},
+                            };
+                            provider.models[model.id] = { limit: model.limit };
+                            providers.set(model.providerID, provider);
+                        }
+                        await refreshModelLimitsFromApi({
+                            config: {
+                                providers: async () => ({
+                                    data: { providers: [...providers.values()] },
+                                }),
+                            },
+                        });
+                        queriedModels.add(draftModelKey);
+                    }
                 }
                 const usageDb = db;
                 const limitFor = (providerID: string, modelID: string) => {

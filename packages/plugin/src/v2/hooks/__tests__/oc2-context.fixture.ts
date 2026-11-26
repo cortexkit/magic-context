@@ -80,6 +80,7 @@ export async function oc2ContextFixture(
         limit = { context: 1000000 } as { context: number; input?: number; output?: number },
         /** Further plugin settings, merged over the fixture's own. */
         configOverrides = {} as Record<string, unknown>,
+        listModels = undefined as V2Context["model"]["list"] | undefined,
         eventStream = (_options: { signal: AbortSignal }): AsyncIterable<unknown> =>
             (async function* () {})(),
     } = {},
@@ -147,7 +148,7 @@ export async function oc2ContextFixture(
         location: { directory: root },
         agent: { transform: async () => {}, reload: async () => {} },
         model: {
-            list: () => [{ id: model, providerID: provider, limit }],
+            list: listModels ?? (() => [{ id: model, providerID: provider, limit }]),
         },
         storage: {
             get: async (key: string) => storage.get(key),
