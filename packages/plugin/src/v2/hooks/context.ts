@@ -188,6 +188,7 @@ import {
 } from "../fold/native-replay";
 import { controlKey, effortPart, rememberedControlKey } from "../fold/native-replay-v3";
 import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
+import { hasUnsummarizedBlocks } from "../fold/partial-boundary";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
 import {
@@ -2341,7 +2342,7 @@ export async function registerContext(context: V2Context) {
         const retiredInstructions =
             (await nativeFoldReplay?.instructionRetirement(draft.sessionID, reader)) ??
             (() => false);
-        const boundary = Math.max(
+        const floor = Math.max(
             nativeFloor ?? -Infinity,
             // A changed hidden row may have lived inside the frozen
             // prefix. Make it available to the shared-path rebuild too.
@@ -2353,6 +2354,18 @@ export async function registerContext(context: V2Context) {
                 reader.sequenceForId(draft.sessionID, boundaryID) ??
                 (reader.earliestSequence(draft.sessionID) ?? 0) - 1,
         );
+        // A compartment can end inside the floor row and leave later blocks of
+        // it unsummarized; the shared transform keeps such a row raw, so it is
+        // restored with the rows after it, as before the checkpoint. Rust mode
+        // restores from the module's own boundary row instead.
+        const floorRow =
+            !rustModeModuleClient && Number.isFinite(floor)
+                ? reader.range(draft.sessionID, floor - 1, floor).find((row) => row.seq === floor)
+                : undefined;
+        const boundary =
+            floorRow && hasUnsummarizedBlocks(db, reader, draft.sessionID, floorRow.id)
+                ? floor - 1
+                : floor;
         if (moduleBoundarySeq !== undefined)
             sessionLog(
                 draft.sessionID,

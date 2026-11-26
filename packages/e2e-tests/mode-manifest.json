@@ -99,6 +99,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/partial-boundary-manual-compaction.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real host manual /compact when the newest compartment ends inside a tool step (end_block_index on the call, its result unsummarized): the result is served once before and after the compaction, on the next turn and after a restart, and each request keeps the previous one as its exact prefix; a whole-row arm pins the unchanged request. Background compaction (OpenCode 2.3.1+) is turned off so the hook sees the running row. PID lsof proves isolated stores.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/native-fold-provenance.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

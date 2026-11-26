@@ -404,8 +404,13 @@ export async function oc2ContextFixture(
                 logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
             };
         },
-        /** Publish the next compartment, covering rows through `endIndex` (a served row). */
-        compartment(endIndex: number) {
+        /**
+         * Publish the next compartment, covering rows through `endIndex` (a served
+         * row). With `endBlockIndex` it covers that row only through that block,
+         * as a summary written by the Rust module can, and the row's later
+         * blocks stay unsummarized.
+         */
+        compartment(endIndex: number, endBlockIndex?: number) {
             if (rows[endIndex]!.type === "system") throw new Error("boundary must be served");
             const sequence = compartments++;
             const startIndex = coveredThrough + 1;
@@ -417,6 +422,7 @@ export async function oc2ContextFixture(
                     endMessage: endIndex + 1,
                     startMessageId: rows[startIndex]!.id,
                     endMessageId: rows[endIndex]!.id,
+                    ...(endBlockIndex === undefined ? {} : { endBlockIndex }),
                     title: `Review history ${sequence}`,
                     content: prose.repeat(3),
                     p1: prose.repeat(3),
