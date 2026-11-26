@@ -917,7 +917,7 @@ fn opencode_probe_command(bin: &str, args: &[&str], cwd: &Path) -> tokio::proces
     command
 }
 
-const NO_OPENCODE_PROBE_DIR: &str = "no safe working folder. Set MAGIC_CONTEXT_STORAGE_DIR to a folder outside the system temp folder and the AppImage mount.";
+const NO_OPENCODE_PROBE_DIR: &str = "no safe working folder. Set MAGIC_CONTEXT_STORAGE_DIR to a folder outside the system temp folder and the AppImage mount, then restart the dashboard.";
 
 fn opencode_probe_dir() -> Option<PathBuf> {
     let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
@@ -940,7 +940,10 @@ fn opencode_probe_dir_from(
             return None;
         }
         let dir = dir.canonicalize().ok()?;
+        // A filesystem root (`/`, or a drive root on Windows) would let OpenCode open the
+        // whole filesystem as a project, for example with `HOME=/` in a container.
         (dir.is_dir()
+            && dir.parent().is_some()
             && opencode_probe_dir_outside(&dir, temp)
             && appdir.map_or(true, |root| opencode_probe_dir_outside(&dir, root)))
         .then_some(dir)
@@ -2021,7 +2024,7 @@ mod tests {
 
         assert_eq!(
             result.unwrap_err(),
-            "Couldn't load models from OpenCode: no safe working folder. Set MAGIC_CONTEXT_STORAGE_DIR to a folder outside the system temp folder and the AppImage mount."
+            "Couldn't load models from OpenCode: no safe working folder. Set MAGIC_CONTEXT_STORAGE_DIR to a folder outside the system temp folder and the AppImage mount, then restart the dashboard."
         );
         assert!(!called.get());
     }
