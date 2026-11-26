@@ -3,6 +3,7 @@ import {
     drainNotifications,
     isTuiConnected,
     type NotificationSink,
+    pushLiveNotification,
     pushNotification,
     registerNotificationSink,
 } from "./rpc-notifications";
@@ -108,6 +109,34 @@ describe("rpc notifications", () => {
         // The sink sees its own session + global, never the foreign session.
         expect(received.sort()).toEqual(["for-live", "global"]);
         unregister();
+    });
+
+    test("live-only notices are scoped to an attached session and never enter replay", () => {
+        const sessionId = "ses_display_only";
+        const attached: string[] = [];
+        const other: string[] = [];
+        pushLiveNotification("display-only", { message: "before attach" }, sessionId);
+        const unregister = registerNotificationSink({
+            sessionId,
+            send: ({ payload }) => attached.push(String(payload.message)),
+        });
+        const unregisterOther = registerNotificationSink({
+            sessionId: "ses_other_session",
+            send: ({ payload }) => other.push(String(payload.message)),
+        });
+        const unregisterUnscoped = registerNotificationSink({
+            send: ({ payload }) => other.push(String(payload.message)),
+        });
+        try {
+            pushLiveNotification("display-only", { message: "while attached" }, sessionId);
+            expect(attached).toEqual(["while attached"]);
+            expect(other).toEqual([]);
+            expect(drainNotifications(0, sessionId, { sessionOnly: true })).toEqual([]);
+        } finally {
+            unregister();
+            unregisterOther();
+            unregisterUnscoped();
+        }
     });
 
     test("a dead sink (throwing send) does not block delivery to other sinks", () => {

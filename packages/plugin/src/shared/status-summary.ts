@@ -37,6 +37,7 @@ export interface UserStatusSummary {
     dreamerRunner?: RunnerStatus;
     warnings: UserFacingFailureKey[];
     hiddenVariantWarnings?: string[];
+    projectBindingWarning?: string;
     dreamerSkipped?: readonly string[];
     dreamerQuotas?: readonly string[];
     hiddenModelSkips?: readonly string[];
@@ -131,6 +132,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         compactionMarker: detail.compactionMarker,
         warnings: statusWarningsFromDetail(detail),
         hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
+        projectBindingWarning: detail.projectBindingWarning,
         dreamerSkipped: detail.dreamerSkipped,
         hiddenModelSkips: detail.hiddenModelSkips,
         dreamerQuotas: [
@@ -257,6 +259,10 @@ export function renderUserStatusSummary(
             : ["Magic Context Status", ...values.map(([label, value]) => `${label}: ${value}`)];
     for (const warning of summary.hiddenVariantWarnings ?? []) {
         lines.push(style === "markdown" ? `- **Warning:** ${warning}` : `Warning: ${warning}`);
+    }
+    if (summary.projectBindingWarning) {
+        const label = style === "markdown" ? "- **Warning:**" : "Warning:";
+        lines.push(`${label} ${summary.projectBindingWarning}`);
     }
     for (const warning of summary.warnings) {
         lines.push(

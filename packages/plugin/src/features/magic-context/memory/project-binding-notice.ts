@@ -12,6 +12,7 @@ const observedBindings = new WeakMap<Database, BoundedSessionMap<BindingObservat
 interface BindingObservation {
     directory: string;
     noticed: Set<string>;
+    warning?: string;
 }
 
 function bindingLog(
@@ -42,13 +43,18 @@ export function observeSessionProjectBinding(
     const key = `${harness}\0${sessionId}`;
     const last = observations.get(key);
     const noticed = last?.noticed ?? new Set<string>();
-    observations.set(key, { directory, noticed });
+    const observation: BindingObservation = {
+        directory,
+        noticed,
+        warning: change ? undefined : last?.warning,
+    };
+    observations.set(key, observation);
 
     const old = change?.previousProjectPath;
     if (!change || (!old && harness !== "pi" && harness !== "omp")) return;
     const memories = old ? getMemoryCount(db, old) : 0;
     const binding = bindingLog(harness, directory, old, identity, memories);
-    if (!old || !memories || noticed.has(old)) {
+    if (!old || !memories) {
         sessionLog(sessionId, binding);
         return;
     }
@@ -58,16 +64,24 @@ export function observeSessionProjectBinding(
         (path) => path && directoryFallback(path) === old,
     );
     const location = oldDirectory ? `the old folder (${oldDirectory})` : `the old project (${old})`;
-    let notice = `This session changed projects. ${memories} ${memories === 1 ? "memory stayed" : "memories stayed"} with ${location}; nothing moved.`;
+    let guidance: string;
     if (old.startsWith("dir:") && /^(dir|git):/.test(identity)) {
-        notice += ` To move them here, close all Magic Context hosts and run: ${identityMergeCommand(oldDirectory ?? old, identity)}`;
+        guidance = `To move them here, close all Magic Context hosts and run: ${identityMergeCommand(oldDirectory ?? old, identity)}`;
     } else if (old.startsWith("git:") && identity.startsWith("dir:")) {
-        notice += " A repository's memories cannot be merged into a folder project.";
+        guidance = "A repository's memories cannot be merged into a folder project.";
     } else {
-        notice +=
-            " Doctor cannot safely offer a merge command without verifying the project directories.";
+        guidance =
+            "Doctor cannot safely offer a merge command without verifying the project directories.";
     }
+    const count = `${memories} ${memories === 1 ? "memory" : "memories"}`;
+    observation.warning = `${count} stayed under this session's previous project. Nothing was moved.\n${guidance}`;
+    if (noticed.has(old)) {
+        sessionLog(sessionId, binding);
+        return;
+    }
+
     noticed.add(old);
+    const notice = `This session changed projects. ${count} stayed with ${location}; nothing moved. ${guidance}`;
     // Also keep the instructions in the log for clients without a notice surface.
     sessionLog(sessionId, `${binding} notice=${JSON.stringify(notice)}`);
     try {
@@ -75,4 +89,8 @@ export function observeSessionProjectBinding(
     } catch {
         // The log above remains available if the UI is closing or unavailable.
     }
+}
+
+export function getProjectBindingWarning(db: Database, sessionId: string): string | undefined {
+    return observedBindings.get(db)?.peek(`${getHarness()}\0${sessionId}`)?.warning;
 }
