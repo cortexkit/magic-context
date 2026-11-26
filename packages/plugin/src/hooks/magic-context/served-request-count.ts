@@ -91,7 +91,10 @@ export function createServedRequestCounts() {
          * other request was recorded while this pass ran (`requestTools` is
          * the session's recorded set read now).
          */
-        requestToolSet(sessionId: string, requestTools?: RequestToolSet): RequestToolSet | undefined {
+        requestToolSet(
+            sessionId: string,
+            requestTools?: RequestToolSet,
+        ): RequestToolSet | undefined {
             const started = passTools.get(sessionId);
             if (!started || !requestTools || requestTools.request !== started.request)
                 return undefined;

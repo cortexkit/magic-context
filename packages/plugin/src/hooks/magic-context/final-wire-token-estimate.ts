@@ -393,29 +393,30 @@ export function createFinalWireUsageTracker() {
         savedRequest(sessionId: string): SavedServedRequest | undefined {
             const saved = served.get(sessionId);
             const copy = saved ? undefined : countCopies.get(sessionId);
-            if (!saved && !copy) return undefined;
+            const source = saved ?? copy;
+            if (!source) return undefined;
             let counted: ReturnType<SavedServedRequest["count"]> | null = null;
             return {
                 count() {
                     if (counted !== null) return counted;
                     counted = undefined;
                     try {
-                        const [providerID, modelID, agentName, , systemPromptTokens] = saved
-                            ? (JSON.parse(saved.envelope) as [
+                        const [providerID, modelID, agentName, , systemPromptTokens] = copy
+                            ? [
+                                  copy.providerID,
+                                  copy.modelID,
+                                  copy.agentName,
+                                  "",
+                                  copy.systemPromptTokens,
+                              ]
+                            : (JSON.parse(saved?.envelope ?? "") as [
                                   string,
                                   string,
                                   string | undefined,
                                   string,
                                   number,
-                              ])
-                            : [
-                                  copy!.providerID,
-                                  copy!.modelID,
-                                  copy!.agentName,
-                                  "",
-                                  copy!.systemPromptTokens,
-                              ];
-                        const messages = (saved?.prefix ?? copy!.prefix).map((text) => {
+                              ]);
+                        const messages = source.prefix.map((text) => {
                             const row = JSON.parse(text) as {
                                 id: string;
                                 role: string;
@@ -588,28 +589,27 @@ export function createFinalWireUsageTracker() {
                 const rows = wireRows(input);
                 const parent = [...rows].reverse().find((row) => row.info.role === "user")?.info.id;
                 if (typeof parent !== "string" || !rows.every(hasCountableParts)) return;
-                if (
-                    !envelope &&
-                    (requestToolDefinitionTokens === undefined ||
-                        !input.providerID ||
-                        !input.modelID)
-                )
-                    return;
+                const { providerID, modelID } = input;
+                const countOnly =
+                    !envelope && requestToolDefinitionTokens !== undefined && providerID && modelID
+                        ? { providerID, modelID, toolDefinitionTokens: requestToolDefinitionTokens }
+                        : undefined;
+                if (!envelope && !countOnly) return;
                 const prefix = rows.map(rowBytes);
                 // Keep this exact-match evidence small without limiting the larger durable replay cache.
                 if (prefix.reduce((sum, text) => sum + text.length, 0) > 4 * 1024 * 1024) return;
-                if (!envelope) {
-                    if (countCopies.size >= 16) countCopies.delete(countCopies.keys().next().value!);
+                if (countOnly) {
+                    const oldest = countCopies.keys().next().value;
+                    if (countCopies.size >= 16 && oldest !== undefined) countCopies.delete(oldest);
                     countCopies.set(sessionId, {
-                        providerID: input.providerID!,
-                        modelID: input.modelID!,
+                        ...countOnly,
                         agentName: input.agentName,
                         systemPromptTokens: input.systemPromptTokens,
-                        toolDefinitionTokens: requestToolDefinitionTokens!,
                         prefix,
                     });
                     return;
                 }
+                if (!envelope) return;
                 if (served.size >= 16) served.delete(served.keys().next().value!);
                 const signed = input.messages.some((row) =>
                     row.parts.some((part) => {

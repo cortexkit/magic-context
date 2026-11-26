@@ -670,7 +670,13 @@ describe("issue 860 on OpenCode 2: the tool set recorded from the session's own 
             // still counts the set its own request carried.
             recordRequestTools(session, 3_000);
             const first = await runPass(session);
-            return { session, sends, first, ownTools, outcome: toolOutcomes(session, first.output) };
+            return {
+                session,
+                sends,
+                first,
+                ownTools,
+                outcome: toolOutcomes(session, first.output),
+            };
         });
         // The pass that sent the result was below the band and made no count
         // of its own, so the count is the saved copy's.
