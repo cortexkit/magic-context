@@ -144,7 +144,9 @@ test("reports directory data after the first commit before a git session binding
                 ],
             },
         ]);
-        expect(formatIdentitySplits(splits).join("\n")).toContain("doctor merge-identities");
+        expect(formatIdentitySplits(splits).join("\n")).toContain(
+            "npx @cortexkit/magic-context@latest doctor merge-identities",
+        );
         expect(db.prepare("SELECT total_changes() AS n").get()).toEqual(before);
     } finally {
         host.close();

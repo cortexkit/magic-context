@@ -336,6 +336,7 @@ export function checkStatusViewSource(candidate: unknown):
         // dropped rather than rendered as a crash.
         warnings: optional.readArray("warnings", isUserFacingFailureKey),
         hiddenVariantWarnings: optional.readArray("hiddenVariantWarnings", isString),
+        projectBindingWarning: optional.read("projectBindingWarning", isString),
         unconfirmedMigrationHolders: optional.read(
             "unconfirmedMigrationHolders",
             isUnconfirmedMigrationHolders,

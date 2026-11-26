@@ -32,6 +32,7 @@ import {
     emptyMemoryImportanceHistogram,
     getActiveMemoryImportanceHistogram,
 } from "../features/magic-context/memory/memory-diagnostics";
+import { getProjectBindingWarning } from "../features/magic-context/memory/project-binding-notice";
 import {
     ProjectIdentityError,
     resolveProjectIdentity,
@@ -711,6 +712,7 @@ export function buildSidebarSnapshot(
             lastTransformError: meta?.last_transform_error
                 ? String(meta.last_transform_error)
                 : null,
+            projectBindingWarning: getProjectBindingWarning(db, sessionId),
             lastDreamerRunAt,
             projectIdentity,
             dreamerBacklog,

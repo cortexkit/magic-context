@@ -4,12 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
+import { directoryFallback } from "../../features/magic-context/memory/project-identity";
+import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
 import { estimateFinalWireInputTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "../../hooks/magic-context/lkg-slot";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
+import { buildStatusDetail } from "../../plugin/rpc-handlers";
+import { drainNotifications, registerNotificationSink } from "../../shared/rpc-notifications";
 import { Database } from "../../shared/sqlite";
+import { buildStatusViewFor } from "../../shared/status-view";
+import { checkLocalStatusSource } from "../../shared/status-view-check";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { nativeFoldCache } from "../fold/memory-cache";
 import {
@@ -20,6 +26,7 @@ import {
 import { FoldOwner } from "../fold/owner";
 import type { StoreRow } from "../store-reader";
 import * as readerModule from "../store-reader";
+import { sidebarText, statusText } from "../tui";
 import { registerContext } from "./context";
 import { adaptPayload } from "./payload";
 import * as storageGate from "./storage-gate";
@@ -77,6 +84,9 @@ async function fixture(checkpoint: StoreRow<"compaction">) {
     const path = spyOn(readerModule, "gaDatabasePath").mockReturnValue(join(dir, "opencode.db"));
     const restore = spyOn(NativeFoldReplay.prototype, "restore");
     const interrupt = mock(async () => ({ interrupted: true }));
+    const synthetic = mock(async ({ id, text }: { id: string; text: string }) => {
+        insert.run(id, "synthetic", 7, JSON.stringify({ text }));
+    });
     let hook: (draft: SessionContext) => Promise<void>;
     let compaction: (draft: SessionContext) => Promise<void>;
     let servedDraft: SessionContext | undefined;
@@ -101,6 +111,7 @@ async function fixture(checkpoint: StoreRow<"compaction">) {
             compact: async () => {},
             wait: async () => {},
             interrupt,
+            synthetic,
             hook: async (name: string, callback: typeof hook) => {
                 if (name === "context") hook = callback;
                 if (name === "compaction") compaction = callback;
@@ -110,9 +121,11 @@ async function fixture(checkpoint: StoreRow<"compaction">) {
     } as unknown as V2Context);
     return {
         db,
+        directory: dir,
         source,
         restore,
         interrupt,
+        synthetic,
         reader: () => new readerModule.V2StoreReader(join(dir, "opencode.db")),
         async seedLegacy(row = checkpoint, recent?: string) {
             source
@@ -204,6 +217,89 @@ async function fixture(checkpoint: StoreRow<"compaction">) {
         },
     };
 }
+
+test("keeps a project change off the OpenCode 2 wire and transcript while showing it in status", async () => {
+    const run = async (mode: "unchanged" | "empty" | "left memories") => {
+        const f = await fixture(cut());
+        const toasts: string[] = [];
+        const unregister = registerNotificationSink({
+            protocol: 2,
+            sessionId: "s",
+            send: ({ type, payload }) => {
+                if (
+                    type === "toast" &&
+                    typeof payload.message === "string" &&
+                    payload.message.includes("changed projects")
+                )
+                    toasts.push(payload.message);
+            },
+        });
+        const from = directoryFallback(join(f.directory, "former project"));
+        const to = directoryFallback(f.directory);
+        try {
+            f.source.prepare("DELETE FROM session_message WHERE type = 'compaction'").run();
+            recordSessionProjectIdentity(f.db, "s", mode === "unchanged" ? to : from);
+            if (mode === "left memories") {
+                f.db
+                    .prepare(
+                        "INSERT INTO memories(project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES (?, 'fact', 'old project fact', 'hash', 1, 1, 1, 1)",
+                    )
+                    .run(from);
+            }
+            const before = f.source.prepare("SELECT * FROM session_message ORDER BY seq").all();
+            await f.run([user("tail")]);
+            // Yield so an asynchronous attempt to append a notice would already be recorded.
+            await Bun.sleep(0);
+            expect(f.synthetic).not.toHaveBeenCalled();
+            expect(f.source.prepare("SELECT * FROM session_message ORDER BY seq").all()).toEqual(
+                before,
+            );
+
+            const guidance = `Review the merge first:\nnpx @cortexkit/magic-context@latest doctor merge-identities --from ${from} --to ${to}\nIt shows what would move. Add --apply to move them.`;
+            const detail = buildStatusDetail(f.db, "s", f.directory);
+            const status = buildStatusViewFor(checkLocalStatusSource(detail), { version: "test" });
+            const warnings = status.warnings.filter(({ text }) =>
+                text.includes("previous project"),
+            );
+            if (mode === "left memories") {
+                expect(warnings).toEqual([
+                    {
+                        text: `1 memory stayed under this session's previous project. Nothing was moved.\n${guidance}`,
+                        tone: "warning",
+                    },
+                ]);
+                expect(toasts).toHaveLength(1);
+                expect(toasts[0]).toContain(guidance);
+                expect(sidebarText(detail)).toContain(guidance);
+                expect(statusText(detail)).toContain(guidance);
+            } else {
+                expect(warnings).toEqual([]);
+                expect(toasts).toEqual([]);
+            }
+            expect(
+                drainNotifications(0, "s", { sessionOnly: true }).filter(
+                    ({ type, payload }) =>
+                        type === "toast" && String(payload.message).includes("changed projects"),
+                ),
+            ).toEqual([]);
+
+            await f.run([user("tail"), user("next-turn")]);
+            expect(toasts).toHaveLength(mode === "left memories" ? 1 : 0);
+            expect(buildStatusDetail(f.db, "s", f.directory).projectBindingWarning).toBe(
+                detail.projectBindingWarning,
+            );
+            const { messages, system, tools, options } = f.currentDraft();
+            return JSON.stringify({ messages, system, tools, options });
+        } finally {
+            unregister();
+            await f.close();
+        }
+    };
+
+    const unchanged = await run("unchanged");
+    expect(await run("left memories")).toBe(unchanged);
+    expect(await run("empty")).toBe(unchanged);
+});
 
 test("provider windows stay host-owned and invisible replay requires a valid local admission", async () => {
     for (const data of [{ providerContext: { messages: [] } }, { native: { messages: [] } }]) {

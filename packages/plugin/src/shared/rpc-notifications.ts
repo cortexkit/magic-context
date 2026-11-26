@@ -58,6 +58,23 @@ function notificationMatchesSink(notification: RpcNotification, sink: Notificati
     return sink.protocol !== 2;
 }
 
+/** Display-only notices go to the terminal showing the session, never to the replay queue. */
+export function pushLiveNotification(
+    type: string,
+    payload: Record<string, unknown>,
+    sessionId: string,
+): void {
+    const notification: RpcNotification = { id: nextNotificationId++, type, payload, sessionId };
+    for (const sink of sinks) {
+        if (sink.sessionId !== sessionId) continue;
+        try {
+            sink.send(notification);
+        } catch {
+            // A socket that closed during the send has no live terminal to notify.
+        }
+    }
+}
+
 /** Push a notification to the TUI. Fans out to any live WS sink immediately and
  *  also enqueues it so a TUI that is momentarily disconnected (reconnecting, or
  *  not yet connected) still receives it on its next hello via the backlog drain.

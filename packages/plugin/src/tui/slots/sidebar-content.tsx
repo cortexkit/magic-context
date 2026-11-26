@@ -784,6 +784,12 @@ const SidebarContent = (props: {
                 </box>
             )}
 
+            {s()?.projectBindingWarning && (
+                <box marginTop={1} width="100%">
+                    <text fg={props.theme.warning}>⚠ {s()?.projectBindingWarning}</text>
+                </box>
+            )}
+
             {/* Named limitations of the host itself (for example an experimental
                 mode this OpenCode version cannot run). They stay for as long as
                 the process runs, so they are drawn like the transform error

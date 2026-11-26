@@ -49,6 +49,9 @@ function compactTokens(value: number): string {
  */
 export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
     if (!snapshot) return "Magic Context · loading…";
+    const warnings = [snapshot.lastTransformError, snapshot.projectBindingWarning]
+        .filter(Boolean)
+        .map((text) => `Warning: ${text}`);
     if (snapshot.compaction_enabled === false) {
         return [
             "Magic Context",
@@ -57,7 +60,7 @@ export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
             ...(snapshot.readySmartNoteCount > 0
                 ? [`Smart Notes ${snapshot.readySmartNoteCount} ready`]
                 : []),
-            ...(snapshot.lastTransformError ? [`Warning: ${snapshot.lastTransformError}`] : []),
+            ...warnings,
         ].join("\n");
     }
     const pressure =
@@ -70,7 +73,7 @@ export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
         `Context ${pressure}`,
         `Historian ${historian} · C:${snapshot.compartmentCount}`,
         `Memories ${snapshot.memoryBlockCount}/${snapshot.memoryCount} · Q:${snapshot.pendingOpsCount}`,
-        ...(snapshot.lastTransformError ? [`Warning: ${snapshot.lastTransformError}`] : []),
+        ...warnings,
     ].join("\n");
 }
 
@@ -99,6 +102,7 @@ export function statusText(
         | "configAdoptedAt"
         | "configReloadFailure"
         | "lastTransformError"
+        | "projectBindingWarning"
     >,
 ): string {
     const context =
@@ -128,6 +132,7 @@ export function statusText(
               ]
             : []),
         ...(detail.lastTransformError ? [`Warning: ${detail.lastTransformError}`] : []),
+        ...(detail.projectBindingWarning ? [`Warning: ${detail.projectBindingWarning}`] : []),
     ].join("\n");
 }
 

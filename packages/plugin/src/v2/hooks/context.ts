@@ -161,7 +161,7 @@ import {
     createPromptSurfaceRuntime,
     type PromptSurfaceRuntime,
 } from "../../shared/prompt-surface-runtime";
-import { pushNotification } from "../../shared/rpc-notifications";
+import { pushLiveNotification, pushNotification } from "../../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import {
     type Database,
@@ -2527,6 +2527,9 @@ export async function registerContext(context: V2Context) {
             tagger,
             ...createV2ThresholdDeps(config),
             contextUsageMap: usage,
+            hostProjectBindingNotice: (sessionID, message) => {
+                pushLiveNotification("toast", { message, variant: "warning" }, sessionID);
+            },
             hostInputEstimate: (sessionID) => checkpointInputEstimates.get(sessionID),
             onPassPermission: (sessionID, permission) => {
                 checkpointPassPermissions.set(sessionID, permission);

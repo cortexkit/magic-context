@@ -167,7 +167,7 @@ function getErrorStderr(error: unknown): string {
     return "";
 }
 
-function directoryFallback(directory: string): string {
+export function directoryFallback(directory: string): string {
     // Use a hash of the full canonical path to avoid collisions between
     // directories with the same basename (e.g. /tmp/api vs /work/api).
     // Switched from Bun.hash to MD5 prefix when the storage layer moved off

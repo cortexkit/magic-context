@@ -25,6 +25,7 @@ import {
 	emptyMemoryImportanceHistogram,
 	getActiveMemoryImportanceHistogram,
 } from "@magic-context/core/features/magic-context/memory/memory-diagnostics";
+import { getProjectBindingWarning } from "@magic-context/core/features/magic-context/memory/project-binding-notice";
 import { getEmbeddingCoverageStatus } from "@magic-context/core/features/magic-context/project-embedding-registry";
 import {
 	getProtectionWindowForSession,
@@ -155,6 +156,7 @@ export interface StatusDialogDetail {
 	compartmentCount: number;
 	lastCompartmentRange: string | null;
 	memoryCount: number;
+	projectBindingWarning?: string;
 	memoryBlockCount: number;
 	memoryImportanceHistogram: MemoryImportanceHistogram;
 	sessionNoteCount: number;
@@ -454,6 +456,7 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 				tokens: s.tailHygiene?.u ?? 0,
 			},
 			memoryCount: s.memoryCount,
+			projectBindingWarning: s.projectBindingWarning,
 			noteCount: s.sessionNoteCount + s.readySmartNoteCount,
 			embedding: s.embedding,
 			warnings: piStatusWarnings(s),
@@ -1219,6 +1222,7 @@ function buildStatusDetail(
 			return last ? `${last.startMessage}-${last.endMessage}` : null;
 		})(),
 		memoryCount: memoryImportanceHistogram.total,
+		projectBindingWarning: getProjectBindingWarning(deps.db, sessionId),
 		memoryBlockCount,
 		memoryImportanceHistogram,
 		sessionNoteCount: safeRead(

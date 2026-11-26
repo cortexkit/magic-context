@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import { startCompactionMarkerCandidatePreparation } from "../../features/magic-context/compaction-marker";
+import { observeSessionProjectBinding } from "../../features/magic-context/memory/project-binding-notice";
 import {
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
@@ -16,7 +17,6 @@ import { getMuralIdentity } from "../../features/magic-context/mural/storage-mur
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
-import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
     addMergedReasoningStrippedIds,
@@ -196,6 +196,7 @@ import {
     rustRawRebuild,
     servedRawBlockIds,
 } from "./rust-served-raw";
+import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute } from "./sentinel";
 import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
@@ -3352,7 +3353,22 @@ export function createRustModeTransform(
                     if (state.recordedSessionProjectIdentity !== sessionProjectIdentity) {
                         // Missing chunk embeddings are restored through the session's
                         // host-owned project binding, not through Rust module state.
-                        recordSessionProjectIdentity(deps.db, sessionId, sessionProjectIdentity);
+                        observeSessionProjectBinding(
+                            deps.db,
+                            sessionId,
+                            sessionProjectIdentity,
+                            directory,
+                            (notice) => {
+                                void withoutSqliteTransformPass(() =>
+                                    sendStatusNotification(
+                                        deps.client,
+                                        sessionId,
+                                        `## Project memory warning\n\n${notice}`,
+                                        {},
+                                    ),
+                                );
+                            },
+                        );
                     }
                     state.recordedSessionProjectIdentity = sessionProjectIdentity;
                     state.recordedSessionDirectory = directory;

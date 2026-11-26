@@ -62,6 +62,8 @@ export interface SidebarSnapshot {
     cacheTtl: string;
     /** Persistent runtime failure shown directly in the sidebar when non-null. */
     lastTransformError: string | null;
+    /** Display-only warning remembered by the running plugin after a project change. */
+    projectBindingWarning?: string;
     /** Durable history-compression failure count used to select the stable summary warning. */
     historianFailureCount?: number;
     lastDreamerRunAt: number | null;
