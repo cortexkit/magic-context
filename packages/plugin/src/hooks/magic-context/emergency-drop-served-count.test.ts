@@ -157,6 +157,112 @@ describe("emergency planner with our count of the last request served", () => {
     });
 });
 
+describe("the episode latch at 95% or more needs new evidence", () => {
+    // A pressure episode whose batch was planned on a reading of 60,138.
+    function latched(reading: number, refusedSinceLastBatch?: boolean): PlannerInput {
+        const floorTags: EmergencyDropTag[] = Array.from({ length: 12 }, (_, i) => ({
+            tagNumber: i + 1,
+            type: "tool",
+            status: "active",
+            toolName: "bash",
+            byteSize: 0,
+            inputByteSize: 0,
+            reasoningByteSize: 0,
+            servedTokens: 4_000,
+            reclaimableTokens: 4_000,
+        }));
+        const input: PlannerInput = {
+            tags: floorTags,
+            floorTags,
+            maxTag: 12,
+            protectedCutoff: 10,
+            usagePercentage: (reading / 45_000) * 100,
+            currentTotalInputTokens: reading,
+            ceilingTokens: 29_250,
+            priorInputSample: 60_138,
+            hasPriorDrop: true,
+        };
+        if (refusedSinceLastBatch !== undefined)
+            input.refusedSinceLastBatch = refusedSinceLastBatch;
+        return input;
+    }
+
+    it("the reading the last batch was planned on, no refusal: the latch holds", () => {
+        expect(releasePlanEmergencyDrop(latched(60_138)).shouldDrop).toBe(true);
+        const plan = planEmergencyDrop(latched(60_138, false));
+        expect(plan.shouldDrop).toBe(false);
+        expect(plan.reason).toContain("has not been renewed since the last batch");
+    });
+
+    it("a renewed reading lifts it, as in the release", () => {
+        const input = latched(60_500, false);
+        expect(planEmergencyDrop(input)).toEqual(releasePlanEmergencyDrop(input));
+        expect(planEmergencyDrop(input).shouldDrop).toBe(true);
+    });
+
+    it("a refusal since the batch lifts it, as in the release", () => {
+        const input = latched(60_138, true);
+        expect(planEmergencyDrop(input)).toEqual(releasePlanEmergencyDrop(input));
+        expect(planEmergencyDrop(input).shouldDrop).toBe(true);
+    });
+
+    it("a caller that does not track refusals keeps the release's rule", () => {
+        const input = latched(60_138);
+        expect(planEmergencyDrop(input)).toEqual(releasePlanEmergencyDrop(input));
+    });
+
+    it("below 95% nothing changes", () => {
+        const input = latched(40_000, false);
+        expect(planEmergencyDrop(input)).toEqual(releasePlanEmergencyDrop(input));
+    });
+
+    it("generated inputs: the only selection shorter than the release's is a batch withheld by this rule", () => {
+        let withheld = 0;
+        for (let seed = 1; seed <= 20_000; seed++) {
+            const base = generatedInput(seed);
+            const r = rng(seed ^ 0xbeef);
+            const input: PlannerInput = {
+                ...base,
+                refusedSinceLastBatch: r() < 0.5,
+                servedCountTokens: r() < 0.5 ? countFor(base, seed) : undefined,
+            };
+            // Make the reading equal the latch's sample often enough to matter.
+            if (input.hasPriorDrop && r() < 0.5)
+                input.priorInputSample = input.currentTotalInputTokens;
+            const plan = planEmergencyDrop(input);
+            const rule =
+                input.hasPriorDrop &&
+                (input.usagePercentage ?? 0) >= 95 &&
+                input.refusedSinceLastBatch === false &&
+                input.currentTotalInputTokens === input.priorInputSample;
+            if (rule) {
+                expect({ seed, shouldDrop: plan.shouldDrop }).toEqual({ seed, shouldDrop: false });
+                if (
+                    releasePlanEmergencyDrop({ ...base, priorInputSample: input.priorInputSample })
+                        .shouldDrop
+                )
+                    withheld++;
+                continue;
+            }
+            const releaseHere = releasePlanEmergencyDrop({
+                ...base,
+                priorInputSample: input.priorInputSample,
+            });
+            if (releaseHere.shouldDrop) {
+                expect({ seed, shouldDrop: plan.shouldDrop }).toEqual({ seed, shouldDrop: true });
+                expect({
+                    seed,
+                    prefix: plan.tagNumbers.slice(0, releaseHere.tagNumbers.length),
+                }).toEqual({
+                    seed,
+                    prefix: releaseHere.tagNumbers,
+                });
+            }
+        }
+        expect(withheld).toBeGreaterThan(100);
+    });
+});
+
 describe("issue 860: the reporter's numbers at the planner", () => {
     // The reporter's log: a reading of 368,415 (818.7% of a 45,000-token usable
     // window, so the reduction point is 29,250) and a skip with "fixed floor
