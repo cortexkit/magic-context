@@ -172,6 +172,21 @@ export function planEmergencyDrop(input: {
      * something left to reclaim. Zero when the caller does not measure it.
      */
     removedThisPassTokens?: number;
+    /**
+     * Our own count of the last request this session served, in the same units
+     * as the tag counts (system prompt, tool definitions and messages, counted
+     * with the session's calibration). Absent when there is no count, or when
+     * the count was made for a different model than the one this pass serves.
+     *
+     * The fixed part of the request is inferred by subtracting our count of
+     * the active tags from a size of the whole request. The provider's reading
+     * is in the provider's units; every token by which it exceeds our count of
+     * the same request would otherwise land in the fixed part, and a fixed
+     * part inflated that way makes the drop skip as if tool drops could never
+     * help. Taking the smaller of the two sizes can only lower the fixed part,
+     * so the selection can only grow; it never turns a drop into a skip.
+     */
+    servedCountTokens?: number;
     /** ceiling = contextLimit × executeThreshold%. */
     ceilingTokens: number;
     /**
@@ -260,15 +275,31 @@ export function planEmergencyDrop(input: {
     // it keeps today's meaning, the size the planner works against, with a
     // fixed floor of zero.
     const removedMeasured = Math.max(input.removedThisPassTokens ?? 0, 0);
+    // The size the fixed part is inferred from: the reading, or our own count
+    // of the same request when that is smaller (see `servedCountTokens`). The
+    // size the planner works against (`served`) stays the reading's.
+    //
+    // After an emergency batch in this pressure episode, the count is set
+    // aside while the reading is still the one that batch was planned on (the
+    // latch stores it rounded): the release's arithmetic runs unchanged. At
+    // 95% or more the latch does not hold, and with the count a reading stuck
+    // high would drop each newly arrived result on every pass; the release
+    // did not, because its inflated fixed part made it skip. In that one
+    // state the plan is exactly the release's, so it never withholds a batch
+    // the release would take.
+    const readingRepeatsLatch =
+        hasPriorDrop && Math.max(0, Math.round(currentTotalInputTokens)) === priorInputSample;
+    const servedCount = readingRepeatsLatch ? undefined : input.servedCountTokens;
+    const floorBase =
+        servedCount !== undefined && Number.isFinite(servedCount) && servedCount > 0
+            ? Math.min(currentTotalInputTokens, servedCount)
+            : currentTotalInputTokens;
     // Floor, served size and gap of one accounting. `newerInReading` says
     // whether the tags newer than the reading are treated as part of it.
     const account = (newerInReading: boolean) => {
         const measuredTail = newerInReading ? tailTokens + newerTailTokens : tailTokens;
-        const removed = Math.min(
-            removedMeasured,
-            Math.max(currentTotalInputTokens - measuredTail, 0),
-        );
-        const floor = Math.max(currentTotalInputTokens - removed - measuredTail, 0);
+        const removed = Math.min(removedMeasured, Math.max(floorBase - measuredTail, 0));
+        const floor = Math.max(floorBase - removed - measuredTail, 0);
         const served =
             currentTotalInputTokens >= measuredTail
                 ? currentTotalInputTokens - removed + (newerInReading ? 0 : newerTailTokens)
@@ -296,9 +327,12 @@ export function planEmergencyDrop(input: {
     const { removed: removedThisPass, floor: fixedFloor, served: servedInputTokens } = accounting;
     const reclaimTokens = accounting.reclaim;
     const servedNote =
-        removedMeasured > 0 || newerTailTokens > 0
+        (removedMeasured > 0 || newerTailTokens > 0
             ? `, served≈${Math.round(servedInputTokens)} after ≈${Math.round(removedThisPass)} removed this pass${removedThisPass < removedMeasured ? ` (≈${Math.round(removedMeasured)} measured)` : ""}${newerTailTokens > 0 ? `, ≈${Math.round(newerTailTokens)} newer than the reading${olderAccounting ? " (counted in the reading)" : ""}` : ""}`
-            : "";
+            : "") +
+        (floorBase < currentTotalInputTokens
+            ? `, floor from our count ≈${Math.round(floorBase)} of the last request (reading ${Math.round(currentTotalInputTokens)})`
+            : "");
     // Tool drops cannot repair oversized fixed overhead. Preserve the working
     // results and leave admission to the overflow/refusal path, even on a pass
     // whose cache rewrite is already priced by another mutation.
@@ -576,4 +610,81 @@ export function emergencyServedMassRemovedSince(
         removed += Math.max(before - servedReasoningTokens(part, calibration), 0);
     }
     return removed;
+}
+
+/** The request a pass serves, split into what tool drops can and cannot remove. */
+export interface EmergencyRequestMeasure {
+    /**
+     * What no tool drop can remove: system prompt, tool definitions, text a
+     * host adds after the transform, and every served part no active tag owns
+     * (the history head, untagged parts, reasoning that stays, placeholders and
+     * skeletons of tags already dropped).
+     */
+    fixedTokens: number;
+    /** Served parts that an active tag owns. */
+    tagTokens: number;
+    /** `fixedTokens + tagTokens`. */
+    totalTokens: number;
+    /** The system prompt and tool definitions inside `fixedTokens`, for logs. */
+    systemTokens: number;
+    toolDefinitionTokens: number;
+}
+
+/**
+ * Count a served request in one walk, split into the parts active tags own and
+ * everything else. No product path calls this: it is the independent witness
+ * tests use to check that our count of a whole request, minus our count of its
+ * active tags, describes the rest of the request.
+ *
+ * Every count uses `calibration`, so the two sums are in one unit. Each part
+ * lands in exactly one of them: a part an active tag owns in `tagTokens`, any
+ * other part in `fixedTokens`. `removedThisPass` names parts to leave out of
+ * both; `countedPart` maps a part to what the request carries in its place.
+ * `systemPromptTokens` and `toolDefinitionTokens` are raw local counts;
+ * `hostAddedTokens` is already in calibrated units.
+ */
+export function measureEmergencyRequest(input: {
+    messages: readonly MessageLike[];
+    activeTagParts: ReadonlySet<unknown>;
+    removedThisPass?: (part: unknown) => boolean;
+    countedPart?: (part: unknown) => unknown;
+    systemPromptTokens: number;
+    toolDefinitionTokens: number;
+    hostAddedTokens?: number;
+    calibration: { systemRatio: number; toolsRatio: number; proseRatio: number };
+}): EmergencyRequestMeasure {
+    const { calibration } = input;
+    const calibrated = (counted: { conversation: number; toolCall: number }) =>
+        counted.conversation * calibration.proseRatio + counted.toolCall * calibration.toolsRatio;
+    let untagged = 0;
+    let tagTokens = 0;
+    for (const message of input.messages) {
+        const owned: unknown[] = [];
+        const other: unknown[] = [];
+        for (const part of message.parts) {
+            if (input.removedThisPass?.(part)) continue;
+            if (input.activeTagParts.has(part)) owned.push(part);
+            else other.push(input.countedPart ? input.countedPart(part) : part);
+        }
+        // Counted per message, because opaque thinking is priced once per
+        // message from the message's own usage.
+        if (owned.length > 0)
+            tagTokens += calibrated(estimateMessageTokens({ ...message, parts: owned }));
+        if (other.length > 0)
+            untagged += calibrated(estimateMessageTokens({ ...message, parts: other }));
+    }
+    const systemTokens = Math.max(0, input.systemPromptTokens) * calibration.systemRatio;
+    const toolDefinitionTokens = Math.max(0, input.toolDefinitionTokens) * calibration.toolsRatio;
+    const hostAdded =
+        input.hostAddedTokens !== undefined && Number.isFinite(input.hostAddedTokens)
+            ? Math.max(0, input.hostAddedTokens)
+            : 0;
+    const fixedTokens = systemTokens + toolDefinitionTokens + hostAdded + untagged;
+    return {
+        fixedTokens,
+        tagTokens,
+        totalTokens: fixedTokens + tagTokens,
+        systemTokens,
+        toolDefinitionTokens,
+    };
 }

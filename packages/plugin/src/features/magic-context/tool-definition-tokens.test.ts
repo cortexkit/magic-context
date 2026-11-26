@@ -8,6 +8,7 @@ import {
     __resetToolDefinitionMeasurements,
     getCurrentToolSetHash,
     getMeasuredToolDefinitionTokens,
+    getSessionRequestToolSet,
     getSessionToolDefinitionTokens,
     getToolDefinitionMeasurementSignature,
     getToolDefinitionSnapshot,
@@ -371,6 +372,37 @@ describe("tool-definition-tokens current tool set", () => {
         } finally {
             closeQuietly(db);
         }
+    });
+
+    test("OpenCode 2: a session's last request's set is found by session alone, numbered per request", () => {
+        const set = (ids: string[], agent: string | undefined, sessionId: string) =>
+            recordToolDefinitionSet(
+                "p",
+                "m",
+                agent,
+                ids.map((id) => ({ id, description: `${id} `.repeat(50), parameters: {} })),
+                sessionId,
+            );
+        set(["read", "lsp"], "build", "s");
+        const first = getSessionRequestToolSet("s");
+        expect(first?.total).toBe(getMeasuredToolDefinitionTokens("p", "m", "build", "s"));
+        // The route lookup without the agent finds nothing; the session lookup does.
+        expect(getMeasuredToolDefinitionTokens("p", "m", undefined, "s")).toBeUndefined();
+        // The same tools again are still a new request.
+        set(["read", "lsp"], "build", "s");
+        const second = getSessionRequestToolSet("s");
+        expect(second?.total).toBe(first?.total);
+        expect(second?.request).toBeGreaterThan(first?.request ?? 0);
+        set(["read"], "plan", "other");
+        expect(getSessionRequestToolSet("s")).toEqual(second);
+        expect(getSessionRequestToolSet("other")?.request).toBeGreaterThan(second?.request ?? 0);
+    });
+
+    test("OpenCode 1: no session has a request's set", () => {
+        fly(["read", "lsp"], "s");
+        expect(getSessionToolDefinitionTokens("s")).toBeGreaterThan(0);
+        expect(getSessionRequestToolSet("s")).toBeUndefined();
+        expect(getSessionRequestToolSet(undefined)).toBeUndefined();
     });
 
     test("rows this version wrote keep counting after a restart until ten minutes of activity pass without them", () => {

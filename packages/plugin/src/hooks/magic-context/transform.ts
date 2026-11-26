@@ -15,7 +15,10 @@ import type { RequestToolsFingerprint } from "../../features/magic-context/reque
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
-import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
+import {
+    sessionDecisionCalibration,
+    sessionEmergencyCalibration,
+} from "../../features/magic-context/session-decision-calibration";
 import { hasRecordedSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     type ContextDatabase,
@@ -60,6 +63,11 @@ import {
 } from "../../features/magic-context/store-generation-rebase";
 import type { Tagger } from "../../features/magic-context/tagger";
 import { observeTemporalDecisions } from "../../features/magic-context/temporal-decisions";
+import {
+    getMeasuredToolDefinitionTokens,
+    getSessionRequestToolSet,
+    getToolDefinitionsRevision,
+} from "../../features/magic-context/tool-definition-tokens";
 import {
     clearOpenCodePendingTransformDecision,
     normalizeMaterializeReason,
@@ -236,12 +244,14 @@ import { forceBandConfirmed, heuristicsAlreadyRanThisTurn } from "./routine-clea
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
+import { createServedRequestCounts } from "./served-request-count";
 import { takeSignedThinkingFitSnapshot } from "./signed-thinking-fit-snapshot";
 import {
     decideSignedThinkingHold,
     readingEndsHold,
     type SignedThinkingHoldDecision,
 } from "./signed-thinking-hold";
+import { reportSmallWindow } from "./small-window-notice";
 import {
     replayClearedReasoning,
     replayStrippedInlineThinking,
@@ -877,6 +887,7 @@ export function createTransform(deps: TransformDeps) {
     // Called when a session is deleted, on both hosts.
     const clearSessionLogState = (sessionId: string): void => {
         prefixHoldLogTurnIds.delete(sessionId);
+        servedRequestCounts.forget(sessionId);
         clearDiagnosticLogState(sessionId);
         forgetHistoryBoundaryRecovery(sessionId);
     };
@@ -889,6 +900,9 @@ export function createTransform(deps: TransformDeps) {
     // The local count of the last served request, for the execute decision of
     // a session whose provider reports no usage (see local-wire-reading.ts).
     const localWireReadings = createLocalWireReadings();
+    // Our count of the last request each session served, for the emergency
+    // tool drop's fixed part (see served-request-count.ts).
+    const servedRequestCounts = createServedRequestCounts();
     const rustModeTransform =
         deps.transformMode === "rust" && deps.rustModeModuleClient
             ? createRustModeTransform(deps, {
@@ -955,6 +969,7 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         deps.onMessagesPassStarted?.(sessionId, messages);
+        servedRequestCounts.passStarted(sessionId, getSessionRequestToolSet(sessionId));
         const dateRequest =
             systemDateRequestForOutput(deps.historyRefreshSessions, output) ??
             beginSystemDateRequest(
@@ -2216,11 +2231,11 @@ export function createTransform(deps: TransformDeps) {
         // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
         // (the usable working ceiling, NOT scaled by history_budget_percentage).
         // Resolve the limit the same way resolveHistoryBudgetTokens does: prefer
-        // the model's stable limit, else back-derive from live usage. The
-        // emergency drop only fires at the derived force band, where percentage is reliably high,
-        // so the back-derivation is sound (it would only be unreliable at the
-        // percentage=0 cold start, which is far below the trigger). Undefined
-        // when neither is available → emergency drop skips, 95% block backstops.
+        // the model's stable limit, else back-derive it from live usage (input
+        // tokens over percentage). The back-derived limit is only as good as
+        // that reading: a stale reading or a clamped percentage gives a wrong
+        // window, and the ceiling moves with it. Undefined when neither is
+        // available → emergency drop skips, 95% block backstops.
         const emergencyCeilingLimit = thresholdContextLimit ?? 0;
         const emergencyCeilingTokens =
             Number.isFinite(emergencyCeilingLimit) && emergencyCeilingLimit > 0
@@ -3985,6 +4000,8 @@ export function createTransform(deps: TransformDeps) {
             protectedCutoff,
             protectedCount: protectionWindow.status.protectedCount,
             emergencyCeilingTokens,
+            servedCountTokens: (calibration) =>
+                servedRequestCounts.tokens(sessionId, localReadingModelKey, calibration),
             pendingCompartmentInjection,
             prefixTrimSourceOrder,
             coveredHostInstructions,
@@ -4116,6 +4133,44 @@ export function createTransform(deps: TransformDeps) {
                 );
             }
         }
+        // A primary session whose system prompt and tool definitions alone
+        // take more than half of the reduction point is told so once per
+        // session and model in this process. Display only: it changes nothing
+        // in the request. On a pass whose inputs match the last decision the
+        // work is building the decision key and a map lookup (plus, while a
+        // toast waits for a terminal, a check whether one is attached). The
+        // calibration read (one SELECT) and the sizing of the route's tool
+        // definitions happen only when the key changes: the model, the agent,
+        // the system prompt size, the reduction point, or the tool-definition
+        // revision, which is process-wide and so also moves when another
+        // route's tool definitions are measured.
+        if (fullFeatureMode && modelForBudget && sessionMeta.systemPromptTokens > 0) {
+            const route = modelForBudget;
+            // The emergency drop's ceiling: the same limit and threshold, so the
+            // warning can't disagree with where the drop starts.
+            const reductionPoint = emergencyCeilingTokens;
+            reportSmallWindow({
+                sessionId,
+                modelKey: `${route.providerID}/${route.modelID}`,
+                decisionKey: `${notificationParams.agent ?? ""}\0${getToolDefinitionsRevision()}\0${sessionMeta.systemPromptTokens}\0${reductionPoint ?? ""}`,
+                measure: () => {
+                    const toolDefinitions = getMeasuredToolDefinitionTokens(
+                        route.providerID,
+                        route.modelID,
+                        notificationParams.agent,
+                        sessionId,
+                    );
+                    if (toolDefinitions === undefined) return undefined;
+                    const calibration = sessionEmergencyCalibration(db, sessionId);
+                    return {
+                        systemPromptTokens:
+                            sessionMeta.systemPromptTokens * calibration.systemRatio,
+                        toolDefinitionTokens: toolDefinitions * calibration.toolsRatio,
+                        reductionPointTokens: reductionPoint,
+                    };
+                },
+            });
+        }
         if (!compactionOff) {
             // Recovery estimates provider input even while reusing cached messages.
             // Cache-busting passes also retain raw counts for telemetry; samples never drive decisions.
@@ -4145,10 +4200,35 @@ export function createTransform(deps: TransformDeps) {
                     : undefined);
             if (finalWireEstimate) {
                 logIncompleteFinalWire(finalWireEstimate, messages);
-                sessionLog(
-                    sessionId,
-                    `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
-                );
+                // The byte-bound refusal check reads message bytes up to the
+                // limit and does not tokenize, so its per-part counts are zero
+                // because nothing was tokenized, not because the request is
+                // empty. Say what it found instead of printing those zeros: a
+                // lower bound made of the provider's measured input for a
+                // prefix of the request (when there is one) plus the message
+                // bytes counted, divided by four. "Proven over" only when the
+                // bound is of the grade the refusal decision accepts (system
+                // prompt and tool definitions known).
+                const byteBound =
+                    finalWireEstimate.refusalBasis === "byte-bound" &&
+                    finalWireEstimate.refusalTokens !== undefined;
+                const envelope = `system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`;
+                if (byteBound) {
+                    const lower = finalWireEstimate.refusalTokens ?? finalWireEstimate.tokens;
+                    const prefix = finalWireEstimate.refusalBaselineTokens ?? 0;
+                    const verdict = finalWireEstimate.refusalGrade
+                        ? `proven over the window limit=${boundaryContextLimit}`
+                        : `over the window limit=${boundaryContextLimit} by a byte bound that is not refusal grade`;
+                    const counted = `lower bound ${lower} = measured prefix ${prefix} + message bytes/4 ${lower - prefix}${finalWireEstimate.countingStopped ? ", counted until the bound passed the limit" : ""}`;
+                    sessionLog(
+                        sessionId,
+                        `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} ${verdict}: ${counted}; conversation and tools not tokenized ${envelope}`,
+                    );
+                } else
+                    sessionLog(
+                        sessionId,
+                        `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} ${envelope}`,
+                    );
             }
             // Count the request this pass serves, for the next pass's execute
             // decision while the provider still reports no usage. A pass with a
@@ -5121,18 +5201,56 @@ export function createTransform(deps: TransformDeps) {
                 `thinking binding recovery: stripped bound reasoning from ${bindingRecovery.messageIds.length} assistant(s) [${bindingRecovery.messageIds.join(",")}]; flag=${cleared === undefined ? "kept" : cleared ? "cleared" : "rearmed"}`,
             );
         }
+        // On OpenCode 2 the transform is not told the agent a request's tools
+        // were measured under, so the route lookup finds no measurement; the
+        // session's own recorded tool set is that measurement, but only when it
+        // was recorded for the request this pass served (undefined otherwise,
+        // and always on OpenCode 1).
+        const requestToolSet = servedRequestCounts.requestToolSet(
+            sessionId,
+            getSessionRequestToolSet(sessionId),
+        );
         if (passOutcome.captureEligible)
             afterCapture(sessionId, "final wire usage capture", () =>
-                finalWireUsage.capture(sessionId, {
-                    messages,
-                    systemPromptTokens: sessionMeta.systemPromptTokens,
-                    providerID: modelForBudget?.providerID,
-                    modelID: modelForBudget?.modelID,
-                    agentName: notificationParams.agent,
+                finalWireUsage.capture(
                     sessionId,
-                    systemPromptHash: sessionMeta.systemPromptHash,
-                }),
+                    {
+                        messages,
+                        systemPromptTokens: sessionMeta.systemPromptTokens,
+                        providerID: modelForBudget?.providerID,
+                        modelID: modelForBudget?.modelID,
+                        agentName: notificationParams.agent,
+                        sessionId,
+                        systemPromptHash: sessionMeta.systemPromptHash,
+                    },
+                    requestToolSet?.total,
+                ),
             );
+        // Keep our count of the request this pass served for the next pass's
+        // emergency drop: the count this pass already made, or else the copy
+        // just saved, counted only if the next pass's planner runs. A pass that
+        // saved no copy (capture not eligible) offers no saved copy, because
+        // the tracker would still hold an older request.
+        afterCapture(sessionId, "served request count", () =>
+            servedRequestCounts.record(sessionId, {
+                modelKey: localReadingModelKey,
+                // Only a count whose system prompt and tool definitions were
+                // measured: one that leaves part of that envelope out would
+                // understate the fixed part without bound. Without a route
+                // measurement the estimate takes the session's last recorded
+                // set, which is this request's own when `requestToolSet` is set.
+                components:
+                    (finalWireEstimate?.toolDefinitionsMeasured === true ||
+                        requestToolSet !== undefined) &&
+                    sessionMeta.systemPromptTokens > 0
+                        ? finalWireEstimate?.pressureComponents
+                        : undefined,
+                saved: passOutcome.captureEligible
+                    ? finalWireUsage.savedRequest(sessionId)
+                    : undefined,
+                hostAddedTokens: recoveryHostAddedTokens,
+            }),
+        );
         afterCapture(sessionId, "pass permission report", () =>
             deps.onPassPermission?.(sessionId, postTransformResult.prefixMutationPermitted),
         );

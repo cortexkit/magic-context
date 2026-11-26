@@ -173,9 +173,18 @@ interface SessionFlight {
     key: string;
     /** OpenCode 2: the exact set this session's last request carried. */
     exact?: ToolSetSummary;
+    /**
+     * OpenCode 2: which request `exact` was recorded from. Every recorded
+     * request gets a larger number, so two reads that return the same number
+     * saw the same request.
+     */
+    request?: number;
 }
 
 const routes = new Map<string, RouteMeasurements>();
+
+/** The number the next request recorded through `recordToolDefinitionSet` gets. */
+let nextRequestNumber = 1;
 
 // The route each session's tools were last measured under, and on OpenCode 2
 // the exact set. Bounded like other per-session state: an evicted session
@@ -482,6 +491,21 @@ function retire(route: RouteMeasurements, toolID: string, slot: ToolSlot, rowDel
 }
 
 /**
+ * Bumped whenever a measured tool set can have changed: a tool measured anew
+ * or with new content, tools forgotten or aged out, a route's first live
+ * fire, a reload or a reset. A reader that decided something from the
+ * measurements can skip deciding again while it is unchanged. Tools leaving
+ * OpenCode 1's activity window only as time passes are seen at the next
+ * expiry sweep, which runs on the next measurement.
+ */
+let definitionsRevision = 0;
+
+/** See `definitionsRevision`. */
+export function getToolDefinitionsRevision(): number {
+    return definitionsRevision;
+}
+
+/**
  * A new slot for a tool measured now, reusing the token count of a retired
  * slot with the same content instead of tokenizing again.
  */
@@ -493,6 +517,7 @@ function freshSlot(
     fingerprint: string,
     now: number,
 ): ToolSlot {
+    definitionsRevision += 1;
     const retired = route.retired.get(toolID);
     if (retired) route.retired.delete(toolID);
     const reuse = retired?.fingerprint === fingerprint ? retired : undefined;
@@ -526,6 +551,7 @@ function expire(route: RouteMeasurements): void {
         route,
         leaving.map(([id]) => id),
     );
+    definitionsRevision += 1;
     for (const [id, slot] of leaving) {
         route.tools.delete(id);
         retire(route, id, slot, deleted);
@@ -588,6 +614,7 @@ export function setDatabase(db: Database): void {
  * Routes already measured in this process are left alone.
  */
 export function loadToolDefinitionMeasurements(db: Database): void {
+    definitionsRevision += 1;
     let rows: Array<{
         provider_id: string;
         model_id: string;
@@ -658,6 +685,7 @@ export function recordToolDefinition(
         // tool this request re-offers has its row overwritten, never deleted
         // first.
         route.live = true;
+        definitionsRevision += 1;
         for (const slot of route.tools.values()) if (slot.legacy) slot.lastFireAt = now;
     }
     if (sessionId) sessionFlights.set(sessionId, { key });
@@ -695,6 +723,7 @@ export function recordToolDefinitionSet(
     if (!providerID || !modelID) return;
     const { key, route } = routeFor(providerID, modelID, agentName);
     const now = advanceClock(route);
+    const wasLive = route.live;
     route.live = true;
     const next = new Map<string, ToolSlot>();
     for (const tool of tools) {
@@ -712,6 +741,7 @@ export function recordToolDefinitionSet(
         );
     }
     const removed = [...route.tools].filter(([id]) => !next.has(id));
+    if (!wasLive || removed.length > 0) definitionsRevision += 1;
     route.tools = next;
     route.oldestFireAt = now;
     if (removed.length > 0) {
@@ -723,7 +753,11 @@ export function recordToolDefinitionSet(
     }
     for (const [toolID, slot] of next) writeSlot(route, toolID, slot);
     if (sessionId)
-        sessionFlights.set(sessionId, { key, exact: summarize([...next.entries()], true) });
+        sessionFlights.set(sessionId, {
+            key,
+            exact: summarize([...next.entries()], true),
+            request: nextRequestNumber++,
+        });
 }
 
 /**
@@ -790,8 +824,27 @@ export function getSessionToolDefinitionTokens(sessionId: string | undefined): n
     return route ? summarize(currentTools(route), route.live).total : undefined;
 }
 
+/**
+ * OpenCode 2: the tool set of the last request recorded for `sessionId`, as
+ * that request carried it, with the number identifying the request. It is
+ * looked up by session alone, because the messages transform on OpenCode 2 is
+ * not told the agent the request draft was recorded under. Undefined on
+ * OpenCode 1, whose tool figures are a route's recent activity rather than
+ * one request's set, and for a session with no request recorded in this
+ * process.
+ */
+export function getSessionRequestToolSet(
+    sessionId: string | undefined,
+): { request: number; total: number } | undefined {
+    if (!sessionId) return undefined;
+    const flight = sessionFlights.peek(sessionId);
+    if (!flight?.exact || flight.request === undefined) return undefined;
+    return { request: flight.request, total: flight.exact.total };
+}
+
 /** Test helper: reset the store so suites don't leak measurements. */
 export function __resetToolDefinitionMeasurements(): void {
+    definitionsRevision += 1;
     routes.clear();
     sessionFlights.clear();
     persistenceDb = null;

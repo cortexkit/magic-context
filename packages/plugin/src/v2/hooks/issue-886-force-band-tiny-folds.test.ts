@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { updateSessionMeta } from "../../features/magic-context/storage";
 import { markProtectedTailPolicyV3Seeded } from "../../features/magic-context/storage-meta-persisted";
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
+import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import type { V2Message } from "../types";
 import { oc2ContextFixture as fixture, prose } from "./__tests__/oc2-context.fixture";
 
@@ -31,6 +32,7 @@ const STEPS = 12;
 const INPUT_TOKENS = 870_000;
 /** Shell steps already in the turn when measuring starts. */
 const EARLIER_STEPS = 90;
+const PROSE_TOKENS = estimateTokens(prose);
 
 /** One shell step of the batch turn, with a few hundred tokens of output. */
 const shellStep = (n: number) => ({
@@ -65,6 +67,13 @@ async function driveActiveTurn(): Promise<LoopResult> {
         instructions: false,
         protectedTokens: 16_000,
     });
+    // The emergency drop caps the size it infers the fixed part from by its
+    // own count of the last request, so a fixed part above the ceiling
+    // (650,000 of the 1,000,000-token window) must really be in the request,
+    // not only in the provider's reading: a system prompt of about 700,000
+    // tokens. It is in place before the first pass, so it never changes
+    // mid-loop.
+    f.setSystem(`Review the isolated project. ${prose.repeat(Math.ceil(700_000 / PROSE_TOKENS))}`);
     const runs: Array<[number, number]> = [];
     const agent = spyOn(incremental, "runCompartmentAgent").mockImplementation(async (deps) => {
         try {

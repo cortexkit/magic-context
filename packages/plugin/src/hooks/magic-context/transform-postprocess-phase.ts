@@ -127,6 +127,7 @@ import {
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
+import type { DecisionCalibration } from "./decision-calibration";
 import { degradedPassError } from "./degraded-pass-refusal";
 import { diagnosticStateChanged } from "./diagnostic-log-state";
 import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
@@ -1899,6 +1900,12 @@ interface RunPostTransformPhaseArgs {
      * emergency drop then skips (the 95% block stays the backstop).
      */
     emergencyCeilingTokens?: number;
+    /**
+     * Our count of the last request this session served, priced with the
+     * calibration the emergency drop measures tags with; undefined when there
+     * is none or it was made for another model. See served-request-count.ts.
+     */
+    servedCountTokens?: (calibration: DecisionCalibration) => number | undefined;
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
     /** Save host-order IDs before tag replay or tool pruning can remove the message that marks the prefix-trimming boundary. */
     prefixTrimSourceOrder?: PrefixTrimSourceOrder;
@@ -3722,6 +3729,7 @@ export async function runPostTransformPhase(
                                   passAlreadyPriced: emergencyRewriteAlreadyPriced,
                                   servedBeforePass: servedBeforeRemovals,
                                   sinceReading: tagsNewerThanReading,
+                                  servedCountTokens: args.servedCountTokens,
                               }
                             : undefined,
                     routine: routineCleanupApplied,

@@ -313,6 +313,13 @@ export interface FinalWireTokenEstimateInput {
  * same route/envelope and complete prefix survive, followed by its own reply.
  * No durable session aggregate or another route's usage can stand in for this.
  */
+/** A saved copy of the last request served, counted only if someone asks. */
+export interface SavedServedRequest {
+    count():
+        | { modelKey: string; components: { system: number; tools: number; prose: number } }
+        | undefined;
+}
+
 export function createFinalWireUsageTracker() {
     const fallbackLogged = new Set<string>();
     const served = new Map<
@@ -325,6 +332,23 @@ export function createFinalWireUsageTracker() {
             signed: boolean;
             estimate: number;
             driftLogged?: boolean;
+        }
+    >();
+    // A copy kept only so the emergency drop can count the request later, for
+    // a request `served` cannot hold because its route's tool definitions
+    // have no measurement signature (OpenCode 2, where the transform is not
+    // told the agent the tools were measured under). It carries the tool
+    // total of that request's own recorded set. `estimate` never reads it, so
+    // reuse of provider usage is unchanged.
+    const countCopies = new Map<
+        string,
+        {
+            providerID: string;
+            modelID: string;
+            agentName: string | undefined;
+            systemPromptTokens: number;
+            toolDefinitionTokens: number;
+            prefix: string[];
         }
     >();
     const wireRows = (input: FinalWireTokenEstimateInput) =>
@@ -359,6 +383,81 @@ export function createFinalWireUsageTracker() {
         ]);
     };
     return {
+        /**
+         * The request this tracker last saved for the session (see `capture`),
+         * with a way to count it on demand. The count is in raw local units,
+         * like `pressureComponents`, and is made at most once. Rows keep only
+         * their id, role and parts, so thinking that is priced from a reply's
+         * usage counts as zero here. Undefined when no copy is saved.
+         */
+        savedRequest(sessionId: string): SavedServedRequest | undefined {
+            const saved = served.get(sessionId);
+            const copy = saved ? undefined : countCopies.get(sessionId);
+            const source = saved ?? copy;
+            if (!source) return undefined;
+            let counted: ReturnType<SavedServedRequest["count"]> | null = null;
+            return {
+                count() {
+                    if (counted !== null) return counted;
+                    counted = undefined;
+                    try {
+                        const [providerID, modelID, agentName, , systemPromptTokens] = copy
+                            ? [
+                                  copy.providerID,
+                                  copy.modelID,
+                                  copy.agentName,
+                                  "",
+                                  copy.systemPromptTokens,
+                              ]
+                            : (JSON.parse(saved?.envelope ?? "") as [
+                                  string,
+                                  string,
+                                  string | undefined,
+                                  string,
+                                  number,
+                              ]);
+                        const messages = source.prefix.map((text) => {
+                            const row = JSON.parse(text) as {
+                                id: string;
+                                role: string;
+                                parts: unknown[];
+                            };
+                            return {
+                                info: { id: row.id, role: row.role },
+                                parts: row.parts,
+                            } as unknown as MessageLike;
+                        });
+                        const estimate = estimateFinalWireInputTokens({
+                            messages,
+                            systemPromptTokens,
+                            // A copy without a signature carries its own
+                            // request's tool total; a saved request looks its
+                            // route's measurement up, as before.
+                            toolDefinitionTokens: copy?.toolDefinitionTokens,
+                            providerID,
+                            modelID,
+                            agentName,
+                            sessionId,
+                        });
+                        // A count that leaves out part of the fixed envelope
+                        // would understate the fixed part without bound, so it
+                        // counts only with both sizes measured.
+                        if (
+                            estimate.pressureComponents &&
+                            estimate.toolDefinitionsMeasured === true &&
+                            systemPromptTokens > 0
+                        )
+                            counted = {
+                                modelKey: `${providerID}/${modelID}`,
+                                components: estimate.pressureComponents,
+                            };
+                    } catch {
+                        counted = undefined;
+                    }
+                    return counted;
+                },
+            };
+        },
         estimate(
             sessionId: string,
             request: FinalWireTokenEstimateInput,
@@ -423,10 +522,21 @@ export function createFinalWireUsageTracker() {
             }
             return estimateOutgoingWireForRefusal({ ...input, measuredPrefix }, limit);
         },
-        capture(sessionId: string, request: FinalWireTokenEstimateInput): void {
+        /**
+         * Save the request a pass served. `requestToolDefinitionTokens` is the
+         * tool total of this very request's recorded tool set (OpenCode 2),
+         * used only to keep a copy for counting when the route has no
+         * measurement signature.
+         */
+        capture(
+            sessionId: string,
+            request: FinalWireTokenEstimateInput,
+            requestToolDefinitionTokens?: number,
+        ): void {
             const input = { ...request, sessionId: request.sessionId ?? sessionId };
             const previous = served.get(sessionId);
             served.delete(sessionId);
+            countCopies.delete(sessionId);
             try {
                 const alreadyLogged = fallbackLogged.delete(sessionId);
                 const fallbackSteps = opaqueThinkingFallbackSteps(input.messages);
@@ -478,11 +588,28 @@ export function createFinalWireUsageTracker() {
                 const envelope = envelopeFor(input);
                 const rows = wireRows(input);
                 const parent = [...rows].reverse().find((row) => row.info.role === "user")?.info.id;
-                if (!envelope || typeof parent !== "string" || !rows.every(hasCountableParts))
-                    return;
+                if (typeof parent !== "string" || !rows.every(hasCountableParts)) return;
+                const { providerID, modelID } = input;
+                const countOnly =
+                    !envelope && requestToolDefinitionTokens !== undefined && providerID && modelID
+                        ? { providerID, modelID, toolDefinitionTokens: requestToolDefinitionTokens }
+                        : undefined;
+                if (!envelope && !countOnly) return;
                 const prefix = rows.map(rowBytes);
                 // Keep this exact-match evidence small without limiting the larger durable replay cache.
                 if (prefix.reduce((sum, text) => sum + text.length, 0) > 4 * 1024 * 1024) return;
+                if (countOnly) {
+                    const oldest = countCopies.keys().next().value;
+                    if (countCopies.size >= 16 && oldest !== undefined) countCopies.delete(oldest);
+                    countCopies.set(sessionId, {
+                        ...countOnly,
+                        agentName: input.agentName,
+                        systemPromptTokens: input.systemPromptTokens,
+                        prefix,
+                    });
+                    return;
+                }
+                if (!envelope) return;
                 if (served.size >= 16) served.delete(served.keys().next().value!);
                 const signed = input.messages.some((row) =>
                     row.parts.some((part) => {
@@ -575,8 +702,28 @@ export interface FinalWireTokenEstimate {
      * pressure reading: for an unseeded model it doubles the whole request.
      */
     pressureTokens?: number;
+    /**
+     * The local counts `pressureTokens` is made from, before any ratio is
+     * applied: system prompt, tool definitions plus tool calls and results,
+     * and prose. A caller that must compare the whole request with tag counts
+     * made under a different calibration applies its own ratios to these.
+     */
+    pressureComponents?: { system: number; tools: number; prose: number };
     completeness?: "complete" | "partial";
     componentsComplete?: boolean;
+    /**
+     * The byte-bound refusal check stopped reading the messages as soon as
+     * their bytes alone proved the request over the limit: `tokens` is then a
+     * lower bound at the point counting stopped, and `messageTokens` was
+     * never counted.
+     */
+    countingStopped?: boolean;
+    /**
+     * With a byte-bound refusal count: the part of `refusalTokens` that is the
+     * provider's measured input for a prefix of the request (0 without one).
+     * The rest is the counted message bytes divided by four.
+     */
+    refusalBaselineTokens?: number;
 }
 
 /**
@@ -639,6 +786,8 @@ export function estimateOutgoingWireForRefusal(
                     systemTokens: input.systemPromptTokens,
                     toolDefinitionTokens: tools,
                     toolDefinitionsMeasured: tools !== undefined,
+                    countingStopped: over && bytes.aborted,
+                    refusalBaselineTokens: over ? baseline : undefined,
                 };
             }
         }
@@ -696,14 +845,12 @@ export function estimateFinalWireInputTokens(
     };
     const tokens = providerMass(rawComponents, calibration, true);
     const pressureToolDefinitions = measuredToolDefinitions ?? borrowedToolDefinitions ?? 0;
-    const pressureTokens = providerMass(
-        {
-            system: rawComponents.system,
-            tools: pressureToolDefinitions + messageTokens.toolCall,
-            prose: rawComponents.prose,
-        },
-        calibration,
-    );
+    const pressureComponents = {
+        system: rawComponents.system,
+        tools: pressureToolDefinitions + messageTokens.toolCall,
+        prose: rawComponents.prose,
+    };
+    const pressureTokens = providerMass(pressureComponents, calibration);
     const complete =
         Number.isFinite(tokens) &&
         tokens > 0 &&
@@ -761,6 +908,7 @@ export function estimateFinalWireInputTokens(
         rawTokens: rawComponents.system + rawComponents.tools + rawComponents.prose,
         rawComponents,
         pressureTokens,
+        pressureComponents,
         completeness: complete ? "complete" : "partial",
         componentsComplete:
             toolDefinitions !== undefined && input.messages.every(hasCountableParts),

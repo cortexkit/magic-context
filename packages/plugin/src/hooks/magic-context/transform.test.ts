@@ -4790,7 +4790,16 @@ describe("createTransform historian failure handling", () => {
         const order: string[] = [];
         const removeSink = registerNotificationSink({
             sessionId,
-            send: () => {
+            send: (notification) => {
+                // The 110,000-token system prompt also takes more than half of
+                // the window, which shows its own display-only toast; this test
+                // is about the order of the refusal's notice and the abort.
+                if (
+                    String(notification.payload.message ?? "").startsWith(
+                        "Context window too small",
+                    )
+                )
+                    return;
                 order.push("notify");
             },
         });
@@ -4866,7 +4875,13 @@ describe("createTransform historian failure handling", () => {
             throwOnError: true,
         });
         expect(getEmergencyInputSample(db, sessionId)).toBe(0);
-        expect(drainNotifications(0, sessionId)[0]?.payload.message).toBe(
+        // The small-window toast is display-only and comes first; the
+        // refusal's own notice is the next one.
+        const notices = drainNotifications(0, sessionId).filter(
+            (notice) =>
+                !String(notice.payload.message ?? "").startsWith("Context window too small"),
+        );
+        expect(notices[0]?.payload.message).toBe(
             "Context full — /ctx-flush or /clear to continue.",
         );
     });

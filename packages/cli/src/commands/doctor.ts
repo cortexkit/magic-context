@@ -30,6 +30,7 @@ import { diagnoseIdentitySplits } from "./doctor-identity-splits";
 import { runDoctor as runOmpDoctor } from "./doctor-omp";
 import { runDoctor as runOpenCodeDoctor } from "./doctor-opencode";
 import { doctor as runPiDoctor } from "./doctor-pi";
+import { diagnoseSmallWindows } from "./doctor-small-window";
 
 export interface RunDoctorOptions extends V22BackfillCommandArgs {
     force?: boolean;
@@ -90,6 +91,16 @@ export async function runDoctor(options: RunDoctorOptions): Promise<number> {
     } catch (error) {
         log.warn(
             `Identity split check unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
+
+    // Models whose system prompt and tool definitions alone take more than
+    // half of the usable window. Reads the shared store, once per run.
+    try {
+        for (const line of diagnoseSmallWindows()) log.warn(line);
+    } catch (error) {
+        log.warn(
+            `Context window size check unavailable: ${error instanceof Error ? error.message : String(error)}`,
         );
     }
 

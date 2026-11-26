@@ -3,6 +3,11 @@ import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import { log } from "../../shared/logger";
 import { pluginPackageVersion } from "../../shared/plugin-package-version";
 import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
+import {
+    formatSmallWindowCondition,
+    reductionPointTokens,
+    smallWindowCondition,
+} from "../../shared/small-window";
 import { buildUnavailableStatusView } from "../../shared/status-view";
 import { statusVersionNotice } from "../../shared/status-view-check";
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../../tui/compaction-off";
@@ -74,7 +79,27 @@ export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
         `Historian ${historian} · C:${snapshot.compartmentCount}`,
         `Memories ${snapshot.memoryBlockCount}/${snapshot.memoryCount} · Q:${snapshot.pendingOpsCount}`,
         ...warnings,
+        ...smallWindowLines(snapshot),
     ].join("\n");
+}
+
+/** The small-window warning, derived from the numbers the snapshot carries. */
+function smallWindowLines(
+    snapshot: Pick<
+        SidebarSnapshot,
+        "systemPromptTokens" | "toolDefinitionTokens" | "contextLimit" | "executeThreshold"
+    >,
+): string[] {
+    const condition = smallWindowCondition({
+        systemPromptTokens: snapshot.systemPromptTokens,
+        // 0 in the snapshot means never measured.
+        toolDefinitionTokens: snapshot.toolDefinitionTokens || undefined,
+        reductionPointTokens: reductionPointTokens(
+            snapshot.contextLimit,
+            snapshot.executeThreshold,
+        ),
+    });
+    return condition ? [`Warning: ${formatSmallWindowCondition(condition)}`] : [];
 }
 
 /**
@@ -103,6 +128,9 @@ export function statusText(
         | "configReloadFailure"
         | "lastTransformError"
         | "projectBindingWarning"
+        | "systemPromptTokens"
+        | "toolDefinitionTokens"
+        | "executeThreshold"
     >,
 ): string {
     const context =
@@ -133,6 +161,7 @@ export function statusText(
             : []),
         ...(detail.lastTransformError ? [`Warning: ${detail.lastTransformError}`] : []),
         ...(detail.projectBindingWarning ? [`Warning: ${detail.projectBindingWarning}`] : []),
+        ...smallWindowLines(detail),
     ].join("\n");
 }
 

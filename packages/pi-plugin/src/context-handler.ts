@@ -304,6 +304,7 @@ import type { ModelInput } from "@magic-context/core/shared/model-resolution";
 import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import { recoveryReasoningPrefixes } from "@magic-context/core/shared/recovery-reasoning-prefix";
+import { reductionPointTokens } from "@magic-context/core/shared/small-window";
 import {
 	guardSqliteTransformPass,
 	type Statement as PreparedStatement,
@@ -561,6 +562,7 @@ import {
 	getPiServedTagNumbers,
 	PiServedIdentityError,
 } from "./served-array-ledger";
+import { reportPiSmallWindow } from "./small-window-pi";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import {
 	piImageWireTokens,
@@ -5697,6 +5699,30 @@ export function registerPiContextHandler(
 					usableContextLimit: usageContextLimit,
 				}));
 			const realUsagePercentageBeforeEmergencyBump = usagePercentage;
+			// Display only: tell the user once if the system prompt and tools
+			// alone take more than half of the reduction point. Checked only on
+			// passes at or above the execute threshold, where such a session
+			// soon is; a decision is remade only when its inputs change (see
+			// reportPiSmallWindow), because measuring the tool set serializes
+			// every tool.
+			if (usagePercentage >= effectiveExecuteThresholdPercentage) {
+				try {
+					reportPiSmallWindow({
+						ctx,
+						pi,
+						sessionId,
+						modelKey: currentModelKey,
+						reductionPointTokens: reductionPointTokens(
+							usageContextLimit,
+							effectiveExecuteThresholdPercentage,
+						),
+						calibration: () =>
+							sessionDecisionCalibration(options.db, sessionId),
+					});
+				} catch (error) {
+					sessionLog(sessionId, "small window check failed:", error);
+				}
+			}
 			// Emergency bump LAST so it floors recovery pressure without capping
 			// a higher live forward-pressure reading.
 			if (needsEmergencyBump) {

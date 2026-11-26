@@ -6,6 +6,7 @@ import {
     getSessionToolDefinitionTokens,
     loadToolDefinitionMeasurements,
     recordToolDefinition,
+    recordToolDefinitionSet,
     setDatabase,
 } from "../../features/magic-context/tool-definition-tokens";
 import * as logger from "../../shared/logger";
@@ -152,6 +153,58 @@ it("OpenCode correlated provider usage wins over full-prefix estimates and rejec
         {},
     );
     expect(tracker.estimate("session", { messages, ...envelope }).refusalBasis).toBe("calibrated");
+});
+
+it("OpenCode 2: without a route signature a copy is kept for counting only, with its own request's tool total", () => {
+    // The tools were measured under the request draft's agent; the transform
+    // asks without one, so the route has no signature for it.
+    const route = { providerID: "anthropic", modelID: "claude-fable-5-1" };
+    recordToolDefinitionSet(
+        route.providerID,
+        route.modelID,
+        "build",
+        [{ id: "probe", description: "A probe", parameters: {} }],
+        "session",
+    );
+    const prefix = [
+        {
+            info: { id: "input", role: "user" },
+            parts: [{ type: "text", text: "word ".repeat(2000) }],
+        },
+    ] as MessageLike[];
+    const envelope = { systemPromptTokens: 100, systemPromptHash: "system-v1", ...route };
+    const tracker = createFinalWireUsageTracker();
+    // Without the request's own tool total nothing is saved, as before.
+    tracker.capture("session", { messages: prefix, ...envelope });
+    expect(tracker.savedRequest("session")).toBeUndefined();
+    tracker.capture("session", { messages: prefix, ...envelope }, 4_000);
+    const counted = tracker.savedRequest("session")?.count();
+    const prose = estimateMessageTokens(prefix[0]!).conversation;
+    expect(counted).toEqual({
+        modelKey: `${route.providerID}/${route.modelID}`,
+        components: { system: 100, tools: 4_000, prose },
+    });
+    // The copy is not provider-usage evidence: the next request's refusal
+    // estimate is what it is with no copy at all.
+    const reply = {
+        info: {
+            id: "reply",
+            role: "assistant",
+            parentID: "input",
+            ...route,
+            finish: "stop",
+            time: { completed: Date.now() + 1 },
+            tokens: { input: 100, cache: { read: 20, write: 10 } },
+        },
+        parts: [{ type: "text", text: "New reply" }],
+    } as unknown as MessageLike;
+    const next = { messages: [...prefix, reply], ...envelope, sessionId: "session" };
+    expect(tracker.estimate("session", next, 16_000)).toEqual(
+        createFinalWireUsageTracker().estimate("session", next, 16_000),
+    );
+    // A later capture without a tool total drops the copy.
+    tracker.capture("session", { messages: prefix, ...envelope });
+    expect(tracker.savedRequest("session")).toBeUndefined();
 });
 
 it("rows reloaded at startup stop disabling provider-measured evidence once the route flies", () => {

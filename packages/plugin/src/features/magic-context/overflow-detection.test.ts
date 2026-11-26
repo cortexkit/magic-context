@@ -246,6 +246,22 @@ describe("overflow-detection / detectOverflow", () => {
     });
 
     test.each([
+        // Issue 860: the text LiteLLM returned to the reporter, quoted from the issue.
+        "input (485974 tokens) is longer than the model's context length (262144)",
+        // The same wording inside LiteLLM's HTTP 400 message, without the class name.
+        "litellm.BadRequestError: OpenAIException - The input (485974 tokens) is longer than the model's context length (262144).",
+    ])("detects LiteLLM overflow without the limit's unit and parses both counts: %s", (message) => {
+        expect(detectOverflow({ status: 400, message })).toMatchObject({
+            isOverflow: true,
+            reportedInputTokens: 485_974,
+            reportedLimit: 262_144,
+            reportedLimitProvenance: "combined",
+        });
+        expect(parseReportedInputTokens(message)).toBe(485_974);
+        expect(parseReportedLimit(message)?.value).toBe(262_144);
+    });
+
+    test.each([
         1_260_773, 1_260_808,
     ])("extracts DeepSeek rejected input %d without counting completion tokens", (input) => {
         const message =
@@ -269,10 +285,146 @@ describe("overflow-detection / detectOverflow", () => {
         "The input (626827 tokens) could not be sent: connection reset",
         "Invalid API key; model's context length (262144 tokens)",
         "The input (626827 tokens) is longer than the configured log limit (262144 tokens)",
+        "The input (626827 tokens) is longer than the configured log limit (262144)",
+        "input (485974 tokens) is longer than expected; model's context length (262144)",
         "BadRequestError: expected an image in the messages, not text in the completion",
         "BadRequestError: invalid schema (1260773 in the messages, 131072 in the completion)",
     ])("does not classify ordinary provider errors as overflow: %s", (message) => {
         expect(detectOverflow({ status: 400, message })).toEqual({ isOverflow: false });
+    });
+
+    test("the unitless LiteLLM wording needs an input larger than the limit", () => {
+        // Counts that contradict an overflow are not one, even in the exact wording.
+        expect(
+            detectOverflow({
+                status: 400,
+                message: "input (19 tokens) is longer than the model's context length (262144)",
+            }),
+        ).toEqual({ isOverflow: false });
+    });
+
+    test("the unitless LiteLLM wording quoted by an authentication failure is not an overflow", () => {
+        const message =
+            "Invalid API key; rejected example body: input (485974 tokens) is longer than the model's context length (262144)";
+        expect(detectOverflow({ status: 401, message })).toEqual({ isOverflow: false });
+        // The failure's own words decide when the status is not given.
+        expect(detectOverflow({ message })).toEqual({ isOverflow: false });
+    });
+
+    // Probes of the unitless wording inside other errors. The status is read
+    // from status fields at every nesting level, never from the text.
+    const BARE = "input (485974 tokens) is longer than the model's context length (262144)";
+    test.each<[string, unknown, boolean]>([
+        [
+            "an authentication status nested under an outer 400",
+            { status: 400, error: { status: 401, message: BARE } },
+            false,
+        ],
+        [
+            "a permission status nested under an outer 400",
+            { statusCode: 400, data: { error: { statusCode: 403, message: BARE } } },
+            false,
+        ],
+        [
+            "an authentication message without an authentication status",
+            { status: 400, message: `Incorrect API key provided; example: ${BARE}` },
+            false,
+        ],
+        [
+            "an authentication error type with no status",
+            { type: "authentication_error", message: BARE },
+            false,
+        ],
+        [
+            "a permission error type nested in the body",
+            { status: 400, error: { type: "permission_error", message: BARE } },
+            false,
+        ],
+        [
+            "a schema error quoting the sentence (422)",
+            { status: 422, message: `Unexpected examples[0] string: ${BARE}` },
+            false,
+        ],
+        [
+            "a quota error quoting the sentence (429)",
+            { status: 429, message: `quota exceeded: ${BARE}` },
+            false,
+        ],
+        [
+            "an input equal to the limit",
+            { status: 400, message: BARE.replace("485974", "262144") },
+            false,
+        ],
+        [
+            "a grouped input count that starts with 401",
+            { status: 400, message: BARE.replace("485974", "401,974") },
+            true,
+        ],
+        [
+            "a grouped input count that starts with 403",
+            { status: 400, message: BARE.replace("485974", "403 974") },
+            true,
+        ],
+        ["the bare sentence in an outer 400", { status: 400, message: BARE }, true],
+        [
+            "the bare sentence nested under an outer 400",
+            { statusCode: 400, data: { message: BARE } },
+            true,
+        ],
+    ])("unitless LiteLLM wording: %s", (_name, error, isOverflow) => {
+        expect(detectOverflow(error).isOverflow).toBe(isOverflow);
+    });
+
+    test.each<[string, unknown, boolean]>([
+        // These match the release's older patterns before the unitless check
+        // runs; the authentication guard covers only the unitless wording.
+        [
+            "an authentication status quoting the LiteLLM class name",
+            { status: 401, message: `ContextWindowExceededError: ${BARE}` },
+            true,
+        ],
+        [
+            "an authentication status quoting the wording with its unit",
+            { status: 401, message: BARE.replace("262144)", "262144 tokens)") },
+            true,
+        ],
+        // Wordings no provider has been seen to send; not recognised.
+        [
+            "another wording of the same refusal",
+            {
+                status: 400,
+                message:
+                    "Model has a context window of 262144 tokens, but received 485974 input tokens.",
+            },
+            false,
+        ],
+        [
+            "the wording with a typographic apostrophe",
+            { status: 400, message: BARE.replace("model's", "model\u2019s") },
+            false,
+        ],
+        // Still recognised, as in the release.
+        [
+            "the OpenAI wording",
+            {
+                status: 400,
+                message:
+                    "This model maximum context length is 262144 tokens. However, your messages resulted in 485974 tokens.",
+            },
+            true,
+        ],
+    ])("pin, as in the release: %s", (_name, error, isOverflow) => {
+        expect(detectOverflow(error).isOverflow).toBe(isOverflow);
+    });
+
+    test("a grouped input count is parsed whole", () => {
+        expect(
+            detectOverflow({ status: 400, message: BARE.replace("485974", "401,974") }),
+        ).toMatchObject({
+            isOverflow: true,
+            reportedInputTokens: 401_974,
+            reportedLimit: 262_144,
+        });
     });
 
     test("does not extract LiteLLM counts from ordinary errors or incomplete DeepSeek fields", () => {
