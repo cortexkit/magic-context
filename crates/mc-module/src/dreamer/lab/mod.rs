@@ -1,5 +1,7 @@
-//! One unscheduled dreamer experiment using frozen inputs. Only the child
-//! session's attribution fact is written to the live context store.
+//! One unscheduled dreamer experiment using frozen inputs. Its only write to
+//! the live context store is the attribution fact of the session it starts:
+//! the record that says which task and project that session's model cost
+//! belongs to ([`crate::attribution`]).
 
 mod frozen;
 mod git;

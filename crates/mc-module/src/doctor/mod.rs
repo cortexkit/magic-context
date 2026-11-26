@@ -27,8 +27,10 @@ pub fn run(args: &[OsString]) -> ExitCode {
 }
 
 fn data_home() -> Result<PathBuf, CheckError> {
-    // The runner supplies this root. A fallback to the user's home or older
-    // store overrides could inspect a different installation.
+    // `ck doctor` starts this program with a cleared environment and passes
+    // the data home in XDG_DATA_HOME. Falling back to HOME, or honouring the
+    // MAGIC_CONTEXT_* path variables the serving module reads, could make a
+    // check inspect a different installation than the one it was asked about.
     cortexkit_paths::env_absolute_path(&cortexkit_paths::SystemEnv, "XDG_DATA_HOME")
         .map_err(|_| CheckError)?
         .ok_or(CheckError)

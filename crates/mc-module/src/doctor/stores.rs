@@ -138,7 +138,8 @@ fn immutable(path: &Path) -> rusqlite::Result<Connection> {
 
 fn context_version(found: i64) -> Option<Finding> {
     // This store tracks versions in the migration ledger, not user_version.
-    // Use the same query and fences as the serving opener.
+    // Use the same query as the serving opener, and the same oldest and
+    // newest versions it accepts.
     let supported = i64::from(context_db::SCHEMA_VERSION);
     let (id, severity, summary, name, fence) = if found > supported {
         (

@@ -29,8 +29,9 @@ pub(super) struct DataDir {
 
 impl DataDir {
     pub(super) fn open(home: &Path) -> Result<Option<Self>, Errno> {
-        // The runner's supplied home is the trust root (on macOS the OS may
-        // spell it through /var). Below it, open every named component without
+        // `ck doctor` starts this program with the data home in XDG_DATA_HOME.
+        // That folder is trusted as given (on macOS its real path can go
+        // through /var). Below it, open every named component without
         // following links.
         let home = match fs::canonicalize(home) {
             Ok(home) => home,
