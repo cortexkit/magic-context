@@ -65,6 +65,9 @@ export async function setup(context: V2Context) {
     setHarness("opencode2");
     bindStaleBuildNotice({}, import.meta.url, "opencode2");
     const duties = await registerContext(context);
+    const unregisterForkHistoryNotice = duties
+        ? (await import("./hooks/fork-history-notice")).registerForkHistoryNotice(context)
+        : undefined;
     const checks =
         loadPluginConfigDetailed(context.location.directory).config.auto_update === false
             ? undefined
@@ -75,6 +78,7 @@ export async function setup(context: V2Context) {
     log("[magic-context] @cortexkit/opencode-magic-context v2 setup");
     flushLogger();
     return async () => {
+        unregisterForkHistoryNotice?.();
         await checks?.dispose();
         await duties?.dispose();
     };

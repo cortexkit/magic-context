@@ -13,6 +13,8 @@ import type { V2Message } from "./types";
  */
 export const STORAGE_NOTICE_PREFIX = "[Magic Context storage notice] ";
 
+export const FORK_HISTORY_NOTICE = `${STORAGE_NOTICE_PREFIX}This fork is missing saved history summaries. Run /ctx-recomp without a range in this fork to rebuild them from its raw history.`;
+
 /** The notice stored when a turn is refused because the context database is unavailable. */
 export function formatStorageRefusalNotice(reason: FailClosedReason): string {
     return `${STORAGE_NOTICE_PREFIX}This turn was not sent to the model. ${formatFailClosedBlockingSummary(reason)}`;

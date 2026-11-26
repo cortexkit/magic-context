@@ -1,8 +1,11 @@
 import {
+    type CloneCompartmentBoundary,
+    type CloneCompartmentRow,
     type CloneSessionStateFilter,
     type CopySessionStateForCloneResult,
     copySessionStateForClone,
 } from "../features/magic-context/storage-clone";
+import { sessionLog } from "../shared/logger";
 import type { Database } from "../shared/sqlite";
 import { RAW_MESSAGE_TYPES, type V2ForkOrigin, type V2RowStamp } from "./store-reader";
 
@@ -101,6 +104,122 @@ function splitMessageScopedId(id: string): { messageId: string; suffix: string }
     return { messageId: id.slice(0, -match[1].length), suffix: match[1] };
 }
 
+interface ForkCompartmentProof {
+    sessionId: string;
+    sequenceForId(id: string): number | undefined;
+    matchingBodies(): ReadonlySet<string>;
+}
+
+function selectForkCompartments(
+    source: readonly CloneCompartmentBoundary[],
+    map: V2ForkIdMap,
+    proof: ForkCompartmentProof,
+): { rows: Map<number, CloneCompartmentRow>; rawTailAfter: number | undefined } {
+    const rows = new Map<number, CloneCompartmentRow>();
+    const forkId = (id: string) => map.parentToFork.get(id) ?? "";
+    const ordinal = (id: string) => map.forkOrdinals.get(forkId(id));
+    let matchingPrefix: number | undefined;
+    const provePrefix = () => {
+        const matching = proof.matchingBodies();
+        let length = 0;
+        // Missing or extra counted rows, mismatched roles or creation times,
+        // and changed bodies invalidate position here even if later ids pair.
+        for (const [position, id] of map.parentOrdinals) {
+            if (ordinal(id) !== position || !matching.has(id)) break;
+            length = position;
+        }
+        return length;
+    };
+    let stopped = false;
+    let rawTailAfter: number | undefined;
+    let lastEnd = 0;
+    for (const [i, row] of source.entries()) {
+        const { sequence, startMessage, endMessage, startMessageId, endMessageId } = row;
+        const start = ordinal(startMessageId);
+        const end = ordinal(endMessageId);
+        let reason: string;
+        if (stopped) {
+            // The history head cuts one prefix, not individual intervals. A
+            // later summary would advance it past the raw history we just kept.
+            reason = "after first skipped compartment";
+        } else if (start !== undefined && end !== undefined) {
+            rows.set(sequence, {
+                sequence,
+                startMessage: start,
+                endMessage: end,
+                startMessageId: forkId(startMessageId),
+                endMessageId: forkId(endMessageId),
+            });
+            lastEnd = end;
+            continue;
+        } else {
+            const startSeq = start === undefined ? proof.sequenceForId(startMessageId) : undefined;
+            const endSeq = end === undefined ? proof.sequenceForId(endMessageId) : undefined;
+            const pastBoundary =
+                (startSeq ?? -1) > map.throughSeq || (endSeq ?? -1) > map.throughSeq;
+            const previous = source[i - 1];
+            const next = source[i + 1];
+            if (pastBoundary) {
+                reason = "outside the fork boundary";
+            } else if (startSeq !== undefined || endSeq !== undefined) {
+                reason = "a live endpoint was not copied";
+            } else if (row.rebaseStatus === "unresolved") {
+                reason = "parent coordinates are unresolved";
+            } else if (
+                !Number.isSafeInteger(startMessage) ||
+                !Number.isSafeInteger(endMessage) ||
+                startMessage < 1 ||
+                endMessage < startMessage ||
+                endMessage > map.parentOrdinals.size
+            ) {
+                reason = "range is invalid or not wholly inside the fork boundary";
+            } else if (row.startBlockIndex !== null || row.endBlockIndex !== null) {
+                reason = "block boundaries cannot be proven by message order";
+            } else if (
+                (start !== undefined && start !== startMessage) ||
+                (end !== undefined && end !== endMessage)
+            ) {
+                reason = "live endpoint conflicts with the stored position";
+            } else if (
+                // A complete host copy proves where current parent messages landed,
+                // not that these saved ordinals still name the original range.
+                // Bound each side with a live anchor at its saved coordinate or
+                // an abutting neighbour's live anchor (or the start of history).
+                (previous ? previous.endMessage !== startMessage - 1 : startMessage !== 1) ||
+                (next && next.startMessage !== endMessage + 1) ||
+                (start === undefined &&
+                    previous &&
+                    ordinal(previous.endMessageId) !== startMessage - 1) ||
+                (end === undefined && (!next || ordinal(next.startMessageId) !== endMessage + 1))
+            ) {
+                reason = "live neighboring anchors do not prove the stored range";
+            } else if (
+                (end === undefined ? endMessage + 1 : endMessage) >
+                (matchingPrefix ??= provePrefix())
+            ) {
+                reason = "parent and fork raw prefixes do not match in order and body";
+            } else {
+                rows.set(sequence, {
+                    sequence,
+                    startMessage,
+                    endMessage,
+                    startMessageId: forkId(map.parentOrdinals.get(startMessage) ?? ""),
+                    endMessageId: forkId(map.parentOrdinals.get(endMessage) ?? ""),
+                });
+                lastEnd = endMessage;
+                continue;
+            }
+            stopped = true;
+            if (!pastBoundary) rawTailAfter = lastEnd;
+        }
+        sessionLog(
+            proof.sessionId,
+            `v2 fork skipped compartment ${sequence} (${startMessage}-${endMessage}): ${reason}`,
+        );
+    }
+    return { rows, rawTailAfter };
+}
+
 /**
  * The clone filter for one fork. Message-scoped ids map through the paired
  * rows. Tool call ids are not message ids: the host copies the rows' bodies
@@ -110,6 +229,7 @@ function splitMessageScopedId(id: string): { messageId: string; suffix: string }
 export function forkCloneFilter(
     idMap: V2ForkIdMap,
     copiedToolCallIds: ReadonlySet<string>,
+    proof?: ForkCompartmentProof,
 ): CloneSessionStateFilter {
     const mapMessageScoped = (id: string): string | undefined => {
         const direct = idMap.parentToFork.get(id);
@@ -119,7 +239,15 @@ export function forkCloneFilter(
         const mapped = idMap.parentToFork.get(messageId);
         return mapped ? `${mapped}${suffix}` : undefined;
     };
+    let rawTailAfter: number | undefined;
     return {
+        selectCompartments:
+            proof &&
+            ((source) => {
+                const plan = selectForkCompartments(source, idMap, proof);
+                rawTailAfter = plan.rawTailAfter;
+                return plan.rows;
+            }),
         resolveBoundaryOrdinal: (messageId) => {
             const forkId = idMap.parentToFork.get(messageId);
             return forkId ? idMap.forkOrdinals.get(forkId) : undefined;
@@ -128,6 +256,18 @@ export function forkCloneFilter(
             mapMessageScoped(messageId) !== undefined || copiedToolCallIds.has(messageId),
         mapMessageId: (messageId) => mapMessageScoped(messageId) ?? messageId,
         includeTag: (tag) => {
+            if (rawTailAfter !== undefined) {
+                // A historian queues regular drops for covered content. In an
+                // unproven tail they are indistinguishable from other drops;
+                // neither the committed status nor the queue may hide that raw input.
+                const owner =
+                    tag.type === "tool"
+                        ? tag.toolOwnerMessageId
+                        : splitMessageScopedId(tag.messageId).messageId;
+                const copy = owner && idMap.parentToFork.get(owner);
+                if (!copy || (idMap.forkOrdinals.get(copy) ?? Infinity) > rawTailAfter)
+                    return false;
+            }
             if (tag.type === "tool") {
                 return (
                     tag.toolOwnerMessageId !== null &&
@@ -165,6 +305,7 @@ export interface V2ForkStore {
     sessionExists(sessionID: string): boolean;
     sequenceForId(sessionID: string, id: string): number | undefined;
     rowStampsThrough(sessionID: string, throughSeq: number): V2RowStamp[];
+    matchingForkBodies(parentID: string, forkID: string, throughSeq: number): ReadonlySet<string>;
 }
 
 function countSessionRows(db: Database, table: string, sessionId: string): number {
@@ -252,7 +393,11 @@ export function seedV2ForkFromParent(args: {
         db,
         parentSessionID,
         sessionId,
-        forkCloneFilter(idMap, copiedToolCallIds),
+        forkCloneFilter(idMap, copiedToolCallIds, {
+            sessionId,
+            sequenceForId: (id) => store.sequenceForId(parentSessionID, id),
+            matchingBodies: () => store.matchingForkBodies(parentSessionID, sessionId, throughSeq),
+        }),
     );
     if (result.kind === "destination-not-empty")
         return { kind: "destination-not-empty", parentSessionID };

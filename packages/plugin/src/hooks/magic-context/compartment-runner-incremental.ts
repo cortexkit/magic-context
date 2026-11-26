@@ -141,6 +141,7 @@ import {
     RawOrdinalsNotReady,
 } from "./read-session-raw";
 import { sendStatusNotification } from "./send-session-notification";
+import { notifyStoredHistoryGap } from "./stored-history-notice";
 
 const inconsistentProducerWindows = new Set<string>();
 function logInconsistentProducerWindowOnce(
@@ -521,6 +522,8 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                     `historian no-op: stored compartments still invalid ("${existingValidationError}"); backing off`,
                 );
             }
+            if (!unresolvedInvolved)
+                await notifyStoredHistoryGap(directory, sessionId, existingValidationError);
             telemetry.status = "noop";
             telemetry.failureReason = `existing-validation backoff: ${existingValidationError}`;
             return;
@@ -557,7 +560,11 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             const failCount = incrementHistorianFailure(db, sessionId, existingValidationError);
             telemetry.failureReason = `existing-validation: ${existingValidationError}`;
             retainDrainReservationForRetryThrottle = true;
-            if (unresolvedInvolved) {
+            if (await notifyStoredHistoryGap(directory, sessionId, existingValidationError)) {
+                // The host owns this repair hint; the usual notice promises a retry
+                // and can replace the specific instruction with a generic warning.
+                issueNotified = true;
+            } else if (unresolvedInvolved) {
                 // Record the failure time like any other permanent historian
                 // failure, which is also what the backoff above measures from.
                 await notifyCountedFailure(failCount, buildStoredCompartmentsInvalidNotice());

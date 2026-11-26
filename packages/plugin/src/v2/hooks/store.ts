@@ -14,6 +14,7 @@ import {
     type V2StoreReader,
 } from "../store-reader";
 import { toolStateContent } from "../tool-result";
+import { FORK_HISTORY_NOTICE } from "./storage-notice";
 
 const rawMessageTypes = new Set<MessageType>(RAW_MESSAGE_TYPES);
 const isRawRow = (row: StoreRow) => rawMessageTypes.has(row.type);
@@ -81,6 +82,9 @@ function projectRawMessages(
                       })
                     : [{ type: "text", text: row.data.text ?? "" }],
         };
+        // Preserve the host ordinal but never expose the user's repair notice
+        // to the historian, /ctx-recomp, or other raw-history readers.
+        if (row.type === "synthetic" && row.data.text === FORK_HISTORY_NOTICE) message.parts = [];
         // Keep host provenance available to coordinate repair without changing the
         // enumerable RawMessage shape shared with the v1 differential fixtures.
         Object.defineProperty(message, "storeType", { value: row.type, enumerable: false });

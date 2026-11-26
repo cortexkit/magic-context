@@ -1309,6 +1309,16 @@ export class V2StoreReader {
         ).all(sessionID, throughSeq) as V2RowStamp[];
     }
 
+    /** Exact body equality for candidate fork pairs, without decoding or returning the bodies. */
+    matchingForkBodies(parentID: string, forkID: string, throughSeq: number): Set<string> {
+        const rows = this.prepare(
+            `SELECT p.id FROM session_message p JOIN session_message f ON f.seq = p.seq
+             WHERE p.session_id = ? AND f.session_id = ? AND p.seq <= ?
+               AND p.type = f.type AND p.time_created = f.time_created AND p.data = f.data`,
+        ).all(parentID, forkID, throughSeq) as { id: string }[];
+        return new Set(rows.map(({ id }) => id));
+    }
+
     latestSequenceForIds(sessionID: string, ids: readonly string[]): number {
         let latest = -1;
         for (let offset = 0; offset < ids.length; offset += 500) {

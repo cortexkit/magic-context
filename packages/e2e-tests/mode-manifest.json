@@ -1117,6 +1117,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/fork-stale-summary.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "A real OpenCode 2 fork inherits summaries with proven stale anchors, keeps raw history when it cannot prove a range, and can summarize either way. A previously broken fork gets one user-only repair notice and rebuilds with /ctx-recomp. PID lsof proves throwaway-store containment.",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/missing-history-boundary.test.ts",
             "tier": "excluded",
             "invocation": {

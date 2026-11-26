@@ -65,7 +65,14 @@ const BOUNDARY_SEQ = 8;
 const parentId = (seq: number) => `msg_parent_${String(seq).padStart(2, "0")}`;
 const forkId = (seq: number) => `${FORK_PREFIX}_${seq}`;
 
-function createStore(options: { boundary?: string | null; withParentRow?: boolean } = {}) {
+function createStore(
+    options: {
+        boundary?: string | null;
+        withParentRow?: boolean;
+        copyAll?: boolean;
+        changedBodyAt?: number;
+    } = {},
+) {
     const dir = createTestTempDirFromPath(join(tmpdir(), "mc-fork-inheritance-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const path = join(dir, "opencode.db");
@@ -92,9 +99,14 @@ function createStore(options: { boundary?: string | null; withParentRow?: boolea
         insert.run(parentId(row.seq), PARENT, row.type, row.seq, row.seq * 100, row.seq * 100);
         // The host copies settled rows through the boundary with the same seq,
         // type and timestamps.
-        if (row.seq <= BOUNDARY_SEQ && row.copied !== false)
+        if (row.seq <= BOUNDARY_SEQ && (options.copyAll || row.copied !== false))
             insert.run(forkId(row.seq), FORK, row.type, row.seq, row.seq * 100, row.seq * 100);
     }
+    if (options.changedBodyAt !== undefined)
+        db.prepare("UPDATE session_message SET data = ? WHERE id = ?").run(
+            '{"text":"different content under the same copy stamps"}',
+            forkId(options.changedBodyAt),
+        );
     // The fork's own first turn, after the boundary.
     insert.run("msg_fork_native_user", FORK, "user", 11, 5_000, 5_000);
     db.close();
@@ -261,6 +273,62 @@ describe("forkBoundarySeq", () => {
 });
 
 describe("seedV2ForkFromParent", () => {
+    const inherited = (db: Database) =>
+        forkRows(
+            db,
+            "SELECT sequence, start_message_id AS start, end_message_id AS end FROM compartments WHERE session_id = ? ORDER BY sequence",
+        );
+
+    it("inherits a stale start and a stale end when the raw order and the live neighbors prove both ranges", () => {
+        const { reader } = createStore({ copyAll: true });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, "old-start"], [4, parentId(5)]);
+        insertCompartment(db, PARENT, 2, [5, parentId(6)], [5, "old-end"]);
+        insertCompartment(db, PARENT, 3, [6, parentId(7)], [7, parentId(8)]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([
+            { sequence: 0, start: forkId(1), end: forkId(2) },
+            { sequence: 1, start: forkId(4), end: forkId(5) },
+            { sequence: 2, start: forkId(6), end: forkId(6) },
+            { sequence: 3, start: forkId(7), end: forkId(8) },
+        ]);
+    });
+
+    it.each([
+        ["a counted row was not copied", {}, "old-start", parentId(6)],
+        ["a copied body differs", { copyAll: true, changedBodyAt: 5 }, "old-start", parentId(6)],
+        ["a live endpoint conflicts", { copyAll: true }, "old-start", parentId(5)],
+        ["a live endpoint was not copied", {}, parentId(5), "old-end"],
+    ] as const)("keeps the raw tail when %s", (_case, options, start, end) => {
+        const { reader } = createStore(options);
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [2, parentId(2)]);
+        insertCompartment(db, PARENT, 1, [3, start], [5, end]);
+        insertCompartment(db, PARENT, 2, [6, parentId(7)], [7, parentId(8)]);
+        insertTag(db, PARENT, `${parentId(4)}:p0`, 1, "dropped");
+        insertTag(db, PARENT, `${parentId(7)}:p0`, 2, "active");
+        db.prepare(
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, 2, 'drop', 1, 'opencode2')",
+        ).run(PARENT);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(2) }]);
+        expect(forkRows(db, "SELECT message_id FROM tags WHERE session_id = ?")).toEqual([]);
+        expect(forkRows(db, "SELECT tag_id FROM pending_ops WHERE session_id = ?")).toEqual([]);
+    });
+
+    it("does not fill a stale boundary with a row excluded by a before fork", () => {
+        const { reader } = createStore({
+            copyAll: true,
+            boundary: JSON.stringify({ type: "before", messageID: parentId(8) }),
+        });
+        const db = createContextDb();
+        insertCompartment(db, PARENT, 0, [1, parentId(1)], [5, parentId(6)]);
+        insertCompartment(db, PARENT, 1, [6, parentId(7)], [7, "old-end"]);
+        expect(seedV2ForkFromParent({ db, store: reader, sessionId: FORK }).kind).toBe("seeded");
+        expect(inherited(db)).toEqual([{ sequence: 0, start: forkId(1), end: forkId(6) }]);
+    });
+
     it("forks indexed temporal choices by mapped identity, retaining pending and empty rows", () => {
         const { reader } = createStore();
         const db = createContextDb();
@@ -458,6 +526,8 @@ describe("seedV2ForkFromParent", () => {
             forkOrigin: (id: string) => reader.forkOrigin(id),
             sessionExists: (id: string) => reader.sessionExists(id),
             sequenceForId: (session: string, id: string) => reader.sequenceForId(session, id),
+            matchingForkBodies: (parent: string, fork: string, through: number) =>
+                reader.matchingForkBodies(parent, fork, through),
             rowStampsThrough: (session: string, through: number) => {
                 const rows = reader.rowStampsThrough(session, through);
                 if (session === FORK && !sessionHasMagicContextState(db, FORK)) {
