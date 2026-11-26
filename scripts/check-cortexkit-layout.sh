@@ -2,8 +2,8 @@
 # Nothing under .cortexkit/ may be tracked except the allowed folders and files.
 #
 # The fleet layout keeps internal material (design notes, investigations, tool state)
-# under .cortexkit/, ignored by git, and tracks only release-notes/, skills/, rules/ and
-# WORKER.md there. The check lists every tracked file under .cortexkit/ and fails on
+# under .cortexkit/, ignored by git, and tracks only release-notes/, skills/, rules/, WORKER.md and the top-level project
+# settings files (<module>.jsonc, which the daemon reads) there. The check lists every tracked file under .cortexkit/ and fails on
 # any that is outside that list.
 #
 # It does not ask git which tracked files are ignored (`git ls-files -ci`): a stray `!`
@@ -33,7 +33,7 @@ if ! all="$(git ls-files -- .cortexkit)"; then
   echo "BLIND: git ls-files failed" >&2
   exit 2
 fi
-bad="$(printf '%s\n' "$all" | grep -vE '^\.cortexkit/(release-notes/|skills/|rules/|WORKER\.md$)' | grep -v '^$')"
+bad="$(printf '%s\n' "$all" | grep -vE '^\.cortexkit/(release-notes/|skills/|rules/|WORKER\.md$|[a-z0-9-]+\.jsonc$)' | grep -v '^$')"
 if [ -n "$bad" ]; then
   echo "tracked files under .cortexkit/ that the layout keeps out of git:" >&2
   printf '%s\n' "$bad" | sed 's/^/  /' >&2
