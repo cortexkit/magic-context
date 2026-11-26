@@ -298,6 +298,9 @@ export interface OpenCode2SpawnOptions {
 	 * session can switch its reasoning variant; OpenCode 2.3 renders that switch as a system
 	 * message whose only content is the new effort level. */
 	modelVariants?: Array<{ id: string; settings?: Record<string, unknown> }>;
+	/** The `compaction` setting of every configured model, for example
+	 * `{ mode: "provider" }` to have the host compact that model the provider's way. */
+	modelCompaction?: Record<string, unknown>;
 	mockResponse?: MockResponse;
 	extraConfig?: Record<string, unknown>;
 	magicContextConfig?: Record<string, unknown>;
@@ -458,6 +461,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 								{
 									name: id,
 									...(options.modelVariants ? { variants: options.modelVariants } : {}),
+									...(options.modelCompaction ? { compaction: options.modelCompaction } : {}),
 	                                ...(options.visionModel ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
 									limit: {
 										// 2.0.5 required() is unchanged, but 16k minus a 32k output
