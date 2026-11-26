@@ -93,6 +93,30 @@ function rowLabels(sectionTitle: string, overrides: Partial<StatusViewSource> = 
 }
 
 describe("status view model", () => {
+    test("warns while the system prompt and tool definitions take more than half of the reduction point", () => {
+        // Issue 860: usable 45,000 at a 65% threshold, so reduction starts at
+        // 29,250; 6,062 + 15,134 is 72% of it.
+        const small = view({
+            systemPromptTokens: 6_062,
+            toolDefinitionTokens: 15_134,
+            contextLimit: 45_000,
+            executeThreshold: 65,
+        });
+        expect(small.warnings).toContainEqual({
+            text: "Context window too small: the system prompt (6,062 tokens) and tool definitions (15,134 tokens) take 72% of the 29,250 tokens at which reduction starts, leaving about 8,054 tokens for the conversation. Raise the model's context setting or remove tools.",
+            tone: "warning",
+        });
+        // Under half, or with the tool definitions not measured: no warning.
+        expect(view().warnings).toEqual([]);
+        expect(
+            view({
+                systemPromptTokens: 6_062,
+                toolDefinitionTokens: 0,
+                contextLimit: 10_000,
+                executeThreshold: 65,
+            }).warnings,
+        ).toEqual([]);
+    });
     test("shows dropped hidden-run variants as warnings", () => {
         expect(
             view({ hiddenVariantWarnings: ["variant 'medium' not offered by example/model"] })

@@ -485,6 +485,21 @@ function retire(route: RouteMeasurements, toolID: string, slot: ToolSlot, rowDel
  * A new slot for a tool measured now, reusing the token count of a retired
  * slot with the same content instead of tokenizing again.
  */
+/**
+ * Bumped whenever a measured tool set can have changed: a tool measured anew
+ * or with new content, tools forgotten or aged out, a route's first live
+ * fire, a reload or a reset. A reader that decided something from the
+ * measurements can skip deciding again while it is unchanged. Tools leaving
+ * OpenCode 1's activity window only as time passes are seen at the next
+ * expiry sweep, which runs on the next measurement.
+ */
+let definitionsRevision = 0;
+
+/** See `definitionsRevision`. */
+export function getToolDefinitionsRevision(): number {
+    return definitionsRevision;
+}
+
 function freshSlot(
     route: RouteMeasurements,
     toolID: string,
@@ -493,6 +508,7 @@ function freshSlot(
     fingerprint: string,
     now: number,
 ): ToolSlot {
+    definitionsRevision += 1;
     const retired = route.retired.get(toolID);
     if (retired) route.retired.delete(toolID);
     const reuse = retired?.fingerprint === fingerprint ? retired : undefined;
@@ -526,6 +542,7 @@ function expire(route: RouteMeasurements): void {
         route,
         leaving.map(([id]) => id),
     );
+    definitionsRevision += 1;
     for (const [id, slot] of leaving) {
         route.tools.delete(id);
         retire(route, id, slot, deleted);
@@ -588,6 +605,7 @@ export function setDatabase(db: Database): void {
  * Routes already measured in this process are left alone.
  */
 export function loadToolDefinitionMeasurements(db: Database): void {
+    definitionsRevision += 1;
     let rows: Array<{
         provider_id: string;
         model_id: string;
@@ -658,6 +676,7 @@ export function recordToolDefinition(
         // tool this request re-offers has its row overwritten, never deleted
         // first.
         route.live = true;
+        definitionsRevision += 1;
         for (const slot of route.tools.values()) if (slot.legacy) slot.lastFireAt = now;
     }
     if (sessionId) sessionFlights.set(sessionId, { key });
@@ -695,6 +714,7 @@ export function recordToolDefinitionSet(
     if (!providerID || !modelID) return;
     const { key, route } = routeFor(providerID, modelID, agentName);
     const now = advanceClock(route);
+    const wasLive = route.live;
     route.live = true;
     const next = new Map<string, ToolSlot>();
     for (const tool of tools) {
@@ -712,6 +732,7 @@ export function recordToolDefinitionSet(
         );
     }
     const removed = [...route.tools].filter(([id]) => !next.has(id));
+    if (!wasLive || removed.length > 0) definitionsRevision += 1;
     route.tools = next;
     route.oldestFireAt = now;
     if (removed.length > 0) {
@@ -792,6 +813,7 @@ export function getSessionToolDefinitionTokens(sessionId: string | undefined): n
 
 /** Test helper: reset the store so suites don't leak measurements. */
 export function __resetToolDefinitionMeasurements(): void {
+    definitionsRevision += 1;
     routes.clear();
     sessionFlights.clear();
     persistenceDb = null;

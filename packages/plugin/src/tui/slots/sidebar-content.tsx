@@ -7,6 +7,7 @@ import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
 import { directoryForSession } from "../data/session-directory"
 import { formatThresholdPercent } from "../../shared/format-threshold"
 import { renderUserFacingFailure } from "../../shared/user-facing-codes"
+import { formatSmallWindowCondition, reductionPointTokens, smallWindowCondition } from "../../shared/small-window"
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../compaction-off"
 import {
     computeEffectiveOrder,
@@ -738,6 +739,19 @@ const SidebarContent = (props: {
     )
 
     const s = createMemo(() => snapshot())
+    // Derived from the numbers this snapshot already carries, so the line
+    // shows for as long as the condition holds, also after a restart.
+    const smallWindow = createMemo(() => {
+        const snap = s()
+        return snap
+            ? smallWindowCondition({
+                  systemPromptTokens: snap.systemPromptTokens,
+                  // 0 in the snapshot means never measured.
+                  toolDefinitionTokens: snap.toolDefinitionTokens || undefined,
+                  reductionPointTokens: reductionPointTokens(snap.contextLimit, snap.executeThreshold),
+              })
+            : null
+    })
     const compactionOff = () => s()?.compaction_enabled === false
     const contextSummaryColor = createMemo(() => {
         if (compactionOff()) return props.theme.accent
@@ -781,6 +795,14 @@ const SidebarContent = (props: {
             {s()?.lastTransformError && (
                 <box marginTop={1} width="100%">
                     <text fg={props.theme.error}>⚠ {s()!.lastTransformError}</text>
+                </box>
+            )}
+
+            {/* The system prompt and tool definitions alone take more than half
+                of the usable window: only the user can fix that. */}
+            {smallWindow() && (
+                <box marginTop={1} width="100%">
+                    <text fg={props.theme.warning}>⚠ {formatSmallWindowCondition(smallWindow()!)}</text>
                 </box>
             )}
 

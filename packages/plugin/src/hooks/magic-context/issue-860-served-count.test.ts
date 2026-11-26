@@ -44,6 +44,11 @@ import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
 import * as logger from "../../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import {
+    __resetNotificationStateForTests,
+    type RpcNotification,
+    registerNotificationSink,
+} from "../../shared/rpc-notifications";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -52,6 +57,7 @@ import * as incremental from "./compartment-runner-incremental";
 import * as emergencyDrop from "./emergency-drop";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "./lkg-slot";
+import * as smallWindowNotice from "./small-window-notice";
 import { createTransform } from "./transform";
 import { recordUsageRefusal } from "./transform-context-state";
 
@@ -100,6 +106,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+    smallWindowNotice.resetSmallWindowReportsForTest();
+    __resetNotificationStateForTests();
     resetEmergencyRecoveryRegistryForTest();
     __resetToolDefinitionMeasurements();
     resetLkgSlotsForTest();
@@ -960,6 +968,101 @@ describe("issue 860: the final check's log line", () => {
             /^transform: final-wire telemetry estimate=(\d+) trusted=false proven over the window limit=\d+: lower bound \1 = measured prefix 0 \+ message bytes\/4 \1, counted until the bound passed the limit; conversation and tools not tokenized system=20000 /,
         );
     }, 60_000);
+});
+
+describe("issue 860: telling the user the window is too small", () => {
+    const smallWindowText =
+        "Context window too small for litellm/proxy-model: the system prompt (6,062 tokens) and tool definitions (14,480 tokens) take 70% of the 29,250 tokens at which reduction starts, leaving about 8,708 tokens for the conversation. Raise the model's context setting or remove tools.";
+
+    test("a terminal toast once per session and model, and the log line, on a session far below the band", async () => {
+        measureToolDefinitions(15_134);
+        const session = openSession("ses-860-small-window", { tail: 3, reading: 4_500 });
+        const delivered: RpcNotification[] = [];
+        registerNotificationSink({ sessionId: session.sessionId, send: (n) => delivered.push(n) });
+        const lines: string[] = [];
+        for (let step = 0; step < 3; step++) {
+            const pass = await runPass(session);
+            expect(pass.error).toBeUndefined();
+            lines.push(...pass.lines);
+        }
+        const toasts = delivered.filter((n) => n.type === "toast");
+        expect(toasts).toHaveLength(1);
+        expect(toasts[0]!.payload).toMatchObject({ message: smallWindowText, variant: "warning" });
+        expect(toasts[0]!.sessionId).toBe(session.sessionId);
+        expect(lines.filter((line) => line.startsWith("small window: "))).toEqual([
+            `small window: ${smallWindowText}`,
+        ]);
+    }, 60_000);
+
+    test("no terminal attached: no toast yet, and one is shown once a terminal attaches", async () => {
+        measureToolDefinitions(15_134);
+        const session = openSession("ses-860-small-window-late", { tail: 3, reading: 4_500 });
+        expect((await runPass(session)).error).toBeUndefined();
+        const delivered: RpcNotification[] = [];
+        registerNotificationSink({ sessionId: session.sessionId, send: (n) => delivered.push(n) });
+        expect((await runPass(session)).error).toBeUndefined();
+        expect((await runPass(session)).error).toBeUndefined();
+        expect(delivered.filter((n) => n.type === "toast")).toHaveLength(1);
+    }, 60_000);
+
+    test("nothing is said when the tool definitions are not measured", async () => {
+        const unmeasured = openSession("ses-860-small-window-unmeasured", {
+            tail: 3,
+            reading: 4_500,
+        });
+        const delivered: RpcNotification[] = [];
+        registerNotificationSink({ send: (n) => delivered.push(n) });
+        const pass = await runPass(unmeasured);
+        expect(pass.error).toBeUndefined();
+        expect(pass.log).not.toContain("small window: ");
+        expect(delivered.filter((n) => n.type === "toast")).toEqual([]);
+    }, 60_000);
+
+    test("pin: the notice changes no byte of the request, on any pass", async () => {
+        // The same session twice, each in a store of its own: once as is, once
+        // with the notice switched off. Below the band, in the band, and over
+        // the window.
+        const serve = async (notice: boolean) => {
+            closeDatabase();
+            resetLkgSlotsForTest();
+            smallWindowNotice.resetSmallWindowReportsForTest();
+            __resetNotificationStateForTests();
+            dir = createTestTempDirFromPath(join(tmpdir(), "issue-860-notice-"));
+            process.env.XDG_DATA_HOME = dir;
+            process.env.XDG_CACHE_HOME = dir;
+            __resetToolDefinitionMeasurements();
+            measureToolDefinitions(15_134);
+            const off = notice
+                ? undefined
+                : spyOn(smallWindowNotice, "reportSmallWindow").mockImplementation(() => null);
+            const served: string[] = [];
+            const logs: string[] = [];
+            try {
+                const session = openSession("ses-860-notice-pin", { tail: 12, reading: 4_500 });
+                registerNotificationSink({ sessionId: session.sessionId, send: () => {} });
+                for (const reading of [4_500, 39_600, 368_415]) {
+                    session.usage.set(session.sessionId, {
+                        usage: { inputTokens: reading, percentage: (reading / 45_000) * 100 },
+                        updatedAt: Date.now(),
+                    });
+                    const pass = await runPass(session);
+                    expect(pass.error).toBeUndefined();
+                    served.push(JSON.stringify(pass.output.messages));
+                    logs.push(...pass.lines);
+                }
+            } finally {
+                off?.mockRestore();
+                closeDatabase();
+                rmSync(dir, { recursive: true, force: true });
+            }
+            return { served, logs };
+        };
+        const withNotice = await serve(true);
+        const without = await serve(false);
+        expect(withNotice.logs.some((line) => line.startsWith("small window: "))).toBe(true);
+        expect(without.logs.some((line) => line.startsWith("small window: "))).toBe(false);
+        expect(withNotice.served).toEqual(without.served);
+    }, 120_000);
 });
 
 describe("issue 860: the differential over this file's scenarios", () => {

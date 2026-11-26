@@ -14,7 +14,10 @@ import type { RequestToolsFingerprint } from "../../features/magic-context/reque
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
-import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
+import {
+    sessionDecisionCalibration,
+    sessionEmergencyCalibration,
+} from "../../features/magic-context/session-decision-calibration";
 import {
     hasRecordedSessionProjectIdentity,
     recordSessionProjectIdentity,
@@ -62,6 +65,10 @@ import {
 } from "../../features/magic-context/store-generation-rebase";
 import type { Tagger } from "../../features/magic-context/tagger";
 import { observeTemporalDecisions } from "../../features/magic-context/temporal-decisions";
+import {
+    getMeasuredToolDefinitionTokens,
+    getToolDefinitionsRevision,
+} from "../../features/magic-context/tool-definition-tokens";
 import {
     clearOpenCodePendingTransformDecision,
     normalizeMaterializeReason,
@@ -245,6 +252,7 @@ import {
     readingEndsHold,
     type SignedThinkingHoldDecision,
 } from "./signed-thinking-hold";
+import { reportSmallWindow } from "./small-window-notice";
 import {
     replayClearedReasoning,
     replayStrippedInlineThinking,
@@ -2223,11 +2231,11 @@ export function createTransform(deps: TransformDeps) {
         // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
         // (the usable working ceiling, NOT scaled by history_budget_percentage).
         // Resolve the limit the same way resolveHistoryBudgetTokens does: prefer
-        // the model's stable limit, else back-derive from live usage. The
-        // emergency drop only fires at the derived force band, where percentage is reliably high,
-        // so the back-derivation is sound (it would only be unreliable at the
-        // percentage=0 cold start, which is far below the trigger). Undefined
-        // when neither is available → emergency drop skips, 95% block backstops.
+        // the model's stable limit, else back-derive it from live usage (input
+        // tokens over percentage). The back-derived limit is only as good as
+        // that reading: a stale reading or a clamped percentage gives a wrong
+        // window, and the ceiling moves with it. Undefined when neither is
+        // available → emergency drop skips, 95% block backstops.
         const emergencyCeilingLimit = thresholdContextLimit ?? 0;
         const emergencyCeilingTokens =
             Number.isFinite(emergencyCeilingLimit) && emergencyCeilingLimit > 0
@@ -4106,6 +4114,44 @@ export function createTransform(deps: TransformDeps) {
                     "calibration: completeness=partial reason=unavailable-returned-array-count",
                 );
             }
+        }
+        // A primary session whose system prompt and tool definitions alone
+        // take more than half of the reduction point is told so once per
+        // session and model in this process. Display only: it changes nothing
+        // in the request. On a pass whose inputs match the last decision the
+        // work is building the decision key and a map lookup (plus, while a
+        // toast waits for a terminal, a check whether one is attached). The
+        // calibration read (one SELECT) and the sizing of the route's tool
+        // definitions happen only when the key changes: the model, the agent,
+        // the system prompt size, the reduction point, or the tool-definition
+        // revision, which is process-wide and so also moves when another
+        // route's tool definitions are measured.
+        if (fullFeatureMode && modelForBudget && sessionMeta.systemPromptTokens > 0) {
+            const route = modelForBudget;
+            // The emergency drop's ceiling: the same limit and threshold, so the
+            // warning can't disagree with where the drop starts.
+            const reductionPoint = emergencyCeilingTokens;
+            reportSmallWindow({
+                sessionId,
+                modelKey: `${route.providerID}/${route.modelID}`,
+                decisionKey: `${notificationParams.agent ?? ""}\0${getToolDefinitionsRevision()}\0${sessionMeta.systemPromptTokens}\0${reductionPoint ?? ""}`,
+                measure: () => {
+                    const toolDefinitions = getMeasuredToolDefinitionTokens(
+                        route.providerID,
+                        route.modelID,
+                        notificationParams.agent,
+                        sessionId,
+                    );
+                    if (toolDefinitions === undefined) return undefined;
+                    const calibration = sessionEmergencyCalibration(db, sessionId);
+                    return {
+                        systemPromptTokens:
+                            sessionMeta.systemPromptTokens * calibration.systemRatio,
+                        toolDefinitionTokens: toolDefinitions * calibration.toolsRatio,
+                        reductionPointTokens: reductionPoint,
+                    };
+                },
+            });
         }
         if (!compactionOff) {
             // Recovery estimates provider input even while reusing cached messages.

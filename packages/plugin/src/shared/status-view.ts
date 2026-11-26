@@ -20,6 +20,11 @@ import { formatThresholdPercent } from "./format-threshold";
 import { primaryQuotaDiagnostic } from "./quota-diagnostic";
 import type { TailHygieneStatus } from "./rpc-types";
 import {
+    formatSmallWindowCondition,
+    reductionPointTokens,
+    smallWindowCondition,
+} from "./small-window";
+import {
     type StatusCheck,
     type StatusUnavailableReason,
     type StatusVersions,
@@ -696,6 +701,13 @@ function statusSections(source: StatusViewSource, now: number): StatusSection[] 
 
 function warningBlock(source: StatusViewSource): StatusWarning[] {
     const holders = source.unconfirmedMigrationHolders;
+    const smallWindow = smallWindowCondition({
+        systemPromptTokens: source.systemPromptTokens,
+        // The status snapshot carries 0 when the tool definitions were never
+        // measured, so 0 reads as unknown here.
+        toolDefinitionTokens: source.toolDefinitionTokens || undefined,
+        reductionPointTokens: reductionPointTokens(source.contextLimit, source.executeThreshold),
+    });
     return [
         ...(holders && holders.pids.length > 0
             ? [
@@ -725,6 +737,9 @@ function warningBlock(source: StatusViewSource): StatusWarning[] {
                     : renderUserFacingFailure(code),
             tone: "warning" as const,
         })),
+        ...(smallWindow
+            ? [{ text: formatSmallWindowCondition(smallWindow), tone: "warning" as const }]
+            : []),
     ];
 }
 
