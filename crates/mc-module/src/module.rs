@@ -1516,6 +1516,7 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         engine.spawn(start.execute_with(
             self.inner.client.clone(),
             self.inner.labs.clone(),
+            live.clone(),
             move |root, project| {
                 config
                     .resolve_for_project(root.to_str(), Some(project), "", 0)

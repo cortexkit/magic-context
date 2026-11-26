@@ -12,6 +12,19 @@ use crate::dreamer::run::tests::{Client, Ends};
 const SYSTEM: &str = include_str!("fixtures/PERSONA.md");
 const MESSAGE: &str = include_str!("fixtures/first-message.md");
 
+impl Start {
+    async fn execute<C: RunnerClient + Router>(
+        self,
+        client: Arc<C>,
+        registry: Arc<Registry>,
+        embedding: Option<crate::embedding::Provider>,
+    ) {
+        let db = Arc::new(ContextDb::open(&self.live).unwrap());
+        self.execute_with(client, registry, db, move |_, _| embedding)
+            .await;
+    }
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -177,10 +190,57 @@ fn verdict(id: i64, note: &str) -> Value {
     json!({"id":id,"verdict":"keep","life":"long","proof":"none","evidence":[],"note":note})
 }
 
+fn live_contents_except_attribution(path: &Path) -> BTreeMap<(String, String), Vec<String>> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let schema = conn
+        .prepare("SELECT type, name, sql FROM sqlite_schema")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    schema
+        .into_iter()
+        .map(|(kind, name, sql)| {
+            let mut contents = vec![format!("{sql:?}")];
+            if kind == "table" && name != "attribution_facts" {
+                let mut query = format!("SELECT * FROM \"{}\"", name.replace('"', "\"\""));
+                if name == "sqlite_sequence" {
+                    // The fact's AUTOINCREMENT key is the only other write.
+                    query.push_str(" WHERE name <> 'attribution_facts'");
+                }
+                let mut stmt = conn.prepare(&query).unwrap();
+                let columns = stmt.column_count();
+                let mut rows = stmt
+                    .query_map([], |row| {
+                        let values = (0..columns)
+                            .map(|column| row.get_ref(column))
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        Ok(format!("{values:?}"))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                rows.sort_unstable();
+                contents.extend(rows);
+            }
+            ((kind, name), contents)
+        })
+        .collect()
+}
+
 #[tokio::test]
-async fn scripted_lab_records_incremental_verdicts_and_request_without_store_writes() {
+async fn scripted_lab_records_verdicts_and_request_with_only_attribution_in_the_live_store() {
     let fixture = Fixture::new();
-    let live_before = fs::read(&fixture.live).unwrap();
+    let live_before = live_contents_except_attribution(&fixture.live);
     let frozen_before = fs::read(&fixture.frozen).unwrap();
     let mut spec = fixture.spec_value();
     spec["tools"]
@@ -297,7 +357,9 @@ async fn scripted_lab_records_incremental_verdicts_and_request_without_store_wri
         ["from", "include_agent", "limit", "query", "to"]
     );
     assert_eq!(client.selects.lock().unwrap()[0].requirements.eq, Some(29));
-    assert_eq!(live_before, fs::read(&fixture.live).unwrap());
+    drop(sends);
+    assert_lab_attribution(&fixture, &client);
+    assert_eq!(live_before, live_contents_except_attribution(&fixture.live));
     assert_eq!(frozen_before, fs::read(&fixture.frozen).unwrap());
 }
 
@@ -386,6 +448,58 @@ fn sidekick_provider(client: &mut Client, presets: &[&str], tools: &[&str]) {
 
 fn available_sidekick(client: &mut Client) {
     sidekick_provider(client, &["worker", "sidekick"], &["sidekick"]);
+}
+
+fn assert_lab_attribution(fixture: &Fixture, client: &Client) {
+    let frozen = frozen::open(&fixture.frozen).unwrap();
+    let frozen_facts: i64 = frozen
+        .query_row("SELECT COUNT(*) FROM attribution_facts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(frozen_facts, 0, "the frozen store must not get a fact");
+
+    let sends = client.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    let child = &sends[0].0.session;
+    assert!(child.session.starts_with("mc-dream:lab-"));
+    let live = ContextDb::open(&fixture.live).unwrap();
+    let facts = crate::attribution::tests::rows(&live);
+    assert_eq!(facts.len(), 1, "the lab must attribute its child once");
+    let fact: Value = serde_json::from_str(&facts[0].1).unwrap();
+    assert_eq!(
+        fact["subject"],
+        json!({"kind": "session", "runner": child.runner, "harness": child.harness, "session": child.session})
+    );
+    assert_eq!(fact["workload"], "dreamer");
+    assert_eq!(fact["task"], "magic-context.dream.lab");
+    assert_eq!(fact["project_id"], "p");
+    assert_eq!(fact["alfonso"], Value::Null);
+    assert_eq!(fact["parent"], Value::Null);
+}
+
+#[tokio::test]
+async fn lab_launch_records_one_attribution_fact_in_the_live_store() {
+    let fixture = Fixture::new();
+    let client = fixture
+        .run(fixture.spec_value(), Ends::LabTools(vec![]))
+        .await;
+    assert_lab_attribution(&fixture, &client);
+}
+
+#[tokio::test]
+async fn sidekick_lab_launch_records_one_attribution_fact_in_the_live_store() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["sidekick"]);
+    let client = fixture
+        .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
+        .await;
+    assert_eq!(
+        *client.lab_send_projects.lock().unwrap(),
+        [Some("p".to_owned())]
+    );
+    assert_lab_attribution(&fixture, &client);
 }
 
 #[tokio::test]
