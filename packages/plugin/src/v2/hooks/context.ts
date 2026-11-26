@@ -2524,11 +2524,11 @@ export async function registerContext(context: V2Context) {
             onRustEngineReconnectRefusal: (refusal) => rustRefusalRecovery?.arm(refusal),
             ...createHostSeams(context, readAllForConversion, pagedRead, liveModels),
         }));
-    const runManagedContext = async (draft: SessionContext): Promise<void> => {
+    const runManagedContext = async (draft: SessionContext): Promise<"managed" | "skipped"> => {
         // Learn the host's message and attachment classes, so attachments on rows restored
         // after a host checkpoint can be rebuilt in the host's own shape.
         rememberHostMedia(draft.messages);
-        if (hiddenChildHook.apply(draft)) return;
+        if (hiddenChildHook.apply(draft)) return "skipped";
         // A dreamer that was off at boot and has since been turned on in the
         // config starts here; startDreamer stays a no-op while it is off.
         if (dreamTrigger === undefined && hiddenCompletionExecutor !== undefined)
@@ -2536,7 +2536,7 @@ export async function registerContext(context: V2Context) {
         removeDreamerOnlyTools(draft);
         // A deletion that races an in-flight pass must not let that pass rebuild
         // the state just cleared by the one deletion event.
-        if (deletedSessions.has(draft.sessionID)) return;
+        if (deletedSessions.has(draft.sessionID)) return "skipped";
         const systemAtEntry = structuredClone(draft.system);
         const slotAtEntry = getSlot(draft.sessionID);
         // The host checkpoint message this pass's transform input was restored
@@ -2591,7 +2591,7 @@ export async function registerContext(context: V2Context) {
             (await isMagicContextSynthetic(newest.id as string))
         ) {
             await refuseBeforeProvider(context.session, draft.sessionID, "storage-notice-turn");
-            return;
+            return "skipped";
         }
         // Storage notices are for the user and never reach the model. Dropping them
         // on every pass, from the first one that could contain them, keeps the
@@ -2842,12 +2842,12 @@ export async function registerContext(context: V2Context) {
                         "storage-unavailable",
                         formatFailClosedBlockingMessage(storageReason),
                     );
-                    return;
+                    return "skipped";
                 }
                 await refuseBeforeProvider(context.session, draft.sessionID, "usage-unavailable");
-                return;
+                return "skipped";
             }
-            if (!db) return;
+            if (!db) return "skipped";
             if (!storageOpenedAtBoot && !storageRecoveryAnnounced) {
                 storageRecoveryAnnounced = true;
                 const recovered = await recoverHiddenWork(db);
@@ -3358,8 +3358,9 @@ export async function registerContext(context: V2Context) {
                     headApplied ? servedHead : null,
                 );
             }
+            return "managed";
         } catch (error) {
-            if (error instanceof V2LkgAdmissionReplay) return;
+            if (error instanceof V2LkgAdmissionReplay) return "managed";
             if (error instanceof V2ContextRefusal) throw error;
             if (
                 !compactionOff &&
@@ -3391,7 +3392,7 @@ export async function registerContext(context: V2Context) {
                         );
                         mapped.commit();
                         adoptReplay(input.draft);
-                        return;
+                        return "managed";
                     } catch (replayError) {
                         if (!(replayError instanceof StorageBusyRefusalError)) throw replayError;
                     }
@@ -3461,6 +3462,7 @@ export async function registerContext(context: V2Context) {
                 // otherwise viable turn.
                 log("[magic-context] v2 context unavailable", error);
             }
+            return "skipped";
         }
     };
     /**
@@ -3545,8 +3547,9 @@ export async function registerContext(context: V2Context) {
                 compactionOff || hiddenChild ? undefined : generateReplayAnchor(draft.messages);
             beginServedRequest(draft.sessionID);
             let returned = false;
+            let outcome: Awaited<ReturnType<typeof runManagedContext>>;
             try {
-                await runManagedContext(draft);
+                outcome = await runManagedContext(draft);
                 if (!compactionOff) await refuseOversizedCheckpoint(draft);
                 if (
                     !deletedSessions.has(draft.sessionID) &&
@@ -3590,9 +3593,10 @@ export async function registerContext(context: V2Context) {
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here
             // so side questions reuse the exact history handed back to the host.
+            // An interrupted turn can return normally without serving a request.
             if (compactionOff)
                 sessionLog(draft.sessionID, "generate replay capture skipped: compaction-disabled");
-            else if (!hiddenChild && !deletedSessions.has(draft.sessionID))
+            else if (outcome === "managed" && !hiddenChild && !deletedSessions.has(draft.sessionID))
                 generateReplay.capture(draft, anchor);
         }),
     );

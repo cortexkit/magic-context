@@ -376,6 +376,12 @@ export async function oc2ContextFixture(
                 logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
             };
         },
+        async generate(question: string) {
+            const draft = inputDraft();
+            draft.messages.push({ role: "user", content: [{ type: "text", text: question }] });
+            await hooks.get("generate")!(draft);
+            return draft;
+        },
         /** A pass whose refusal is returned rather than thrown. */
         async attempt() {
             const draft = inputDraft();
