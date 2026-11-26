@@ -254,6 +254,7 @@ import { V2OverflowRecovery } from "./overflow-recovery";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { RestoredRowCache } from "./restore-rows";
+import { pruneCommittedRevertMessages } from "./revert-message-state";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
 import { hasRequiredSessionAPI, OPENCODE2_SESSION_API_NOTICE } from "./session-api-gate";
@@ -1869,9 +1870,30 @@ export async function registerContext(context: V2Context) {
                                 // Rebuild the search index after the host deletes stored rows;
                                 // its saved position for appending may now point past the end.
                                 const indexDb = db;
-                                withoutSqliteTransformPass(() =>
-                                    scheduleClearAndReindex(indexDb, sessionID, pagedRead),
-                                );
+                                withoutSqliteTransformPass(() => {
+                                    scheduleClearAndReindex(indexDb, sessionID, pagedRead);
+                                    try {
+                                        const reader = openStoreReader();
+                                        try {
+                                            if (
+                                                pruneCommittedRevertMessages(
+                                                    indexDb,
+                                                    reader,
+                                                    sessionID,
+                                                ).size
+                                            )
+                                                tagger.cleanup(sessionID);
+                                        } finally {
+                                            reader.close();
+                                        }
+                                    } catch (error) {
+                                        sessionLog(
+                                            sessionID,
+                                            "committed revert message cleanup failed:",
+                                            error,
+                                        );
+                                    }
+                                });
                             }
                         }
                         if (

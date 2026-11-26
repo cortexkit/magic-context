@@ -5,8 +5,31 @@ import {
     getMessageIndexQueueHeapStats,
 } from "../../features/magic-context/message-index-async";
 import { searchMessageHistory } from "../../features/magic-context/search";
+import {
+    getOrCreateSessionMeta,
+    getPendingOps,
+    getTagsBySession,
+} from "../../features/magic-context/storage";
+import {
+    appendAutoSearchHintDecision,
+    appendNoteNudgeAnchor,
+    getAutoSearchHintDecisions,
+    getNoteNudgeAnchors,
+    getPersistedNoteNudge,
+    getPersistedReasoningWatermark,
+    getStrippedPlaceholderIds,
+    setPersistedNoteNudgeTrigger,
+    setPersistedReasoningWatermark,
+    setStrippedPlaceholderIds,
+} from "../../features/magic-context/storage-meta-persisted";
+import {
+    freezeTemporalDecisions,
+    getTemporalDecisions,
+} from "../../features/magic-context/temporal-decisions";
 import { getServedRecordForTest } from "../../hooks/magic-context/served-check";
 import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
+import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
+import { createCtxReduceTools } from "../../tools/ctx-reduce/tools";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
 type Event = { type: string; data: { sessionID: string } };
@@ -137,6 +160,100 @@ test("committing an OpenCode 2 revert ends the previous served comparison", asyn
             "a pass without rebuild permission changed served messages",
         );
         expect(getServedRecordForTest(fixture.session)).toBeDefined();
+    } finally {
+        await fixture.cleanup();
+    }
+});
+
+test("a committed OpenCode 2 revert removes only state owned by absent stored messages", async () => {
+    const events = eventBus();
+    const fixture = await oc2ContextFixture(989, {
+        temporal: false,
+        instructions: false,
+        eventStream: events.stream,
+    });
+    const { db, session, rows } = fixture;
+    try {
+        const kept = rows.at(-1)!.id;
+        fixture.user("This user message will be removed", 1_000);
+        const removed = rows.at(-1)!.id;
+        fixture.respondWithTool({
+            name: "read",
+            input: { filePath: "fixture.txt" },
+            output: "tool output",
+        });
+        const assistant = rows.at(-1)!.id;
+        fixture.user("Last user message before the revert", 1_000);
+        await fixture.pass();
+
+        const before = getTagsBySession(db, session);
+        const owners = (tags: typeof before) =>
+            tags.map((tag) => tag.toolOwnerMessageId ?? contentTagOwnerMessageId(tag.messageId));
+        const droppedTag = before.find((tag) => tag.toolOwnerMessageId === assistant);
+        expect(droppedTag).toBeDefined();
+        expect(owners(before)).toContain(removed);
+        const spentThrough = Math.max(...before.map((tag) => tag.tagNumber));
+        expect(getOrCreateSessionMeta(db, session).counter).toBe(spentThrough);
+
+        setStrippedPlaceholderIds(db, session, new Set([kept, removed]));
+        for (const id of [kept, removed]) {
+            appendNoteNudgeAnchor(db, session, id, `Note for ${id}`);
+            appendAutoSearchHintDecision(db, session, {
+                messageId: id,
+                decision: "no-hint",
+                reason: "empty",
+            });
+        }
+        setPersistedNoteNudgeTrigger(db, session, removed);
+        freezeTemporalDecisions(
+            db,
+            session,
+            new Map([
+                [kept, ""],
+                [removed, ""],
+            ]),
+        );
+        setPersistedReasoningWatermark(db, session, spentThrough);
+
+        await events.emit({ type: "session.revert.started", data: { sessionID: session } });
+        expect(getTagsBySession(db, session)).toEqual(before);
+        expect(getStrippedPlaceholderIds(db, session)).toEqual(new Set([kept, removed]));
+
+        fixture.revertBefore(removed);
+        await events.emit({ type: "session.revert.committed", data: { sessionID: session } });
+        const after = getTagsBySession(db, session);
+        expect(owners(after)).toContain(kept);
+        expect(owners(after)).not.toContain(removed);
+        expect(owners(after)).not.toContain(assistant);
+        expect(getStrippedPlaceholderIds(db, session)).toEqual(new Set([kept]));
+        expect(getNoteNudgeAnchors(db, session).map(({ messageId }) => messageId)).toEqual([kept]);
+        expect(getAutoSearchHintDecisions(db, session).map(({ messageId }) => messageId)).toEqual([
+            kept,
+        ]);
+        expect(getPersistedNoteNudge(db, session).triggerMessageId).toBeNull();
+        expect(getTemporalDecisions(db, session)).toEqual(new Map([[kept, ""]]));
+        expect(getPersistedReasoningWatermark(db, session)).toBe(
+            Math.max(...after.map((tag) => tag.tagNumber)),
+        );
+        expect(getOrCreateSessionMeta(db, session).counter).toBe(spentThrough);
+
+        fixture.user("The replacement must not inherit a spent tag", 1_000);
+        const replacement = rows.at(-1)!.id;
+        await fixture.pass();
+        const replacementTag = getTagsBySession(db, session).find(
+            (tag) => contentTagOwnerMessageId(tag.messageId) === replacement,
+        );
+        expect(replacementTag?.tagNumber).toBeGreaterThan(spentThrough);
+
+        const reduce = createCtxReduceTools({ db }).ctx_reduce!;
+        const pendingBefore = getPendingOps(db, session);
+        const result = await reduce.execute({ drop: String(droppedTag!.tagNumber) }, {
+            sessionID: session,
+        } as Parameters<typeof reduce.execute>[1]);
+        expect(result).toBe(
+            `Error: Unknown tag(s) §${droppedTag!.tagNumber}§. Check available tags in conversation.`,
+        );
+        expect(getPendingOps(db, session)).toEqual(pendingBefore);
     } finally {
         await fixture.cleanup();
     }

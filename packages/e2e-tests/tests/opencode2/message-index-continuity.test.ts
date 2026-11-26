@@ -3,7 +3,9 @@ import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { getLastIndexedOrdinal } from "../../../plugin/src/features/magic-context/message-index";
 import { searchMessageHistory } from "../../../plugin/src/features/magic-context/search";
+import { getTagsBySession } from "../../../plugin/src/features/magic-context/storage-tags";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import { contentTagOwnerMessageId } from "../../../plugin/src/shared/tag-owner-id";
 import { renderSearchArchive } from "../../../plugin/src/tools/ctx-expand/search-archive";
 import {
 	gaDatabasePath,
@@ -203,3 +205,103 @@ test("OpenCode 2 real host advances the raw index after a new post-rebase messag
 		await host.stop();
 	}
 });
+
+test("a committed OpenCode 2 revert serves the same bytes as the unedited branch except for the spent tag numbers", async () => {
+	const host = await spawnOpencode2({
+		providerID: "anthropic",
+		compactionAuto: false,
+		modelOutputLimit: 8192,
+		magicContextConfig: {
+			temporal_awareness: false,
+			historian: { disable: true },
+			dreamer: { disable: true },
+			memory: { auto_search: { enabled: false } },
+		},
+	});
+	const db = new Database(
+		join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"),
+		{ readonly: true },
+	);
+	const raw = new V2StoreReader(
+		gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env),
+	);
+	const client = OpenCode.make({
+		baseUrl: host.url,
+		headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
+	});
+	try {
+		await waitForPluginActive(client, host.cwd);
+		inspectOpenFiles(host.pid!, host.root, host.env);
+		const createSession = () =>
+			client.session.create({
+				location: { directory: host.cwd },
+				model: { providerID: "anthropic", id: "mock-model" },
+			});
+		const { id: edited } = await createSession();
+		const { id: clean } = await createSession();
+		const prompt = async (sessionID: string, text: string) => {
+			const offset = host.mock.requests().length;
+			await client.session.prompt({ sessionID, text });
+			await client.session.wait(
+				{ sessionID },
+				{ signal: AbortSignal.timeout(20_000) },
+			);
+			const wire = host.mock
+				.requests()
+				.slice(offset)
+				.find(
+					({ rawBody }) =>
+						rawBody?.includes(text) && rawBody.includes("<session-history>"),
+				)?.rawBody;
+			if (!wire) throw new Error(`No managed request for ${text}`);
+			return wire;
+		};
+		const first = await prompt(edited, "Keep this first turn");
+		const beforeDropped = raw.messageCount(edited);
+		await prompt(edited, "Remove this second turn");
+		await prompt(edited, "Remove this third turn");
+		const beforeRevert = raw.messageCount(edited);
+		const tagForMessage = (sessionId: string, messageId: string) =>
+			getTagsBySession(db, sessionId).find(
+				(tag) => contentTagOwnerMessageId(tag.messageId) === messageId,
+			);
+		const messages = () => raw.page(edited, { limit: 32 }).rows;
+		const dropped = messages().find(
+			(row) => row.data.text === "Remove this second turn",
+		);
+		if (!dropped) throw new Error("The host's second user message is missing");
+		const stage = () =>
+			client.session.revert.stage({ sessionID: edited, messageID: dropped.id });
+		const oldTag = tagForMessage(edited, dropped.id);
+		expect(oldTag?.status).toBe("active");
+		await stage();
+		await client.session.revert.clear({ sessionID: edited });
+		expect(raw.messageCount(edited)).toBe(beforeRevert);
+		expect(tagForMessage(edited, dropped.id)).toEqual(oldTag);
+		await stage();
+		await client.session.revert.commit({ sessionID: edited });
+		expect(raw.messageCount(edited)).toBe(beforeDropped);
+		const after = await prompt(edited, "This is the replacement turn");
+		expect(tagForMessage(edited, dropped.id)).toBeUndefined();
+		expect(host.pluginLog()).not.toContain(
+			"a pass without rebuild permission changed served messages",
+		);
+
+		expect(await prompt(clean, "Keep this first turn")).toBe(first);
+		const control = await prompt(clean, "This is the replacement turn");
+		// Only the decimal number in the replacement text may differ. The undone
+		// tags remain spent, so the surviving prefix must never be renumbered.
+		const replacementTag = /§(\d+)§ This is the replacement turn/g;
+		const [actualTag] = [...after.matchAll(replacementTag)];
+		const [controlTag] = [...control.matchAll(replacementTag)];
+		expect([...after.matchAll(replacementTag)]).toHaveLength(1);
+		expect([...control.matchAll(replacementTag)]).toHaveLength(1);
+		expect(Number(actualTag?.[1])).toBeGreaterThan(Number(controlTag?.[1]));
+		expect(after.replace(actualTag![0], controlTag![0])).toBe(control);
+		inspectOpenFiles(host.pid!, host.root, host.env);
+	} finally {
+		raw.close();
+		db.close();
+		await host.stop();
+	}
+}, 60_000);
