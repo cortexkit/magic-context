@@ -2001,6 +2001,26 @@ export async function registerContext(context: V2Context) {
             },
         }).m0Text;
     };
+    /**
+     * The history head a compaction request with no running checkpoint row
+     * stands for, rendered without keeping it. OpenCode asks for a summary
+     * without a row when it prepares a compaction in the background after a
+     * high-usage reply (2.3.1 and later, on by default) and, on older hosts,
+     * for a model in provider compaction mode. Nothing is cut at that moment
+     * and the host may never install the prepared summary, but the next
+     * context pass serves whatever baseline is stored. Keeping this render
+     * would therefore change the provider's cached prefix on a pass that
+     * believes it replays it unchanged, without landing queued reductions or
+     * the thinking handling a real fold gets. The stored baseline and every
+     * marker are put back as they were; a later pass folds on its own terms.
+     */
+    const renderUnkeptBaseline = (draft: SessionContext) => {
+        const store = storage.require();
+        // Staging reads the session row before rendering, so make sure it
+        // exists: the hook can run before any context pass created it.
+        getOrCreateSessionMeta(store, draft.sessionID);
+        return stageManualBaseline(store, draft.sessionID, () => materialize(draft)).summary;
+    };
     await context.session.hook("compaction", async (draft) => {
         // A hidden child is compacted by the host like any session once its own
         // sizing (its system prompt, instructions and tools, never the calibrated
@@ -2171,7 +2191,9 @@ export async function registerContext(context: V2Context) {
                 // Kept lazy for the TypeScript lane: materializing writes cache state and
                 // must only happen when the fold identity is actually new.
                 materialize: () => {
-                    const summary = moduleBaseline ?? materialize(draft);
+                    const summary =
+                        moduleBaseline ??
+                        (running ? materialize(draft) : renderUnkeptBaseline(draft));
                     return hasFoldSummary(summary) ? summary : RAW_HISTORY_ACCOUNT;
                 },
                 // The host stores the note; the owner keeps the head it stands for,
