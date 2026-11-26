@@ -2556,6 +2556,83 @@ describe("createDreamTaskExecutor — compress-cues", () => {
 });
 
 describe("createDreamTaskExecutor — retrospective", () => {
+    test("logs the retrospective scan frontier and the watermark read back after scheduling", async () => {
+        db = freshDb();
+        const project = "/repo/retrospective-watermark-log";
+        const watermarkMs = Date.now() - 1000;
+        const scannedTs = watermarkMs + 1;
+        const config = {
+            task: "retrospective",
+            schedule: "0 5 * * *",
+            timeoutMinutes: 20,
+        } as const;
+        writeTaskScheduleState(db, {
+            projectPath: project,
+            task: config.task,
+            nextDueAt: null,
+            lastRunAt: null,
+            schedule: config.schedule,
+            lastStatus: null,
+            lastError: null,
+            retryCount: 0,
+            retrospectiveWatermarkMs: watermarkMs,
+        });
+        const executor = createDreamTaskExecutor({
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: {
+                listProjectSessions: () => [{ sessionId: "root", updatedAt: scannedTs }],
+                readUserMessagesSince: () => ({
+                    messages: [
+                        {
+                            sessionId: "root",
+                            ordinal: 1,
+                            role: "user",
+                            text: "First turn",
+                            ts: scannedTs,
+                        },
+                    ],
+                    truncated: false,
+                }),
+                readUserMessagesBefore: () => [],
+            },
+        });
+        // Sample the row when the line is emitted, not only after the task returns.
+        const diagnostic: Array<{ line: string; storedAtLog?: number | null }> = [];
+        const logSpy = spyOn(logger, "log").mockImplementation((line) => {
+            if (line.includes("retrospective: watermark")) {
+                diagnostic.push({
+                    line,
+                    storedAtLog: getTaskScheduleState(db!, project, config.task)
+                        ?.retrospectiveWatermarkMs,
+                });
+            }
+        });
+        try {
+            const result = await runManualDream({
+                db,
+                projectIdentity: project,
+                tasks: [config],
+                executor,
+                task: config.task,
+            });
+            expect(result.ran).toEqual(["retrospective"]);
+            expect(getTaskScheduleState(db, project, config.task)?.retrospectiveWatermarkMs).toBe(
+                scannedTs,
+            );
+            expect(diagnostic).toEqual([
+                {
+                    line: expect.stringContaining(
+                        `start=${watermarkMs} maxScannedTs=${scannedTs} patch=${scannedTs} stored=${scannedTs}`,
+                    ),
+                    storedAtLog: scannedTs,
+                },
+            ]);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
     test("probe-only opening user line skips the gate and completes with an explicit no-op", async () => {
         db = freshDb();
         const project = "/repo/retrospective-probe-only";
