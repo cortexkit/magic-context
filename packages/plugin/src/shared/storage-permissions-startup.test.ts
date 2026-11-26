@@ -9,7 +9,7 @@ import {
     tightenStorageTreeSync,
     writeStorageFileDurableAtomicSync,
 } from "./storage-permissions";
-import { cleanupTestTempDir, createTestTempDirFromPath } from "./test-temp-dir";
+import { cleanupTestTempDir, createTestTempDir, createTestTempDirFromPath } from "./test-temp-dir";
 
 const roots: string[] = [];
 const markerName = ".storage-permissions-v1";
@@ -216,12 +216,39 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
 
     it("invalidates when the existing private-directory check finds a wrong mode", () => {
         const root = fixture();
-        fs.writeFileSync(join(root, markerName), "1\n", { mode: 0o600 });
+        expect(tightenStorageTreeSync(root).failures).toBe(0);
+        expect(fs.existsSync(join(root, markerName))).toBe(true);
         const directory = join(root, "lkg-recovery-fences");
         fs.chmodSync(directory, 0o755);
         ensurePrivateStorageDirectorySync(directory);
         expect(fs.existsSync(join(root, markerName))).toBe(false);
         expect(fs.lstatSync(directory).mode & 0o777).toBe(0o700);
+    });
+
+    it("repairs an unchecked directory when unlink fails on a read-only ancestor", () => {
+        const { dir: parent } = createTestTempDir("mc-read-only-ancestor-");
+        roots.push(parent);
+        const root = join(parent, "storage");
+        const directory = join(root, "lkg-recovery-fences");
+        const marker = join(root, markerName);
+        fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+        fs.chmodSync(directory, 0o755);
+        fs.writeFileSync(marker, "1\n", { mode: 0o600 });
+
+        const rmSync = fs.rmSync;
+        const remove = spyOn(fs, "rmSync").mockImplementation((path, options) => {
+            if (path === join(parent, markerName)) {
+                throw Object.assign(new Error("injected read-only ancestor"), { code: "EROFS" });
+            }
+            return rmSync(path, options);
+        });
+        try {
+            ensurePrivateStorageDirectorySync(directory);
+            expect(fs.lstatSync(directory).mode & 0o777).toBe(0o700);
+            expect(fs.existsSync(marker)).toBe(false);
+        } finally {
+            remove.mockRestore();
+        }
     });
 
     it("walks the full tree in the same call when a certified start finds a loose root", () => {
