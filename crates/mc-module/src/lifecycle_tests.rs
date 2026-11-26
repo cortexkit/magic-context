@@ -9,6 +9,9 @@ use cortexkit_role_llm_runner::send::SendReply;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+#[path = "cache_sentinel_log_tests.rs"]
+mod cache_sentinel_log_tests;
+
 #[path = "pass_decision_tests.rs"]
 mod pass_decision_tests;
 
