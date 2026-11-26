@@ -160,6 +160,28 @@ describe("offline identity command", () => {
         ).toThrow("Unknown identity: dir:absent");
         expect(fileHash(path)).toBe(before);
     }, 30_000);
+    it("previews the old directory key from a folder path even after its first git commit", () => {
+        const { path } = fixture();
+        const directory = join(dirname(path), "source with spaces");
+        mkdirSync(directory);
+        execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        execFileSync(
+            "git",
+            ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "first"],
+            { cwd: directory, windowsHide: true },
+        );
+        const key = `dir:${createHash("md5").update(directory).digest("hex").slice(0, 12)}`;
+        const db = new Database(path);
+        db.prepare("INSERT INTO project_state(project_path) VALUES (?)").run(key);
+        db.close();
+        const before = fileHash(path);
+        expect(
+            runMergeIdentityCli([
+                "--db", path, "--from", directory, "--to", "git:target", "--force",
+            ]),
+        ).toBe(0);
+        expect(fileHash(path)).toBe(before);
+    }, 30_000);
     it("previews a checkpointed WAL database without sidecars and preserves its bytes", () => {
         const { path, args } = fixture();
         const writer = new Database(path);
