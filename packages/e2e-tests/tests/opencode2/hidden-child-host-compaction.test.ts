@@ -49,6 +49,9 @@ function withDb<T>(path: string, read: (db: Database) => T, readwrite = false): 
 		? new Database(path)
 		: new Database(path, { readonly: true });
 	try {
+		// The running host writes to this store. Wait for its lock; without a
+		// wait, a write that lands during one of the host's turns fails at once.
+		db.exec("PRAGMA busy_timeout = 5000");
 		return read(db);
 	} finally {
 		db.close();
